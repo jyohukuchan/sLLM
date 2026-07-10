@@ -69,6 +69,20 @@ The first formal performance run is under `performance-clean-08bdcec/`:
 - all 44 AMD SMI/KFD VRAM captures agreed exactly and found only the worker PID; initial/final resident VRAM was `18,183,073,792 / 18,183,774,208` bytes
 - the independent validator accepted the complete raw structure and recorded only the two prompt-3584 threshold failures; producer output contains no self-reported pass flag
 
+The clean correctness evidence for the selected M=128 serving path is under
+`m128-p32-p4095-clean-72008b9/`:
+
+- runner commit: `72008b91d3e2ada892208803b1891a5af466c5f2`
+- binary SHA-256: `2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204`
+- both M=128 and all-M1 producers recorded `runner_worktree_clean=true` and the same commit/binary identity
+- workload: raw-token prompt 32/128/512/4095, G=1, active1/waiting0, no request batching
+- M=128 request time at prompt 32/128/512/4095 was `1.131062 / 0.176792 / 1.005426 / 56.753855` seconds; all-M1 was `1.160059 / 3.979503 / 18.786001 / 369.124277` seconds
+- prompt 32 used 32 M=1 calls; prompt 128 used one M=128 call; prompt 512 used four M=128 calls; prompt 4095 used 31 M=128 calls plus 127 M=1 tail calls
+- every request emitted the same top-1 token on both paths, reached the expected 40-layer KV length/position/block, and returned to active0/waiting0 with zero allocated blocks and zero cache lengths
+- M=128 versus all-M1 had worst relative L2 `0.055494862`, minimum cosine `0.998492050`, exact top-1 for all prompts, and top-10 overlap 10; prompt 32 was bitwise equal, while the other prompts passed the numeric gates rather than bitwise equality
+- M=128 versus the frozen vLLM source had exact top-1 for all prompts, top-10 overlap at least 9, worst relative L2 `0.065402638`, and minimum cosine `0.997865524`
+- `chunk.json` and `m1.json` hold producer results; `m128-captures/` and `m1-captures/` hold distinct regular-file F32 payloads; `validation.json` is the independent comparison result regenerated from the repository-relative paths
+
 ## 次の行動
 
-prompt 8/32/128/512/4095のcorrectness oracleと3584+512 deep boundaryは完了した。正式性能runでは短文TTFTとdecodeが合格し、3584-token TTFTだけが不合格だった。P8-Cへは進まず、既にprimitive evidenceがあるM=32/M=128を単一request chunk候補として限定比較する。
+M=8の正しさと初回性能run、および選択したM=128のclean correctness oracleは完了した。次はM=128で3584+512 deep boundaryを再実行し、その後に変更していないformal TTFT/decode gateを判定する。全gate合格までP8-Cへは進まない。

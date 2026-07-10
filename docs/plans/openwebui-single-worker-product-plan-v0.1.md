@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 selected M=128 after the M=8 gate failure and is preparing clean correctness and formal performance evidence
+Status: in progress; P8-B2 selected M=128 and passed its clean correctness oracle; deep-boundary and formal performance evidence remain
 
 Date: 2026-07-10
 
@@ -736,6 +736,43 @@ single-request chunks without changing batching, context, or latency limits.
 4. Advance to P8-C only if the clean M=128 correctness, boundary, and every formal
    performance threshold pass. Otherwise profile the failing component once before
    approving any further implementation change.
+
+#### P8-B2 M=128 clean correctness result (2026-07-10)
+
+##### 前回の要点
+
+The bounded candidate screen selected M=128 after a 3584-token diagnostic took
+`31.310532` seconds, but that dirty-worktree diagnostic was not release evidence.
+The selected path still required one clean M=128/all-M1 oracle pair before the
+deep-boundary and formal performance runs.
+
+##### 今回の変更点
+
+- Clean evidence is frozen under
+  `benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/m128-p32-p4095-clean-72008b9/`.
+- Both producers used clean commit
+  `72008b91d3e2ada892208803b1891a5af466c5f2` and binary SHA-256
+  `2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204`.
+- Prompt 32/128/512/4095 M=128 request times were
+  `1.131062 / 0.176792 / 1.005426 / 56.753855` seconds. The matching all-M1
+  times were `1.160059 / 3.979503 / 18.786001 / 369.124277` seconds.
+- The 4095-token path used 31 M=128 calls and a 127-token M=1 tail, emitted token
+  `291`, reached KV length 4095 at position 4094/block 255, and reset all runtime,
+  scheduler, allocator, and 40-layer cache state.
+- The independent validator passed every required prompt against both all-M1 and
+  the frozen vLLM source. M=128 versus all-M1 had worst relative L2
+  `0.055494862`, minimum cosine `0.998492050`, exact top-1 on all prompts, and
+  top-10 overlap 10. Only prompt 32 was bitwise equal; the other prompts passed
+  the defined numeric gates.
+
+##### 次の行動
+
+1. Run and independently validate the exact prompt 3584 plus 512 generated-token
+   boundary through the clean M=128 path.
+2. Run the unchanged formal resident TTFT/decode matrix with two warmups and five
+   measured samples.
+3. Complete P8-B2 and advance to P8-C only if the boundary evidence and every
+   formal threshold pass.
 
 ### P8-C: Sampling, Cancellation, and Resident Worker
 

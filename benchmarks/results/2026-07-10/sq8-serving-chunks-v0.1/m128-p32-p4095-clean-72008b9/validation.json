@@ -1,0 +1,929 @@
+{
+  "evidence": [
+    {
+      "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+      "prefill_mode": "m128-chunk128",
+      "result_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/m128-p32-p4095-clean-72008b9/chunk.json",
+      "result_sha256": "4b610d42789c36c2fee14b313b2dc6e5e66f52332afa5a48159b457c1000c07f",
+      "runner_binary_sha256": "2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204",
+      "runner_git_commit": "72008b91d3e2ada892208803b1891a5af466c5f2",
+      "runner_worktree_clean": true,
+      "schema_version": "ullm.sq8.serving_chunks.v4"
+    },
+    {
+      "prefill_implementation": "sq8.sequential-m1.v1",
+      "prefill_mode": "all-m1",
+      "result_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/m128-p32-p4095-clean-72008b9/m1.json",
+      "result_sha256": "dfc7a3bc89117e6ad37fda1d309ed98b2b434a538fceade3e64e7ad4667d2b81",
+      "runner_binary_sha256": "2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204",
+      "runner_git_commit": "72008b91d3e2ada892208803b1891a5af466c5f2",
+      "runner_worktree_clean": true,
+      "schema_version": "ullm.sq8.serving_smoke.v2"
+    }
+  ],
+  "passed": true,
+  "prompts": [
+    {
+      "captures": {
+        "all_m1_hidden_sha256": "67bf14c8d834d1bbe8c8b59b6678efb6fbffaff0e92646e858f5a4835a00ac60",
+        "all_m1_logits_sha256": "54302905b15ffcac913ae1fab209ceec4965d9e7bd4fe7a7f07220d181e8198d",
+        "chunk_hidden_sha256": "67bf14c8d834d1bbe8c8b59b6678efb6fbffaff0e92646e858f5a4835a00ac60",
+        "chunk_logits_sha256": "54302905b15ffcac913ae1fab209ceec4965d9e7bd4fe7a7f07220d181e8198d"
+      },
+      "chunk_vs_all_m1": {
+        "final_hidden": {
+          "cosine_similarity": 1.0,
+          "elements": 5120,
+          "max_abs": 0.0,
+          "nonfinite_count": 0,
+          "relative_l2": 0.0
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 13.282909393310547,
+              "token_id": 75902
+            },
+            {
+              "logit": 12.564422607421875,
+              "token_id": 198
+            },
+            {
+              "logit": 12.427502632141113,
+              "token_id": 698
+            },
+            {
+              "logit": 12.17397689819336,
+              "token_id": 425
+            },
+            {
+              "logit": 12.048297882080078,
+              "token_id": 1
+            },
+            {
+              "logit": 11.091970443725586,
+              "token_id": 271
+            },
+            {
+              "logit": 10.994184494018555,
+              "token_id": 58
+            },
+            {
+              "logit": 10.756233215332031,
+              "token_id": 876
+            },
+            {
+              "logit": 10.645975112915039,
+              "token_id": 18040
+            },
+            {
+              "logit": 10.50955581665039,
+              "token_id": 1837
+            }
+          ],
+          "cosine_similarity": 1.0,
+          "elements": 151936,
+          "max_abs": 0.0,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 13.282909393310547,
+              "token_id": 75902
+            },
+            {
+              "logit": 12.564422607421875,
+              "token_id": 198
+            },
+            {
+              "logit": 12.427502632141113,
+              "token_id": 698
+            },
+            {
+              "logit": 12.17397689819336,
+              "token_id": 425
+            },
+            {
+              "logit": 12.048297882080078,
+              "token_id": 1
+            },
+            {
+              "logit": 11.091970443725586,
+              "token_id": 271
+            },
+            {
+              "logit": 10.994184494018555,
+              "token_id": 58
+            },
+            {
+              "logit": 10.756233215332031,
+              "token_id": 876
+            },
+            {
+              "logit": 10.645975112915039,
+              "token_id": 18040
+            },
+            {
+              "logit": 10.50955581665039,
+              "token_id": 1837
+            }
+          ],
+          "relative_l2": 0.0,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        }
+      },
+      "chunk_vs_source": {
+        "final_hidden": {
+          "cosine_similarity": 0.9989616701655274,
+          "elements": 5120,
+          "max_abs": 0.5938644409179688,
+          "nonfinite_count": 0,
+          "relative_l2": 0.04577201497769474
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 13.282909393310547,
+              "token_id": 75902
+            },
+            {
+              "logit": 12.564422607421875,
+              "token_id": 198
+            },
+            {
+              "logit": 12.427502632141113,
+              "token_id": 698
+            },
+            {
+              "logit": 12.17397689819336,
+              "token_id": 425
+            },
+            {
+              "logit": 12.048297882080078,
+              "token_id": 1
+            },
+            {
+              "logit": 11.091970443725586,
+              "token_id": 271
+            },
+            {
+              "logit": 10.994184494018555,
+              "token_id": 58
+            },
+            {
+              "logit": 10.756233215332031,
+              "token_id": 876
+            },
+            {
+              "logit": 10.645975112915039,
+              "token_id": 18040
+            },
+            {
+              "logit": 10.50955581665039,
+              "token_id": 1837
+            }
+          ],
+          "cosine_similarity": 0.9995811819354294,
+          "elements": 151936,
+          "max_abs": 0.6140317916870117,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 13.375,
+              "token_id": 75902
+            },
+            {
+              "logit": 12.4375,
+              "token_id": 198
+            },
+            {
+              "logit": 12.375,
+              "token_id": 698
+            },
+            {
+              "logit": 12.25,
+              "token_id": 425
+            },
+            {
+              "logit": 12.125,
+              "token_id": 1
+            },
+            {
+              "logit": 11.125,
+              "token_id": 58
+            },
+            {
+              "logit": 11.0625,
+              "token_id": 271
+            },
+            {
+              "logit": 10.6875,
+              "token_id": 876
+            },
+            {
+              "logit": 10.5625,
+              "token_id": 18040
+            },
+            {
+              "logit": 10.5,
+              "token_id": 1837
+            }
+          ],
+          "relative_l2": 0.02971480391640588,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        },
+        "source_greedy_g1_sha256": "a1fae9b52e63b9e67f4b2f0b4c8e636d4d9ae5c379454fd71e73e57b1b98bb80",
+        "source_hidden_sha256": "25e74b5ce37b4ce77002db35adf3315feda2a4414da99b0cd0f07f796007f88c",
+        "source_logits_sha256": "3c726adcfef338c5835a00244bca3fb119c8ae776db059957973adb73cc8909d"
+      },
+      "prompt_tokens": 32,
+      "token_id": 75902
+    },
+    {
+      "captures": {
+        "all_m1_hidden_sha256": "55bc0bc238ba70cc1bc793b9596441c45ba021a3901ac5b57835ba072df92dee",
+        "all_m1_logits_sha256": "adc263ab56924a91cee81c8deb59075800da36753a5e48fd36e201d945e53a4e",
+        "chunk_hidden_sha256": "15436f4b2d7420793830463e1b1591f783cb028242283a99d8979bedca33cced",
+        "chunk_logits_sha256": "5585bf2f62e9149fc15babb2de98ce9e7f29b0860dae6e0899be75f0a7cb3bc8"
+      },
+      "chunk_vs_all_m1": {
+        "final_hidden": {
+          "cosine_similarity": 0.998492050389101,
+          "elements": 5120,
+          "max_abs": 1.526041030883789,
+          "nonfinite_count": 0,
+          "relative_l2": 0.055494861834984616
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 19.84341049194336,
+              "token_id": 115
+            },
+            {
+              "logit": 19.586559295654297,
+              "token_id": 240
+            },
+            {
+              "logit": 19.519121170043945,
+              "token_id": 237
+            },
+            {
+              "logit": 19.48231315612793,
+              "token_id": 114
+            },
+            {
+              "logit": 19.341346740722656,
+              "token_id": 95
+            },
+            {
+              "logit": 19.340444564819336,
+              "token_id": 245
+            },
+            {
+              "logit": 19.01042938232422,
+              "token_id": 234
+            },
+            {
+              "logit": 18.872920989990234,
+              "token_id": 223
+            },
+            {
+              "logit": 18.778779983520508,
+              "token_id": 241
+            },
+            {
+              "logit": 18.738109588623047,
+              "token_id": 222
+            }
+          ],
+          "cosine_similarity": 0.9990080647464114,
+          "elements": 151936,
+          "max_abs": 0.7576179504394531,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 20.486244201660156,
+              "token_id": 115
+            },
+            {
+              "logit": 20.072782516479492,
+              "token_id": 240
+            },
+            {
+              "logit": 20.062185287475586,
+              "token_id": 95
+            },
+            {
+              "logit": 20.0181941986084,
+              "token_id": 237
+            },
+            {
+              "logit": 19.812705993652344,
+              "token_id": 245
+            },
+            {
+              "logit": 19.772314071655273,
+              "token_id": 114
+            },
+            {
+              "logit": 19.514381408691406,
+              "token_id": 223
+            },
+            {
+              "logit": 19.410396575927734,
+              "token_id": 234
+            },
+            {
+              "logit": 19.29102325439453,
+              "token_id": 241
+            },
+            {
+              "logit": 19.217424392700195,
+              "token_id": 222
+            }
+          ],
+          "relative_l2": 0.04789408342962691,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        }
+      },
+      "chunk_vs_source": {
+        "final_hidden": {
+          "cosine_similarity": 0.9978655243925386,
+          "elements": 5120,
+          "max_abs": 1.7984628677368164,
+          "nonfinite_count": 0,
+          "relative_l2": 0.06540263845274857
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 19.84341049194336,
+              "token_id": 115
+            },
+            {
+              "logit": 19.586559295654297,
+              "token_id": 240
+            },
+            {
+              "logit": 19.519121170043945,
+              "token_id": 237
+            },
+            {
+              "logit": 19.48231315612793,
+              "token_id": 114
+            },
+            {
+              "logit": 19.341346740722656,
+              "token_id": 95
+            },
+            {
+              "logit": 19.340444564819336,
+              "token_id": 245
+            },
+            {
+              "logit": 19.01042938232422,
+              "token_id": 234
+            },
+            {
+              "logit": 18.872920989990234,
+              "token_id": 223
+            },
+            {
+              "logit": 18.778779983520508,
+              "token_id": 241
+            },
+            {
+              "logit": 18.738109588623047,
+              "token_id": 222
+            }
+          ],
+          "cosine_similarity": 0.9980621839019954,
+          "elements": 151936,
+          "max_abs": 1.0346794128417969,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 20.125,
+              "token_id": 115
+            },
+            {
+              "logit": 19.75,
+              "token_id": 95
+            },
+            {
+              "logit": 19.75,
+              "token_id": 240
+            },
+            {
+              "logit": 19.75,
+              "token_id": 245
+            },
+            {
+              "logit": 19.625,
+              "token_id": 237
+            },
+            {
+              "logit": 19.5,
+              "token_id": 114
+            },
+            {
+              "logit": 19.375,
+              "token_id": 233
+            },
+            {
+              "logit": 19.375,
+              "token_id": 234
+            },
+            {
+              "logit": 19.25,
+              "token_id": 241
+            },
+            {
+              "logit": 19.125,
+              "token_id": 223
+            }
+          ],
+          "relative_l2": 0.0647299792188265,
+          "top_10_overlap": 9,
+          "top_1_exact": true
+        },
+        "source_greedy_g1_sha256": "52e9e3add38bf08350e260942004423cf95fce71609ae1a46b260442db2608bb",
+        "source_hidden_sha256": "3e8312df3134ebcbe4875081738de9f34d3e3eb6a348d28503e577248ccf4283",
+        "source_logits_sha256": "d2235b477f3c4e1fbb2c33b7b9407d224ae72443df648c620a8be0c117832a5c"
+      },
+      "prompt_tokens": 128,
+      "token_id": 115
+    },
+    {
+      "captures": {
+        "all_m1_hidden_sha256": "e2b267fa8fc288a22e3d24222554f76264761528488775ef28bbb2addeabce0b",
+        "all_m1_logits_sha256": "f05e2e076d8b6a0dcde1ad2bb30fb5484ef9111a6ef36a236d718b34b30bee5a",
+        "chunk_hidden_sha256": "000c3a285506ce07ba388fe22819ee0f1da2a4576e824c18e9339908ceea8f4a",
+        "chunk_logits_sha256": "fc9275d622b7b896a4df4a1050c24282e36f8e61bfe04442d2d045281db52acd"
+      },
+      "chunk_vs_all_m1": {
+        "final_hidden": {
+          "cosine_similarity": 0.9999271572244323,
+          "elements": 5120,
+          "max_abs": 0.5155906677246094,
+          "nonfinite_count": 0,
+          "relative_l2": 0.01253925687694786
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 5.555368423461914,
+              "token_id": 66
+            },
+            {
+              "logit": 5.310253143310547,
+              "token_id": 64
+            },
+            {
+              "logit": 5.203099727630615,
+              "token_id": 69
+            },
+            {
+              "logit": 5.08168888092041,
+              "token_id": 198
+            },
+            {
+              "logit": 5.035387992858887,
+              "token_id": 75
+            },
+            {
+              "logit": 4.863002777099609,
+              "token_id": 280
+            },
+            {
+              "logit": 4.59030818939209,
+              "token_id": 220
+            },
+            {
+              "logit": 4.4255051612854,
+              "token_id": 259
+            },
+            {
+              "logit": 4.3302412033081055,
+              "token_id": 300
+            },
+            {
+              "logit": 4.2466559410095215,
+              "token_id": 665
+            }
+          ],
+          "cosine_similarity": 0.9999819294984559,
+          "elements": 151936,
+          "max_abs": 0.23052740097045898,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 5.508979320526123,
+              "token_id": 66
+            },
+            {
+              "logit": 5.3114800453186035,
+              "token_id": 64
+            },
+            {
+              "logit": 5.1864213943481445,
+              "token_id": 69
+            },
+            {
+              "logit": 5.07991886138916,
+              "token_id": 198
+            },
+            {
+              "logit": 5.0607008934021,
+              "token_id": 75
+            },
+            {
+              "logit": 4.826581954956055,
+              "token_id": 280
+            },
+            {
+              "logit": 4.624653339385986,
+              "token_id": 220
+            },
+            {
+              "logit": 4.430631637573242,
+              "token_id": 259
+            },
+            {
+              "logit": 4.335830211639404,
+              "token_id": 300
+            },
+            {
+              "logit": 4.228420257568359,
+              "token_id": 665
+            }
+          ],
+          "relative_l2": 0.006023787990777605,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        }
+      },
+      "chunk_vs_source": {
+        "final_hidden": {
+          "cosine_similarity": 0.9998704175860695,
+          "elements": 5120,
+          "max_abs": 1.652435302734375,
+          "nonfinite_count": 0,
+          "relative_l2": 0.021985286382721562
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 5.555368423461914,
+              "token_id": 66
+            },
+            {
+              "logit": 5.310253143310547,
+              "token_id": 64
+            },
+            {
+              "logit": 5.203099727630615,
+              "token_id": 69
+            },
+            {
+              "logit": 5.08168888092041,
+              "token_id": 198
+            },
+            {
+              "logit": 5.035387992858887,
+              "token_id": 75
+            },
+            {
+              "logit": 4.863002777099609,
+              "token_id": 280
+            },
+            {
+              "logit": 4.59030818939209,
+              "token_id": 220
+            },
+            {
+              "logit": 4.4255051612854,
+              "token_id": 259
+            },
+            {
+              "logit": 4.3302412033081055,
+              "token_id": 300
+            },
+            {
+              "logit": 4.2466559410095215,
+              "token_id": 665
+            }
+          ],
+          "cosine_similarity": 0.9999669998403922,
+          "elements": 151936,
+          "max_abs": 0.39084434509277344,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 5.65625,
+              "token_id": 66
+            },
+            {
+              "logit": 5.40625,
+              "token_id": 64
+            },
+            {
+              "logit": 5.28125,
+              "token_id": 69
+            },
+            {
+              "logit": 5.28125,
+              "token_id": 198
+            },
+            {
+              "logit": 5.1875,
+              "token_id": 75
+            },
+            {
+              "logit": 4.96875,
+              "token_id": 280
+            },
+            {
+              "logit": 4.71875,
+              "token_id": 220
+            },
+            {
+              "logit": 4.5625,
+              "token_id": 259
+            },
+            {
+              "logit": 4.34375,
+              "token_id": 300
+            },
+            {
+              "logit": 4.34375,
+              "token_id": 665
+            }
+          ],
+          "relative_l2": 0.018492116212145828,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        },
+        "source_greedy_g1_sha256": "46f83e3a0dcc4f04f3eecc056ca777afc551ff50c61ae15f1486e3497cd51bfb",
+        "source_hidden_sha256": "a4a60850e3e41bb400eff5dd6cfc72ae8181af588e9dc79a92049df33d38fde4",
+        "source_logits_sha256": "7c2180bde9812bdf74429ccc792441bcd52da3ef01f62fb25ab8955755d56225"
+      },
+      "prompt_tokens": 512,
+      "token_id": 66
+    },
+    {
+      "captures": {
+        "all_m1_hidden_sha256": "76f5a6825c83a431e5c52bd6f598c31596552c448737cc5f00cccc08cdd12a2f",
+        "all_m1_logits_sha256": "4f5f84fd0b2e708a0a6310d24dec0738f385719ecc83fc7759e8a18319741cc9",
+        "chunk_hidden_sha256": "98da6f0aa80d9f081b6fff564121c52cfd1e17a658c8b2625b316f8267474372",
+        "chunk_logits_sha256": "b078501953d97a24392a15e73afeeed96339a6f9bab2677502c75d5eca1fbaed"
+      },
+      "chunk_vs_all_m1": {
+        "final_hidden": {
+          "cosine_similarity": 0.9999485991698879,
+          "elements": 5120,
+          "max_abs": 0.6355819702148438,
+          "nonfinite_count": 0,
+          "relative_l2": 0.01176985154955999
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 5.672956943511963,
+              "token_id": 291
+            },
+            {
+              "logit": 3.5629518032073975,
+              "token_id": 280
+            },
+            {
+              "logit": 3.375913619995117,
+              "token_id": 198
+            },
+            {
+              "logit": 3.049593687057495,
+              "token_id": 287
+            },
+            {
+              "logit": 2.8536972999572754,
+              "token_id": 11
+            },
+            {
+              "logit": 2.83888578414917,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.7839670181274414,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.782602310180664,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.718179702758789,
+              "token_id": 271
+            },
+            {
+              "logit": 2.540742874145508,
+              "token_id": 401
+            }
+          ],
+          "cosine_similarity": 0.9999867288497123,
+          "elements": 151936,
+          "max_abs": 0.2256946563720703,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 5.603614807128906,
+              "token_id": 291
+            },
+            {
+              "logit": 3.5562033653259277,
+              "token_id": 280
+            },
+            {
+              "logit": 3.3699569702148438,
+              "token_id": 198
+            },
+            {
+              "logit": 3.0349855422973633,
+              "token_id": 287
+            },
+            {
+              "logit": 2.8721351623535156,
+              "token_id": 11
+            },
+            {
+              "logit": 2.8569819927215576,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.79616641998291,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.772732973098755,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.7204012870788574,
+              "token_id": 271
+            },
+            {
+              "logit": 2.5549285411834717,
+              "token_id": 401
+            }
+          ],
+          "relative_l2": 0.009257730656330886,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        }
+      },
+      "chunk_vs_source": {
+        "final_hidden": {
+          "cosine_similarity": 0.9999034679121998,
+          "elements": 5120,
+          "max_abs": 1.3508987426757812,
+          "nonfinite_count": 0,
+          "relative_l2": 0.019391937133831045
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 5.672956943511963,
+              "token_id": 291
+            },
+            {
+              "logit": 3.5629518032073975,
+              "token_id": 280
+            },
+            {
+              "logit": 3.375913619995117,
+              "token_id": 198
+            },
+            {
+              "logit": 3.049593687057495,
+              "token_id": 287
+            },
+            {
+              "logit": 2.8536972999572754,
+              "token_id": 11
+            },
+            {
+              "logit": 2.83888578414917,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.7839670181274414,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.782602310180664,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.718179702758789,
+              "token_id": 271
+            },
+            {
+              "logit": 2.540742874145508,
+              "token_id": 401
+            }
+          ],
+          "cosine_similarity": 0.999974780829727,
+          "elements": 151936,
+          "max_abs": 0.3527493476867676,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 5.5625,
+              "token_id": 291
+            },
+            {
+              "logit": 3.53125,
+              "token_id": 280
+            },
+            {
+              "logit": 3.34375,
+              "token_id": 198
+            },
+            {
+              "logit": 3.0,
+              "token_id": 287
+            },
+            {
+              "logit": 2.859375,
+              "token_id": 11
+            },
+            {
+              "logit": 2.84375,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.765625,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.65625,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.59375,
+              "token_id": 271
+            },
+            {
+              "logit": 2.453125,
+              "token_id": 401
+            }
+          ],
+          "relative_l2": 0.02124979802317311,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        },
+        "source_greedy_g1_sha256": "b6b377341928ee7f4acc7425ce929e81dce2f1e6bae365fea798897ead9138bc",
+        "source_hidden_sha256": "cd2e9bb7a3a5f28db8388e6ec7d94049f2fa5606cb01658e3c82fd622d139f2d",
+        "source_logits_sha256": "6f1bb44b2c1792e0c0c63db858d939e8a7460e49f3a51f143e97c3591794f9d3"
+      },
+      "prompt_tokens": 4095,
+      "token_id": 291
+    }
+  ],
+  "required_prompts": [
+    32,
+    128,
+    512,
+    4095
+  ],
+  "schema_version": "ullm.sq8.serving_chunks_validation.v1",
+  "source_oracle": {
+    "fixture_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/sq8-serving-v0.1/oracles/vllm-source-v0.1",
+    "fixture_set_id": "qwen3-14b-fp8-sq8-serving-v0.1",
+    "metadata_sha256": "1710ebf504c3cf84616f265f57575d48b91804635a0c0151875eadc91fbc122b",
+    "payload_manifest_sha256": "5972a024c91509b432e68ee39a3dd1cf7a0f0ba2ba48fe7ef5c0bfb02957405c",
+    "sha256sums_sha256": "d6d083fc5881480de3a60ae413b56c057d4eaed6d96286db554d0e3c50fecec5"
+  },
+  "source_prompts": [
+    32,
+    128,
+    512,
+    4095
+  ],
+  "thresholds": {
+    "chunk_vs_all_m1": {
+      "max_relative_l2": 0.1,
+      "min_cosine_similarity": 0.995,
+      "min_top_10_overlap": 5,
+      "top_1": "exact"
+    },
+    "chunk_vs_source": {
+      "max_relative_l2": 0.2,
+      "min_cosine_similarity": 0.98,
+      "min_top_10_overlap": 3,
+      "top_1": "exact"
+    }
+  }
+}
