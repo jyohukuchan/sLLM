@@ -240,9 +240,24 @@ impl SchedulerState {
 
     /// Records one synchronized prompt token for an incrementally prefilling request.
     pub fn advance_prefill_token(&mut self, request_id: RequestId) -> Result<usize, String> {
+        self.advance_prefill_tokens(request_id, 1)
+    }
+
+    /// Atomically records one synchronized prompt execution unit.
+    pub fn advance_prefill_tokens(
+        &mut self,
+        request_id: RequestId,
+        token_count: usize,
+    ) -> Result<usize, String> {
+        if token_count == 0 {
+            return Err(format!(
+                "request {:?} prefill token count must be greater than zero",
+                request_id
+            ));
+        }
         let state = self
             .active
-            .get_mut(&request_id)
+            .get(&request_id)
             .ok_or_else(|| format!("request {:?} is not active", request_id))?;
         if state.generated_tokens != 0 {
             return Err(format!(
@@ -258,8 +273,16 @@ impl SchedulerState {
         }
         let next_cached = state
             .cached_tokens
-            .checked_add(1)
+            .checked_add(token_count)
             .ok_or_else(|| format!("request {:?} cached token count overflow", request_id))?;
+        if next_cached > state.request.prompt_tokens {
+            return Err(format!(
+                "request {:?} prefill advance {} exceeds remaining prompt tokens {}",
+                request_id,
+                token_count,
+                state.request.prompt_tokens - state.cached_tokens
+            ));
+        }
         let max_cache_capacity = state
             .allocation
             .blocks
@@ -272,6 +295,10 @@ impl SchedulerState {
                 request_id, max_cache_capacity
             ));
         }
+        let state = self
+            .active
+            .get_mut(&request_id)
+            .expect("prefill request was validated before atomic commit");
         state.cached_tokens = next_cached;
         Ok(next_cached)
     }
@@ -1077,6 +1104,64 @@ mod tests {
             .advance_prefill_token(RequestId(1))
             .expect_err("prefill after generation should be rejected");
         assert!(err.contains("generation started"), "{err}");
+        assert_eq!(scheduler.active_request(RequestId(1)), Some(&before));
+    }
+
+    #[test]
+    fn scheduler_state_bulk_prefill_progress_is_atomic() {
+        let mut scheduler = SchedulerState::with_block_size(4, 16);
+        scheduler
+            .activate_single_request_with_all_blocks(Request::new(1, 17, 2))
+            .expect("activation should succeed");
+
+        assert_eq!(
+            scheduler
+                .advance_prefill_tokens(RequestId(1), 8)
+                .expect("first chunk should advance"),
+            8
+        );
+        assert_eq!(
+            scheduler
+                .advance_prefill_tokens(RequestId(1), 8)
+                .expect("second chunk should advance"),
+            16
+        );
+
+        for invalid_width in [0, 2] {
+            let before = scheduler
+                .active_request(RequestId(1))
+                .expect("request should remain active")
+                .clone();
+            let err = scheduler
+                .advance_prefill_tokens(RequestId(1), invalid_width)
+                .expect_err("invalid bulk progress must be rejected");
+            assert!(
+                err.contains("greater than zero") || err.contains("exceeds remaining"),
+                "{err}"
+            );
+            assert_eq!(scheduler.active_request(RequestId(1)), Some(&before));
+        }
+
+        assert_eq!(
+            scheduler
+                .advance_prefill_tokens(RequestId(1), 1)
+                .expect("M=1 tail should advance"),
+            17
+        );
+        let before = scheduler
+            .active_request(RequestId(1))
+            .expect("request should remain active")
+            .clone();
+        let err = scheduler
+            .advance_prefill_tokens(RequestId(1), 1)
+            .expect_err("completed prefill must reject another token");
+        assert!(err.contains("already completed"), "{err}");
+        assert_eq!(scheduler.active_request(RequestId(1)), Some(&before));
+
+        let err = scheduler
+            .advance_prefill_tokens(RequestId(99), 8)
+            .expect_err("unknown request must be rejected");
+        assert!(err.contains("not active"), "{err}");
         assert_eq!(scheduler.active_request(RequestId(1)), Some(&before));
     }
 

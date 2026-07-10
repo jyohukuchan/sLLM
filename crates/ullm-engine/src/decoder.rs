@@ -2164,6 +2164,99 @@ impl PagedDecodeState {
         Ok(start..end)
     }
 
+    /// Appends one resident K/V chunk and attends it over an identity-mapped cached prefix.
+    ///
+    /// K/V writes and attention are ordered on `stream`; callers own synchronization and must
+    /// poison their request if any later enqueue or synchronization fails.
+    pub(crate) fn prefill_chunk_from_device(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &RuntimeBuffer,
+        k: &RuntimeBuffer,
+        v: &RuntimeBuffer,
+        new_tokens: usize,
+        softmax_scale: f32,
+        output: &mut RuntimeBuffer,
+    ) -> Result<std::ops::Range<usize>, String> {
+        if new_tokens == 0 {
+            return Err("paged decoder prefill chunk must contain at least one token".into());
+        }
+        validate_softmax_scale(softmax_scale)?;
+        if let Some((logical_block, physical_block)) = self
+            .block_table
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(logical_block, physical_block)| *physical_block as usize != *logical_block)
+        {
+            return Err(format!(
+                "paged decoder cached-prefix attention requires an identity block table: block_table[{logical_block}]={physical_block}"
+            ));
+        }
+
+        let cached_prefix_len = self.written_len;
+        let end = cached_prefix_len
+            .checked_add(new_tokens)
+            .ok_or_else(|| "paged decoder prefill chunk position overflows".to_string())?;
+        self.validate_cache_position(end - 1)?;
+        validate_device_buffer_bytes(
+            q,
+            f32_bytes(
+                new_tokens
+                    .checked_mul(self.shape.q_elements()?)
+                    .ok_or_else(|| "paged decoder prefill chunk Q size overflows".to_string())?,
+            ),
+            "prefill chunk Q",
+        )?;
+        validate_device_buffer_bytes(
+            k,
+            f32_bytes(
+                new_tokens
+                    .checked_mul(self.shape.k_token_elements()?)
+                    .ok_or_else(|| "paged decoder prefill chunk K size overflows".to_string())?,
+            ),
+            "prefill chunk K",
+        )?;
+        validate_device_buffer_bytes(
+            v,
+            f32_bytes(
+                new_tokens
+                    .checked_mul(self.shape.v_token_elements()?)
+                    .ok_or_else(|| "paged decoder prefill chunk V size overflows".to_string())?,
+            ),
+            "prefill chunk V",
+        )?;
+        validate_device_buffer_bytes(
+            output,
+            f32_bytes(
+                new_tokens
+                    .checked_mul(self.shape.output_elements()?)
+                    .ok_or_else(|| {
+                        "paged decoder prefill chunk output size overflows".to_string()
+                    })?,
+            ),
+            "prefill chunk output",
+        )?;
+
+        let written = self.write_sequence_from_device(stream, k, v, new_tokens)?;
+        ullm_runtime_sys::cached_prefix_attn_f32_flash2(
+            q,
+            &self.k_cache_buffer,
+            &self.v_cache_buffer,
+            cached_prefix_len,
+            new_tokens,
+            self.shape.q_heads,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            softmax_scale,
+            output,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run paged decoder cached-prefix attention: {err}"))?;
+        Ok(written)
+    }
+
     pub fn decode_step(
         &mut self,
         stream: &mut RuntimeStream,
@@ -3462,6 +3555,143 @@ mod tests {
             1.0 / (shape.head_dim as f32).sqrt(),
         );
         assert_f32s_close(&output, &expected, 1e-5);
+    }
+
+    #[test]
+    fn paged_decode_state_prefill_chunk_attends_prefix_and_chunk_causally_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let block_table = vec![0_u32, 1, 2, 3];
+        let prefix_len = 2_usize;
+        let new_tokens = 3_usize;
+        let total_tokens = prefix_len + new_tokens;
+        let logical_k = (0..total_tokens * shape.k_token_elements().unwrap())
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..total_tokens * shape.v_token_elements().unwrap())
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let q = (0..new_tokens * shape.q_elements().unwrap())
+            .map(|index| ((index * 7) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+        let prefix_k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_k[..prefix_len * shape.k_token_elements().unwrap()],
+        );
+        let prefix_v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_v[..prefix_len * shape.v_token_elements().unwrap()],
+        );
+        let chunk_k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_k[prefix_len * shape.k_token_elements().unwrap()..],
+        );
+        let chunk_v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_v[prefix_len * shape.v_token_elements().unwrap()..],
+        );
+        let q_buffer = upload_test_f32_buffer(&mut context, &mut stream, &q);
+        let mut output = context
+            .alloc_buffer(f32_bytes(new_tokens * shape.output_elements().unwrap()))
+            .unwrap();
+
+        let mut state =
+            PagedDecodeState::new(&mut context, &mut stream, shape, block_table.clone()).unwrap();
+        assert_eq!(
+            state
+                .write_sequence_from_device(&mut stream, &prefix_k, &prefix_v, prefix_len)
+                .unwrap(),
+            0..prefix_len
+        );
+        let written = state
+            .prefill_chunk_from_device(
+                &mut stream,
+                &q_buffer,
+                &chunk_k,
+                &chunk_v,
+                new_tokens,
+                1.0 / (shape.head_dim as f32).sqrt(),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(written, prefix_len..total_tokens);
+        assert_eq!(state.written_len(), total_tokens);
+
+        let cache = state.read_cache_to_host(&mut stream).unwrap();
+        let actual = read_f32_buffer(
+            &output,
+            &mut stream,
+            new_tokens * shape.output_elements().unwrap(),
+        )
+        .unwrap();
+        let mut expected = Vec::with_capacity(actual.len());
+        for chunk_index in 0..new_tokens {
+            let q_start = chunk_index * shape.q_elements().unwrap();
+            let q_end = q_start + shape.q_elements().unwrap();
+            expected.extend(expected_paged_decode_attn(
+                &q[q_start..q_end],
+                &cache.k,
+                &cache.v,
+                &block_table,
+                prefix_len + chunk_index + 1,
+                shape,
+                1.0 / (shape.head_dim as f32).sqrt(),
+            ));
+        }
+        assert_f32s_close(&actual, &expected, 1e-5);
+    }
+
+    #[test]
+    fn paged_decode_state_prefill_chunk_rejects_nonidentity_table_before_mutation() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let new_tokens = 2_usize;
+        let q = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &vec![0.0; new_tokens * shape.q_elements().unwrap()],
+        );
+        let k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &vec![0.0; new_tokens * shape.k_token_elements().unwrap()],
+        );
+        let v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &vec![0.0; new_tokens * shape.v_token_elements().unwrap()],
+        );
+        let mut output = context
+            .alloc_buffer(f32_bytes(new_tokens * shape.output_elements().unwrap()))
+            .unwrap();
+        let mut state =
+            PagedDecodeState::new(&mut context, &mut stream, shape, vec![1, 0, 2, 3]).unwrap();
+
+        let err = state
+            .prefill_chunk_from_device(&mut stream, &q, &k, &v, new_tokens, 1.0, &mut output)
+            .unwrap_err();
+        assert!(err.contains("identity block table"), "{err}");
+        assert_eq!(state.written_len(), 0);
     }
 
     #[test]
