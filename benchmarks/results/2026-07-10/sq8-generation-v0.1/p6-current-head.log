@@ -1,0 +1,13 @@
+Script started on 2026-07-10 10:23:39+09:00 [COMMAND="env HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1 target/release/examples/sq8_ck_full_model /tmp/ullm-qwen3-14b-fp8-sq8-canonical-full-v0.2 /tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d /tmp/ullm-qwen3-14b-fp8-vllm-oracle-m8-v0.1 benchmarks/results/2026-07-10/sq8-generation-v0.1/p6-current-head.json" <not executed on terminal>]
+CPU SQ8 oracle completed layer 1/40
+CPU SQ8 oracle completed layer 5/40
+CPU SQ8 oracle completed layer 10/40
+CPU SQ8 oracle completed layer 15/40
+CPU SQ8 oracle completed layer 20/40
+CPU SQ8 oracle completed layer 25/40
+CPU SQ8 oracle completed layer 30/40
+CPU SQ8 oracle completed layer 35/40
+CPU SQ8 oracle completed layer 40/40
+passed=true output=benchmarks/results/2026-07-10/sq8-generation-v0.1/p6-current-head.json full_p50_ms=34.201610 stack_p50_ms=29.996848 head_p50_ms=4.199236 top1=353
+
+Script done on 2026-07-10 10:27:03+09:00 [COMMAND_EXIT_CODE="0"]

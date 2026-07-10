@@ -1,0 +1,3609 @@
+{
+  "schema_version": "ullm.sq8.full_model.v1",
+  "passed": true,
+  "source": {
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "artifact_config_sha256": "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793",
+    "artifact_index_sha256": "6a9c8e17744118347080916d8f673b881941cf42989ee77266b14dc2062a7151",
+    "package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "vllm_oracle_metadata_sha256": "5caafcd2c976482dd01e51b537593d8924d381a8a9ab076b2082325e22fea39e",
+    "model_revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+    "vllm_layer_output_sha256": [
+      "eb91f95c87bea02584b0dcac37c7bbf6ef4202e0be41f82092ae757dbf8c72ef",
+      "e46f8731d6c7d94edcf9a43996d735ea5f9ce7c63806f78fb5804bed565975f9",
+      "2fd912a7e10fdbf65885917e5042af8399c7c2f2bb3882273d9ab6e98b90a325",
+      "77c187fe2c42e0ad0415f0dd7d47293642fc28b97b5277ea64aa62920f3d0664",
+      "4b9fc515445c254f8280bf6d97b6062ce3ae81f28973c79477373f7db11c93bb",
+      "35049a4b79004f86f903301246c32f676f484e2f3671d2b0cffecb2084c6153b",
+      "5f47bf6c10643c425d4ea5f384e8b642947833b655c40d9e164c74fcbc3a4818",
+      "a93ba8f3c80f3fd62d3655dd8e6ec3de61d38d55cd8268100c933cbaa43b4766",
+      "2383103d26abc9983413a033492ce3a5294e1f8958c1f53768e9dc9869127d58",
+      "4c8c4e2052ef2ee28f04e7a84d8e851777bcf7d3a71e428a18bf4a9982dfb561",
+      "73003d97ff582e3cad34bef487abbb4258cfff8d6aab29010efca07e59f687aa",
+      "80bf0de09011670e62e62ae96bd33184be532296cab3dd3ccc9d848ca2386378",
+      "06f319ea397b863998ec404fef66ac1ec4053debb26f383c65271ff6fd8e9835",
+      "4c90539d3e28978dea6b427fcf226fd845147d0fd7ec7914d27c9b81e13e2495",
+      "f7335753c38aa1ee4111fc5a6aa69f8979b51b7e07afc59e87d546a705e120ec",
+      "a28896c43957851b55fa61ca8d28e203d4c8953f612c221891ecfa35e7f757c9",
+      "16fb02679eee834406b2eb3e6f598247128408277ba8ad23694cc2dea2ca887b",
+      "cdeb193cc22159f3afedd5546d8d5c818666ce2e662f072a64976c23aac68516",
+      "5e1593d07be3f9f1213f80541fd151b65d1a06f7c3ef72f9a452271ad2376f93",
+      "2da343e2b4c362d2a078ba88af42a518d90a52301c02b51030255c956ceeda9e",
+      "c7d6e1c85c757daa62b0d4d1df3a91b9833c631501dd174f8e619610496fb90f",
+      "b336691b5ea7a94cd67e95aadb3cdba7165500f4060c9badd9821be0f2b05e5e",
+      "1d0bea843d61b1856a7575331ab1538c410dfdeaf68ec1e68035c6b810ee81c3",
+      "7293f72291bf10c976f8afe72c02a8f117a8815ec95a83c1033b9a95b5cff20f",
+      "de07e887b9f2f3e85441c9caf63a4767ae2602a6127e196270f61b89f513ffec",
+      "0243682e3c6a293c61c1cc1f5b1c7f68b5f38981980a24272fda5c3c24858aa0",
+      "eda64092ba738219dba4313e83daa398f3916d160654f7d77ba110c5529e0922",
+      "80206c83c62184aa10f3adb1f40fb2fa7a9e2f40f8414e45e0f6d84702bb871c",
+      "a029f4aa0e8b261c00553002a11dbafeb8d51158bf61c94e82e61c4bdb73ed79",
+      "0bd80855489cdabf41faf6eb0eabe1a808888fea4a1cfce12601c8cae880d332",
+      "72e4ba720252ee61065e06ebf063f7ca47f91fb5030794dbaf3dd501c2d2d2de",
+      "061d31efb44cfb5c31930ce47101ba4206814be76078c0a8756ae910316686bd",
+      "a8a0319384e084c803af7a0e5cc04404b0f3c7760c69113bbdd7dd21ddf10ccc",
+      "ae6255deaf14cff5b14f4132ec67ae4544914d6e3899ed68796c6b86f319942d",
+      "a011b7c44945570cc8b10b34c871f87ec216286f01b9beaaca7e8365ca9a33a1",
+      "5f77c7bb5dcb66b08608deeb55bb6ab0ec52fe796ca60833806cfd412521fadb",
+      "23b6e0ac7c38ad9c73e2e1fe551d786c56ff9535f22e8b5a0eda41e0462080ba",
+      "17086b20f23078d0b1c2a01bfecc3b61f5bc13679323728d24863b5d01c33509",
+      "785cd224b9cd62feabca51bdc85534fbcff0bf1c1a1d3a7fb0bfd92cb4837951",
+      "575f6ab62ea8bb4276aae007cf598e7b074bb5a2c077ef5fc0ecfff9213ed4cd"
+    ],
+    "vllm_final_hidden_sha256": "a6772963cee66d8429eaa7b4e72e2594345b1a6613a06a1bf67660b4f02aa9a7",
+    "vllm_logits_sha256": "24c93f3fbe0fc3d2a101c782f0e181be1206cabd56e900814a608d2a09fd268e"
+  },
+  "input": {
+    "sequence_len": 8,
+    "token_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "position_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "embedding_tensor": "model.embed_tokens.weight",
+    "selected_embedding_f32_le_sha256": "3504c3cd7d4aa4893b49085b065893d541af453bdf6d6a7cf654e3190329436b"
+  },
+  "payloads": {
+    "embedding": {
+      "tensor_name": "model.embed_tokens.weight",
+      "dtype": "BF16",
+      "shape": [
+        151936,
+        5120
+      ],
+      "elements": 777912320,
+      "payload_bytes": 1555824640,
+      "payload_sha256": "720549f9f5bae3c8a6520d03f8f07ad79ff9a1885d639d6a9e09afc8550cc0f5",
+      "verified_chunks": 93
+    },
+    "layer_norms": [
+      {
+        "tensor_name": "model.layers.0.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "89b88f4223cd2ff5e9b1a5cc91e0df53d5030d2e42fae36d820a7e60134eb47f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.0.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "50b24a6da90babc9d5abdbd5e9427a4cf68e7ae690e86004dba4235de3da7e10",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.0.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "7273c07210c53551f9b5ad82769de03070c3af05efb2d07dca714900f7dea794",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.0.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "1c7d207d670b629287672f32b03087b7128fb2e18cb739e128a68c7b1d0f728f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.1.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "e2f44bb9081651bc3254f49f9235fc9ee03dfae1025ce704c798008a0e8f17d2",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.1.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "f98927b198d2a5729db4d220997f6b210e3559db467cf9e66c06df57974434fe",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.1.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "fee50a3c916dcc537daf68ff492cd61efef242759cb807dce9120f62799e1358",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.1.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "f77f9260866e77b4bba469b4b56a1d5ba95ed0e9e514cf6d191ec274a1038540",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.2.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "f6d221a2c15372e30efd7c2efce5eff69523e4b4798ff7116a57f30fc9b0e406",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.2.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "28ea799f453bb4dda48011de88df373be8352dfaf3ad28a94c87ed0639b57851",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.2.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "5b8cf3fbd446b06f9b9a9ebc6143381a90dfff8706945a16078a2552abbe8f8e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.2.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "216e7638901e73b47433e5d2a293513d5f0d141c94a2a881b65bb1ea1655d4b8",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.3.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "3644d9a1fc22ded75ddd0833d7927daccbf571f3f849868d195531fdfed7b402",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.3.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "ce3a515fbd3cc9c5a2f5235beeab1c8256bb04a96baaf03fc8ccb0130c489d19",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.3.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "99e8c3ca9df298b5fdef6929401b7a71aedd5486f8e457b8d3a5444c0ce95a78",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.3.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "a247020501ab4d216ecda455cd9169db92c4a03d1d4c0c7c645f516497f9fe95",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.4.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "781e59cbaa7c0a95125f106700c5ec0d0d3dba524e490f0e8e6245249add7ca3",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.4.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "60af468e1f13269f0a9d87b822db4a5d3228e1dae16f2c3790ef47262daac155",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.4.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "14821303f98700164b1e4389e29e1e9764185de65c5f2a748dbb1ccdb5ebac0f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.4.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "168b36eea8feadd7535250a9ee34d5c0d3c1e497df9d4ffe036ae65f2e567348",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.5.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "03d2131c1aac971c191244d54b1cf17aa94f0dcd9bae636618c6a0d700c6a240",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.5.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "e159db6a9c00835c3e258f51460b0f7c916e67473f6c78dd763439cb14725eee",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.5.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "b08117d11438b227c07644fd66919522880a71fdc9e87c0a575708a352352579",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.5.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "4fad8ee9cc20f17a6f9efcf13162601e437619f2f2190e7ea71b1ce213dba6d5",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.6.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "c8f9b5f719c21793b03cbc19cc2e9e14a64c60d7c52d95581a8cca759e4e019c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.6.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "0bbe7a56701a1c77b3d436e4bcace11a4242a31f4027c361c5356b4fc20fd988",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.6.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "05ed8e2dc3c1b99d7e2e0b8a02bceefeb3ae623d05737e3b4a446c15410366e9",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.6.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "d6101f4933a510199bfa32fa6779515bf093e5be60ac5b40b39b9e64d4785efa",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.7.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "3cac7634abeaa354aa1936c1e42a4b6968576e2215b2e291f9122f42615b2a2b",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.7.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "4b71d0b4224f41aa0cdff41583b288b964122e5343c0930d6e512de5650e18e0",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.7.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "5578ddbb435d078fdf5689f29cc29805ffa3184b7d4c4e913a6f544cfa3a066e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.7.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3cf2bddaac18fac833fa09f874c7332325aeb945a812a314f29fca47616d4658",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.8.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "9e67d8bb6eb4e5ff6bb0b8fdf579083e12ee071bc5527e5bd5194a36f51b40ad",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.8.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "05f506f7581e24537cff6d378cd2257b3499287b26ad20c66804dbbea579e222",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.8.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "7ecf51e37ae55f07e8695de05c437f784cb27d031b7d557494681934a6ed34e6",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.8.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "a670ba224b90be8f00394563b813ec21502a9fbc58af5df25cb0db50a405f685",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.9.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "43f03f5e5ad967d6854a9915cd3c4039beb154fed627eea245f769633426b14c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.9.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "8af0feac40da08738fbeb524379fe22c764a8587b5a3af16ef9d28f3bb2e2309",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.9.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3b6ef5b955142c018f21bb2aa68139b019bc4758408eb797bb1dbb2c46fbee57",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.9.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "9bf4d9c06914a46fd9fb591698dbdf23ba3779f03f00bcf02abe00e7dcc5501c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.10.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "7b5dd5a02f3792531ff044a2420bb5749d5f455f2bf799084c0a82615c1ede8b",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.10.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "5ab7f767ea2ae876487578a005adc1123d5c650af5f01ba113014321bb7a6b83",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.10.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3b72463e6ca0113c397e0a4d56d76f8bcba35e89d4c10f509ecee086c2271ba2",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.10.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "baf34933f22332aafbb35283dafb9dacb4d88b320385f4cb5338f3cdb5c8d03c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.11.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "156afc74b42cb1e483e6a15c37d0ee432a2fda27e6e660d3dcd49c53b2da5e8a",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.11.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "d18c0ca29f1adffbfc33ac9f60814cbe2aa52ea1dc5c4e8427b87719fecda590",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.11.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "a59b7f6ebffdb5acafa724e500f0d6fcf488185141f82897f9a4ef8096bf226e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.11.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "097de06c98a6e91386e6aadf81cb0f4b0da54f5561bd23b4688eda8414317604",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.12.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "47c6198b60729d298cb86d7d8dfe1b461cbfad542a063e759b06cf010ec57659",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.12.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "c6f43f75ba2678d01e496bb277ee93181e5b11bf3dd62eb2adba2b4193bb4e39",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.12.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "5412903166771840f664787efdc0bcdaad838d6b0dbfe986dc3d90fc9db3905c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.12.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "81b0285fab1ff74d6e16c25c74b6f63958a136f11a31959a094260dbc36fcb3c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.13.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "e3596ac683eec8f17d944f86b156f37f3ffab5d6b0e1c147cbbca1bf8a71273b",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.13.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "41b834aa1ea31d3d16eeb5a76386ff9223872b52e98bfb9fe1f0c36a9e3e1775",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.13.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "d0530d808f1d813975b61f2a05fd8989f7740af2599ec509da4f34fe324eb831",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.13.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "2b59a82070ceb19def5a189243265ad043f882e109f08fd33bcb4ca21402da42",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.14.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "2cfbc7e57776512a65a8f0a32735165cccd585b392fa79119987e558a4a643ad",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.14.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "586e708d027926d03c307284d9d9f8921d8b5aacd43eaa8859eeb7115cb15a76",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.14.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "54473f22021656bcb288dbbb78fbc2ba7aa704528d22f8e3bab942ec4c44f194",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.14.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "a0869850f53a5d9220a4010c17f4acdaa77a7a02ea3b9c13898517661dcae7ef",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.15.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "21119ae9416873c6f99b6cbb18eab20df1ae90813fd01259330d12e4815bbd81",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.15.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "88aeb7fdb0155a3f72e602985822b20d97512fb943b68afd02c91e94d90e607e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.15.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3d7b204c5747a0abff4b91e9f2f2e5ee0075f6ba0ddb3eac6bd3d09114adc670",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.15.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "654c2948e676829099df136571ec267402665f9e66ae0e1313a351b0fabfeaec",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.16.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "633ef0590c47a742b4310db710912342e097c90cde9a87105c7fd23b72209730",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.16.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "5c946f03a86acbd285e9fe6b991dc0dc25ab75100dd2792865b5679b3077b593",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.16.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "122538465553e236318f9348475f3ab9cb45aec5dccd0712562207498f757f48",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.16.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "cceded205cf1da5ba1a1c1038ed51431fa55ab964e95e6c40a79380dd910fa6f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.17.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "d36b9abae50a97abe7d3720bfc2ab6c591df7d0cd1d4082acd97b4daf3478e69",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.17.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "2e6d8fd7cb8fee3e94a8d26b7173fabda9673916db7939b9eec678960ff1ee0f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.17.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "acda577a565f7073bdf33c594549246fb51eab8cd2285c6a0b895136ed2e7a12",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.17.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "ed8274a2b13c56c41247939e033041f3e9094c993f1b2a16c720523791abf5b9",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.18.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "c5e210d436bcfb617e990e4a7552d78ced87fb8e9724f3183c1640df8ad7bdfe",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.18.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "38175a201f00a7b38b94fcd02f25d498b418f88ad172d5102f22c3e6ec17ca94",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.18.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "ab4dc41a69e317625da4fd63b2e01ce34e5f2523e7c1975c7001fb9f5f34e0c0",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.18.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "76df2b21b92a7b4f908240d0611a4571bc678ad94d7b9ef871a4d659a10e6e78",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.19.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "a020c15e5781967336a2004a60a4bcf839cc6f5b49c8c6d60790a6b4864ddaf1",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.19.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "cae83b21c4f89f1ada7f2b17c9019ea716fc841b2e51d7e4a514d6f01d671503",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.19.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "296b1f5469cfd84090b31b7e6f4a01fb05cbfd7b1f4aab0b16d67b2b65775ca0",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.19.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "5905efefe08be81ca85e798630213c09dfbfa719d0782702805799c09aefb17e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.20.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "38c52a15711bed8c2069a9206249b6b3a4fe79a1cec5166fb3583efe45fa3a43",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.20.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "6dd194db5713f18a5a0c884904adb283b27079f86e09548d0ffcaa2c02a4f8db",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.20.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "f7ff0967ffaf24e7f7106357916f891f2c72009b6a678f247e31b92ee127875c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.20.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "2285cc349395b4c10326a4a3e94b0d403780947fd33baec35b62db985c741ae8",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.21.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "0363f609335b1fc80ed4b74f71b2de758cd856976f723da52cda73eb31b2e8ce",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.21.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "7dfa7ead737b965fbdc5dc0bdc1fbb499bf7c52df6bd710a4acc31498f15088c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.21.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3463815273a582005cb0a2ebd838bdaa59ebade5714f633694af12b502bcb375",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.21.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "38c45c8bc99cf233b5f920ed526d3d41458c9d8dac91dd5b8dc8e0b8c398f08b",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.22.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "4d3ca3631560522b11cbd211f322ceae5eeb14fc7069d3a54475ee5bef5c1815",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.22.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "e83ca709e22f6c1d9acf95d513876fc2346a8e63b40fa500999a4c22b2c4e36a",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.22.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3295141ee883607911cd736fafa90bad7b8f4e33869c6eb27422f4ddc50f916f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.22.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "bd91e30645eb8cd470efb8bff01092c992dd382193c56510d668533de1db6aa6",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.23.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "b175ea981cc039cb12d124ef040cbfd7f2a9281dcf49556646e408709aafccf8",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.23.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "791d40aaee8f38b314fc6e053afa5233757d032cfd771321e0f6a003a0068ca7",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.23.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "d4f386e39a0e75b75d22d82783df33de0873d7e72c04d5ed75a292b402a9ec87",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.23.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "ce1d3ec6b93f8d684158fcb9d895fb961a62d3eb427bc303bab6d50713897bd2",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.24.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "db947c267f43d8ea47c0b20e3aefba5c8cc3d7b09fd908af56ae0ce567656af3",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.24.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "2c92c7563f2c033718ec6df6626bb305240b967167f79ec08c35830bf51c8309",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.24.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "1d8ef07db6c88f15ea9c7a1066ebdb294eff7d53d45aeace27b82dd9064a1fa3",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.24.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "f48c8fc523edea6e6eb778dc4b9b90cb63b8bc6f855e23f4f510ac5713956feb",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.25.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "0aec735044fd5c1f19456150a5606b48c46d22d3c9c94e8165575f6ba76df99e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.25.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "e39286c1ae9d4ac35e504e78a3d55a1c8aad3f8071a6cfbee6c60d4921040d7c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.25.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "b5806c5e9fc15ceecc914d378f82e549054c7c6fa828c66f54b87f886651cff9",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.25.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "b587cdbaae42724565477926eef9125e18877af33bec920f85ff7b2a6463b219",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.26.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "8a2d9ff9fe0a2d74315d79d850e93be403969dd6cdcbd708cf6b03defc35e0bc",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.26.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "c8fffc5e6c1985b96679df0984f18cf76118e825636e526d2692f96334bb30f4",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.26.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "ae20efb2ae5734449f0053d091bccda9d58cf52c72765b9c5a67d1e3f0f455e6",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.26.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "08a512d22567b1ad47882ffd9697ae4b766968fc35573ebe3ae3633f45bd639f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.27.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "287a9634d2f609550bbde5fa84665d17cc9365602d2efe74e1966ebd8210c70f",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.27.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "cd1a622f6a961ed726e21b87451f16eac94ac8a525bf00bcbc3a71b565b58183",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.27.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "051f90f1416cfad1b7288803f814759f50bec6d8e0ca353c82050dfdf9c4e791",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.27.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "42e43c8171f4f32ceaf996e1144e77b63950afe87c06b22f26f864188574b209",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.28.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "9378a4c278a5e6ea1d99aad53bff1197c4275dd3a75534ee01ca8b52550ffe92",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.28.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "face6bead6520006c9766f911e9a737caa0a7ecd36cb11383e0aa97a0a2a4f96",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.28.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "909b40fc86dbef0ba01bbebe46f74569fd16defe61e7515a5148f4aecff15bb7",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.28.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "f7efb36b0034921beb667f97a11773ce8d89cd44d692693ce0e73ca0ea015661",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.29.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "df0b6546002dcfd46d5c0ac170a4df96312f8f65270e02c80f9fb3dde68e3d26",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.29.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "4497c7aeefe736219f72b49d118710a4735ec5a9621618af1b5082a6f131e418",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.29.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "041fa3a08833ab4060a1f360c42c42617a93e1d8c2155912ca7bbf01be60c8a7",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.29.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "c7c3991d3c46d586beef2caafdd46e2e5488662114db2ba1403a1d7feca6cf42",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.30.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "48932f3622309e0bbf8ea3cf294fcfc21e351ba557394d9f66691694332bb003",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.30.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "1fbd22a953621e542bd0427916239cfdc4cb85cd3dacaef80e9c2acee697c9f3",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.30.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "b98e800d960c4e258e3d22e8d6ec705b3210b59906e4c16ce8a733bfa3469acb",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.30.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "942bfb82b0d4eb9dc812374ecdea011a6b7394225bd225f65223e2d215ee4be3",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.31.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "76bb061d9ae61b346f737788b3e47597dfa0db2a67af6931fba81f3f810cc665",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.31.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "d4cdac66da53723f123cb87223ed5ab58135b351f6768025352d9606cbbf12d0",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.31.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "3d613f7b0fadff204eae7529792f32f3d0ff5216b6fb292e0cc4fa30af124957",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.31.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "d18ad68179a3c1000ddfc7729997d110f51b20c8e6a8f002de40fa8809c5bbb4",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.32.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "17f14da9bd1fd37f59dea7abb2f38c44c024f8a60b30cffff28fa397e0f3030c",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.32.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "57777101715d3fb43a35fc34e0949a45bee38b957b72ee1493834bd3fc0a6630",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.32.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "08429c8a6017fd5e6ab34e3d4fae6126ccd4d596ba59bc7f456ddb24183b4a41",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.32.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "2bef266c2b1956aa1f7553e3a41e9d2b20f2c03267ff3044f5b56e141acade02",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.33.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "932bac5ea1bbaa67d77b3a3a7392dc951908b2f4c89db2dd320e7d42df3e19bd",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.33.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "c3a0025ebcc3f8d51936e936b7f54bd55521909ae74b77d74ba6036eaf2c6195",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.33.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "e53daa4f7d02d7163a901a204e56aba93e2fd4d8477879ef49ec3c2cc215a342",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.33.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "8c916b315ec3126a7e49ebdc0b7aaf964cbe5b6d517e650b20f8d7eb3fb4126b",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.34.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "cd3f33b9b2fe8e45b71f997dd9e6c3f7156e35de5d3861e6c85a7c584c6758cc",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.34.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "7c628e7f6a0175379bc8f27bddb1457d941d39db6c8b9ef88e036308238112ce",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.34.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "06a25070482830f00f3e81f9129e873de9c23e34f8487ffd8cc11c7de98b5833",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.34.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "224005efb2a3bef90bd64dac0a8e7e4bc7f55fd553b3d6c805f0469f16bfbede",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.35.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "2b914ef25f7c8e6e9a0ad72ec4a9ceabfabc2ceb4aefab928326b37c8d5a78dd",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.35.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "f15bd74a4aa4a81bcb9f68492b54394d36548ed2d63d2718a9018a92db52269e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.35.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "19c5436fd94508c007e97420338b0459f55a43f37749530958fb450e6f91f19e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.35.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "2f07e40afe3dc48f35b1752c286954cdedcbceb3bef6d5e8e9b9482337fbc3dd",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.36.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "d207911433e20f00537c100db044ce94bc6d31e01d9f5a94f0d6a16859f49f15",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.36.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "e5d3a2ed6170f3e9fcaaa648121cf12efe8a4459786aa1746d43d20ee7421b79",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.36.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "324f7563365b1675198688d8711dbd56066d017743138dd71ba118dd43938ebd",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.36.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "a53ad26631c89ca9bbc3ed44465686575907e702ba7cdcfe8616d722271876df",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.37.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "2f6e9e17dc09a8506a0f4c336b93f17631ea028785ba2296d7be64e61b9beb02",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.37.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "15a47baddf89557976ae52a009dc1058634f4bddd03b62b385994ec795249434",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.37.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "a060464aedfab9a85b844c2e72a44a4fa889dc233b45ac9cd2bb6c4a6c01f5c0",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.37.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "44ee44d4437fbff687ae87e3c2c12db17aa2845ce7a7c55fb45bcf99d0a8391e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.38.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "bd9070a371185a82cda0648a6b8447c72230007bf7c589536853cb8f51a359fe",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.38.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "f12d059d589a6608ef18097445e1c482493a6990256309f565ac44ed37c96a3a",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.38.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "fb2b1e7a0cec5f1f5529cefbbf07c4816bd8f69b8192efe8ee89bc61c220cc69",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.38.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "6071958b52d992f8f15a92cca9661b54bacce8e1453a2836267223a08104e306",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.39.input_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "50eff43dab5a3e58faf767804b80bb85f998b0594ef174d22d2469a5607b81d8",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.39.post_attention_layernorm.weight",
+        "dtype": "BF16",
+        "shape": [
+          5120
+        ],
+        "elements": 5120,
+        "payload_bytes": 10240,
+        "payload_sha256": "7b3e7cdd370b9d6b424b7c0207ccc6fea3cbd908703616d88c7c3b3fcd1c762e",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.39.self_attn.q_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "54df459cddf421b9804c9d8a02091c78ebda47da1fbcc9235d87b52bd480aca6",
+        "verified_chunks": 1
+      },
+      {
+        "tensor_name": "model.layers.39.self_attn.k_norm.weight",
+        "dtype": "BF16",
+        "shape": [
+          128
+        ],
+        "elements": 128,
+        "payload_bytes": 256,
+        "payload_sha256": "e543342e575c8268969de2eff06613151b85f2ed9a5fe598373f9305e8eb463d",
+        "verified_chunks": 1
+      }
+    ],
+    "final_norm": {
+      "tensor_name": "model.norm.weight",
+      "dtype": "BF16",
+      "shape": [
+        5120
+      ],
+      "elements": 5120,
+      "payload_bytes": 10240,
+      "payload_sha256": "00e8c9b2696bc683b0a9b2403aecf41ba3555875b1483829b2f154ca563b6e2c",
+      "verified_chunks": 1
+    },
+    "lm_head": {
+      "tensor_name": "lm_head.weight",
+      "dtype": "BF16",
+      "shape": [
+        151936,
+        5120
+      ],
+      "elements": 777912320,
+      "payload_bytes": 1555824640,
+      "payload_sha256": "8488b7e7753b3ba708efa81b2426feb67196c793eee1fd226dfd14f0915b4b6f",
+      "verified_chunks": 93
+    }
+  },
+  "device": {
+    "runtime_index": 1,
+    "backend_device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "gcn_arch_name": "",
+    "compute_major": 12,
+    "compute_minor": 0,
+    "total_global_mem": 34208743424
+  },
+  "cpu_oracle": {
+    "elapsed_ms": 168525.164969,
+    "layer_output_f32_le_sha256": [
+      "d468c9453b8352faca0549edfab4a101d9e484a61331cfdf0057b3802131a201",
+      "387e3bf6eed06995be4e42099f00ab521fcf0593745261da69fc6471a5ed4ec4",
+      "343a2549db4d8b75510da742aa1c6bfba2ae1ae6a0e3cbf92f61dca29874fb01",
+      "4f608d3b3b51f3b2d17bda51c506e8b8bd38a084c5cd93818bdd9915c7af53bd",
+      "a9af63c07812cf816d4d2743bb2f4b5e36c2506e6a7092f6c6a2b20898e2b4b2",
+      "f41bd7a1cc7dacfce28e0548e6c6dc4c7987409e5369b897bfd04681188b30a5",
+      "1c51d9dbbf60eee4599987e5cb8ca2e6b643bcb27d1a16ad03b8e0e076585df9",
+      "67431334974330aa6b53a55464009814bc7732008482e37dabed2df2953327a4",
+      "ee75338a059f8d0b5789948a5b59edf1befcbe08e3aa673efedc8c46bad8fce6",
+      "da14779f975a3368dfad4aa9a8391dc558985f7a02f77d3d1add544353df88c6",
+      "2a3a976ccf283537f96b641942f35272f51cd4df832cef3d07663e2f930fb993",
+      "6ab6be5fa158533976a9bd31d87e4cdf65d28386ab9afbd0d2514401e452cfe5",
+      "677709d706ed37453f63a974c5ca36fc8331270d27ef8db2fb969af5d7b81bbb",
+      "6925231e25292ba07156e6ffd0f07e537aeb4a37703e7e1a593cba3381d6dc6c",
+      "242f3906a957c5c2cf2af768108bec77fe58a7501e43d30db84b7de825b611d9",
+      "da16a54c024fe1205ea7a4113375bac4e9a115a30caf2e22fe73508e5cb83c15",
+      "70f9c6ca321d9f956e57d4da9a83779778de9c7f664ffeda350e21dd4b2c4480",
+      "e928f893b96a5ceffcfea4fd1dcdab74695a445ea9bec36a93bfa5d614c51838",
+      "bdc97dd77cce626a383775d1da7ecb24651ab6c2ef782479e54b9da9b442b242",
+      "d56b3dc8264637b8b776a0336829eaf4062af659a1ba5983405c6f80ab3ff75c",
+      "bbe243f6039dadf5a3a63392b51d50a1fa9c8862807d35b2d3090a79e55ebf86",
+      "6c70a8eca38c08bf6f860baa3fcfd65160ad2d87ba5106c756645429a9c52a66",
+      "65860030624fcee56337d1b1b0b6ec478ce4576102768f468fa02ada90042a55",
+      "f52abcf25252eb21afbeedf66e751df0b7ad91c32956978b47208c72ca0ff930",
+      "496112a6171003a163fe54d2a0a015e0f22d320bffe0071b23d51ab94f17a3ed",
+      "20f1a95f8fc7461d76df88a1f11a2b964149fce5d376274fba91999b08537a7d",
+      "aefd50af579509bbd5bc96f7a547e1149c8f6715b782265bd2148cd61b43305f",
+      "7c1c046a4f68ba2add4b7d04e752a98a1b06d7fe09623a8ae9884550887eb917",
+      "82b395ffa7cea915ebb9d2d13f499e2c571721a17aa3af3690f59ed033a9449d",
+      "44d49b1c174468de143b8f05fa5dcf6b1a9a749756c24e7bd9509bb2dc09d781",
+      "c25dd8cf44d29fba9896f0875c31b94bbb9c3edfec828860ff910e1e7dbc39be",
+      "4aabd525dd0af52c2bd52eab31e5680578c356314a3fcf01c3d804d0292f2eb7",
+      "71c44282f874d80ef7a63701be914a0d6e22f29810d7fa634eb2184fad08a2e7",
+      "6b8289a43607172d2c786e34d35a6be35728d4e4848ef62d021067d50e2fc40d",
+      "07c57e925b2ed4a64ddbe7fee35062c409e8edcaa2ff1abc86372abd339e4f13",
+      "982c1d33967fa55f867229cdd06c8f88943c6719049f89ffd361e2b8415bcf51",
+      "ae12514082ef7a10a07a9b6b3975a932e94c3b0f8bfc0c020bf847c64a580791",
+      "681d5c16396eb78f9af833eab14968bca3793fd02c4bb6bb48a03c46437f3e5e",
+      "d733c02a4737cc72d97ca23d48b437301e22ef7a26bb0202ded41c1db9b0993e",
+      "b0f2b9c20c275ae5f2f335efd023ba68ee6459dee1c01732e4c91bb7e69a3089"
+    ]
+  },
+  "layer_boundaries": [
+    {
+      "layer_index": 0,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -6.0092163,
+        "maximum": 18.180664,
+        "max_abs": 18.180664,
+        "f32_le_sha256": "d0f58252a8305c59db92d28dd4ee057af0fd55415abf6743b12809e89b854dc7"
+      },
+      "cpu_sq8_f32_le_sha256": "d468c9453b8352faca0549edfab4a101d9e484a61331cfdf0057b3802131a201",
+      "vllm_f32_le_sha256": "eb91f95c87bea02584b0dcac37c7bbf6ef4202e0be41f82092ae757dbf8c72ef",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 2.0317997039623404e-7,
+          "max_abs": 0.03125,
+          "relative_l2": 0.0015005725925865399,
+          "cosine_similarity": 0.9999988832775003
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 8.902719607181862e-6,
+        "max_abs": 0.1806640625,
+        "relative_l2": 0.009946726705352626,
+        "cosine_similarity": 0.9999517629752139
+      }
+    },
+    {
+      "layer_index": 1,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -8.595123,
+        "maximum": 44.743164,
+        "max_abs": 44.743164,
+        "f32_le_sha256": "bc15431092897d5ee68edad48a80dadb61551c83435f8ce5319316a69eb900f4"
+      },
+      "cpu_sq8_f32_le_sha256": "387e3bf6eed06995be4e42099f00ab521fcf0593745261da69fc6471a5ed4ec4",
+      "vllm_f32_le_sha256": "e46f8731d6c7d94edcf9a43996d735ea5f9ce7c63806f78fb5804bed565975f9",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 2.2794379322297434e-6,
+          "max_abs": 0.03125,
+          "relative_l2": 0.0032714522452515554,
+          "cosine_similarity": 0.9999947034275021
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.000024468573554221092,
+        "max_abs": 0.2431640625,
+        "relative_l2": 0.01075012222280556,
+        "cosine_similarity": 0.9999477792204502
+      }
+    },
+    {
+      "layer_index": 2,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -13.578522,
+        "maximum": 99.555664,
+        "max_abs": 99.555664,
+        "f32_le_sha256": "0ad7c2c8df0a7e464d8c9c7dc0eabd73ee0561da21d07bf119815639fbd96b2b"
+      },
+      "cpu_sq8_f32_le_sha256": "343a2549db4d8b75510da742aa1c6bfba2ae1ae6a0e3cbf92f61dca29874fb01",
+      "vllm_f32_le_sha256": "2fd912a7e10fdbf65885917e5042af8399c7c2f2bb3882273d9ab6e98b90a325",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.000012264239825878273,
+          "max_abs": 0.216796875,
+          "relative_l2": 0.005086882801693249,
+          "cosine_similarity": 0.9999883121513164
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.000053461213153369774,
+        "max_abs": 0.5556640625,
+        "relative_l2": 0.010652843982910108,
+        "cosine_similarity": 0.9999540793178082
+      }
+    },
+    {
+      "layer_index": 3,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -14.651276,
+        "maximum": 112.74936,
+        "max_abs": 112.74936,
+        "f32_le_sha256": "eed5d5a0b242f54cd23e4b263d1059807f360e5a0becfcc7a51816c01a675406"
+      },
+      "cpu_sq8_f32_le_sha256": "4f608d3b3b51f3b2d17bda51c506e8b8bd38a084c5cd93818bdd9915c7af53bd",
+      "vllm_f32_le_sha256": "77c187fe2c42e0ad0415f0dd7d47293642fc28b97b5277ea64aa62920f3d0664",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.00002159407002941951,
+          "max_abs": 0.22796630859375,
+          "relative_l2": 0.0060287601133452865,
+          "cosine_similarity": 0.999982792972603
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.0000838066864155526,
+        "max_abs": 0.749359130859375,
+        "relative_l2": 0.011921772371442908,
+        "cosine_similarity": 0.9999425610872454
+      }
+    },
+    {
+      "layer_index": 4,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -19.342194,
+        "maximum": 152.76498,
+        "max_abs": 152.76498,
+        "f32_le_sha256": "33d9c2b3d47bff66da73a16f640178ce7ca2eaa6dcedc87a1e180dea1eb3df22"
+      },
+      "cpu_sq8_f32_le_sha256": "a9af63c07812cf816d4d2743bb2f4b5e36c2506e6a7092f6c6a2b20898e2b4b2",
+      "vllm_f32_le_sha256": "4b9fc515445c254f8280bf6d97b6062ce3ae81f28973c79477373f7db11c93bb",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.00004473227827805366,
+          "max_abs": 0.22796630859375,
+          "relative_l2": 0.0068571352949532895,
+          "cosine_similarity": 0.9999773208004895
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.0001252115774564628,
+        "max_abs": 0.764984130859375,
+        "relative_l2": 0.011510441067856756,
+        "cosine_similarity": 0.9999445265897698
+      }
+    },
+    {
+      "layer_index": 5,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -19.32779,
+        "maximum": 160.74545,
+        "max_abs": 160.74545,
+        "f32_le_sha256": "78af2604b1e92520d28281746331fe44f71e40f6cfa16b25490e30dcd7e7f2ee"
+      },
+      "cpu_sq8_f32_le_sha256": "f41bd7a1cc7dacfce28e0548e6c6dc4c7987409e5369b897bfd04681188b30a5",
+      "vllm_f32_le_sha256": "35049a4b79004f86f903301246c32f676f484e2f3671d2b0cffecb2084c6153b",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.00010145161974407483,
+          "max_abs": 0.29827880859375,
+          "relative_l2": 0.009215139569530916,
+          "cosine_similarity": 0.9999586274177266
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.000225050851994824,
+        "max_abs": 0.745452880859375,
+        "relative_l2": 0.013770347939565964,
+        "cosine_similarity": 0.9999168234600649
+      }
+    },
+    {
+      "layer_index": 6,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.81995,
+        "maximum": 10846.4795,
+        "max_abs": 10846.4795,
+        "f32_le_sha256": "7f2a1f35336edd0cd5bf8f656cc17a68a79212dc4be77e1187d9b1549285eb20"
+      },
+      "cpu_sq8_f32_le_sha256": "1c51d9dbbf60eee4599987e5cb8ca2e6b643bcb27d1a16ad03b8e0e076585df9",
+      "vllm_f32_le_sha256": "5f47bf6c10643c425d4ea5f384e8b642947833b655c40d9e164c74fcbc3a4818",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.00024042832113910516,
+          "max_abs": 0.2978515625,
+          "relative_l2": 0.0002857475905632055,
+          "cosine_similarity": 0.9999999595584482
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.23034429593637684,
+        "max_abs": 94.4794921875,
+        "relative_l2": 0.008922982506515895,
+        "cosine_similarity": 0.9999997037069321
+      }
+    },
+    {
+      "layer_index": 7,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -104.12268,
+        "maximum": 11022.37,
+        "max_abs": 11022.37,
+        "f32_le_sha256": "e44d619d6e27e7d356641b5bd2ab2c5ce6c6644211dc0e633a79d2694f985789"
+      },
+      "cpu_sq8_f32_le_sha256": "67431334974330aa6b53a55464009814bc7732008482e37dabed2df2953327a4",
+      "vllm_f32_le_sha256": "a93ba8f3c80f3fd62d3655dd8e6ec3de61d38d55cd8268100c933cbaa43b4766",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.00041872795881516667,
+          "max_abs": 0.519256591796875,
+          "relative_l2": 0.00037116505176629916,
+          "cosine_similarity": 0.999999931472006
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.16827587446656442,
+        "max_abs": 78.3701171875,
+        "relative_l2": 0.007495251802670593,
+        "cosine_similarity": 0.9999990200649952
+      }
+    },
+    {
+      "layer_index": 8,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -104.37805,
+        "maximum": 11044.495,
+        "max_abs": 11044.495,
+        "f32_le_sha256": "04e6911ecdd87565ee3082cb64bb093713d3053296e43742c4eb97c0396bbb23"
+      },
+      "cpu_sq8_f32_le_sha256": "ee75338a059f8d0b5789948a5b59edf1befcbe08e3aa673efedc8c46bad8fce6",
+      "vllm_f32_le_sha256": "2383103d26abc9983413a033492ce3a5294e1f8958c1f53768e9dc9869127d58",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.0006356779206677202,
+          "max_abs": 0.472381591796875,
+          "relative_l2": 0.000456409358635442,
+          "cosine_similarity": 0.9999998961883206
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.265601079767891,
+        "max_abs": 100.4951171875,
+        "relative_l2": 0.009416227241973739,
+        "cosine_similarity": 0.999999289191664
+      }
+    },
+    {
+      "layer_index": 9,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.25305,
+        "maximum": 11083.694,
+        "max_abs": 11083.694,
+        "f32_le_sha256": "18fb2fba8e32d41b1189df67572d20cd9c99d022b0984f6ca17851d1ce017f12"
+      },
+      "cpu_sq8_f32_le_sha256": "da14779f975a3368dfad4aa9a8391dc558985f7a02f77d3d1add544353df88c6",
+      "vllm_f32_le_sha256": "4c8c4e2052ef2ee28f04e7a84d8e851777bcf7d3a71e428a18bf4a9982dfb561",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.001010492855316165,
+          "max_abs": 0.2939453125,
+          "relative_l2": 0.0005734182351195789,
+          "cosine_similarity": 0.9999998359419414
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.16074220593231103,
+        "max_abs": 75.6943359375,
+        "relative_l2": 0.007283341139494797,
+        "cosine_similarity": 0.9999986838030368
+      }
+    },
+    {
+      "layer_index": 10,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.5636,
+        "maximum": 11108.444,
+        "max_abs": 11108.444,
+        "f32_le_sha256": "3e77c7cff599570fac937494e378f179174a6db109827deb48b6a189c410fa07"
+      },
+      "cpu_sq8_f32_le_sha256": "2a3a976ccf283537f96b641942f35272f51cd4df832cef3d07663e2f930fb993",
+      "vllm_f32_le_sha256": "73003d97ff582e3cad34bef487abbb4258cfff8d6aab29010efca07e59f687aa",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.0015844235094616605,
+          "max_abs": 0.298828125,
+          "relative_l2": 0.0007164416194918841,
+          "cosine_similarity": 0.999999743686482
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.2686077575994947,
+        "max_abs": 100.4443359375,
+        "relative_l2": 0.009414855769247906,
+        "cosine_similarity": 0.999998935442354
+      }
+    },
+    {
+      "layer_index": 11,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.16223,
+        "maximum": 11139.397,
+        "max_abs": 11139.397,
+        "f32_le_sha256": "0db100f79c2dd9a31748cb50e56ca83a7cb737d14d38f43b25a19b772bc83a38"
+      },
+      "cpu_sq8_f32_le_sha256": "6ab6be5fa158533976a9bd31d87e4cdf65d28386ab9afbd0d2514401e452cfe5",
+      "vllm_f32_le_sha256": "80bf0de09011670e62e62ae96bd33184be532296cab3dd3ccc9d848ca2386378",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.0022680605187819945,
+          "max_abs": 0.437744140625,
+          "relative_l2": 0.0008548168926374686,
+          "cosine_similarity": 0.9999996349770396
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.1365236287794737,
+        "max_abs": 67.3974609375,
+        "relative_l2": 0.006674064513151306,
+        "cosine_similarity": 0.999997942674474
+      }
+    },
+    {
+      "layer_index": 12,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.68176,
+        "maximum": 11172.772,
+        "max_abs": 11172.772,
+        "f32_le_sha256": "02263ca6bb8f25594cf7e73d72b0c1740c04d8558e892df00322f1a644762caf"
+      },
+      "cpu_sq8_f32_le_sha256": "677709d706ed37453f63a974c5ca36fc8331270d27ef8db2fb969af5d7b81bbb",
+      "vllm_f32_le_sha256": "06f319ea397b863998ec404fef66ac1ec4053debb26f383c65271ff6fd8e9835",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.002921553877505116,
+          "max_abs": 0.574462890625,
+          "relative_l2": 0.0009673131375187193,
+          "cosine_similarity": 0.9999995324840425
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.06166250839042725,
+        "max_abs": 36.7724609375,
+        "relative_l2": 0.0044600940389196595,
+        "cosine_similarity": 0.9999967436122289
+      }
+    },
+    {
+      "layer_index": 13,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.505005,
+        "maximum": 11178.616,
+        "max_abs": 11178.616,
+        "f32_le_sha256": "7a17a45cc4336522596941e8cfc6d714bb17fcff4be088c4a5aad553a4e88ed5"
+      },
+      "cpu_sq8_f32_le_sha256": "6925231e25292ba07156e6ffd0f07e537aeb4a37703e7e1a593cba3381d6dc6c",
+      "vllm_f32_le_sha256": "4c90539d3e28978dea6b427fcf226fd845147d0fd7ec7914d27c9b81e13e2495",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.0032754782882275487,
+          "max_abs": 0.837188720703125,
+          "relative_l2": 0.0010237295086877,
+          "cosine_similarity": 0.9999994763073583
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.07121173015778869,
+        "max_abs": 42.6162109375,
+        "relative_l2": 0.004793030640350314,
+        "cosine_similarity": 0.9999971243188251
+      }
+    },
+    {
+      "layer_index": 14,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -101.36243,
+        "maximum": 11183.491,
+        "max_abs": 11183.491,
+        "f32_le_sha256": "38c1df62497f431b86411ccb2263add480cd7bc6840fb26017519702d680e486"
+      },
+      "cpu_sq8_f32_le_sha256": "242f3906a957c5c2cf2af768108bec77fe58a7501e43d30db84b7de825b611d9",
+      "vllm_f32_le_sha256": "f7335753c38aa1ee4111fc5a6aa69f8979b51b7e07afc59e87d546a705e120ec",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.003556852092180751,
+          "max_abs": 0.555938720703125,
+          "relative_l2": 0.0010663595519534502,
+          "cosine_similarity": 0.9999994316236125
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.07779238723053426,
+        "max_abs": 47.4912109375,
+        "relative_l2": 0.005009505962082988,
+        "cosine_similarity": 0.9999977313990597
+      }
+    },
+    {
+      "layer_index": 15,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -100.473755,
+        "maximum": 11186.46,
+        "max_abs": 11186.46,
+        "f32_le_sha256": "b6ca0da2d4e2432168354abafee8e1f4353092362ca5eaec432c2b4e205def10"
+      },
+      "cpu_sq8_f32_le_sha256": "da16a54c024fe1205ea7a4113375bac4e9a115a30caf2e22fe73508e5cb83c15",
+      "vllm_f32_le_sha256": "a28896c43957851b55fa61ca8d28e203d4c8953f612c221891ecfa35e7f757c9",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.0042919978801096385,
+          "max_abs": 0.618438720703125,
+          "relative_l2": 0.001171070829422312,
+          "cosine_similarity": 0.9999993144711908
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.08246070694274485,
+        "max_abs": 50.4599609375,
+        "relative_l2": 0.005157392209083197,
+        "cosine_similarity": 0.9999980246114988
+      }
+    },
+    {
+      "layer_index": 16,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -99.477295,
+        "maximum": 11186.429,
+        "max_abs": 11186.429,
+        "f32_le_sha256": "0e063f2e5f1c2fd9022378efca12f4e2d5c622f37ada2cff4e70b2be83821727"
+      },
+      "cpu_sq8_f32_le_sha256": "70f9c6ca321d9f956e57d4da9a83779778de9c7f664ffeda350e21dd4b2c4480",
+      "vllm_f32_le_sha256": "16fb02679eee834406b2eb3e6f598247128408277ba8ad23694cc2dea2ca887b",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.004837005844200213,
+          "max_abs": 0.519287109375,
+          "relative_l2": 0.0012432027006154507,
+          "cosine_similarity": 0.9999992273853344
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.0796480478274195,
+        "max_abs": 50.4287109375,
+        "relative_l2": 0.005068463275648511,
+        "cosine_similarity": 0.9999982757687248
+      }
+    },
+    {
+      "layer_index": 17,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -98.67261,
+        "maximum": 11195.991,
+        "max_abs": 11195.991,
+        "f32_le_sha256": "7eee941fcc3aa5c5b3ef11640dc88c915894a2616ad549fe9ccbe2c99326be14"
+      },
+      "cpu_sq8_f32_le_sha256": "e928f893b96a5ceffcfea4fd1dcdab74695a445ea9bec36a93bfa5d614c51838",
+      "vllm_f32_le_sha256": "cdeb193cc22159f3afedd5546d8d5c818666ce2e662f072a64976c23aac68516",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.005363676888779739,
+          "max_abs": 0.588134765625,
+          "relative_l2": 0.0013080129258903211,
+          "cosine_similarity": 0.9999991447137325
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.10480486793177228,
+        "max_abs": 59.9912109375,
+        "relative_l2": 0.005813789841639021,
+        "cosine_similarity": 0.9999984031469794
+      }
+    },
+    {
+      "layer_index": 18,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -98.309326,
+        "maximum": 11200.991,
+        "max_abs": 11200.991,
+        "f32_le_sha256": "b17a548a63dc2cebc89704a806fda93f761f22f2a5fcfd6e65a04d52f46211a4"
+      },
+      "cpu_sq8_f32_le_sha256": "bdc97dd77cce626a383775d1da7ecb24651ab6c2ef782479e54b9da9b442b242",
+      "vllm_f32_le_sha256": "5e1593d07be3f9f1213f80541fd151b65d1a06f7c3ef72f9a452271ad2376f93",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.00578585870581365,
+          "max_abs": 0.666259765625,
+          "relative_l2": 0.0013579464011285087,
+          "cosine_similarity": 0.9999990781697108
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.1177800310593787,
+        "max_abs": 64.9912109375,
+        "relative_l2": 0.006162951985378187,
+        "cosine_similarity": 0.9999985220113201
+      }
+    },
+    {
+      "layer_index": 19,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -106.36401,
+        "maximum": 12499.491,
+        "max_abs": 12499.491,
+        "f32_le_sha256": "f639f879ef63d0134e945aeefa53f02b67daf99957b3d3f374a294093a989018"
+      },
+      "cpu_sq8_f32_le_sha256": "d56b3dc8264637b8b776a0336829eaf4062af659a1ba5983405c6f80ab3ff75c",
+      "vllm_f32_le_sha256": "2da343e2b4c362d2a078ba88af42a518d90a52301c02b51030255c956ceeda9e",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.006834605237506802,
+          "max_abs": 0.916259765625,
+          "relative_l2": 0.0013230715413124912,
+          "cosine_similarity": 0.9999991248885808
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.18368840993885535,
+        "max_abs": 83.4912109375,
+        "relative_l2": 0.00690515009892424,
+        "cosine_similarity": 0.9999988095363144
+      }
+    },
+    {
+      "layer_index": 20,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -105.62964,
+        "maximum": 12551.554,
+        "max_abs": 12551.554,
+        "f32_le_sha256": "6257afeb54e25142abfa1f607f1c44b95d64abb3b1e0d1c014b583dc78d84dd7"
+      },
+      "cpu_sq8_f32_le_sha256": "bbe243f6039dadf5a3a63392b51d50a1fa9c8862807d35b2d3090a79e55ebf86",
+      "vllm_f32_le_sha256": "c7d6e1c85c757daa62b0d4d1df3a91b9833c631501dd174f8e619610496fb90f",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.008244162470780985,
+          "max_abs": 0.85546875,
+          "relative_l2": 0.0014471645165220833,
+          "cosine_similarity": 0.9999989530246856
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.138484842704657,
+        "max_abs": 71.5537109375,
+        "relative_l2": 0.0059649974120911395,
+        "cosine_similarity": 0.9999985098791523
+      }
+    },
+    {
+      "layer_index": 21,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -105.093506,
+        "maximum": 12553.929,
+        "max_abs": 12553.929,
+        "f32_le_sha256": "25e0d1ad013c7e02b4fc80613aa52508470b779d922931ebfbca86135a2cbcd1"
+      },
+      "cpu_sq8_f32_le_sha256": "6c70a8eca38c08bf6f860baa3fcfd65160ad2d87ba5106c756645429a9c52a66",
+      "vllm_f32_le_sha256": "b336691b5ea7a94cd67e95aadb3cdba7165500f4060c9badd9821be0f2b05e5e",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.009693126356931736,
+          "max_abs": 1.33984375,
+          "relative_l2": 0.0015688557576642175,
+          "cosine_similarity": 0.9999987695386993
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.15197314014370072,
+        "max_abs": 73.9287109375,
+        "relative_l2": 0.006248187161264167,
+        "cosine_similarity": 0.9999975289576782
+      }
+    },
+    {
+      "layer_index": 22,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.23804,
+        "maximum": 12571.616,
+        "max_abs": 12571.616,
+        "f32_le_sha256": "e3a68b6b93ff62097a8eb1fe63472cac0834819c63ff14f5d1ad579662b0f518"
+      },
+      "cpu_sq8_f32_le_sha256": "65860030624fcee56337d1b1b0b6ec478ce4576102768f468fa02ada90042a55",
+      "vllm_f32_le_sha256": "1d0bea843d61b1856a7575331ab1538c410dfdeaf68ec1e68035c6b810ee81c3",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.010923262860477267,
+          "max_abs": 1.87109375,
+          "relative_l2": 0.0016630027345765192,
+          "cosine_similarity": 0.9999986174023662
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.22560645203931076,
+        "max_abs": 91.6162109375,
+        "relative_l2": 0.007611879384457391,
+        "cosine_similarity": 0.9999968318328007
+      }
+    },
+    {
+      "layer_index": 23,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.80444,
+        "maximum": 12581.647,
+        "max_abs": 12581.647,
+        "f32_le_sha256": "21403b238a4aa236e8a3a648c2219664e0b6e81a088b44ee7acd6b90b83b69ac"
+      },
+      "cpu_sq8_f32_le_sha256": "f52abcf25252eb21afbeedf66e751df0b7ad91c32956978b47208c72ca0ff930",
+      "vllm_f32_le_sha256": "7293f72291bf10c976f8afe72c02a8f117a8815ec95a83c1033b9a95b5cff20f",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.013141430491791516,
+          "max_abs": 1.46484375,
+          "relative_l2": 0.001822348300276746,
+          "cosine_similarity": 0.9999983396185037
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.2727639980414317,
+        "max_abs": 101.6474609375,
+        "relative_l2": 0.008368093862306381,
+        "cosine_similarity": 0.999996419633383
+      }
+    },
+    {
+      "layer_index": 24,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.24609,
+        "maximum": 12572.616,
+        "max_abs": 12572.616,
+        "f32_le_sha256": "b9b22e09563b8d9156051ca7cf6abc02a4f6d5d317d0d33681996bc26b756ff4"
+      },
+      "cpu_sq8_f32_le_sha256": "496112a6171003a163fe54d2a0a015e0f22d320bffe0071b23d51ab94f17a3ed",
+      "vllm_f32_le_sha256": "de07e887b9f2f3e85441c9caf63a4767ae2602a6127e196270f61b89f513ffec",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.014764902433246064,
+          "max_abs": 1.05859375,
+          "relative_l2": 0.0019328313838486016,
+          "cosine_similarity": 0.9999981321825375
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.23322028704359593,
+        "max_abs": 92.6162109375,
+        "relative_l2": 0.0077368227670318035,
+        "cosine_similarity": 0.9999958622474979
+      }
+    },
+    {
+      "layer_index": 25,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.700195,
+        "maximum": 12572.272,
+        "max_abs": 12572.272,
+        "f32_le_sha256": "7a65f09a144f7fa9f2128808e7e93348e6f4ca6801cf95470a5c1b86cafec24a"
+      },
+      "cpu_sq8_f32_le_sha256": "20f1a95f8fc7461d76df88a1f11a2b964149fce5d376274fba91999b08537a7d",
+      "vllm_f32_le_sha256": "0243682e3c6a293c61c1cc1f5b1c7f68b5f38981980a24272fda5c3c24858aa0",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.01697520973733992,
+          "max_abs": 1.55859375,
+          "relative_l2": 0.0020721865566592783,
+          "cosine_similarity": 0.9999978531416084
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.23555715296205718,
+        "max_abs": 92.2724609375,
+        "relative_l2": 0.007774029096981694,
+        "cosine_similarity": 0.9999951865243046
+      }
+    },
+    {
+      "layer_index": 26,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.66,
+        "maximum": 12570.429,
+        "max_abs": 12570.429,
+        "f32_le_sha256": "dd438eecafeaddcda540ee78a6709c1ccfda3ffdccdb9d60f1b98ff0613a5cbf"
+      },
+      "cpu_sq8_f32_le_sha256": "aefd50af579509bbd5bc96f7a547e1149c8f6715b782265bd2148cd61b43305f",
+      "vllm_f32_le_sha256": "eda64092ba738219dba4313e83daa398f3916d160654f7d77ba110c5529e0922",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.020397984029949866,
+          "max_abs": 2.12109375,
+          "relative_l2": 0.002271158310363493,
+          "cosine_similarity": 0.99999742106656
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.23453106254119058,
+        "max_abs": 90.4287109375,
+        "relative_l2": 0.007754412869452824,
+        "cosine_similarity": 0.9999940217447298
+      }
+    },
+    {
+      "layer_index": 27,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.50253,
+        "maximum": 12573.554,
+        "max_abs": 12573.554,
+        "f32_le_sha256": "4e3939cc26b7bb5c624bf2ac29ab0b8d3f9cb1961f2ed7789af03c8cca9551e9"
+      },
+      "cpu_sq8_f32_le_sha256": "7c1c046a4f68ba2add4b7d04e752a98a1b06d7fe09623a8ae9884550887eb917",
+      "vllm_f32_le_sha256": "80206c83c62184aa10f3adb1f40fb2fa7a9e2f40f8414e45e0f6d84702bb871c",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.025781246971153055,
+          "max_abs": 3.08984375,
+          "relative_l2": 0.002551633353430859,
+          "cosine_similarity": 0.9999967448753126
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.2585926216762737,
+        "max_abs": 93.5537109375,
+        "relative_l2": 0.00813871608649371,
+        "cosine_similarity": 0.9999924385230976
+      }
+    },
+    {
+      "layer_index": 28,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.837494,
+        "maximum": 12571.491,
+        "max_abs": 12571.491,
+        "f32_le_sha256": "42fbcae6fdcf5149968f80acccbacabc67aa9cd7a356e663ca7f1cb6a69f486f"
+      },
+      "cpu_sq8_f32_le_sha256": "82b395ffa7cea915ebb9d2d13f499e2c571721a17aa3af3690f59ed033a9449d",
+      "vllm_f32_le_sha256": "a029f4aa0e8b261c00553002a11dbafeb8d51158bf61c94e82e61c4bdb73ed79",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.032808074159417916,
+          "max_abs": 3.19140625,
+          "relative_l2": 0.0028769311731535407,
+          "cosine_similarity": 0.9999958620021875
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.2650942030820791,
+        "max_abs": 91.4912109375,
+        "relative_l2": 0.008234228263803326,
+        "cosine_similarity": 0.9999900920124786
+      }
+    },
+    {
+      "layer_index": 29,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.9039,
+        "maximum": 12579.562,
+        "max_abs": 12579.562,
+        "f32_le_sha256": "610f63c48e218de5aeac2be67a55a979de353fe78efdf3928b966fca06a060f0"
+      },
+      "cpu_sq8_f32_le_sha256": "44d49b1c174468de143b8f05fa5dcf6b1a9a749756c24e7bd9509bb2dc09d781",
+      "vllm_f32_le_sha256": "0bd80855489cdabf41faf6eb0eabe1a808888fea4a1cfce12601c8cae880d332",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.04509193622114242,
+          "max_abs": 3.230712890625,
+          "relative_l2": 0.003368153907381358,
+          "cosine_similarity": 0.9999943282818369
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.32488664226438707,
+        "max_abs": 99.5615234375,
+        "relative_l2": 0.009108271538544693,
+        "cosine_similarity": 0.99998664307624
+      }
+    },
+    {
+      "layer_index": 30,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.58066,
+        "maximum": 12588.616,
+        "max_abs": 12588.616,
+        "f32_le_sha256": "1d28112e9a10854e74a321a0fdd49443133515438eef0c31800db9d234cf3793"
+      },
+      "cpu_sq8_f32_le_sha256": "c25dd8cf44d29fba9896f0875c31b94bbb9c3edfec828860ff910e1e7dbc39be",
+      "vllm_f32_le_sha256": "72e4ba720252ee61065e06ebf063f7ca47f91fb5030794dbaf3dd501c2d2d2de",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.06623655056164288,
+          "max_abs": 4.25390625,
+          "relative_l2": 0.004074121441186388,
+          "cosine_similarity": 0.9999917015638644
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.4054039174324385,
+        "max_abs": 108.6162109375,
+        "relative_l2": 0.010160669997535106,
+        "cosine_similarity": 0.9999814066369221
+      }
+    },
+    {
+      "layer_index": 31,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.48105,
+        "maximum": 12595.483,
+        "max_abs": 12595.483,
+        "f32_le_sha256": "9041fee0b86141970436f985a4273a2efa2bc8d55fafb3f475574197be959718"
+      },
+      "cpu_sq8_f32_le_sha256": "4aabd525dd0af52c2bd52eab31e5680578c356314a3fcf01c3d804d0292f2eb7",
+      "vllm_f32_le_sha256": "061d31efb44cfb5c31930ce47101ba4206814be76078c0a8756ae910316686bd",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.08455046124851118,
+          "max_abs": 4.71484375,
+          "relative_l2": 0.004595680191782727,
+          "cosine_similarity": 0.9999894411273428
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.46447896144543277,
+        "max_abs": 115.4833984375,
+        "relative_l2": 0.010864126187196614,
+        "cosine_similarity": 0.9999785263344433
+      }
+    },
+    {
+      "layer_index": 32,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.368744,
+        "maximum": 12604.866,
+        "max_abs": 12604.866,
+        "f32_le_sha256": "8687a08925c75bc8e1b2d4c39982dc075d37afdcbebfd06c135e73c002564b7d"
+      },
+      "cpu_sq8_f32_le_sha256": "71c44282f874d80ef7a63701be914a0d6e22f29810d7fa634eb2184fad08a2e7",
+      "vllm_f32_le_sha256": "a8a0319384e084c803af7a0e5cc04404b0f3c7760c69113bbdd7dd21ddf10ccc",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.11145077339103271,
+          "max_abs": 6.08984375,
+          "relative_l2": 0.00526546402274732,
+          "cosine_similarity": 0.9999861400979497
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.5545520457459452,
+        "max_abs": 124.8662109375,
+        "relative_l2": 0.011854235221262773,
+        "cosine_similarity": 0.9999735162482484
+      }
+    },
+    {
+      "layer_index": 33,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -101.59433,
+        "maximum": 12604.944,
+        "max_abs": 12604.944,
+        "f32_le_sha256": "91ceb63ab54be2c758e11dcbaa58785fa727333cc920ee194947c6fb3033986a"
+      },
+      "cpu_sq8_f32_le_sha256": "6b8289a43607172d2c786e34d35a6be35728d4e4848ef62d021067d50e2fc40d",
+      "vllm_f32_le_sha256": "ae6255deaf14cff5b14f4132ec67ae4544914d6e3899ed68796c6b86f319942d",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.15299818293703754,
+          "max_abs": 7.82080078125,
+          "relative_l2": 0.006156018859349307,
+          "cosine_similarity": 0.9999810565331666
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.60373989608414,
+        "max_abs": 124.9443359375,
+        "relative_l2": 0.012341434487060283,
+        "cosine_similarity": 0.999967367233304
+      }
+    },
+    {
+      "layer_index": 34,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.460785,
+        "maximum": 12598.522,
+        "max_abs": 12598.522,
+        "f32_le_sha256": "d8574e2f46228447450bbfe6adc93ddcd2db8fba13d6604f428bb616da509eed"
+      },
+      "cpu_sq8_f32_le_sha256": "07c57e925b2ed4a64ddbe7fee35062c409e8edcaa2ff1abc86372abd339e4f13",
+      "vllm_f32_le_sha256": "a011b7c44945570cc8b10b34c871f87ec216286f01b9beaaca7e8365ca9a33a1",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.1988389329012396,
+          "max_abs": 8.72705078125,
+          "relative_l2": 0.007002618804221575,
+          "cosine_similarity": 0.9999754891315564
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.6236898992979188,
+        "max_abs": 118.5224609375,
+        "relative_l2": 0.012509359966774856,
+        "cosine_similarity": 0.9999604039383958
+      }
+    },
+    {
+      "layer_index": 35,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.03891,
+        "maximum": 12587.593,
+        "max_abs": 12587.593,
+        "f32_le_sha256": "35490351fdb33d2351c03bab59e7a885c41b34e4d7049ee8b9b9e826864b008c"
+      },
+      "cpu_sq8_f32_le_sha256": "982c1d33967fa55f867229cdd06c8f88943c6719049f89ffd361e2b8415bcf51",
+      "vllm_f32_le_sha256": "5f77c7bb5dcb66b08608deeb55bb6ab0ec52fe796ca60833806cfd412521fadb",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.24117994073517793,
+          "max_abs": 8.41455078125,
+          "relative_l2": 0.007688173561229228,
+          "cosine_similarity": 0.999970452133075
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.6249702152172072,
+        "max_abs": 107.5927734375,
+        "relative_l2": 0.012471472686775127,
+        "cosine_similarity": 0.999952983518243
+      }
+    },
+    {
+      "layer_index": 36,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -102.6102,
+        "maximum": 12541.249,
+        "max_abs": 12541.249,
+        "f32_le_sha256": "8b93672232cf338346e3bba1eef5d9fc8cbba1e99d803ed2063d7bcc54927eb5"
+      },
+      "cpu_sq8_f32_le_sha256": "ae12514082ef7a10a07a9b6b3975a932e94c3b0f8bfc0c020bf847c64a580791",
+      "vllm_f32_le_sha256": "23b6e0ac7c38ad9c73e2e1fe551d786c56ff9535f22e8b5a0eda41e0462080ba",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.3016125728706454,
+          "max_abs": 9.53955078125,
+          "relative_l2": 0.008583981788221832,
+          "cosine_similarity": 0.9999631646111405
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 0.7917122128046288,
+        "max_abs": 125.2490234375,
+        "relative_l2": 0.014031794765655598,
+        "cosine_similarity": 0.9999428235145291
+      }
+    },
+    {
+      "layer_index": 37,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -103.3309,
+        "maximum": 12326.749,
+        "max_abs": 12326.749,
+        "f32_le_sha256": "07ebb62d155052c622a8d05ae5d8267cbe1d3e7c4574bbfe8ba996a05626fb27"
+      },
+      "cpu_sq8_f32_le_sha256": "681d5c16396eb78f9af833eab14968bca3793fd02c4bb6bb48a03c46437f3e5e",
+      "vllm_f32_le_sha256": "17086b20f23078d0b1c2a01bfecc3b61f5bc13679323728d24863b5d01c33509",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.3850391190581113,
+          "max_abs": 9.03955078125,
+          "relative_l2": 0.009770452216608525,
+          "cosine_similarity": 0.9999523060204653
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 1.172131446438671,
+        "max_abs": 166.7490234375,
+        "relative_l2": 0.017251682159436864,
+        "cosine_similarity": 0.9999268957856574
+      }
+    },
+    {
+      "layer_index": 38,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -109.244965,
+        "maximum": 11284.593,
+        "max_abs": 11284.593,
+        "f32_le_sha256": "4e8e48e944d74f62defd8dad9a688f706ec9157af75ba2fcecefae67814f2309"
+      },
+      "cpu_sq8_f32_le_sha256": "d733c02a4737cc72d97ca23d48b437301e22ef7a26bb0202ded41c1db9b0993e",
+      "vllm_f32_le_sha256": "785cd224b9cd62feabca51bdc85534fbcff0bf1c1a1d3a7fb0bfd92cb4837951",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 0.5046181371220563,
+          "max_abs": 15.212890625,
+          "relative_l2": 0.011842710336516156,
+          "cosine_similarity": 0.9999300502699414
+        },
+        "max_relative_l2": 0.1,
+        "min_cosine": 0.995,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 2.5084744799491268,
+        "max_abs": 276.5927734375,
+        "relative_l2": 0.02696055267946217,
+        "cosine_similarity": 0.9998726856119694
+      }
+    },
+    {
+      "layer_index": 39,
+      "optimized_health": {
+        "elements": 40960,
+        "nonfinite": 0,
+        "minimum": -321.21713,
+        "maximum": 4749.593,
+        "max_abs": 4749.593,
+        "f32_le_sha256": "4b1a9e835d7af71c35bc1a8f9265f066e3e67e81e39e7f81521dba03455bb4e7"
+      },
+      "cpu_sq8_f32_le_sha256": "b0f2b9c20c275ae5f2f335efd023ba68ee6459dee1c01732e4c91bb7e69a3089",
+      "vllm_f32_le_sha256": "575f6ab62ea8bb4276aae007cf598e7b074bb5a2c077ef5fc0ecfff9213ed4cd",
+      "optimized_vs_cpu_sq8": {
+        "metrics": {
+          "element_count": 40960,
+          "nonfinite_count": 0,
+          "mse": 1.275163232719525,
+          "max_abs": 100.0576171875,
+          "relative_l2": 0.030492298862366745,
+          "cosine_similarity": 0.9995673845541831
+        },
+        "max_relative_l2": 0.08,
+        "min_cosine": 0.997,
+        "passed": true
+      },
+      "optimized_vs_vllm": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 5.73884390656865,
+        "max_abs": 365.5927734375,
+        "relative_l2": 0.06655599993460926,
+        "cosine_similarity": 0.9985139105064265
+      }
+    }
+  ],
+  "final_head": {
+    "resident_validation_layer39_matches_audit_bits": true,
+    "device_final_hidden_health": {
+      "elements": 5120,
+      "nonfinite": 0,
+      "minimum": -38.736935,
+      "maximum": 29.82178,
+      "max_abs": 38.736935,
+      "f32_le_sha256": "7f72aa665cfb552b25bdac559ede8332b685b86217bc9e29da433e397a70a080"
+    },
+    "device_logits_health": {
+      "elements": 151936,
+      "nonfinite": 0,
+      "minimum": -15.415184,
+      "maximum": 13.642277,
+      "max_abs": 15.415184,
+      "f32_le_sha256": "b40bd6c0e3feb11e16e058ad7668e87210a6b746daadd70fc3f725bd4c74cb74"
+    },
+    "cpu_final_hidden_f32_le_sha256": "45a5f1bdcecdf83db8be8b41392f55ae050ea06727a8edc05c1eef295305c244",
+    "cpu_logits_f32_le_sha256": "573f8c44fbcb5fe975c4fd66c664e658e39d6bc6d5c6a1b3bd8e164b30b6d41a",
+    "device_vs_cpu_final_hidden": {
+      "metrics": {
+        "element_count": 5120,
+        "nonfinite_count": 0,
+        "mse": 2.8107561846955866e-14,
+        "max_abs": 7.62939453125e-6,
+        "relative_l2": 1.0960481842317075e-7,
+        "cosine_similarity": 0.9999999999999909
+      },
+      "max_relative_l2": 0.002,
+      "min_cosine": 0.999999,
+      "passed": true
+    },
+    "device_vs_cpu_logits": {
+      "metrics": {
+        "element_count": 151936,
+        "nonfinite_count": 0,
+        "mse": 2.4670421896064334e-13,
+        "max_abs": 3.814697265625e-6,
+        "relative_l2": 2.060008209116002e-7,
+        "cosine_similarity": 0.9999999999999016
+      },
+      "max_relative_l2": 0.002,
+      "min_cosine": 0.999999,
+      "passed": true
+    },
+    "device_vs_vllm_final_hidden": {
+      "metrics": {
+        "element_count": 5120,
+        "nonfinite_count": 0,
+        "mse": 0.00429289064465768,
+        "max_abs": 1.1300582885742188,
+        "relative_l2": 0.04253753323548277,
+        "cosine_similarity": 0.9991131536875918
+      },
+      "max_relative_l2": 0.15,
+      "min_cosine": 0.99,
+      "passed": true
+    },
+    "device_vs_vllm_logits": {
+      "metrics": {
+        "element_count": 151936,
+        "nonfinite_count": 0,
+        "mse": 0.010133104330474998,
+        "max_abs": 0.5109741687774658,
+        "relative_l2": 0.041190031517998854,
+        "cosine_similarity": 0.9992311957756344
+      },
+      "max_relative_l2": 0.15,
+      "min_cosine": 0.99,
+      "passed": true
+    },
+    "device_top_10": [
+      {
+        "token_id": 353,
+        "logit": 13.642277
+      },
+      {
+        "token_id": 3764,
+        "logit": 12.002111
+      },
+      {
+        "token_id": 25010,
+        "logit": 10.942808
+      },
+      {
+        "token_id": 220,
+        "logit": 10.043804
+      },
+      {
+        "token_id": 5572,
+        "logit": 9.681643
+      },
+      {
+        "token_id": 671,
+        "logit": 9.46444
+      },
+      {
+        "token_id": 3014,
+        "logit": 9.125923
+      },
+      {
+        "token_id": 374,
+        "logit": 9.072189
+      },
+      {
+        "token_id": 368,
+        "logit": 8.948836
+      },
+      {
+        "token_id": 262,
+        "logit": 8.945652
+      }
+    ],
+    "cpu_top_10": [
+      {
+        "token_id": 353,
+        "logit": 13.642278
+      },
+      {
+        "token_id": 3764,
+        "logit": 12.002112
+      },
+      {
+        "token_id": 25010,
+        "logit": 10.942808
+      },
+      {
+        "token_id": 220,
+        "logit": 10.043806
+      },
+      {
+        "token_id": 5572,
+        "logit": 9.6816435
+      },
+      {
+        "token_id": 671,
+        "logit": 9.46444
+      },
+      {
+        "token_id": 3014,
+        "logit": 9.125924
+      },
+      {
+        "token_id": 374,
+        "logit": 9.07219
+      },
+      {
+        "token_id": 368,
+        "logit": 8.948837
+      },
+      {
+        "token_id": 262,
+        "logit": 8.945653
+      }
+    ],
+    "vllm_top_10": [
+      {
+        "token_id": 353,
+        "logit": 13.8125
+      },
+      {
+        "token_id": 3764,
+        "logit": 11.875
+      },
+      {
+        "token_id": 25010,
+        "logit": 10.8125
+      },
+      {
+        "token_id": 220,
+        "logit": 10.0625
+      },
+      {
+        "token_id": 5572,
+        "logit": 9.5625
+      },
+      {
+        "token_id": 671,
+        "logit": 9.375
+      },
+      {
+        "token_id": 3014,
+        "logit": 9.125
+      },
+      {
+        "token_id": 374,
+        "logit": 9.0625
+      },
+      {
+        "token_id": 262,
+        "logit": 8.9375
+      },
+      {
+        "token_id": 16,
+        "logit": 8.8125
+      }
+    ],
+    "device_top_1": 353,
+    "cpu_top_1": 353,
+    "vllm_top_1": 353,
+    "device_vllm_top_10_overlap": 9,
+    "top_1_contract_passed": true,
+    "passed": true
+  },
+  "execution": {
+    "sequence_len": 8,
+    "stack_invocations_per_timed_sample": 1,
+    "layers": 40,
+    "projections": 280,
+    "activation_quantizations": 160,
+    "layer_d2d_copies": 40,
+    "stack_execution_synchronizations": 1,
+    "head_d2d_copies": 1,
+    "head_rmsnorm_calls": 1,
+    "head_bf16_matvec_calls": 1,
+    "head_result_readbacks": 2,
+    "head_execution_synchronizations": 1,
+    "timed_path_fallback_used": false,
+    "timed_path_host_staging_used": false,
+    "layerwise_audit_is_non_timed": true,
+    "layerwise_audit_host_staging_used": true,
+    "layerwise_audit_readbacks": 40,
+    "fresh_input_uploads_for_validation_and_timing": 14,
+    "input_ready_state_checks": 14,
+    "output_ready_state_checks": 14,
+    "validated_stack_reports": 14,
+    "validated_head_reports": 14,
+    "timed_output_hash_stability_checks": 13,
+    "dispatch_implementation_counts": {
+      "mem_v1_default_tile_16x128x128": 160,
+      "mem_v1_default_tile_16x128x256": 40,
+      "mem_v1_kpadding_tile_16x128x256": 80
+    },
+    "required_hip_kernel_env": [
+      "ULLM_REQUIRE_HIP_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL"
+    ],
+    "passed": true
+  },
+  "timing": {
+    "warmups": 3,
+    "repeats": 10,
+    "input_upload_excluded": true,
+    "inter_stage_host_validation_excluded": true,
+    "stack_final_synchronization_included": true,
+    "head_readback_decode_and_validation_included": true,
+    "full_stack_and_head": {
+      "samples_ms": [
+        34.1852,
+        34.20158,
+        34.143688999999995,
+        34.27741,
+        34.23587,
+        34.20164,
+        34.192499,
+        34.22097,
+        34.157809,
+        34.266791
+      ],
+      "p50_ms": 34.20161,
+      "p95_ms": 34.27263145
+    },
+    "stack": {
+      "samples_ms": [
+        29.990013,
+        29.992284,
+        29.986503000000003,
+        30.066284,
+        29.995604,
+        30.021784,
+        30.001533000000002,
+        30.017374,
+        29.998093,
+        29.989563
+      ],
+      "p50_ms": 29.9968485,
+      "p95_ms": 30.046259
+    },
+    "head": {
+      "samples_ms": [
+        4.194997,
+        4.209156,
+        4.157036000000001,
+        4.210936,
+        4.240116,
+        4.179736,
+        4.190846,
+        4.203476,
+        4.159596,
+        4.276828
+      ],
+      "p50_ms": 4.1992365,
+      "p95_ms": 4.2603076
+    }
+  },
+  "vram": {
+    "device_total_global_mem": 34208743424,
+    "artifact_weight_and_scale_bytes": 13213670400,
+    "layer_norm_f32_bytes": 1679360,
+    "shared_stack_workspace_bytes": 3989504,
+    "resident_stack_hidden_bytes": 163840,
+    "model_head_resident_bytes": 1556493824,
+    "minimum_accounted_resident_bytes": 14775996928,
+    "unaccounted_device_bytes": 19432746496,
+    "excludes_allocator_and_backend_overhead": true,
+    "fits_device": true
+  }
+}
