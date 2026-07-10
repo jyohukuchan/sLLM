@@ -1129,6 +1129,43 @@ blocked indefinitely could also block the complete worker indefinitely.
 3. Run 100 sequential requests with deterministic mixed cancellation and the
    frozen post-release RSS/VRAM sampling rules before advancing to P8-D.
 
+#### P8-C formal acceptance tooling checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The resident worker and its terminal-cleanup watchdog passed the functional
+R9700 smoke, but the formal 2+10 cancellation and 100-request resource gates had
+no fail-closed producer or independent validator.
+
+##### 今回の変更点
+
+- Froze the standalone worker evidence contract in
+  `docs/specs/sq8-worker-acceptance-v0.1.md`, separate from the later HTTP and
+  systemd P8-F release schema.
+- Added a streaming producer for the exact latency/recovery/resource schedule
+  and an independent validator that reconstructs commands, worker events,
+  process identity, KFD ownership, AMD SMI VRAM, all 4,950 Theil-Sen pairs, and
+  every threshold from raw evidence.
+- Bounded every worker command write and complete process-group cleanup. Raw
+  command/event equality is JSON-type-sensitive, and every one of 34
+  cancellations is subject to the five-second terminal bound.
+- Required the configured repository to be the actual Git worktree top level,
+  kept evidence output outside it, and recorded both initial and final clean Git
+  identities. Evidence creation/publication uses no-follow directory FDs and
+  rolls a final raw name back to `.incomplete` on failure or interruption.
+- Producer and validator tests pass 78/78. Independent adversarial review found
+  no remaining P0/P1 finding. This completes the measurement tooling, not the
+  real R9700 acceptance gate.
+
+##### 次の行動
+
+1. Commit the producer, validator, contract, and tests, then build one release
+   worker from that clean commit and record its SHA-256.
+2. Run the complete standalone acceptance schedule on the isolated physical
+   R9700 with all ten required HIP guards.
+3. Validate the published raw evidence independently. Advance to P8-D only when
+   cancellation, recovery, process, RSS, and VRAM gates all pass.
+
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 
 Tasks:

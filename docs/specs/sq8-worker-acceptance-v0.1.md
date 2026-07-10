@@ -28,6 +28,17 @@ validation result schema is `ullm.sq8.worker_acceptance.validation.v1`.
 The run MUST use a tracked-clean source tree and one release worker built from
 the recorded commit. The only permitted untracked path is `.rocprofv3/` and its
 descendants. Any other untracked path invalidates the run.
+The evidence output directory MUST be a fresh prospective path outside the
+source repository. The configured repository root MUST equal bounded
+`git rev-parse --show-toplevel` output, not a repository subdirectory. Before
+creating the evidence directory, the producer resolves its existing parent
+strictly and rejects an existing output path, an unresolvable parent, or any
+symbolic-link component. Creation rechecks that boundary, opens every parent
+component with `O_NOFOLLOW`, and creates/opens the directory relative to the
+verified parent descriptor. Before final publication, the producer reopens the
+requested path without following symbolic links and requires its device/inode
+identity to equal the held directory descriptor. This prevents evidence writes
+from changing the source status that the run is intended to attest.
 The validator receives the expected commit and worker binary SHA-256 separately
 from the raw producer and requires exact matches.
 
@@ -103,6 +114,9 @@ upper bounds use the percentile algorithm in section 7 and p95 MUST be at most
 Every request MUST release within 180,000,000,000 ns of generate write start.
 Before cancellation, the gap from generate write start or the prior observed
 worker event to the next observed worker event MUST be at most 30,000,000,000 ns.
+The gap from observing the scheduled cancel target (`started` for prompt or
+token index `0` for decode) to cancel write start MUST also be at most
+30,000,000,000 ns. A larger gap fails the acceptance gate.
 After cancel write start, the five-second cancellation bound takes precedence.
 
 ## 4. Request Schedule
@@ -234,7 +248,10 @@ Every `command` contains `schema_version`, `record_type`, `phase`,
 exact UTF-8 object written before its terminating LF. The validator checks its
 hash, reparses it with duplicate-key rejection, and derives all command fields,
 including the complete prompt token array, from it. Timestamps are strictly
-increasing.
+increasing. Equality between the reparsed raw command and its summary is
+recursive and JSON-type-sensitive: booleans, integers, and floating-point
+numbers are distinct types even where Python's ordinary equality would equate
+them.
 
 `phase` is `latency_warmup`, `latency_measured`, `resource_warmup`,
 `resource_measured`, or `shutdown`. Generate records additionally contain exactly
@@ -254,7 +271,9 @@ exact worker stdout JSON before LF and `event` is its decoded object. The valida
 checks the hash, reparses the raw value, requires equality with `event`, and then
 independently checks its exact field set,
 request identity, event ordering, progress, contiguous token indices, terminal
-counts, outcome, cancel reason, and `reset_complete=true`.
+counts, outcome, cancel reason, and `reset_complete=true`. Raw/event equality is
+recursive and JSON-type-sensitive, including boolean versus integer or
+floating-point values.
 
 ### 6.4 Resource Sample
 
@@ -311,11 +330,20 @@ A `gpu_metric` contains exactly `schema_version`, `record_type`, `boundary`,
 
 The final `process_exit` contains exactly `schema_version`, `record_type`,
 `stdout_eof_monotonic_ns`, `exit_observed_monotonic_ns`, `exit_code`,
-`stderr_file`, and `stderr_sha256`. Exit code MUST be zero. `stderr_file` is a
-regular sibling named `worker-stderr.jsonl` containing the complete worker stderr
-byte stream and its SHA-256 MUST match. The successful raw evidence basename is
+`stderr_file`, `stderr_sha256`, `final_git_commit`, `final_git_status_raw`, and
+`final_git_status_raw_sha256`. Exit code MUST be zero. `stderr_file` is a regular
+sibling named `worker-stderr.jsonl` containing the complete worker stderr byte
+stream and its SHA-256 MUST match. After worker exit and stderr finalization, as
+late as possible before writing `process_exit`, the producer runs bounded
+`git rev-parse HEAD` and `git status --porcelain=v1 --untracked-files=all`
+commands. The final commit MUST equal both the header commit and the independently
+supplied expected commit. The final raw status hash MUST match, and the status
+MUST contain only untracked `.rocprofv3/` descendants. Initial and final raw
+status text need not be identical. The successful raw evidence basename is
 `raw.jsonl`; the producer writes `raw.jsonl.incomplete` and renames it only after
-the complete successful run.
+the complete successful run. Publication includes a directory `fsync`; a failure
+after rename MUST move the raw file back to `raw.jsonl.incomplete` before the
+producer reports failure.
 
 Idle shutdown starts at shutdown command write start. Stdout EOF may race before
 write completion, but process exit observation MUST follow write completion and
