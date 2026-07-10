@@ -370,6 +370,24 @@ pub struct Sq8PreparedToken {
     nonce: u64,
 }
 
+#[cfg(test)]
+impl Sq8PreparedToken {
+    pub(crate) fn for_worker_test(
+        token_id: usize,
+        generated_index: usize,
+        cache_len: usize,
+        terminal_reason: Option<Sq8FinishReason>,
+    ) -> Self {
+        Self {
+            token_id,
+            generated_index,
+            cache_len,
+            terminal_reason,
+            nonce: generated_index as u64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sq8PreparedAdvance {
     PromptProgress {

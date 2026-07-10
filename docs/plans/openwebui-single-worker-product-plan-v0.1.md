@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C sampler, transactional session publication, bounded JSONL codec, active1 control, and resident CPU thread topology are implemented; real HIP/session worker integration is next
+Status: in progress; P8-B2 is complete; P8-C sampler, transactional publication, bounded JSONL codec, active1 control, resident CPU topology, and the real HIP/session backend are implemented; worker process composition and the R9700 gate are next
 
 Date: 2026-07-10
 
@@ -1028,6 +1028,40 @@ were not connected through the production thread/channel topology.
    the tested reader, inference, and writer ownership sequence.
 3. Run R9700 cancellation races, reset recovery, sequential-request, latency,
    and host/VRAM growth acceptance before exposing the HTTP gateway.
+
+#### P8-C real session backend checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The resident CPU topology enforced active1 ownership and ordered publication,
+but no production backend loaded or drove `Qwen3Sq8ServingSession`.
+
+##### 今回の変更点
+
+- Added `Qwen3Sq8WorkerBackend`, which fails closed unless the gfx1201 feature,
+  every required HIP guard, one isolated R9700 device, the canonical artifact,
+  and the fixed package all validate before Ready.
+- The inference-thread backend owns one session, stream, and context in safe drop
+  order. It loads with fixed M=128 chunks and bounded 16 MiB host upload staging.
+- Connected prompt progress and transactional prepared-token publication to the
+  request-scoped writer callback. A token is committed only after its JSONL line
+  flushes; terminal cleanup validates the exact reset summary before release.
+- Split HIP ownership from a private generic session adapter. Production and CPU
+  fake operations now exercise the same start, advance, callback, finish, and
+  abort mapping without adding public API or dynamic dispatch.
+- Deterministic tests cover two-token Length, EOS Stop, cancel after the prepared
+  barrier with zero callback, cancel-token forwarding, and finish/abort reset
+  ordering before release. All 349 engine tests and the gfx1201 feature build
+  pass; clippy reports only the unchanged 18 pre-existing warnings.
+
+##### 次の行動
+
+1. Add a CPU-testable process runner and the `ullm-sq8-worker` binary, keeping
+   stdin, inference, and the sole stdout writer on their fixed owner threads.
+2. Prove clean EOF/shutdown and every blocked-stdin fatal path exits without
+   waiting on the reader thread.
+3. Run the actual adapter on R9700 for two-token, prepared-token cancellation,
+   and two sequential requests before starting the HTTP gateway.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

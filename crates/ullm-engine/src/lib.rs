@@ -22,6 +22,7 @@ pub mod sq8_model_head_runtime;
 pub mod sq8_sampling;
 pub mod sq8_serving_runtime;
 pub mod sq8_stack_runtime;
+pub mod sq8_worker_backend;
 pub mod sq8_worker_protocol;
 pub mod sq8_worker_runtime;
 pub mod sq_canonical;
