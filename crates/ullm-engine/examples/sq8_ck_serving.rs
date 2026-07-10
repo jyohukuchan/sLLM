@@ -12,8 +12,7 @@ use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
 use ullm_engine::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
 use ullm_engine::sq8_layer_runtime::{
     QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV,
-    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
-    QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
 };
 use ullm_engine::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
@@ -1196,7 +1195,10 @@ fn parse_options() -> Result<Options, String> {
     }
     if performance_gate
         && (test_only_ignore_eos
-            || prefill_mode != Sq8ServingPrefillMode::FixedM8Chunks
+            || !matches!(
+                prefill_mode,
+                Sq8ServingPrefillMode::FixedM8Chunks | Sq8ServingPrefillMode::FixedM128Chunks
+            )
             || prompt_token_ids_explicit
             || max_new_tokens_explicit
             || second_max_new_tokens_explicit
@@ -1208,7 +1210,7 @@ fn parse_options() -> Result<Options, String> {
             || result_json.is_none())
     {
         return Err(
-            "--performance-gate requires exactly --prefill-mode m8-chunk8 \
+            "--performance-gate requires --prefill-mode m8-chunk8 or m128-chunk128 \
              --result-json PATH without prompt, generation, oracle, cancellation, \
              or deep-boundary options"
                 .into(),

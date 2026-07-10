@@ -9,7 +9,8 @@ use ullm_engine::sq8_serving_runtime::{
     QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS, QWEN3_14B_SQ8_SERVING_TOP_K, Sq8ServingSnapshot,
 };
 
-const SCHEMA_VERSION: &str = "ullm.sq8.serving_performance.raw.v1";
+const RAW_SCHEMA_V1: &str = "ullm.sq8.serving_performance.raw.v1";
+const RAW_SCHEMA_V2: &str = "ullm.sq8.serving_performance.raw.v2";
 const WARMUP_RUNS: usize = 2;
 const MEASURED_RUNS: usize = 5;
 const TTFT_MAX_NEW_TOKENS: usize = 512;
@@ -268,6 +269,62 @@ pub(super) fn validate_output_path(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+fn performance_schema_version(mode: Sq8ServingPrefillMode) -> Result<&'static str, String> {
+    match mode {
+        Sq8ServingPrefillMode::FixedM8Chunks => Ok(RAW_SCHEMA_V1),
+        Sq8ServingPrefillMode::FixedM128Chunks => Ok(RAW_SCHEMA_V2),
+        _ => Err("performance gate requires the fixed M=8 or M=128 prefill mode".into()),
+    }
+}
+
+fn performance_prompt_execution_calls(
+    prompt_tokens: usize,
+    prefill_chunk_tokens: usize,
+) -> Result<usize, String> {
+    if prompt_tokens == 0 || prefill_chunk_tokens == 0 {
+        return Err("performance prompt execution count requires nonzero dimensions".into());
+    }
+    (prompt_tokens / prefill_chunk_tokens)
+        .checked_add(prompt_tokens % prefill_chunk_tokens)
+        .ok_or_else(|| "performance prompt execution call count overflows".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_performance_prompt_progress(
+    request_id: &str,
+    prompt_tokens: usize,
+    prefill_chunk_tokens: usize,
+    expected_prompt_tokens_processed: &mut usize,
+    prompt_tokens_processed: usize,
+    cache_len: usize,
+    execution_width: usize,
+) -> Result<(), String> {
+    let remaining = prompt_tokens
+        .checked_sub(*expected_prompt_tokens_processed)
+        .ok_or_else(|| format!("prompt progress moved beyond {request_id}"))?;
+    let expected_width = if remaining >= prefill_chunk_tokens {
+        prefill_chunk_tokens
+    } else {
+        1
+    };
+    let expected_processed = expected_prompt_tokens_processed
+        .checked_add(expected_width)
+        .ok_or_else(|| format!("prompt progress overflows for {request_id}"))?;
+    if execution_width != expected_width
+        || prompt_tokens_processed != expected_processed
+        || cache_len != expected_processed
+        || expected_processed >= prompt_tokens
+    {
+        return Err(format!(
+            "prompt progress mismatch for {request_id}: width={execution_width} \
+             processed={prompt_tokens_processed} cache_len={cache_len} \
+             expected_width={expected_width} expected_processed={expected_processed}"
+        ));
+    }
+    *expected_prompt_tokens_processed = expected_processed;
+    Ok(())
+}
+
 pub(super) fn run(
     session: &mut Qwen3Sq8ServingSession,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -276,9 +333,10 @@ pub(super) fn run(
     load_seconds: f64,
 ) -> Result<(), String> {
     validate_output_path(options)?;
-    if session.prefill_mode() != Sq8ServingPrefillMode::FixedM8Chunks {
-        return Err("performance gate requires the fixed M=8 prefill mode".into());
-    }
+    let load_report = session.load_report();
+    let prefill_mode = load_report.prefill_mode;
+    let prefill_chunk_tokens = load_report.prefill_chunk_tokens;
+    let schema_version = performance_schema_version(prefill_mode)?;
     let origin = Instant::now();
     let environment = capture_environment()?;
     let initial_vram = capture_vram(&origin)?;
@@ -294,6 +352,7 @@ pub(super) fn run(
                     stream,
                     &origin,
                     prompt_tokens,
+                    prefill_chunk_tokens,
                     phase,
                     sample_index,
                 )?);
@@ -321,6 +380,7 @@ pub(super) fn run(
                 session,
                 stream,
                 &origin,
+                prefill_chunk_tokens,
                 phase,
                 sample_index,
             )?);
@@ -345,11 +405,11 @@ pub(super) fn run(
     let final_vram = capture_vram(&origin)?;
     let load_report = session.load_report();
     let result = PerformanceResult {
-        schema_version: SCHEMA_VERSION,
+        schema_version,
         runner_git_commit: runner_identity.git_commit,
         runner_worktree_clean: runner_identity.worktree_clean,
         runner_binary_sha256: runner_identity.binary_sha256,
-        prefill_mode: prefill_mode_name(session.prefill_mode()),
+        prefill_mode: prefill_mode_name(load_report.prefill_mode),
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
         prefill_implementation: load_report.prefill_implementation.clone(),
         warmup_runs: WARMUP_RUNS,
@@ -412,6 +472,7 @@ fn run_ttft_sample(
     stream: &mut ullm_runtime_sys::RuntimeStream,
     origin: &Instant,
     prompt_tokens: usize,
+    prefill_chunk_tokens: usize,
     phase: &'static str,
     sample_index: usize,
 ) -> Result<TtftSample, String> {
@@ -422,9 +483,11 @@ fn run_ttft_sample(
         TTFT_MAX_NEW_TOKENS,
     );
     let cancel = Sq8CancellationToken::new();
-    let expected_prompt_calls = prompt_tokens / QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
+    let expected_prompt_calls =
+        performance_prompt_execution_calls(prompt_tokens, prefill_chunk_tokens)?;
     let mut prompt_execution_calls = 0_usize;
     let mut prompt_progress_events = 0_usize;
+    let mut expected_prompt_tokens_processed = 0_usize;
     let request_start_elapsed_ns = elapsed_ns(origin)?;
     session
         .start(request, cancel.clone(), stream)
@@ -441,15 +504,15 @@ fn run_ttft_sample(
                 execution_width,
             } => {
                 prompt_progress_events += 1;
-                if execution_width != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-                    || prompt_tokens_processed
-                        != prompt_progress_events * QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-                    || cache_len != prompt_tokens_processed
-                {
-                    return Err(format!(
-                        "TTFT prompt progress mismatch for {request_id}: {advance:?}"
-                    ));
-                }
+                validate_performance_prompt_progress(
+                    &request_id,
+                    prompt_tokens,
+                    prefill_chunk_tokens,
+                    &mut expected_prompt_tokens_processed,
+                    prompt_tokens_processed,
+                    cache_len,
+                    execution_width,
+                )?;
             }
             Sq8ServingAdvance::Token {
                 token_id,
@@ -561,6 +624,7 @@ fn run_decode_sample(
     session: &mut Qwen3Sq8ServingSession,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     origin: &Instant,
+    prefill_chunk_tokens: usize,
     phase: &'static str,
     sample_index: usize,
 ) -> Result<DecodeSample, String> {
@@ -571,8 +635,10 @@ fn run_decode_sample(
         DECODE_GENERATED_TOKENS,
     );
     let cancel = Sq8CancellationToken::new();
-    let expected_prompt_calls = DECODE_PROMPT_TOKENS / QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
+    let expected_prompt_calls =
+        performance_prompt_execution_calls(DECODE_PROMPT_TOKENS, prefill_chunk_tokens)?;
     let mut prompt_progress_events = 0_usize;
+    let mut expected_prompt_tokens_processed = 0_usize;
     let mut execution_calls = 0_usize;
     let mut generated = Vec::with_capacity(DECODE_GENERATED_TOKENS);
     let request_start_elapsed_ns = elapsed_ns(origin)?;
@@ -591,15 +657,15 @@ fn run_decode_sample(
                 execution_width,
             } => {
                 prompt_progress_events += 1;
-                if execution_width != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-                    || prompt_tokens_processed
-                        != prompt_progress_events * QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-                    || cache_len != prompt_tokens_processed
-                {
-                    return Err(format!(
-                        "decode prompt progress mismatch for {request_id}: {advance:?}"
-                    ));
-                }
+                validate_performance_prompt_progress(
+                    &request_id,
+                    DECODE_PROMPT_TOKENS,
+                    prefill_chunk_tokens,
+                    &mut expected_prompt_tokens_processed,
+                    prompt_tokens_processed,
+                    cache_len,
+                    execution_width,
+                )?;
             }
             Sq8ServingAdvance::Token {
                 token_id,
