@@ -284,8 +284,9 @@ fn main() -> Result<(), String> {
     let result = ServingSmokeResult {
         schema_version: match (options.test_only_ignore_eos, options.prefill_mode) {
             (true, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_deep_boundary.v1",
+            (true, Sq8ServingPrefillMode::FixedM128Chunks) => "ullm.sq8.serving_deep_boundary.v2",
             (true, _) => {
-                return Err("deep-boundary evidence requires fixed M=8 chunks".into());
+                return Err("deep-boundary evidence requires fixed M=8 or M=128 chunks".into());
             }
             (false, Sq8ServingPrefillMode::SequentialM1) => "ullm.sq8.serving_smoke.v2",
             (false, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_chunks.v3",
@@ -1177,8 +1178,10 @@ fn parse_options() -> Result<Options, String> {
         return Err("cancellation modes must be mutually exclusive".into());
     }
     if test_only_ignore_eos
-        && (prefill_mode != Sq8ServingPrefillMode::FixedM8Chunks
-            || prompt_lengths.as_deref() != Some(&[DEEP_BOUNDARY_PROMPT_TOKENS])
+        && (!matches!(
+            prefill_mode,
+            Sq8ServingPrefillMode::FixedM8Chunks | Sq8ServingPrefillMode::FixedM128Chunks
+        ) || prompt_lengths.as_deref() != Some(&[DEEP_BOUNDARY_PROMPT_TOKENS])
             || max_new_tokens != DEEP_BOUNDARY_GENERATED_TOKENS
             || second_prompt_token_ids.is_some()
             || cancel_after_first_token
@@ -1187,7 +1190,7 @@ fn parse_options() -> Result<Options, String> {
             || result_json.is_none())
     {
         return Err(
-            "--test-only-ignore-eos requires exactly --prefill-mode m8-chunk8 \
+            "--test-only-ignore-eos requires --prefill-mode m8-chunk8 or m128-chunk128 \
              --prompt-lengths 3584 --max-new-tokens 512 --result-json PATH, \
              without second request, cancellation, or oracle capture"
                 .into(),
