@@ -1,4 +1,6 @@
-60be03c4fee744477c94e6d5263316edec21af22bb568fb3cb857177406849c0  ./README.md
+4cd1acc5f634ad0c272b306a4c364acb5d91b3dafbfca6467556c4923d53d9e0  ./README.md
+eaec89a54a4b4578430c251531b402d7e863e6302c9c7a7932bafd4a494edd83  ./deep-boundary-p3584-g512-clean-5084396/result.json
+8b5833d70375f7e509ebbb3bed566f4c19eac3185f365578e04ea00c5ae4f5b9  ./deep-boundary-p3584-g512-clean-5084396/validation.json
 5952cd1415c4263c6a882906aa9827bc7356cff26839f552966033184759e3d9  ./p32-p512-clean-28cd88e/chunk-captures/serving-smoke-p0032-final-hidden.f32le
 424ac7944ccef32bc32db8f73e8c51f4b05adc8c8e480aac3af6611042e4dafb  ./p32-p512-clean-28cd88e/chunk-captures/serving-smoke-p0032-logits.f32le
 15436f4b2d7420793830463e1b1591f783cb028242283a99d8979bedca33cced  ./p32-p512-clean-28cd88e/chunk-captures/serving-smoke-p0128-final-hidden.f32le

@@ -45,6 +45,17 @@ Clean build-identity evidence for prompt 4095 is under `p4095-clean-55562d9/`:
 - chunk vs vLLM source hidden relative L2/cosine: `0.019835477 / 0.999888264`; logits relative L2/cosine: `0.020959889 / 0.999974552`
 - both comparisons have exact top-1 and top-10 overlap 10
 
+The exact 4096-token deep-boundary run is under `deep-boundary-p3584-g512-clean-5084396/`:
+
+- runner commit: `5084396b35e6d74e7fce8fa298bd58580b2d7e7b`
+- binary SHA-256: `58d1af401459cd321798a6d8b50292da53c49d43a1d7828ced34bbc256ff6f13`
+- prompt 3584 plus 512 actual generated tokens ran with the explicit test-only ignore-EOS policy
+- execution used 448 fixed M=8 prefill chunks and 511 M=1 decode writes, for 959 synchronized execution calls
+- every generated index 0 through 511 records all 40 cache lengths, scheduler active1/waiting0, and the exact cache write position
+- final cache length/position/block are `4095 / 4094 / 255`; reset returned all 40 caches and the allocator to zero
+- resident request time was `136.763141` seconds, reset time was `0.003174` seconds, and model load was `24.088511` seconds
+- the independent validator passed after recomputing all prefill, decode, terminal, reset, and external build-identity constraints
+
 ## 次の行動
 
-prompt 8/32/128/512/4095のcorrectness oracleは完了した。P8-B2の残件は3584+512 deep boundaryと、warmup 2 / repeat 5のTTFT/decode性能gateである。
+prompt 8/32/128/512/4095のcorrectness oracleと3584+512 deep boundaryは完了した。P8-B2の残件はwarmup 2 / repeat 5のTTFT/decode性能gateである。
