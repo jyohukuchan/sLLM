@@ -146,6 +146,7 @@ def validate_result(
     mode: str,
     required_prompts: tuple[int, ...],
     source_root: Path,
+    require_build_identity: bool,
 ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
     common.regular_file(result_path, None, f"{mode} result")
     result_path = result_path.resolve(strict=True)
@@ -165,6 +166,19 @@ def validate_result(
     }[mode]
     if implementation != expected_implementation:
         fail(f"{result_path} has the wrong prefill implementation")
+    git_commit = result.get("runner_git_commit")
+    binary_sha256 = result.get("runner_binary_sha256")
+    worktree_clean = result.get("runner_worktree_clean")
+    has_build_identity = (
+        isinstance(git_commit, str)
+        and len(git_commit) == 40
+        and all(character in "0123456789abcdef" for character in git_commit)
+        and isinstance(binary_sha256, str)
+        and common.SHA256_RE.fullmatch(binary_sha256) is not None
+        and isinstance(worktree_clean, bool)
+    )
+    if require_build_identity and (not has_build_identity or worktree_clean is not True):
+        fail(f"{result_path} does not bind a clean runner commit/binary")
     common.validate_device(result.get("device"), f"{result_path}.device")
     cache_lengths = result.get("post_reset_cache_lengths")
     if (
@@ -266,6 +280,9 @@ def validate_result(
         "schema_version": schema,
         "prefill_mode": mode,
         "prefill_implementation": implementation,
+        "runner_git_commit": git_commit if has_build_identity else None,
+        "runner_worktree_clean": worktree_clean if has_build_identity else None,
+        "runner_binary_sha256": binary_sha256 if has_build_identity else None,
     }
 
 
@@ -299,6 +316,7 @@ def validate_results(
     fixture_root: Path,
     required_prompts: tuple[int, ...],
     source_prompts: tuple[int, ...],
+    require_build_identity: bool = False,
 ) -> dict[str, Any]:
     if not set(source_prompts).issubset(required_prompts):
         fail("source prompts must be a subset of required prompts")
@@ -309,6 +327,7 @@ def validate_results(
         mode=CHUNK_MODE,
         required_prompts=required_prompts,
         source_root=source["root"],
+        require_build_identity=require_build_identity,
     )
     m1, m1_evidence = validate_result(
         m1_result,
@@ -316,12 +335,18 @@ def validate_results(
         mode=M1_MODE,
         required_prompts=required_prompts,
         source_root=source["root"],
+        require_build_identity=require_build_identity,
     )
     try:
         if os.path.samefile(chunk_result, m1_result):
             fail("chunk and all-M1 results must be different files")
     except OSError as error:
         fail(f"failed to compare result file identity: {error}")
+    for field in ("runner_git_commit", "runner_binary_sha256"):
+        chunk_value = chunk_evidence[field]
+        m1_value = m1_evidence[field]
+        if (chunk_value is not None or m1_value is not None) and chunk_value != m1_value:
+            fail(f"chunk/all-M1 {field} differs")
 
     prompts = []
     for prompt_tokens in required_prompts:
@@ -467,6 +492,7 @@ def parse_args() -> argparse.Namespace:
         "--source-prompts", default=",".join(str(value) for value in DEFAULT_SOURCE_PROMPTS)
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--require-build-identity", action="store_true")
     return parser.parse_args()
 
 
@@ -481,6 +507,7 @@ def main() -> int:
             args.fixture_root,
             required_prompts,
             source_prompts,
+            args.require_build_identity,
         )
         if args.output is not None:
             common.write_json_create_new(args.output, validation)

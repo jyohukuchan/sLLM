@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::Serialize;
-use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
+use sha2::{Digest, Sha256};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
 use ullm_engine::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
@@ -131,6 +133,9 @@ struct ServingSmokeResult {
     prefill_mode: &'static str,
     prefill_chunk_tokens: usize,
     prefill_implementation: String,
+    runner_git_commit: String,
+    runner_worktree_clean: bool,
+    runner_binary_sha256: String,
     passed: bool,
     requests: Vec<ServingCaseResult>,
     cancelled_request: Option<CancelledCaseResult>,
@@ -149,6 +154,13 @@ struct ServingSmokeResult {
     post_reset_cache_lengths_all_zero: bool,
 }
 
+#[derive(Debug)]
+struct RunnerIdentity {
+    git_commit: String,
+    worktree_clean: bool,
+    binary_sha256: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ServingDeviceResult {
     device_id: i32,
@@ -162,6 +174,7 @@ struct ServingDeviceResult {
 
 fn main() -> Result<(), String> {
     let options = parse_options()?;
+    let runner_identity = runner_identity()?;
     if let Some(directory) = &options.oracle_capture_dir {
         std::fs::create_dir(directory).map_err(|err| {
             format!(
@@ -198,6 +211,7 @@ fn main() -> Result<(), String> {
         .prompt_token_ids
         .clone();
     let mut requests = Vec::with_capacity(cases.len());
+    let evidence_root = options.result_json.as_deref().and_then(Path::parent);
     for case in cases {
         requests.push(run_completed_request(
             &mut session,
@@ -206,6 +220,7 @@ fn main() -> Result<(), String> {
             case.prompt_token_ids,
             case.max_new_tokens,
             options.oracle_capture_dir.as_deref(),
+            evidence_root,
         )?);
     }
     let cancelled_request = match (
@@ -238,6 +253,9 @@ fn main() -> Result<(), String> {
         prefill_mode: prefill_mode_name(options.prefill_mode),
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
         prefill_implementation: load_report.prefill_implementation.clone(),
+        runner_git_commit: runner_identity.git_commit,
+        runner_worktree_clean: runner_identity.worktree_clean,
+        runner_binary_sha256: runner_identity.binary_sha256,
         passed: true,
         requests,
         cancelled_request,
@@ -279,6 +297,7 @@ fn run_completed_request(
     prompt_token_ids: Vec<usize>,
     max_new_tokens: usize,
     oracle_capture_dir: Option<&Path>,
+    evidence_root: Option<&Path>,
 ) -> Result<ServingCaseResult, String> {
     let request = Sq8ServingRequest::greedy(request_id, prompt_token_ids.clone(), max_new_tokens);
     session
@@ -312,6 +331,7 @@ fn run_completed_request(
                     capture_directory,
                     request_id,
                     capture,
+                    evidence_root,
                 )?);
             }
             oracle.advance
@@ -477,20 +497,30 @@ fn persist_oracle_capture(
     directory: &Path,
     request_id: &str,
     capture: ullm_engine::sq8_serving_runtime::Sq8ServingOracleCapture,
+    evidence_root: Option<&Path>,
 ) -> Result<OracleCaptureResult, String> {
     let final_hidden_file = directory.join(format!("{request_id}-final-hidden.f32le"));
     let logits_file = directory.join(format!("{request_id}-logits.f32le"));
     write_f32_le_create_new(&final_hidden_file, &capture.final_hidden)?;
     write_f32_le_create_new(&logits_file, &capture.logits)?;
+    let recorded_final_hidden = evidence_path(&final_hidden_file, evidence_root);
+    let recorded_logits = evidence_path(&logits_file, evidence_root);
     Ok(OracleCaptureResult {
         position: capture.position,
         top1_token_id: capture.top1.token_id,
         top1_logit: capture.top1.logit,
-        final_hidden_file,
+        final_hidden_file: recorded_final_hidden,
         final_hidden_f32_le_sha256: capture.final_hidden_f32_le_sha256,
-        logits_file,
+        logits_file: recorded_logits,
         logits_f32_le_sha256: capture.logits_f32_le_sha256,
     })
+}
+
+fn evidence_path(path: &Path, evidence_root: Option<&Path>) -> PathBuf {
+    evidence_root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn write_f32_le_create_new(path: &Path, values: &[f32]) -> Result<(), String> {
@@ -532,6 +562,70 @@ fn write_bytes_create_new(path: &Path, payload: &[u8]) -> Result<(), String> {
         .map_err(|err| format!("failed to finish {}: {err}", path.display()))?;
     file.sync_all()
         .map_err(|err| format!("failed to sync {}: {err}", path.display()))
+}
+
+fn runner_identity() -> Result<RunnerIdentity, String> {
+    let root_output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|err| format!("failed to inspect runner git root: {err}"))?;
+    if !root_output.status.success() {
+        return Err("runner evidence requires a git worktree".into());
+    }
+    let root = String::from_utf8(root_output.stdout)
+        .map_err(|err| format!("runner git root is not UTF-8: {err}"))?;
+    let root = root.trim();
+    let commit_output = Command::new("git")
+        .args(["-C", root, "rev-parse", "HEAD"])
+        .output()
+        .map_err(|err| format!("failed to inspect runner git commit: {err}"))?;
+    if !commit_output.status.success() {
+        return Err("failed to resolve runner git commit".into());
+    }
+    let git_commit = String::from_utf8(commit_output.stdout)
+        .map_err(|err| format!("runner git commit is not UTF-8: {err}"))?
+        .trim()
+        .to_string();
+    if git_commit.len() != 40 || !git_commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("runner git commit is invalid: {git_commit:?}"));
+    }
+    let status_output = Command::new("git")
+        .args(["-C", root, "status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .map_err(|err| format!("failed to inspect runner worktree status: {err}"))?;
+    if !status_output.status.success() {
+        return Err("failed to inspect runner worktree status".into());
+    }
+    let status = String::from_utf8(status_output.stdout)
+        .map_err(|err| format!("runner worktree status is not UTF-8: {err}"))?;
+    let worktree_clean = status
+        .lines()
+        .all(|line| line == "?? .rocprofv3/" || line.starts_with("?? .rocprofv3/"));
+
+    let executable = std::env::current_exe()
+        .map_err(|err| format!("failed to resolve runner executable: {err}"))?;
+    let mut file = File::open(&executable).map_err(|err| {
+        format!(
+            "failed to open runner executable {}: {err}",
+            executable.display()
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|err| format!("failed to hash runner executable: {err}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(RunnerIdentity {
+        git_commit,
+        worktree_clean,
+        binary_sha256: format!("{:x}", digest.finalize()),
+    })
 }
 
 fn run_cancel_after_first_token(

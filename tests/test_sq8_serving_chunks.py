@@ -198,3 +198,24 @@ def test_chunk_validator_rejects_payload_hash_tampering(tmp_path):
     payload.write_bytes(values)
     with pytest.raises(tool.ValidationError):
         validate(tool, chunk, m1)
+
+
+def test_chunk_validator_can_require_matching_clean_build_identity(tmp_path):
+    tool = load_tool()
+    chunk, m1 = write_fixture(tmp_path)
+    with pytest.raises(tool.ValidationError):
+        tool.validate_results(chunk, m1, FIXTURE_ROOT, (8,), (8,), True)
+
+    for path in (chunk, m1):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["runner_git_commit"] = "a" * 40
+        document["runner_worktree_clean"] = True
+        document["runner_binary_sha256"] = "b" * 64
+        path.write_text(json.dumps(document), encoding="utf-8")
+    assert tool.validate_results(chunk, m1, FIXTURE_ROOT, (8,), (8,), True)["passed"]
+
+    document = json.loads(m1.read_text(encoding="utf-8"))
+    document["runner_binary_sha256"] = "c" * 64
+    m1.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(tool.ValidationError):
+        tool.validate_results(chunk, m1, FIXTURE_ROOT, (8,), (8,), True)
