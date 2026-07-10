@@ -300,13 +300,11 @@ class Sq8ServingFixtureToolTests(unittest.TestCase):
             "vllm-raw-p0001 keys differ",
         )
 
-    def test_fabricated_chat_template_case_is_rejected(self) -> None:
+    def test_self_consistent_chat_template_manifest_tamper_is_rejected(self) -> None:
         self.assert_artifact_rejected(
-            "chat-template.pending.json",
-            lambda value: value["cases"].append(
-                {"prompt_tokens": 32, "token_ids": [1] * 32}
-            ),
-            "chat_template_placeholder_payload.cases length differs",
+            "chat-template/manifest.json",
+            lambda value: value.__setitem__("passed", True),
+            "chat-template manifest differs from its independent trust anchor",
         )
 
     def test_openwebui_capture_identity_and_requests_are_exact(self) -> None:

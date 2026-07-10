@@ -1,10 +1,70 @@
 {
   "artifact_files_excluding_manifest_and_sums": [
     {
-      "bytes": 587,
-      "file": "chat-template.pending.json",
-      "kind": "chat_template_placeholder",
-      "sha256": "97ceed8fb5622330661d8b0dad606f0538a3089fec3189428408196b534f17ed"
+      "bytes": 1303,
+      "file": "chat-template/fixtures/code-block.json",
+      "kind": "chat_template_fixture",
+      "sha256": "721ae5e98daa1d6d65a772aabf205b71d55ca7f76dd08933d5dccfe14320b61f"
+    },
+    {
+      "bytes": 1188,
+      "file": "chat-template/fixtures/english-user.json",
+      "kind": "chat_template_fixture",
+      "sha256": "5284fec176ef1654b9d386468107fca6ae042b42fc613ba4c1fc221048a6129e"
+    },
+    {
+      "bytes": 1333,
+      "file": "chat-template/fixtures/exact-p0032.json",
+      "kind": "chat_template_fixture",
+      "sha256": "c660c7fb3c25d2a3e25693e2beb2abc10295a06935772d17d23cedab04f24c07"
+    },
+    {
+      "bytes": 2776,
+      "file": "chat-template/fixtures/exact-p0128.json",
+      "kind": "chat_template_fixture",
+      "sha256": "f8fe81bacb8761f3aa10cce1c333a51f9a85d65b5bfc7b02499886fb9f550a37"
+    },
+    {
+      "bytes": 8538,
+      "file": "chat-template/fixtures/exact-p0512.json",
+      "kind": "chat_template_fixture",
+      "sha256": "e2f53c514a228e9e10871fc0df1867394aae12416215c9716770d2b420a3480f"
+    },
+    {
+      "bytes": 31581,
+      "file": "chat-template/fixtures/exact-p2048.json",
+      "kind": "chat_template_fixture",
+      "sha256": "cd04c3339542f07731074ac0e00740a83061e620f6caff9c2a7e5316df1ccdcf"
+    },
+    {
+      "bytes": 54622,
+      "file": "chat-template/fixtures/exact-p3584.json",
+      "kind": "chat_template_fixture",
+      "sha256": "e3cd6c722302f73d688492b73a182298f34cc0a1498def209c262e5e9aa92912"
+    },
+    {
+      "bytes": 1541,
+      "file": "chat-template/fixtures/japanese-user.json",
+      "kind": "chat_template_fixture",
+      "sha256": "d6cb16ec18ff653ee43f044d8348026e658b2c83da2958687d7f9daf738225e8"
+    },
+    {
+      "bytes": 1372,
+      "file": "chat-template/fixtures/system-user.json",
+      "kind": "chat_template_fixture",
+      "sha256": "bc03d37cdf15dfe5446857c9e722222eff8142f69b439ce6fdc15f830aa61639"
+    },
+    {
+      "bytes": 1528,
+      "file": "chat-template/fixtures/two-turn.json",
+      "kind": "chat_template_fixture",
+      "sha256": "70a98ac22388f9d5a208e406dbc63ec50122a8c886df2a13666cfad6d4bf537e"
+    },
+    {
+      "bytes": 4948,
+      "file": "chat-template/manifest.json",
+      "kind": "chat_template_fixture",
+      "sha256": "6324b74e2604b86d46bf2dfdc259c1ca68d8cc9a47e90bfb765919f4aa9d54e0"
     },
     {
       "bytes": 937,
@@ -97,9 +157,19 @@
       "sha256": "06e0e09cf3e6e53e104945292875ba644ae885315061d7e0f15b8dafbfdf8ad1"
     }
   ],
-  "chat_template_placeholder": {
-    "placeholder_file": "chat-template.pending.json",
-    "status": "pending_root_owned_exact_length_export"
+  "chat_template_fixture": {
+    "directory": "chat-template",
+    "exact_prompt_lengths": [
+      32,
+      128,
+      512,
+      2048,
+      3584
+    ],
+    "manifest_file": "chat-template/manifest.json",
+    "manifest_sha256": "6324b74e2604b86d46bf2dfdc259c1ca68d8cc9a47e90bfb765919f4aa9d54e0",
+    "status": "ready_independent_recompute_passed",
+    "validator": "tools/validate-sq8-chat-template-fixtures.py"
   },
   "comparison_contract": {
     "metric_definitions": {

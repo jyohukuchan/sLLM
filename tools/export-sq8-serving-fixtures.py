@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import stat
 import struct
 import tempfile
@@ -18,12 +19,14 @@ from typing import Any
 
 SCHEMA_VERSION = "ullm.sq8.serving_fixtures.v1"
 ORACLE_PLACEHOLDER_SCHEMA_VERSION = "ullm.sq8.serving_oracle_placeholder.v1"
-CHAT_PLACEHOLDER_SCHEMA_VERSION = "ullm.sq8.serving_chat_placeholder.v1"
 REAL_ORACLE_SCHEMA_VERSION = "ullm.sq8.serving_oracle.v1"
 OPENWEBUI_CAPTURE_SCHEMA_VERSION = "ullm.openwebui.interop_capture.v1"
 DEFAULT_OUTPUT = Path("tests/fixtures/sq8-serving-v0.1")
 PROMPT_LENGTHS = (1, 8, 32, 128, 512, 4095)
 CHAT_PROMPT_LENGTHS = (32, 128, 512, 2048, 3584)
+CHAT_TEMPLATE_MANIFEST_SHA256 = (
+    "6324b74e2604b86d46bf2dfdc259c1ca68d8cc9a47e90bfb765919f4aa9d54e0"
+)
 VOCAB_SIZE = 151_936
 HIDDEN_SIZE = 5_120
 CONTEXT_LENGTH = 4_096
@@ -278,6 +281,11 @@ OPENWEBUI_CAPTURE = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--chat-template-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT / "chat-template",
+    )
     return parser.parse_args()
 
 
@@ -393,23 +401,21 @@ def oracle_placeholder(prompt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def chat_placeholder() -> dict[str, Any]:
-    return {
-        "schema_version": CHAT_PLACEHOLDER_SCHEMA_VERSION,
-        "status": "pending_root_owned_exact_length_export",
-        "required_exact_prompt_lengths": list(CHAT_PROMPT_LENGTHS),
-        "chat_template_sha256": TOKENIZER_IDENTITY["chat_template_sha256"],
-        "transformers_version": VLLM_IDENTITY["transformers_version"],
-        "add_generation_prompt": True,
-        "enable_thinking": False,
-        "cases": [],
-        "trust": {
-            "synthetic_chat_template_values_forbidden": True,
-            "real_export_required": True,
-            "manifest_sha256_anchor": None,
-            "exporter_source_commit": None,
-        },
-    }
+def copy_chat_template_fixture(source: Path, destination: Path) -> None:
+    source = source.expanduser().resolve()
+    if not source.is_dir():
+        raise SystemExit(f"chat-template fixture directory does not exist: {source}")
+    manifest = source / "manifest.json"
+    if not manifest.is_file() or manifest.is_symlink():
+        raise SystemExit("chat-template manifest must be a regular non-symlink file")
+    if sha256_file(manifest) != CHAT_TEMPLATE_MANIFEST_SHA256:
+        raise SystemExit("chat-template manifest differs from the frozen trusted export")
+    for path in source.rglob("*"):
+        if path.is_symlink():
+            raise SystemExit(f"chat-template fixture contains a symlink: {path}")
+        if not path.is_file() and not path.is_dir():
+            raise SystemExit(f"chat-template fixture contains an unsupported entry: {path}")
+    shutil.copytree(source, destination)
 
 
 def artifact_records(root: Path) -> list[dict[str, Any]]:
@@ -429,7 +435,9 @@ def artifact_records(root: Path) -> list[dict[str, Any]]:
             if relative == "openwebui/capture.json"
             else "openwebui_forwarded_request"
             if relative.startswith("openwebui/")
-            else "chat_template_placeholder"
+            else "chat_template_fixture"
+            if relative.startswith("chat-template/")
+            else "contract_fixture"
         )
         records.append(
             {
@@ -442,7 +450,7 @@ def artifact_records(root: Path) -> list[dict[str, Any]]:
     return records
 
 
-def export_fixture_set(root: Path) -> None:
+def export_fixture_set(root: Path, chat_template_dir: Path) -> None:
     (root / "raw").mkdir(parents=True)
     (root / "oracles").mkdir()
     (root / "openwebui").mkdir()
@@ -477,8 +485,7 @@ def export_fixture_set(root: Path) -> None:
             }
         )
 
-    chat_relative = "chat-template.pending.json"
-    write_json(root / chat_relative, chat_placeholder())
+    copy_chat_template_fixture(chat_template_dir, root / "chat-template")
     write_json(root / "openwebui/stream-request.json", OPENWEBUI_STREAM_REQUEST)
     write_json(root / "openwebui/nonstream-request.json", OPENWEBUI_NONSTREAM_REQUEST)
     write_json(root / "openwebui/capture.json", OPENWEBUI_CAPTURE)
@@ -494,9 +501,13 @@ def export_fixture_set(root: Path) -> None:
         "generation_cases": GENERATION_CASES,
         "raw_prompts": prompts,
         "oracle_placeholders": oracle_records,
-        "chat_template_placeholder": {
-            "status": "pending_root_owned_exact_length_export",
-            "placeholder_file": chat_relative,
+        "chat_template_fixture": {
+            "status": "ready_independent_recompute_passed",
+            "directory": "chat-template",
+            "manifest_file": "chat-template/manifest.json",
+            "manifest_sha256": CHAT_TEMPLATE_MANIFEST_SHA256,
+            "exact_prompt_lengths": list(CHAT_PROMPT_LENGTHS),
+            "validator": "tools/validate-sq8-chat-template-fixtures.py",
         },
         "openwebui_interop_capture": {
             "status": "captured_sanitized",
@@ -537,7 +548,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix=f".{output.name}.", dir=output.parent) as temporary:
         staged = Path(temporary) / output.name
         staged.mkdir()
-        export_fixture_set(staged)
+        export_fixture_set(staged, args.chat_template_dir)
         for path in staged.rglob("*"):
             mode = path.stat().st_mode
             if path.is_file():

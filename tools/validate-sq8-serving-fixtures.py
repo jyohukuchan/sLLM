@@ -17,12 +17,27 @@ from typing import Any
 
 SCHEMA_VERSION = "ullm.sq8.serving_fixtures.v1"
 ORACLE_PLACEHOLDER_SCHEMA_VERSION = "ullm.sq8.serving_oracle_placeholder.v1"
-CHAT_PLACEHOLDER_SCHEMA_VERSION = "ullm.sq8.serving_chat_placeholder.v1"
 REAL_ORACLE_SCHEMA_VERSION = "ullm.sq8.serving_oracle.v1"
 OPENWEBUI_CAPTURE_SCHEMA_VERSION = "ullm.openwebui.interop_capture.v1"
-TRUSTED_MANIFEST_SHA256 = "eea3e6b48583b429b0f36bd82756db0d9967474c8d2af1d7143de274e18bc313"
+TRUSTED_MANIFEST_SHA256 = "c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af"
 PROMPT_LENGTHS = (1, 8, 32, 128, 512, 4095)
 CHAT_PROMPT_LENGTHS = (32, 128, 512, 2048, 3584)
+CHAT_TEMPLATE_MANIFEST_SHA256 = (
+    "6324b74e2604b86d46bf2dfdc259c1ca68d8cc9a47e90bfb765919f4aa9d54e0"
+)
+CHAT_TEMPLATE_FILES = {
+    "chat-template/manifest.json",
+    "chat-template/fixtures/code-block.json",
+    "chat-template/fixtures/english-user.json",
+    "chat-template/fixtures/exact-p0032.json",
+    "chat-template/fixtures/exact-p0128.json",
+    "chat-template/fixtures/exact-p0512.json",
+    "chat-template/fixtures/exact-p2048.json",
+    "chat-template/fixtures/exact-p3584.json",
+    "chat-template/fixtures/japanese-user.json",
+    "chat-template/fixtures/system-user.json",
+    "chat-template/fixtures/two-turn.json",
+}
 VOCAB_SIZE = 151_936
 HIDDEN_SIZE = 5_120
 CONTEXT_LENGTH = 4_096
@@ -477,23 +492,91 @@ def expected_oracle_placeholder(prompt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def expected_chat_placeholder() -> dict[str, Any]:
+def expected_chat_template_record() -> dict[str, Any]:
     return {
-        "schema_version": CHAT_PLACEHOLDER_SCHEMA_VERSION,
-        "status": "pending_root_owned_exact_length_export",
-        "required_exact_prompt_lengths": list(CHAT_PROMPT_LENGTHS),
-        "chat_template_sha256": EXPECTED_TOKENIZER_IDENTITY["chat_template_sha256"],
-        "transformers_version": EXPECTED_VLLM_IDENTITY["transformers_version"],
-        "add_generation_prompt": True,
-        "enable_thinking": False,
-        "cases": [],
-        "trust": {
-            "synthetic_chat_template_values_forbidden": True,
-            "real_export_required": True,
-            "manifest_sha256_anchor": None,
-            "exporter_source_commit": None,
-        },
+        "status": "ready_independent_recompute_passed",
+        "directory": "chat-template",
+        "manifest_file": "chat-template/manifest.json",
+        "manifest_sha256": CHAT_TEMPLATE_MANIFEST_SHA256,
+        "exact_prompt_lengths": list(CHAT_PROMPT_LENGTHS),
+        "validator": "tools/validate-sq8-chat-template-fixtures.py",
     }
+
+
+def validate_chat_template_manifest(root: Path) -> None:
+    path = safe_file(root, "chat-template/manifest.json", "chat-template manifest")
+    if sha256_file(path) != CHAT_TEMPLATE_MANIFEST_SHA256:
+        fail("chat-template manifest differs from its independent trust anchor")
+    manifest = load_json(path, "chat-template/manifest.json")
+    exact_keys(
+        manifest,
+        {
+            "schema_version",
+            "fixture_set_id",
+            "model",
+            "tokenizer",
+            "template_options",
+            "exact_length_contract",
+            "fixture_files",
+        },
+        "chat_template_manifest",
+    )
+    exact_value(
+        manifest["schema_version"],
+        "ullm.sq8.chat_template_fixtures.v1",
+        "chat_template_manifest.schema_version",
+    )
+    exact_value(
+        manifest["fixture_set_id"],
+        "qwen3-14b-fp8-sq8-chat-template-v0.1",
+        "chat_template_manifest.fixture_set_id",
+    )
+    exact_value(
+        manifest["model"].get("id"),
+        EXPECTED_SOURCE_IDENTITY["name"],
+        "chat_template_manifest.model.id",
+    )
+    exact_value(
+        manifest["model"].get("revision"),
+        EXPECTED_SOURCE_IDENTITY["revision"],
+        "chat_template_manifest.model.revision",
+    )
+    exact_value(
+        manifest["tokenizer"].get("class"),
+        EXPECTED_TOKENIZER_IDENTITY["tokenizer_class"],
+        "chat_template_manifest.tokenizer.class",
+    )
+    exact_value(
+        manifest["tokenizer"].get("revision"),
+        EXPECTED_TOKENIZER_IDENTITY["revision"],
+        "chat_template_manifest.tokenizer.revision",
+    )
+    exact_value(
+        manifest["tokenizer"].get("transformers_version"),
+        EXPECTED_VLLM_IDENTITY["transformers_version"],
+        "chat_template_manifest.tokenizer.transformers_version",
+    )
+    exact_value(
+        manifest["tokenizer"].get("chat_template"),
+        {
+            "utf8_bytes": EXPECTED_TOKENIZER_IDENTITY["chat_template_utf8_bytes"],
+            "sha256": EXPECTED_TOKENIZER_IDENTITY["chat_template_sha256"],
+        },
+        "chat_template_manifest.tokenizer.chat_template",
+    )
+    exact_value(
+        manifest["template_options"],
+        {"add_generation_prompt": True, "enable_thinking": False},
+        "chat_template_manifest.template_options",
+    )
+    exact_value(
+        manifest["exact_length_contract"].get("target_prompt_tokens"),
+        list(CHAT_PROMPT_LENGTHS),
+        "chat_template_manifest.exact_length_contract.target_prompt_tokens",
+    )
+    fixture_files = manifest["fixture_files"]
+    if not isinstance(fixture_files, list) or len(fixture_files) != 10:
+        fail("chat_template_manifest.fixture_files must contain exactly 10 fixtures")
 
 
 def validate_prompt_payload(path: Path, prompt: dict[str, Any], label: str) -> None:
@@ -523,7 +606,7 @@ def validate_artifacts(root: Path, manifest: dict[str, Any]) -> set[str]:
     expected_paths = {
         *(f"raw/prompt-{length:04d}.u32le" for length in PROMPT_LENGTHS),
         *(f"oracles/raw-p{length:04d}.pending.json" for length in PROMPT_LENGTHS),
-        "chat-template.pending.json",
+        *CHAT_TEMPLATE_FILES,
         "openwebui/capture.json",
         "openwebui/nonstream-request.json",
         "openwebui/stream-request.json",
@@ -548,7 +631,9 @@ def validate_artifacts(root: Path, manifest: dict[str, Any]) -> set[str]:
             if record["file"] == "openwebui/capture.json"
             else "openwebui_forwarded_request"
             if record["file"].startswith("openwebui/")
-            else "chat_template_placeholder"
+            else "chat_template_fixture"
+            if record["file"].startswith("chat-template/")
+            else "contract_fixture"
         )
         if record["kind"] != expected_kind:
             fail(f"{label}.kind is invalid")
@@ -561,7 +646,13 @@ def validate_artifacts(root: Path, manifest: dict[str, Any]) -> set[str]:
 def validate_tree(root: Path, artifact_paths: set[str]) -> None:
     expected_files = artifact_paths | {"manifest.json", "SHA256SUMS"}
     actual_files: set[str] = set()
-    expected_directories = {"raw", "oracles", "openwebui"}
+    expected_directories = {
+        "raw",
+        "oracles",
+        "openwebui",
+        "chat-template",
+        "chat-template/fixtures",
+    }
     actual_directories: set[str] = set()
     for path in root.rglob("*"):
         relative = path.relative_to(root).as_posix()
@@ -575,7 +666,7 @@ def validate_tree(root: Path, artifact_paths: set[str]) -> None:
         else:
             fail(f"fixture tree contains a non-regular entry: {relative}")
     if actual_directories != expected_directories:
-        fail("fixture directory set differs from raw/oracles/openwebui")
+        fail("fixture directory set differs from the frozen serving fixture tree")
     if actual_files != expected_files:
         fail(
             f"fixture file set differs: missing={sorted(expected_files - actual_files)} "
@@ -631,7 +722,7 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
             "generation_cases",
             "raw_prompts",
             "oracle_placeholders",
-            "chat_template_placeholder",
+            "chat_template_fixture",
             "openwebui_interop_capture",
             "artifact_files_excluding_manifest_and_sums",
             "trust",
@@ -688,12 +779,9 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
         "oracle_placeholders",
     )
     exact_value(
-        manifest["chat_template_placeholder"],
-        {
-            "status": "pending_root_owned_exact_length_export",
-            "placeholder_file": "chat-template.pending.json",
-        },
-        "chat_template_placeholder",
+        manifest["chat_template_fixture"],
+        expected_chat_template_record(),
+        "chat_template_fixture",
     )
     exact_value(
         manifest["openwebui_interop_capture"],
@@ -735,16 +823,7 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
             expected_oracle_placeholder(prompt),
             oracle_record["oracle_id"],
         )
-    chat_path = safe_file(
-        root,
-        manifest["chat_template_placeholder"]["placeholder_file"],
-        "chat template placeholder",
-    )
-    exact_value(
-        load_json(chat_path, "chat-template.pending.json"),
-        expected_chat_placeholder(),
-        "chat_template_placeholder_payload",
-    )
+    validate_chat_template_manifest(root)
     exact_value(
         load_json(
             safe_file(root, "openwebui/capture.json", "OpenWebUI capture"),

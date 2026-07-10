@@ -51,10 +51,14 @@ same frozen list. A revision name without the per-file hashes is insufficient.
 | chat-template UTF-8 bytes | 4168 |
 | chat-template SHA-256 | `a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8` |
 
-The exact-length chat-message cases are root-owned work. The checked-in
-`chat-template.pending.json` contains no fabricated text or token IDs and fixes
-only the required lengths 32, 128, 512, 2048, and 3584, with
-`add_generation_prompt=true` and `enable_thinking=false`.
+The checked-in `chat-template/` fixture contains real tokenizer output for exact
+lengths 32, 128, 512, 2048, and 3584 plus English, Japanese, system/user,
+two-turn, and code-block cases. Its manifest SHA-256 is
+`6324b74e2604b86d46bf2dfdc259c1ca68d8cc9a47e90bfb765919f4aa9d54e0`.
+`tools/validate-sq8-chat-template-fixtures.py` independently reloads the frozen
+local tokenizer with `local_files_only=true`, `trust_remote_code=false`,
+`add_generation_prompt=true`, and `enable_thinking=false`, then recomputes the
+rendered text, token IDs, lengths, and hashes for every case.
 
 ### 2.3 vLLM capture environment
 
@@ -166,7 +170,8 @@ tree beside the destination and publishes with Linux `renameat2(RENAME_NOREPLACE
 tests/fixtures/sq8-serving-v0.1/
   manifest.json
   SHA256SUMS
-  chat-template.pending.json
+  chat-template/manifest.json
+  chat-template/fixtures/*.json
   raw/prompt-NNNN.u32le
   oracles/raw-pNNNN.pending.json
   openwebui/capture.json
@@ -189,7 +194,7 @@ import the exporter.
 The checked-in fixture-set status is
 `input_contract_ready_oracles_pending`, and `promotion_eligible` is `false`.
 The trusted bootstrap manifest SHA-256 is
-`eea3e6b48583b429b0f36bd82756db0d9967474c8d2af1d7143de274e18bc313`.
+`c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af`.
 
 ## 7. OpenWebUI interoperability capture
 
