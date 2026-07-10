@@ -75,4 +75,6 @@ fn load_failure_exits_one_and_stdout_contains_only_protocol_json() {
     assert_eq!(logs[0]["schema_version"], "ullm.worker.log.v1");
     assert_eq!(logs[0]["event"], "process_failed");
     assert_eq!(logs[0]["error_code"], "process_failed");
+    assert!(logs[0]["detail"].as_str().unwrap().contains("startup"));
+    assert!(logs[0].get("prompt_token_ids").is_none());
 }

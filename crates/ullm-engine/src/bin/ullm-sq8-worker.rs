@@ -39,7 +39,7 @@ fn main() -> ExitCode {
         }
         Ok(CliAction::Run(args)) => run_worker(args),
         Err(_) => {
-            write_process_log("error", "cli_failed", Some("invalid_cli"));
+            write_process_log("error", "cli_failed", Some("invalid_cli"), None);
             ExitCode::FAILURE
         }
     }
@@ -49,7 +49,7 @@ fn run_worker(args: WorkerArgs) -> ExitCode {
     let config = match Qwen3Sq8WorkerBackendConfig::new(args.artifact, args.package) {
         Ok(config) => config,
         Err(_) => {
-            write_process_log("error", "cli_failed", Some("invalid_cli"));
+            write_process_log("error", "cli_failed", Some("invalid_cli"), None);
             return ExitCode::FAILURE;
         }
     };
@@ -57,11 +57,16 @@ fn run_worker(args: WorkerArgs) -> ExitCode {
     let output = BufWriter::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdout());
     match run_sq8_worker_process(input, output, move || Qwen3Sq8WorkerBackend::load(config)) {
         Ok(_) => {
-            write_process_log("info", "process_stopped", None);
+            write_process_log("info", "process_stopped", None, None);
             ExitCode::SUCCESS
         }
-        Err(_) => {
-            write_process_log("error", "process_failed", Some("process_failed"));
+        Err(error) => {
+            write_process_log(
+                "error",
+                "process_failed",
+                Some("process_failed"),
+                Some(&error),
+            );
             ExitCode::FAILURE
         }
     }
@@ -109,22 +114,30 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
 }
 
 #[derive(Serialize)]
-struct ProcessLog {
+struct ProcessLog<'a> {
     schema_version: &'static str,
     level: &'static str,
     event: &'static str,
     phase: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
 }
 
-fn write_process_log(level: &'static str, event: &'static str, error_code: Option<&'static str>) {
+fn write_process_log(
+    level: &'static str,
+    event: &'static str,
+    error_code: Option<&'static str>,
+    detail: Option<&str>,
+) {
     let record = ProcessLog {
         schema_version: "ullm.worker.log.v1",
         level,
         event,
         phase: "process",
         error_code,
+        detail,
     };
     let mut stderr = std::io::stderr().lock();
     let _ = serde_json::to_writer(&mut stderr, &record);
@@ -189,12 +202,14 @@ mod tests {
             event: "process_failed",
             phase: "process",
             error_code: Some("process_failed"),
+            detail: Some("startup: invalid configuration"),
         })
         .unwrap();
         assert_eq!(value["schema_version"], "ullm.worker.log.v1");
         assert_eq!(value["error_code"], "process_failed");
         assert!(value.get("artifact").is_none());
         assert!(value.get("package").is_none());
-        assert!(value.get("message").is_none());
+        assert_eq!(value["detail"], "startup: invalid configuration");
+        assert!(value.get("prompt_token_ids").is_none());
     }
 }
