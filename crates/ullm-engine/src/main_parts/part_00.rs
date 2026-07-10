@@ -57,6 +57,7 @@ use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
     SchedulerState,
 };
+use ullm_engine::sq8_model_head_runtime::validate_qwen3_14b_sq8_r9700_device_info;
 use ullm_engine::sq::{
     fp8_e4m3fn_to_f32,
     materialize_sq_fp8_tensor_rows_to_runtime_f32, read_sq_fp8_artifact,
@@ -364,21 +365,13 @@ fn sq_fp8_projection_kernel_families(
     }
 }
 
-const RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
-const RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const RDNA4_GFX1201_R9700_NAME: &str = "AMD Radeon Graphics";
 const RDNA4_GFX1201_R9700_CANONICAL_NAME: &str = "Radeon_AI_PRO_R9700";
 
 fn dispatchable_sq8_projection_gpu_name(
     info: &ullm_runtime_sys::DeviceInfo,
 ) -> Cow<'_, str> {
-    if info.name == RDNA4_GFX1201_R9700_NAME
-        && info.compute_major == 12
-        && (info.gcn_arch_name.is_empty() || info.gcn_arch_name.eq_ignore_ascii_case("gfx1201"))
-        && (RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MIN
-            ..=RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MAX)
-            .contains(&info.total_global_mem)
-    {
+    if validate_qwen3_14b_sq8_r9700_device_info(info).is_ok() {
         Cow::Borrowed(RDNA4_GFX1201_R9700_CANONICAL_NAME)
     } else {
         Cow::Borrowed(info.name.as_str())

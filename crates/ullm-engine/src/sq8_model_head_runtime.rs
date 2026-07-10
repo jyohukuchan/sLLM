@@ -76,7 +76,7 @@ impl Sq8ModelHeadDeviceIdentity {
         let arch = self.gcn_arch_name.split(':').next().unwrap_or_default();
         if self.backend != "hip"
             || self.name != R9700_RUNTIME_NAME
-            || (!arch.is_empty() && arch != "gfx1201")
+            || (!arch.is_empty() && !arch.eq_ignore_ascii_case("gfx1201"))
             || self.compute_major != 12
             || self.compute_minor != 0
             || !(R9700_MEMORY_BYTES_MIN..=R9700_MEMORY_BYTES_MAX).contains(&self.total_global_mem)
@@ -1057,6 +1057,59 @@ mod tests {
         let mut bad = report;
         bad.lm_head.tensor_name = "model.lm_head.weight".into();
         assert!(bad.validate_contract().is_err());
+    }
+
+    #[test]
+    fn r9700_runtime_identity_is_bounded_and_fail_closed() {
+        let base = DeviceInfo {
+            device_id: 0,
+            backend: "hip".to_string(),
+            name: R9700_RUNTIME_NAME.to_string(),
+            total_global_mem: R9700_MEMORY_BYTES_MIN,
+            compute_major: 12,
+            compute_minor: 0,
+            gcn_arch_name: String::new(),
+            flags: 0,
+        };
+        validate_qwen3_14b_sq8_r9700_device_info(&base).unwrap();
+        for (arch, memory) in [
+            ("gfx1201", R9700_MEMORY_BYTES_MAX),
+            ("GFX1201:sramecc+", R9700_MEMORY_BYTES_MIN),
+        ] {
+            let mut accepted = base.clone();
+            accepted.gcn_arch_name = arch.to_string();
+            accepted.total_global_mem = memory;
+            validate_qwen3_14b_sq8_r9700_device_info(&accepted).unwrap();
+        }
+
+        let mut rejected = Vec::new();
+        let mut value = base.clone();
+        value.backend = "cpu".to_string();
+        rejected.push(value);
+        let mut value = base.clone();
+        value.name = "HIP device 0".to_string();
+        rejected.push(value);
+        let mut value = base.clone();
+        value.compute_major = 11;
+        rejected.push(value);
+        let mut value = base.clone();
+        value.compute_minor = 1;
+        rejected.push(value);
+        for arch in ["gfx1200", "gfx12010", "gfx1030"] {
+            let mut value = base.clone();
+            value.gcn_arch_name = arch.to_string();
+            rejected.push(value);
+        }
+        let mut value = base.clone();
+        value.total_global_mem = R9700_MEMORY_BYTES_MIN - 1;
+        rejected.push(value);
+        let mut value = base;
+        value.total_global_mem = R9700_MEMORY_BYTES_MAX + 1;
+        rejected.push(value);
+
+        for value in rejected {
+            assert!(validate_qwen3_14b_sq8_r9700_device_info(&value).is_err());
+        }
     }
 
     #[test]

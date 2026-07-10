@@ -106,7 +106,10 @@ void validate_device(int device_id) {
     hip_check(hipSetDevice(device_id), "hipSetDevice");
     hipDeviceProp_t properties{};
     hip_check(hipGetDeviceProperties(&properties, device_id), "hipGetDeviceProperties");
-    if (std::strncmp(properties.gcnArchName, "gfx1201", 7u) != 0 ||
+    const bool is_gfx1201 =
+        std::strncmp(properties.gcnArchName, "gfx1201", 7u) == 0 &&
+        (properties.gcnArchName[7] == '\0' || properties.gcnArchName[7] == ':');
+    if (!is_gfx1201 ||
         properties.major != 12 || properties.minor != 0) {
         throw std::runtime_error(
             std::string("SQ8 CK requires gfx1201 compute 12.0; selected ") +
