@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 
 
-RAW_SCHEMA_VERSION = "ullm.sq8.worker_acceptance.raw.v1"
-RESULT_SCHEMA_VERSION = "ullm.sq8.worker_acceptance.validation.v1"
+RAW_SCHEMA_VERSION = "ullm.sq8.worker_acceptance.raw.v2"
+RESULT_SCHEMA_VERSION = "ullm.sq8.worker_acceptance.validation.v2"
 WORKER_SCHEMA_VERSION = "ullm.worker.v1"
 MAX_LINE_BYTES = 8 * 1024 * 1024
 U64_MAX = (1 << 64) - 1
@@ -157,10 +157,7 @@ RESOURCE_GPU_FIELDS = {
     "worker_pid",
     "mem_usage_value",
     "mem_usage_unit",
-    "kfd_vram_bytes",
-    "kfd_processes",
-    "kfd_positive_processes",
-    "unrelated_positive_kfd_pids",
+    "kfd_snapshot",
 }
 ISOLATION_CHECK_FIELDS = {
     "schema_version",
@@ -169,8 +166,32 @@ ISOLATION_CHECK_FIELDS = {
     "request_index",
     "request_id",
     "release_observed_monotonic_ns",
-    "captured_monotonic_ns",
-    "kfd_processes",
+    "kfd_snapshot",
+}
+KFD_SNAPSHOT_FIELDS = {
+    "acquisition_started_monotonic_ns",
+    "acquisition_completed_monotonic_ns",
+    "deadline_monotonic_ns",
+    "attempt_count",
+    "retry_reasons",
+    "attempts",
+    "before_identities",
+    "processes",
+    "after_identities",
+}
+KFD_ATTEMPT_FIELDS = {
+    "attempt_index",
+    "started_monotonic_ns",
+    "completed_monotonic_ns",
+    "outcome",
+    "retry_reason",
+    "retry_stage",
+    "retry_pid",
+    "pids_before",
+    "before_identities",
+    "processes",
+    "pids_after",
+    "after_identities",
 }
 GPU_METRIC_FIELDS = {
     "schema_version",
@@ -389,15 +410,53 @@ def validated_raw_text(value: Any, digest_value: Any, label: str) -> str:
     return value
 
 
-def parse_kfd_processes(value: Any, label: str) -> list[tuple[int, int]]:
+def parse_kfd_pids(value: Any, label: str) -> list[int]:
     if not isinstance(value, list):
         fail(f"{label} must be an array")
-    parsed: list[tuple[int, int]] = []
+    parsed = [
+        integer(item, f"{label}[{index}]", minimum=1, maximum=U32_MAX)
+        for index, item in enumerate(value)
+    ]
+    if parsed != sorted(set(parsed)):
+        fail(f"{label} must have ascending unique PIDs")
+    return parsed
+
+
+def parse_kfd_identities(value: Any, label: str) -> list[tuple[int, int, int]]:
+    if not isinstance(value, list):
+        fail(f"{label} must be an array")
+    parsed: list[tuple[int, int, int]] = []
     for index, entry_value in enumerate(value):
         entry = exact_fields(
-            entry_value, {"pid", "vram_raw", "vram_bytes"}, f"{label}[{index}]"
+            entry_value, {"pid", "st_dev", "st_ino"}, f"{label}[{index}]"
+        )
+        parsed.append(
+            (
+                integer(
+                    entry["pid"], f"{label}[{index}].pid", minimum=1, maximum=U32_MAX
+                ),
+                integer(entry["st_dev"], f"{label}[{index}].st_dev", minimum=0),
+                integer(entry["st_ino"], f"{label}[{index}].st_ino", minimum=1),
+            )
+        )
+    if [item[0] for item in parsed] != sorted({item[0] for item in parsed}):
+        fail(f"{label} must have ascending unique PIDs")
+    return parsed
+
+
+def parse_kfd_processes(value: Any, label: str) -> list[tuple[int, int, int, int]]:
+    if not isinstance(value, list):
+        fail(f"{label} must be an array")
+    parsed: list[tuple[int, int, int, int]] = []
+    for index, entry_value in enumerate(value):
+        entry = exact_fields(
+            entry_value,
+            {"pid", "st_dev", "st_ino", "vram_raw", "vram_bytes"},
+            f"{label}[{index}]",
         )
         pid = integer(entry["pid"], f"{label}[{index}].pid", minimum=1, maximum=U32_MAX)
+        st_dev = integer(entry["st_dev"], f"{label}[{index}].st_dev", minimum=0)
+        st_ino = integer(entry["st_ino"], f"{label}[{index}].st_ino", minimum=1)
         raw = entry["vram_raw"]
         if (
             not isinstance(raw, str)
@@ -405,15 +464,261 @@ def parse_kfd_processes(value: Any, label: str) -> list[tuple[int, int]]:
             or not raw.isascii()
             or not raw.isdecimal()
             or raw != raw.strip()
+            or len(raw) > 4096
         ):
             fail(f"{label}[{index}].vram_raw must be stripped decimal ASCII")
         amount = integer(entry["vram_bytes"], f"{label}[{index}].vram_bytes")
         if int(raw, 10) != amount:
             fail(f"{label}[{index}] raw KFD value differs from vram_bytes")
-        parsed.append((pid, amount))
-    if parsed != sorted(parsed) or len({pid for pid, _ in parsed}) != len(parsed):
+        parsed.append((pid, st_dev, st_ino, amount))
+    if [item[0] for item in parsed] != sorted({item[0] for item in parsed}):
         fail(f"{label} must have ascending unique PIDs")
     return parsed
+
+
+@dataclass(frozen=True)
+class ParsedKfdSnapshot:
+    started_ns: int
+    completed_ns: int
+    processes: list[tuple[int, int, int, int]]
+    attempt_count: int
+    retry_count: int
+
+
+def parse_kfd_snapshot(
+    value: Any, label: str, expected_worker_pid: int | None
+) -> ParsedKfdSnapshot:
+    snapshot = exact_fields(value, KFD_SNAPSHOT_FIELDS, label)
+    started = timestamp(
+        snapshot["acquisition_started_monotonic_ns"],
+        f"{label}.acquisition_started_monotonic_ns",
+    )
+    completed = timestamp(
+        snapshot["acquisition_completed_monotonic_ns"],
+        f"{label}.acquisition_completed_monotonic_ns",
+    )
+    deadline = timestamp(
+        snapshot["deadline_monotonic_ns"], f"{label}.deadline_monotonic_ns"
+    )
+    if deadline != started + 1_000_000_000 or completed <= started or completed > deadline:
+        fail(f"{label} does not preserve the fixed one-second acquisition deadline")
+    attempt_count = integer(
+        snapshot["attempt_count"], f"{label}.attempt_count", minimum=1
+    )
+    attempts = snapshot["attempts"]
+    if not isinstance(attempts, list) or len(attempts) != attempt_count:
+        fail(f"{label}.attempts differs from attempt_count")
+
+    parsed_attempts: list[dict[str, Any]] = []
+    expected_retry_reasons: list[str] = []
+    previous_completed = -1
+    for index, attempt_value in enumerate(attempts):
+        attempt_label = f"{label}.attempts[{index}]"
+        attempt = exact_fields(attempt_value, KFD_ATTEMPT_FIELDS, attempt_label)
+        if integer(attempt["attempt_index"], f"{attempt_label}.attempt_index") != index:
+            fail(f"{attempt_label} index is not contiguous")
+        attempt_started = timestamp(
+            attempt["started_monotonic_ns"], f"{attempt_label}.started_monotonic_ns"
+        )
+        attempt_completed = timestamp(
+            attempt["completed_monotonic_ns"],
+            f"{attempt_label}.completed_monotonic_ns",
+        )
+        if (
+            (index == 0 and attempt_started != started)
+            or (index > 0 and attempt_started <= previous_completed)
+            or attempt_completed <= attempt_started
+            or attempt_completed > deadline
+        ):
+            fail(f"{attempt_label} timestamps violate acquisition ordering")
+        previous_completed = attempt_completed
+        pids_before = parse_kfd_pids(attempt["pids_before"], f"{attempt_label}.pids_before")
+        before_identities = parse_kfd_identities(
+            attempt["before_identities"], f"{attempt_label}.before_identities"
+        )
+        processes = parse_kfd_processes(
+            attempt["processes"], f"{attempt_label}.processes"
+        )
+        pids_after_value = attempt["pids_after"]
+        pids_after = (
+            None
+            if pids_after_value is None
+            else parse_kfd_pids(pids_after_value, f"{attempt_label}.pids_after")
+        )
+        if expected_worker_pid is not None and expected_worker_pid not in pids_before:
+            fail(f"{attempt_label} omits the required worker from the before PID set")
+        if (
+            expected_worker_pid is not None
+            and pids_after is not None
+            and expected_worker_pid not in pids_after
+        ):
+            fail(f"{attempt_label} omits the required worker from the after PID set")
+        after_identities = parse_kfd_identities(
+            attempt["after_identities"], f"{attempt_label}.after_identities"
+        )
+        before_identity_pids = [item[0] for item in before_identities]
+        process_pids = [item[0] for item in processes]
+        after_identity_pids = [item[0] for item in after_identities]
+        if any(
+            amount > 0 and pid != expected_worker_pid
+            for pid, _, _, amount in processes
+        ):
+            fail(f"{attempt_label} contains an unexpected positive KFD owner")
+        if any(
+            (pid, st_dev, st_ino)
+            != before_identities[before_identity_pids.index(pid)]
+            for pid, st_dev, st_ino, _ in processes
+            if pid in before_identity_pids
+        ) or any(pid not in before_identity_pids for pid in process_pids):
+            fail(f"{attempt_label} process directory identity differs from before")
+
+        outcome = attempt["outcome"]
+        retry_reason = attempt["retry_reason"]
+        retry_stage = attempt["retry_stage"]
+        retry_pid = attempt["retry_pid"]
+        if outcome == "stable":
+            if index != attempt_count - 1:
+                fail(f"{attempt_label} stable attempt must be final")
+            if any(item is not None for item in (retry_reason, retry_stage, retry_pid)):
+                fail(f"{attempt_label} stable attempt contains retry metadata")
+            if (
+                pids_after is None
+                or pids_before != pids_after
+                or before_identity_pids != pids_before
+                or process_pids != pids_before
+                or after_identity_pids != pids_after
+                or before_identities != after_identities
+            ):
+                fail(f"{attempt_label} stable KFD identity/process sets differ")
+        elif outcome == "retry":
+            if index == attempt_count - 1:
+                fail(f"{attempt_label} final attempt must be stable")
+            if retry_reason not in {"entry_disappeared", "pid_set_changed"}:
+                fail(f"{attempt_label} retry reason is invalid")
+            if retry_stage not in {"before", "read", "after"}:
+                fail(f"{attempt_label} retry stage is invalid")
+            parsed_retry_pid = (
+                None
+                if retry_pid is None
+                else integer(
+                    retry_pid,
+                    f"{attempt_label}.retry_pid",
+                    minimum=1,
+                    maximum=U32_MAX,
+                )
+            )
+            if retry_reason == "entry_disappeared":
+                if (
+                    expected_worker_pid is not None
+                    and parsed_retry_pid == expected_worker_pid
+                ):
+                    fail(f"{attempt_label} retries a required worker disappearance")
+                if retry_stage == "before":
+                    if processes or pids_after is not None or after_identities:
+                        fail(f"{attempt_label} before disappearance has later evidence")
+                    if parsed_retry_pid is None or (
+                        before_identity_pids != pids_before[: len(before_identity_pids)]
+                        or len(before_identity_pids) >= len(pids_before)
+                        or pids_before[len(before_identity_pids)] != parsed_retry_pid
+                    ):
+                        fail(f"{attempt_label} before disappearance prefix differs")
+                elif retry_stage == "read":
+                    if (
+                        parsed_retry_pid is None
+                        or before_identity_pids != pids_before
+                        or process_pids != pids_before[: len(process_pids)]
+                        or len(process_pids) >= len(pids_before)
+                        or pids_before[len(process_pids)] != parsed_retry_pid
+                        or pids_after is not None
+                        or after_identities
+                    ):
+                        fail(f"{attempt_label} read disappearance prefix differs")
+                else:
+                    if (
+                        before_identity_pids != pids_before
+                        or process_pids != pids_before
+                    ):
+                        fail(f"{attempt_label} after retry lacks complete before reads")
+                    if parsed_retry_pid is None or (
+                        pids_after is None
+                        or after_identity_pids != pids_after[: len(after_identity_pids)]
+                        or len(after_identity_pids) >= len(pids_after)
+                        or pids_after[len(after_identity_pids)] != parsed_retry_pid
+                    ):
+                        fail(f"{attempt_label} after disappearance prefix differs")
+                    before_map = {
+                        pid: (dev, ino) for pid, dev, ino in before_identities
+                    }
+                    after_map = {
+                        pid: (dev, ino) for pid, dev, ino in after_identities
+                    }
+                    if any(
+                        before_map[pid] != after_map[pid]
+                        for pid in before_map.keys() & after_map.keys()
+                    ):
+                        fail(f"{attempt_label} reused a PID across retry identities")
+            else:
+                if (
+                    retry_stage != "after"
+                    or parsed_retry_pid is not None
+                    or before_identity_pids != pids_before
+                    or process_pids != pids_before
+                    or pids_after is None
+                    or after_identity_pids != pids_after
+                    or pids_before == pids_after
+                ):
+                    fail(f"{attempt_label} PID-set retry evidence differs")
+                before_map = {pid: (dev, ino) for pid, dev, ino in before_identities}
+                after_map = {pid: (dev, ino) for pid, dev, ino in after_identities}
+                if any(before_map[pid] != after_map[pid] for pid in before_map.keys() & after_map.keys()):
+                    fail(f"{attempt_label} reused a PID across retry sets")
+            expected_retry_reasons.append(
+                f"{retry_reason}:{retry_stage}:"
+                f"{parsed_retry_pid if parsed_retry_pid is not None else 'null'}"
+            )
+        else:
+            fail(f"{attempt_label}.outcome must be stable or retry")
+        parsed_attempts.append(
+            {
+                "completed": attempt_completed,
+                "before_identities": before_identities,
+                "processes": processes,
+                "after_identities": after_identities,
+            }
+        )
+
+    if completed != parsed_attempts[-1]["completed"]:
+        fail(f"{label} completion differs from the final stable attempt")
+    retry_reasons = snapshot["retry_reasons"]
+    if not json_type_equal(retry_reasons, expected_retry_reasons):
+        fail(f"{label}.retry_reasons differs from retry attempts")
+    final = attempts[-1]
+    if (
+        not json_type_equal(snapshot["before_identities"], final["before_identities"])
+        or not json_type_equal(snapshot["processes"], final["processes"])
+        or not json_type_equal(snapshot["after_identities"], final["after_identities"])
+    ):
+        fail(f"{label} final snapshot summaries differ from the stable attempt")
+    final_processes = parsed_attempts[-1]["processes"]
+    final_positive = [
+        (pid, amount) for pid, _, _, amount in final_processes if amount > 0
+    ]
+    if expected_worker_pid is None:
+        if final_positive:
+            fail(f"{label} preflight snapshot contains positive KFD VRAM")
+    elif (
+        len(final_positive) != 1
+        or final_positive[0][0] != expected_worker_pid
+        or final_positive[0][1] <= 0
+    ):
+        fail(f"{label} does not prove sole positive worker KFD ownership")
+    return ParsedKfdSnapshot(
+        started,
+        completed,
+        final_processes,
+        attempt_count,
+        attempt_count - 1,
+    )
 
 
 def parse_proc_stat(raw: str, expected_pid: int, label: str) -> tuple[int, int]:
@@ -587,6 +892,19 @@ class AcceptanceValidator:
         self.process_exit: dict[str, Any] | None = None
         self.stderr_path: Path | None = None
         self.stderr_sha256: str | None = None
+        self.preflight_kfd_completed_ns = -1
+        self.kfd_snapshot_count = 0
+        self.kfd_attempt_count = 0
+        self.kfd_retry_count = 0
+
+    def _validate_kfd_snapshot(
+        self, value: Any, label: str, expected_worker_pid: int | None
+    ) -> ParsedKfdSnapshot:
+        parsed = parse_kfd_snapshot(value, label, expected_worker_pid)
+        self.kfd_snapshot_count += 1
+        self.kfd_attempt_count += parsed.attempt_count
+        self.kfd_retry_count += parsed.retry_count
+        return parsed
 
     def consume(self, record: dict[str, Any], line_number: int) -> None:
         label = f"line {line_number}"
@@ -769,7 +1087,7 @@ class AcceptanceValidator:
                 "required_hip_guards",
                 "amd_smi_version_raw",
                 "amd_smi_version_raw_sha256",
-                "preflight_kfd_processes",
+                "preflight_kfd_snapshot",
             },
             "header.environment",
         )
@@ -791,12 +1109,12 @@ class AcceptanceValidator:
         ):
             if required not in version_raw:
                 fail(f"header.environment AMD SMI version is missing {required!r}")
-        preflight_kfd = parse_kfd_processes(
-            environment["preflight_kfd_processes"],
-            "header.environment.preflight_kfd_processes",
+        preflight_kfd = self._validate_kfd_snapshot(
+            environment["preflight_kfd_snapshot"],
+            "header.environment.preflight_kfd_snapshot",
+            None,
         )
-        if any(amount > 0 for _, amount in preflight_kfd):
-            fail("header.environment preflight KFD evidence contains positive R9700 VRAM")
+        self.preflight_kfd_completed_ns = preflight_kfd.completed_ns
 
         schedule = exact_fields(record["schedule"], set(SCHEDULE), "header.schedule")
         thresholds = exact_fields(record["thresholds"], set(THRESHOLDS), "header.thresholds")
@@ -827,6 +1145,8 @@ class AcceptanceValidator:
         exact_fields(event, set(expected), "ready event")
         if not json_type_equal(event, expected):
             fail("ready event differs from the frozen worker identity")
+        if observed <= self.preflight_kfd_completed_ns:
+            fail("ready observation does not follow preflight KFD acquisition")
         self.last_record_time_ns = observed
         self.pending_isolation = IsolationExpectation(
             "ready", None, None, None, observed
@@ -1255,20 +1575,17 @@ class AcceptanceValidator:
             or record["release_observed_monotonic_ns"] != expected.release_observed_ns
         ):
             fail(f"{label} isolation check does not match Ready/release identity")
-        captured = timestamp(
-            record["captured_monotonic_ns"], f"{label}.captured_monotonic_ns"
+        snapshot = self._validate_kfd_snapshot(
+            record["kfd_snapshot"],
+            f"{label}.kfd_snapshot",
+            self.worker_identity["pid"],
         )
-        if captured < expected.not_before_ns or captured <= self.last_record_time_ns:
-            fail(f"{label} isolation capture is not ordered after Ready/release")
-        kfd = parse_kfd_processes(record["kfd_processes"], f"{label}.kfd_processes")
-        positive = [(pid, amount) for pid, amount in kfd if amount > 0]
         if (
-            len(positive) != 1
-            or positive[0][0] != self.worker_identity["pid"]
-            or positive[0][1] <= 0
+            snapshot.started_ns <= expected.not_before_ns
+            or snapshot.started_ns <= self.last_record_time_ns
         ):
-            fail(f"{label} does not prove sole positive worker KFD ownership")
-        self.last_record_time_ns = captured
+            fail(f"{label} isolation capture is not ordered after Ready/release")
+        self.last_record_time_ns = snapshot.completed_ns
         self.isolation_check_count += 1
         self.pending_isolation = None
 
@@ -1325,18 +1642,20 @@ class AcceptanceValidator:
             ):
                 fail(f"{label} does not match its measured request release")
 
-        resource = self._validate_resource_values(record["worker"], record["gpu"], label)
+        resource, kfd_completed = self._validate_resource_values(
+            record["worker"], record["gpu"], sample_started, label
+        )
         point.samples.append(resource)
         point.previous_sample_ns = sample_started
-        self.last_record_time_ns = sample_started
+        self.last_record_time_ns = kfd_completed
         self.resource_sample_count += 1
         if len(point.samples) == 5:
             self._finish_resource_point(point)
             self.resource_point = None
 
     def _validate_resource_values(
-        self, worker_value: Any, gpu_value: Any, label: str
-    ) -> dict[str, int]:
+        self, worker_value: Any, gpu_value: Any, sample_started: int, label: str
+    ) -> tuple[dict[str, int], int]:
         if self.worker_identity is None:
             fail("resource sample appears before worker identity")
         worker = exact_fields(worker_value, RESOURCE_WORKER_FIELDS, f"{label}.worker")
@@ -1445,48 +1764,18 @@ class AcceptanceValidator:
         ):
             fail(f"{label} GPU identity/isolation differs from the frozen R9700")
         mem_usage = integer(gpu["mem_usage_value"], f"{label}.gpu.mem_usage_value", minimum=1)
-        kfd_vram = integer(gpu["kfd_vram_bytes"], f"{label}.gpu.kfd_vram_bytes", minimum=1)
-        if mem_usage != kfd_vram:
-            fail(f"{label} AMD SMI and KFD VRAM bytes differ")
-        full_kfd = parse_kfd_processes(
-            gpu["kfd_processes"], f"{label}.gpu.kfd_processes"
+        kfd_snapshot = self._validate_kfd_snapshot(
+            gpu["kfd_snapshot"], f"{label}.gpu.kfd_snapshot", pid
         )
-        kfd_processes = gpu["kfd_positive_processes"]
-        if not isinstance(kfd_processes, list) or not kfd_processes:
-            fail(f"{label}.gpu.kfd_positive_processes must be a nonempty array")
-        parsed_kfd: list[tuple[int, int]] = []
-        for index, process in enumerate(kfd_processes):
-            process = exact_fields(
-                process, {"pid", "vram_bytes"}, f"{label}.gpu.kfd_positive_processes[{index}]"
-            )
-            parsed_kfd.append(
-                (
-                    integer(
-                        process["pid"],
-                        f"{label}.gpu.kfd_positive_processes[{index}].pid",
-                        minimum=1,
-                        maximum=U32_MAX,
-                    ),
-                    integer(
-                        process["vram_bytes"],
-                        f"{label}.gpu.kfd_positive_processes[{index}].vram_bytes",
-                        minimum=1,
-                    ),
-                )
-            )
-        if parsed_kfd != sorted(parsed_kfd) or len({item[0] for item in parsed_kfd}) != len(parsed_kfd):
-            fail(f"{label}.gpu.kfd_positive_processes must have ascending unique PIDs")
-        derived_positive = [(process_pid, amount) for process_pid, amount in full_kfd if amount > 0]
-        if parsed_kfd != derived_positive:
-            fail(f"{label}.gpu.kfd_positive_processes differs from raw KFD entries")
-        own_kfd = [amount for process_pid, amount in parsed_kfd if process_pid == pid]
-        unrelated_kfd = [process_pid for process_pid, _ in parsed_kfd if process_pid != pid]
-        if (
-            own_kfd != [kfd_vram]
-            or gpu["unrelated_positive_kfd_pids"] != unrelated_kfd
-            or unrelated_kfd
-        ):
-            fail(f"{label} KFD process evidence does not prove isolated worker ownership")
+        if kfd_snapshot.started_ns < sample_started:
+            fail(f"{label} KFD acquisition starts before resource sample")
+        own_kfd = [
+            amount
+            for process_pid, _, _, amount in kfd_snapshot.processes
+            if process_pid == pid and amount > 0
+        ]
+        if own_kfd != [mem_usage]:
+            fail(f"{label} AMD SMI and final stable KFD VRAM bytes differ")
         raw_json = gpu["process_raw_json"]
         if not isinstance(raw_json, str):
             fail(f"{label}.gpu.process_raw_json must be a string")
@@ -1523,13 +1812,16 @@ class AcceptanceValidator:
             fail(f"{label} parsed AMD SMI worker VRAM differs from recorded fields")
         integer(info["pid"], f"{label}.gpu.raw.pid", minimum=1, maximum=U32_MAX)
         integer(memory["value"], f"{label}.gpu.raw.mem_usage.value", minimum=1)
-        return {
-            "rss": vmrss_bytes,
-            "vram": mem_usage,
-            "threads": threads,
-            "fds": fd_count,
-            "children": len(parsed_children),
-        }
+        return (
+            {
+                "rss": vmrss_bytes,
+                "vram": mem_usage,
+                "threads": threads,
+                "fds": fd_count,
+                "children": len(parsed_children),
+            },
+            kfd_snapshot.completed_ns,
+        )
 
     def _finish_resource_point(self, point: ResourcePoint) -> None:
         medians = {
@@ -1692,6 +1984,11 @@ class AcceptanceValidator:
                 "worker evidence must contain Ready plus 134 release isolation checks, "
                 f"got {self.isolation_check_count}"
             )
+        if self.kfd_snapshot_count != 641:
+            fail(
+                "worker evidence must contain preflight + 135 isolation + 505 resource "
+                f"KFD snapshots, got {self.kfd_snapshot_count}"
+            )
         if self.command_count != 169:
             fail(f"request matrix must produce exactly 169 commands, got {self.command_count}")
         if self.release_count != 134:
@@ -1743,6 +2040,9 @@ class AcceptanceValidator:
                 "resource_points": len(self.rss_points),
                 "gpu_metrics": self.gpu_metric_count,
                 "isolation_checks": self.isolation_check_count,
+                "kfd_snapshots": self.kfd_snapshot_count,
+                "kfd_attempts": self.kfd_attempt_count,
+                "kfd_retries": self.kfd_retry_count,
                 "all_cancellations": len(self.all_cancel_bounds),
                 "non_latency_warmup_cancellations": len(
                     self.non_latency_warmup_cancel_bounds

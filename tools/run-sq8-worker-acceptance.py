@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import fractions
 import hashlib
 import json
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable
 
 
-RAW_SCHEMA = "ullm.sq8.worker_acceptance.raw.v1"
+RAW_SCHEMA = "ullm.sq8.worker_acceptance.raw.v2"
 WORKER_SCHEMA = "ullm.worker.v1"
 MAX_LINE_BYTES = 8 * 1024 * 1024
 STDOUT_QUEUE_ITEMS = 2
@@ -38,6 +39,8 @@ PROCESS_GROUP_GRACE_SECONDS = 2.0
 LATENCY_P95_MAX_NS = 2_000_000_000
 IDLE_SETTLE_NS = 5_000_000_000
 SAMPLE_INTERVAL_NS = 1_000_000_000
+KFD_SNAPSHOT_DEADLINE_NS = 1_000_000_000
+KFD_SNAPSHOT_RETRY_SLEEP_SECONDS = 0.005
 THEIL_SEN_MAX_BYTES_PER_REQUEST = 262_144
 FINAL_DELTA_MAX_BYTES = 67_108_864
 
@@ -1023,31 +1026,328 @@ def capture_worker_proc(proc_root: Path, pid: int) -> dict[str, Any]:
     return worker
 
 
-def capture_kfd_processes(kfd_proc_root: Path) -> list[dict[str, Any]]:
+class KfdSnapshotUnstable(RuntimeError):
+    def __init__(self, reason: str, stage: str, pid: int | None):
+        super().__init__(f"{reason}:{stage}:{pid if pid is not None else 'null'}")
+        self.reason = reason
+        self.stage = stage
+        self.pid = pid
+
+
+def _enumerate_kfd_pid_names(root_descriptor: int, stage: str) -> tuple[str, ...]:
     try:
-        entries = list(os.scandir(kfd_proc_root))
+        names = os.listdir(root_descriptor)
     except OSError as error:
         fail(f"failed to enumerate KFD processes: {error}")
-    result: list[dict[str, Any]] = []
-    for entry in entries:
-        if not entry.name.isascii() or not entry.name.isdecimal():
+    numeric: list[tuple[int, str]] = []
+    for name in names:
+        if not name.isascii() or not name.isdecimal():
             continue
-        if not entry.is_dir(follow_symlinks=False):
-            fail(f"KFD process entry is not a real directory: {entry.name}")
-        pid = int(entry.name, 10)
+        pid = int(name, 10)
         if pid <= 0:
-            fail(f"KFD process PID must be positive: {entry.name}")
-        path = Path(entry.path) / f"vram_{KFD_GPU_ID}"
+            fail(f"KFD process PID must be positive: {name}")
+        if name != str(pid):
+            fail(f"KFD process PID must use canonical decimal syntax: {name}")
+        numeric.append((pid, name))
+    numeric.sort()
+    return tuple(name for _, name in numeric)
+
+
+def _require_kfd_worker_pid(
+    pid_names: tuple[str, ...], expected_worker_pid: int | None, stage: str
+) -> None:
+    if expected_worker_pid is not None and str(expected_worker_pid) not in pid_names:
+        fail(f"required worker PID {expected_worker_pid} is missing from KFD {stage} set")
+
+
+def _open_kfd_pid_directories(
+    root_descriptor: int,
+    pid_names: tuple[str, ...],
+    expected_worker_pid: int | None,
+    stage: str,
+    opened: dict[str, tuple[int, int, int]],
+) -> None:
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    for pid_name in pid_names:
+        pid = int(pid_name, 10)
         try:
-            raw = path.read_text(encoding="ascii").strip()
-        except (OSError, UnicodeError) as error:
-            fail(f"failed to read KFD VRAM for PID {pid}: {error}")
-        if not raw.isdecimal():
-            fail(f"KFD VRAM for PID {pid} is not a non-negative integer")
-        value = int(raw, 10)
-        result.append({"pid": pid, "vram_raw": raw, "vram_bytes": value})
-    result.sort(key=lambda item: item["pid"])
-    return result
+            descriptor = os.open(pid_name, directory_flags, dir_fd=root_descriptor)
+        except OSError as error:
+            if error.errno == errno.ENOENT:
+                if pid == expected_worker_pid:
+                    fail(f"required worker PID {pid} disappeared from KFD {stage} set")
+                raise KfdSnapshotUnstable("entry_disappeared", stage, pid) from error
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                fail(f"KFD process entry is not a real directory: {pid_name}")
+            fail(f"failed to open KFD process PID {pid}: {error}")
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError as error:
+            os.close(descriptor)
+            fail(f"failed to inspect KFD process PID {pid}: {error}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            os.close(descriptor)
+            fail(f"KFD process entry is not a real directory: {pid_name}")
+        opened[pid_name] = (descriptor, metadata.st_dev, metadata.st_ino)
+
+
+def _kfd_identities(
+    opened: dict[str, tuple[int, int, int]]
+) -> list[dict[str, int]]:
+    return [
+        {"pid": int(name, 10), "st_dev": item[1], "st_ino": item[2]}
+        for name, item in opened.items()
+    ]
+
+
+def _close_kfd_pid_directories(
+    opened: dict[str, tuple[int, int, int]]
+) -> list[OSError]:
+    errors: list[OSError] = []
+    while opened:
+        _, item = opened.popitem()
+        try:
+            os.close(item[0])
+        except OSError as error:
+            errors.append(error)
+    return errors
+
+
+def _read_kfd_vram(
+    process_descriptor: int,
+    pid: int,
+    st_dev: int,
+    st_ino: int,
+    expected_worker_pid: int | None,
+) -> dict[str, Any]:
+    file_descriptor = -1
+    try:
+        try:
+            file_descriptor = os.open(
+                f"vram_{KFD_GPU_ID}",
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=process_descriptor,
+            )
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                fail(f"KFD VRAM for PID {pid} must not be a symbolic link")
+            if error.errno == errno.ENOENT:
+                if pid == expected_worker_pid:
+                    fail(f"required worker KFD VRAM file is missing for PID {pid}")
+                raise KfdSnapshotUnstable("entry_disappeared", "read", pid) from error
+            fail(f"failed to open KFD VRAM for PID {pid}: {error}")
+        try:
+            metadata = os.fstat(file_descriptor)
+        except OSError as error:
+            fail(f"failed to inspect KFD VRAM for PID {pid}: {error}")
+        if not stat.S_ISREG(metadata.st_mode):
+            fail(f"KFD VRAM for PID {pid} is not a regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            try:
+                chunk = os.read(file_descriptor, min(4096, 4097 - total))
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    if pid == expected_worker_pid:
+                        fail(f"required worker KFD VRAM read disappeared for PID {pid}")
+                    if chunks:
+                        fail(
+                            "KFD VRAM read disappeared after partial data for PID "
+                            f"{pid}"
+                        )
+                    raise KfdSnapshotUnstable(
+                        "entry_disappeared", "read", pid
+                    ) from error
+                fail(f"failed to read KFD VRAM for PID {pid}: {error}")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 4096:
+                fail(f"KFD VRAM for PID {pid} exceeds 4096 bytes")
+        raw_bytes = b"".join(chunks)
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+    try:
+        raw = raw_bytes.decode("ascii", errors="strict").strip()
+    except UnicodeError as error:
+        fail(f"KFD VRAM for PID {pid} is not ASCII: {error}")
+    if not raw.isdecimal():
+        fail(f"KFD VRAM for PID {pid} is not a non-negative integer")
+    return {
+        "pid": pid,
+        "st_dev": st_dev,
+        "st_ino": st_ino,
+        "vram_raw": raw,
+        "vram_bytes": int(raw, 10),
+    }
+
+
+def _capture_kfd_attempt(
+    root_descriptor: int,
+    expected_worker_pid: int | None,
+    attempt_index: int,
+    started_ns: int,
+) -> tuple[dict[str, Any], bool]:
+    pids_before: tuple[str, ...] = ()
+    pids_after: tuple[str, ...] | None = None
+    before_opened: dict[str, tuple[int, int, int]] = {}
+    after_opened: dict[str, tuple[int, int, int]] = {}
+    processes: list[dict[str, Any]] = []
+    unstable: KfdSnapshotUnstable | None = None
+    stable = False
+    try:
+        try:
+            pids_before = _enumerate_kfd_pid_names(root_descriptor, "before")
+            _require_kfd_worker_pid(pids_before, expected_worker_pid, "before")
+            _open_kfd_pid_directories(
+                root_descriptor,
+                pids_before,
+                expected_worker_pid,
+                "before",
+                before_opened,
+            )
+            for pid_name in pids_before:
+                descriptor, st_dev, st_ino = before_opened[pid_name]
+                process = _read_kfd_vram(
+                    descriptor,
+                    int(pid_name, 10),
+                    st_dev,
+                    st_ino,
+                    expected_worker_pid,
+                )
+                processes.append(process)
+                if (
+                    process["vram_bytes"] > 0
+                    and process["pid"] != expected_worker_pid
+                ):
+                    fail(
+                        f"unexpected positive KFD owner observed: {process['pid']}"
+                    )
+
+            pids_after = _enumerate_kfd_pid_names(root_descriptor, "after")
+            _require_kfd_worker_pid(pids_after, expected_worker_pid, "after")
+            _open_kfd_pid_directories(
+                root_descriptor,
+                pids_after,
+                expected_worker_pid,
+                "after",
+                after_opened,
+            )
+            if pids_before != pids_after:
+                raise KfdSnapshotUnstable("pid_set_changed", "after", None)
+            stable = True
+        except KfdSnapshotUnstable as error:
+            unstable = error
+
+        for pid_name in set(before_opened) & set(after_opened):
+            if before_opened[pid_name][1:] != after_opened[pid_name][1:]:
+                fail(f"KFD PID {pid_name} directory identity changed during snapshot")
+
+        before_identities = _kfd_identities(before_opened)
+        after_identities = _kfd_identities(after_opened)
+    finally:
+        close_errors = _close_kfd_pid_directories(after_opened)
+        close_errors.extend(_close_kfd_pid_directories(before_opened))
+        if close_errors:
+            fail(f"failed to close KFD process directory: {close_errors[0]}")
+    completed_ns = next_strict_timestamp(started_ns)
+    attempt = {
+        "attempt_index": attempt_index,
+        "started_monotonic_ns": started_ns,
+        "completed_monotonic_ns": completed_ns,
+        "outcome": "stable" if stable else "retry",
+        "retry_reason": None if unstable is None else unstable.reason,
+        "retry_stage": None if unstable is None else unstable.stage,
+        "retry_pid": None if unstable is None else unstable.pid,
+        "pids_before": [int(name, 10) for name in pids_before],
+        "before_identities": before_identities,
+        "processes": processes,
+        "pids_after": (
+            None if pids_after is None else [int(name, 10) for name in pids_after]
+        ),
+        "after_identities": after_identities,
+    }
+    return attempt, stable
+
+
+def capture_kfd_snapshot(
+    kfd_proc_root: Path,
+    expected_worker_pid: int | None,
+    *,
+    not_before_ns: int | None = None,
+) -> dict[str, Any]:
+    if expected_worker_pid is not None:
+        integer(expected_worker_pid, "expected KFD worker PID", minimum=1)
+    if not_before_ns is not None:
+        integer(not_before_ns, "KFD acquisition ordering floor", minimum=0)
+    try:
+        root_descriptor = os.open(
+            kfd_proc_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as error:
+        fail(f"failed to open KFD process root: {error}")
+    try:
+        root_metadata = os.fstat(root_descriptor)
+    except OSError as error:
+        os.close(root_descriptor)
+        fail(f"failed to inspect KFD process root: {error}")
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        os.close(root_descriptor)
+        fail("KFD process root is not a directory")
+    acquisition_started_ns = (
+        time.monotonic_ns()
+        if not_before_ns is None
+        else next_strict_timestamp(not_before_ns)
+    )
+    deadline_ns = acquisition_started_ns + KFD_SNAPSHOT_DEADLINE_NS
+    attempts: list[dict[str, Any]] = []
+    attempt_started_ns = acquisition_started_ns
+    try:
+        while True:
+            attempt, stable = _capture_kfd_attempt(
+                root_descriptor,
+                expected_worker_pid,
+                len(attempts),
+                attempt_started_ns,
+            )
+            attempts.append(attempt)
+            if attempt["completed_monotonic_ns"] > deadline_ns:
+                fail("stable KFD snapshot acquisition exceeded one second")
+            if stable:
+                return {
+                    "acquisition_started_monotonic_ns": acquisition_started_ns,
+                    "acquisition_completed_monotonic_ns": attempt[
+                        "completed_monotonic_ns"
+                    ],
+                    "deadline_monotonic_ns": deadline_ns,
+                    "attempt_count": len(attempts),
+                    "retry_reasons": [
+                        f"{item['retry_reason']}:{item['retry_stage']}:"
+                        f"{item['retry_pid'] if item['retry_pid'] is not None else 'null'}"
+                        for item in attempts[:-1]
+                    ],
+                    "attempts": attempts,
+                    "before_identities": attempt["before_identities"],
+                    "processes": attempt["processes"],
+                    "after_identities": attempt["after_identities"],
+                }
+            remaining_ns = deadline_ns - time.monotonic_ns()
+            if remaining_ns <= 0:
+                fail("stable KFD snapshot acquisition exceeded one second")
+            time.sleep(
+                min(KFD_SNAPSHOT_RETRY_SLEEP_SECONDS, remaining_ns / 1_000_000_000)
+            )
+            attempt_started_ns = next_strict_timestamp(
+                attempt["completed_monotonic_ns"]
+            )
+            if attempt_started_ns > deadline_ns:
+                fail("stable KFD snapshot acquisition exceeded one second")
+    finally:
+        os.close(root_descriptor)
 
 
 def positive_kfd_processes(
@@ -1060,8 +1360,12 @@ def positive_kfd_processes(
     ]
 
 
-def scan_kfd_positive(kfd_proc_root: Path) -> list[dict[str, int]]:
-    return positive_kfd_processes(capture_kfd_processes(kfd_proc_root))
+def scan_kfd_positive(
+    kfd_proc_root: Path, expected_worker_pid: int | None
+) -> list[dict[str, int]]:
+    return positive_kfd_processes(
+        capture_kfd_snapshot(kfd_proc_root, expected_worker_pid)["processes"]
+    )
 
 
 def require_isolated_kfd_processes(
@@ -1074,7 +1378,8 @@ def require_isolated_kfd_processes(
 
 
 def require_isolated_kfd(kfd_proc_root: Path, worker_pid: int | None) -> None:
-    require_isolated_kfd_processes(capture_kfd_processes(kfd_proc_root), worker_pid)
+    snapshot = capture_kfd_snapshot(kfd_proc_root, worker_pid)
+    require_isolated_kfd_processes(snapshot["processes"], worker_pid)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1086,7 +1391,7 @@ class ProbeContext:
 
 
 def capture_resource_sample(context: ProbeContext, worker_pid: int) -> tuple[dict[str, Any], int, int]:
-    def probe() -> tuple[bytes, int, list[dict[str, Any]]]:
+    def probe() -> tuple[bytes, int, dict[str, Any]]:
         process_raw = context.command_runner(
             [
                 context.amd_smi,
@@ -1099,12 +1404,15 @@ def capture_resource_sample(context: ProbeContext, worker_pid: int) -> tuple[dic
             "amd-smi process",
         )
         vram = parse_amd_process(process_raw, worker_pid)
-        return process_raw, vram, capture_kfd_processes(context.kfd_proc_root)
+        return process_raw, vram, capture_kfd_snapshot(
+            context.kfd_proc_root, worker_pid
+        )
 
     worker, probe_result = capture_worker_proc_with_probe(
         context.proc_root, worker_pid, probe
     )
-    process_raw, vram, kfd_processes = probe_result
+    process_raw, vram, kfd_snapshot = probe_result
+    kfd_processes = kfd_snapshot["processes"]
     kfd_positive = positive_kfd_processes(kfd_processes)
     own = [item["vram_bytes"] for item in kfd_positive if item["pid"] == worker_pid]
     unrelated = [item["pid"] for item in kfd_positive if item["pid"] != worker_pid]
@@ -1120,10 +1428,7 @@ def capture_resource_sample(context: ProbeContext, worker_pid: int) -> tuple[dic
         "worker_pid": worker_pid,
         "mem_usage_value": vram,
         "mem_usage_unit": "B",
-        "kfd_vram_bytes": own[0],
-        "kfd_processes": kfd_processes,
-        "kfd_positive_processes": kfd_positive,
-        "unrelated_positive_kfd_pids": unrelated,
+        "kfd_snapshot": kfd_snapshot,
     }
     return {"worker": worker, "gpu": gpu}, worker["vmrss_bytes"], vram
 
@@ -1156,14 +1461,20 @@ def record_isolation_check(
     request_index: int | None,
     request_id: str | None,
     release_observed_monotonic_ns: int | None,
+    not_before_monotonic_ns: int | None = None,
 ) -> None:
-    processes = capture_kfd_processes(kfd_proc_root)
-    require_isolated_kfd_processes(processes, worker_pid)
-    floor = (
+    ordering_floor = (
         release_observed_monotonic_ns
         if release_observed_monotonic_ns is not None
-        else -1
+        else not_before_monotonic_ns
     )
+    if ordering_floor is None:
+        fail("ready isolation check requires an ordering floor")
+    snapshot = capture_kfd_snapshot(
+        kfd_proc_root, worker_pid, not_before_ns=ordering_floor
+    )
+    processes = snapshot["processes"]
+    require_isolated_kfd_processes(processes, worker_pid)
     evidence.write(
         {
             "schema_version": RAW_SCHEMA,
@@ -1172,8 +1483,7 @@ def record_isolation_check(
             "request_index": request_index,
             "request_id": request_id,
             "release_observed_monotonic_ns": release_observed_monotonic_ns,
-            "captured_monotonic_ns": next_strict_timestamp(floor),
-            "kfd_processes": processes,
+            "kfd_snapshot": snapshot,
         }
     )
 
@@ -1608,7 +1918,7 @@ class Preflight:
     amd_version_raw: bytes
     amd_list_raw: bytes
     guards: dict[str, str]
-    preflight_kfd_processes: list[dict[str, Any]]
+    preflight_kfd_snapshot: dict[str, Any]
 
 
 def preflight(args: argparse.Namespace, runner: CommandRunner = run_bounded_command) -> Preflight:
@@ -1640,10 +1950,10 @@ def preflight(args: argparse.Namespace, runner: CommandRunner = run_bounded_comm
         fail("AMD SMI version differs from the frozen environment")
     amd_list = runner([args.amd_smi, "list", "--json"], "amd-smi list")
     parse_amd_smi_list(amd_list)
-    preflight_kfd_processes = capture_kfd_processes(
-        Path("/sys/class/kfd/kfd/proc")
+    preflight_kfd_snapshot = capture_kfd_snapshot(
+        Path("/sys/class/kfd/kfd/proc"), None
     )
-    require_isolated_kfd_processes(preflight_kfd_processes, None)
+    require_isolated_kfd_processes(preflight_kfd_snapshot["processes"], None)
     return Preflight(
         repo_root=repo_root,
         output_dir=output_dir,
@@ -1656,7 +1966,7 @@ def preflight(args: argparse.Namespace, runner: CommandRunner = run_bounded_comm
         amd_version_raw=amd_version,
         amd_list_raw=amd_list,
         guards=guards,
-        preflight_kfd_processes=preflight_kfd_processes,
+        preflight_kfd_snapshot=preflight_kfd_snapshot,
     )
 
 
@@ -1709,7 +2019,7 @@ def header_record(
             "required_hip_guards": preflight_result.guards,
             "amd_smi_version_raw": preflight_result.amd_version_raw.decode("utf-8"),
             "amd_smi_version_raw_sha256": sha256_bytes(preflight_result.amd_version_raw),
-            "preflight_kfd_processes": preflight_result.preflight_kfd_processes,
+            "preflight_kfd_snapshot": preflight_result.preflight_kfd_snapshot,
         },
         "schedule": {
             "latency_warmups": 2,
@@ -1811,6 +2121,7 @@ def execute(args: argparse.Namespace) -> None:
             request_index=None,
             request_id=None,
             release_observed_monotonic_ns=None,
+            not_before_monotonic_ns=ready_item.observed_monotonic_ns,
         )
         transport = WorkerTransport(process.stdin, evidence)
 

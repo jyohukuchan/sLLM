@@ -1140,7 +1140,7 @@ no fail-closed producer or independent validator.
 ##### 今回の変更点
 
 - Froze the standalone worker evidence contract in
-  `docs/specs/sq8-worker-acceptance-v0.1.md`, separate from the later HTTP and
+  `docs/specs/sq8-worker-acceptance-v0.2.md`, separate from the later HTTP and
   systemd P8-F release schema.
 - Added a streaming producer for the exact latency/recovery/resource schedule
   and an independent validator that reconstructs commands, worker events,
@@ -1153,9 +1153,17 @@ no fail-closed producer or independent validator.
   kept evidence output outside it, and recorded both initial and final clean Git
   identities. Evidence creation/publication uses no-follow directory FDs and
   rolls a final raw name back to `.incomplete` on failure or interruption.
-- Producer and validator tests pass 78/78. Independent adversarial review found
-  no remaining P0/P1 finding. This completes the measurement tooling, not the
-  real R9700 acceptance gate.
+- The first formal v0.1 run passed latency and reached resource request 87, then
+  correctly remained incomplete after a short-lived KFD PID entry disappeared
+  between enumeration and read. No successful v0.1 evidence was published.
+- v0.2 replaces each bare KFD read with a one-second stable double-collect
+  interval. It retains every attempt, PID-directory identity, partial successful
+  read, and retry reason, while forbidding a retry from hiding an unexpected
+  positive owner, required-worker loss, PID reuse, or partial VRAM read.
+- Producer and validator tests pass 98/98, including deterministic KFD churn and
+  forged-v2 negatives. A 600-iteration real-sysfs probe also passes. Independent
+  adversarial review found no remaining P0/P1 finding. This completes the
+  measurement tooling, not the real R9700 acceptance gate.
 
 ##### 次の行動
 

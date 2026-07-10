@@ -1,8 +1,13 @@
-# SQ8 Standalone Worker Acceptance Evidence v0.1
+# SQ8 Standalone Worker Acceptance Evidence v0.2
 
 Status: frozen P8-C measurement contract
 
-Date: 2026-07-10
+Date: 2026-07-11
+
+This contract supersedes v0.1 after the first formal run stopped near resource
+request 87 on a KFD list/read `ENOENT` race. No successful v0.1 raw evidence was
+published. The v0.1 incomplete file remains failure evidence and MUST be rejected
+by the v0.2 validator rather than reinterpreted.
 
 ## 1. Scope
 
@@ -22,8 +27,8 @@ service, or restart segment and MUST use its own schema.
 
 ## 2. Fixed Identity
 
-The raw schema version is `ullm.sq8.worker_acceptance.raw.v1`. The independent
-validation result schema is `ullm.sq8.worker_acceptance.validation.v1`.
+The raw schema version is `ullm.sq8.worker_acceptance.raw.v2`. The independent
+validation result schema is `ullm.sq8.worker_acceptance.validation.v2`.
 
 The run MUST use a tracked-clean source tree and one release worker built from
 the recorded commit. The only permitted untracked path is `.rocprofv3/` and its
@@ -71,6 +76,34 @@ GPU isolation is an explicit sampled claim rather than an unobservable continuou
 claim. No other process may have positive VRAM on KFD GPU `51545` at preflight,
 after Ready, immediately after every release including latency recovery, or in
 any resource sample. Every one of those observations is retained as raw evidence.
+
+Each KFD observation is a double-collect interval claim, not an atomic instant.
+The producer opens and verifies the KFD root, enumerates the numeric PID set,
+opens every PID directory relative to the root with `O_DIRECTORY|O_NOFOLLOW`, and
+holds every directory descriptor and `(st_dev,st_ino)` identity through the
+attempt. It reads each `vram_51545` through that PID descriptor with `O_NOFOLLOW`,
+a 4096-byte bound, and an explicit EOF read. It then independently enumerates and
+opens every after PID, holding those descriptors until the complete name and
+identity maps have been compared. A stable attempt requires exact before/after
+PID and `(st_dev,st_ino)` map equality and one valid read for every before PID.
+
+All attempts share one deadline exactly 1,000,000,000 ns after acquisition start.
+A non-worker PID directory or VRAM file that disappears with `ENOENT`, or a
+before/after PID-set difference, discards that acquisition attempt and may retry.
+The required worker PID or its VRAM file missing, any PID identity change, root
+enumeration failure, unknown I/O error, non-directory entry, symbolic-link
+substitution, oversized/non-ASCII/malformed value, or deadline exhaustion fails
+immediately. Every successfully read positive owner is checked immediately; an
+owner other than the expected worker is fatal even if the attempt later retries.
+Preflight expects no positive owner. Ready, release, and resource observations
+require the unchanged worker as the sole positive owner.
+
+The retry is internal to one KFD acquisition. It MUST NOT re-run AMD SMI, worker
+`/proc` capture, a resource sample, a five-sample point, or a request. Every
+discarded attempt that precedes a final stable attempt is retained inside the raw
+snapshot with its interval, PID sets, identities, successful reads, outcome, and
+retry reason. The v0.2 validator reconstructs all attempts and rejects positive
+owners in discarded evidence as well as in the stable result.
 
 ## 3. Clock and Cancellation Bound
 
@@ -226,11 +259,11 @@ The exact top-level fields are `schema_version`, `record_type`, `clock`, `build`
   that entry to match all four identities.
 - `environment` contains exactly `hip_visible_devices`,
   `required_hip_guards`, `amd_smi_version_raw`, and
-  `amd_smi_version_raw_sha256`, and `preflight_kfd_processes`; the guard object contains exactly the ten names
+  `amd_smi_version_raw_sha256`, and `preflight_kfd_snapshot`; the guard object contains exactly the ten names
   from section 2 with string value `1`. The AMD SMI raw version MUST contain tool
   `26.2.2+e1a6bc5663`, library `26.2.2`, and ROCm `7.2.1`.
-  `preflight_kfd_processes` uses the raw KFD entry format from section 6.5 and
-  MUST contain no positive `vram_bytes`.
+  `preflight_kfd_snapshot` uses section 6.4.1 with no expected worker and MUST
+  contain no positive `vram_bytes` in any attempt.
 - `schedule` contains exactly `latency_warmups=2`, `latency_measured=10`,
   `resource_warmups=10`, `resource_requests=100`, `cancel_block_size=5`,
   `cancel_block_offset=4`, `idle_settle_ms=5000`, `samples_per_point=5`, and
@@ -286,7 +319,9 @@ For baseline records, `phase=baseline` and all request/release fields are null.
 For post-release records, `phase=post_release`, request index is `1..100`, and the
 request fields match the measured release. Sample indices are `0..4` in order.
 Sample 0 starts at least 5,000,000,000 ns after settle start; later sample starts
-are at least 1,000,000,000 ns apart.
+are at least 1,000,000,000 ns apart. Each resource KFD acquisition starts at or
+after `sample_started_monotonic_ns`; its completion, not sample start, is the
+ordering floor for later evidence.
 
 The nested `worker` object contains exactly `pid`, `ppid`, `exe`,
 `starttime_ticks_before`, `starttime_ticks_after`, `vmrss_kb`, `vmrss_bytes`,
@@ -300,24 +335,54 @@ MUST match the independently supplied worker binary SHA-256.
 
 The nested `gpu` object contains exactly `index`, `bdf`, `uuid`, `kfd_gpu_id`,
 `process_raw_json`, `process_raw_sha256`, `worker_pid`, `mem_usage_value`,
-`mem_usage_unit`, `kfd_vram_bytes`, `kfd_processes`, `kfd_positive_processes`, and
-`unrelated_positive_kfd_pids`. `kfd_positive_processes` is an ascending unique
-array of objects containing exactly `pid` and `vram_bytes`. The validator reparses
-`process_raw_json`, checks its SHA-256 and exact worker record, derives the
-positive and unrelated lists from `kfd_processes`, and requires the unrelated list
-to be empty. `kfd_processes` is an ascending unique array of objects containing
-exactly `pid`, `vram_raw`, and `vram_bytes`; `vram_raw` is the exact stripped ASCII
-content of that PID's `vram_51545` file and MUST parse back to `vram_bytes`.
+`mem_usage_unit`, and `kfd_snapshot`. The validator reparses `process_raw_json`,
+checks its SHA-256 and exact worker record, validates the complete snapshot under
+section 6.4.1, and requires the final stable worker `vram_bytes` to equal AMD SMI
+`mem_usage_value` exactly.
+
+#### 6.4.1 KFD Snapshot
+
+A `kfd_snapshot` contains exactly `acquisition_started_monotonic_ns`,
+`acquisition_completed_monotonic_ns`, `deadline_monotonic_ns`, `attempt_count`,
+`retry_reasons`, `attempts`, `before_identities`, `processes`, and
+`after_identities`. The deadline equals start plus 1,000,000,000 ns, completion is
+the final attempt completion at or before that deadline, and `attempt_count`
+equals the nonempty `attempts` length. Top-level identity/process arrays exactly
+duplicate the final stable attempt. `retry_reasons` exactly derives, in order,
+from all preceding retry attempts. It is an array of strings formatted exactly as
+`retry_reason:retry_stage:retry_pid`, where `retry_pid` is its canonical positive
+decimal value or the literal `null`.
+
+Each attempt contains exactly `attempt_index`, `started_monotonic_ns`,
+`completed_monotonic_ns`, `outcome`, `retry_reason`, `retry_stage`, `retry_pid`,
+`pids_before`, `before_identities`, `processes`, `pids_after`, and
+`after_identities`. Indices are contiguous from zero. Attempt intervals are
+strictly ordered, lie within the common deadline, all non-final outcomes are
+`retry`, and the final outcome is `stable`. Retry reason is
+`entry_disappeared` at stage `before`, `read`, or `after`, or
+`pid_set_changed` at stage `after`. The partial identity/process arrays must be
+the exact ascending prefix implied by the stage and `retry_pid`.
+
+An identity contains exactly `pid`, `st_dev`, and `st_ino`. A process entry
+contains those fields plus `vram_raw` and `vram_bytes`; `vram_raw` is nonempty
+stripped decimal ASCII and parses exactly to `vram_bytes`. All PID arrays and
+entry arrays are ascending and unique. Every process identity must match its
+before identity. The stable attempt requires process PIDs and both identity PID
+maps to equal `pids_before == pids_after`, with exact before/after device and
+inode equality. With a required worker, every before and non-null after PID set
+contains it. The validator checks every attempt for unexpected positive owners;
+only the final stable attempt must contain the required worker as the sole
+positive owner.
 
 ### 6.5 Isolation Check
 
 An `isolation_check` contains exactly `schema_version`, `record_type`, `phase`,
 `request_index`, `request_id`, `release_observed_monotonic_ns`,
-`captured_monotonic_ns`, and `kfd_processes`. One Ready check uses phase `ready`
-and null request/release fields. Every request release is immediately followed by
-one check with matching phase, index, ID, and release timestamp. The KFD array uses
-the raw format from section 6.4. At Ready and after each release, the only positive
-entry MUST be the unchanged worker PID.
+and `kfd_snapshot`. One Ready check uses phase `ready` and null request/release
+fields. Every request release is immediately followed by one check with matching
+phase, index, ID, and release timestamp. Snapshot acquisition starts strictly
+after Ready or the matching release and after prior evidence activity. Its final
+stable attempt proves the unchanged worker is the sole positive owner.
 
 ### 6.6 GPU Metric
 
@@ -369,6 +434,9 @@ schema, ordering, identity, hash, resource, schedule, or threshold error. They d
 not drop or replace a sample, retry only a failed point, continue after worker
 fatal/EOF, or convert an incomplete run into a result. A new result requires a
 fresh complete worker process and complete run.
+
+The only retry exception is the bounded KFD acquisition mechanism in section 2.
+It preserves every discarded attempt and never repeats its enclosing observation.
 
 External commands and worker cleanup use bounded waits. On failure, the producer
 terminates the complete child process group rather than only its direct PID.

@@ -73,6 +73,49 @@ class EvidenceBuilder:
     def add(self, record):
         self.records.append(record)
 
+    def kfd_snapshot(self, values):
+        started = self.tick()
+        identities = [
+            {"pid": pid, "st_dev": 9, "st_ino": 100_000 + pid}
+            for pid, _ in values
+        ]
+        processes = [
+            {
+                "pid": pid,
+                "st_dev": 9,
+                "st_ino": 100_000 + pid,
+                "vram_raw": str(amount),
+                "vram_bytes": amount,
+            }
+            for pid, amount in values
+        ]
+        completed = self.tick()
+        attempt = {
+            "attempt_index": 0,
+            "started_monotonic_ns": started,
+            "completed_monotonic_ns": completed,
+            "outcome": "stable",
+            "retry_reason": None,
+            "retry_stage": None,
+            "retry_pid": None,
+            "pids_before": [pid for pid, _ in values],
+            "before_identities": identities,
+            "processes": processes,
+            "pids_after": [pid for pid, _ in values],
+            "after_identities": deepcopy(identities),
+        }
+        return {
+            "acquisition_started_monotonic_ns": started,
+            "acquisition_completed_monotonic_ns": completed,
+            "deadline_monotonic_ns": started + 1_000_000_000,
+            "attempt_count": 1,
+            "retry_reasons": [],
+            "attempts": [attempt],
+            "before_identities": deepcopy(identities),
+            "processes": deepcopy(processes),
+            "after_identities": deepcopy(identities),
+        }
+
     def header(self):
         amd_list = compact_json(
             [
@@ -95,6 +138,7 @@ class EvidenceBuilder:
             "AMDSMI Library version: 26.2.2 | ROCm version: 7.2.1\n"
         )
         git_status_raw = ""
+        preflight_kfd_snapshot = self.kfd_snapshot([])
         self.add(
             {
                 "schema_version": VALIDATOR.RAW_SCHEMA_VERSION,
@@ -131,7 +175,7 @@ class EvidenceBuilder:
                     },
                     "amd_smi_version_raw": amd_version,
                     "amd_smi_version_raw_sha256": sha256_text(amd_version),
-                    "preflight_kfd_processes": [],
+                    "preflight_kfd_snapshot": preflight_kfd_snapshot,
                 },
                 "schedule": dict(VALIDATOR.SCHEDULE),
                 "thresholds": dict(VALIDATOR.THRESHOLDS),
@@ -154,6 +198,7 @@ class EvidenceBuilder:
         return observed
 
     def isolation_check(self, phase, request_index, request_id, release_observed):
+        snapshot = self.kfd_snapshot([(WORKER_PID, VRAM_BYTES)])
         self.add(
             {
                 "schema_version": VALIDATOR.RAW_SCHEMA_VERSION,
@@ -162,14 +207,7 @@ class EvidenceBuilder:
                 "request_index": request_index,
                 "request_id": request_id,
                 "release_observed_monotonic_ns": release_observed,
-                "captured_monotonic_ns": self.tick(),
-                "kfd_processes": [
-                    {
-                        "pid": WORKER_PID,
-                        "vram_raw": str(VRAM_BYTES),
-                        "vram_bytes": VRAM_BYTES,
-                    }
-                ],
+                "kfd_snapshot": snapshot,
             }
         )
 
@@ -348,6 +386,7 @@ class EvidenceBuilder:
             settle = self._point_settle
             self.now += 1_000_000_000
         self._point_settle = settle
+        sample_started = self.now
         rss_kb = self.rss_for_point(point_index)
         vram = self.vram_for_point(point_index)
         threads = self.threads_for_point(point_index)
@@ -371,6 +410,7 @@ class EvidenceBuilder:
             ]
         )
         baseline = phase == "baseline"
+        kfd_snapshot = self.kfd_snapshot([(WORKER_PID, vram)])
         self.add(
             {
                 "schema_version": VALIDATOR.RAW_SCHEMA_VERSION,
@@ -382,7 +422,7 @@ class EvidenceBuilder:
                 "release_observed_monotonic_ns": None if baseline else release["observed"],
                 "settle_started_monotonic_ns": settle,
                 "sample_index": sample_index,
-                "sample_started_monotonic_ns": self.now,
+                "sample_started_monotonic_ns": sample_started,
                 "worker": {
                     "pid": WORKER_PID,
                     "ppid": WORKER_PPID,
@@ -415,16 +455,7 @@ class EvidenceBuilder:
                     "worker_pid": WORKER_PID,
                     "mem_usage_value": vram,
                     "mem_usage_unit": "B",
-                    "kfd_vram_bytes": vram,
-                    "kfd_processes": [
-                        {
-                            "pid": WORKER_PID,
-                            "vram_raw": str(vram),
-                            "vram_bytes": vram,
-                        }
-                    ],
-                    "kfd_positive_processes": [{"pid": WORKER_PID, "vram_bytes": vram}],
-                    "unrelated_positive_kfd_pids": [],
+                    "kfd_snapshot": kfd_snapshot,
                 },
             }
         )
@@ -530,6 +561,10 @@ def first_record(records, predicate):
 
 def shift_timestamps(value, cutoff, delta):
     if isinstance(value, dict):
+        if "acquisition_started_monotonic_ns" in value:
+            if value["acquisition_started_monotonic_ns"] >= cutoff:
+                shift_all_timestamps(value, delta)
+            return
         for key, item in value.items():
             if key.endswith("_monotonic_ns") and isinstance(item, int) and item >= cutoff:
                 value[key] = item + delta
@@ -538,6 +573,45 @@ def shift_timestamps(value, cutoff, delta):
     elif isinstance(value, list):
         for item in value:
             shift_timestamps(item, cutoff, delta)
+
+
+def shift_all_timestamps(value, delta):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.endswith("_monotonic_ns") and isinstance(item, int):
+                value[key] = item + delta
+            else:
+                shift_all_timestamps(item, delta)
+    elif isinstance(value, list):
+        for item in value:
+            shift_all_timestamps(item, delta)
+
+
+def prepend_valid_kfd_pid_set_retry(snapshot):
+    stable = snapshot["attempts"][0]
+    started = snapshot["acquisition_started_monotonic_ns"]
+    stable["attempt_index"] = 1
+    stable["started_monotonic_ns"] = started + 2
+    extra_pid = WORKER_PID + 100
+    extra_identity = {"pid": extra_pid, "st_dev": 9, "st_ino": 300_000 + extra_pid}
+    retry = {
+        "attempt_index": 0,
+        "started_monotonic_ns": started,
+        "completed_monotonic_ns": started + 1,
+        "outcome": "retry",
+        "retry_reason": "pid_set_changed",
+        "retry_stage": "after",
+        "retry_pid": None,
+        "pids_before": list(stable["pids_before"]),
+        "before_identities": deepcopy(stable["before_identities"]),
+        "processes": deepcopy(stable["processes"]),
+        "pids_after": [*stable["pids_after"], extra_pid],
+        "after_identities": [*deepcopy(stable["after_identities"]), extra_identity],
+    }
+    snapshot["attempt_count"] = 2
+    snapshot["retry_reasons"] = ["pid_set_changed:after:null"]
+    snapshot["attempts"] = [retry, stable]
+    return retry
 
 
 class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
@@ -598,7 +672,7 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
             raw_path, _ = write_fixture(Path(temporary), EvidenceBuilder().build())
             lines = raw_path.read_text(encoding="utf-8").splitlines(keepends=True)
             duplicate = (
-                '{"schema_version":"ullm.sq8.worker_acceptance.raw.v1",'
+                '{"schema_version":"ullm.sq8.worker_acceptance.raw.v2",'
                 + lines[0].lstrip()[1:]
             )
             lines[0] = duplicate
@@ -688,19 +762,202 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(VALIDATOR.ValidationError, "parsed AMD SMI"):
                 VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
 
-    def test_kfd_positive_processes_derive_unrelated_owners(self):
+    def test_kfd_snapshot_rejects_unrelated_positive_owner(self):
         with tempfile.TemporaryDirectory() as temporary:
             records = EvidenceBuilder().build()
             sample = first_record(
                 records,
                 lambda record: record.get("record_type") == "resource_sample",
             )
-            sample["gpu"]["kfd_positive_processes"].append(
-                {"pid": WORKER_PID + 1, "vram_bytes": 4096}
+            sample["gpu"]["kfd_snapshot"]["attempts"][0]["processes"].append(
+                {
+                    "pid": WORKER_PID + 1,
+                    "st_dev": 9,
+                    "st_ino": 200_000 + WORKER_PID,
+                    "vram_raw": "4096",
+                    "vram_bytes": 4096,
+                }
             )
-            sample["gpu"]["unrelated_positive_kfd_pids"] = []
             raw_path, _ = write_fixture(Path(temporary), records)
-            with self.assertRaisesRegex(VALIDATOR.ValidationError, "differs from raw KFD"):
+            with self.assertRaisesRegex(VALIDATOR.ValidationError, "unexpected positive"):
+                VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+
+    def test_kfd_snapshot_valid_retry_is_audited_and_counted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = EvidenceBuilder().build()
+            isolation = first_record(
+                records,
+                lambda record: record.get("record_type") == "isolation_check",
+            )
+            prepend_valid_kfd_pid_set_retry(isolation["kfd_snapshot"])
+            raw_path, _ = write_fixture(Path(temporary), records)
+            result = VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["counts"]["kfd_snapshots"], 641)
+            self.assertEqual(result["counts"]["kfd_attempts"], 642)
+            self.assertEqual(result["counts"]["kfd_retries"], 1)
+
+    def test_kfd_snapshot_retry_cannot_hide_unrelated_positive_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = EvidenceBuilder().build()
+            isolation = first_record(
+                records,
+                lambda record: record.get("record_type") == "isolation_check",
+            )
+            retry = prepend_valid_kfd_pid_set_retry(isolation["kfd_snapshot"])
+            retry["processes"].append(
+                {
+                    "pid": WORKER_PID + 1,
+                    "st_dev": 9,
+                    "st_ino": 400_000 + WORKER_PID,
+                    "vram_raw": "1",
+                    "vram_bytes": 1,
+                }
+            )
+            raw_path, _ = write_fixture(Path(temporary), records)
+            with self.assertRaisesRegex(VALIDATOR.ValidationError, "unexpected positive"):
+                VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+
+    def test_kfd_snapshot_rejects_required_worker_disappearance_retry(self):
+        snapshot = EvidenceBuilder().kfd_snapshot([(WORKER_PID, VRAM_BYTES)])
+        stable = snapshot["attempts"][0]
+        started = snapshot["acquisition_started_monotonic_ns"]
+        stable["attempt_index"] = 1
+        stable["started_monotonic_ns"] = started + 2
+        retry = {
+            "attempt_index": 0,
+            "started_monotonic_ns": started,
+            "completed_monotonic_ns": started + 1,
+            "outcome": "retry",
+            "retry_reason": "entry_disappeared",
+            "retry_stage": "before",
+            "retry_pid": WORKER_PID,
+            "pids_before": [WORKER_PID],
+            "before_identities": [],
+            "processes": [],
+            "pids_after": None,
+            "after_identities": [],
+        }
+        snapshot["attempt_count"] = 2
+        snapshot["retry_reasons"] = [
+            f"entry_disappeared:before:{WORKER_PID}"
+        ]
+        snapshot["attempts"] = [retry, stable]
+
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "required worker disappearance"
+        ):
+            VALIDATOR.parse_kfd_snapshot(snapshot, "snapshot", WORKER_PID)
+
+    def test_kfd_snapshot_rejects_oversized_vram_raw(self):
+        snapshot = EvidenceBuilder().kfd_snapshot([(WORKER_PID, VRAM_BYTES)])
+        process = snapshot["attempts"][0]["processes"][0]
+        process["vram_raw"] = "1" * 4097
+        process["vram_bytes"] = int(process["vram_raw"], 10)
+
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "decimal ASCII"):
+            VALIDATOR.parse_kfd_snapshot(snapshot, "snapshot", WORKER_PID)
+
+    def test_kfd_snapshot_rejects_identity_mismatch_before_after_retry(self):
+        snapshot = EvidenceBuilder().kfd_snapshot([(WORKER_PID, VRAM_BYTES)])
+        stable = snapshot["attempts"][0]
+        started = snapshot["acquisition_started_monotonic_ns"]
+        stable["attempt_index"] = 1
+        stable["started_monotonic_ns"] = started + 2
+        extra_pid = WORKER_PID + 100
+        before_identities = [
+            deepcopy(stable["before_identities"][0]),
+            {"pid": extra_pid, "st_dev": 9, "st_ino": 500_000 + extra_pid},
+        ]
+        retry = {
+            "attempt_index": 0,
+            "started_monotonic_ns": started,
+            "completed_monotonic_ns": started + 1,
+            "outcome": "retry",
+            "retry_reason": "entry_disappeared",
+            "retry_stage": "after",
+            "retry_pid": extra_pid,
+            "pids_before": [WORKER_PID, extra_pid],
+            "before_identities": before_identities,
+            "processes": [
+                deepcopy(stable["processes"][0]),
+                {
+                    "pid": extra_pid,
+                    "st_dev": 9,
+                    "st_ino": 500_000 + extra_pid,
+                    "vram_raw": "0",
+                    "vram_bytes": 0,
+                },
+            ],
+            "pids_after": [WORKER_PID, extra_pid],
+            "after_identities": [
+                {
+                    **deepcopy(stable["after_identities"][0]),
+                    "st_ino": stable["after_identities"][0]["st_ino"] + 1,
+                }
+            ],
+        }
+        snapshot["attempt_count"] = 2
+        snapshot["retry_reasons"] = [
+            f"entry_disappeared:after:{extra_pid}"
+        ]
+        snapshot["attempts"] = [retry, stable]
+
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "retry identities"):
+            VALIDATOR.parse_kfd_snapshot(snapshot, "snapshot", WORKER_PID)
+
+    def test_kfd_snapshot_deadline_identity_and_required_worker_fail_closed(self):
+        mutations = {
+            "deadline": lambda snapshot: snapshot.update(
+                {"deadline_monotonic_ns": snapshot["deadline_monotonic_ns"] + 1}
+            ),
+            "identity": lambda snapshot: snapshot["attempts"][0][
+                "after_identities"
+            ][0].update({"st_ino": 999_999}),
+            "worker": lambda snapshot: prepend_valid_kfd_pid_set_retry(snapshot).update(
+                {
+                    "pids_before": [WORKER_PID + 100],
+                    "before_identities": [
+                        {
+                            "pid": WORKER_PID + 100,
+                            "st_dev": 9,
+                            "st_ino": 400_000 + WORKER_PID,
+                        }
+                    ],
+                    "processes": [
+                        {
+                            "pid": WORKER_PID + 100,
+                            "st_dev": 9,
+                            "st_ino": 400_000 + WORKER_PID,
+                            "vram_raw": "0",
+                            "vram_bytes": 0,
+                        }
+                    ],
+                }
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    records = EvidenceBuilder().build()
+                    isolation = first_record(
+                        records,
+                        lambda record: record.get("record_type") == "isolation_check",
+                    )
+                    mutate(isolation["kfd_snapshot"])
+                    directory = root / name
+                    directory.mkdir()
+                    raw_path, _ = write_fixture(directory, records)
+                    with self.assertRaises(VALIDATOR.ValidationError):
+                        VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+
+    def test_v1_incomplete_schema_is_not_accepted_by_v2_validator(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = EvidenceBuilder().build()
+            records[0]["schema_version"] = "ullm.sq8.worker_acceptance.raw.v1"
+            raw_path, _ = write_fixture(Path(temporary), records)
+            with self.assertRaisesRegex(VALIDATOR.ValidationError, "wrong schema_version"):
                 VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
 
     def test_cancel_p95_gate_is_derived_from_ten_measured_bounds(self):
@@ -859,9 +1116,18 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
             ),
             "preflight": lambda header: header["environment"].update(
                 {
-                    "preflight_kfd_processes": [
-                        {"pid": 99, "vram_raw": "4096", "vram_bytes": 4096}
-                    ]
+                    "preflight_kfd_snapshot": {
+                        **header["environment"]["preflight_kfd_snapshot"],
+                        "processes": [
+                            {
+                                "pid": 99,
+                                "st_dev": 9,
+                                "st_ino": 100_099,
+                                "vram_raw": "4096",
+                                "vram_bytes": 4096,
+                            }
+                        ],
+                    }
                 }
             ),
             "threshold": lambda header: header["thresholds"].update(
@@ -986,7 +1252,9 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
             sample = first_record(
                 records, lambda record: record.get("record_type") == "resource_sample"
             )
-            sample["gpu"]["kfd_processes"][0]["vram_raw"] = "1"
+            sample["gpu"]["kfd_snapshot"]["attempts"][0]["processes"][0][
+                "vram_raw"
+            ] = "1"
             kfd_dir = root / "kfd"
             kfd_dir.mkdir()
             raw_path, _ = write_fixture(kfd_dir, records)

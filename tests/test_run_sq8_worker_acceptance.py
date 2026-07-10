@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import fcntl
 import io
 import json
@@ -110,6 +111,40 @@ def amd_process_raw(pid: int, vram: int = 20_000_000_000):
             }
         ]
     )
+
+
+def synthetic_kfd_snapshot(pid: int, amount: int):
+    identity = {"pid": pid, "st_dev": 9, "st_ino": 100_000 + pid}
+    process = {
+        **identity,
+        "vram_raw": str(amount),
+        "vram_bytes": amount,
+    }
+    attempt = {
+        "attempt_index": 0,
+        "started_monotonic_ns": 1,
+        "completed_monotonic_ns": 2,
+        "outcome": "stable",
+        "retry_reason": None,
+        "retry_stage": None,
+        "retry_pid": None,
+        "pids_before": [pid],
+        "before_identities": [identity],
+        "processes": [process],
+        "pids_after": [pid],
+        "after_identities": [dict(identity)],
+    }
+    return {
+        "acquisition_started_monotonic_ns": 1,
+        "acquisition_completed_monotonic_ns": 2,
+        "deadline_monotonic_ns": 1_000_000_001,
+        "attempt_count": 1,
+        "retry_reasons": [],
+        "attempts": [attempt],
+        "before_identities": [dict(identity)],
+        "processes": [dict(process)],
+        "after_identities": [dict(identity)],
+    }
 
 
 class CaptureEvidence:
@@ -819,22 +854,379 @@ class ProcAndGpuProbeTests(unittest.TestCase):
     def test_kfd_probe_records_all_positive_processes_in_pid_order(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for pid, amount in ((30, 0), (20, 200), (10, 100)):
+            for pid, amount in ((30, 0), (20, 0), (10, 100)):
                 process = root / str(pid)
                 process.mkdir()
                 (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(f"{amount}\n", encoding="ascii")
             self.assertEqual(
-                TOOL.scan_kfd_positive(root),
-                [{"pid": 10, "vram_bytes": 100}, {"pid": 20, "vram_bytes": 200}],
+                TOOL.scan_kfd_positive(root, 10),
+                [{"pid": 10, "vram_bytes": 100}],
             )
+            snapshot = TOOL.capture_kfd_snapshot(root, 10)
+            self.assertEqual(snapshot["attempt_count"], 1)
             self.assertEqual(
-                TOOL.capture_kfd_processes(root),
                 [
-                    {"pid": 10, "vram_raw": "100", "vram_bytes": 100},
-                    {"pid": 20, "vram_raw": "200", "vram_bytes": 200},
-                    {"pid": 30, "vram_raw": "0", "vram_bytes": 0},
+                    (item["pid"], item["vram_raw"], item["vram_bytes"])
+                    for item in snapshot["processes"]
+                ],
+                [
+                    (10, "100", 100),
+                    (20, "0", 0),
+                    (30, "0", 0),
                 ],
             )
+
+    def test_kfd_snapshot_retries_disappearing_entry_and_keeps_stable_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid, amount in ((10, 100), (20, 0), (30, 0)):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    f"{amount}\n", encoding="ascii"
+                )
+            real_open = TOOL.os.open
+            removed = False
+
+            def open_with_disappearance(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal removed
+                if path == "20" and dir_fd is not None and not removed:
+                    removed = True
+                    (root / "20" / f"vram_{TOOL.KFD_GPU_ID}").unlink()
+                    (root / "20").rmdir()
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(
+                TOOL.os, "open", side_effect=open_with_disappearance
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                snapshot = TOOL.capture_kfd_snapshot(root, 10)
+            self.assertTrue(removed)
+            sleep.assert_called()
+            self.assertEqual(snapshot["attempt_count"], 2)
+            self.assertEqual(snapshot["retry_reasons"], ["entry_disappeared:before:20"])
+            self.assertEqual(
+                [(item["pid"], item["vram_bytes"]) for item in snapshot["processes"]],
+                [
+                    (10, 100),
+                    (30, 0),
+                ],
+            )
+            self.assertEqual(
+                TOOL.positive_kfd_processes(snapshot["processes"]),
+                [{"pid": 10, "vram_bytes": 100}],
+            )
+
+    def test_kfd_snapshot_never_hides_positive_owner_behind_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid, amount in ((10, 100), (20, 200)):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    f"{amount}\n", encoding="ascii"
+                )
+            with mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(TOOL.AcceptanceError, "positive KFD owner"):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            sleep.assert_not_called()
+
+    def test_kfd_snapshot_retries_nonworker_vram_enoent_after_directory_open(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid, amount in ((10, 100), (20, 0)):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    f"{amount}\n", encoding="ascii"
+                )
+            real_open = TOOL.os.open
+            vram_open_count = 0
+
+            def open_with_vram_disappearance(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal vram_open_count
+                if path == f"vram_{TOOL.KFD_GPU_ID}":
+                    vram_open_count += 1
+                    if vram_open_count == 2:
+                        (root / "20" / path).unlink()
+                        (root / "20").rmdir()
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(
+                TOOL.os, "open", side_effect=open_with_vram_disappearance
+            ), mock.patch.object(TOOL.time, "sleep"):
+                snapshot = TOOL.capture_kfd_snapshot(root, 10)
+            self.assertEqual(snapshot["attempt_count"], 2)
+            self.assertEqual(snapshot["retry_reasons"], ["entry_disappeared:read:20"])
+            self.assertEqual(
+                [item["pid"] for item in snapshot["attempts"][0]["processes"]],
+                [10],
+            )
+            self.assertEqual([item["pid"] for item in snapshot["processes"]], [10])
+
+    def test_kfd_snapshot_retries_nonworker_vram_read_enoent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid, amount in ((10, 100), (20, 0)):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    f"{amount}\n", encoding="ascii"
+                )
+            real_open = TOOL.os.open
+            real_read = TOOL.os.read
+            vram_open_count = 0
+            disappearing_fd = -1
+            injected = False
+
+            def open_with_target(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal vram_open_count, disappearing_fd
+                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+                if path == f"vram_{TOOL.KFD_GPU_ID}":
+                    vram_open_count += 1
+                    if vram_open_count == 2:
+                        disappearing_fd = descriptor
+                return descriptor
+
+            def read_with_disappearance(descriptor, size):
+                nonlocal injected
+                if descriptor == disappearing_fd and not injected:
+                    injected = True
+                    (root / "20" / f"vram_{TOOL.KFD_GPU_ID}").unlink()
+                    (root / "20").rmdir()
+                    raise FileNotFoundError(errno.ENOENT, "synthetic read disappearance")
+                return real_read(descriptor, size)
+
+            with mock.patch.object(
+                TOOL.os, "open", side_effect=open_with_target
+            ), mock.patch.object(
+                TOOL.os, "read", side_effect=read_with_disappearance
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                snapshot = TOOL.capture_kfd_snapshot(root, 10)
+            self.assertTrue(injected)
+            sleep.assert_called_once()
+            self.assertEqual(snapshot["attempt_count"], 2)
+            self.assertEqual(snapshot["retry_reasons"], ["entry_disappeared:read:20"])
+            self.assertEqual(
+                [item["pid"] for item in snapshot["attempts"][0]["processes"]],
+                [10],
+            )
+
+    def test_kfd_snapshot_worker_vram_read_enoent_is_fatal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            process = root / "10"
+            process.mkdir()
+            (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                "100\n", encoding="ascii"
+            )
+            with mock.patch.object(
+                TOOL.os,
+                "read",
+                side_effect=FileNotFoundError(errno.ENOENT, "synthetic read disappearance"),
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(
+                    TOOL.AcceptanceError, "required worker KFD VRAM read disappeared"
+                ):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            sleep.assert_not_called()
+
+    def test_kfd_snapshot_partial_read_cannot_be_hidden_by_enoent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid, amount in ((10, 100), (20, 200)):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    f"{amount}\n", encoding="ascii"
+                )
+            real_open = TOOL.os.open
+            real_read = TOOL.os.read
+            vram_open_count = 0
+            target_fd = -1
+            target_reads = 0
+
+            def open_with_target(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal vram_open_count, target_fd
+                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+                if path == f"vram_{TOOL.KFD_GPU_ID}":
+                    vram_open_count += 1
+                    if vram_open_count == 2:
+                        target_fd = descriptor
+                return descriptor
+
+            def read_partial_then_disappear(descriptor, size):
+                nonlocal target_reads
+                if descriptor == target_fd:
+                    target_reads += 1
+                    if target_reads == 1:
+                        return b"4096\n"
+                    raise FileNotFoundError(
+                        errno.ENOENT, "synthetic read disappearance"
+                    )
+                return real_read(descriptor, size)
+
+            with mock.patch.object(
+                TOOL.os, "open", side_effect=open_with_target
+            ), mock.patch.object(
+                TOOL.os, "read", side_effect=read_partial_then_disappear
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(
+                    TOOL.AcceptanceError, "read disappeared after partial data"
+                ):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            self.assertEqual(target_reads, 2)
+            sleep.assert_not_called()
+
+    def test_kfd_snapshot_start_is_strictly_after_ordering_floor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            process = root / "10"
+            process.mkdir()
+            (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                "100\n", encoding="ascii"
+            )
+            with mock.patch.object(
+                TOOL.time, "monotonic_ns", side_effect=[100, 100, 101, 102]
+            ):
+                snapshot = TOOL.capture_kfd_snapshot(root, 10, not_before_ns=100)
+            self.assertEqual(snapshot["acquisition_started_monotonic_ns"], 101)
+            self.assertEqual(snapshot["acquisition_completed_monotonic_ns"], 102)
+
+    def test_kfd_snapshot_persistent_pid_churn_expires_fixed_deadline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid in (10, 20):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    "0\n", encoding="ascii"
+                )
+            enumerations = [
+                ("10",),
+                ("10", "20"),
+                ("10",),
+                ("10", "20"),
+            ]
+            with mock.patch.object(
+                TOOL, "_enumerate_kfd_pid_names", side_effect=enumerations
+            ) as enumerate_pids, mock.patch.object(
+                TOOL.time,
+                "monotonic_ns",
+                side_effect=[0, 10, 20, 30, 40, TOOL.KFD_SNAPSHOT_DEADLINE_NS + 1],
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(
+                    TOOL.AcceptanceError, "snapshot acquisition exceeded one second"
+                ):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            self.assertEqual(enumerate_pids.call_count, 4)
+            sleep.assert_called_once()
+
+    def test_kfd_snapshot_rejects_pid_and_vram_symlink_substitutions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                "100\n", encoding="ascii"
+            )
+            directory_case = root / "directory-case"
+            directory_case.mkdir()
+            (directory_case / "10").symlink_to(outside, target_is_directory=True)
+            with mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(TOOL.AcceptanceError, "real directory"):
+                    TOOL.capture_kfd_snapshot(directory_case, 10)
+            sleep.assert_not_called()
+
+            file_case = root / "file-case"
+            process = file_case / "10"
+            process.mkdir(parents=True)
+            value = root / "value"
+            value.write_text("100\n", encoding="ascii")
+            (process / f"vram_{TOOL.KFD_GPU_ID}").symlink_to(value)
+            with mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(TOOL.AcceptanceError, "symbolic link"):
+                    TOOL.capture_kfd_snapshot(file_case, 10)
+            sleep.assert_not_called()
+
+    def test_kfd_snapshot_required_worker_vram_missing_fails_without_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "10").mkdir()
+            with mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(
+                    TOOL.AcceptanceError, "required worker KFD VRAM file is missing"
+                ):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            sleep.assert_not_called()
+
+    def test_kfd_snapshot_rejects_pid_directory_identity_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            process = root / "10"
+            process.mkdir()
+            (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                "100\n", encoding="ascii"
+            )
+            original_enumerate = TOOL._enumerate_kfd_pid_names
+            replaced = False
+
+            def enumerate_with_replacement(descriptor, stage):
+                nonlocal replaced
+                if stage == "after" and not replaced:
+                    replaced = True
+                    process.rename(root / "old-10")
+                    process.mkdir()
+                    (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                        "100\n", encoding="ascii"
+                    )
+                return original_enumerate(descriptor, stage)
+
+            with mock.patch.object(
+                TOOL, "_enumerate_kfd_pid_names", side_effect=enumerate_with_replacement
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(TOOL.AcceptanceError, "identity changed"):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            self.assertTrue(replaced)
+            sleep.assert_not_called()
+
+    def test_kfd_snapshot_identity_mismatch_is_fatal_before_after_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for pid, amount in ((10, 100), (20, 0)):
+                process = root / str(pid)
+                process.mkdir()
+                (process / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                    f"{amount}\n", encoding="ascii"
+                )
+            original_enumerate = TOOL._enumerate_kfd_pid_names
+            real_open = TOOL.os.open
+            after_started = False
+
+            def enumerate_with_replacement(descriptor, stage):
+                nonlocal after_started
+                if stage == "after" and not after_started:
+                    after_started = True
+                    (root / "10").rename(root / "old-10")
+                    (root / "10").mkdir()
+                    (root / "10" / f"vram_{TOOL.KFD_GPU_ID}").write_text(
+                        "100\n", encoding="ascii"
+                    )
+                return original_enumerate(descriptor, stage)
+
+            def open_with_after_disappearance(path, flags, mode=0o777, *, dir_fd=None):
+                if path == "20" and after_started and (root / "20").exists():
+                    (root / "20" / f"vram_{TOOL.KFD_GPU_ID}").unlink()
+                    (root / "20").rmdir()
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(
+                TOOL, "_enumerate_kfd_pid_names", side_effect=enumerate_with_replacement
+            ), mock.patch.object(
+                TOOL.os, "open", side_effect=open_with_after_disappearance
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(TOOL.AcceptanceError, "identity changed"):
+                    TOOL.capture_kfd_snapshot(root, 10)
+            sleep.assert_not_called()
 
     def test_kfd_probe_rejects_nonpositive_numeric_pid(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -842,7 +1234,18 @@ class ProcAndGpuProbeTests(unittest.TestCase):
             process.mkdir()
             (process / f"vram_{TOOL.KFD_GPU_ID}").write_text("0\n", encoding="ascii")
             with self.assertRaisesRegex(TOOL.AcceptanceError, "PID must be positive"):
-                TOOL.capture_kfd_processes(Path(temporary))
+                TOOL.capture_kfd_snapshot(Path(temporary), None)
+
+    def test_kfd_snapshot_root_enumeration_enoent_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(
+                TOOL.os, "listdir", side_effect=FileNotFoundError(errno.ENOENT, "gone")
+            ), mock.patch.object(TOOL.time, "sleep") as sleep:
+                with self.assertRaisesRegex(
+                    TOOL.AcceptanceError, "failed to enumerate KFD processes"
+                ):
+                    TOOL.capture_kfd_snapshot(Path(temporary), None)
+            sleep.assert_not_called()
 
     def test_amd_smi_identity_and_process_parser(self):
         TOOL.parse_amd_smi_list(amd_list_raw())
@@ -895,26 +1298,22 @@ class ProcAndGpuProbeTests(unittest.TestCase):
             captured, rss, vram = TOOL.capture_resource_sample(context, 222)
             self.assertEqual(rss, 12345 * 1024)
             self.assertEqual(vram, 20_000_000_000)
+            snapshot = captured["gpu"]["kfd_snapshot"]
+            self.assertEqual(snapshot["attempt_count"], 1)
             self.assertEqual(
-                captured["gpu"]["kfd_positive_processes"],
-                [{"pid": 222, "vram_bytes": 20_000_000_000}],
-            )
-            self.assertEqual(
-                captured["gpu"]["kfd_processes"],
                 [
-                    {
-                        "pid": 222,
-                        "vram_raw": "20000000000",
-                        "vram_bytes": 20_000_000_000,
-                    }
+                    (item["pid"], item["vram_raw"], item["vram_bytes"])
+                    for item in snapshot["processes"]
+                ],
+                [
+                    (222, "20000000000", 20_000_000_000),
                 ],
             )
-            self.assertEqual(captured["gpu"]["unrelated_positive_kfd_pids"], [])
 
             other = kfd_root / "333"
             other.mkdir()
             (other / f"vram_{TOOL.KFD_GPU_ID}").write_text("1\n", encoding="ascii")
-            with self.assertRaisesRegex(TOOL.AcceptanceError, "isolated KFD"):
+            with self.assertRaisesRegex(TOOL.AcceptanceError, "positive KFD owner"):
                 TOOL.capture_resource_sample(context, 222)
 
     def test_isolation_check_keeps_raw_zero_and_positive_kfd_entries(self):
@@ -938,12 +1337,16 @@ class ProcAndGpuProbeTests(unittest.TestCase):
             )
             record = evidence.records[0]
             self.assertEqual(record["record_type"], "isolation_check")
-            self.assertGreater(record["captured_monotonic_ns"], 100)
+            snapshot = record["kfd_snapshot"]
+            self.assertGreater(snapshot["acquisition_started_monotonic_ns"], 100)
             self.assertEqual(
-                record["kfd_processes"],
                 [
-                    {"pid": 111, "vram_raw": "0", "vram_bytes": 0},
-                    {"pid": 222, "vram_raw": "500", "vram_bytes": 500},
+                    (item["pid"], item["vram_raw"], item["vram_bytes"])
+                    for item in snapshot["processes"]
+                ],
+                [
+                    (111, "0", 0),
+                    (222, "500", 500),
                 ],
             )
 
@@ -962,9 +1365,7 @@ class HeaderAndCliTests(unittest.TestCase):
             amd_version_raw=b"version\n",
             amd_list_raw=amd_list_raw(),
             guards={name: "1" for name in TOOL.REQUIRED_HIP_GUARDS},
-            preflight_kfd_processes=[
-                {"pid": 111, "vram_raw": "0", "vram_bytes": 0}
-            ],
+            preflight_kfd_snapshot=synthetic_kfd_snapshot(111, 0),
         )
         header = TOOL.header_record(identity, 222, 111, 1234, "/worker")
         TOOL.exact_keys(
@@ -991,8 +1392,8 @@ class HeaderAndCliTests(unittest.TestCase):
             TOOL.sha256_bytes(header["build"]["git_status_raw"].encode("utf-8")),
         )
         self.assertEqual(
-            header["environment"]["preflight_kfd_processes"],
-            [{"pid": 111, "vram_raw": "0", "vram_bytes": 0}],
+            header["environment"]["preflight_kfd_snapshot"],
+            synthetic_kfd_snapshot(111, 0),
         )
 
     def test_cli_requires_worker_and_fresh_output_directory(self):
