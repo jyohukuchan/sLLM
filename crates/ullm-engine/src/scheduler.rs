@@ -98,6 +98,45 @@ impl SchedulerState {
         self.active.keys().copied().collect()
     }
 
+    /// Activates one request with the allocator's complete fixed block table.
+    ///
+    /// This is the active1/waiting0 serving path. Queue-based callers continue to use
+    /// `pop_prefill_batch_with_allocation`, which reserves only the blocks their requests need.
+    pub fn activate_single_request_with_all_blocks(
+        &mut self,
+        request: Request,
+    ) -> Result<SchedulerRequestAllocation, String> {
+        if !self.queue.is_empty() {
+            return Err("single-request activation requires an empty waiting queue".into());
+        }
+        if !self.active.is_empty() {
+            return Err("single-request activation requires no active request".into());
+        }
+        let total_blocks = usize::try_from(self.allocator.total_blocks())
+            .map_err(|_| "KV block count does not fit usize".to_string())?;
+        if total_blocks == 0 {
+            return Err("single-request activation requires at least one KV block".into());
+        }
+        if self.allocator.free_blocks() != total_blocks || self.allocator.allocated_blocks() != 0 {
+            return Err("single-request activation requires the allocator baseline".into());
+        }
+
+        let allocation = self.allocator.allocate(request.id, total_blocks)?;
+        self.active.insert(
+            request.id,
+            ActiveRequestState {
+                request: request.clone(),
+                allocation: allocation.clone(),
+                cached_tokens: 0,
+                generated_tokens: 0,
+            },
+        );
+        Ok(SchedulerRequestAllocation {
+            request,
+            allocation,
+        })
+    }
+
     pub fn ready_decode_batch(
         &self,
         max_requests: usize,
@@ -197,6 +236,44 @@ impl SchedulerState {
 
         state.cached_tokens = state.request.prompt_tokens;
         Ok(())
+    }
+
+    /// Records one synchronized prompt token for an incrementally prefilling request.
+    pub fn advance_prefill_token(&mut self, request_id: RequestId) -> Result<usize, String> {
+        let state = self
+            .active
+            .get_mut(&request_id)
+            .ok_or_else(|| format!("request {:?} is not active", request_id))?;
+        if state.generated_tokens != 0 {
+            return Err(format!(
+                "request {:?} cannot advance prefill after generation started",
+                request_id
+            ));
+        }
+        if state.cached_tokens >= state.request.prompt_tokens {
+            return Err(format!(
+                "request {:?} prefill already completed",
+                request_id
+            ));
+        }
+        let next_cached = state
+            .cached_tokens
+            .checked_add(1)
+            .ok_or_else(|| format!("request {:?} cached token count overflow", request_id))?;
+        let max_cache_capacity = state
+            .allocation
+            .blocks
+            .len()
+            .checked_mul(self.allocator.block_size_tokens() as usize)
+            .ok_or_else(|| format!("request {:?} cache capacity overflows", request_id))?;
+        if next_cached > max_cache_capacity {
+            return Err(format!(
+                "request {:?} exceeds allocated cache capacity {}",
+                request_id, max_cache_capacity
+            ));
+        }
+        state.cached_tokens = next_cached;
+        Ok(next_cached)
     }
 
     /// Records the first generated token from prefill logits without caching a decode input.
@@ -907,6 +984,119 @@ mod tests {
 
         assert_eq!(scheduler.release_request(RequestId(1)), 2);
         assert_eq!(scheduler.allocator_stats().free_blocks, 4);
+    }
+
+    #[test]
+    fn scheduler_state_single_request_activation_owns_and_reuses_all_blocks() {
+        let mut scheduler = SchedulerState::with_block_size(4, 16);
+        let activated = scheduler
+            .activate_single_request_with_all_blocks(Request::new(7, 3, 2))
+            .expect("single request activation should succeed");
+        assert_eq!(activated.allocation.blocks, vec![0, 1, 2, 3]);
+        assert_eq!(scheduler.active_len(), 1);
+        assert_eq!(scheduler.allocator_stats().free_blocks, 0);
+        assert_eq!(scheduler.allocator_stats().allocated_blocks, 4);
+
+        assert_eq!(scheduler.release_request(RequestId(7)), 4);
+        let reused = scheduler
+            .activate_single_request_with_all_blocks(Request::new(8, 1, 1))
+            .expect("released fixed table should be reusable");
+        assert_eq!(reused.allocation.blocks, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn scheduler_state_single_request_activation_rejects_nonbaseline_without_mutation() {
+        let mut active = SchedulerState::with_block_size(4, 16);
+        active
+            .activate_single_request_with_all_blocks(Request::new(1, 1, 1))
+            .expect("first activation should succeed");
+        let stats = active.allocator_stats();
+        let err = active
+            .activate_single_request_with_all_blocks(Request::new(2, 1, 1))
+            .expect_err("second active request should be rejected");
+        assert!(err.contains("no active request"), "{err}");
+        assert_eq!(active.allocator_stats(), stats);
+        assert_eq!(active.active_request_ids(), vec![RequestId(1)]);
+
+        let mut waiting = SchedulerState::with_block_size(4, 16);
+        waiting.enqueue(Request::new(3, 1, 1));
+        let stats = waiting.allocator_stats();
+        let err = waiting
+            .activate_single_request_with_all_blocks(Request::new(4, 1, 1))
+            .expect_err("waiting queue should be rejected");
+        assert!(err.contains("empty waiting queue"), "{err}");
+        assert_eq!(waiting.allocator_stats(), stats);
+        assert_eq!(waiting.waiting_len(), 1);
+
+        let mut empty = SchedulerState::with_block_size(0, 16);
+        let err = empty
+            .activate_single_request_with_all_blocks(Request::new(5, 1, 1))
+            .expect_err("zero-block allocator should be rejected");
+        assert!(err.contains("at least one KV block"), "{err}");
+        assert_eq!(empty.active_len(), 0);
+    }
+
+    #[test]
+    fn scheduler_state_incremental_prefill_tracks_each_cached_token() {
+        let mut scheduler = SchedulerState::with_block_size(4, 16);
+        scheduler
+            .activate_single_request_with_all_blocks(Request::new(1, 3, 2))
+            .expect("activation should succeed");
+
+        for expected in 1..=3 {
+            assert_eq!(
+                scheduler
+                    .advance_prefill_token(RequestId(1))
+                    .expect("prompt token should advance"),
+                expected
+            );
+            let active = scheduler
+                .active_request(RequestId(1))
+                .expect("request should remain active");
+            assert_eq!(active.cached_tokens, expected);
+            assert_eq!(active.generated_tokens, 0);
+        }
+        let before = scheduler
+            .active_request(RequestId(1))
+            .expect("request should remain active")
+            .clone();
+        let err = scheduler
+            .advance_prefill_token(RequestId(1))
+            .expect_err("prefill must stop at the prompt boundary");
+        assert!(err.contains("prefill already completed"), "{err}");
+        assert_eq!(scheduler.active_request(RequestId(1)), Some(&before));
+
+        scheduler
+            .record_prefill_generated_token(RequestId(1))
+            .expect("first generated token should be recorded");
+        let before = scheduler
+            .active_request(RequestId(1))
+            .expect("request should remain active")
+            .clone();
+        let err = scheduler
+            .advance_prefill_token(RequestId(1))
+            .expect_err("prefill after generation should be rejected");
+        assert!(err.contains("generation started"), "{err}");
+        assert_eq!(scheduler.active_request(RequestId(1)), Some(&before));
+    }
+
+    #[test]
+    fn scheduler_state_incremental_prefill_rejects_unknown_request_without_mutation() {
+        let mut scheduler = SchedulerState::with_block_size(4, 16);
+        scheduler
+            .activate_single_request_with_all_blocks(Request::new(1, 3, 2))
+            .expect("activation should succeed");
+        let stats = scheduler.allocator_stats();
+        let active = scheduler
+            .active_request(RequestId(1))
+            .expect("request should be active")
+            .clone();
+        let err = scheduler
+            .advance_prefill_token(RequestId(99))
+            .expect_err("unknown request should be rejected");
+        assert!(err.contains("not active"), "{err}");
+        assert_eq!(scheduler.allocator_stats(), stats);
+        assert_eq!(scheduler.active_request(RequestId(1)), Some(&active));
     }
 
     #[test]
