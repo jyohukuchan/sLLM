@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: ready for execution
+Status: in progress; P8-B2 correctness is complete and the first formal performance run failed only the 3584-token TTFT gate
 
 Date: 2026-07-10
 
@@ -642,6 +642,60 @@ If a latency gate fails, v0.1 is not releasable. Further work is limited to meas
 Stop condition:
 
 - do not add the worker until the advertised context has both correctness and hard latency evidence.
+
+#### P8-B2 formal gate result and bounded recovery plan (2026-07-10)
+
+##### 前回の要点
+
+The fixed M=8 path passed the full correctness matrix and the exact 3584 prompt plus
+512 generated-token boundary. The first clean formal performance run used one
+resident load, two warmups, five measured samples, and a complete reset after every
+sample.
+
+##### 今回の変更点
+
+- Evidence is frozen under
+  `benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/performance-clean-08bdcec/`.
+- Prompt 32/128/512/2048 TTFT p50 was
+  `0.144360 / 0.602628 / 3.035701 / 23.481711` seconds and passed.
+- Prompt 3584 TTFT was p50 `61.023836` seconds and p95 `61.025951`
+  seconds. It failed the fixed `50 / 60` second limits; the limits and advertised
+  4096-token context remain unchanged.
+- Prompt 32 / generation 64 decode passed at p50 `27.779928` token/s and
+  p95 inter-token latency `0.036897` seconds.
+- The measured prompt-length curve is closely described by
+  `T(N) ~= 0.0195 + 0.004036 N + 3.623e-6 N^2` seconds. This is a diagnostic
+  inference, not a release contract: the linear term is consistent with repeating
+  the M=8 stack, while the quadratic term is consistent with cached-prefix
+  attention work.
+- CK projection and layer-shape evidence already covers M=16, M=32, and M=128.
+  A larger fixed chunk still contains tokens from exactly one request and therefore
+  does not change the no-batching product contract.
+
+##### 次の行動
+
+1. Generalize the serving-only cached-prefix chunk plumbing to measured fixed
+   widths M=32 and M=128 while retaining M=8 as the frozen oracle. Do not expose
+   either candidate to the product configuration yet.
+2. Before long timing, require planner/cache-transition tests at 31/32/33,
+   127/128/129, and 4095 tokens, plus prompt 32/128/512 final hidden/logit
+   comparison against the existing M=8 and source-oracle gates.
+3. On the isolated R9700, run a bounded candidate screen at prompt 3584 with one
+   resident load, two warmups, and three measured first-token samples per width.
+   Select the faster correct width only if it passes both existing 50/60-second
+   limits; do not tune thresholds from these samples.
+4. For the selected width, repeat the prompt 4095 independent oracle and the
+   3584+512 deep-boundary run, then rerun the unchanged formal 2-warmup/5-measured
+   TTFT and decode matrix.
+5. If neither measured width passes, collect one kernel-summary profile of a
+   3584-token request and make only the change justified by the dominant component.
+   Request batching, a waiting queue, relaxed latency limits, or a reduced context
+   are not fallback options inside plan v0.1.
+
+P8-C remains blocked until the selected single-request prefill path passes the
+unchanged formal gate. This bounds the optimization work to one candidate screen,
+one selected-path validation cycle, and, only if necessary, one profiler-directed
+change before the plan is explicitly reconsidered.
 
 ### P8-C: Sampling, Cancellation, and Resident Worker
 

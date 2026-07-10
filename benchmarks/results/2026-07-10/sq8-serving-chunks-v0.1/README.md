@@ -56,6 +56,19 @@ The exact 4096-token deep-boundary run is under `deep-boundary-p3584-g512-clean-
 - resident request time was `136.763141` seconds, reset time was `0.003174` seconds, and model load was `24.088511` seconds
 - the independent validator passed after recomputing all prefill, decode, terminal, reset, and external build-identity constraints
 
+The first formal performance run is under `performance-clean-08bdcec/`:
+
+- runner commit: `08bdcecdbfad78827131b8b2d390122e4e19457a`
+- binary SHA-256: `ee1090689062f9d604513de142d784aa39afc97c5d6cbfef1e85623d6166c71b`
+- raw result SHA-256: `71a896684a361cbc050bdbdd37d188e41dbc7b0f0ad90ec4d467ac810f22b03f`
+- one resident model load took `24.379317` seconds; every prompt length used two warmups and five measured samples
+- TTFT p50/p95 at prompt 32, 128, 512, and 2048 was `0.144360/0.144457`, `0.602628/0.603478`, `3.035701/3.037958`, and `23.481711/23.503208` seconds; all four gates passed
+- prompt 3584 TTFT was `61.023836/61.025951` seconds and failed the fixed `50/60` second gate
+- prompt 32 / generation 64 passed at p50 `27.779928` token/s and p95 inter-token latency `0.036897` seconds
+- all 42 requests completed their required cancel or length terminal path and returned active0/waiting0, all 40 cache lengths, and the allocator to the Ready baseline
+- all 44 AMD SMI/KFD VRAM captures agreed exactly and found only the worker PID; initial/final resident VRAM was `18,183,073,792 / 18,183,774,208` bytes
+- the independent validator accepted the complete raw structure and recorded only the two prompt-3584 threshold failures; producer output contains no self-reported pass flag
+
 ## 次の行動
 
-prompt 8/32/128/512/4095のcorrectness oracleと3584+512 deep boundaryは完了した。P8-B2の残件はwarmup 2 / repeat 5のTTFT/decode性能gateである。
+prompt 8/32/128/512/4095のcorrectness oracleと3584+512 deep boundaryは完了した。正式性能runでは短文TTFTとdecodeが合格し、3584-token TTFTだけが不合格だった。P8-Cへは進まず、既にprimitive evidenceがあるM=32/M=128を単一request chunk候補として限定比較する。
