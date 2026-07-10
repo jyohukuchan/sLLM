@@ -26,3 +26,7 @@ required-features = ["rocm-ck-gfx1201"]
 [[example]]
 name = "sq8_ck_generate"
 required-features = ["rocm-ck-gfx1201"]
+
+[[example]]
+name = "sq8_ck_serving"
+required-features = ["rocm-ck-gfx1201"]

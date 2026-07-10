@@ -392,6 +392,76 @@ impl Qwen3Sq8LayerWorkspace {
         self.poison_reason.as_deref()
     }
 
+    pub(crate) fn validate_serving_usable(&self) -> Result<(), String> {
+        self.ensure_usable()?;
+        self.config.validate()
+    }
+
+    pub(crate) fn validate_serving_baseline(&self) -> Result<(), String> {
+        self.validate_serving_usable()?;
+        if self.last_profile.is_some() {
+            return Err("Qwen3-14B SQ8 serving workspace still has request metadata".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn enqueue_serving_reset(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        self.validate_serving_usable()?;
+        for (label, buffer) in [
+            ("input normed", &mut self.input_normed),
+            ("q projected", &mut self.q_projected),
+            ("k projected", &mut self.k_projected),
+            ("v projected", &mut self.v_projected),
+            ("q normed", &mut self.q_normed),
+            ("k normed", &mut self.k_normed),
+            ("q rope", &mut self.q_rope),
+            ("k rope", &mut self.k_rope),
+            ("attention", &mut self.attention),
+            ("o projected", &mut self.o_projected),
+            ("attention residual", &mut self.attention_residual),
+            ("post normed", &mut self.post_normed),
+            ("gate projected", &mut self.gate_projected),
+            ("up projected", &mut self.up_projected),
+            ("MLP activation", &mut self.mlp_activation),
+            ("down projected", &mut self.down_projected),
+            ("output", &mut self.output),
+            ("projection workspace", &mut self.projection_workspace),
+        ] {
+            let bytes = buffer
+                .size()
+                .map_err(|err| format!("failed to inspect Qwen3-14B SQ8 serving {label}: {err}"))?;
+            buffer.zero(0, bytes, Some(&mut *stream)).map_err(|err| {
+                format!("failed to enqueue Qwen3-14B SQ8 serving {label} reset: {err}")
+            })?;
+        }
+        self.qkv_activation
+            .zero(Some(&mut *stream))
+            .map_err(|err| {
+                format!("failed to enqueue Qwen3-14B SQ8 serving qkv activation reset: {err}")
+            })?;
+        self.o_activation.zero(Some(&mut *stream)).map_err(|err| {
+            format!("failed to enqueue Qwen3-14B SQ8 serving o activation reset: {err}")
+        })?;
+        self.gate_up_activation
+            .zero(Some(&mut *stream))
+            .map_err(|err| {
+                format!("failed to enqueue Qwen3-14B SQ8 serving gate/up activation reset: {err}")
+            })?;
+        self.down_activation
+            .zero(Some(&mut *stream))
+            .map_err(|err| {
+                format!("failed to enqueue Qwen3-14B SQ8 serving down activation reset: {err}")
+            })?;
+        Ok(())
+    }
+
+    pub(crate) fn commit_serving_reset(&mut self) {
+        self.last_profile = None;
+    }
+
     pub fn run_synchronized(
         &mut self,
         weights: &Qwen3Sq8LayerWeights,

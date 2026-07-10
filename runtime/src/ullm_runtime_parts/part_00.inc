@@ -271,6 +271,17 @@ public:
         return hip_memcpy_async_(dst, src, bytes, kind, stream) == 0;
     }
 
+    bool memset_async(void *dst, int value, size_t bytes, void *stream, int device_id) {
+        load_once();
+        if (bytes == 0) {
+            return true;
+        }
+        if (hip_memset_async_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_memset_async_(dst, value, bytes, stream) == 0;
+    }
+
     bool module_load_data(void **module, const void *image, int device_id) {
         load_once();
         if (hip_module_load_data_ == nullptr || module == nullptr || image == nullptr ||
@@ -368,6 +379,7 @@ private:
     using hip_stream_synchronize_fn = int (*)(void *);
     using hip_device_synchronize_fn = int (*)();
     using hip_memcpy_async_fn = int (*)(void *, const void *, size_t, int, void *);
+    using hip_memset_async_fn = int (*)(void *, int, size_t, void *);
     using hip_module_load_data_fn = int (*)(void **, const void *);
     using hip_module_get_function_fn = int (*)(void **, void *, const char *);
     using hip_module_launch_kernel_fn = int (*)(
@@ -422,6 +434,8 @@ private:
                 reinterpret_cast<hip_device_synchronize_fn>(dlsym(handle_, "hipDeviceSynchronize"));
             hip_memcpy_async_ =
                 reinterpret_cast<hip_memcpy_async_fn>(dlsym(handle_, "hipMemcpyAsync"));
+            hip_memset_async_ =
+                reinterpret_cast<hip_memset_async_fn>(dlsym(handle_, "hipMemsetAsync"));
             hip_module_load_data_ =
                 reinterpret_cast<hip_module_load_data_fn>(dlsym(handle_, "hipModuleLoadData"));
             hip_module_get_function_ =
@@ -449,6 +463,7 @@ private:
     hip_stream_synchronize_fn hip_stream_synchronize_ = nullptr;
     hip_device_synchronize_fn hip_device_synchronize_ = nullptr;
     hip_memcpy_async_fn hip_memcpy_async_ = nullptr;
+    hip_memset_async_fn hip_memset_async_ = nullptr;
     hip_module_load_data_fn hip_module_load_data_ = nullptr;
     hip_module_get_function_fn hip_module_get_function_ = nullptr;
     hip_module_launch_kernel_fn hip_module_launch_kernel_ = nullptr;

@@ -110,6 +110,14 @@ impl Sq8CkQuantizedActivation {
         &self.scales
     }
 
+    /// Enqueues zeroing for both request-derived activation buffers.
+    pub fn zero(&mut self, stream: Option<&mut RuntimeStream>) -> Result<(), String> {
+        let mut stream = stream;
+        self.quantized
+            .zero(0, self.quantized_bytes(), stream.as_deref_mut())?;
+        self.scales.zero(0, self.scale_bytes(), stream)
+    }
+
     pub fn quantized_bytes(&self) -> usize {
         self.m * self.k
     }

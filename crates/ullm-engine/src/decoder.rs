@@ -2003,6 +2003,32 @@ impl PagedDecodeState {
         self.written_len
     }
 
+    pub(crate) fn enqueue_serving_reset(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        for (label, buffer) in [
+            ("q", &mut self.q_buffer),
+            ("k token", &mut self.k_token_buffer),
+            ("v token", &mut self.v_token_buffer),
+            ("k cache", &mut self.k_cache_buffer),
+            ("v cache", &mut self.v_cache_buffer),
+            ("output", &mut self.output_buffer),
+        ] {
+            let bytes = buffer
+                .size()
+                .map_err(|err| format!("failed to inspect serving paged {label} buffer: {err}"))?;
+            buffer
+                .zero(0, bytes, Some(&mut *stream))
+                .map_err(|err| format!("failed to enqueue serving paged {label} reset: {err}"))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_serving_reset(&mut self) {
+        self.written_len = 0;
+    }
+
     pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
         zero_buffer(&mut self.k_cache_buffer, Some(stream))?;
         zero_buffer(&mut self.v_cache_buffer, Some(stream))?;
@@ -3314,6 +3340,41 @@ mod tests {
             assert_f32s_close(&step.output, &expected, 1e-5);
         }
         assert_eq!(state.written_len(), cache_len);
+    }
+
+    #[test]
+    fn serving_reset_zeroes_multiple_paged_states_before_metadata_commit() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 2,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let mut states = (0..2)
+            .map(|_| {
+                PagedDecodeState::new(&mut context, &mut stream, shape, vec![0_u32, 1_u32]).unwrap()
+            })
+            .collect::<Vec<_>>();
+        for state in &mut states {
+            state
+                .write_token(&mut stream, &[1.0, -2.0], &[3.0, -4.0])
+                .unwrap();
+            assert_eq!(state.written_len(), 1);
+            state.enqueue_serving_reset(&mut stream).unwrap();
+            assert_eq!(state.written_len(), 1);
+        }
+        stream.synchronize().unwrap();
+        for state in &mut states {
+            state.commit_serving_reset();
+            assert_eq!(state.written_len(), 0);
+            let cache = state.read_cache_to_host(&mut stream).unwrap();
+            assert!(cache.k.iter().all(|value| *value == 0.0));
+            assert!(cache.v.iter().all(|value| *value == 0.0));
+        }
     }
 
     #[test]

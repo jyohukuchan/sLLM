@@ -77,6 +77,12 @@ ullm_status ullm_runtime_buffer_size(
     const ullm_runtime_buffer *buffer,
     size_t *bytes);
 
+ullm_status ullm_runtime_buffer_zero(
+    ullm_runtime_buffer *buffer,
+    size_t offset,
+    size_t bytes,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_buffer_copy_from_host(
     ullm_runtime_buffer *buffer,
     size_t offset,

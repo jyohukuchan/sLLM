@@ -173,6 +173,44 @@ ullm_status ullm_runtime_buffer_size(
     return ULLM_STATUS_OK;
 }
 
+ullm_status ullm_runtime_buffer_zero(
+    ullm_runtime_buffer *buffer,
+    size_t offset,
+    size_t bytes,
+    ullm_runtime_stream *stream) {
+    if (buffer == nullptr) {
+        set_error("buffer zero received a null buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!checked_range(offset, bytes, buffer->bytes)) {
+        set_error("buffer zero range is out of bounds");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(buffer, stream)) {
+        set_error("buffer zero stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (bytes == 0) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    auto *dst = static_cast<unsigned char *>(buffer->ptr) + offset;
+    if (buffer->backend == BackendKind::Cpu) {
+        std::memset(dst, 0, bytes);
+    } else if (!hip_runtime().memset_async(
+                   dst,
+                   0,
+                   bytes,
+                   stream == nullptr ? nullptr : stream->stream,
+                   buffer->hip_device_id)) {
+        set_error("failed to zero HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 ullm_status ullm_runtime_buffer_copy_from_host(
     ullm_runtime_buffer *buffer,
     size_t offset,

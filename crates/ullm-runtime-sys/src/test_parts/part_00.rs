@@ -51,6 +51,36 @@
     }
 
     #[test]
+    fn cpu_buffer_zero_clears_only_requested_range() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut buffer = context.alloc_buffer(32).unwrap();
+        buffer
+            .copy_from_host(0, &[0xa5_u8; 32], Some(&mut stream))
+            .unwrap();
+        buffer.zero(7, 19, Some(&mut stream)).unwrap();
+        buffer.zero(32, 0, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output = [0_u8; 32];
+        buffer
+            .copy_to_host(0, &mut output, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(&output[..7], &[0xa5_u8; 7]);
+        assert_eq!(&output[7..26], &[0_u8; 19]);
+        assert_eq!(&output[26..], &[0xa5_u8; 6]);
+    }
+
+    #[test]
+    fn buffer_zero_rejects_out_of_bounds_range() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut buffer = context.alloc_buffer(8).unwrap();
+        let err = buffer.zero(7, 2, None).unwrap_err();
+        assert!(err.contains("out of bounds"), "{err}");
+    }
+
+    #[test]
     fn cpu_buffer_copies_between_runtime_buffers() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();

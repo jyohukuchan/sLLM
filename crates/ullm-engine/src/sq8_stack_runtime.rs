@@ -413,6 +413,7 @@ pub struct Qwen3Sq8StackRuntime {
     state: Sq8StackResidentState,
     last_execution_report: Option<Sq8StackExecutionReport>,
     next_paged_decode_position: Option<usize>,
+    paged_m1_sequence_active: bool,
 }
 
 #[derive(Debug)]
@@ -462,6 +463,44 @@ impl Qwen3Sq8PagedDecodeRuntime {
             )),
             None => Ok(()),
         }
+    }
+
+    fn validate_serving_usable(&self) -> Result<(), String> {
+        self.ensure_usable()?;
+        self.config.validate()?;
+        self.workspace.validate_serving_usable()?;
+        let expected = hidden_bytes(self.config)?;
+        let actual = self.resident_hidden.size()?;
+        if actual != expected {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving decode hidden size mismatch: expected={expected} actual={actual}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_serving_baseline(&self) -> Result<(), String> {
+        self.validate_serving_usable()?;
+        self.workspace.validate_serving_baseline()?;
+        if self.output_ready || self.last_execution_report.is_some() {
+            return Err("Qwen3-14B SQ8 serving decode still has request metadata".into());
+        }
+        Ok(())
+    }
+
+    fn enqueue_serving_reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
+        self.validate_serving_usable()?;
+        self.workspace.enqueue_serving_reset(stream)?;
+        let bytes = self.resident_hidden.size()?;
+        self.resident_hidden
+            .zero(0, bytes, Some(stream))
+            .map_err(|err| format!("failed to enqueue SQ8 serving decode hidden reset: {err}"))
+    }
+
+    fn commit_serving_reset(&mut self) {
+        self.workspace.commit_serving_reset();
+        self.output_ready = false;
+        self.last_execution_report = None;
     }
 
     fn poison(&mut self, reason: String) {
@@ -538,6 +577,7 @@ impl Qwen3Sq8StackRuntime {
             state: Sq8StackResidentState::NeedsInput,
             last_execution_report: None,
             next_paged_decode_position: None,
+            paged_m1_sequence_active: false,
         })
     }
 
@@ -563,6 +603,90 @@ impl Qwen3Sq8StackRuntime {
 
     pub fn last_execution_report(&self) -> Option<&Sq8StackExecutionReport> {
         self.last_execution_report.as_ref()
+    }
+
+    /// Validates the complete serving baseline without changing scheduler or runtime state.
+    pub(crate) fn validate_paged_m1_sequence_start(
+        &self,
+        decode: &Qwen3Sq8PagedDecodeRuntime,
+        caches: &[PagedDecodeState],
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        self.workspace.validate_serving_baseline()?;
+        decode.validate_serving_baseline()?;
+        validate_paged_cache_layer_count(caches)?;
+        validate_paged_hip_only_guards()?;
+        if self.status() != Sq8StackRuntimeStatus::NeedsInput
+            || self.last_execution_report.is_some()
+            || self.next_paged_decode_position.is_some()
+            || self.paged_m1_sequence_active
+        {
+            return Err("Qwen3-14B SQ8 paged M=1 sequence is already active".into());
+        }
+        if let Some((layer_index, cache)) = caches
+            .iter()
+            .enumerate()
+            .find(|(_, cache)| cache.written_len() != 0)
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 paged M=1 layer {layer_index} cache is not empty: {}",
+                cache.written_len()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Starts a sequence only after `validate_paged_m1_sequence_start` succeeds.
+    pub(crate) fn begin_paged_m1_sequence(&mut self) {
+        debug_assert!(!self.paged_m1_sequence_active);
+        debug_assert!(self.next_paged_decode_position.is_none());
+        self.paged_m1_sequence_active = true;
+        self.next_paged_decode_position = Some(0);
+    }
+
+    pub(crate) fn enqueue_serving_reset(
+        &mut self,
+        decode: &mut Qwen3Sq8PagedDecodeRuntime,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        decode.validate_serving_usable()?;
+        if !self.paged_m1_sequence_active || self.next_paged_decode_position.is_none() {
+            return Err("Qwen3-14B SQ8 serving reset requires an active M=1 sequence".into());
+        }
+        self.workspace.enqueue_serving_reset(stream)?;
+        let bytes = self.resident_hidden.size()?;
+        self.resident_hidden
+            .zero(0, bytes, Some(&mut *stream))
+            .map_err(|err| format!("failed to enqueue SQ8 serving stack hidden reset: {err}"))?;
+        decode.enqueue_serving_reset(stream)
+    }
+
+    /// Commits request metadata only after all reset commands have synchronized successfully.
+    pub(crate) fn commit_serving_reset(&mut self, decode: &mut Qwen3Sq8PagedDecodeRuntime) {
+        self.workspace.commit_serving_reset();
+        self.state = Sq8StackResidentState::NeedsInput;
+        self.last_execution_report = None;
+        self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
+        decode.commit_serving_reset();
+    }
+
+    pub(crate) fn validate_serving_baseline(
+        &self,
+        decode: &Qwen3Sq8PagedDecodeRuntime,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        self.workspace.validate_serving_baseline()?;
+        decode.validate_serving_baseline()?;
+        if self.status() != Sq8StackRuntimeStatus::NeedsInput
+            || self.last_execution_report.is_some()
+            || self.next_paged_decode_position.is_some()
+            || self.paged_m1_sequence_active
+        {
+            return Err("Qwen3-14B SQ8 serving stack is not at its reusable baseline".into());
+        }
+        Ok(())
     }
 
     /// Returns the completed hidden state for crate-internal same-stream composition.
@@ -637,6 +761,7 @@ impl Qwen3Sq8StackRuntime {
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
         self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
         let copy_result = self
             .resident_hidden
             .copy_from_host(0, &bytes, Some(&mut *stream))
@@ -680,6 +805,7 @@ impl Qwen3Sq8StackRuntime {
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
         self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
         let copy_result = self
             .resident_hidden
             .copy_from_buffer(0, input, 0, expected_bytes, Some(&mut *stream))
@@ -749,6 +875,7 @@ impl Qwen3Sq8StackRuntime {
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
         self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
 
         for layer_index in 0..QWEN3_14B_SQ8_STACK_LAYERS {
@@ -884,6 +1011,35 @@ impl Qwen3Sq8StackRuntime {
     ) -> Result<Sq8PagedStackExecutionReport, String> {
         self.validate_runtime_contract()?;
         self.state.require_output_ready()?;
+        if self.paged_m1_sequence_active {
+            return Err("P7 paged decode cannot run during a serving M=1 sequence".into());
+        }
+        self.run_paged_decode_common_synchronized(decode, input, position, caches, stream)
+    }
+
+    pub(crate) fn run_paged_m1_sequence_step_optimized_synchronized(
+        &mut self,
+        decode: &mut Qwen3Sq8PagedDecodeRuntime,
+        input: &RuntimeBuffer,
+        position: usize,
+        caches: &mut [PagedDecodeState],
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8PagedStackExecutionReport, String> {
+        self.validate_runtime_contract()?;
+        if !self.paged_m1_sequence_active {
+            return Err("Qwen3-14B SQ8 serving paged M=1 sequence is not active".into());
+        }
+        self.run_paged_decode_common_synchronized(decode, input, position, caches, stream)
+    }
+
+    fn run_paged_decode_common_synchronized(
+        &mut self,
+        decode: &mut Qwen3Sq8PagedDecodeRuntime,
+        input: &RuntimeBuffer,
+        position: usize,
+        caches: &mut [PagedDecodeState],
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8PagedStackExecutionReport, String> {
         decode.ensure_usable()?;
         validate_paged_cache_layer_count(caches)?;
         validate_paged_hip_only_guards()?;
@@ -1014,6 +1170,7 @@ impl Qwen3Sq8StackRuntime {
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
         self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
         let mut layer_audits = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
 
@@ -1258,6 +1415,7 @@ impl Qwen3Sq8StackRuntime {
     fn poison_with_error(&mut self, error: String) -> String {
         self.last_execution_report = None;
         self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
         self.state.poison(error.clone());
         error
     }

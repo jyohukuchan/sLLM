@@ -548,6 +548,84 @@ impl Sq8ModelHeadM1Result {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Sq8ModelHeadServingExecutionReport {
+    pub(crate) binding: Sq8ModelHeadM1ExecutionBinding,
+    pub(crate) position: usize,
+    pub(crate) cache_len: usize,
+    pub(crate) final_norm: Sq8ModelHeadPayloadIdentity,
+    pub(crate) lm_head: Sq8ModelHeadPayloadIdentity,
+    pub(crate) logits_health: Sq8ModelHeadTensorHealth,
+    pub(crate) stack_kernel_guard_checks: usize,
+    pub(crate) paged_kernel_guard_checks: usize,
+    pub(crate) head_kernel_guard_checks: usize,
+    pub(crate) rmsnorm_call_count: usize,
+    pub(crate) bf16_matvec_call_count: usize,
+    pub(crate) result_readback_count: usize,
+    pub(crate) execution_synchronization_count: usize,
+    pub(crate) fallback_used: bool,
+    pub(crate) host_staging_used: bool,
+}
+
+impl Sq8ModelHeadServingExecutionReport {
+    pub(crate) fn validate_contract(&self) -> Result<(), String> {
+        self.binding.validate_contract()?;
+        self.final_norm.validate(
+            QWEN3_14B_FINAL_NORM_TENSOR,
+            &QWEN3_14B_FINAL_NORM_SHAPE,
+            QWEN3_14B_HIDDEN_SIZE as u64,
+            bf16_bytes(QWEN3_14B_HIDDEN_SIZE)? as u64,
+        )?;
+        self.lm_head.validate(
+            QWEN3_14B_LM_HEAD_TENSOR,
+            &QWEN3_14B_LM_HEAD_SHAPE,
+            checked_elements(QWEN3_14B_VOCAB_SIZE, QWEN3_14B_HIDDEN_SIZE, "LM head")? as u64,
+            bf16_bytes(checked_elements(
+                QWEN3_14B_VOCAB_SIZE,
+                QWEN3_14B_HIDDEN_SIZE,
+                "LM head",
+            )?)? as u64,
+        )?;
+        validate_health_contract(&self.logits_health, QWEN3_14B_VOCAB_SIZE, "serving logits")?;
+        if self.cache_len != self.position + 1
+            || self.stack_kernel_guard_checks != QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.paged_kernel_guard_checks != QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.head_kernel_guard_checks
+                != QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.rmsnorm_call_count != 1
+            || self.bf16_matvec_call_count != 1
+            || self.result_readback_count != 1
+            || self.execution_synchronization_count != 1
+            || self.fallback_used
+            || self.host_staging_used
+        {
+            return Err("Qwen3-14B SQ8 serving model-head operation contract mismatch".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Sq8ModelHeadServingResult {
+    pub(crate) logits: Vec<f32>,
+    pub(crate) report: Sq8ModelHeadServingExecutionReport,
+}
+
+impl Sq8ModelHeadServingResult {
+    pub(crate) fn validate_contract(&self) -> Result<(), String> {
+        self.report.validate_contract()?;
+        let health = validate_sq8_model_head_tensor_health(
+            &self.logits,
+            QWEN3_14B_VOCAB_SIZE,
+            "serving logits",
+        )?;
+        if health != self.report.logits_health {
+            return Err("Qwen3-14B SQ8 serving logits health/hash mismatch".into());
+        }
+        Ok(())
+    }
+}
+
 /// Owns fixed Qwen3-14B final normalization and BF16 language-model-head storage.
 ///
 /// Model loading may use bounded host staging. Each public execution consumes a completed,
@@ -713,6 +791,46 @@ impl Qwen3Sq8ModelHeadRuntime {
         &self.package_manifest_sha256
     }
 
+    pub(crate) fn validate_serving_baseline(&self) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        if self.status() != Sq8ModelHeadRuntimeStatus::Ready {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving model head requires Ready, got {:?}",
+                self.status()
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_serving_preflight(&self) -> Result<(), String> {
+        self.validate_serving_baseline()?;
+        validate_serving_hip_only_guards()
+    }
+
+    pub(crate) fn enqueue_serving_reset(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        for (label, buffer) in [
+            ("selected hidden", &mut self.selected_hidden),
+            ("final hidden", &mut self.final_hidden),
+            ("logits", &mut self.logits),
+        ] {
+            let bytes = buffer
+                .size()
+                .map_err(|err| format!("failed to inspect Qwen3-14B SQ8 serving {label}: {err}"))?;
+            buffer.zero(0, bytes, Some(&mut *stream)).map_err(|err| {
+                format!("failed to enqueue Qwen3-14B SQ8 serving {label} reset: {err}")
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_serving_reset(&mut self) {
+        self.state = Sq8ModelHeadRuntimeState::Ready;
+    }
+
     /// Applies final normalization and the BF16 language-model head to the stack's last row.
     ///
     /// The stack must already have completed and synchronized. This method then enqueues one D2D
@@ -850,6 +968,103 @@ impl Qwen3Sq8ModelHeadRuntime {
             paged_decode,
             stream,
         )
+    }
+
+    /// Runs the serving head with one logits readback and no audit-only hidden/top1 readbacks.
+    pub(crate) fn run_m1_serving_logits_synchronized(
+        &mut self,
+        decode: &Qwen3Sq8PagedDecodeRuntime,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
+        let paged_decode = decode.last_execution_report().ok_or_else(|| {
+            "Qwen3-14B SQ8 serving model head requires a completed paged decode".to_string()
+        })?;
+        paged_decode.validate_contract()?;
+        if paged_decode.phase != Sq8PagedStackPhase::Decode {
+            return Err("Qwen3-14B SQ8 serving model head requires a decode-phase report".into());
+        }
+        let binding = Sq8ModelHeadM1ExecutionBinding {
+            profile: paged_decode.stack.profile,
+            device: self.device.clone(),
+            package_manifest_sha256: self.package_manifest_sha256.clone(),
+            artifact_content_sha256: paged_decode.stack.artifact_content_sha256.clone(),
+        };
+        let resident_hidden = decode.resident_hidden_buffer()?;
+        self.validate_serving_execution_preconditions(resident_hidden, &binding, paged_decode)?;
+
+        let logits_bytes = f32_bytes(QWEN3_14B_VOCAB_SIZE)?;
+        let mut logits_host = zeroed_host_bytes(logits_bytes, "serving logits readback")?;
+        let operation_result = (|| {
+            segmented_rmsnorm_f32(
+                resident_hidden,
+                &self.final_norm_f32,
+                1,
+                QWEN3_14B_HIDDEN_SIZE,
+                QWEN3_14B_RMS_NORM_EPSILON,
+                &mut self.final_hidden,
+                Some(&mut *stream),
+            )?;
+            matvec_bf16_f32(
+                &self.lm_head_bf16,
+                &self.final_hidden,
+                QWEN3_14B_VOCAB_SIZE,
+                QWEN3_14B_HIDDEN_SIZE,
+                &mut self.logits,
+                Some(&mut *stream),
+            )?;
+            self.logits
+                .copy_to_host(0, &mut logits_host, Some(&mut *stream))?;
+            Ok::<(), String>(())
+        })();
+        if let Err(operation_error) = operation_result {
+            return Err(self.poison_after_stream_recovery(stream, operation_error));
+        }
+        if let Err(sync_error) = stream.synchronize() {
+            return Err(self.poison_with_error(format!(
+                "failed to synchronize Qwen3-14B SQ8 serving model head: {sync_error}"
+            )));
+        }
+
+        let logits = decode_f32_le_values(&logits_host);
+        let logits_health = match validate_sq8_model_head_tensor_health(
+            &logits,
+            QWEN3_14B_VOCAB_SIZE,
+            "serving logits",
+        ) {
+            Ok(health) => health,
+            Err(err) => return Err(self.poison_with_error(err)),
+        };
+        let artifact_to_bind = binding.artifact_content_sha256.clone();
+        let result = Sq8ModelHeadServingResult {
+            logits,
+            report: Sq8ModelHeadServingExecutionReport {
+                binding,
+                position: paged_decode.position,
+                cache_len: paged_decode.position + 1,
+                final_norm: self.final_norm_identity.clone(),
+                lm_head: self.lm_head_identity.clone(),
+                logits_health,
+                stack_kernel_guard_checks: QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len(),
+                paged_kernel_guard_checks: QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len(),
+                head_kernel_guard_checks: QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len(),
+                rmsnorm_call_count: 1,
+                bf16_matvec_call_count: 1,
+                result_readback_count: 1,
+                execution_synchronization_count: 1,
+                fallback_used: false,
+                host_staging_used: false,
+            },
+        };
+        if let Err(err) = result.validate_contract() {
+            return Err(self.poison_with_error(format!(
+                "Qwen3-14B SQ8 serving model-head result validation failed: {err}"
+            )));
+        }
+        if self.m1_artifact_content_sha256.is_none() {
+            self.m1_artifact_content_sha256 = Some(artifact_to_bind);
+        }
+        self.state = Sq8ModelHeadRuntimeState::OutputReady;
+        Ok(result)
     }
 
     /// Executes the decode head from one report-bound resident hidden row.
@@ -1119,6 +1334,45 @@ impl Qwen3Sq8ModelHeadRuntime {
         validate_m1_hip_only_guards()
     }
 
+    fn validate_serving_execution_preconditions(
+        &self,
+        resident_hidden: &RuntimeBuffer,
+        binding: &Sq8ModelHeadM1ExecutionBinding,
+        paged_decode: &Sq8PagedStackExecutionReport,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        binding.validate_contract()?;
+        paged_decode.validate_contract()?;
+        if paged_decode.phase != Sq8PagedStackPhase::Decode
+            || paged_decode.stack.profile != binding.profile
+            || paged_decode.stack.artifact_content_sha256 != binding.artifact_content_sha256
+        {
+            return Err(
+                "Qwen3-14B SQ8 serving model-head input is not bound to its paged decode report"
+                    .into(),
+            );
+        }
+        if binding.device != self.device
+            || binding.package_manifest_sha256 != self.package_manifest_sha256
+        {
+            return Err("Qwen3-14B SQ8 serving model-head identity binding mismatch".into());
+        }
+        if let Some(bound_artifact) = &self.m1_artifact_content_sha256
+            && bound_artifact != &binding.artifact_content_sha256
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving model-head artifact binding mismatch: bound={bound_artifact} input={}",
+                binding.artifact_content_sha256
+            ));
+        }
+        validate_buffer_size(
+            resident_hidden,
+            f32_bytes(QWEN3_14B_HIDDEN_SIZE)?,
+            "serving resident hidden input",
+        )?;
+        validate_serving_hip_only_guards()
+    }
+
     fn poison_after_stream_recovery(
         &mut self,
         stream: &mut RuntimeStream,
@@ -1237,6 +1491,21 @@ fn validate_m1_hip_only_guards() -> Result<(), String> {
         if std::env::var(name).ok().as_deref() != Some("1") {
             return Err(format!(
                 "Qwen3-14B SQ8 M=1 model-head execution requires {name}=1 to forbid HIP host-staging fallback"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_serving_hip_only_guards() -> Result<(), String> {
+    for name in QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .chain(QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV)
+        .chain(QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV)
+    {
+        if std::env::var(name).ok().as_deref() != Some("1") {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving model-head execution requires {name}=1 to forbid HIP host-staging fallback"
             ));
         }
     }

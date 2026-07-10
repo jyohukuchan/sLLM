@@ -458,6 +458,39 @@ impl Qwen3Sq8EmbeddingRuntime {
         self.state.poison_reason()
     }
 
+    pub(crate) fn validate_serving_baseline(&self) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        if self.status() != Sq8EmbeddingRuntimeStatus::Ready {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving embedding requires Ready, got {:?}",
+                self.status()
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_serving_preflight(&self) -> Result<(), String> {
+        self.validate_serving_baseline()?;
+        validate_hip_only_guards()
+    }
+
+    pub(crate) fn enqueue_serving_reset(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        let bytes = self.output_f32.size().map_err(|err| {
+            format!("failed to inspect Qwen3-14B SQ8 serving embedding output: {err}")
+        })?;
+        self.output_f32.zero(0, bytes, Some(stream)).map_err(|err| {
+            format!("failed to enqueue Qwen3-14B SQ8 serving embedding reset: {err}")
+        })
+    }
+
+    pub(crate) fn commit_serving_reset(&mut self) {
+        self.state = Sq8EmbeddingRuntimeState::Ready;
+    }
+
     /// Gathers one token embedding to the resident M=1 F32 output and synchronizes `stream`.
     /// No tensor value is copied to or from host memory.
     pub fn gather_token_synchronized(
