@@ -17,6 +17,11 @@ serde_json = "1.0"
 sha2 = "0.10"
 ullm-runtime-sys = { path = "../ullm-runtime-sys" }
 
+[[bin]]
+name = "ullm-sq8-worker"
+path = "src/bin/ullm-sq8-worker.rs"
+required-features = ["rocm-ck-gfx1201"]
+
 [[example]]
 name = "sq8_ck_layer"
 required-features = ["rocm-ck-gfx1201"]

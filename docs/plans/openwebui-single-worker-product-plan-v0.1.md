@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C sampler, transactional publication, bounded JSONL codec, active1 control, resident CPU topology, and the real HIP/session backend are implemented; worker process composition and the R9700 gate are next
+Status: in progress; P8-B2 is complete; P8-C sampler, transactional publication, bounded JSONL codec, active1 control, resident CPU topology, real HIP/session backend, and worker process composition are implemented; the R9700 worker gate is next
 
 Date: 2026-07-10
 
@@ -1062,6 +1062,39 @@ but no production backend loaded or drove `Qwen3Sq8ServingSession`.
    waiting on the reader thread.
 3. Run the actual adapter on R9700 for two-token, prepared-token cancellation,
    and two sequential requests before starting the HTTP gateway.
+
+#### P8-C worker process checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The production backend existed, but no executable composed stdin, inference,
+and stdout ownership into one bounded-lifetime process.
+
+##### 今回の変更点
+
+- Added a generic process runner and feature-gated `ullm-sq8-worker` binary. The
+  backend is built on the inference thread, the reader starts only after Ready,
+  and one writer thread exclusively owns protocol stdout.
+- The main runner waits on inference, not stdin. On fatal inference or writer
+  failure, an unfinished blocking reader is detached; the fatal writer path is
+  still joined before returning nonzero. Clean shutdown joins every owner.
+- Added strict `--artifact PATH --package PATH` parsing. Help, version, CLI
+  errors, and structured process logs use stderr only; stdout remains JSONL.
+- Process tests cover idle EOF, explicit shutdown, active EOF cancellation,
+  load/shutdown/framing failures, backend and stdout failure while stdin remains
+  blocked, one stdout thread, and two sequential requests with one backend load.
+- All 358 engine library tests, four CLI unit tests, and three real-binary
+  subprocess tests pass. The subprocess tests verify OS exit codes and that
+  stdout is empty for help/CLI failure or contains only protocol JSON on load
+  failure. Independent review found no P0/P1.
+
+##### 次の行動
+
+1. Build the release worker and run it with the canonical artifact/package and
+   an isolated R9700 under every required HIP guard.
+2. Capture two-token, prepared-token cancellation, and sequential-request JSONL
+   evidence, including reset completion and process exit.
+3. Check VRAM and host RSS return to the resident baseline, then begin P8-D.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

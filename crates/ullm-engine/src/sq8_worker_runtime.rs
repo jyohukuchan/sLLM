@@ -700,6 +700,117 @@ fn fail_inference(
     message.into()
 }
 
+pub fn run_sq8_worker_process<R, W, B, F>(
+    input: R,
+    output: W,
+    build_backend: F,
+) -> Result<Sq8CommandReaderExit, String>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+    B: Sq8InferenceBackend + 'static,
+    F: FnOnce() -> Result<B, String> + Send + 'static,
+{
+    let control = Arc::new(Sq8WorkerControl::new());
+    let (events, writer) = spawn_sq8_ordered_writer(output)?;
+    let (commands, command_receiver) = sync_channel(1);
+    let inference = match spawn_sq8_inference_thread(
+        Arc::clone(&control),
+        events.clone(),
+        command_receiver,
+        build_backend,
+    ) {
+        Ok(inference) => inference,
+        Err(error) => {
+            drop(commands);
+            drop(events);
+            let writer_result = writer.close_and_join().map(|_| ());
+            return Err(join_worker_process_errors([
+                ("inference spawn", Err(error)),
+                ("writer close", writer_result),
+            ]));
+        }
+    };
+
+    if let Err(startup_error) = inference.wait_until_ready() {
+        drop(commands);
+        let inference_result = inference.join();
+        drop(events);
+        let writer_result = writer.close_and_join().map(|_| ());
+        return Err(join_worker_process_errors([
+            ("startup", Err(startup_error)),
+            ("inference join", inference_result),
+            ("writer close", writer_result),
+        ]));
+    }
+
+    let reader_control = Arc::clone(&control);
+    let reader_events = events.clone();
+    let reader = match thread::Builder::new()
+        .name("ullm-sq8-reader".into())
+        .spawn(move || run_sq8_command_reader(input, &reader_control, &reader_events, &commands))
+    {
+        Ok(reader) => reader,
+        Err(_) => {
+            let inference_result = inference.join();
+            drop(events);
+            let writer_result = writer.close_and_join().map(|_| ());
+            return Err(join_worker_process_errors([
+                (
+                    "reader spawn",
+                    Err("failed to spawn SQ8 reader thread".into()),
+                ),
+                ("inference join", inference_result),
+                ("writer close", writer_result),
+            ]));
+        }
+    };
+
+    let inference_result = inference.join();
+    let reader_result = if inference_result.is_ok() || reader.is_finished() {
+        Some(
+            reader
+                .join()
+                .map_err(|_| "SQ8 reader thread panicked".to_string())
+                .and_then(|result| result),
+        )
+    } else {
+        drop(reader);
+        None
+    };
+    drop(events);
+    let writer_result = writer.close_and_join().map(|_| ());
+
+    if inference_result.is_ok()
+        && reader_result.as_ref().is_some_and(Result::is_ok)
+        && writer_result.is_ok()
+    {
+        return reader_result.expect("successful reader result was checked");
+    }
+
+    let mut failures = vec![("inference join", inference_result)];
+    if let Some(reader_result) = reader_result {
+        failures.push(("reader join", reader_result.map(|_| ())));
+    }
+    failures.push(("writer close", writer_result));
+    Err(join_worker_process_errors(failures))
+}
+
+fn join_worker_process_errors<I>(results: I) -> String
+where
+    I: IntoIterator<Item = (&'static str, Result<(), String>)>,
+{
+    let failures = results
+        .into_iter()
+        .filter_map(|(stage, result)| result.err().map(|error| format!("{stage}: {error}")))
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        "SQ8 worker process failed without an error detail".into()
+    } else {
+        failures.join("; ")
+    }
+}
+
 pub fn run_sq8_command_reader<R: BufRead>(
     input: R,
     control: &Arc<Sq8WorkerControl>,
@@ -957,10 +1068,12 @@ mod tests {
         SQ8_WORKER_MAX_RECORD_BYTES, Sq8CancelReason, Sq8ReleaseOutcomeEvent, Sq8WorkerLifecycle,
     };
     use serde_json::Value;
-    use std::io::{BufReader, Cursor};
+    use std::io::{BufReader, Cursor, Write};
+    use std::os::unix::net::UnixStream;
     use std::rc::Rc;
-    use std::sync::{Mutex, mpsc};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Condvar, Mutex, mpsc};
+    use std::time::{Duration, Instant};
 
     fn valid_generate(request_id: &str) -> String {
         format!(
@@ -1084,6 +1197,350 @@ mod tests {
         let mut backend = fake_backend(false, barrier, completed);
         backend.fail_shutdown = true;
         backend
+    }
+
+    #[derive(Default)]
+    struct SharedProcessOutput {
+        bytes: Mutex<Vec<u8>>,
+        changed: Condvar,
+        thread_ids: Mutex<Vec<thread::ThreadId>>,
+        flushes: AtomicUsize,
+    }
+
+    impl SharedProcessOutput {
+        fn lines(&self) -> Vec<Value> {
+            self.bytes
+                .lock()
+                .unwrap()
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice(line).unwrap())
+                .collect()
+        }
+
+        fn record_thread(&self) {
+            self.thread_ids.lock().unwrap().push(thread::current().id());
+        }
+
+        fn wait_for_line_count(&self, expected: usize, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            let mut bytes = self.bytes.lock().unwrap();
+            loop {
+                if bytes.iter().filter(|byte| **byte == b'\n').count() >= expected {
+                    return true;
+                }
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                let (next, wait) = self.changed.wait_timeout(bytes, remaining).unwrap();
+                bytes = next;
+                if wait.timed_out() {
+                    return bytes.iter().filter(|byte| **byte == b'\n').count() >= expected;
+                }
+            }
+        }
+    }
+
+    struct SharedProcessWriter {
+        output: Arc<SharedProcessOutput>,
+        fail_after_flushes: Option<usize>,
+    }
+
+    impl SharedProcessWriter {
+        fn new(output: Arc<SharedProcessOutput>) -> Self {
+            Self {
+                output,
+                fail_after_flushes: None,
+            }
+        }
+
+        fn fail_after_flushes(output: Arc<SharedProcessOutput>, flushes: usize) -> Self {
+            Self {
+                output,
+                fail_after_flushes: Some(flushes),
+            }
+        }
+    }
+
+    impl Write for SharedProcessWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.record_thread();
+            if self
+                .fail_after_flushes
+                .is_some_and(|limit| self.output.flushes.load(AtomicOrdering::SeqCst) >= limit)
+            {
+                return Err(std::io::Error::other("injected process stdout failure"));
+            }
+            self.output.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.output.record_thread();
+            self.output.flushes.fetch_add(1, AtomicOrdering::SeqCst);
+            self.output.changed.notify_all();
+            Ok(())
+        }
+    }
+
+    struct WaitForCancellationBackend;
+
+    impl Sq8InferenceBackend for WaitForCancellationBackend {
+        fn execute(
+            &mut self,
+            _request: Sq8ServingRequest,
+            admission: Sq8WorkerAdmission,
+            publications: &mut Sq8RequestEventPublisher<'_>,
+        ) -> Result<(), String> {
+            publications.publish_started()?;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !admission.cancel.is_cancelled() {
+                if Instant::now() >= deadline {
+                    return Err("process test did not observe shutdown cancellation".into());
+                }
+                thread::yield_now();
+            }
+            publications.publish_released(Sq8ReleaseOutcomeEvent::Cancelled)
+        }
+    }
+
+    #[test]
+    fn process_runner_idle_eof_joins_all_owners_and_uses_one_writer_thread() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let caller_thread = thread::current().id();
+        let exit = run_sq8_worker_process(
+            Cursor::new(Vec::<u8>::new()),
+            SharedProcessWriter::new(Arc::clone(&output)),
+            || Ok(fake_backend(false, None, None)),
+        )
+        .unwrap();
+
+        assert_eq!(exit, Sq8CommandReaderExit::IdleShutdown);
+        let lines = output.lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["type"], "ready");
+        let thread_ids = output.thread_ids.lock().unwrap();
+        assert!(!thread_ids.is_empty());
+        assert!(thread_ids.iter().all(|id| *id == thread_ids[0]));
+        assert_ne!(thread_ids[0], caller_thread);
+    }
+
+    #[test]
+    fn process_runner_explicit_idle_shutdown_exits_cleanly() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let input = Cursor::new(
+            b"{\"schema_version\":\"ullm.worker.v1\",\"type\":\"shutdown\"}\n".to_vec(),
+        );
+        let exit =
+            run_sq8_worker_process(input, SharedProcessWriter::new(Arc::clone(&output)), || {
+                Ok(fake_backend(false, None, None))
+            })
+            .unwrap();
+
+        assert_eq!(exit, Sq8CommandReaderExit::IdleShutdown);
+        assert_eq!(output.lines()[0]["type"], "ready");
+    }
+
+    #[test]
+    fn process_runner_handles_two_sequential_requests_with_one_backend() {
+        let (mut input_writer, input_reader) = UnixStream::pair().unwrap();
+        let output = Arc::new(SharedProcessOutput::default());
+        let process_output = Arc::clone(&output);
+        let build_count = Arc::new(AtomicUsize::new(0));
+        let process_build_count = Arc::clone(&build_count);
+        let (completed, completion) = mpsc::channel();
+        let process = thread::spawn(move || {
+            let result = run_sq8_worker_process(
+                BufReader::new(input_reader),
+                SharedProcessWriter::new(process_output),
+                move || {
+                    process_build_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok(fake_backend(false, None, None))
+                },
+            );
+            completed.send(result).unwrap();
+        });
+        assert!(output.wait_for_line_count(1, Duration::from_secs(1)));
+
+        writeln!(input_writer, "{}", valid_generate("req-process-a")).unwrap();
+        input_writer.flush().unwrap();
+        assert!(output.wait_for_line_count(6, Duration::from_secs(1)));
+        assert_eq!(output.lines()[5]["request_id"], "req-process-a");
+
+        writeln!(input_writer, "{}", valid_generate("req-process-b")).unwrap();
+        input_writer.flush().unwrap();
+        assert!(output.wait_for_line_count(11, Duration::from_secs(1)));
+        assert_eq!(output.lines()[10]["request_id"], "req-process-b");
+
+        writeln!(
+            input_writer,
+            "{{\"schema_version\":\"ullm.worker.v1\",\"type\":\"shutdown\"}}"
+        )
+        .unwrap();
+        input_writer.flush().unwrap();
+        let exit = completion
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit, Sq8CommandReaderExit::IdleShutdown);
+        assert_eq!(build_count.load(AtomicOrdering::SeqCst), 1);
+
+        let lines = output.lines();
+        let tokens = lines
+            .iter()
+            .filter(|line| line["type"] == "token")
+            .map(|line| {
+                (
+                    line["request_id"].as_str().unwrap(),
+                    line["index"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            [
+                ("req-process-a", 0),
+                ("req-process-a", 1),
+                ("req-process-b", 0),
+                ("req-process-b", 1),
+            ]
+        );
+        drop(input_writer);
+        process.join().unwrap();
+    }
+
+    #[test]
+    fn process_runner_active_eof_cancels_releases_and_then_shuts_down() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let input = Cursor::new(format!("{}\n", valid_generate("req-eof-process")).into_bytes());
+        let exit =
+            run_sq8_worker_process(input, SharedProcessWriter::new(Arc::clone(&output)), || {
+                Ok(WaitForCancellationBackend)
+            })
+            .unwrap();
+
+        assert_eq!(exit, Sq8CommandReaderExit::ActiveShutdown { generation: 1 });
+        let lines = output.lines();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ready", "started", "released"]
+        );
+        assert_eq!(lines[2]["outcome"], "cancelled");
+        assert_eq!(lines[2]["cancel_reason"], "shutdown");
+    }
+
+    #[test]
+    fn process_runner_load_failure_is_nonzero_without_ready() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let error = run_sq8_worker_process(
+            Cursor::new(Vec::<u8>::new()),
+            SharedProcessWriter::new(Arc::clone(&output)),
+            || Err::<FakeInferenceBackend, _>("injected process load failure".into()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("startup"), "{error}");
+        let lines = output.lines();
+        assert!(lines.iter().all(|line| line["type"] != "ready"));
+        assert!(lines.iter().any(|line| line["type"] == "error"));
+    }
+
+    #[test]
+    fn process_runner_shutdown_failure_changes_clean_eof_to_nonzero() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let error = run_sq8_worker_process(
+            Cursor::new(Vec::<u8>::new()),
+            SharedProcessWriter::new(Arc::clone(&output)),
+            || Ok(fake_backend_with_shutdown_failure(None, None)),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("shutdown failure"), "{error}");
+        let lines = output.lines();
+        assert_eq!(lines[0]["type"], "ready");
+        assert!(lines.iter().any(|line| line["type"] == "error"));
+    }
+
+    #[test]
+    fn process_runner_framing_fatal_wakes_idle_inference() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let started = Instant::now();
+        let error = run_sq8_worker_process(
+            Cursor::new(b"{".to_vec()),
+            SharedProcessWriter::new(Arc::clone(&output)),
+            || Ok(fake_backend(false, None, None)),
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            error.contains("framing") || error.contains("poison"),
+            "{error}"
+        );
+        let lines = output.lines();
+        assert_eq!(lines[0]["type"], "ready");
+        assert!(lines.iter().any(|line| line["type"] == "error"));
+    }
+
+    #[test]
+    fn process_runner_inference_fatal_does_not_join_blocked_stdin_reader() {
+        let (mut input_writer, input_reader) = UnixStream::pair().unwrap();
+        let output = Arc::new(SharedProcessOutput::default());
+        let process_output = Arc::clone(&output);
+        let (completed, completion) = mpsc::channel();
+        let process = thread::spawn(move || {
+            let result = run_sq8_worker_process(
+                BufReader::new(input_reader),
+                SharedProcessWriter::new(process_output),
+                || Ok(fake_backend(true, None, None)),
+            );
+            completed.send(result).unwrap();
+        });
+        writeln!(input_writer, "{}", valid_generate("req-blocked-fatal")).unwrap();
+        input_writer.flush().unwrap();
+
+        let result = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_err());
+        let lines = output.lines();
+        assert!(lines.iter().any(|line| line["type"] == "ready"));
+        assert!(lines.iter().any(|line| line["type"] == "started"));
+        assert!(lines.iter().all(|line| line["type"] != "released"));
+        drop(input_writer);
+        process.join().unwrap();
+    }
+
+    #[test]
+    fn process_runner_stdout_failure_does_not_join_blocked_stdin_reader() {
+        let (mut input_writer, input_reader) = UnixStream::pair().unwrap();
+        let output = Arc::new(SharedProcessOutput::default());
+        let process_output = Arc::clone(&output);
+        let (completed, completion) = mpsc::channel();
+        let process = thread::spawn(move || {
+            let result = run_sq8_worker_process(
+                BufReader::new(input_reader),
+                SharedProcessWriter::fail_after_flushes(process_output, 1),
+                || Ok(fake_backend(false, None, None)),
+            );
+            completed.send(result).unwrap();
+        });
+        writeln!(input_writer, "{}", valid_generate("req-blocked-writer")).unwrap();
+        input_writer.flush().unwrap();
+
+        let result = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_err());
+        let lines = output.lines();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ready"]
+        );
+        drop(input_writer);
+        process.join().unwrap();
     }
 
     #[test]
