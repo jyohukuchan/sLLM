@@ -800,7 +800,7 @@ def _latency_sample(
         or len(usage_positions) != 1
         or not max(content_positions)
         < finish_positions[0]
-        < usage_positions[0]
+        <= usage_positions[0]
         < done_positions[0]
         or _attribute(items[usage_positions[0]], "usage_is_object", "decode usage")
         is not True
@@ -1701,7 +1701,7 @@ def _validate_resource_sse(result: object, trace: object, label: str) -> None:
         or len(finish_positions) != 1
         or not max(content_positions)
         < finish_positions[0]
-        < usage_positions[0]
+        <= usage_positions[0]
         < done_positions[0]
         or _attribute(items[usage_positions[0]], "usage_is_object", f"{label} usage")
         is not True

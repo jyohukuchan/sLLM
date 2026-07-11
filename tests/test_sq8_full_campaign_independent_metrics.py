@@ -581,6 +581,85 @@ def move_first_content_before_lifecycle(session: Session, result_index: int) -> 
     )
 
 
+def merge_finish_and_usage(session: Session, result_index: int) -> None:
+    result = session.http_results[result_index]
+    sse = cast(SseMetadata, result.sse)
+    finish_index = next(
+        index
+        for index, value in enumerate(sse.items)
+        if value.finish_reason is not None
+    )
+    usage_index = next(
+        index for index, value in enumerate(sse.items) if value.usage_present
+    )
+    if usage_index != finish_index + 1:
+        raise AssertionError("test SSE finish/usage objects are not adjacent")
+    finish = sse.items[finish_index]
+    usage = sse.items[usage_index]
+    merged = dataclasses.replace(
+        finish,
+        observed_monotonic_ns=usage.observed_monotonic_ns,
+        usage_present=True,
+        usage_is_object=usage.usage_is_object,
+        completion_tokens=usage.completion_tokens,
+    )
+    items = (
+        *sse.items[:finish_index],
+        merged,
+        *(
+            dataclasses.replace(value, chunk_index=value.chunk_index - 1)
+            for value in sse.items[usage_index + 1 :]
+        ),
+    )
+    replacement = dataclasses.replace(
+        result,
+        sse=dataclasses.replace(sse, chunk_count=sse.chunk_count - 1, items=items),
+    )
+    session.http_results = (
+        *session.http_results[:result_index],
+        replacement,
+        *session.http_results[result_index + 1 :],
+    )
+
+
+def move_usage_before_finish(session: Session, result_index: int) -> None:
+    result = session.http_results[result_index]
+    sse = cast(SseMetadata, result.sse)
+    finish_index = next(
+        index
+        for index, value in enumerate(sse.items)
+        if value.finish_reason is not None
+    )
+    usage_index = next(
+        index for index, value in enumerate(sse.items) if value.usage_present
+    )
+    finish = sse.items[finish_index]
+    usage = sse.items[usage_index]
+    items = list(sse.items)
+    items[finish_index] = dataclasses.replace(
+        finish,
+        finish_reason=None,
+        usage_present=True,
+        usage_is_object=usage.usage_is_object,
+        completion_tokens=usage.completion_tokens,
+    )
+    items[usage_index] = dataclasses.replace(
+        usage,
+        finish_reason=finish.finish_reason,
+        usage_present=False,
+        usage_is_object=None,
+        completion_tokens=None,
+    )
+    replacement = dataclasses.replace(
+        result, sse=dataclasses.replace(sse, items=tuple(items))
+    )
+    session.http_results = (
+        *session.http_results[:result_index],
+        replacement,
+        *session.http_results[result_index + 1 :],
+    )
+
+
 def canonical(value: dict[str, Any]) -> bytes:
     return (
         json.dumps(
@@ -887,6 +966,23 @@ class IndependentLatencyTests(unittest.TestCase):
         self.assertEqual(observed["request_count"], 72)
         self.assertEqual(observed["decode64"]["metrics"]["interval_count"], 630)
 
+    def test_decode_accepts_finish_and_usage_in_the_same_sse_object(self) -> None:
+        session, producer_input = latency_session()
+        merge_finish_and_usage(session, 60)
+        self.assertEqual(
+            METRICS.reconstruct_latency_results(session),
+            PRODUCER.project_latency(producer_input),
+        )
+
+    def test_decode_rejects_usage_before_finish(self) -> None:
+        session, _producer_input = latency_session()
+        move_usage_before_finish(session, 60)
+        with self.assertRaisesRegex(
+            METRICS.IndependentMetricsError,
+            "decode finish/usage/\\[DONE\\] contract differs",
+        ):
+            METRICS.reconstruct_latency_results(session)
+
     def test_schedule_lifecycle_and_sse_negatives_are_rejected(self) -> None:
         mutations: tuple[tuple[str, Callable[[Session], None]], ...] = (
             (
@@ -1005,6 +1101,19 @@ class IndependentResourceTests(unittest.TestCase):
             self.assertEqual(observed, expected)
             self.assertEqual(observed["resource_sample_count"], 610)
             self.assertEqual(observed["gpu_metric_count"], 4)
+
+    def test_resource_accepts_finish_and_usage_in_the_same_sse_object(self) -> None:
+        with ResourceFixture() as fixture:
+            merge_finish_and_usage(fixture.session, 0)
+            expected = PRODUCER.analyze_soak_resources(
+                fixture.root / "soak-resources.raw.jsonl"
+            )
+            self.assertEqual(
+                METRICS.reconstruct_soak_resource_results(
+                    fixture.root, fixture.session
+                ),
+                expected,
+            )
 
     def test_schedule_identity_outcome_hash_and_window_negatives_are_rejected(
         self,
