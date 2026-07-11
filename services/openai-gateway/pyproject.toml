@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ullm-openai-gateway"
+version = "0.1.0"
+description = "Single-worker OpenAI Chat Completions gateway for uLLM"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.116.1",
+  "jinja2==3.1.6",
+  "transformers==5.12.1",
+  "uvicorn==0.35.0",
+]
+
+[dependency-groups]
+dev = [
+  "httpx==0.28.1",
+  "mypy==2.1.0",
+  "pytest==9.0.3",
+  "ruff==0.14.14",
+]
+
+[project.scripts]
+ullm-openai-gateway = "ullm_openai_gateway.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ullm_openai_gateway"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

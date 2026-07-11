@@ -1,0 +1,406 @@
+"""Strict OpenAI request normalization without framework-native coercion."""
+
+from __future__ import annotations
+
+import json
+import math
+import secrets
+from dataclasses import dataclass
+from typing import Any
+
+from .errors import invalid_request, model_not_found, unsupported_parameter
+
+
+MODEL_ID = "ullm-qwen3-14b-sq8"
+CONTEXT_LENGTH = 4_096
+DEFAULT_MAX_COMPLETION_TOKENS = 256
+MAX_COMPLETION_TOKENS = 512
+DEFAULT_TEMPERATURE = 0.6
+DEFAULT_TOP_P = 0.95
+TOP_K = 20
+EOS_TOKEN_IDS = (151_645, 151_643)
+
+ROOT_FIELDS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "seed",
+        "n",
+        "stop",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "user",
+        "top_k",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "functions",
+        "function_call",
+        "response_format",
+        "modalities",
+        "audio",
+        "reasoning_effort",
+        "store",
+        "metadata",
+        "service_tier",
+        "prediction",
+    }
+)
+ALWAYS_UNSUPPORTED = frozenset(
+    {
+        "top_k",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "functions",
+        "function_call",
+        "response_format",
+        "modalities",
+        "audio",
+        "reasoning_effort",
+        "store",
+        "metadata",
+        "service_tier",
+        "prediction",
+    }
+)
+
+
+class DuplicateKeyError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedMessage:
+    role: str
+    content: str
+
+    def as_template_value(self) -> dict[str, str]:
+        return {"role": self.role, "content": self.content}
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedChatRequest:
+    messages: tuple[NormalizedMessage, ...]
+    stream: bool
+    include_usage: bool
+    max_completion_tokens: int
+    temperature: float
+    top_p: float
+    seed: int
+
+
+def decode_json_object(raw: bytes) -> dict[str, Any]:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise invalid_request("The request body is not valid UTF-8.") from error
+
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise DuplicateKeyError(key)
+            result[key] = value
+        return result
+
+    def reject_constant(_: str) -> Any:
+        raise ValueError("non-finite JSON number")
+
+    def finite_float(raw: str) -> float:
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("non-finite JSON number")
+        return value
+
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=object_pairs,
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+    except (
+        json.JSONDecodeError,
+        DuplicateKeyError,
+        ValueError,
+        RecursionError,
+    ) as error:
+        raise invalid_request("The request body is not valid JSON.") from error
+    if not isinstance(value, dict):
+        raise invalid_request("The request body root must be an object.")
+    return value
+
+
+def normalize_chat_request(value: dict[str, Any]) -> NormalizedChatRequest:
+    model = _required(value, "model")
+    if not isinstance(model, str):
+        raise invalid_request("model must be a string.", "model")
+    if model != MODEL_ID:
+        raise model_not_found()
+
+    raw_messages = _required(value, "messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        raise invalid_request("messages must be a nonempty array.", "messages")
+
+    _validate_unknown_fields(value, ROOT_FIELDS, "")
+    for field, item in value.items():
+        if field in ALWAYS_UNSUPPORTED and item is not None:
+            raise unsupported_parameter(field)
+
+    messages = _normalize_messages(raw_messages)
+    stream = _optional_bool(value, "stream", False)
+    include_usage = _normalize_stream_options(value.get("stream_options"), stream)
+    maximum = _normalize_maximum(value)
+    temperature = _optional_number(
+        value, "temperature", DEFAULT_TEMPERATURE, minimum=0.0, maximum=2.0
+    )
+    top_p = _optional_number(
+        value,
+        "top_p",
+        DEFAULT_TOP_P,
+        minimum=0.0,
+        maximum=1.0,
+        minimum_inclusive=False,
+    )
+    seed = _normalize_seed(value.get("seed"))
+    _normalize_neutral_fields(value)
+    if value.get("user") is not None and not isinstance(value["user"], str):
+        raise invalid_request("user must be a string.", "user")
+    return NormalizedChatRequest(
+        messages=messages,
+        stream=stream,
+        include_usage=include_usage,
+        max_completion_tokens=maximum,
+        temperature=temperature,
+        top_p=top_p,
+        seed=seed,
+    )
+
+
+def _required(value: dict[str, Any], field: str) -> Any:
+    if field not in value or value[field] is None:
+        raise invalid_request(f"{field} is required.", field)
+    return value[field]
+
+
+def _validate_unknown_fields(
+    value: dict[str, Any], allowed: frozenset[str], prefix: str
+) -> None:
+    for field, item in value.items():
+        if field not in allowed and item is not None:
+            path = f"{prefix}.{field}" if prefix else field
+            raise unsupported_parameter(path)
+
+
+def _normalize_messages(raw_messages: list[Any]) -> tuple[NormalizedMessage, ...]:
+    result: list[NormalizedMessage] = []
+    for index, item in enumerate(raw_messages):
+        path = f"messages[{index}]"
+        if not isinstance(item, dict):
+            raise invalid_request("Each message must be an object.", path)
+        _validate_unknown_fields(item, frozenset({"role", "content"}), path)
+        if "role" not in item or item["role"] is None:
+            raise invalid_request("role is required.", f"{path}.role")
+        if "content" not in item or item["content"] is None:
+            raise invalid_request("content is required.", f"{path}.content")
+        role = item["role"]
+        content = item["content"]
+        if not isinstance(role, str) or role not in {"system", "user", "assistant"}:
+            raise invalid_request("Message role is invalid.", f"{path}.role")
+        result.append(
+            NormalizedMessage(role=role, content=_normalize_content(content, path))
+        )
+    _validate_role_order(result)
+    return tuple(result)
+
+
+def _normalize_content(value: Any, message_path: str) -> str:
+    if isinstance(value, str):
+        _require_scalar_text(value, f"{message_path}.content")
+        return value
+    if not isinstance(value, list) or not value:
+        raise invalid_request(
+            "Message content must be a string or nonempty text-part array.",
+            f"{message_path}.content",
+        )
+    parts: list[str] = []
+    for index, part in enumerate(value):
+        path = f"{message_path}.content[{index}]"
+        if not isinstance(part, dict):
+            raise invalid_request("Content parts must be objects.", path)
+        _validate_unknown_fields(part, frozenset({"type", "text"}), path)
+        if "type" not in part or part["type"] is None:
+            raise invalid_request("type is required.", f"{path}.type")
+        part_type = part["type"]
+        if not isinstance(part_type, str):
+            raise invalid_request("Content-part type must be a string.", f"{path}.type")
+        if part_type != "text":
+            raise unsupported_parameter(f"{path}.type")
+        if "text" not in part or part["text"] is None:
+            raise invalid_request("text is required.", f"{path}.text")
+        text = part["text"]
+        if not isinstance(text, str):
+            raise invalid_request("Content-part text must be a string.", f"{path}.text")
+        _require_scalar_text(text, f"{path}.text")
+        parts.append(text)
+    return "".join(parts)
+
+
+def _validate_role_order(messages: list[NormalizedMessage]) -> None:
+    offset = 1 if messages[0].role == "system" else 0
+    if offset == len(messages):
+        raise invalid_request(
+            "The conversation must contain a user message.", "messages"
+        )
+    for index in range(offset, len(messages)):
+        expected = "user" if (index - offset) % 2 == 0 else "assistant"
+        if messages[index].role != expected:
+            raise invalid_request(
+                "Message roles are not in the required order.",
+                f"messages[{index}].role",
+            )
+    if messages[-1].role != "user":
+        raise invalid_request(
+            "The conversation must end with a user message.", "messages"
+        )
+
+
+def _normalize_stream_options(value: Any, stream: bool) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        raise invalid_request("stream_options must be an object.", "stream_options")
+    _validate_unknown_fields(value, frozenset({"include_usage"}), "stream_options")
+    include_usage = _optional_bool(value, "include_usage", False)
+    if include_usage and not stream:
+        raise invalid_request(
+            "stream_options.include_usage requires stream=true.",
+            "stream_options.include_usage",
+        )
+    return include_usage
+
+
+def _normalize_maximum(value: dict[str, Any]) -> int:
+    first = value.get("max_tokens")
+    second = value.get("max_completion_tokens")
+    if first is not None and second is not None:
+        raise unsupported_parameter("max_completion_tokens")
+    maximum = second if second is not None else first
+    if maximum is None:
+        return DEFAULT_MAX_COMPLETION_TOKENS
+    if isinstance(maximum, bool) or not isinstance(maximum, int):
+        field = "max_completion_tokens" if second is not None else "max_tokens"
+        raise invalid_request("The completion maximum must be an integer.", field)
+    if not 1 <= maximum <= MAX_COMPLETION_TOKENS:
+        field = "max_completion_tokens" if second is not None else "max_tokens"
+        raise invalid_request("The completion maximum is outside 1..512.", field)
+    return maximum
+
+
+def _optional_bool(value: dict[str, Any], field: str, default: bool) -> bool:
+    item = value.get(field)
+    if item is None:
+        return default
+    if not isinstance(item, bool):
+        raise invalid_request(f"{field} must be a boolean.", field)
+    return item
+
+
+def _optional_number(
+    value: dict[str, Any],
+    field: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+    minimum_inclusive: bool = True,
+) -> float:
+    item = value.get(field)
+    if item is None:
+        return default
+    if isinstance(item, bool) or not isinstance(item, (int, float)):
+        raise invalid_request(f"{field} must be a number.", field)
+    if isinstance(item, int):
+        lower_ok = item >= minimum if minimum_inclusive else item > minimum
+        if not lower_ok or item > maximum:
+            raise invalid_request(f"{field} is outside the supported range.", field)
+        return float(item)
+    lower_ok = item >= minimum if minimum_inclusive else item > minimum
+    if not math.isfinite(item) or not lower_ok or item > maximum:
+        raise invalid_request(f"{field} is outside the supported range.", field)
+    return float(item)
+
+
+def _normalize_seed(value: Any) -> int:
+    if value is None:
+        unsigned = secrets.randbits(64)
+        return unsigned if unsigned < 2**63 else unsigned - 2**64
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise invalid_request("seed must be a signed 64-bit integer.", "seed")
+    if not -(2**63) <= value < 2**63:
+        raise invalid_request("seed must be a signed 64-bit integer.", "seed")
+    return value
+
+
+def _normalize_neutral_fields(value: dict[str, Any]) -> None:
+    n = value.get("n")
+    if n is not None:
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise invalid_request("n must be an integer.", "n")
+        if n != 1:
+            raise unsupported_parameter("n")
+
+    for field in ("frequency_penalty", "presence_penalty"):
+        item = value.get(field)
+        if item is None:
+            continue
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise invalid_request(f"{field} must be a finite number.", field)
+        if isinstance(item, float) and not math.isfinite(item):
+            raise invalid_request(f"{field} must be a finite number.", field)
+        if item != 0:
+            raise unsupported_parameter(field)
+
+    stop = value.get("stop")
+    if stop is not None:
+        if stop == "" or (isinstance(stop, list) and not stop):
+            pass
+        elif not isinstance(stop, (str, list)):
+            raise invalid_request("stop must be a string or array.", "stop")
+        else:
+            raise unsupported_parameter("stop")
+
+    bias = value.get("logit_bias")
+    if bias is not None:
+        if not isinstance(bias, dict):
+            raise invalid_request("logit_bias must be an object.", "logit_bias")
+        if bias:
+            raise unsupported_parameter("logit_bias")
+
+    logprobs = value.get("logprobs")
+    if logprobs is not None:
+        if not isinstance(logprobs, bool):
+            raise invalid_request("logprobs must be a boolean.", "logprobs")
+        if logprobs:
+            raise unsupported_parameter("logprobs")
+    if value.get("top_logprobs") is not None:
+        raise unsupported_parameter("top_logprobs")
+
+
+def _require_scalar_text(value: str, param: str) -> None:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise invalid_request(
+            "Text contains an invalid Unicode scalar value.", param
+        ) from error
