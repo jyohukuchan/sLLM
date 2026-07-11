@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -14,6 +15,7 @@ import types
 import unittest
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -641,6 +643,401 @@ class FakeValidator:
         finally:
             os.close(descriptor)
         return ORCHESTRATOR.FileEvidence(len(raw), hashlib.sha256(raw).hexdigest())
+
+
+class ProductionSafetyPrimitiveTests(unittest.TestCase):
+    API_SECRET = b"api-secret-0123456789abcdef"
+    OPENWEBUI_TOKEN = b"openwebui-token-0123456789abcdef"
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.root.chmod(0o700)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write_secret(self, name: str, raw: bytes, mode: int) -> Path:
+        path = self.root / name
+        path.write_bytes(raw)
+        path.chmod(mode)
+        return path
+
+    def snapshot_api(self, path: Path) -> bytes:
+        return ORCHESTRATOR._snapshot_secret_file(
+            path,
+            expected_uid=os.geteuid(),
+            expected_gid=os.getegid(),
+            expected_mode=0o640,
+            label="API credential",
+        )
+
+    def test_secret_snapshots_accept_exact_api_and_token_contracts(self):
+        api = self.write_secret("api-key", self.API_SECRET + b"\n", 0o640)
+        token = self.write_secret("token", self.OPENWEBUI_TOKEN, 0o600)
+        real_identity = ORCHESTRATOR._StableFileIdentity.from_stat
+
+        def root_owned(value):
+            return dataclasses.replace(real_identity(value), uid=0)
+
+        with mock.patch.object(
+            ORCHESTRATOR._StableFileIdentity,
+            "from_stat",
+            side_effect=root_owned,
+        ):
+            self.assertEqual(ORCHESTRATOR.snapshot_api_secret(api), self.API_SECRET)
+        self.assertEqual(
+            ORCHESTRATOR.snapshot_openwebui_token(token), self.OPENWEBUI_TOKEN
+        )
+
+    def test_secret_snapshot_rejects_symlink_mode_owner_and_multiple_lines(self):
+        api = self.write_secret("api-key", self.API_SECRET, 0o640)
+        symlink = self.root / "api-key-link"
+        symlink.symlink_to(api)
+        with self.assertRaises(ORCHESTRATOR.FullCampaignError):
+            self.snapshot_api(symlink)
+
+        api.chmod(0o600)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "owner, mode, or size"
+        ):
+            self.snapshot_api(api)
+        api.chmod(0o640)
+        real_identity = ORCHESTRATOR._StableFileIdentity.from_stat
+
+        def wrong_owner(value):
+            return dataclasses.replace(real_identity(value), uid=1)
+
+        with self.assertRaisesRegex(ORCHESTRATOR.FullCampaignError, "owner"):
+            with mock.patch.object(
+                ORCHESTRATOR._StableFileIdentity,
+                "from_stat",
+                side_effect=wrong_owner,
+            ):
+                ORCHESTRATOR.snapshot_api_secret(api)
+
+        token = self.write_secret(
+            "token", self.OPENWEBUI_TOKEN + b"\nsecond-line", 0o600
+        )
+        with self.assertRaisesRegex(ORCHESTRATOR.FullCampaignError, "one bounded"):
+            ORCHESTRATOR.snapshot_openwebui_token(token)
+
+    def test_secret_snapshot_rejects_path_replacement_during_read(self):
+        api = self.write_secret("api-key", self.API_SECRET, 0o640)
+        replacement = self.write_secret(
+            "replacement", b"replacement-api-secret-012345", 0o640
+        )
+        real_read = os.read
+        replaced = False
+
+        def replace_then_read(descriptor, maximum):
+            nonlocal replaced
+            if not replaced:
+                os.replace(replacement, api)
+                replaced = True
+            return real_read(descriptor, maximum)
+
+        with (
+            mock.patch.object(ORCHESTRATOR.os, "read", side_effect=replace_then_read),
+            self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError, "changed while it was read"
+            ),
+        ):
+            self.snapshot_api(api)
+
+    def test_token_snapshot_rejects_mode_owner_and_hardlinks(self):
+        token = self.write_secret("token", self.OPENWEBUI_TOKEN, 0o640)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "owner, mode, or size"
+        ):
+            ORCHESTRATOR.snapshot_openwebui_token(token)
+
+        token.chmod(0o600)
+        hardlink = self.root / "token-hardlink"
+        os.link(token, hardlink)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "owner, mode, or size"
+        ):
+            ORCHESTRATOR.snapshot_openwebui_token(token)
+        hardlink.unlink()
+
+        real_identity = ORCHESTRATOR._StableFileIdentity.from_stat
+
+        def wrong_owner(value):
+            return dataclasses.replace(real_identity(value), uid=os.geteuid() + 1)
+
+        with (
+            mock.patch.object(
+                ORCHESTRATOR._StableFileIdentity,
+                "from_stat",
+                side_effect=wrong_owner,
+            ),
+            self.assertRaisesRegex(ORCHESTRATOR.FullCampaignError, "owner"),
+        ):
+            ORCHESTRATOR.snapshot_openwebui_token(token)
+
+    def test_secret_snapshot_rejects_fifo_without_blocking(self):
+        fifo = self.root / "api-key-fifo"
+        os.mkfifo(fifo, 0o640)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "owner, mode, or size"
+        ):
+            self.snapshot_api(fifo)
+
+    def test_secret_owner_creates_private_masters_and_cleans_idempotently(self):
+        owner = ORCHESTRATOR.CampaignSecretOwner.create(
+            self.API_SECRET,
+            self.OPENWEBUI_TOKEN,
+            parent=self.root,
+        )
+        directory = owner.directory
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(owner.api_key_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(owner.openwebui_token_path.stat().st_mode), 0o600)
+        self.assertEqual(owner.api_key_path.read_bytes(), self.API_SECRET)
+        self.assertEqual(owner.openwebui_token_path.read_bytes(), self.OPENWEBUI_TOKEN)
+
+        owner.close()
+        owner.close()
+        self.assertFalse(directory.exists())
+
+    def test_secret_owner_removes_expected_masters_before_reporting_extra_entry(self):
+        owner = ORCHESTRATOR.CampaignSecretOwner.create(
+            self.API_SECRET,
+            self.OPENWEBUI_TOKEN,
+            parent=self.root,
+        )
+        extra = owner.directory / "unexpected"
+        extra.write_bytes(b"unrelated")
+        extra.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "changed before cleanup"
+        ):
+            owner.close()
+        self.assertTrue(owner.closed)
+        self.assertEqual(owner._directory_fd, -1)
+        self.assertEqual(owner._parent_fd, -1)
+        self.assertFalse(owner.api_key_path.exists())
+        self.assertFalse(owner.openwebui_token_path.exists())
+        self.assertTrue(extra.exists())
+        owner.close()
+
+        extra.unlink()
+        owner.directory.rmdir()
+
+    def test_secret_owner_deletes_modified_master_and_closes_all_descriptors(self):
+        owner = ORCHESTRATOR.CampaignSecretOwner.create(
+            self.API_SECRET,
+            self.OPENWEBUI_TOKEN,
+            parent=self.root,
+        )
+        directory = owner.directory
+        owner.api_key_path.write_bytes(b"modified-api-secret-0123456789")
+        owner.api_key_path.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "changed before cleanup"
+        ):
+            owner.close()
+        self.assertTrue(owner.closed)
+        self.assertEqual(owner._directory_fd, -1)
+        self.assertEqual(owner._parent_fd, -1)
+        self.assertFalse(directory.exists())
+
+    def test_secret_owner_rejects_parent_replacement_during_creation(self):
+        parent = self.root / "runtime"
+        parent.mkdir(mode=0o700)
+        moved = self.root / "runtime-old"
+        real_write = ORCHESTRATOR._write_private_master
+        calls = 0
+
+        def write_then_replace(*args, **kwargs):
+            nonlocal calls
+            identity = real_write(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                parent.rename(moved)
+                parent.mkdir(mode=0o700)
+            return identity
+
+        with (
+            mock.patch.object(
+                ORCHESTRATOR,
+                "_write_private_master",
+                side_effect=write_then_replace,
+            ),
+            self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError, "parent changed during"
+            ),
+        ):
+            ORCHESTRATOR.CampaignSecretOwner.create(
+                self.API_SECRET,
+                self.OPENWEBUI_TOKEN,
+                parent=parent,
+            )
+        self.assertEqual(list(moved.iterdir()), [])
+
+    def test_composite_guard_rejects_json_escape_and_cross_chunk_secret(self):
+        escaped_secret = b'escaped-"api\\secret-012345'
+        token = self.OPENWEBUI_TOKEN
+        guard = ORCHESTRATOR.CampaignSecretGuard((escaped_secret, token))
+        encoded = json.dumps(
+            {"credential": escaped_secret.decode("ascii")}, separators=(",", ":")
+        ).encode("ascii")
+        self.assertNotIn(escaped_secret, encoded)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "forbidden campaign cleartext"
+        ):
+            guard.reject(encoded, "escaped JSON")
+
+        scanner = guard.scanner("chunked evidence")
+        split = len(token) // 2
+        scanner.feed(b"prefix-" + token[:split])
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "forbidden campaign cleartext"
+        ):
+            scanner.feed(token[split:] + b"-suffix")
+
+    def test_composite_guard_duck_types_with_collector_writer(self):
+        guard = ORCHESTRATOR.CampaignSecretGuard(
+            (self.API_SECRET, self.OPENWEBUI_TOKEN)
+        )
+        output = self.root / "guarded.jsonl"
+        writer = COLLECTOR.AtomicJsonlWriter(output, guard)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "forbidden campaign cleartext"
+        ):
+            writer.write_value({"escaped": self.API_SECRET.decode("ascii")})
+        writer.abort_close()
+
+    def test_composite_guard_scan_file_preserves_raw_chunk_overlap(self):
+        guard = ORCHESTRATOR.CampaignSecretGuard(
+            (self.API_SECRET, self.OPENWEBUI_TOKEN)
+        )
+        prefix_bytes = ORCHESTRATOR.SECRET_COPY_CHUNK_BYTES - len(self.API_SECRET) // 2
+        evidence = self.root / "chunked-evidence.bin"
+        evidence.write_bytes(b"x" * prefix_bytes + self.API_SECRET + b"suffix")
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "forbidden campaign cleartext"
+        ):
+            guard.scan_file(evidence, "chunked evidence file")
+
+    def test_composite_guard_scans_multiline_json_and_ignores_non_json_shape(self):
+        escaped_secret = b'escaped-"api\\secret-012345'
+        guard = ORCHESTRATOR.CampaignSecretGuard((escaped_secret, self.OPENWEBUI_TOKEN))
+        document = self.root / "evidence.json"
+        document.write_text(
+            json.dumps(
+                {"nested": {"credential": escaped_secret.decode("ascii")}},
+                indent=2,
+            ),
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "forbidden campaign cleartext"
+        ):
+            guard.scan_file(document, "multiline JSON")
+
+        empty = self.root / "empty.bin"
+        empty.write_bytes(b"")
+        guard.scan_file(empty, "empty binary")
+        leading_t = self.root / "leading-t.bin"
+        leading_t.write_bytes(b"this is not JSON")
+        guard.scan_file(leading_t, "leading t binary")
+
+    def test_composite_guard_fails_closed_on_oversized_json(self):
+        guard = ORCHESTRATOR.CampaignSecretGuard(
+            (self.API_SECRET, self.OPENWEBUI_TOKEN)
+        )
+        document = self.root / "oversized.json"
+        document.write_text(json.dumps({"padding": "x" * 128}), encoding="ascii")
+        with (
+            mock.patch.object(ORCHESTRATOR, "SECRET_SCAN_JSON_MAX_BYTES", 64),
+            self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError, "semantic JSON scan bound"
+            ),
+        ):
+            guard.scan_file(document, "oversized JSON")
+
+    def test_composite_guard_bounds_flat_semantic_structures_before_enqueue(self):
+        guard = ORCHESTRATOR.CampaignSecretGuard(
+            (self.API_SECRET, self.OPENWEBUI_TOKEN)
+        )
+        oversized = [None] * (ORCHESTRATOR.SECRET_SCAN_MAX_NODES + 1)
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "semantic secret-scan node bound"
+        ):
+            guard.reject_json_value(oversized, "flat semantic array")
+
+        raw = b"[" + (b"0," * ORCHESTRATOR.SECRET_SCAN_MAX_NODES) + b"0]"
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "semantic secret-scan node bound"
+        ):
+            guard.reject(raw, "flat raw JSON array")
+
+    def test_campaign_lock_is_nonblocking_and_reusable_after_close(self):
+        path = self.root / "full-campaign.lock"
+        first = ORCHESTRATOR.CampaignLockOwner.acquire(path)
+        try:
+            with self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError, "already holds the lock"
+            ):
+                ORCHESTRATOR.CampaignLockOwner.acquire(path)
+        finally:
+            first.close()
+            first.close()
+
+        second = ORCHESTRATOR.CampaignLockOwner.acquire(path)
+        second.close()
+
+    def test_campaign_lock_closes_descriptors_after_entry_replacement(self):
+        path = self.root / "full-campaign.lock"
+        owner = ORCHESTRATOR.CampaignLockOwner.acquire(path)
+        replacement = self.root / "replacement.lock"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+        os.replace(replacement, path)
+
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "changed while held"
+        ):
+            owner.close()
+        self.assertTrue(owner.closed)
+        owner.close()
+        with ORCHESTRATOR.CampaignLockOwner.acquire(path):
+            pass
+
+    def test_campaign_lock_rejects_replacement_during_flock(self):
+        path = self.root / "full-campaign.lock"
+        replacement = self.root / "replacement.lock"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+        real_flock = ORCHESTRATOR.fcntl.flock
+        replaced = False
+
+        def lock_then_replace(descriptor, operation):
+            nonlocal replaced
+            result = real_flock(descriptor, operation)
+            if operation & ORCHESTRATOR.fcntl.LOCK_EX and not replaced:
+                os.replace(replacement, path)
+                replaced = True
+            return result
+
+        with (
+            mock.patch.object(
+                ORCHESTRATOR.fcntl,
+                "flock",
+                side_effect=lock_then_replace,
+            ),
+            self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError, "changed during acquisition"
+            ),
+        ):
+            ORCHESTRATOR.CampaignLockOwner.acquire(path)
+
+        with ORCHESTRATOR.CampaignLockOwner.acquire(path):
+            pass
 
 
 class FullCampaignOrchestratorTests(unittest.TestCase):

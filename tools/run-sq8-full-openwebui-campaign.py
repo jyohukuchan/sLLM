@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import fcntl
 import hashlib
+import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -51,6 +54,12 @@ DERIVED_ARTIFACTS = frozenset(
     }
 )
 MAX_PNG_BYTES = 128 << 20
+SECRET_MIN_BYTES = 16
+SECRET_MAX_BYTES = 4096
+SECRET_READ_MAX_BYTES = SECRET_MAX_BYTES + 1
+SECRET_SCAN_JSON_MAX_BYTES = 16 << 20
+SECRET_SCAN_MAX_NODES = 100_000
+SECRET_COPY_CHUNK_BYTES = 64 << 10
 
 
 class FullCampaignError(RuntimeError):
@@ -59,6 +68,777 @@ class FullCampaignError(RuntimeError):
 
 def fail(message: str) -> NoReturn:
     raise FullCampaignError(message)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StableFileIdentity:
+    device: int
+    inode: int
+    mode: int
+    links: int
+    uid: int
+    gid: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    @classmethod
+    def from_stat(cls, value: os.stat_result) -> _StableFileIdentity:
+        return cls(
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_uid,
+            value.st_gid,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    def inode_anchor(self) -> tuple[int, int, int, int, int]:
+        return (self.device, self.inode, self.mode, self.uid, self.gid)
+
+
+def _secret_file_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("O_NOFOLLOW is required for campaign secret snapshots")
+    return os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+def _private_directory_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("O_NOFOLLOW is required for private campaign directories")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+def _write_all(descriptor: int, raw: bytes, label: str) -> None:
+    offset = 0
+    try:
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset:])
+            if written <= 0:
+                fail(f"{label} write made no progress")
+            offset += written
+    except FullCampaignError:
+        raise
+    except OSError:
+        fail(f"failed to write {label}")
+
+
+def _normalize_secret(raw: bytes, label: str) -> bytes:
+    if raw.endswith(b"\n"):
+        raw = raw[:-1]
+    if (
+        not SECRET_MIN_BYTES <= len(raw) <= SECRET_MAX_BYTES
+        or b"\r" in raw
+        or b"\n" in raw
+        or b"\x00" in raw
+    ):
+        fail(f"{label} must contain one bounded secret line")
+    return raw
+
+
+def _snapshot_secret_file(
+    path: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    expected_mode: int,
+    label: str,
+) -> bytes:
+    if (
+        not isinstance(path, os.PathLike)
+        or type(expected_uid) is not int
+        or expected_uid < 0
+        or type(expected_gid) is not int
+        or expected_gid < 0
+        or type(expected_mode) is not int
+    ):
+        fail(f"{label} snapshot binding differs")
+    absolute = Path(os.path.abspath(path))
+    descriptor = -1
+    try:
+        descriptor = os.open(absolute, _secret_file_flags())
+        before = _StableFileIdentity.from_stat(os.fstat(descriptor))
+        entry_before = _StableFileIdentity.from_stat(
+            os.stat(absolute, follow_symlinks=False)
+        )
+        if (
+            before != entry_before
+            or not stat.S_ISREG(before.mode)
+            or stat.S_IMODE(before.mode) != expected_mode
+            or before.links != 1
+            or before.uid != expected_uid
+            or before.gid != expected_gid
+            or not SECRET_MIN_BYTES <= before.size <= SECRET_READ_MAX_BYTES
+        ):
+            fail(f"{label} file identity, owner, mode, or size differs")
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(SECRET_COPY_CHUNK_BYTES, SECRET_READ_MAX_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > SECRET_READ_MAX_BYTES:
+                fail(f"{label} file exceeds its byte bound")
+            chunks.append(chunk)
+
+        after = _StableFileIdentity.from_stat(os.fstat(descriptor))
+        entry_after = _StableFileIdentity.from_stat(
+            os.stat(absolute, follow_symlinks=False)
+        )
+        if before != after or before != entry_after or total != before.size:
+            fail(f"{label} file changed while it was read")
+        return _normalize_secret(b"".join(chunks), label)
+    except FullCampaignError:
+        raise
+    except OSError:
+        fail(f"failed to snapshot {label} without following links")
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                fail(f"failed to close {label} snapshot")
+
+
+def snapshot_api_secret(path: Path) -> bytes:
+    """Snapshot the root-owned, execution-group-readable gateway credential."""
+
+    return _snapshot_secret_file(
+        path,
+        expected_uid=0,
+        expected_gid=os.getegid(),
+        expected_mode=0o640,
+        label="API credential",
+    )
+
+
+def snapshot_openwebui_token(path: Path) -> bytes:
+    """Snapshot the private OpenWebUI bearer token owned by the execution user."""
+
+    return _snapshot_secret_file(
+        path,
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+        expected_mode=0o600,
+        label="OpenWebUI token",
+    )
+
+
+def _validate_private_parent(parent: Path, uid: int, gid: int, label: str) -> Path:
+    absolute = Path(os.path.abspath(parent))
+    try:
+        if absolute.resolve(strict=True) != absolute:
+            fail(f"{label} contains a symbolic link")
+        identity = _StableFileIdentity.from_stat(absolute.lstat())
+    except FullCampaignError:
+        raise
+    except OSError:
+        fail(f"{label} is unavailable")
+    if (
+        not stat.S_ISDIR(identity.mode)
+        or stat.S_ISLNK(identity.mode)
+        or stat.S_IMODE(identity.mode) != 0o700
+        or identity.uid != uid
+        or identity.gid != gid
+    ):
+        fail(f"{label} owner or mode differs")
+    return absolute
+
+
+def _write_private_master(
+    directory_fd: int,
+    name: str,
+    raw: bytes,
+    *,
+    uid: int,
+    gid: int,
+) -> _StableFileIdentity:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(descriptor, 0o600)
+        _write_all(descriptor, raw, f"campaign secret master {name}")
+        os.fsync(descriptor)
+        identity = _StableFileIdentity.from_stat(os.fstat(descriptor))
+        entry = _StableFileIdentity.from_stat(
+            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        )
+        if (
+            identity != entry
+            or not stat.S_ISREG(identity.mode)
+            or stat.S_IMODE(identity.mode) != 0o600
+            or identity.links != 1
+            or identity.uid != uid
+            or identity.gid != gid
+            or identity.size != len(raw)
+        ):
+            fail("campaign secret master identity differs")
+        return identity
+    except FullCampaignError:
+        raise
+    except OSError:
+        fail("failed to create a private campaign secret master")
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                fail("failed to close a private campaign secret master")
+
+
+class CampaignSecretOwner:
+    """Own two private master copies for the lifetime of one campaign."""
+
+    _API_NAME = "gateway-api-key"
+    _TOKEN_NAME = "openwebui-token"
+
+    def __init__(
+        self,
+        directory: Path,
+        directory_fd: int,
+        directory_identity: _StableFileIdentity,
+        parent: Path,
+        parent_fd: int,
+        api_identity: _StableFileIdentity,
+        token_identity: _StableFileIdentity,
+        *,
+        uid: int,
+        gid: int,
+    ) -> None:
+        self.directory = directory
+        self.api_key_path = directory / self._API_NAME
+        self.openwebui_token_path = directory / self._TOKEN_NAME
+        self._directory_fd = directory_fd
+        self._directory_identity = directory_identity
+        self._parent = parent
+        self._parent_fd = parent_fd
+        self._file_identities = {
+            self._API_NAME: api_identity,
+            self._TOKEN_NAME: token_identity,
+        }
+        self.uid = uid
+        self.gid = gid
+        self.closed = False
+
+    @classmethod
+    def create(
+        cls,
+        api_secret: bytes,
+        openwebui_token: bytes,
+        *,
+        parent: Path | None = None,
+    ) -> CampaignSecretOwner:
+        expected_uid = os.geteuid()
+        expected_gid = os.getegid()
+        if type(api_secret) is not bytes or type(openwebui_token) is not bytes:
+            fail("campaign secret master values must be bytes")
+        api_value = _normalize_secret(api_secret, "API credential")
+        token_value = _normalize_secret(openwebui_token, "OpenWebUI token")
+        root = _validate_private_parent(
+            Path(f"/run/user/{expected_uid}") if parent is None else parent,
+            expected_uid,
+            expected_gid,
+            "campaign secret parent",
+        )
+
+        parent_fd = -1
+        directory_fd = -1
+        directory: Path | None = None
+        directory_name: str | None = None
+        created_names: list[str] = []
+        try:
+            parent_fd = os.open(root, _private_directory_flags())
+            parent_identity = _StableFileIdentity.from_stat(os.fstat(parent_fd))
+            if parent_identity != _StableFileIdentity.from_stat(root.lstat()):
+                fail("campaign secret parent changed while opening")
+            for _attempt in range(16):
+                candidate = f"ullm-sq8-campaign-{secrets.token_hex(12)}"
+                try:
+                    os.mkdir(candidate, 0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    continue
+                directory_name = candidate
+                break
+            if directory_name is None:
+                fail("failed to allocate a private campaign secret directory")
+            directory = root / directory_name
+            directory_fd = os.open(
+                directory_name, _private_directory_flags(), dir_fd=parent_fd
+            )
+            api_identity = _write_private_master(
+                directory_fd,
+                cls._API_NAME,
+                api_value,
+                uid=expected_uid,
+                gid=expected_gid,
+            )
+            created_names.append(cls._API_NAME)
+            token_identity = _write_private_master(
+                directory_fd,
+                cls._TOKEN_NAME,
+                token_value,
+                uid=expected_uid,
+                gid=expected_gid,
+            )
+            created_names.append(cls._TOKEN_NAME)
+            os.fsync(directory_fd)
+            directory_identity = _StableFileIdentity.from_stat(os.fstat(directory_fd))
+            entry = _StableFileIdentity.from_stat(
+                os.stat(directory_name, dir_fd=parent_fd, follow_symlinks=False)
+            )
+            if (
+                directory_identity != entry
+                or not stat.S_ISDIR(directory_identity.mode)
+                or stat.S_IMODE(directory_identity.mode) != 0o700
+                or directory_identity.uid != expected_uid
+                or directory_identity.gid != expected_gid
+                or set(os.listdir(directory_fd)) != set(created_names)
+            ):
+                fail("campaign secret directory identity differs")
+            if (
+                _StableFileIdentity.from_stat(root.lstat()).inode_anchor()
+                != parent_identity.inode_anchor()
+            ):
+                fail("campaign secret parent changed during master creation")
+            os.fsync(parent_fd)
+            return cls(
+                directory,
+                directory_fd,
+                directory_identity,
+                root,
+                parent_fd,
+                api_identity,
+                token_identity,
+                uid=expected_uid,
+                gid=expected_gid,
+            )
+        except BaseException:
+            if directory_fd >= 0:
+                try:
+                    entries = set(os.listdir(directory_fd))
+                except OSError:
+                    entries = set()
+                for name in (cls._TOKEN_NAME, cls._API_NAME):
+                    if name not in entries:
+                        continue
+                    try:
+                        os.unlink(name, dir_fd=directory_fd)
+                    except OSError:
+                        pass
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
+            if directory_name is not None and parent_fd >= 0:
+                try:
+                    os.rmdir(directory_name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            if parent_fd >= 0:
+                try:
+                    os.close(parent_fd)
+                except OSError:
+                    pass
+            raise
+
+    def __enter__(self) -> CampaignSecretOwner:
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException:
+            if error is None:
+                raise
+            error.add_note("campaign secret cleanup also failed")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        tampered = False
+        cleanup_failed = False
+        parent_entry_matches = False
+        try:
+            descriptor_identity = _StableFileIdentity.from_stat(
+                os.fstat(self._directory_fd)
+            )
+            parent_entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    self.directory.name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+            parent_entry_matches = (
+                parent_entry.inode_anchor() == self._directory_identity.inode_anchor()
+            )
+            entries = set(os.listdir(self._directory_fd))
+            if (
+                descriptor_identity != self._directory_identity
+                or parent_entry != self._directory_identity
+                or entries != set(self._file_identities)
+            ):
+                tampered = True
+        except OSError:
+            tampered = True
+            entries = set()
+
+        for name, expected in self._file_identities.items():
+            try:
+                current = _StableFileIdentity.from_stat(
+                    os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+                )
+                if current != expected:
+                    tampered = True
+                if (current.device, current.inode) == (
+                    expected.device,
+                    expected.inode,
+                ):
+                    os.unlink(name, dir_fd=self._directory_fd)
+            except FileNotFoundError:
+                tampered = True
+            except OSError:
+                cleanup_failed = True
+        try:
+            os.fsync(self._directory_fd)
+        except OSError:
+            cleanup_failed = True
+        try:
+            os.close(self._directory_fd)
+        except OSError:
+            cleanup_failed = True
+        finally:
+            self._directory_fd = -1
+        try:
+            if parent_entry_matches:
+                os.rmdir(self.directory.name, dir_fd=self._parent_fd)
+        except OSError:
+            cleanup_failed = True
+        try:
+            os.fsync(self._parent_fd)
+        except OSError:
+            cleanup_failed = True
+        try:
+            os.close(self._parent_fd)
+        except OSError:
+            cleanup_failed = True
+        finally:
+            self._parent_fd = -1
+        self.closed = True
+        if tampered:
+            fail("campaign secret directory or masters changed before cleanup")
+        if cleanup_failed:
+            fail("failed to remove private campaign secret masters")
+
+
+class CampaignSecretScanner:
+    """Streaming raw-secret scanner that retains cross-chunk overlap."""
+
+    def __init__(self, secrets: tuple[bytes, ...], label: str) -> None:
+        self.secrets = secrets
+        self.label = label
+        self.tail = b""
+        self.overlap = max(len(value) for value in secrets) - 1
+
+    def feed(self, chunk: bytes) -> None:
+        if type(chunk) is not bytes:
+            fail(f"{self.label} secret scan chunk type differs")
+        combined = self.tail + chunk
+        if any(secret in combined for secret in self.secrets):
+            fail(f"{self.label} contains forbidden campaign cleartext")
+        self.tail = combined[-self.overlap :] if self.overlap else b""
+
+
+class CampaignSecretGuard:
+    """Scan API and browser credentials in raw, structured, and streamed evidence."""
+
+    def __init__(self, values: Iterable[bytes]) -> None:
+        secrets = tuple(values)
+        if (
+            not secrets
+            or any(type(value) is not bytes or not value for value in secrets)
+            or len(set(secrets)) != len(secrets)
+        ):
+            fail("campaign forbidden secret set differs")
+        self.secrets = secrets
+
+    def _reject_raw(self, raw: bytes, label: str) -> None:
+        if any(secret in raw for secret in self.secrets):
+            fail(f"{label} contains forbidden campaign cleartext")
+
+    def _scan_json_if_complete(self, raw: bytes, label: str) -> bool:
+        if not raw or len(raw) > SECRET_SCAN_JSON_MAX_BYTES:
+            return False
+        if raw.count(b",") + 1 > SECRET_SCAN_MAX_NODES:
+            fail(f"{label} exceeds the semantic secret-scan node bound")
+        try:
+            value = json.loads(raw.decode("utf-8", errors="strict"))
+        except (UnicodeError, ValueError, RecursionError):
+            return False
+        self.reject_json_value(value, label)
+        return True
+
+    def reject(self, raw: bytes, label: str) -> None:
+        if type(raw) is not bytes or type(label) is not str or not label:
+            fail("campaign raw secret scan arguments differ")
+        self._reject_raw(raw, label)
+        self._scan_json_if_complete(raw, label)
+
+    def reject_json_value(self, value: Any, label: str) -> None:
+        pending: list[tuple[Any, int]] = [(value, 0)]
+        visited = 0
+        while pending:
+            item, depth = pending.pop()
+            visited += 1
+            if depth > 128 or visited > SECRET_SCAN_MAX_NODES:
+                fail(f"{label} exceeds the semantic secret-scan bound")
+            if type(item) is dict:
+                if visited + len(pending) + len(item) > SECRET_SCAN_MAX_NODES:
+                    fail(f"{label} exceeds the semantic secret-scan node bound")
+                for key, child in item.items():
+                    if type(key) is str:
+                        try:
+                            self._reject_raw(
+                                key.encode("utf-8", errors="strict"), label
+                            )
+                        except UnicodeError:
+                            fail(f"{label} contains a non-UTF-8 object key")
+                    pending.append((child, depth + 1))
+            elif type(item) in {list, tuple}:
+                if visited + len(pending) + len(item) > SECRET_SCAN_MAX_NODES:
+                    fail(f"{label} exceeds the semantic secret-scan node bound")
+                pending.extend((child, depth + 1) for child in item)
+            elif type(item) is str:
+                try:
+                    self._reject_raw(item.encode("utf-8", errors="strict"), label)
+                except UnicodeError:
+                    fail(f"{label} contains a non-UTF-8 string")
+            elif type(item) in {bytes, bytearray}:
+                self._reject_raw(bytes(item), label)
+
+    def scanner(self, label: str) -> CampaignSecretScanner:
+        if type(label) is not str or not label:
+            fail("campaign streaming secret scan label differs")
+        return CampaignSecretScanner(self.secrets, label)
+
+    def scan_file(self, path: Path, label: str) -> None:
+        descriptor = -1
+        document = bytearray()
+        line = bytearray()
+        scanner = self.scanner(label)
+        absolute = Path(os.path.abspath(path))
+        semantic_mode = absolute.suffix
+
+        def finish_line() -> None:
+            stripped = bytes(line).strip()
+            if stripped and not self._scan_json_if_complete(stripped, label):
+                fail(f"{label} contains a JSONL row that cannot be semantic-scanned")
+            line.clear()
+
+        try:
+            descriptor = os.open(absolute, _secret_file_flags())
+            before = _StableFileIdentity.from_stat(os.fstat(descriptor))
+            if not stat.S_ISREG(before.mode) or before != _StableFileIdentity.from_stat(
+                os.stat(absolute, follow_symlinks=False)
+            ):
+                fail(f"{label} scan file identity differs")
+            while chunk := os.read(descriptor, SECRET_COPY_CHUNK_BYTES):
+                scanner.feed(chunk)
+                if semantic_mode == ".json":
+                    if len(document) + len(chunk) > SECRET_SCAN_JSON_MAX_BYTES:
+                        fail(f"{label} exceeds the semantic JSON scan bound")
+                    document.extend(chunk)
+                elif semantic_mode == ".jsonl":
+                    parts = chunk.split(b"\n")
+                    for index, part in enumerate(parts):
+                        if len(line) + len(part) > SECRET_SCAN_JSON_MAX_BYTES:
+                            fail(f"{label} JSONL row exceeds the semantic scan bound")
+                        line.extend(part)
+                        if index < len(parts) - 1:
+                            finish_line()
+            if semantic_mode == ".json":
+                if not self._scan_json_if_complete(bytes(document).strip(), label):
+                    fail(f"{label} is not completely semantic-scannable JSON")
+            elif semantic_mode == ".jsonl" and line:
+                finish_line()
+            after = _StableFileIdentity.from_stat(os.fstat(descriptor))
+            entry_after = _StableFileIdentity.from_stat(
+                os.stat(absolute, follow_symlinks=False)
+            )
+            if before != after or before != entry_after:
+                fail(f"{label} changed while it was scanned")
+        except FullCampaignError:
+            raise
+        except OSError:
+            fail(f"failed to scan {label} without following links")
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    fail(f"failed to close {label} after secret scanning")
+
+
+class CampaignLockOwner:
+    """Hold the host-wide full-campaign lock through one open description."""
+
+    def __init__(
+        self,
+        path: Path,
+        descriptor: int,
+        parent_descriptor: int,
+        identity: _StableFileIdentity,
+    ):
+        self.path = path
+        self._descriptor = descriptor
+        self._parent_descriptor = parent_descriptor
+        self._identity = identity
+        self.closed = False
+
+    @classmethod
+    def acquire(
+        cls,
+        path: Path,
+    ) -> CampaignLockOwner:
+        expected_uid = os.geteuid()
+        expected_gid = os.getegid()
+        absolute = Path(os.path.abspath(path))
+        _validate_private_parent(
+            absolute.parent, expected_uid, expected_gid, "campaign lock parent"
+        )
+        descriptor = -1
+        parent_descriptor = -1
+        try:
+            parent_descriptor = os.open(absolute.parent, _private_directory_flags())
+            if _StableFileIdentity.from_stat(
+                os.fstat(parent_descriptor)
+            ) != _StableFileIdentity.from_stat(absolute.parent.lstat()):
+                fail("campaign lock parent changed while opening")
+            descriptor = os.open(
+                absolute.name,
+                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            identity = _StableFileIdentity.from_stat(os.fstat(descriptor))
+            entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    absolute.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            if (
+                identity != entry
+                or not stat.S_ISREG(identity.mode)
+                or stat.S_IMODE(identity.mode) != 0o600
+                or identity.links != 1
+                or identity.uid != expected_uid
+                or identity.gid != expected_gid
+            ):
+                fail("campaign lock file identity, owner, or mode differs")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fail("another full SQ8 campaign already holds the lock")
+            locked_identity = _StableFileIdentity.from_stat(os.fstat(descriptor))
+            locked_entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    absolute.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            if locked_identity != identity or locked_entry != identity:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                fail("campaign lock file changed during acquisition")
+            return cls(absolute, descriptor, parent_descriptor, identity)
+        except FullCampaignError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
+            raise
+        except OSError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
+            fail("failed to acquire the full SQ8 campaign lock")
+
+    def __enter__(self) -> CampaignLockOwner:
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException:
+            if error is None:
+                raise
+            error.add_note("campaign lock cleanup also failed")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        identity_changed = False
+        cleanup_failed = False
+        try:
+            current = _StableFileIdentity.from_stat(os.fstat(self._descriptor))
+            entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    self.path.name,
+                    dir_fd=self._parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            if current != self._identity or entry != self._identity:
+                identity_changed = True
+        except OSError:
+            identity_changed = True
+        try:
+            fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+        except OSError:
+            cleanup_failed = True
+        try:
+            os.close(self._descriptor)
+        except OSError:
+            cleanup_failed = True
+        finally:
+            self._descriptor = -1
+        try:
+            os.close(self._parent_descriptor)
+        except OSError:
+            cleanup_failed = True
+        finally:
+            self._parent_descriptor = -1
+        self.closed = True
+        if identity_changed:
+            fail("campaign lock file changed while held")
+        if cleanup_failed:
+            fail("failed to release the full SQ8 campaign lock")
 
 
 class SessionWriterProtocol(Protocol):
@@ -1033,9 +1813,13 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "CampaignLockOwner",
     "CampaignBackend",
     "CampaignConfig",
     "CampaignEvidence",
+    "CampaignSecretGuard",
+    "CampaignSecretOwner",
+    "CampaignSecretScanner",
     "FinalPhaseResult",
     "FileEvidence",
     "FullCampaignError",
@@ -1046,4 +1830,6 @@ __all__ = [
     "ResourceAdapterProtocol",
     "ViewsRenderer",
     "run_full_campaign",
+    "snapshot_api_secret",
+    "snapshot_openwebui_token",
 ]
