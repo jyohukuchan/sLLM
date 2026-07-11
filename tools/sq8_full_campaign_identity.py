@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime
 import hashlib
@@ -104,6 +105,13 @@ SOURCE_ROLE_PATHS = {
     "worker_runtime": "crates/ullm-engine/src/sq8_worker_runtime.rs",
     "engine_library": "crates/ullm-engine/src/lib.rs",
     "workspace_lock": "Cargo.lock",
+    "serving_fixture_manifest": "tests/fixtures/sq8-serving-v0.1/manifest.json",
+    "chat_template_fixture_manifest": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/manifest.json"
+    ),
+    "runtime_oracle_validation": (
+        "benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-validation.json"
+    ),
 }
 
 SOURCE_GROUPS = {
@@ -120,6 +128,11 @@ SOURCE_GROUPS = {
         role
         for role in SOURCE_ROLE_PATHS
         if role.startswith("openwebui_") or role.startswith("systemd_")
+    ),
+    "oracle": (
+        "serving_fixture_manifest",
+        "chat_template_fixture_manifest",
+        "runtime_oracle_validation",
     ),
 }
 
@@ -1748,6 +1761,149 @@ def _process_document(value: ProcessSnapshot) -> dict[str, Any]:
     }
 
 
+def _serving_oracle_identity(
+    serving_manifest: _PinnedFile,
+    chat_manifest: _PinnedFile,
+    runtime_validation: _PinnedFile,
+    chat_template_identity: dict[str, Any],
+) -> dict[str, Any]:
+    assert serving_manifest.raw is not None
+    value = _json_object(serving_manifest.raw, "serving fixture manifest")
+    if value.get("schema_version") != "ullm.sq8.serving_fixtures.v1":
+        fail("serving fixture manifest schema differs")
+    vllm = _exact(
+        value.get("vllm_identity"),
+        {
+            "async_scheduling",
+            "backend",
+            "device",
+            "dtype",
+            "enable_prefix_caching",
+            "enforce_eager",
+            "max_num_seqs",
+            "package_version",
+            "pipeline_parallel_size",
+            "python_version",
+            "rocr_visible_devices",
+            "runner",
+            "source_revision_from_package_version",
+            "tensor_parallel_size",
+            "torch_git_version",
+            "torch_hip_version",
+            "torch_version",
+            "transformers_version",
+        },
+        "serving vLLM identity",
+    )
+    device = _exact(
+        vllm["device"],
+        {
+            "compute_capability",
+            "gfx",
+            "name",
+            "total_memory_bytes",
+            "visible_device_index",
+        },
+        "serving vLLM device identity",
+    )
+    if (
+        vllm["backend"] != "vLLM"
+        or vllm["async_scheduling"] is not False
+        or vllm["enable_prefix_caching"] is not False
+        or vllm["enforce_eager"] is not True
+        or vllm["max_num_seqs"] != 1
+        or vllm["pipeline_parallel_size"] != 1
+        or vllm["tensor_parallel_size"] != 1
+        or vllm["rocr_visible_devices"] != "1"
+        or vllm["runner"] != "LLM.generate"
+        or device["gfx"] != DEVICE_ARCHITECTURE
+        or device["visible_device_index"] != 0
+    ):
+        fail("serving vLLM execution identity differs")
+    for key in (
+        "dtype",
+        "package_version",
+        "python_version",
+        "source_revision_from_package_version",
+        "torch_git_version",
+        "torch_hip_version",
+        "torch_version",
+        "transformers_version",
+    ):
+        _safe_text(vllm[key], f"serving vLLM {key}")
+    capability = device["compute_capability"]
+    if (
+        type(capability) is not list
+        or len(capability) != 2
+        or any(type(item) is not int or item < 0 for item in capability)
+    ):
+        fail("serving vLLM compute capability differs")
+    _safe_text(device["name"], "serving vLLM device name")
+    _integer(device["total_memory_bytes"], "serving vLLM device memory", minimum=1)
+
+    tokenizer = _exact(
+        value.get("tokenizer_identity"),
+        {
+            "chat_template_sha256",
+            "chat_template_utf8_bytes",
+            "files",
+            "revision",
+            "tokenizer_class",
+        },
+        "serving oracle tokenizer identity",
+    )
+    if (
+        tokenizer["revision"] != MODEL_REVISION
+        or tokenizer["chat_template_utf8_bytes"] != chat_template_identity["utf8_bytes"]
+        or tokenizer["chat_template_sha256"] != chat_template_identity["sha256"]
+        or type(tokenizer["files"]) is not list
+        or not tokenizer["files"]
+    ):
+        fail("serving oracle tokenizer or chat template identity differs")
+    _safe_text(tokenizer["tokenizer_class"], "serving tokenizer class")
+    _sha(tokenizer["chat_template_sha256"], "serving chat template SHA-256")
+
+    chat_fixture = _exact(
+        value.get("chat_template_fixture"),
+        {
+            "directory",
+            "exact_prompt_lengths",
+            "manifest_file",
+            "manifest_sha256",
+            "status",
+            "validator",
+        },
+        "chat template fixture identity",
+    )
+    if (
+        chat_fixture["directory"] != "chat-template"
+        or chat_fixture["exact_prompt_lengths"] != [32, 128, 512, 2048, 3584]
+        or chat_fixture["manifest_file"] != "chat-template/manifest.json"
+        or chat_fixture["manifest_sha256"] != chat_manifest.sha256
+        or chat_fixture["status"] != "ready_independent_recompute_passed"
+        or chat_fixture["validator"] != "tools/validate-sq8-chat-template-fixtures.py"
+    ):
+        fail("chat template fixture manifest identity differs")
+    return {
+        "serving_fixture_manifest": {
+            "path": SOURCE_ROLE_PATHS["serving_fixture_manifest"],
+            "bytes": serving_manifest.bytes,
+            "sha256": serving_manifest.sha256,
+        },
+        "chat_template_fixture_manifest": {
+            "path": SOURCE_ROLE_PATHS["chat_template_fixture_manifest"],
+            "bytes": chat_manifest.bytes,
+            "sha256": chat_manifest.sha256,
+        },
+        "runtime_oracle_validation": {
+            "path": SOURCE_ROLE_PATHS["runtime_oracle_validation"],
+            "bytes": runtime_validation.bytes,
+            "sha256": runtime_validation.sha256,
+        },
+        "vllm_identity": copy.deepcopy(vllm),
+    }
+
+
 def _environment_document(
     inputs: IdentityBuildInputs,
     live: LiveIdentity,
@@ -1883,6 +2039,7 @@ def _model_document(
     package_manifest: _PinnedFile,
     tokenizer_entries: list[dict[str, Any]],
     chat_template_identity: dict[str, Any],
+    serving_oracle: dict[str, Any],
     worker_binary: _PinnedFile,
     source_entries_by_role: dict[str, dict[str, Any]],
     source_sets: dict[str, str],
@@ -1945,6 +2102,7 @@ def _model_document(
             "chat_template": chat_template_identity,
             "files": tokenizer_entries,
         },
+        "oracle": serving_oracle,
         "worker": {
             "binary": os.fspath(Path(os.path.abspath(inputs.worker_binary))),
             "binary_bytes": worker_binary.bytes,
@@ -1981,14 +2139,22 @@ def build_identity_artifacts(
     pins = _PinSet()
     try:
         source_entries_by_role: dict[str, dict[str, Any]] = {}
+        retained_sources: dict[str, _PinnedFile] = {}
         for spec in specs:
+            retain = spec.role in {
+                "serving_fixture_manifest",
+                "chat_template_fixture_manifest",
+                "runtime_oracle_validation",
+            }
             pinned = pins.open(
                 spec.path,
                 maximum=spec.maximum_bytes,
                 forbidden_values=inputs.forbidden_values,
-                retain=False,
+                retain=retain,
                 expected_sha256=spec.expected_sha256,
             )
+            if retain:
+                retained_sources[spec.role] = pinned
             source_entries_by_role[spec.role] = {
                 "role": spec.role,
                 "path": spec.logical_path,
@@ -2088,6 +2254,12 @@ def build_identity_artifacts(
             "utf8_bytes": len(chat_template_raw),
             "sha256": _sha256(chat_template_raw),
         }
+        serving_oracle = _serving_oracle_identity(
+            retained_sources["serving_fixture_manifest"],
+            retained_sources["chat_template_fixture_manifest"],
+            retained_sources["runtime_oracle_validation"],
+            chat_template_identity,
+        )
         worker_binary = pins.open(
             inputs.worker_binary,
             maximum=MAX_WORKER_BINARY_BYTES,
@@ -2125,6 +2297,7 @@ def build_identity_artifacts(
             package_manifest,
             tokenizer_entries,
             chat_template_identity,
+            serving_oracle,
             worker_binary,
             source_entries_by_role,
             source_sets,
@@ -2138,6 +2311,17 @@ def build_identity_artifacts(
             != model_identity["worker"]["binary_sha256"]
         ):
             fail("environment and model worker identities differ")
+        environment_sources = {item["role"]: item for item in environment["sources"]}
+        for role in (
+            "serving_fixture_manifest",
+            "chat_template_fixture_manifest",
+            "runtime_oracle_validation",
+        ):
+            if (
+                environment_sources[role]["sha256"]
+                != model_identity["oracle"][role]["sha256"]
+            ):
+                fail("environment and model oracle source identities differ")
         environment_raw = _canonical(environment)
         model_raw = _canonical(model_identity)
         for raw in (environment_raw, model_raw):
@@ -2501,6 +2685,7 @@ def validate_model_identity_document(value: Any) -> dict[str, Any]:
             "promotion_validation",
             "product",
             "tokenizer",
+            "oracle",
             "worker",
         },
         "model identity document",
@@ -2641,6 +2826,100 @@ def validate_model_identity_document(value: Any) -> dict[str, Any]:
         minimum=1,
     )
     _sha(chat_template["sha256"], "model tokenizer chat template SHA-256")
+
+    oracle = _exact(
+        document["oracle"],
+        {
+            "serving_fixture_manifest",
+            "chat_template_fixture_manifest",
+            "runtime_oracle_validation",
+            "vllm_identity",
+        },
+        "model serving oracle",
+    )
+    for role in (
+        "serving_fixture_manifest",
+        "chat_template_fixture_manifest",
+        "runtime_oracle_validation",
+    ):
+        _validate_file_identity(
+            oracle[role],
+            f"model oracle {role}",
+            expected_path=SOURCE_ROLE_PATHS[role],
+        )
+    vllm = _exact(
+        oracle["vllm_identity"],
+        {
+            "async_scheduling",
+            "backend",
+            "device",
+            "dtype",
+            "enable_prefix_caching",
+            "enforce_eager",
+            "max_num_seqs",
+            "package_version",
+            "pipeline_parallel_size",
+            "python_version",
+            "rocr_visible_devices",
+            "runner",
+            "source_revision_from_package_version",
+            "tensor_parallel_size",
+            "torch_git_version",
+            "torch_hip_version",
+            "torch_version",
+            "transformers_version",
+        },
+        "model vLLM oracle identity",
+    )
+    vllm_device = _exact(
+        vllm["device"],
+        {
+            "compute_capability",
+            "gfx",
+            "name",
+            "total_memory_bytes",
+            "visible_device_index",
+        },
+        "model vLLM oracle device",
+    )
+    if (
+        vllm["backend"] != "vLLM"
+        or vllm["async_scheduling"] is not False
+        or vllm["enable_prefix_caching"] is not False
+        or vllm["enforce_eager"] is not True
+        or vllm["max_num_seqs"] != 1
+        or vllm["pipeline_parallel_size"] != 1
+        or vllm["tensor_parallel_size"] != 1
+        or vllm["rocr_visible_devices"] != "1"
+        or vllm["runner"] != "LLM.generate"
+        or vllm_device["gfx"] != DEVICE_ARCHITECTURE
+        or vllm_device["visible_device_index"] != 0
+    ):
+        fail("model vLLM oracle execution identity differs")
+    for key in (
+        "dtype",
+        "package_version",
+        "python_version",
+        "source_revision_from_package_version",
+        "torch_git_version",
+        "torch_hip_version",
+        "torch_version",
+        "transformers_version",
+    ):
+        _safe_text(vllm[key], f"model vLLM oracle {key}")
+    capability = vllm_device["compute_capability"]
+    if (
+        type(capability) is not list
+        or len(capability) != 2
+        or any(type(item) is not int or item < 0 for item in capability)
+    ):
+        fail("model vLLM oracle compute capability differs")
+    _safe_text(vllm_device["name"], "model vLLM oracle device name")
+    _integer(
+        vllm_device["total_memory_bytes"],
+        "model vLLM oracle device memory",
+        minimum=1,
+    )
 
     worker = _exact(
         document["worker"],

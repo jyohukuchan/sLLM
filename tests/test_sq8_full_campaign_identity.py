@@ -140,7 +140,14 @@ class IdentityFixture:
         )
 
     def _build_sources(self) -> None:
+        oracle_roles = {
+            "serving_fixture_manifest",
+            "chat_template_fixture_manifest",
+            "runtime_oracle_validation",
+        }
         for role, relative in IDENTITY.SOURCE_ROLE_PATHS.items():
+            if role in oracle_roles:
+                continue
             if role == "systemd_service":
                 raw = b"[Service]\nUser=homelab1\nUMask=0077\n"
             elif role == "systemd_environment_contract":
@@ -150,6 +157,69 @@ class IdentityFixture:
             else:
                 raw = f"fixture source for {role}\n".encode("ascii")
             self._write(self.repo / relative, raw)
+        chat_manifest_raw = canonical(
+            {"schema_version": "ullm.sq8.chat_template_fixtures.v1"}
+        )
+        self._write(
+            self.repo / IDENTITY.SOURCE_ROLE_PATHS["chat_template_fixture_manifest"],
+            chat_manifest_raw,
+        )
+        runtime_validation_raw = canonical(
+            {"schema_version": "ullm.sq8.runtime_oracle_validation.v1"}
+        )
+        self._write(
+            self.repo / IDENTITY.SOURCE_ROLE_PATHS["runtime_oracle_validation"],
+            runtime_validation_raw,
+        )
+        template = b"fake-qwen3-chat-template-v1"
+        serving_manifest = {
+            "schema_version": "ullm.sq8.serving_fixtures.v1",
+            "vllm_identity": {
+                "async_scheduling": False,
+                "backend": "vLLM",
+                "device": {
+                    "compute_capability": [12, 0],
+                    "gfx": IDENTITY.DEVICE_ARCHITECTURE,
+                    "name": "AMD Radeon Graphics",
+                    "total_memory_bytes": 34_208_743_424,
+                    "visible_device_index": 0,
+                },
+                "dtype": "bfloat16",
+                "enable_prefix_caching": False,
+                "enforce_eager": True,
+                "max_num_seqs": 1,
+                "package_version": "0.23.1rc1.dev618+synthetic",
+                "pipeline_parallel_size": 1,
+                "python_version": "3.12.3",
+                "rocr_visible_devices": "1",
+                "runner": "LLM.generate",
+                "source_revision_from_package_version": "synthetic",
+                "tensor_parallel_size": 1,
+                "torch_git_version": "synthetic-torch-git",
+                "torch_hip_version": "7.2.53211",
+                "torch_version": "2.11.0+synthetic",
+                "transformers_version": "5.12.1",
+            },
+            "tokenizer_identity": {
+                "chat_template_sha256": sha256(template),
+                "chat_template_utf8_bytes": len(template),
+                "files": [{"file": "tokenizer_config.json"}],
+                "revision": IDENTITY.MODEL_REVISION,
+                "tokenizer_class": "Qwen2Tokenizer",
+            },
+            "chat_template_fixture": {
+                "directory": "chat-template",
+                "exact_prompt_lengths": [32, 128, 512, 2048, 3584],
+                "manifest_file": "chat-template/manifest.json",
+                "manifest_sha256": sha256(chat_manifest_raw),
+                "status": "ready_independent_recompute_passed",
+                "validator": "tools/validate-sq8-chat-template-fixtures.py",
+            },
+        }
+        self._write(
+            self.repo / IDENTITY.SOURCE_ROLE_PATHS["serving_fixture_manifest"],
+            canonical(serving_manifest),
+        )
         self._write(
             self.effective_unit,
             (self.repo / IDENTITY.SOURCE_ROLE_PATHS["systemd_service"]).read_bytes(),
@@ -474,6 +544,17 @@ class FullCampaignIdentityTests(unittest.TestCase):
             {"utf8_bytes": len(template), "sha256": sha256(template)},
         )
         self.assertEqual(
+            artifacts.model_identity["oracle"]["vllm_identity"]["backend"],
+            "vLLM",
+        )
+        self.assertEqual(
+            artifacts.environment["source_sets"]["oracle"],
+            IDENTITY._source_aggregate(
+                {item["role"]: item for item in artifacts.environment["sources"]},
+                IDENTITY.SOURCE_GROUPS["oracle"],
+            ),
+        )
+        self.assertEqual(
             artifacts.environment_bytes,
             IDENTITY.serialize_environment_document(artifacts.environment),
         )
@@ -653,6 +734,9 @@ class FullCampaignIdentityTests(unittest.TestCase):
                 "full_payloads", False
             ),
             lambda value: value["tokenizer"].__setitem__("aggregate_sha256", "0" * 64),
+            lambda value: value["oracle"]["vllm_identity"].__setitem__(
+                "max_num_seqs", 2
+            ),
             lambda value: value["worker"].__setitem__(
                 "package_manifest_sha256", "0" * 64
             ),
