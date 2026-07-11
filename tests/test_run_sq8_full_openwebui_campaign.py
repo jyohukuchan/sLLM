@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import dataclasses
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -1282,9 +1284,287 @@ class FullCampaignOrchestratorTests(unittest.TestCase):
             any(path.name.startswith(".campaign") for path in self.root.iterdir())
         )
 
-    def test_cli_is_fail_closed_until_production_backend_is_wired(self):
-        self.assertEqual(ORCHESTRATOR.main([]), 2)
-        self.assertEqual(ORCHESTRATOR.main(["--production-backend"]), 2)
+    def test_cli_requires_an_explicit_mode_and_all_anchors(self):
+        with self.assertRaises(SystemExit):
+            ORCHESTRATOR.main([])
+
+
+class FakePreparationOwner:
+    def __init__(self, name: str, calls: list[str], *, close_error: bool = False):
+        self.name = name
+        self.calls = calls
+        self.close_error = close_error
+        self.closed = False
+
+    def revalidate(self):
+        self.calls.append(f"revalidate:{self.name}")
+
+    def close(self):
+        self.calls.append(f"close:{self.name}")
+        self.closed = True
+        if self.close_error:
+            raise RuntimeError(f"{self.name} cleanup")
+
+
+class FakePreparationRuntime:
+    API = b"api-secret-that-must-not-leak"
+    TOKEN = b"token-secret-that-must-not-leak"
+
+    def __init__(self, *, fail_at=None, interrupt_at=None, cleanup_error=None):
+        self.calls = []
+        self.fail_at = fail_at
+        self.interrupt_at = interrupt_at
+        self.cleanup_error = cleanup_error
+        self.lock = FakePreparationOwner(
+            "lock", self.calls, close_error=cleanup_error == "lock"
+        )
+        self.tools = FakePreparationOwner(
+            "tools", self.calls, close_error=cleanup_error == "tools"
+        )
+        self.secret = FakePreparationOwner(
+            "secret", self.calls, close_error=cleanup_error == "secret"
+        )
+        self.anchor = FakePreparationOwner("git", self.calls)
+
+    def step(self, name):
+        self.calls.append(name)
+        if self.interrupt_at == name:
+            raise KeyboardInterrupt
+        if self.fail_at == name:
+            raise RuntimeError("injected preparation failure")
+
+    def validate_request(self, request):
+        self.step("validate")
+        ORCHESTRATOR._validate_final_destination(request.final_path)
+
+    def acquire_lock(self):
+        self.step("lock")
+        return self.lock
+
+    def capture_git_anchor(self, expected_commit):
+        self.step("git")
+        return self.anchor
+
+    def create_head_tools(self, anchor):
+        self.step("tools")
+        return self.tools
+
+    def validate_promotion(self, anchor, tools):
+        self.step("promotion")
+        return {"verified": True}
+
+    def snapshot_api_key(self, path):
+        self.step("api-secret")
+        return self.API
+
+    def snapshot_token(self, path):
+        self.step("token-secret")
+        return self.TOKEN
+
+    def create_secret_owner(self, api_key, token):
+        self.step("secret-owner")
+        if (api_key, token) != (self.API, self.TOKEN):
+            raise AssertionError("secret values differ")
+        return self.secret
+
+    def build_identity(self, request, anchor, promotion, guard):
+        self.step("identity")
+        self.guard = guard
+        return types.SimpleNamespace(name="identity")
+
+    def discover_container(self):
+        self.step("container")
+        return types.SimpleNamespace(container_id="a" * 64)
+
+    def run_operational(self, identity, container):
+        self.step("operational")
+        return (identity.name, container.container_id)
+
+    def build_resource(self, request, identity, guard):
+        self.step("resource")
+        return (request.run_id, identity.name)
+
+    def build_config(self, request, identity, resource):
+        self.step("config")
+        return ORCHESTRATOR.CampaignConfig(
+            request.final_path,
+            os.getuid(),
+            os.getgid(),
+            BOOT_ID,
+            ORCHESTRATOR.PidEpoch(NORMAL_GATEWAY, NORMAL_WORKER),
+        )
+
+    def revalidate_prepared(self, prepared):
+        identity = self.build_identity(
+            prepared.request,
+            prepared.git_anchor,
+            prepared.promotion,
+            prepared.secret_guard,
+        )
+        container = self.discover_container()
+        self.run_operational(identity, container)
+        self.build_resource(prepared.request, identity, prepared.secret_guard)
+        self.step("runtime-revalidate")
+
+
+class ProductionPreparationCliTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def arguments(self, mode="--preflight-only"):
+        return [
+            mode,
+            "--expected-commit",
+            "a" * 40,
+            "--expected-worker-binary-sha256",
+            "b" * 64,
+            "--run-id",
+            "production-run",
+            "--final-path",
+            os.fspath(self.root / "campaign"),
+            "--api-key-file",
+            os.fspath(self.root / "api"),
+            "--openwebui-token-file",
+            os.fspath(self.root / "token"),
+        ]
+
+    def run_main(self, runtime, mode="--preflight-only"):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = ORCHESTRATOR.main(self.arguments(mode), runtime=runtime)
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_preflight_success_has_fixed_order_redacted_report_and_no_campaign(self):
+        runtime = FakePreparationRuntime()
+        status, stdout, stderr = self.run_main(runtime)
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            runtime.calls[:13],
+            [
+                "validate",
+                "lock",
+                "git",
+                "tools",
+                "promotion",
+                "api-secret",
+                "token-secret",
+                "secret-owner",
+                "identity",
+                "container",
+                "operational",
+                "resource",
+                "config",
+            ],
+        )
+        self.assertEqual(
+            runtime.calls[13:],
+            [
+                "revalidate:lock",
+                "revalidate:secret",
+                "revalidate:tools",
+                "revalidate:git",
+                "identity",
+                "container",
+                "operational",
+                "resource",
+                "runtime-revalidate",
+                "close:secret",
+                "close:tools",
+                "close:lock",
+            ],
+        )
+        report = json.loads(stdout)
+        self.assertEqual(report["status"], "ready")
+        self.assertLess(len(stdout.encode()), 4096)
+        self.assertNotIn(runtime.API.decode(), stdout)
+        self.assertNotIn(runtime.TOKEN.decode(), stdout)
+        self.assertFalse((self.root / "campaign").exists())
+
+    def test_execute_is_fail_closed_without_preparation(self):
+        runtime = FakePreparationRuntime()
+        status, stdout, stderr = self.run_main(runtime, "--execute")
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertIn("not wired", stderr)
+        self.assertEqual(runtime.calls, [])
+
+    def test_existing_final_destination_fails_before_lock(self):
+        (self.root / "campaign").mkdir()
+        runtime = FakePreparationRuntime()
+        status, stdout, stderr = self.run_main(runtime)
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertEqual(stderr, "production preflight failed\n")
+        self.assertEqual(runtime.calls, ["validate"])
+
+    def test_every_phase_failure_closes_all_acquired_owners_in_reverse(self):
+        phases = (
+            "lock",
+            "git",
+            "tools",
+            "promotion",
+            "api-secret",
+            "token-secret",
+            "secret-owner",
+            "identity",
+            "container",
+            "operational",
+            "resource",
+            "config",
+        )
+        for phase in phases:
+            with self.subTest(phase=phase):
+                runtime = FakePreparationRuntime(fail_at=phase)
+                status, stdout, stderr = self.run_main(runtime)
+                self.assertEqual((status, stdout), (2, ""))
+                self.assertEqual(stderr, "production preflight failed\n")
+                closes = [item for item in runtime.calls if item.startswith("close:")]
+                expected = []
+                if phase in {
+                    "identity",
+                    "container",
+                    "operational",
+                    "resource",
+                    "config",
+                }:
+                    expected.append("close:secret")
+                if "tools" in runtime.calls and phase != "tools":
+                    expected.append("close:tools")
+                if "lock" in runtime.calls and phase != "lock":
+                    expected.append("close:lock")
+                self.assertEqual(closes, expected)
+
+    def test_keyboard_interrupt_returns_130_and_cleans_owners(self):
+        runtime = FakePreparationRuntime(interrupt_at="operational")
+        status, stdout, stderr = self.run_main(runtime)
+        self.assertEqual((status, stdout), (130, ""))
+        self.assertEqual(stderr, "production preflight interrupted\n")
+        self.assertEqual(
+            [item for item in runtime.calls if item.startswith("close:")],
+            ["close:secret", "close:tools", "close:lock"],
+        )
+
+    def test_cleanup_failure_does_not_stop_later_cleanup_or_leak_details(self):
+        runtime = FakePreparationRuntime(fail_at="identity", cleanup_error="secret")
+        status, stdout, stderr = self.run_main(runtime)
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertEqual(stderr, "production preflight failed\n")
+        self.assertEqual(
+            [item for item in runtime.calls if item.startswith("close:")],
+            ["close:secret", "close:tools", "close:lock"],
+        )
+
+    def test_success_cleanup_failure_never_prints_ready(self):
+        runtime = FakePreparationRuntime(cleanup_error="secret")
+        status, stdout, stderr = self.run_main(runtime)
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertEqual(stderr, "production preflight failed\n")
+        self.assertEqual(
+            [item for item in runtime.calls if item.startswith("close:")],
+            ["close:secret", "close:tools", "close:lock"],
+        )
 
 
 if __name__ == "__main__":

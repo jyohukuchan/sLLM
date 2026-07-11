@@ -8,12 +8,16 @@ import collections
 import dataclasses
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import secrets
 import stat
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping, NoReturn, Protocol, Sequence
 
 
@@ -470,6 +474,37 @@ class CampaignSecretOwner:
                 raise
             error.add_note("campaign secret cleanup also failed")
 
+    def revalidate(self) -> None:
+        """Verify that both private masters and their directory are unchanged."""
+
+        if self.closed:
+            fail("campaign secret owner is already closed")
+        try:
+            directory = _StableFileIdentity.from_stat(os.fstat(self._directory_fd))
+            entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    self.directory.name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            )
+            if (
+                directory != self._directory_identity
+                or entry != self._directory_identity
+                or set(os.listdir(self._directory_fd)) != set(self._file_identities)
+            ):
+                fail("campaign secret directory changed")
+            for name, expected in self._file_identities.items():
+                current = _StableFileIdentity.from_stat(
+                    os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+                )
+                if current != expected:
+                    fail("campaign secret master changed")
+        except FullCampaignError:
+            raise
+        except OSError:
+            fail("campaign secret masters are unavailable")
+
     def close(self) -> None:
         if self.closed:
             return
@@ -811,6 +846,23 @@ class CampaignLockOwner:
             if error is None:
                 raise
             error.add_note("campaign lock cleanup also failed")
+
+    def revalidate(self) -> None:
+        if self.closed:
+            fail("campaign lock owner is already closed")
+        try:
+            current = _StableFileIdentity.from_stat(os.fstat(self._descriptor))
+            entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    self.path.name,
+                    dir_fd=self._parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+        except OSError:
+            fail("campaign lock file is unavailable")
+        if current != self._identity or entry != self._identity:
+            fail("campaign lock file changed while held")
 
     def close(self) -> None:
         if self.closed:
@@ -1801,23 +1853,462 @@ def run_full_campaign(
         raise
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProductionPreparationRequest:
+    expected_commit: str
+    expected_worker_binary_sha256: str
+    run_id: str
+    final_path: Path
+    api_key_file: Path
+    openwebui_token_file: Path
+
+
+class ProductionPreparationRuntime(Protocol):
+    """Dependency-injected boundary for the read-only production preparation."""
+
+    def validate_request(self, request: ProductionPreparationRequest) -> None: ...
+
+    def acquire_lock(self) -> Any: ...
+
+    def capture_git_anchor(self, expected_commit: str) -> Any: ...
+
+    def create_head_tools(self, anchor: Any) -> Any: ...
+
+    def validate_promotion(self, anchor: Any, tools: Any) -> dict[str, Any]: ...
+
+    def snapshot_api_key(self, path: Path) -> bytes: ...
+
+    def snapshot_token(self, path: Path) -> bytes: ...
+
+    def create_secret_owner(
+        self, api_key: bytes, token: bytes
+    ) -> CampaignSecretOwner: ...
+
+    def build_identity(
+        self,
+        request: ProductionPreparationRequest,
+        anchor: Any,
+        promotion: dict[str, Any],
+        guard: CampaignSecretGuard,
+    ) -> Any: ...
+
+    def discover_container(self) -> Any: ...
+
+    def run_operational(self, identity: Any, container: Any) -> Any: ...
+
+    def build_resource(
+        self,
+        request: ProductionPreparationRequest,
+        identity: Any,
+        guard: CampaignSecretGuard,
+    ) -> Any: ...
+
+    def build_config(
+        self, request: ProductionPreparationRequest, identity: Any, resource: Any
+    ) -> CampaignConfig: ...
+
+    def revalidate_prepared(self, prepared: "PreparedProductionCampaign") -> None: ...
+
+
+def _validate_final_destination(path: Path) -> None:
+    if not isinstance(path, Path) or not path.is_absolute():
+        fail("campaign final destination must be an absolute Path")
+    if Path(os.path.abspath(path)) != path or path.name in {"", ".", ".."}:
+        fail("campaign final destination must be lexically canonical")
+    try:
+        parent = path.parent.lstat()
+    except OSError:
+        fail("campaign final destination parent is unavailable")
+    if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+        fail("campaign final destination parent is not a directory")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        fail("campaign final destination cannot be inspected")
+    fail("campaign final destination already exists")
+
+
+@dataclasses.dataclass(slots=True)
+class PreparedProductionCampaign:
+    """Own every preflight pin until publication or explicit close."""
+
+    request: ProductionPreparationRequest
+    runtime: ProductionPreparationRuntime
+    lock_owner: Any
+    git_anchor: Any
+    tool_owner: Any
+    secret_owner: CampaignSecretOwner
+    secret_guard: CampaignSecretGuard
+    promotion: dict[str, Any]
+    identity: Any
+    operational: Any
+    resource: Any
+    config: CampaignConfig
+    closed: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        request: ProductionPreparationRequest,
+        runtime: ProductionPreparationRuntime,
+    ) -> "PreparedProductionCampaign":
+        runtime.validate_request(request)
+        lock_owner: Any | None = None
+        tool_owner: Any | None = None
+        secret_owner: CampaignSecretOwner | None = None
+        try:
+            lock_owner = runtime.acquire_lock()
+            anchor = runtime.capture_git_anchor(request.expected_commit)
+            tool_owner = runtime.create_head_tools(anchor)
+            promotion = runtime.validate_promotion(anchor, tool_owner)
+            api_key = runtime.snapshot_api_key(request.api_key_file)
+            token = runtime.snapshot_token(request.openwebui_token_file)
+            try:
+                secret_owner = runtime.create_secret_owner(api_key, token)
+                guard = CampaignSecretGuard((api_key, token))
+            finally:
+                api_key = b""
+                token = b""
+            identity = runtime.build_identity(request, anchor, promotion, guard)
+            container = runtime.discover_container()
+            operational = runtime.run_operational(identity, container)
+            resource = runtime.build_resource(request, identity, guard)
+            config = runtime.build_config(request, identity, resource)
+            return cls(
+                request,
+                runtime,
+                lock_owner,
+                anchor,
+                tool_owner,
+                secret_owner,
+                guard,
+                promotion,
+                identity,
+                operational,
+                resource,
+                config,
+            )
+        except BaseException as error:
+            for owner, note in (
+                (secret_owner, "campaign secret cleanup also failed"),
+                (tool_owner, "HEAD tool cleanup also failed"),
+                (lock_owner, "campaign lock cleanup also failed"),
+            ):
+                if owner is None:
+                    continue
+                try:
+                    owner.close()
+                except BaseException:
+                    error.add_note(note)
+            raise
+
+    def revalidate(self) -> None:
+        if self.closed:
+            fail("prepared production campaign is already closed")
+        self.lock_owner.revalidate()
+        self.secret_owner.revalidate()
+        self.tool_owner.revalidate()
+        self.git_anchor.revalidate()
+        _validate_final_destination(self.request.final_path)
+        self.runtime.revalidate_prepared(self)
+
+    def report(self) -> dict[str, Any]:
+        report = {
+            "schema_version": "ullm.sq8.production_preflight.v1",
+            "status": "ready",
+            "run_id": self.request.run_id,
+            "git_commit": self.request.expected_commit,
+            "worker_binary_sha256": self.request.expected_worker_binary_sha256,
+            "service_epoch": {
+                "gateway_pid": self.config.normal_epoch.gateway_pid,
+                "worker_pid": self.config.normal_epoch.worker_pid,
+            },
+        }
+        encoded = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+        self.secret_guard.reject(encoded, "production preflight report")
+        if len(encoded) > 4096:
+            fail("production preflight report exceeds its byte bound")
+        return report
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        errors: list[BaseException] = []
+        for owner in (self.secret_owner, self.tool_owner, self.lock_owner):
+            try:
+                owner.close()
+            except BaseException as error:
+                errors.append(error)
+        self.closed = True
+        if errors:
+            primary = errors[0]
+            for _error in errors[1:]:
+                primary.add_note("a later prepared-owner cleanup also failed")
+            raise primary
+
+    def __enter__(self) -> "PreparedProductionCampaign":
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException:
+            if error is None:
+                raise
+            error.add_note("prepared production campaign cleanup also failed")
+
+
+def _load_hyphenated_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        fail("production preflight dependency cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class SystemProductionPreparationRuntime:
+    """Fixed-path implementation composed exclusively from existing read-only APIs."""
+
+    def __init__(self) -> None:
+        import sq8_full_campaign_identity as identity
+        import sq8_full_campaign_operational as operational
+        import sq8_full_campaign_prepare as prepare
+        import sq8_full_campaign_production as production
+        import sq8_full_campaign_resource as resource
+
+        self.identity_module = identity
+        self.operational_module = operational
+        self.prepare_module = prepare
+        self.production_module = production
+        self.resource_module = resource
+        self.settings = production.production_preflight_settings()
+        self.collector = _load_hyphenated_module(
+            "_sq8_full_campaign_preflight_collector",
+            TOOLS_DIR / "collect-sq8-openwebui-release.py",
+        )
+        self.validator = _load_hyphenated_module(
+            "_sq8_full_campaign_preflight_validator",
+            TOOLS_DIR / "validate-sq8-openwebui-release.py",
+        )
+
+    def validate_request(self, request: ProductionPreparationRequest) -> None:
+        if not isinstance(request, ProductionPreparationRequest):
+            fail("production preparation request type differs")
+        if (
+            len(request.expected_commit) != 40
+            or any(value not in "0123456789abcdef" for value in request.expected_commit)
+            or len(request.expected_worker_binary_sha256) != 64
+            or any(
+                value not in "0123456789abcdef"
+                for value in request.expected_worker_binary_sha256
+            )
+            or not request.run_id
+            or len(request.run_id) > 128
+        ):
+            fail("production preparation anchor or run ID differs")
+        _validate_final_destination(request.final_path)
+
+    def acquire_lock(self) -> CampaignLockOwner:
+        return CampaignLockOwner.acquire(
+            self.production_module.canonical_campaign_lock_path()
+        )
+
+    def capture_git_anchor(self, expected_commit: str) -> Any:
+        return self.production_module.GitAnchor.capture(
+            self.settings, expected_commit=expected_commit
+        )
+
+    def create_head_tools(self, anchor: Any) -> Any:
+        return self.production_module.HeadPromotionToolSnapshotOwner.create(
+            self.settings, anchor
+        )
+
+    def validate_promotion(self, anchor: Any, tools: Any) -> dict[str, Any]:
+        return self.production_module.run_pinned_full_promotion_validation(
+            self.settings, anchor, tools
+        )
+
+    def snapshot_api_key(self, path: Path) -> bytes:
+        return snapshot_api_secret(path)
+
+    def snapshot_token(self, path: Path) -> bytes:
+        return snapshot_openwebui_token(path)
+
+    def create_secret_owner(self, api_key: bytes, token: bytes) -> CampaignSecretOwner:
+        return CampaignSecretOwner.create(
+            api_key, token, parent=self.settings.private_runtime_parent
+        )
+
+    def build_identity(
+        self,
+        request: ProductionPreparationRequest,
+        anchor: Any,
+        promotion: dict[str, Any],
+        guard: CampaignSecretGuard,
+    ) -> Any:
+        return self.prepare_module.build_production_identity_preflight(
+            anchor,
+            promotion,
+            expected_worker_binary_sha256=request.expected_worker_binary_sha256,
+            captured_utc=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            forbidden_values=guard.secrets,
+            identity_probe=self.identity_module.SystemIdentityProbe(),
+            independent_validator=self.validator,
+        )
+
+    def discover_container(self) -> Any:
+        commands = self.operational_module.BoundedReadOnlyCommandReader(
+            self.operational_module.production_container_discovery_commands()
+        )
+        return self.operational_module.discover_production_openwebui_container(commands)
+
+    def run_operational(self, identity: Any, container: Any) -> Any:
+        expectation = self.prepare_module.build_operational_expectation(
+            identity.live_identity, container_id=container.container_id
+        )
+        commands = self.operational_module.BoundedReadOnlyCommandReader(
+            self.operational_module.production_read_only_commands(expectation)
+        )
+        dependencies = self.operational_module.OperationalDependencies(
+            commands=commands,
+            http=self.operational_module.BoundedHttpReader(
+                frozenset({expectation.openwebui_health_url})
+            ),
+            gateway_http=self.operational_module.ProductionGatewayNamespaceReader(),
+            observer_paths=self.operational_module.OsObserverPathReader(),
+            gpu=self.operational_module.load_worker_acceptance_gpu_reader(commands),
+            monotonic_ns=time.monotonic_ns,
+        )
+        return self.operational_module.run_operational_preflight(
+            expectation, dependencies
+        )
+
+    def build_resource(
+        self,
+        request: ProductionPreparationRequest,
+        identity: Any,
+        guard: CampaignSecretGuard,
+    ) -> Any:
+        started_utc = identity.identity_artifacts.environment["captured_utc"]
+        return self.resource_module.build_resource_contract(
+            identity.identity_artifacts,
+            identity.independent_identity,
+            self.validator,
+            run_id=request.run_id,
+            started_utc=started_utc,
+            negative_case_type=self.collector.NegativeCase,
+            resource_config_type=self.collector.ResourceSegmentConfig,
+            forbidden_values=guard.secrets,
+        )
+
+    def build_config(
+        self, request: ProductionPreparationRequest, identity: Any, resource: Any
+    ) -> CampaignConfig:
+        del resource
+        boot_id = identity.identity_artifacts.environment["host"]["boot_id"]
+        return CampaignConfig(
+            request.final_path,
+            os.geteuid(),
+            os.getegid(),
+            boot_id,
+            identity.service_epoch,
+        )
+
+    def revalidate_prepared(self, prepared: PreparedProductionCampaign) -> None:
+        # Promotion payload hashing is deliberately cached; all mutable live pins are
+        # checked again through identity, operational, and resource composition.
+        captured_utc = prepared.identity.identity_artifacts.environment["captured_utc"]
+        rebuilt_identity = self.prepare_module.build_production_identity_preflight(
+            prepared.git_anchor,
+            prepared.promotion,
+            expected_worker_binary_sha256=(
+                prepared.request.expected_worker_binary_sha256
+            ),
+            captured_utc=captured_utc,
+            forbidden_values=prepared.secret_guard.secrets,
+            identity_probe=self.identity_module.SystemIdentityProbe(),
+            independent_validator=self.validator,
+        )
+        if rebuilt_identity != prepared.identity:
+            fail("production identity preflight changed")
+        rebuilt_container = self.discover_container()
+        rebuilt_operational = self.run_operational(rebuilt_identity, rebuilt_container)
+        cached_operational = prepared.operational
+        if (
+            rebuilt_operational.systemd.stable_identity()
+            != cached_operational.systemd.stable_identity()
+            or rebuilt_operational.container != cached_operational.container
+            or rebuilt_operational.gpu.stable_identity()
+            != cached_operational.gpu.stable_identity()
+            or rebuilt_operational.observer_parent != cached_operational.observer_parent
+            or rebuilt_operational.gateway_ready != cached_operational.gateway_ready
+            or rebuilt_operational.openwebui_health
+            != cached_operational.openwebui_health
+        ):
+            fail("production operational preflight changed")
+        rebuilt_resource = self.build_resource(
+            prepared.request, rebuilt_identity, prepared.secret_guard
+        )
+        if rebuilt_resource != prepared.resource:
+            fail("production resource contract changed")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--production-backend",
-        action="store_true",
-        help="reserved until the production backend is explicitly wired",
-    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--preflight-only", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--expected-worker-binary-sha256", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--final-path", required=True, type=Path)
+    parser.add_argument("--api-key-file", required=True, type=Path)
+    parser.add_argument("--openwebui-token-file", required=True, type=Path)
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    build_parser().parse_args(argv)
-    print(
-        "full campaign production backend is not wired; refusing to run",
-        file=sys.stderr,
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runtime: ProductionPreparationRuntime | None = None,
+) -> int:
+    arguments = build_parser().parse_args(argv)
+    if arguments.execute:
+        print(
+            "full campaign production backend is not wired; refusing to execute",
+            file=sys.stderr,
+        )
+        return 2
+    request = ProductionPreparationRequest(
+        arguments.expected_commit,
+        arguments.expected_worker_binary_sha256,
+        arguments.run_id,
+        arguments.final_path,
+        arguments.api_key_file,
+        arguments.openwebui_token_file,
     )
-    return 2
+    try:
+        selected = SystemProductionPreparationRuntime() if runtime is None else runtime
+        with PreparedProductionCampaign.create(request, selected) as prepared:
+            prepared.revalidate()
+            report = prepared.report()
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+        return 0
+    except KeyboardInterrupt:
+        print("production preflight interrupted", file=sys.stderr)
+        return 130
+    except BaseException:
+        print("production preflight failed", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
@@ -1832,6 +2323,10 @@ __all__ = [
     "CampaignSecretGuard",
     "CampaignSecretOwner",
     "CampaignSecretScanner",
+    "PreparedProductionCampaign",
+    "ProductionPreparationRequest",
+    "ProductionPreparationRuntime",
+    "SystemProductionPreparationRuntime",
     "FinalPhaseResult",
     "FileEvidence",
     "FullCampaignError",
