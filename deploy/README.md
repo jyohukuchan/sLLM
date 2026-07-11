@@ -21,7 +21,10 @@ provider-stream-error patch with zero fuzz, checks the fixed post-patch SHA256,
 and compiles the result. Existing connections and the external `open-webui`
 volume are preserved. Its session signing key is mounted read-only from
 `/etc/ullm/openwebui-secret-key`, so a container replacement does not invalidate
-every login session.
+every login session. Automatic version checks are disabled because this
+deployment upgrades only after verifying a new pinned image digest and local
+patch hashes; this also prevents an update notification from covering the chat
+Stop control.
 
 ## Install the gateway
 
