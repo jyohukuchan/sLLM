@@ -108,6 +108,7 @@ class CampaignJournalProtocol(Protocol):
 class ResourceSegmentResultProtocol(Protocol):
     segment: str
     identity: Any
+    sampling_cases: tuple[dict[str, Any], ...]
 
 
 class ResourceAdapterProtocol(Protocol):
@@ -493,6 +494,17 @@ def _validate_resource_result(
     if result.segment != segment:
         fail("resource adapter segment result differs")
     _identity_values(result.identity)
+    try:
+        sampling_cases = result.sampling_cases
+    except AttributeError:
+        fail("resource adapter result lacks sampling cases")
+    expected_sampling_count = 20 if segment == "normal" else 0
+    if (
+        type(sampling_cases) is not tuple
+        or len(sampling_cases) != expected_sampling_count
+        or any(type(item) is not dict for item in sampling_cases)
+    ):
+        fail("resource adapter sampling result differs")
     if session.counts.get("lifecycle_probe", 0) != prior_probe_count + 1:
         fail("resource adapter did not append exactly one lifecycle probe")
 

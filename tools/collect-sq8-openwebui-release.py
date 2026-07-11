@@ -2164,6 +2164,21 @@ class ResourceSegmentResult:
     negative_requests: int
     resource_samples: int
     gpu_metrics: int
+    sampling_cases: tuple[dict[str, Any], ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ResourceRequestObservation:
+    request_id: str
+    release_observed_monotonic_ns: int
+    temperature: int | float
+    top_p: int | float
+    seed: int
+    http_status: int
+    http_outcome: str
+    release_outcome: str
+    completion_tokens: int
+    reset_complete: bool
 
 
 class ResourceSegmentCollector:
@@ -2312,7 +2327,7 @@ class ResourceSegmentCollector:
             self._validate_restart_identity(normal_identity, identity)
 
         self._capture_metric(segment, "before")
-        last_release: dict[str, Any] | None = None
+        last_release: _ResourceRequestObservation | None = None
         for index in range(1, warmups + 1):
             case_id = f"{segment}-warmup-{index:02d}"
             last_release = self._run_positive_request(
@@ -2327,12 +2342,13 @@ class ResourceSegmentCollector:
             fail("resource segment lacks warmup releases")
         assert last_release is not None
         baseline_start = max(
-            self.runtime.now_ns(), last_release["observed_monotonic_ns"]
+            self.runtime.now_ns(), last_release.release_observed_monotonic_ns
         )
         self._sample_point(segment, identity, None, None, baseline_start)
 
         negatives = {item.after_request: item for item in self.config.negative_cases}
         negative_count = 0
+        sampling_cases: list[dict[str, Any]] = []
         for index in range(1, measured + 1):
             case_id = f"{segment}-measured-{index:03d}"
             release = self._run_positive_request(
@@ -2343,11 +2359,34 @@ class ResourceSegmentCollector:
                 request_index=index,
                 measured=True,
             )
-            settle_start = max(self.runtime.now_ns(), release["observed_monotonic_ns"])
+            settle_start = max(
+                self.runtime.now_ns(), release.release_observed_monotonic_ns
+            )
             self._sample_point(segment, identity, index, release, settle_start)
+            if segment == "normal" and index in SAMPLED_NORMAL_INDICES:
+                sampling_cases.append(
+                    {
+                        "request_index": index,
+                        "temperature": release.temperature,
+                        "top_p": release.top_p,
+                        "seed": release.seed,
+                        "http_status": release.http_status,
+                        "http_outcome": release.http_outcome,
+                        "release_outcome": release.release_outcome,
+                        "completion_tokens": release.completion_tokens,
+                        "reset_complete": release.reset_complete,
+                    }
+                )
             if segment == "normal" and index in negatives:
                 self._run_negative_request(phase, identity, negatives[index])
                 negative_count += 1
+        expected_sampling_indices = (
+            tuple(sorted(SAMPLED_NORMAL_INDICES)) if segment == "normal" else ()
+        )
+        if tuple(item["request_index"] for item in sampling_cases) != (
+            expected_sampling_indices
+        ):
+            fail("resource sampling case schedule differs")
         self._capture_metric(segment, "after")
         self._completed_segments.add(segment)
         self._segment_active = False
@@ -2359,6 +2398,7 @@ class ResourceSegmentCollector:
             negative_requests=negative_count,
             resource_samples=(measured + 1) * 5,
             gpu_metrics=2,
+            sampling_cases=tuple(sampling_cases),
         )
 
     def _resource_body(self, segment: str, index: int, measured: bool) -> bytes:
@@ -2391,14 +2431,38 @@ class ResourceSegmentCollector:
         *,
         request_index: int,
         measured: bool,
-    ) -> dict[str, Any]:
+    ) -> _ResourceRequestObservation:
+        request_body = self._resource_body(segment, request_index, measured)
+        request = strict_json_object(
+            request_body,
+            "resource positive request body",
+            maximum=MAX_HTTP_BODY_BYTES,
+        )
+        sampled = (
+            segment == "normal" and measured and request_index in SAMPLED_NORMAL_INDICES
+        )
+        expected_parameters: tuple[int | float, int | float, int] = (
+            (0.6, 0.95, request_index) if sampled else (0, 1, 0)
+        )
+        parameters = (
+            request.get("temperature"),
+            request.get("top_p"),
+            request.get("seed"),
+        )
+        expected_types = (float, float, int) if sampled else (int, int, int)
+        if parameters != expected_parameters or any(
+            type(value) is not expected_type
+            for value, expected_type in zip(parameters, expected_types, strict=True)
+        ):
+            fail("resource positive request sampling parameters differ")
+        temperature, top_p, seed = expected_parameters
         plan = HttpPlan(
             phase=phase,
             case_id=case_id,
             request_index=request_index,
             request_key=f"p8f-{case_id}",
             target=self.config.target,
-            body=self._resource_body(segment, request_index, measured),
+            body=request_body,
             expected_status=200,
             expect_release=True,
         )
@@ -2418,7 +2482,24 @@ class ResourceSegmentCollector:
             or release["reset_complete"] is not True
         ):
             fail("resource request release differs from length/two/reset-complete")
-        return release
+        return _ResourceRequestObservation(
+            request_id=nonempty_string(
+                release["request_id"], "resource release request ID"
+            ),
+            release_observed_monotonic_ns=integer(
+                release["observed_monotonic_ns"],
+                "resource release observed timestamp",
+                minimum=1,
+            ),
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
+            http_status=observation.status,
+            http_outcome=observation.outcome,
+            release_outcome=release["outcome"],
+            completion_tokens=release["completion_tokens"],
+            reset_complete=release["reset_complete"],
+        )
 
     def _run_negative_request(
         self, phase: str, identity: ProcessIdentity, negative: NegativeCase
@@ -2545,7 +2626,7 @@ class ResourceSegmentCollector:
         segment: str,
         identity: ProcessIdentity,
         request_index: int | None,
-        release: dict[str, Any] | None,
+        release: _ResourceRequestObservation | None,
         settle_start: int,
     ) -> None:
         prior_sample: int | None = None
@@ -2566,14 +2647,12 @@ class ResourceSegmentCollector:
                 "segment": segment,
                 "phase": "baseline" if release is None else "post_release",
                 "request_index": request_index,
-                "request_id": None if release is None else release["request_id"],
-                "release_outcome": None if release is None else release["outcome"],
+                "request_id": None if release is None else release.request_id,
+                "release_outcome": None if release is None else release.release_outcome,
                 "release_observed_monotonic_ns": None
                 if release is None
-                else release["observed_monotonic_ns"],
-                "reset_complete": None
-                if release is None
-                else release["reset_complete"],
+                else release.release_observed_monotonic_ns,
+                "reset_complete": None if release is None else release.reset_complete,
                 "idle_settle_started_monotonic_ns": settle_start,
                 "sample_index": sample_index,
                 "sample_monotonic_ns": capture.sample_monotonic_ns,

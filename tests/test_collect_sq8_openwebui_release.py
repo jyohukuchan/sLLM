@@ -904,6 +904,45 @@ class CollectorTestCase(unittest.TestCase):
             self.assertEqual(result.negative_requests, 3)
             self.assertEqual(result.resource_samples, 505)
             self.assertEqual(result.gpu_metrics, 2)
+            expected_sampling_cases = tuple(
+                {
+                    "request_index": index,
+                    "temperature": 0.6,
+                    "top_p": 0.95,
+                    "seed": index,
+                    "http_status": 200,
+                    "http_outcome": "eof",
+                    "release_outcome": "length",
+                    "completion_tokens": 2,
+                    "reset_complete": True,
+                }
+                for index in range(5, 101, 5)
+            )
+            self.assertEqual(result.sampling_cases, expected_sampling_cases)
+            self.assertTrue(
+                all(
+                    type(case["temperature"]) is float and type(case["top_p"]) is float
+                    for case in result.sampling_cases
+                )
+            )
+            sampled_plans = {
+                plan.request_index: json.loads(plan.body)
+                for plan in runtime.plans
+                if plan.case_id.startswith("normal-measured-")
+                and plan.request_index in COLLECTOR.SAMPLED_NORMAL_INDICES
+            }
+            self.assertEqual(tuple(sorted(sampled_plans)), tuple(range(5, 101, 5)))
+            self.assertEqual(
+                tuple(
+                    (
+                        sampled_plans[index]["temperature"],
+                        sampled_plans[index]["top_p"],
+                        sampled_plans[index]["seed"],
+                    )
+                    for index in sorted(sampled_plans)
+                ),
+                tuple((0.6, 0.95, index) for index in range(5, 101, 5)),
+            )
             self.assertEqual(runtime.http_count, 113)
             self.assertEqual(runtime.max_active, 1)
             self.assertFalse(runtime.restarted)
@@ -963,6 +1002,7 @@ class CollectorTestCase(unittest.TestCase):
             self.assertEqual(result.measured_requests, 20)
             self.assertEqual(result.negative_requests, 0)
             self.assertEqual(result.resource_samples, 105)
+            self.assertEqual(result.sampling_cases, ())
             self.assertEqual(runtime.http_count, 30)
             self.assertEqual(runtime.max_active, 1)
             self.assertFalse(runtime.closed)
@@ -1013,6 +1053,7 @@ class CollectorTestCase(unittest.TestCase):
         try:
             result = component.collect_restart(normal_identity)
             self.assertEqual(result.identity.gateway_pid, 2200)
+            self.assertEqual(result.sampling_cases, ())
             self.assertEqual(runtime.http_count, 30)
             self.assertEqual(resource.line_count, 107)
             self.assertEqual(journal.raw_writer.line_count, 0)

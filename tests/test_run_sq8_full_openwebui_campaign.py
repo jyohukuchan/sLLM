@@ -130,10 +130,21 @@ class Identity:
     n_restarts: int
 
 
-@dataclasses.dataclass(frozen=True)
-class SegmentResult:
-    segment: str
-    identity: Identity
+def sampling_cases():
+    return tuple(
+        {
+            "request_index": index,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "seed": index,
+            "http_status": 200,
+            "http_outcome": "eof",
+            "release_outcome": "length",
+            "completion_tokens": 2,
+            "reset_complete": True,
+        }
+        for index in range(5, 101, 5)
+    )
 
 
 def hook(record_type: str, phase: str, case_id: str, **fields):
@@ -154,7 +165,7 @@ class FakeResourceAdapter:
         self.journal = journal
         self.closed = False
 
-    def _collect(self, segment: str, identity: Identity) -> SegmentResult:
+    def _collect(self, segment: str, identity: Identity):
         self.backend._maybe_fail(f"resource_{segment}")
         self.backend.calls.append(f"resource:{segment}")
         phase = f"resource_{segment}"
@@ -189,7 +200,17 @@ class FakeResourceAdapter:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        return SegmentResult(segment, identity)
+        normal = segment == "normal"
+        return COLLECTOR.ResourceSegmentResult(
+            segment=segment,
+            identity=identity,
+            warmup_requests=10,
+            measured_requests=100 if normal else 20,
+            negative_requests=3 if normal else 0,
+            resource_samples=505 if normal else 105,
+            gpu_metrics=2,
+            sampling_cases=sampling_cases() if normal else (),
+        )
 
     def collect_normal(self, *, expected_identity=None):
         assert expected_identity is None
@@ -552,6 +573,14 @@ class FakeRenderer:
 
     def render(self, context):
         self.calls.append("render")
+        assert isinstance(
+            context.evidence.resource_normal, COLLECTOR.ResourceSegmentResult
+        )
+        assert context.evidence.resource_normal.sampling_cases == sampling_cases()
+        assert isinstance(
+            context.evidence.resource_restart, COLLECTOR.ResourceSegmentResult
+        )
+        assert context.evidence.resource_restart.sampling_cases == ()
         return {
             relative: (b"summary\n" if relative.endswith(".md") else b"{}\n")
             for relative in ORCHESTRATOR.DERIVED_ARTIFACTS
@@ -701,6 +730,24 @@ class FullCampaignOrchestratorTests(unittest.TestCase):
             (final / "browser/post-header-failure.png").read_bytes(),
             backend.failure_png.read_bytes(),
         )
+
+    def test_resource_result_requires_explicit_sampling_cases(self):
+        result = types.SimpleNamespace(
+            segment="normal",
+            identity=Identity(
+                "/system.slice/ullm-openai.service", 1001, 10001, 1002, 10002, 2
+            ),
+        )
+        session = types.SimpleNamespace(counts={"lifecycle_probe": 1})
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "lacks sampling cases"
+        ):
+            ORCHESTRATOR._validate_resource_result(
+                session,
+                result,
+                segment="normal",
+                prior_probe_count=0,
+            )
 
     def test_phase_failure_rolls_back_stage_and_work(self):
         with self.assertRaisesRegex(RuntimeError, "injected stop failure"):
