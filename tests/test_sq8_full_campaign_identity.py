@@ -507,7 +507,12 @@ class FakeProbe:
 
 class FullCampaignIdentityTests(unittest.TestCase):
     def test_source_contract_has_exact_unique_group_coverage(self) -> None:
-        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 69)
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 70)
+        self.assertEqual(
+            IDENTITY.SOURCE_ROLE_PATHS["campaign_backend"],
+            "tools/sq8_full_campaign_backend.py",
+        )
+        self.assertIn("campaign_backend", IDENTITY.SOURCE_GROUPS["campaign"])
         self.assertEqual(
             IDENTITY.SOURCE_GROUPS["all"], tuple(IDENTITY.SOURCE_ROLE_PATHS)
         )
@@ -537,6 +542,11 @@ class FullCampaignIdentityTests(unittest.TestCase):
         missing = dict(IDENTITY.SOURCE_GROUPS)
         missing["all"] = missing["all"][:-1]
         mutations.append(missing)
+        missing_backend = dict(IDENTITY.SOURCE_GROUPS)
+        missing_backend["campaign"] = tuple(
+            role for role in missing_backend["campaign"] if role != "campaign_backend"
+        )
+        mutations.append(missing_backend)
         unclassified = dict(IDENTITY.SOURCE_GROUPS)
         unclassified["fixture"] = tuple(
             role for role in unclassified["fixture"] if role != "fixture_ttft_p3584"

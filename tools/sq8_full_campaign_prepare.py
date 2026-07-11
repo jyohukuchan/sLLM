@@ -73,7 +73,7 @@ AMD_SMI_TOOL = "26.2.2+e1a6bc5663"
 AMD_SMI_LIBRARY = "26.2.2"
 ROCM_VERSION = "7.2.1"
 
-EXPECTED_SOURCE_COUNT = 69
+EXPECTED_SOURCE_COUNT = 70
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -421,7 +421,7 @@ def _validate_artifact_sources(artifacts: identity.IdentityArtifacts) -> str:
         or type(all_sha) is not str
         or SHA256_RE.fullmatch(all_sha) is None
     ):
-        fail("69-source identity artifact contract differs")
+        fail("70-source identity artifact contract differs")
     assert isinstance(all_sha, str)
     return all_sha
 

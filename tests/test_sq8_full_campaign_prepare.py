@@ -330,7 +330,7 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
         self.assertEqual(
             IDENTITY.SOURCE_ROLE_PATHS, VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS
         )
-        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 69)
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 70)
         self.assertEqual(IDENTITY.HIP_GUARDS, VALIDATOR.HIP_GUARDS)
         self.assertEqual(IDENTITY.UPSTREAM_MODEL_ID, VALIDATOR.UPSTREAM_MODEL_ID)
         self.assertEqual(IDENTITY.SERVED_MODEL_ID, VALIDATOR.SERVED_MODEL_ID)
@@ -378,7 +378,7 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
         self.assertEqual(live_expectation.hardware.amd_smi_library, "26.2.2")
         self.assertEqual(live_expectation.hardware.rocm_version, "7.2.1")
 
-    def test_build_composes_69_sources_and_independent_validation(self) -> None:
+    def test_build_composes_70_sources_and_independent_validation(self) -> None:
         anchor = FakeAnchor()
         validator = FakeIndependentValidator()
         result = self.run_build(anchor=anchor, validator=validator)
@@ -508,7 +508,7 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
         source_rejection = FakeIndependentValidator()
         source_rejection.source_error = True
         source_drift = FakeIndependentValidator()
-        source_drift.source_count = 67
+        source_drift.source_count = 69
         for label, validator in (
             ("identity", identity_rejection),
             ("source", source_rejection),

@@ -2811,7 +2811,12 @@ class CampaignIdentityValidationTest(unittest.TestCase):
         )
 
     def test_source_contract_rejects_unknown_duplicate_and_missing_roles(self) -> None:
-        self.assertEqual(len(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS), 69)
+        self.assertEqual(len(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS), 70)
+        self.assertEqual(
+            VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS["campaign_backend"],
+            "tools/sq8_full_campaign_backend.py",
+        )
+        self.assertIn("campaign_backend", VALIDATOR.EXPECTED_SOURCE_GROUPS["campaign"])
         VALIDATOR._validate_identity_source_contract()
         duplicate_paths = dict(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS)
         duplicate_paths["campaign_views"] = duplicate_paths["campaign_renderer"]
@@ -2830,6 +2835,11 @@ class CampaignIdentityValidationTest(unittest.TestCase):
         missing = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
         missing["all"] = missing["all"][:-1]
         mutations.append(missing)
+        missing_backend = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
+        missing_backend["campaign"] = tuple(
+            role for role in missing_backend["campaign"] if role != "campaign_backend"
+        )
+        mutations.append(missing_backend)
         unclassified = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
         unclassified["fixture"] = tuple(
             role for role in unclassified["fixture"] if role != "fixture_ttft_p3584"
@@ -2863,6 +2873,16 @@ class CampaignIdentityValidationTest(unittest.TestCase):
                 for item in value["sources"]
                 if item["role"] == "fixture_ttft_p0032"
             ).__setitem__("sha256", "0" * 64),
+            lambda value: value["sources"].remove(
+                next(
+                    item
+                    for item in value["sources"]
+                    if item["role"] == "campaign_backend"
+                )
+            ),
+            lambda value: next(
+                item for item in value["sources"] if item["role"] == "campaign_backend"
+            ).__setitem__("sha256", "0" * 64),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -2889,7 +2909,7 @@ class CampaignIdentityValidationTest(unittest.TestCase):
 
     def test_trusted_git_blob_rejects_a_recorded_worktree_substitution(self) -> None:
         repo, commit = self.build_source_checkout()
-        role = "gate_api_contract"
+        role = "campaign_backend"
         path = repo / VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS[role]
         replacement = b"substituted gate source\n"
         path.write_bytes(replacement)
@@ -4406,7 +4426,7 @@ class FullReleaseValidationTest(unittest.TestCase):
             environment_sha256="c" * 64,
             model_identity_sha256="d" * 64,
         )
-        source = VALIDATOR.SourceCheckoutData(GIT_COMMIT, 69, "e" * 64)
+        source = VALIDATOR.SourceCheckoutData(GIT_COMMIT, 70, "e" * 64)
         resources = VALIDATOR.ResourceResult({}, 610, 4)
         latency = {"request_count": 72}
         reconstructed_resource = {
@@ -4483,7 +4503,7 @@ class FullReleaseValidationTest(unittest.TestCase):
         report = json.loads(report_raw)
         self.assertEqual(report["release_status"], "complete")
         self.assertTrue(report["full_campaign_validated"])
-        self.assertEqual(report["gate_details"]["source_checkout"]["source_count"], 69)
+        self.assertEqual(report["gate_details"]["source_checkout"]["source_count"], 70)
 
     def test_source_failure_never_creates_validation_file(self) -> None:
         EvidenceBuilder(self.root).build()
