@@ -18,7 +18,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Iterable, Mapping, NoReturn, Protocol, Sequence, cast
+from typing import Any, Callable, Iterable, Mapping, NoReturn, Protocol, Sequence
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -1821,8 +1821,6 @@ def run_full_campaign(
             _checkpoint(journal, backend, config, "latency")
 
             final = backend.final(bundle.component_directory("final"))
-            backend.close()
-            cleanup.backend_closed = True
             final_probe_fields = _validate_ready_probe_record(
                 final.lifecycle_probe_record,
                 phase="final",
@@ -1874,6 +1872,8 @@ def run_full_campaign(
             resource.commit()
             session.writer.commit()
             journal.seal(final_cursor, _deadline(backend, config))
+            backend.close()
+            cleanup.backend_closed = True
             for relative in (
                 "raw-session-results.jsonl",
                 "soak-resources.raw.jsonl",
@@ -2205,11 +2205,8 @@ class SystemProductionPreparationRuntime:
         )
 
     def validate_promotion(self, anchor: Any, tools: Any) -> dict[str, Any]:
-        return cast(
-            dict[str, Any],
-            self.production_module.run_pinned_full_promotion_validation(
-                self.settings, anchor, tools
-            ),
+        return self.production_module.run_pinned_full_promotion_validation(
+            self.settings, anchor, tools
         )
 
     def snapshot_api_key(self, path: Path) -> bytes:

@@ -267,6 +267,8 @@ class FakeBackend:
             raise RuntimeError(f"injected {phase} failure")
 
     def now_ns(self):
+        if self.closed:
+            raise RuntimeError("backend is closed")
         return time.monotonic_ns()
 
     def scan_evidence(self, raw, label):
@@ -1177,6 +1179,12 @@ class FullCampaignOrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(backend.calls[-2:], ["render", "validate"])
         self.assertIn("journal:seal", backend.calls)
+        self.assertLess(
+            backend.calls.index("journal:seal"), backend.calls.index("backend:close")
+        )
+        self.assertLess(
+            backend.calls.index("backend:close"), backend.calls.index("render")
+        )
         self.assertTrue(backend.source.closed)
         self.assertFalse(backend.observer_open)
 
