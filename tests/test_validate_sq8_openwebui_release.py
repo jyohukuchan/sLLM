@@ -4,15 +4,18 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from collections import Counter
 from collections.abc import Callable
 from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -1544,7 +1547,7 @@ class FullCampaignOrderTest(unittest.TestCase):
         self.assertEqual(browser.result_text_utf8_bytes, len(text_raw))
         self.assertEqual(browser.result_text_sha256, sha256_bytes(text_raw))
 
-        command_raw = b"kill --signal KILL -- 1201"
+        command_raw = b"signal.pidfd_send_signal"
         fault = VALIDATOR._validate_fault_injection_data(
             {
                 "injection": "post_header_worker_kill",
@@ -1561,6 +1564,21 @@ class FullCampaignOrderTest(unittest.TestCase):
         )
         self.assertEqual(fault.command_utf8_bytes, len(command_raw))
         self.assertEqual(fault.command_sha256, sha256_bytes(command_raw))
+        with self.assertRaises(VALIDATOR.ValidationError):
+            VALIDATOR._validate_fault_injection_data(
+                {
+                    "injection": "post_header_worker_kill",
+                    "target_pid": 1201,
+                    "target_starttime_ticks": 10_001,
+                    "signal": "SIGKILL",
+                    "command": "kill --signal KILL -- 1201",
+                    "started_monotonic_ns": 30,
+                    "completed_monotonic_ns": 40,
+                },
+                "post_header_failure",
+                "post-header-failure",
+                "fault compact test",
+            )
 
     def test_browser_selector_is_bounded_before_compact_retention(self) -> None:
         record = {
@@ -2531,6 +2549,148 @@ class ApiContractHttpValidationTest(unittest.TestCase):
         self.assert_invalid("body chunk is empty", records)
 
 
+class ApiContractQuietCheckValidationTest(unittest.TestCase):
+    def fixture(self):
+        labels = [case.case_id for case in VALIDATOR.API_CONTRACT_CASES] + [
+            "http-client-shutdown",
+            "post-observer-close",
+            "final-readiness-and-identity",
+        ]
+        observations = tuple(
+            VALIDATOR.ApiJournalObservationData(
+                phase="api_contract",
+                case_id=f"api-journal-{index + 1:02d}",
+                observation_index=index,
+                journal_cursor=f"api-cursor-{index + 1:02d}",
+                journal_monotonic_usec=100 + index,
+                journal_pid=1200,
+                message_utf8_bytes=len(f"message-{index}".encode()),
+                message_sha256=sha256_bytes(f"message-{index}".encode()),
+            )
+            for index in range(13)
+        )
+        checks = tuple(
+            VALIDATOR.LifecycleQuietCheckData(
+                phase="api_contract",
+                case_id=label,
+                quiet_sequence=index,
+                label=label,
+                checked_monotonic_ns=200_000 + index,
+                observer_open=index <= 10,
+                observer_event_count=0,
+                new_journal_record_count=1,
+                journal_record_count=index + 1,
+                journal_cursor=observations[index].journal_cursor,
+            )
+            for index, label in enumerate(labels)
+        )
+        http_results = tuple(
+            SimpleNamespace(
+                phase="api_contract",
+                case_id=case.case_id,
+                response_end_monotonic_ns=150_000 + index,
+            )
+            for index, case in enumerate(VALIDATOR.API_CONTRACT_CASES)
+        )
+        return checks, observations, http_results
+
+    def test_exact_quiet_schedule_is_bound_to_complete_journal_observations(self):
+        checks, observations, http_results = self.fixture()
+        self.assertEqual(
+            VALIDATOR.validate_api_contract_quiet_checks(
+                checks, observations, http_results, 1200
+            ),
+            checks,
+        )
+
+    def test_quiet_schedule_rejects_missing_or_rebound_evidence(self):
+        checks, observations, http_results = self.fixture()
+        mutations = {
+            "missing-check": checks[:-1],
+            "rebound-cursor": checks[:5]
+            + (dataclasses.replace(checks[5], journal_cursor="api-cursor-01"),)
+            + checks[6:],
+            "regressed-count": checks[:-1]
+            + (
+                dataclasses.replace(
+                    checks[-1],
+                    journal_record_count=12,
+                    new_journal_record_count=0,
+                    journal_cursor=observations[11].journal_cursor,
+                ),
+            ),
+            "early-check": (
+                dataclasses.replace(checks[0], checked_monotonic_ns=99_999),
+            )
+            + checks[1:],
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name), self.assertRaises(VALIDATOR.ValidationError):
+                VALIDATOR.validate_api_contract_quiet_checks(
+                    mutated, observations, http_results, 1200
+                )
+
+    def test_global_journal_requires_the_complete_contiguous_observation_span(self):
+        checks, observations, _http_results = self.fixture()
+
+        def journal_record(cursor, monotonic, message):
+            return {
+                "__CURSOR": cursor,
+                "__MONOTONIC_TIMESTAMP": str(monotonic),
+                "_BOOT_ID": BOOT_ID,
+                "_PID": "1200",
+                "_SYSTEMD_UNIT": "ullm-openai.service",
+                "PRIORITY": "6",
+                "MESSAGE": message,
+            }
+
+        records = [
+            journal_record(
+                observation.journal_cursor,
+                observation.journal_monotonic_usec,
+                f"message-{index}",
+            )
+            for index, observation in enumerate(observations)
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "service-journal.raw.jsonl"
+
+            def write(values):
+                path.write_text(
+                    "".join(compact_json(value) + "\n" for value in values),
+                    encoding="utf-8",
+                )
+
+            write(records)
+            VALIDATOR.validate_service_journal(
+                root,
+                {},
+                BOOT_ID,
+                observations[-1].journal_cursor,
+                checks,
+                observations,
+            )
+
+            interrupted = list(records)
+            interrupted.insert(
+                5,
+                journal_record("uncopied-api-cursor", 104, "uncopied API record"),
+            )
+            write(interrupted)
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "interrupts or reorders"
+            ):
+                VALIDATOR.validate_service_journal(
+                    root,
+                    {},
+                    BOOT_ID,
+                    observations[-1].journal_cursor,
+                    checks,
+                    observations,
+                )
+
+
 class CampaignIdentityValidationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -3066,6 +3226,38 @@ class ValidatorTest(unittest.TestCase):
             GIT_COMMIT,
             WORKER_SHA256,
         )
+
+    def test_optional_full_identity_crosschecks_header_probe_and_run_end(self) -> None:
+        VALIDATOR.validate_bundle_layout(self.root)
+        matrix = VALIDATOR.validate_matrix(self.root)
+        identity = mock.create_autospec(VALIDATOR.IdentityData, instance=True)
+        VALIDATOR.validate_session(
+            self.root,
+            matrix,
+            GIT_COMMIT,
+            WORKER_SHA256,
+            identity,
+        )
+        identity.validate_session_header.assert_called_once()
+        identity.validate_header_source_inputs.assert_called_once()
+        identity.validate_initial_probe.assert_called_once()
+        identity.validate_run_end.assert_called_once()
+
+        rejected = mock.create_autospec(VALIDATOR.IdentityData, instance=True)
+        rejected.validate_session_header.side_effect = VALIDATOR.ValidationError(
+            "injected header identity rejection"
+        )
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "injected header identity rejection"
+        ):
+            VALIDATOR.validate_session(
+                self.root,
+                matrix,
+                GIT_COMMIT,
+                WORKER_SHA256,
+                rejected,
+            )
+        rejected.validate_header_source_inputs.assert_not_called()
 
     def assert_invalid(self, text: str):
         with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
@@ -3910,7 +4102,7 @@ class ValidatorTest(unittest.TestCase):
         refresh_matrix_and_sums(self.root)
         self.assert_invalid("JSON object|failed to decode")
 
-    def test_cli_requires_explicit_phase1_and_never_writes_final_validation(self):
+    def test_cli_defaults_to_full_validation_and_phase1_remains_explicit(self):
         command = [
             sys.executable,
             str(VALIDATOR_PATH),
@@ -3922,7 +4114,9 @@ class ValidatorTest(unittest.TestCase):
         ]
         completed = subprocess.run(command, text=True, capture_output=True, check=False)
         self.assertEqual(completed.returncode, 1)
-        self.assertIn("full P8-F release gates are not implemented", completed.stderr)
+        self.assertIn(
+            "environment.json is not canonical identity JSON", completed.stderr
+        )
         self.assertFalse((self.root / "release-validation.json").exists())
         phase1 = subprocess.run(
             command + ["--phase1-only"], text=True, capture_output=True, check=False
@@ -3930,6 +4124,384 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(phase1.returncode, 0, phase1.stderr)
         self.assertEqual(json.loads(phase1.stdout)["release_status"], "incomplete")
         self.assertFalse((self.root / "release-validation.json").exists())
+
+
+class FullReleaseValidationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "bundle"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def derived_fixture(self) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        self.root.mkdir(parents=True, exist_ok=True)
+        front_documents = {
+            "api-contract-results.json": {
+                "schema_version": "synthetic.api.v1",
+                "case_count": 12,
+            },
+            "sampling-results.json": {
+                "schema_version": "synthetic.sampling.v1",
+                "case_count": 20,
+            },
+            "cancel-results.json": {
+                "schema_version": "synthetic.cancel.v1",
+                "case_count": 5,
+            },
+            "openwebui-smoke.json": {
+                "schema_version": "synthetic.smoke.v1",
+                "case_count": 22,
+            },
+        }
+        front = SimpleNamespace(
+            browser_soak_cases=[
+                {"case_id": f"chat-{index:02d}"} for index in range(1, 21)
+            ],
+            canonical_bytes={
+                name: VALIDATOR.independent_canonical_json_bytes(value)
+                for name, value in front_documents.items()
+            },
+        )
+        latency = {
+            "schema_version": "synthetic.latency.v1",
+            "request_count": 72,
+        }
+        resource = {
+            "resource_sample_count": 610,
+            "gpu_metric_count": 4,
+            "segments": {"normal": {}, "restart": {}},
+        }
+        soak = {
+            "schema_version": VALIDATOR.SOAK_RESULTS_SCHEMA,
+            "browser": {"chat_count": 20, "cases": front.browser_soak_cases},
+            **resource,
+        }
+        expected = {
+            "sampling-results.json": front.canonical_bytes["sampling-results.json"],
+            "cancel-results.json": front.canonical_bytes["cancel-results.json"],
+            "prefill-latency-results.json": VALIDATOR.independent_canonical_json_bytes(
+                latency
+            ),
+            "api-contract-results.json": front.canonical_bytes[
+                "api-contract-results.json"
+            ],
+            "openwebui-smoke.json": front.canonical_bytes["openwebui-smoke.json"],
+            "soak-results.json": VALIDATOR.independent_canonical_json_bytes(soak),
+        }
+        for relative, raw in expected.items():
+            (self.root / relative).write_bytes(raw)
+        return front, latency, resource
+
+    def test_six_views_are_reconstructed_in_fixed_product_order(self) -> None:
+        front, latency, resource = self.derived_fixture()
+        with (
+            mock.patch.object(
+                VALIDATOR, "reconstruct_front_views", return_value=front
+            ) as front_reconstruction,
+            mock.patch.object(
+                VALIDATOR, "reconstruct_latency_results", return_value=latency
+            ),
+            mock.patch.object(
+                VALIDATOR,
+                "reconstruct_soak_resource_results",
+                return_value=resource,
+            ),
+        ):
+            evidence, observed_latency, observed_resource = (
+                VALIDATOR._validate_full_derived_views(
+                    self.root,
+                    SimpleNamespace(),
+                    forbidden_values=(b"never-present-secret",),
+                )
+            )
+        self.assertEqual(tuple(evidence), VALIDATOR.FULL_DERIVED_VIEW_PATHS)
+        self.assertEqual(observed_latency, latency)
+        self.assertEqual(observed_resource, resource)
+        self.assertEqual(
+            front_reconstruction.call_args.kwargs["forbidden_values"],
+            (b"never-present-secret",),
+        )
+
+    def test_modified_derived_view_and_forbidden_cleartext_are_rejected(self) -> None:
+        front, latency, resource = self.derived_fixture()
+        (self.root / "cancel-results.json").write_bytes(b"{}\n")
+        with (
+            mock.patch.object(VALIDATOR, "reconstruct_front_views", return_value=front),
+            mock.patch.object(
+                VALIDATOR, "reconstruct_latency_results", return_value=latency
+            ),
+            mock.patch.object(
+                VALIDATOR,
+                "reconstruct_soak_resource_results",
+                return_value=resource,
+            ),
+            self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "cancel-results.json differs"
+            ),
+        ):
+            VALIDATOR._validate_full_derived_views(
+                self.root, SimpleNamespace(), forbidden_values=()
+            )
+
+        self.derived_fixture()
+        leaked_latency = dict(latency, diagnostic="semantic-secret")
+        with (
+            mock.patch.object(VALIDATOR, "reconstruct_front_views", return_value=front),
+            mock.patch.object(
+                VALIDATOR,
+                "reconstruct_latency_results",
+                return_value=leaked_latency,
+            ),
+            mock.patch.object(
+                VALIDATOR,
+                "reconstruct_soak_resource_results",
+                return_value=resource,
+            ),
+            self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "forbidden semantic cleartext"
+            ),
+        ):
+            VALIDATOR._validate_full_derived_views(
+                self.root,
+                SimpleNamespace(),
+                forbidden_values=(b"semantic-secret",),
+            )
+
+    def test_validation_file_is_mode_0600_exclusive_and_failure_cleans_up(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        raw = VALIDATOR.independent_canonical_json_bytes(
+            {"schema_version": VALIDATOR.FULL_REPORT_SCHEMA}
+        )
+        evidence = VALIDATOR._write_release_validation(self.root, raw)
+        path = self.root / VALIDATOR.RELEASE_VALIDATION_FILE
+        self.assertEqual(evidence, VALIDATOR.FileEvidence(len(raw), sha256_bytes(raw)))
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(path.stat().st_uid, self.root.stat().st_uid)
+        self.assertEqual(path.stat().st_gid, self.root.stat().st_gid)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "exclusively create"):
+            VALIDATOR._write_release_validation(self.root, b'{"changed":true}\n')
+        self.assertEqual(path.read_bytes(), raw)
+
+        path.unlink()
+        with (
+            mock.patch.object(
+                VALIDATOR.os, "write", side_effect=OSError("injected write failure")
+            ),
+            self.assertRaisesRegex(VALIDATOR.ValidationError, "exclusively create"),
+        ):
+            VALIDATOR._write_release_validation(self.root, raw)
+        self.assertFalse(path.exists())
+
+        with (
+            mock.patch.object(
+                VALIDATOR.os,
+                "write",
+                side_effect=KeyboardInterrupt("injected interruption"),
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            VALIDATOR._write_release_validation(self.root, raw)
+        self.assertFalse(path.exists())
+
+    def test_summary_is_independently_exact_and_scans_forbidden_values(self) -> None:
+        raw = VALIDATOR._independent_summary(
+            RUN_ID,
+            SCHEDULE,
+            forbidden_values=(b"not-present-secret",),
+        )
+        schedule_line = compact_json(SCHEDULE)
+        expected = "\n".join(
+            [
+                "# SQ8 OpenWebUI full campaign",
+                "",
+                f"Run ID: `{RUN_ID}`",
+                "",
+                f"Schedule: `{schedule_line}`",
+                "",
+                "Artifacts:",
+                *(
+                    f"- `{relative}`"
+                    for relative in sorted(
+                        VALIDATOR.BUNDLE_FILES,
+                        key=lambda value: value.encode("utf-8"),
+                    )
+                ),
+                "",
+            ]
+        ).encode("ascii")
+        self.assertEqual(raw, expected)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "forbidden cleartext"):
+            VALIDATOR._independent_summary(
+                "run-semantic-secret",
+                SCHEDULE,
+                forbidden_values=(b"semantic-secret",),
+            )
+
+    def test_orchestrator_adapter_forwards_anchors_and_forbidden_values(self) -> None:
+        repo_root = Path(self.temporary.name) / "source"
+        adapter = VALIDATOR.FullCampaignIndependentValidator(
+            expected_commit=GIT_COMMIT,
+            expected_worker_binary_sha256=WORKER_SHA256,
+            repo_root=repo_root,
+            forbidden_values=(b"api-token-secret",),
+        )
+        expected = VALIDATOR.FileEvidence(123, "f" * 64)
+        with mock.patch.object(
+            VALIDATOR, "validate_full_release", return_value=expected
+        ) as full_validation:
+            self.assertEqual(adapter.validate(self.root), expected)
+        full_validation.assert_called_once_with(
+            self.root,
+            expected_commit=GIT_COMMIT,
+            expected_worker_binary_sha256=WORKER_SHA256,
+            repo_root=repo_root,
+            forbidden_values=(b"api-token-secret",),
+        )
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "forbidden cleartext"):
+            VALIDATOR.FullCampaignIndependentValidator(
+                expected_commit=GIT_COMMIT,
+                expected_worker_binary_sha256=WORKER_SHA256,
+                forbidden_values=(b"",),
+            )
+
+    def full_dependencies(self) -> tuple[Any, Any, Any, Any, Any, Any]:
+        order = VALIDATOR.FullCampaignOrderResult(
+            phases=VALIDATOR.FULL_CAMPAIGN_PHASE_ORDER,
+            openwebui_successful_requests=20,
+            cancellation_phases=tuple(SCHEDULE["cancel_phases"]),
+            normal_gateway_pid=1200,
+            restart_gateway_pid=2200,
+            normal_worker_pid=1201,
+            restart_worker_pid=2201,
+            restart_count_before=2,
+            restart_count_after=3,
+        )
+        api = VALIDATOR.ApiContractValidationResult(
+            case_ids=tuple(case.case_id for case in VALIDATOR.API_CONTRACT_CASES),
+            request_keys=tuple(f"api-{index}" for index in range(12)),
+            statuses=tuple(
+                case.expected_status for case in VALIDATOR.API_CONTRACT_CASES
+            ),
+            cases=tuple(
+                {"case_id": case.case_id} for case in VALIDATOR.API_CONTRACT_CASES
+            ),
+        )
+        session = SimpleNamespace(
+            full_campaign_order=order,
+            api_contract=api,
+            lifecycle_quiet_checks=tuple(range(13)),
+            browser_actions=tuple(range(123)),
+        )
+        identity = SimpleNamespace(
+            expected_commit=GIT_COMMIT,
+            expected_worker_binary_sha256=WORKER_SHA256,
+            environment_sha256="c" * 64,
+            model_identity_sha256="d" * 64,
+        )
+        source = VALIDATOR.SourceCheckoutData(GIT_COMMIT, 63, "e" * 64)
+        resources = VALIDATOR.ResourceResult({}, 610, 4)
+        latency = {"request_count": 72}
+        reconstructed_resource = {
+            "resource_sample_count": 610,
+            "gpu_metric_count": 4,
+        }
+        return (
+            session,
+            identity,
+            source,
+            resources,
+            latency,
+            reconstructed_resource,
+        )
+
+    def test_full_entrypoint_requires_source_and_publishes_canonical_report(
+        self,
+    ) -> None:
+        EvidenceBuilder(self.root).build()
+        (
+            session,
+            identity,
+            source,
+            resources,
+            latency,
+            reconstructed_resource,
+        ) = self.full_dependencies()
+        derived = {
+            relative: VALIDATOR.FileEvidence(
+                (self.root / relative).stat().st_size,
+                sha256_file(self.root / relative),
+            )
+            for relative in VALIDATOR.FULL_DERIVED_VIEW_PATHS
+        }
+        summary = (self.root / "summary.md").read_bytes()
+        repo_root = Path(self.temporary.name) / "source"
+        with (
+            mock.patch.object(
+                VALIDATOR, "validate_campaign_identity", return_value=identity
+            ),
+            mock.patch.object(
+                VALIDATOR,
+                "validate_campaign_source_checkout",
+                return_value=source,
+            ) as source_validation,
+            mock.patch.object(
+                VALIDATOR, "validate_session", return_value=session
+            ) as session_validation,
+            mock.patch.object(VALIDATOR, "validate_resources", return_value=resources),
+            mock.patch.object(
+                VALIDATOR,
+                "_validate_full_derived_views",
+                return_value=(derived, latency, reconstructed_resource),
+            ),
+            mock.patch.object(VALIDATOR, "_independent_summary", return_value=summary),
+        ):
+            evidence = VALIDATOR.validate_full_release(
+                self.root,
+                expected_commit=GIT_COMMIT,
+                expected_worker_binary_sha256=WORKER_SHA256,
+                repo_root=repo_root,
+                forbidden_values=(b"not-in-report",),
+            )
+        source_validation.assert_called_once_with(identity, repo_root=repo_root)
+        self.assertIs(session_validation.call_args.args[4], identity)
+        validation_path = self.root / VALIDATOR.RELEASE_VALIDATION_FILE
+        report_raw = validation_path.read_bytes()
+        self.assertEqual(evidence.bytes, len(report_raw))
+        self.assertEqual(evidence.sha256, sha256_bytes(report_raw))
+        self.assertEqual(
+            report_raw,
+            VALIDATOR.independent_canonical_json_bytes(json.loads(report_raw)),
+        )
+        report = json.loads(report_raw)
+        self.assertEqual(report["release_status"], "complete")
+        self.assertTrue(report["full_campaign_validated"])
+        self.assertEqual(report["gate_details"]["source_checkout"]["source_count"], 63)
+
+    def test_source_failure_never_creates_validation_file(self) -> None:
+        EvidenceBuilder(self.root).build()
+        _, identity, _, _, _, _ = self.full_dependencies()
+        session_validation = mock.Mock()
+        with (
+            mock.patch.object(
+                VALIDATOR, "validate_campaign_identity", return_value=identity
+            ),
+            mock.patch.object(
+                VALIDATOR,
+                "validate_campaign_source_checkout",
+                side_effect=VALIDATOR.ValidationError("injected source rejection"),
+            ),
+            mock.patch.object(VALIDATOR, "validate_session", session_validation),
+            self.assertRaisesRegex(VALIDATOR.ValidationError, "source rejection"),
+        ):
+            VALIDATOR.validate_full_release(
+                self.root,
+                expected_commit=GIT_COMMIT,
+                expected_worker_binary_sha256=WORKER_SHA256,
+                repo_root=Path(self.temporary.name) / "source",
+            )
+        session_validation.assert_not_called()
+        self.assertFalse((self.root / VALIDATOR.RELEASE_VALIDATION_FILE).exists())
 
 
 if __name__ == "__main__":

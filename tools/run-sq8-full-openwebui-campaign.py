@@ -127,6 +127,8 @@ class ResourceAdapterProtocol(Protocol):
 
 class ApiResultProtocol(Protocol):
     http_records: tuple[dict[str, Any], ...]
+    journal_records: tuple[dict[str, Any], ...]
+    quiet_check_records: tuple[dict[str, Any], ...]
     derived_view: dict[str, Any]
     final_journal_cursor: str
 
@@ -782,6 +784,20 @@ def run_full_campaign(
             api = backend.api_contract(bundle.component_directory("api-contract"))
             for record in api.http_records:
                 _append_hook_record(session, record, expected_phase="api_contract")
+            for record in api.journal_records:
+                _append_hook_record(
+                    session,
+                    record,
+                    expected_phase="api_contract",
+                    expected_type="api_journal_observation",
+                )
+            for record in api.quiet_check_records:
+                _append_hook_record(
+                    session,
+                    record,
+                    expected_phase="api_contract",
+                    expected_type="lifecycle_quiet_check",
+                )
             api_cursor = _checkpoint(journal, backend, config, "api_contract")
             if api.final_journal_cursor != api_cursor:
                 fail("API contract journal boundary differs from the global campaign")

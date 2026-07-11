@@ -391,6 +391,8 @@ class ApiContractGateIngestTests(unittest.TestCase):
 
         self.assertIsInstance(result, ADAPTER.ApiContractIngestResult)
         self.assertEqual(len(result.http_records), 40)
+        self.assertEqual(len(result.journal_records), 13)
+        self.assertEqual(len(result.quiet_check_records), 13)
         self.assertEqual(result.final_journal_cursor, "cursor-13")
         self.assertEqual(result.derived_view["case_count"], 10)
         self.assertEqual(result.derived_view["http_record_count"], 40)
@@ -409,6 +411,29 @@ class ApiContractGateIngestTests(unittest.TestCase):
             self.assertIn(
                 record["case_id"], {case.case_id for case in GATE.FROZEN_SCHEDULE}
             )
+        expected_quiet_labels = [case.case_id for case in GATE.FROZEN_SCHEDULE] + [
+            "http-client-shutdown",
+            "post-observer-close",
+            "final-readiness-and-identity",
+        ]
+        for index, record in enumerate(result.journal_records):
+            self.assertEqual(record["record_type"], "api_journal_observation")
+            self.assertEqual(record["phase"], "api_contract")
+            self.assertEqual(record["case_id"], f"api-journal-{index + 1:02d}")
+            self.assertEqual(record["fields"]["observation_index"], index)
+            self.assertEqual(
+                record["fields"]["journal_cursor"], f"cursor-{index + 1:02d}"
+            )
+        self.assertEqual(
+            [record["case_id"] for record in result.quiet_check_records],
+            expected_quiet_labels,
+        )
+        for sequence, record in enumerate(result.quiet_check_records):
+            self.assertEqual(record["record_type"], "lifecycle_quiet_check")
+            self.assertEqual(record["phase"], "api_contract")
+            self.assertEqual(record["fields"]["quiet_sequence"], sequence)
+            self.assertEqual(record["fields"]["label"], expected_quiet_labels[sequence])
+            self.assertEqual(record["fields"]["observer_event_count"], 0)
         requests = [
             record
             for record in result.http_records

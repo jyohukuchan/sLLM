@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Independently validate the phase-1 SQ8 OpenWebUI release evidence.
+"""Independently validate SQ8 OpenWebUI release evidence.
 
-Phase 1 validates the immutable bundle, lifecycle journal, and complete resource
-measurement contract.  It deliberately does not publish release-validation.json
-or claim the browser, cancellation, API, and latency gates are complete.
+The legacy phase-1 mode validates the immutable bundle, lifecycle journal, and
+resource measurement contract without publishing a release decision.  The full
+mode additionally reconstructs every derived view from raw evidence, binds the
+recorded source tree to Git, and exclusively publishes release-validation.json.
 """
 
 from __future__ import annotations
@@ -26,7 +27,24 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, BinaryIO, Iterable, Iterator, cast
+from typing import IO, Any, BinaryIO, Iterable, Iterator, NoReturn, Sequence, cast
+
+TOOLS_DIRECTORY = Path(__file__).resolve().parent
+if os.fspath(TOOLS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, os.fspath(TOOLS_DIRECTORY))
+
+from sq8_full_campaign_bundle import FileEvidence  # noqa: E402
+from sq8_full_campaign_independent_metrics import (  # noqa: E402
+    IndependentMetricsError,
+    reconstruct_latency_results,
+    reconstruct_soak_resource_results,
+)
+from sq8_full_campaign_independent_views import (  # noqa: E402
+    IndependentViewError,
+    SOAK_RESULTS_SCHEMA,
+    canonical_json_bytes as independent_canonical_json_bytes,
+    reconstruct_front_views,
+)
 
 
 SESSION_SCHEMA = "ullm.sq8.openwebui_release.raw.v1"
@@ -34,6 +52,7 @@ RESOURCE_SCHEMA = "ullm.sq8.release_measurement.raw.v1"
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 MATRIX_SCHEMA = "ullm.sq8.openwebui_release.matrix.v1"
 PHASE1_REPORT_SCHEMA = "ullm.sq8.openwebui_release.validation.phase1.v1"
+FULL_REPORT_SCHEMA = "ullm.sq8.openwebui_release.validation.v1"
 ENVIRONMENT_SCHEMA = "ullm.sq8.full_campaign.environment.v1"
 MODEL_IDENTITY_SCHEMA = "ullm.sq8.full_campaign.model_identity.v1"
 PROMOTION_SCHEMA = "ullm.sq8_product_promotion.v1"
@@ -649,6 +668,24 @@ SESSION_FIELDS = {
         "message_sha256",
         "event",
     },
+    "api_journal_observation": {
+        "observation_index",
+        "journal_cursor",
+        "journal_monotonic_usec",
+        "journal_pid",
+        "message_utf8_bytes",
+        "message_sha256",
+    },
+    "lifecycle_quiet_check": {
+        "quiet_sequence",
+        "label",
+        "checked_monotonic_ns",
+        "observer_open",
+        "observer_event_count",
+        "new_journal_record_count",
+        "journal_record_count",
+        "journal_cursor",
+    },
     "browser_action": {
         "browser_case",
         "action_index",
@@ -818,7 +855,7 @@ class ValidationError(ValueError):
     pass
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise ValidationError(message)
 
 
@@ -3017,6 +3054,32 @@ class ApiContractValidationResult:
     cases: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class LifecycleQuietCheckData:
+    phase: str
+    case_id: str
+    quiet_sequence: int
+    label: str
+    checked_monotonic_ns: int
+    observer_open: bool
+    observer_event_count: int
+    new_journal_record_count: int
+    journal_record_count: int
+    journal_cursor: str
+
+
+@dataclass(frozen=True)
+class ApiJournalObservationData:
+    phase: str
+    case_id: str
+    observation_index: int
+    journal_cursor: str
+    journal_monotonic_usec: int
+    journal_pid: int
+    message_utf8_bytes: int
+    message_sha256: str
+
+
 @dataclass
 class SessionData:
     run_id: str
@@ -3034,6 +3097,8 @@ class SessionData:
     raw_order_projection: tuple[dict[str, Any], ...]
     http_results: tuple[HttpCompactResult, ...]
     browser_actions: tuple[BrowserActionData, ...]
+    api_journal_observations: tuple[ApiJournalObservationData, ...]
+    lifecycle_quiet_checks: tuple[LifecycleQuietCheckData, ...]
     fault_injection: FaultInjectionData | None
     full_campaign_order: FullCampaignOrderResult | None
     api_contract: ApiContractValidationResult | None
@@ -4096,6 +4161,87 @@ def validate_api_contract_http(
     )
 
 
+def validate_api_contract_quiet_checks(
+    checks: Sequence[LifecycleQuietCheckData],
+    journal_observations: Sequence[ApiJournalObservationData],
+    http_results: Sequence[HttpCompactResult],
+    expected_gateway_pid: int,
+) -> tuple[LifecycleQuietCheckData, ...]:
+    labels = [case.case_id for case in API_CONTRACT_CASES] + [
+        "http-client-shutdown",
+        "post-observer-close",
+        "final-readiness-and-identity",
+    ]
+    if len(checks) != len(labels):
+        fail("API contract lifecycle quiet-check count differs from the fixed schedule")
+    if not journal_observations:
+        fail("API contract lifecycle quiet checks lack journal observations")
+    seen_cursors: set[str] = set()
+    prior_journal_monotonic = -1
+    for index, observation in enumerate(journal_observations):
+        if (
+            observation.phase != "api_contract"
+            or observation.observation_index != index
+            or observation.case_id != f"api-journal-{index + 1:02d}"
+            or observation.journal_cursor in seen_cursors
+            or observation.journal_monotonic_usec < prior_journal_monotonic
+            or observation.journal_pid != expected_gateway_pid
+        ):
+            fail("API contract journal observation identity, order, or PID differs")
+        seen_cursors.add(observation.journal_cursor)
+        prior_journal_monotonic = observation.journal_monotonic_usec
+    api_http = {
+        result.case_id: result
+        for result in http_results
+        if result.phase == "api_contract"
+    }
+    if set(api_http) != {case.case_id for case in API_CONTRACT_CASES}:
+        fail("API contract quiet checks lack their complete HTTP result set")
+
+    prior_checked_ns = -1
+    prior_journal_count = 0
+    for sequence, (check, expected_label) in enumerate(
+        zip(checks, labels, strict=True)
+    ):
+        if (
+            check.phase != "api_contract"
+            or check.case_id != expected_label
+            or check.label != expected_label
+            or check.quiet_sequence != sequence
+            or check.observer_open is not (sequence <= 10)
+            or check.observer_event_count != 0
+            or check.checked_monotonic_ns < prior_checked_ns
+            or check.journal_record_count <= 0
+            or check.journal_record_count > len(journal_observations)
+            or check.journal_record_count < prior_journal_count
+            or check.new_journal_record_count
+            != check.journal_record_count - prior_journal_count
+        ):
+            fail("API contract lifecycle quiet-check identity, order, or count differs")
+        bound_observation = journal_observations[check.journal_record_count - 1]
+        if (
+            check.journal_cursor != bound_observation.journal_cursor
+            or check.checked_monotonic_ns
+            < bound_observation.journal_monotonic_usec * 1000
+        ):
+            fail("API contract lifecycle quiet check differs from its journal boundary")
+        if sequence < len(API_CONTRACT_CASES):
+            response_end_ns = api_http[expected_label].response_end_monotonic_ns
+        else:
+            response_end_ns = max(
+                result.response_end_monotonic_ns for result in api_http.values()
+            )
+        if check.checked_monotonic_ns < response_end_ns:
+            fail("API contract lifecycle quiet check precedes its HTTP boundary")
+        prior_checked_ns = check.checked_monotonic_ns
+        prior_journal_count = check.journal_record_count
+    if prior_journal_count != len(journal_observations):
+        fail(
+            "API contract lifecycle quiet checks do not cover the journal observations"
+        )
+    return tuple(checks)
+
+
 def _add_lifecycle_event(
     traces: dict[str, RequestTrace],
     completion_ids: dict[str, str],
@@ -4221,8 +4367,23 @@ def validate_service_journal(
     expected: dict[str, GatewayEvidence],
     boot_id: str,
     final_cursor: str,
+    quiet_checks: Sequence[LifecycleQuietCheckData] = (),
+    api_journal_observations: Sequence[ApiJournalObservationData] = (),
 ) -> None:
     remaining = dict(expected)
+    observations_by_cursor: dict[str, ApiJournalObservationData] = {}
+    for expected_observation in api_journal_observations:
+        if expected_observation.journal_cursor in observations_by_cursor:
+            fail("API journal observation cursor is duplicated")
+        observations_by_cursor[expected_observation.journal_cursor] = (
+            expected_observation
+        )
+    next_observation_index = 0
+    observation_span_started = False
+    quiet_by_cursor: dict[str, list[LifecycleQuietCheckData]] = defaultdict(list)
+    for check in quiet_checks:
+        quiet_by_cursor[check.journal_cursor].append(check)
+    remaining_quiet_cursors = set(quiet_by_cursor)
     final_seen = False
     seen_cursors: set[str] = set()
     last_cursor: str | None = None
@@ -4247,6 +4408,17 @@ def validate_service_journal(
             fail(f"{label} journal cursor is duplicated")
         seen_cursors.add(cursor)
         last_cursor = cursor
+        if api_journal_observations and not observation_span_started:
+            observation_span_started = (
+                cursor == api_journal_observations[0].journal_cursor
+            )
+        if (
+            observation_span_started
+            and next_observation_index < len(api_journal_observations)
+            and cursor
+            != api_journal_observations[next_observation_index].journal_cursor
+        ):
+            fail(f"{label} interrupts or reorders the copied API journal span")
         if record["_BOOT_ID"] != boot_id:
             fail(f"{label} boot ID differs")
         if record["_SYSTEMD_UNIT"] != "ullm-openai.service":
@@ -4261,8 +4433,28 @@ def validate_service_journal(
         if monotonic < last_monotonic:
             fail(f"{label} journal monotonic timestamps regress")
         last_monotonic = monotonic
+        matching_quiet = quiet_by_cursor.get(cursor, ())
+        if any(
+            monotonic * 1000 > check.checked_monotonic_ns for check in matching_quiet
+        ):
+            fail(f"{label} quiet-check cursor was observed before its journal record")
+        remaining_quiet_cursors.discard(cursor)
         string(record["PRIORITY"], f"{label}.PRIORITY")
         message = string(record["MESSAGE"], f"{label}.MESSAGE", nonempty=False)
+        matched_observation = observations_by_cursor.get(cursor)
+        if matched_observation is not None:
+            message_raw = message.encode("utf-8", errors="strict")
+            if (
+                monotonic != matched_observation.journal_monotonic_usec
+                or int(pid_text) != matched_observation.journal_pid
+                or len(message_raw) != matched_observation.message_utf8_bytes
+                or hashlib.sha256(message_raw).hexdigest()
+                != matched_observation.message_sha256
+            ):
+                fail(f"{label} API journal observation differs from global journal")
+            if matched_observation.observation_index != next_observation_index:
+                fail(f"{label} API journal observation order differs")
+            next_observation_index += 1
         if cursor == final_cursor:
             final_seen = True
         evidence = remaining.pop(cursor, None)
@@ -4297,6 +4489,12 @@ def validate_service_journal(
                     )
     if remaining:
         fail(f"service journal lacks {len(remaining)} copied gateway event cursor(s)")
+    if remaining_quiet_cursors:
+        fail(
+            "service journal lacks one or more API lifecycle quiet-check cursor records"
+        )
+    if next_observation_index != len(api_journal_observations):
+        fail("service journal lacks one or more copied API journal observations")
     if not final_seen:
         fail("service journal lacks the run_end final journal cursor")
     if last_cursor != final_cursor:
@@ -5134,12 +5332,100 @@ def _validate_browser_action_data(
     )
 
 
+def _validate_lifecycle_quiet_check_data(
+    record: dict[str, Any], phase: str, case_id: str, label: str
+) -> LifecycleQuietCheckData:
+    quiet_sequence = integer(
+        record["quiet_sequence"], f"{label}.quiet_sequence", maximum=12
+    )
+    check_label = bounded_utf8_string(
+        record["label"],
+        f"{label}.label",
+        maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+    )
+    if phase != "api_contract" or case_id != check_label:
+        fail(f"{label} lifecycle quiet-check phase or identity differs")
+    checked_ns = integer(
+        record["checked_monotonic_ns"], f"{label}.checked_monotonic_ns"
+    )
+    observer_open = boolean(record["observer_open"], f"{label}.observer_open")
+    observer_event_count = integer(
+        record["observer_event_count"],
+        f"{label}.observer_event_count",
+        maximum=MAX_SESSION_RECORDS,
+    )
+    new_journal_count = integer(
+        record["new_journal_record_count"],
+        f"{label}.new_journal_record_count",
+        maximum=MAX_SESSION_RECORDS,
+    )
+    journal_count = integer(
+        record["journal_record_count"],
+        f"{label}.journal_record_count",
+        minimum=1,
+        maximum=MAX_SESSION_RECORDS,
+    )
+    journal_cursor = bounded_utf8_string(
+        record["journal_cursor"],
+        f"{label}.journal_cursor",
+        maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+    )
+    return LifecycleQuietCheckData(
+        phase=phase,
+        case_id=case_id,
+        quiet_sequence=quiet_sequence,
+        label=check_label,
+        checked_monotonic_ns=checked_ns,
+        observer_open=observer_open,
+        observer_event_count=observer_event_count,
+        new_journal_record_count=new_journal_count,
+        journal_record_count=journal_count,
+        journal_cursor=journal_cursor,
+    )
+
+
+def _validate_api_journal_observation_data(
+    record: dict[str, Any], phase: str, case_id: str, label: str
+) -> ApiJournalObservationData:
+    observation_index = integer(
+        record["observation_index"],
+        f"{label}.observation_index",
+        maximum=MAX_SESSION_RECORDS - 1,
+    )
+    if phase != "api_contract" or case_id != f"api-journal-{observation_index + 1:02d}":
+        fail(f"{label} API journal observation phase or identity differs")
+    return ApiJournalObservationData(
+        phase=phase,
+        case_id=case_id,
+        observation_index=observation_index,
+        journal_cursor=bounded_utf8_string(
+            record["journal_cursor"],
+            f"{label}.journal_cursor",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        ),
+        journal_monotonic_usec=integer(
+            record["journal_monotonic_usec"],
+            f"{label}.journal_monotonic_usec",
+        ),
+        journal_pid=integer(record["journal_pid"], f"{label}.journal_pid", minimum=1),
+        message_utf8_bytes=integer(
+            record["message_utf8_bytes"],
+            f"{label}.message_utf8_bytes",
+            maximum=MAX_JSON_BYTES,
+        ),
+        message_sha256=sha256_value(
+            record["message_sha256"], f"{label}.message_sha256"
+        ),
+    )
+
+
 def _validate_fault_injection_data(
     record: dict[str, Any], phase: str, case_id: str, label: str
 ) -> FaultInjectionData:
     if (
         record["injection"] != "post_header_worker_kill"
         or record["signal"] != "SIGKILL"
+        or record["command"] != "signal.pidfd_send_signal"
     ):
         fail(f"{label} fault identity differs")
     target_pid = integer(record["target_pid"], f"{label}.target_pid", minimum=1)
@@ -5175,7 +5461,10 @@ def validate_session(
     matrix: MatrixData,
     expected_commit: str,
     expected_worker_sha256: str,
+    identity: IdentityData | None = None,
 ) -> SessionData:
+    if identity is not None and not isinstance(identity, IdentityData):
+        fail("raw-session campaign identity argument differs")
     traces: dict[str, RequestTrace] = {}
     completion_ids: dict[str, str] = {}
     releases_by_phase: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -5184,6 +5473,8 @@ def validate_session(
     probes: dict[str, dict[str, Any]] = {}
     order_projection: list[dict[str, Any]] = []
     browser_actions: list[BrowserActionData] = []
+    api_journal_observations: list[ApiJournalObservationData] = []
+    lifecycle_quiet_checks: list[LifecycleQuietCheckData] = []
     fault_injection: FaultInjectionData | None = None
     counts: Counter[str] = Counter()
     run_id: str | None = None
@@ -5233,6 +5524,9 @@ def validate_session(
             run_id, boot_id, fixture_seal = _validate_header(
                 record, root, matrix, expected_worker_sha256
             )
+            if identity is not None:
+                identity.validate_session_header(record)
+                identity.validate_header_source_inputs(record["input_files"])
             http_state = HttpValidationState(
                 fixture_seal=fixture_seal,
                 requests={},
@@ -5296,6 +5590,18 @@ def validate_session(
                 ):
                     fail(f"{label}.screenshot_sha256 differs")
             browser_actions.append(browser_action)
+        elif record_type == "api_journal_observation":
+            api_journal_observations.append(
+                _validate_api_journal_observation_data(
+                    record, phase, cast(str, case_id), label
+                )
+            )
+        elif record_type == "lifecycle_quiet_check":
+            lifecycle_quiet_checks.append(
+                _validate_lifecycle_quiet_check_data(
+                    record, phase, cast(str, case_id), label
+                )
+            )
         elif record_type == "lifecycle_probe":
             probe_name = string(record["probe"], f"{label}.probe")
             expected_probe_phases = {
@@ -5361,6 +5667,8 @@ def validate_session(
             final_cursor = string(
                 record["final_journal_cursor"], f"{label}.final_journal_cursor"
             )
+            if identity is not None:
+                identity.validate_run_end(record)
         order_projection.append(_compact_session_order_record(record))
 
     if (
@@ -5422,6 +5730,8 @@ def validate_session(
         normal_epoch_end_ns,
         post_header_epoch_end_ns,
     ) = _validate_probe_boundary(probes)
+    if identity is not None:
+        identity.validate_initial_probe(probes["normal-segment-start"])
     _validate_gateway_event_pids(
         journal_events,
         normal_gateway_pid,
@@ -5436,12 +5746,27 @@ def validate_session(
         if _claims_full_campaign(order_projection)
         else None
     )
-    api_contract = (
-        validate_api_contract_http(http_state)
-        if full_campaign_order is not None
-        else None
+    if full_campaign_order is not None:
+        api_contract = validate_api_contract_http(http_state)
+        validated_quiet_checks = validate_api_contract_quiet_checks(
+            lifecycle_quiet_checks,
+            api_journal_observations,
+            tuple(http_state.completed_results[key] for key in http_state.ordered_keys),
+            normal_gateway_pid,
+        )
+    else:
+        if lifecycle_quiet_checks or api_journal_observations:
+            fail("partial release evidence contains full-campaign API journal evidence")
+        api_contract = None
+        validated_quiet_checks = ()
+    validate_service_journal(
+        root,
+        journal_events,
+        boot_id,
+        final_cursor,
+        validated_quiet_checks,
+        tuple(api_journal_observations),
     )
-    validate_service_journal(root, journal_events, boot_id, final_cursor)
     return SessionData(
         run_id=run_id,
         boot_id=boot_id,
@@ -5460,6 +5785,8 @@ def validate_session(
             http_state.completed_results[key] for key in http_state.ordered_keys
         ),
         browser_actions=tuple(browser_actions),
+        api_journal_observations=tuple(api_journal_observations),
+        lifecycle_quiet_checks=validated_quiet_checks,
         fault_injection=fault_injection,
         full_campaign_order=full_campaign_order,
         api_contract=api_contract,
@@ -6167,6 +6494,419 @@ def validate_resources(root: Path, session: SessionData) -> ResourceResult:
     )
 
 
+FULL_DERIVED_VIEW_PATHS = (
+    "sampling-results.json",
+    "cancel-results.json",
+    "prefill-latency-results.json",
+    "api-contract-results.json",
+    "openwebui-smoke.json",
+    "soak-results.json",
+)
+RELEASE_VALIDATION_FILE = "release-validation.json"
+
+
+def _directory_anchor(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid)
+
+
+def _read_bounded_root_file(root: Path, relative: str, label: str) -> bytes:
+    if "/" in relative or relative in {"", ".", ".."}:
+        fail(f"{label} is not a root evidence filename")
+    root_fd = -1
+    descriptor = -1
+    try:
+        root_fd = os.open(root, _source_directory_flags())
+        root_identity = _directory_anchor(os.fstat(root_fd))
+        before = os.stat(relative, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 1 <= before.st_size <= MAX_JSON_BYTES
+        ):
+            fail(f"{label} is not one bounded regular file")
+        descriptor = os.open(relative, _source_file_flags(), dir_fd=root_fd)
+        identity = _source_stat_identity(before)
+        if _source_stat_identity(os.fstat(descriptor)) != identity:
+            fail(f"{label} changed while opening")
+        raw = bytearray()
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(SOURCE_COPY_CHUNK_BYTES, MAX_JSON_BYTES + 1 - len(raw)),
+            )
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > MAX_JSON_BYTES:
+                fail(f"{label} exceeds its byte bound")
+        if len(raw) != before.st_size:
+            fail(f"{label} byte count changed while reading")
+        if _source_stat_identity(os.fstat(descriptor)) != identity:
+            fail(f"{label} changed while reading")
+        after = os.stat(relative, dir_fd=root_fd, follow_symlinks=False)
+        if _source_stat_identity(after) != identity:
+            fail(f"{label} changed after reading")
+        if _directory_anchor(os.fstat(root_fd)) != root_identity:
+            fail("campaign bundle root changed while reading evidence")
+        return bytes(raw)
+    except ValidationError:
+        raise
+    except OSError as error:
+        fail(f"failed to read {label}: {error}")
+        raise AssertionError("unreachable")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def _independent_summary(
+    run_id: str,
+    schedule: dict[str, Any],
+    *,
+    forbidden_values: tuple[bytes, ...],
+) -> bytes:
+    schedule_raw = independent_canonical_json_bytes(
+        schedule, forbidden_values=forbidden_values
+    )
+    paths = sorted(BUNDLE_FILES, key=lambda item: item.encode("utf-8"))
+    lines = [
+        "# SQ8 OpenWebUI full campaign",
+        "",
+        f"Run ID: `{run_id}`",
+        "",
+        f"Schedule: `{schedule_raw[:-1].decode('ascii', errors='strict')}`",
+        "",
+        "Artifacts:",
+        *(f"- `{path}`" for path in paths),
+        "",
+    ]
+    raw = "\n".join(lines).encode("ascii", errors="strict")
+    if b"passed" in raw.lower() or b"verdict" in raw.lower():
+        fail("summary.md contains a producer decision")
+    if any(secret in raw for secret in forbidden_values):
+        fail("summary.md contains forbidden cleartext")
+    return raw
+
+
+def _validate_full_derived_views(
+    root: Path,
+    session: SessionData,
+    *,
+    forbidden_values: tuple[bytes, ...],
+) -> tuple[dict[str, FileEvidence], dict[str, Any], dict[str, Any]]:
+    try:
+        front = reconstruct_front_views(
+            cast(Any, session), root, forbidden_values=forbidden_values
+        )
+        latency = reconstruct_latency_results(session)
+        resource = reconstruct_soak_resource_results(root, session)
+        soak = {
+            "schema_version": SOAK_RESULTS_SCHEMA,
+            "browser": {
+                "chat_count": 20,
+                "cases": front.browser_soak_cases,
+            },
+            **resource,
+        }
+        if set(front.canonical_bytes) != {
+            "sampling-results.json",
+            "cancel-results.json",
+            "api-contract-results.json",
+            "openwebui-smoke.json",
+        }:
+            fail("independent front derived-view filename set differs")
+        expected = {
+            "sampling-results.json": front.canonical_bytes["sampling-results.json"],
+            "cancel-results.json": front.canonical_bytes["cancel-results.json"],
+            "prefill-latency-results.json": independent_canonical_json_bytes(
+                latency, forbidden_values=forbidden_values
+            ),
+            "api-contract-results.json": front.canonical_bytes[
+                "api-contract-results.json"
+            ],
+            "openwebui-smoke.json": front.canonical_bytes["openwebui-smoke.json"],
+            "soak-results.json": independent_canonical_json_bytes(
+                soak, forbidden_values=forbidden_values
+            ),
+        }
+    except (IndependentViewError, IndependentMetricsError) as error:
+        fail(f"independent derived-view reconstruction failed: {error}")
+        raise AssertionError("unreachable")
+    if tuple(expected) != FULL_DERIVED_VIEW_PATHS:
+        fail("independent derived-view filename set or order differs")
+    evidence: dict[str, FileEvidence] = {}
+    for relative in FULL_DERIVED_VIEW_PATHS:
+        actual = _read_bounded_root_file(root, relative, relative)
+        reconstructed = expected[relative]
+        if actual != reconstructed:
+            fail(f"{relative} differs from independent raw-evidence reconstruction")
+        evidence[relative] = FileEvidence(
+            len(actual), hashlib.sha256(actual).hexdigest()
+        )
+    return evidence, latency, resource
+
+
+def _full_validation_report(
+    *,
+    matrix: MatrixData,
+    identity: IdentityData,
+    source: SourceCheckoutData,
+    session: SessionData,
+    resources: ResourceResult,
+    derived: dict[str, FileEvidence],
+    latency: dict[str, Any],
+    reconstructed_resource: dict[str, Any],
+    sums_sha256: str,
+) -> dict[str, Any]:
+    order = session.full_campaign_order
+    api = session.api_contract
+    if order is None or api is None:
+        fail("raw evidence does not contain one complete full campaign")
+    return {
+        "schema_version": FULL_REPORT_SCHEMA,
+        "release_status": "complete",
+        "full_campaign_validated": True,
+        "run_id": matrix.run_id,
+        "trusted_anchors": {
+            "git_commit": identity.expected_commit,
+            "worker_binary_sha256": identity.expected_worker_binary_sha256,
+        },
+        "verified_sha256sums_sha256": sums_sha256,
+        "gate_details": {
+            "identity": {
+                "environment_sha256": identity.environment_sha256,
+                "model_identity_sha256": identity.model_identity_sha256,
+            },
+            "source_checkout": {
+                "git_commit": source.git_commit,
+                "source_count": source.source_count,
+                "all_source_sha256": source.all_source_sha256,
+            },
+            "full_order": {
+                "phases": list(order.phases),
+                "openwebui_successful_requests": order.openwebui_successful_requests,
+                "cancellation_phases": list(order.cancellation_phases),
+                "normal_gateway_pid": order.normal_gateway_pid,
+                "restart_gateway_pid": order.restart_gateway_pid,
+                "normal_worker_pid": order.normal_worker_pid,
+                "restart_worker_pid": order.restart_worker_pid,
+                "restart_count_before": order.restart_count_before,
+                "restart_count_after": order.restart_count_after,
+            },
+            "api_contract": {
+                "case_count": len(api.cases),
+                "quiet_check_count": len(session.lifecycle_quiet_checks),
+            },
+            "browser": {"action_count": len(session.browser_actions)},
+            "latency": {"request_count": latency["request_count"]},
+            "resources": {
+                "session_sample_count": resources.sample_count,
+                "session_gpu_metric_count": resources.gpu_metric_count,
+                "reconstructed_sample_count": reconstructed_resource[
+                    "resource_sample_count"
+                ],
+                "reconstructed_gpu_metric_count": reconstructed_resource[
+                    "gpu_metric_count"
+                ],
+            },
+            "derived_views": [
+                {
+                    "path": relative,
+                    "bytes": derived[relative].bytes,
+                    "sha256": derived[relative].sha256,
+                }
+                for relative in FULL_DERIVED_VIEW_PATHS
+            ],
+        },
+    }
+
+
+def _write_release_validation(root: Path, raw: bytes) -> FileEvidence:
+    if not raw or len(raw) > MAX_JSON_BYTES:
+        fail("release-validation.json byte size differs")
+    root_fd = -1
+    descriptor = -1
+    created = False
+    created_anchor: tuple[int, int] | None = None
+    try:
+        root_fd = os.open(root, _source_directory_flags())
+        root_identity = _directory_anchor(os.fstat(root_fd))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            fail("O_NOFOLLOW is required for release validation publication")
+        flags |= os.O_NOFOLLOW
+        descriptor = os.open(RELEASE_VALIDATION_FILE, flags, 0o600, dir_fd=root_fd)
+        created = True
+        created_metadata = os.fstat(descriptor)
+        created_anchor = (created_metadata.st_dev, created_metadata.st_ino)
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(raw)
+        offset = 0
+        while offset < len(view):
+            written = os.write(
+                descriptor, view[offset : offset + SOURCE_COPY_CHUNK_BYTES]
+            )
+            if written <= 0:
+                fail("release-validation.json write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.fstat(root_fd).st_uid
+            or metadata.st_gid != os.fstat(root_fd).st_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != len(raw)
+        ):
+            fail("release-validation.json created file identity differs")
+        identity = _source_stat_identity(metadata)
+        os.close(descriptor)
+        descriptor = -1
+        observed = os.stat(
+            RELEASE_VALIDATION_FILE, dir_fd=root_fd, follow_symlinks=False
+        )
+        if _source_stat_identity(observed) != identity:
+            fail("release-validation.json changed after publication")
+        if _directory_anchor(os.fstat(root_fd)) != root_identity:
+            fail("campaign bundle root changed during validation publication")
+        os.fsync(root_fd)
+        return FileEvidence(len(raw), hashlib.sha256(raw).hexdigest())
+    except BaseException as error:
+        if created and root_fd >= 0:
+            try:
+                cleanup_anchor = created_anchor
+                if cleanup_anchor is None and descriptor >= 0:
+                    created_stat = os.fstat(descriptor)
+                    cleanup_anchor = (created_stat.st_dev, created_stat.st_ino)
+                current = os.stat(
+                    RELEASE_VALIDATION_FILE,
+                    dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                if cleanup_anchor != (current.st_dev, current.st_ino):
+                    raise ValidationError(
+                        "refusing to remove a replaced release-validation.json"
+                    )
+                os.unlink(RELEASE_VALIDATION_FILE, dir_fd=root_fd)
+                os.fsync(root_fd)
+            except FileNotFoundError:
+                pass
+            except (OSError, ValidationError) as cleanup_error:
+                error.add_note(
+                    "failed to remove the incomplete release-validation.json: "
+                    f"{cleanup_error}"
+                )
+        if isinstance(error, OSError):
+            raise ValidationError(
+                f"failed to exclusively create release-validation.json: {error}"
+            ) from error
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def validate_full_release(
+    bundle: Path,
+    *,
+    expected_commit: str,
+    expected_worker_binary_sha256: str,
+    repo_root: Path,
+    forbidden_values: tuple[bytes, ...] = (),
+) -> FileEvidence:
+    root = safe_bundle_root(bundle)
+    validate_bundle_layout(root)
+    sums_sha256 = validate_sha256sums(root)
+    matrix = validate_matrix(root)
+    identity = validate_campaign_identity(
+        root,
+        expected_commit=expected_commit,
+        expected_worker_binary_sha256=expected_worker_binary_sha256,
+    )
+    source = validate_campaign_source_checkout(identity, repo_root=repo_root)
+    session = validate_session(
+        root,
+        matrix,
+        identity.expected_commit,
+        identity.expected_worker_binary_sha256,
+        identity,
+    )
+    if session.full_campaign_order is None or session.api_contract is None:
+        fail("raw evidence does not contain one complete full campaign")
+    resources = validate_resources(root, session)
+    derived, latency, reconstructed_resource = _validate_full_derived_views(
+        root, session, forbidden_values=forbidden_values
+    )
+    expected_summary = _independent_summary(
+        matrix.run_id, matrix.schedule, forbidden_values=forbidden_values
+    )
+    if _read_bounded_root_file(root, "summary.md", "summary.md") != expected_summary:
+        fail("summary.md differs from independent reconstruction")
+    report = _full_validation_report(
+        matrix=matrix,
+        identity=identity,
+        source=source,
+        session=session,
+        resources=resources,
+        derived=derived,
+        latency=latency,
+        reconstructed_resource=reconstructed_resource,
+        sums_sha256=sums_sha256,
+    )
+    try:
+        raw = independent_canonical_json_bytes(
+            report, forbidden_values=forbidden_values
+        )
+    except IndependentViewError as error:
+        fail(f"release validation report serialization failed: {error}")
+        raise AssertionError("unreachable")
+    return _write_release_validation(root, raw)
+
+
+class FullCampaignIndependentValidator:
+    """Orchestrator adapter for one fail-closed full campaign validation."""
+
+    def __init__(
+        self,
+        *,
+        expected_commit: str,
+        expected_worker_binary_sha256: str,
+        repo_root: Path | None = None,
+        forbidden_values: tuple[bytes, ...] = (),
+    ) -> None:
+        self.expected_commit = git_commit(
+            expected_commit, "expected campaign Git commit"
+        )
+        self.expected_worker_binary_sha256 = sha256_value(
+            expected_worker_binary_sha256,
+            "expected campaign worker binary SHA-256",
+        )
+        self.repo_root = (
+            Path(__file__).resolve().parents[1]
+            if repo_root is None
+            else Path(repo_root)
+        )
+        try:
+            independent_canonical_json_bytes({}, forbidden_values=forbidden_values)
+        except IndependentViewError as error:
+            fail(f"validator forbidden cleartext contract differs: {error}")
+        self.forbidden_values = forbidden_values
+
+    def validate(self, stage_path: Path) -> FileEvidence:
+        return validate_full_release(
+            stage_path,
+            expected_commit=self.expected_commit,
+            expected_worker_binary_sha256=self.expected_worker_binary_sha256,
+            repo_root=self.repo_root,
+            forbidden_values=self.forbidden_values,
+        )
+
+
 def validate_phase1(
     bundle: Path,
     *,
@@ -6219,6 +6959,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--expected-worker-binary-sha256", required=True)
     parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+        help="Git top-level used to verify every recorded campaign source",
+    )
+    parser.add_argument(
         "--phase1-only",
         action="store_true",
         help="validate implemented phase-1 gates and emit an explicitly incomplete report",
@@ -6235,28 +6981,28 @@ def _json_default(value: Any) -> Any:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        report = validate_phase1(
-            args.bundle,
-            expected_commit=args.expected_commit,
-            expected_worker_binary_sha256=args.expected_worker_binary_sha256,
-        )
-        if not args.phase1_only:
-            fail(
-                "phase-1 evidence is valid, but full P8-F release gates are not implemented; "
-                "release-validation.json was not written"
+        if args.phase1_only:
+            report = validate_phase1(
+                args.bundle,
+                expected_commit=args.expected_commit,
+                expected_worker_binary_sha256=args.expected_worker_binary_sha256,
+            )
+            output = _identity_canonical_bytes(report)
+        else:
+            validator = FullCampaignIndependentValidator(
+                expected_commit=args.expected_commit,
+                expected_worker_binary_sha256=args.expected_worker_binary_sha256,
+                repo_root=args.repo_root,
+            )
+            validator.validate(args.bundle)
+            root = safe_bundle_root(args.bundle)
+            output = _read_bounded_root_file(
+                root, RELEASE_VALIDATION_FILE, RELEASE_VALIDATION_FILE
             )
     except ValidationError as error:
         print(f"validation failed: {error}", file=sys.stderr)
         return 1
-    print(
-        json.dumps(
-            report,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=_json_default,
-        )
-    )
+    sys.stdout.buffer.write(output)
     return 0
 
 

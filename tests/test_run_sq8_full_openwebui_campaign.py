@@ -310,6 +310,34 @@ class FakeBackend:
                     marker="api",
                 ),
             ),
+            journal_records=(
+                hook(
+                    "api_journal_observation",
+                    "api_contract",
+                    "api-journal-01",
+                    observation_index=0,
+                    journal_cursor="anchor-cursor",
+                    journal_monotonic_usec=1,
+                    journal_pid=NORMAL_GATEWAY,
+                    message_utf8_bytes=3,
+                    message_sha256=hashlib.sha256(b"api").hexdigest(),
+                ),
+            ),
+            quiet_check_records=(
+                hook(
+                    "lifecycle_quiet_check",
+                    "api_contract",
+                    "api-quiet",
+                    quiet_sequence=0,
+                    label="api-quiet",
+                    checked_monotonic_ns=1,
+                    observer_open=False,
+                    observer_event_count=0,
+                    new_journal_record_count=1,
+                    journal_record_count=1,
+                    journal_cursor="anchor-cursor",
+                ),
+            ),
             derived_view={"api": True},
             final_journal_cursor="anchor-cursor",
         )
@@ -674,6 +702,20 @@ class FullCampaignOrchestratorTests(unittest.TestCase):
         ]
         self.assertEqual(records[0]["record_type"], "header")
         self.assertEqual(records[-1]["record_type"], "run_end")
+        quiet = [
+            record
+            for record in records
+            if record["record_type"] == "lifecycle_quiet_check"
+        ]
+        self.assertEqual(len(quiet), 1)
+        self.assertEqual(quiet[0]["journal_cursor"], "anchor-cursor")
+        api_journal = [
+            record
+            for record in records
+            if record["record_type"] == "api_journal_observation"
+        ]
+        self.assertEqual(len(api_journal), 1)
+        self.assertEqual(api_journal[0]["observation_index"], 0)
         self.assertEqual(
             [
                 record["probe"]

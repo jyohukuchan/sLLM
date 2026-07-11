@@ -120,6 +120,8 @@ class ApiContractInputBindings:
 
 class ApiContractIngestResult(NamedTuple):
     http_records: tuple[dict[str, Any], ...]
+    journal_records: tuple[dict[str, Any], ...]
+    quiet_check_records: tuple[dict[str, Any], ...]
     derived_view: dict[str, Any]
     final_journal_cursor: str
 
@@ -846,9 +848,10 @@ def _journal_records(
     gate: Any,
     snapshot: BundleSnapshot,
     bindings: ApiContractInputBindings,
-) -> tuple[list[str], list[int], int]:
+) -> tuple[list[str], list[int], list[dict[str, Any]], int]:
     cursors: list[str] = []
     monotonic_values: list[int] = []
+    campaign_records: list[dict[str, Any]] = []
     seen: set[str] = set()
     last_monotonic = -1
     count = 0
@@ -866,17 +869,18 @@ def _journal_records(
         )
         pid = _decimal(record["_PID"], "service journal PID")
         priority = _decimal(record["PRIORITY"], "service journal priority")
+        message = record["MESSAGE"]
         if (
             monotonic < last_monotonic
             or pid != bindings.gateway_pid
             or priority > 7
             or record["_BOOT_ID"] != bindings.boot_id
             or record["_SYSTEMD_UNIT"] != bindings.service_unit
-            or type(record["MESSAGE"]) is not str
+            or type(message) is not str
         ):
             fail("service journal ordering or bound identity differs")
         try:
-            lifecycle = gate.DIRECT.COL.decode_lifecycle_message(record["MESSAGE"])
+            lifecycle = gate.DIRECT.COL.decode_lifecycle_message(message)
         except Exception as error:
             raise ApiContractIngestError(
                 "service journal MESSAGE is invalid"
@@ -885,10 +889,26 @@ def _journal_records(
             fail("non-GPU API contract journal contains a lifecycle event")
         cursors.append(cursor)
         monotonic_values.append(monotonic)
+        message_raw = message.encode("utf-8", errors="strict")
+        campaign_records.append(
+            {
+                "record_type": "api_journal_observation",
+                "phase": CAMPAIGN_PHASE,
+                "case_id": f"api-journal-{count:02d}",
+                "fields": {
+                    "observation_index": count - 1,
+                    "journal_cursor": cursor,
+                    "journal_monotonic_usec": monotonic,
+                    "journal_pid": pid,
+                    "message_utf8_bytes": len(message_raw),
+                    "message_sha256": hashlib.sha256(message_raw).hexdigest(),
+                },
+            }
+        )
         last_monotonic = monotonic
     if not cursors:
         fail("service journal contains no authoritative API access records")
-    return cursors, monotonic_values, count
+    return cursors, monotonic_values, campaign_records, count
 
 
 def _quiet_checks(
@@ -964,6 +984,32 @@ def _quiet_checks(
     if line_count != 13 or prior_count != journal_count:
         fail("lifecycle quiet checks do not cover the complete journal")
     return checks, line_count
+
+
+def _campaign_quiet_check_records(
+    checks: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    records: list[dict[str, Any]] = []
+    for value in checks:
+        label = cast(str, value["label"])
+        records.append(
+            {
+                "record_type": "lifecycle_quiet_check",
+                "phase": CAMPAIGN_PHASE,
+                "case_id": label,
+                "fields": {
+                    "quiet_sequence": value["sequence"],
+                    "label": label,
+                    "checked_monotonic_ns": value["checked_monotonic_ns"],
+                    "observer_open": value["observer_open"],
+                    "observer_event_count": value["observer_event_count"],
+                    "new_journal_record_count": value["new_journal_record_count"],
+                    "journal_record_count": value["journal_record_count"],
+                    "journal_cursor": value["journal_cursor"],
+                },
+            }
+        )
+    return tuple(records)
 
 
 def _manifest(
@@ -1180,10 +1226,10 @@ def ingest_api_contract_bundle(
         case_end_times = [
             value["response_end_monotonic_ns"] for value in case_summaries
         ]
-        cursors, _journal_monotonic, journal_lines = _journal_records(
+        cursors, _journal_monotonic, journal_records, journal_lines = _journal_records(
             gate, snapshot, bindings
         )
-        _checks, quiet_lines = _quiet_checks(
+        checks, quiet_lines = _quiet_checks(
             gate,
             snapshot,
             cursors,
@@ -1209,7 +1255,13 @@ def ingest_api_contract_bundle(
         snapshot.seal()
         for source in sources.values():
             source.seal()
-        return ApiContractIngestResult(tuple(records), view, cursors[-1])
+        return ApiContractIngestResult(
+            tuple(records),
+            tuple(journal_records),
+            _campaign_quiet_check_records(checks),
+            view,
+            cursors[-1],
+        )
     except ApiContractIngestError:
         raise
     except Exception as error:

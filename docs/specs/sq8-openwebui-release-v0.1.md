@@ -217,6 +217,8 @@ whose `choices[0].delta.content` is a non-empty string. If that SSE object spans
 multiple socket reads, its observation time is the timestamp of the final raw
 body chunk needed to parse the complete object. Socket read boundaries are not
 SSE boundaries and MUST NOT be treated as such.
+The matching `request_first_token.observed_monotonic_ns` MUST NOT be later than
+that first non-empty SSE content observation on the same monotonic clock.
 
 After observing first content, the client closes the response, waits for the
 matching `request_cancel_requested` and `request_released(reset_complete=true)`,
@@ -305,6 +307,8 @@ and service restart identity from these raw records.
 | `http_body_chunk` | one socket-read byte string and its observation time |
 | `http_response_end` | EOF, deliberate client close, timeout, or error and the complete-body hash |
 | `gateway_event` | one raw journal `MESSAGE` plus hash and its exactly decoded lifecycle event |
+| `api_journal_observation` | one non-lifecycle API-gate journal row projected as cursor, time, PID, and `MESSAGE` byte/hash identity |
+| `lifecycle_quiet_check` | one fixed API-gate observer/journal quiet boundary and its cumulative journal cursor/count |
 | `browser_action` | one browser command or wait assertion, selector, timing, result hashes, and screenshot identity |
 | `lifecycle_probe` | bounded systemd identity, readiness, PID/starttime, restart count, and cgroup observation |
 | `fault_injection` | the sole planned post-header worker kill and its target identity/timing |
@@ -337,6 +341,12 @@ Additional exact top-level fields are:
   `body_sha256`, and `observed_monotonic_ns`;
 - `gateway_event`: `journal_cursor`, `journal_monotonic_usec`, `journal_pid`,
   `message`, `message_sha256`, and `event`;
+- `api_journal_observation`: `observation_index`, `journal_cursor`,
+  `journal_monotonic_usec`, `journal_pid`, `message_utf8_bytes`, and
+  `message_sha256`;
+- `lifecycle_quiet_check`: `quiet_sequence`, `label`,
+  `checked_monotonic_ns`, `observer_open`, `observer_event_count`,
+  `new_journal_record_count`, `journal_record_count`, and `journal_cursor`;
 - `browser_action`: `browser_case`, `action_index`, `action`, `selector`,
   `input_sha256`, `started_monotonic_ns`, `completed_monotonic_ns`, `result`,
   `screenshot_file`, and `screenshot_sha256`;
@@ -348,6 +358,18 @@ Additional exact top-level fields are:
 - `run_end`: `completed_utc`, `completed_monotonic_ns`, `final_git_commit`,
   `final_git_status_raw`, `final_git_status_sha256`, `record_counts`, and
   `final_journal_cursor`.
+
+The non-GPU API contract phase records exactly thirteen
+`lifecycle_quiet_check` rows: one after each of the ten fixed HTTP cases, then
+`http-client-shutdown`, `post-observer-close`, and
+`final-readiness-and-identity`. Their observer lifecycle count is zero. Every
+API service-journal row in that phase is copied once as an ascending,
+zero-indexed `api_journal_observation`; each quiet check's cumulative count and
+cursor MUST select the corresponding observation, and the final check MUST cover
+the complete observation list. The independent validator locates the first
+observation cursor in `service-journal.raw.jsonl` and requires the entire list to
+be one byte-identical, uninterrupted global-journal span through the final
+observation cursor.
 
 The header `clock` is exactly `python.time.monotonic_ns`. `identities` contains
 exactly `environment_file`, `environment_sha256`, `model_identity_file`,
