@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-D is complete; P8-E SSE streaming and disconnect safety is next
+Status: in progress; P8-E is complete; P8-F deployment and OpenWebUI end-to-end acceptance is next
 
 Date: 2026-07-10
 
@@ -32,7 +32,7 @@ Concurrency definition: v0.1 has one active GPU request and no waiting request. 
 
 ## 次の行動
 
-最初の実装単位はP8-AとP8-Bである。HTTP依存を追加する前に、可変raw token prompt、4096 context、逐次`next_token`をR9700で成立させ、新M=1経路をP7とvLLMの独立oracleへ照合する。cancelとreset完了protocolはP8-Cで固定する。
+P8-Fを開始する。まずsystemd unit、environment file、secret file、固定Docker bridge bind、firewall、restart policyを実装して、service起動・停止・fatal restartを検証する。その後、実OpenWebUI containerからmodel discovery、日本語・英語・code block・複数turn、Stop、切断後の回復をend-to-endで確認し、release gateを閉じる。
 
 ## 1. Objective
 
@@ -1338,6 +1338,57 @@ Acceptance:
 Stop condition:
 
 - a disconnect that leaves the worker busy or KV allocated blocks the release.
+
+#### P8-E implementation and R9700 acceptance (2026-07-11)
+
+##### 前回の要点
+
+P8-Dでoffline tokenizer、resident worker supervisor、strict OpenAI subset、
+non-streaming HTTPと実R9700 smokeが成立した。OpenWebUIの通常利用には、SSE、
+incremental decode、disconnect/slow-client cancellationが残っていた。
+
+##### 今回の変更点
+
+- Added stable incremental decoding and exact role/content/finish/optional-usage/
+  `[DONE]` ordering. Japanese, emoji, combining characters, and code fences are
+  covered without emitting an unstable replacement prefix.
+- Added a bounded 32-token stream queue. Pipe pumps never await client I/O; the
+  first queue overflow fixes the cancellation reason to `slow_client` and later
+  token events are discarded while release is drained.
+- Added an ASGI-aware streaming response with bounded sends, AnyIO-shielded
+  disconnect cleanup, pre/post-header fatal handling, and no error record after
+  a possibly delivered `[DONE]`.
+- Isolated prompt tokenization from incremental stream decoding with separate
+  tokenizer instances, executors, and locks.
+- Added a post-validation HTTP lifecycle gate. It remains owned from worker
+  admission through matching release and complete JSON/SSE terminal output or
+  close, including post-claim error bodies. This prevents response/fatal ack
+  overlap across request generations while preserving context-validation order.
+- Gateway-requested fatal state is reserved synchronously before task scheduling,
+  so readiness and admission fail closed in the same event-loop tick.
+- All 114 package tests, strict mypy, Ruff check/format, and lock check pass. The
+  final independent review found no P0/P1. Code is fixed at commit
+  `3dcd1cb24ef7102abd0eecfd42ca47e47dc0d202`.
+- On R9700, Japanese SSE emitted role at 34.6 ms, first content at 892.5 ms,
+  and completed in 967.8 ms with exact usage and one terminal `[DONE]`.
+  Stream/non-stream text matched for the same seed, and the fixed one-token
+  limit produced `finish_reason=length`.
+- A synchronized collision returned 429 in 1.495 ms while the leading stream
+  completed. Readiness remained 200 for 20/20 active probes.
+- A real socket disconnect after the first content produced three immediate 429
+  probes before the fourth request was admitted and completed on the same worker
+  PID/starttime. Shutdown removed the gateway, worker, listener, GPU owner, and
+  released the singleton lock.
+- Evidence is fixed at
+  `benchmarks/results/2026-07-11/sq8-p8e-stream-smoke-v0.1/summary.json`.
+
+##### 次の行動
+
+1. Add and install the P8-F systemd unit, environment, secret, and restart policy.
+2. Revalidate the fixed `172.20.0.1` Docker bridge route and least-privilege
+   firewall before changing the bind from loopback.
+3. Run the real OpenWebUI model-discovery, multilingual/multi-turn, Stop,
+   disconnect, restart, and resource release matrix.
 
 ### P8-F: OpenWebUI Integration, Deployment, and Release Gate
 

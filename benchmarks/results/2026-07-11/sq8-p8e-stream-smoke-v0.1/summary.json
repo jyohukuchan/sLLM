@@ -1,0 +1,135 @@
+{
+  "schema_version": "ullm.sq8.p8e_stream_smoke.v1",
+  "recorded_at_utc": "2026-07-11T05:53:50Z",
+  "result": "pass",
+  "identity": {
+    "git_commit": "3dcd1cb24ef7102abd0eecfd42ca47e47dc0d202",
+    "tracked_worktree_clean": true,
+    "worker_binary_sha256": "145a5351db3957130200276314853e394d0fd206a69e2eab260c01141411b950",
+    "gateway_pyproject_sha256": "c154ed02b82abe39c56459977f639b919cb2680685a5d1213250c3fd2e74f6ad",
+    "gateway_uv_lock_sha256": "67b2dc58bd640883c7e990872157e9a1e24e7eaa7583d53bc2efcb3fcb7e88c9",
+    "model": "ullm-qwen3-14b-sq8",
+    "device": "gfx1201",
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "tokenizer_json_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "tokenizer_config_sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+  },
+  "process": {
+    "gateway_pid": 125204,
+    "gateway_starttime_ticks": 99587014,
+    "worker_pid": 125590,
+    "worker_starttime_ticks": 99587237,
+    "worker_pid_unchanged_after_disconnect": true
+  },
+  "startup": {
+    "ready_poll_interval_seconds": 2,
+    "ready_observed_poll_attempt": 17,
+    "ready_status": 200,
+    "model_list_status": 200
+  },
+  "requests": {
+    "japanese_stream_with_usage": {
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "cache_control": "no-cache",
+      "x_accel_buffering": "no",
+      "role_chunk_seconds": 0.034632,
+      "first_content_seconds": 0.892450,
+      "total_seconds": 0.967847,
+      "content": "こんにちは。",
+      "finish_reason": "stop",
+      "prompt_tokens": 22,
+      "completion_tokens": 3,
+      "total_tokens": 25,
+      "record_order": [
+        "role",
+        "content",
+        "content",
+        "finish",
+        "usage",
+        "done"
+      ],
+      "done_count": 1,
+      "replacement_character_present": false
+    },
+    "nonstream_equivalence": {
+      "status": 200,
+      "total_seconds": 0.739245,
+      "content": "こんにちは。",
+      "finish_reason": "stop",
+      "prompt_tokens": 22,
+      "completion_tokens": 3,
+      "total_tokens": 25,
+      "content_matches_stream": true
+    },
+    "length_stream_with_usage": {
+      "status": 200,
+      "total_seconds": 0.609169,
+      "content": "One",
+      "finish_reason": "length",
+      "prompt_tokens": 20,
+      "completion_tokens": 1,
+      "total_tokens": 21,
+      "done_count": 1
+    },
+    "collision": {
+      "status": 429,
+      "total_seconds": 0.001495,
+      "retry_after": "1",
+      "error_code": "request_busy",
+      "queued": false,
+      "leading_request_status": 200,
+      "leading_request_total_seconds": 5.451562,
+      "leading_request_finish_reason": "length",
+      "leading_request_completion_tokens": 128,
+      "leading_request_done_count": 1
+    },
+    "active_readiness": {
+      "ready_200_checks": 20,
+      "ready_non_200_checks": 0
+    },
+    "client_disconnect_and_recovery": {
+      "initial_status": 200,
+      "disconnect_after_first_content": "#",
+      "first_content_seconds": 0.756312,
+      "terminal_success_observed_before_disconnect": false,
+      "recovery_attempt_statuses": [
+        429,
+        429,
+        429,
+        200
+      ],
+      "first_recovery_admission_attempt": 4,
+      "disconnect_to_recovery_response_seconds": 0.914525,
+      "recovery_content": "こんにちは。よろしくお願いします。",
+      "recovery_finish_reason": "length",
+      "worker_pid_unchanged": true
+    }
+  },
+  "raw_stream_validation": {
+    "long_stream_records": 131,
+    "done_count": 1,
+    "done_last": true,
+    "usage_chunks_when_not_requested": 0,
+    "finish_reason": "length",
+    "replacement_character_present": false
+  },
+  "verification": {
+    "gateway_tests_passed": 114,
+    "strict_mypy_passed": true,
+    "ruff_check_passed": true,
+    "ruff_format_check_passed": true,
+    "lock_check_passed": true,
+    "independent_review_p0": 0,
+    "independent_review_p1": 0
+  },
+  "shutdown": {
+    "gateway_exit_code": 0,
+    "worker_process_remaining": false,
+    "gateway_process_remaining": false,
+    "port_8000_listener_remaining": false,
+    "r9700_process_remaining": false,
+    "singleton_lock_reacquired": true
+  }
+}
