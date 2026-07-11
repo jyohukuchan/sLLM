@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Iterable, Iterator
+from typing import Any, BinaryIO, Iterable, Iterator, cast
 
 
 SESSION_SCHEMA = "ullm.sq8.openwebui_release.raw.v1"
@@ -66,6 +66,17 @@ PHASES = {
     "latency",
     "final",
 }
+FULL_CAMPAIGN_PHASE_ORDER = (
+    "preflight",
+    "api_contract",
+    "openwebui",
+    "cancellation",
+    "resource_normal",
+    "post_header_failure",
+    "resource_restart",
+    "latency",
+    "final",
+)
 
 SCHEDULE = {
     "openwebui_chats": 20,
@@ -945,6 +956,28 @@ class SessionData:
     http_requests: dict[str, dict[str, Any]]
     ordered_http_keys: list[str]
     probes: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class FullCampaignOrderResult:
+    phases: tuple[str, ...]
+    openwebui_successful_requests: int
+    cancellation_phases: tuple[str, ...]
+    normal_gateway_pid: int
+    restart_gateway_pid: int
+    normal_worker_pid: int
+    restart_worker_pid: int
+    restart_count_before: int
+    restart_count_after: int
+
+
+@dataclass
+class _CampaignTrace:
+    phase: str
+    case_id: str
+    completion_id: str
+    journal_pid: int
+    events: list[tuple[int, dict[str, Any]]]
 
 
 def validate_hash_bound_bytes(
@@ -1928,6 +1961,425 @@ def _validate_gateway_event_pids(
             and evidence.event["observed_monotonic_ns"] > post_header_epoch_end_ns
         ):
             fail("post-header gateway event exceeds its lifecycle phase boundary")
+
+
+def _campaign_terminal(trace: _CampaignTrace) -> tuple[int, dict[str, Any]]:
+    terminal = [
+        item
+        for item in trace.events
+        if item[1].get("event") in {"request_released", "worker_fatal"}
+    ]
+    if len(terminal) != 1 or terminal[0] != trace.events[-1]:
+        fail("full campaign request trace terminal placement differs")
+    return terminal[0]
+
+
+def _campaign_successful_release(trace: _CampaignTrace) -> bool:
+    _, terminal = _campaign_terminal(trace)
+    return (
+        terminal["event"] == "request_released"
+        and terminal.get("outcome") in {"stop", "length"}
+        and terminal.get("reset_complete") is True
+        and not any(
+            event.get("event") == "request_cancel_requested"
+            for _, event in trace.events
+        )
+    )
+
+
+def _classify_campaign_cancellation(
+    trace: _CampaignTrace,
+    browser_actions: list[tuple[str, int]],
+) -> str:
+    _, terminal = _campaign_terminal(trace)
+    if (
+        terminal["event"] != "request_released"
+        or terminal.get("outcome") != "cancelled"
+        or terminal.get("reset_complete") is not True
+    ):
+        fail("full campaign cancellation target lacks a cancelled/reset release")
+    cancel_events = [
+        (position, event)
+        for position, event in trace.events
+        if event.get("event") == "request_cancel_requested"
+    ]
+    if len(cancel_events) != 1:
+        fail("full campaign cancellation target has the wrong cancel cardinality")
+    cancel_position, cancel_event = cancel_events[0]
+    cancel_observed = integer(
+        cancel_event.get("observed_monotonic_ns"),
+        "full campaign cancellation observed_monotonic_ns",
+    )
+    before_cancel = [
+        event for position, event in trace.events if position < cancel_position
+    ]
+    if not any(event.get("event") == "request_started" for event in before_cancel):
+        fail("full campaign cancellation target is cancelled before request_started")
+
+    stop_actions = [
+        (action, completed_ns)
+        for action, completed_ns in browser_actions
+        if action in {"wait_visible", "click_stop"}
+    ]
+    if stop_actions:
+        wait_times = [
+            completed_ns
+            for action, completed_ns in stop_actions
+            if action == "wait_visible"
+        ]
+        click_times = [
+            completed_ns
+            for action, completed_ns in stop_actions
+            if action == "click_stop"
+        ]
+        if (
+            len(wait_times) != 1
+            or len(click_times) != 1
+            or not wait_times[0] < click_times[0] < cancel_observed
+        ):
+            fail("full campaign OpenWebUI Stop action order differs")
+        return "openwebui_stop_after_visible_content"
+
+    if any(event.get("event") == "request_first_token" for event in before_cancel):
+        return "decode_after_first_content"
+    progress = [
+        integer(
+            event.get("processed_prompt_tokens"),
+            "full campaign cancellation progress.processed_prompt_tokens",
+        )
+        for event in before_cancel
+        if event.get("event") == "request_progress"
+    ]
+    if not progress:
+        return "after_started_before_progress"
+    if progress[-1] == 128 and max(progress) == 128:
+        return "prefill_after_128"
+    if progress[-1] == 2048 and max(progress) == 2048:
+        return "prefill_after_2048"
+    fail("full campaign cancellation progress boundary is not frozen")
+    raise AssertionError("unreachable")
+
+
+def validate_full_campaign_order(
+    records: Iterable[dict[str, Any]],
+) -> FullCampaignOrderResult:
+    """Validate the full-run order before the remaining release gates are wired.
+
+    The caller supplies already schema-validated raw session records in file order.
+    Phase-1 validation deliberately does not call this helper because a phase-1
+    bundle omits the browser, cancellation, and latency phases by definition.
+    """
+
+    materialized = list(records)
+    if not materialized:
+        fail("full campaign raw session is empty")
+    phase_rank = {phase: index for index, phase in enumerate(FULL_CAMPAIGN_PHASE_ORDER)}
+    observed_phases: list[str] = []
+    last_rank = -1
+    header_positions: list[int] = []
+    run_end_positions: list[int] = []
+    traces: dict[str, _CampaignTrace] = {}
+    gateway_records: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    browser_actions: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+    http_request_counts: Counter[tuple[str, str]] = Counter()
+    probes: dict[str, dict[str, Any]] = {}
+    probe_positions: dict[str, int] = {}
+    faults: list[tuple[int, dict[str, Any]]] = []
+
+    for position, record in enumerate(materialized):
+        label = f"full campaign raw record {position}"
+        if type(record) is not dict:
+            fail(f"{label} must be an object")
+        if record.get("schema_version") != SESSION_SCHEMA:
+            fail(f"{label}.schema_version differs")
+        if integer(record.get("sequence"), f"{label}.sequence") != position:
+            fail(f"{label}.sequence is not contiguous from zero")
+        record_type = string(record.get("record_type"), f"{label}.record_type")
+        if record_type not in SESSION_FIELDS:
+            fail(f"{label}.record_type is unknown")
+        phase = string(record.get("phase"), f"{label}.phase")
+        if phase not in phase_rank:
+            fail(f"{label}.phase is invalid")
+        rank = phase_rank[phase]
+        if rank < last_rank:
+            fail("full campaign GPU-mutating phase order regresses")
+        if rank != last_rank:
+            observed_phases.append(phase)
+            last_rank = rank
+        case_value = record.get("case_id")
+        if record_type in {"header", "run_end"}:
+            if case_value is not None:
+                fail(f"{label}.case_id must be null")
+            case_id: str | None = None
+        else:
+            case_id = string(case_value, f"{label}.case_id")
+
+        if record_type == "header":
+            header_positions.append(position)
+        elif record_type == "run_end":
+            run_end_positions.append(position)
+        elif record_type == "http_request":
+            assert case_id is not None
+            http_request_counts[(phase, case_id)] += 1
+        elif record_type == "browser_action":
+            assert case_id is not None
+            action = string(record.get("action"), f"{label}.action")
+            completed_ns = integer(
+                record.get("completed_monotonic_ns"),
+                f"{label}.completed_monotonic_ns",
+            )
+            browser_actions[(phase, case_id)].append((action, completed_ns))
+        elif record_type == "lifecycle_probe":
+            probe = string(record.get("probe"), f"{label}.probe")
+            if probe in probes:
+                fail("full campaign lifecycle probe is duplicated")
+            probes[probe] = record
+            probe_positions[probe] = position
+        elif record_type == "fault_injection":
+            faults.append((position, record))
+        elif record_type == "gateway_event":
+            assert case_id is not None
+            event_value = record.get("event")
+            if type(event_value) is not dict:
+                fail(f"{label}.event must be an object")
+            event = cast(dict[str, Any], event_value)
+            event_name = string(event.get("event"), f"{label}.event.event")
+            if event_name not in LIFECYCLE_FIELDS:
+                fail(f"{label}.event.event is unknown")
+            integer(
+                event.get("observed_monotonic_ns"),
+                f"{label}.event.observed_monotonic_ns",
+            )
+            journal_pid = integer(
+                record.get("journal_pid"), f"{label}.journal_pid", minimum=1
+            )
+            request_id = string(event.get("request_id"), f"{label}.event.request_id")
+            completion_id = string(
+                event.get("completion_id"), f"{label}.event.completion_id"
+            )
+            trace = traces.get(request_id)
+            if trace is None:
+                trace = _CampaignTrace(
+                    phase=phase,
+                    case_id=case_id,
+                    completion_id=completion_id,
+                    journal_pid=journal_pid,
+                    events=[],
+                )
+                traces[request_id] = trace
+            elif (
+                trace.phase != phase
+                or trace.case_id != case_id
+                or trace.completion_id != completion_id
+                or trace.journal_pid != journal_pid
+            ):
+                fail(
+                    "full campaign request changes phase, case, completion, or gateway"
+                )
+            trace.events.append((position, event))
+            gateway_records.append((position, record, event))
+
+    if header_positions != [0] or run_end_positions != [len(materialized) - 1]:
+        fail("full campaign header/run_end placement differs")
+    if tuple(observed_phases) != FULL_CAMPAIGN_PHASE_ORDER:
+        fail("full campaign GPU-mutating phase set/order differs")
+
+    ordered_traces = sorted(traces.values(), key=lambda item: item.events[0][0])
+    for trace in ordered_traces:
+        if not trace.events or trace.events[0][1].get("event") != "request_admitted":
+            fail("full campaign request trace does not begin with request_admitted")
+        if (
+            sum(event.get("event") == "request_admitted" for _, event in trace.events)
+            != 1
+        ):
+            fail("full campaign request trace admission cardinality differs")
+        observed_times = [
+            integer(
+                event.get("observed_monotonic_ns"),
+                "full campaign lifecycle observed_monotonic_ns",
+            )
+            for _, event in trace.events
+        ]
+        if observed_times != sorted(observed_times):
+            fail("full campaign request lifecycle timestamps regress")
+        _campaign_terminal(trace)
+
+    openwebui_traces = [trace for trace in ordered_traces if trace.phase == "openwebui"]
+    if (
+        len(openwebui_traces)
+        != 1 + integer(SCHEDULE["openwebui_chats"], "frozen OpenWebUI chat count")
+        or len({trace.case_id for trace in openwebui_traces}) != len(openwebui_traces)
+        or not all(_campaign_successful_release(trace) for trace in openwebui_traces)
+    ):
+        fail("full campaign OpenWebUI smoke/20-chat cardinality or outcome differs")
+
+    cancellation_traces = [
+        trace for trace in ordered_traces if trace.phase == "cancellation"
+    ]
+    if len(cancellation_traces) != 2 * len(CANCEL_PHASES) or len(
+        {trace.case_id for trace in cancellation_traces}
+    ) != len(cancellation_traces):
+        fail("full campaign cancellation target/recovery cardinality differs")
+    classified: list[str] = []
+    for pair_index in range(len(CANCEL_PHASES)):
+        target = cancellation_traces[pair_index * 2]
+        recovery = cancellation_traces[pair_index * 2 + 1]
+        target_actions = browser_actions.get((target.phase, target.case_id), [])
+        classified.append(_classify_campaign_cancellation(target, target_actions))
+        if not _campaign_successful_release(recovery):
+            fail(
+                "full campaign cancellation target lacks immediate successful recovery"
+            )
+        target_http_count = http_request_counts[(target.phase, target.case_id)]
+        if pair_index < 4:
+            if target_http_count != 1 or any(
+                action == "click_stop" for action, _ in target_actions
+            ):
+                fail("full campaign direct cancellation transport differs")
+        elif target_http_count != 0 or not any(
+            action == "click_stop" for action, _ in target_actions
+        ):
+            fail("full campaign OpenWebUI Stop transport differs")
+    if tuple(classified) != CANCEL_PHASES:
+        fail("full campaign cancellation phase order differs")
+
+    expected_probe_phases = {
+        "normal-segment-start": "resource_normal",
+        "post-header-restart-ready": "post_header_failure",
+        "restart-segment-start": "resource_restart",
+        "final-service-ready": "final",
+    }
+    for probe, expected_phase in expected_probe_phases.items():
+        if probe not in probes or probes[probe].get("phase") != expected_phase:
+            fail("full campaign lifecycle probe phase differs")
+    (
+        normal_gateway_pid,
+        restart_gateway_pid,
+        normal_epoch_end_ns,
+        post_header_epoch_end_ns,
+    ) = _validate_probe_boundary(probes)
+    normal_probe = probes["normal-segment-start"]
+    post_probe = probes["post-header-restart-ready"]
+    restart_probe = probes["restart-segment-start"]
+
+    evidence = {
+        f"full-campaign-{position}": GatewayEvidence(
+            cursor=f"full-campaign-{position}",
+            journal_monotonic_usec=integer(
+                event["observed_monotonic_ns"], "full campaign gateway timestamp"
+            )
+            // 1000,
+            journal_pid=integer(
+                record["journal_pid"], "full campaign gateway journal_pid", minimum=1
+            ),
+            message="",
+            message_sha256="0" * 64,
+            event=event,
+            phase=string(record["phase"], "full campaign gateway phase"),
+        )
+        for position, record, event in gateway_records
+    }
+    _validate_gateway_event_pids(
+        evidence,
+        normal_gateway_pid,
+        restart_gateway_pid,
+        normal_epoch_end_ns,
+        post_header_epoch_end_ns,
+    )
+
+    fatal_records = [
+        (position, record, event)
+        for position, record, event in gateway_records
+        if event.get("event") == "worker_fatal"
+    ]
+    if len(fatal_records) != 1 or len(faults) != 1:
+        fail("full campaign must contain exactly one fault and worker_fatal")
+    fatal_position, fatal_record, fatal_event = fatal_records[0]
+    fault_position, fault = faults[0]
+    if (
+        fault.get("phase") != "post_header_failure"
+        or fault.get("injection") != "post_header_worker_kill"
+        or fault.get("signal") != "SIGKILL"
+        or fault_position >= fatal_position
+        or fatal_record.get("phase") != "post_header_failure"
+        or integer(fatal_record.get("journal_pid"), "full campaign fatal PID")
+        != normal_gateway_pid
+        or integer(fault.get("target_pid"), "full campaign fault target PID")
+        != normal_probe["worker_pid"]
+        or integer(
+            fault.get("target_starttime_ticks"),
+            "full campaign fault target starttime",
+        )
+        != normal_probe["worker_starttime_ticks"]
+    ):
+        fail("full campaign planned post-header fault identity/order differs")
+    fault_started = integer(
+        fault.get("started_monotonic_ns"), "full campaign fault start"
+    )
+    fault_completed = integer(
+        fault.get("completed_monotonic_ns"), "full campaign fault completion"
+    )
+    fatal_observed = integer(
+        fatal_event.get("observed_monotonic_ns"), "full campaign fatal timestamp"
+    )
+    if not (
+        fault_started
+        <= fault_completed
+        <= fatal_observed
+        <= post_probe["observed_monotonic_ns"]
+    ):
+        fail("full campaign post-header fault/restart timestamps differ")
+
+    post_traces = [
+        trace for trace in ordered_traces if trace.phase == "post_header_failure"
+    ]
+    if (
+        len(post_traces) != 2
+        or _campaign_terminal(post_traces[0])[1].get("event") != "worker_fatal"
+        or not _campaign_successful_release(post_traces[1])
+        or post_traces[0].case_id != string(fault.get("case_id"), "fault case_id")
+        or post_traces[1].events[0][0] <= probe_positions["post-header-restart-ready"]
+    ):
+        fail("full campaign post-header failure/recovery order differs")
+
+    post_rank = phase_rank["post_header_failure"]
+    for position, record, _ in gateway_records:
+        phase = string(record["phase"], "full campaign gateway phase")
+        pid = integer(record["journal_pid"], "full campaign gateway PID", minimum=1)
+        if phase_rank[phase] < post_rank:
+            expected_pid = normal_gateway_pid
+        elif phase_rank[phase] > post_rank:
+            expected_pid = restart_gateway_pid
+        else:
+            expected_pid = (
+                normal_gateway_pid
+                if position <= fatal_position
+                else restart_gateway_pid
+            )
+        if pid != expected_pid:
+            fail(
+                "full campaign gateway epoch changes outside the sole restart boundary"
+            )
+
+    return FullCampaignOrderResult(
+        phases=tuple(observed_phases),
+        openwebui_successful_requests=len(openwebui_traces),
+        cancellation_phases=tuple(classified),
+        normal_gateway_pid=normal_gateway_pid,
+        restart_gateway_pid=restart_gateway_pid,
+        normal_worker_pid=integer(
+            normal_probe["worker_pid"], "normal lifecycle worker_pid", minimum=1
+        ),
+        restart_worker_pid=integer(
+            restart_probe["worker_pid"], "restart lifecycle worker_pid", minimum=1
+        ),
+        restart_count_before=integer(
+            normal_probe["n_restarts"], "normal lifecycle n_restarts"
+        ),
+        restart_count_after=integer(
+            restart_probe["n_restarts"], "restart lifecycle n_restarts"
+        ),
+    )
 
 
 def _expected_resource_http_cases() -> list[tuple[str, str, int, str]]:

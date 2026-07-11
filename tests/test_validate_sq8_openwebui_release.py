@@ -872,6 +872,424 @@ def insert_gateway_trace_before_case(
     refresh_matrix_and_sums(root)
 
 
+class FullCampaignOrderFixture:
+    def __init__(self):
+        self.records = []
+        self.now = 1_000_000
+        self.old_gateway_pid = 1200
+        self.old_worker_pid = 1201
+        self.new_gateway_pid = 2200
+        self.new_worker_pid = 2201
+
+    def add(self, record_type: str, phase: str, case_id, **fields) -> None:
+        self.records.append(
+            {
+                "schema_version": VALIDATOR.SESSION_SCHEMA,
+                "record_type": record_type,
+                "sequence": len(self.records),
+                "phase": phase,
+                "case_id": case_id,
+                **fields,
+            }
+        )
+
+    def tick(self) -> int:
+        self.now += 1_000
+        return self.now
+
+    def event(
+        self,
+        phase: str,
+        case_id: str,
+        request_id: str,
+        event_name: str,
+        gateway_pid: int,
+        **fields,
+    ) -> None:
+        self.add(
+            "gateway_event",
+            phase,
+            case_id,
+            journal_pid=gateway_pid,
+            event={
+                "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+                "event": event_name,
+                "observed_monotonic_ns": self.tick(),
+                "request_id": request_id,
+                "completion_id": f"chatcmpl-{request_id}",
+                **fields,
+            },
+        )
+
+    def successful_trace(
+        self, phase: str, case_id: str, gateway_pid: int, outcome: str = "stop"
+    ) -> None:
+        request_id = f"req-{case_id}"
+        self.event(phase, case_id, request_id, "request_admitted", gateway_pid)
+        self.event(
+            phase,
+            case_id,
+            request_id,
+            "request_released",
+            gateway_pid,
+            outcome=outcome,
+            reset_complete=True,
+        )
+
+    def lifecycle_probe(self, phase: str, name: str, *, restarted: bool) -> None:
+        gateway_pid = self.new_gateway_pid if restarted else self.old_gateway_pid
+        worker_pid = self.new_worker_pid if restarted else self.old_worker_pid
+        self.add(
+            "lifecycle_probe",
+            phase,
+            name,
+            probe=name,
+            observed_monotonic_ns=self.tick(),
+            service_active=True,
+            ready_http_status=200,
+            control_group="/system.slice/ullm-openai.service",
+            gateway_pid=gateway_pid,
+            gateway_starttime_ticks=20_000 if restarted else 10_000,
+            worker_pid=worker_pid,
+            worker_starttime_ticks=20_001 if restarted else 10_001,
+            n_restarts=3 if restarted else 2,
+        )
+
+    def cancellation_pair(self, cancel_phase: str, index: int) -> None:
+        target_case = f"cancel-target-{index}"
+        recovery_case = f"cancel-recovery-{index}"
+        request_id = f"req-{target_case}"
+        if cancel_phase != "openwebui_stop_after_visible_content":
+            self.add("http_request", "cancellation", target_case)
+        self.event(
+            "cancellation",
+            target_case,
+            request_id,
+            "request_admitted",
+            self.old_gateway_pid,
+        )
+        self.event(
+            "cancellation",
+            target_case,
+            request_id,
+            "request_started",
+            self.old_gateway_pid,
+        )
+        if cancel_phase == "prefill_after_128":
+            self.event(
+                "cancellation",
+                target_case,
+                request_id,
+                "request_progress",
+                self.old_gateway_pid,
+                processed_prompt_tokens=128,
+            )
+        elif cancel_phase == "prefill_after_2048":
+            for boundary in (128, 2048):
+                self.event(
+                    "cancellation",
+                    target_case,
+                    request_id,
+                    "request_progress",
+                    self.old_gateway_pid,
+                    processed_prompt_tokens=boundary,
+                )
+        elif cancel_phase in {
+            "decode_after_first_content",
+            "openwebui_stop_after_visible_content",
+        }:
+            self.event(
+                "cancellation",
+                target_case,
+                request_id,
+                "request_first_token",
+                self.old_gateway_pid,
+            )
+        if cancel_phase == "openwebui_stop_after_visible_content":
+            wait_started = self.tick()
+            wait_completed = self.tick()
+            self.add(
+                "browser_action",
+                "cancellation",
+                target_case,
+                action="wait_visible",
+                started_monotonic_ns=wait_started,
+                completed_monotonic_ns=wait_completed,
+            )
+            click_started = self.tick()
+            click_completed = self.tick()
+            self.add(
+                "browser_action",
+                "cancellation",
+                target_case,
+                action="click_stop",
+                started_monotonic_ns=click_started,
+                completed_monotonic_ns=click_completed,
+            )
+        self.event(
+            "cancellation",
+            target_case,
+            request_id,
+            "request_cancel_requested",
+            self.old_gateway_pid,
+        )
+        self.event(
+            "cancellation",
+            target_case,
+            request_id,
+            "request_released",
+            self.old_gateway_pid,
+            outcome="cancelled",
+            reset_complete=True,
+        )
+        self.successful_trace(
+            "cancellation", recovery_case, self.old_gateway_pid, "length"
+        )
+
+    def build(self):
+        self.add("header", "preflight", None)
+        self.add("http_response_end", "api_contract", "fixed-api-contract")
+        for index in range(21):
+            case_id = "openwebui-smoke" if index == 0 else f"openwebui-soak-{index:02d}"
+            self.successful_trace("openwebui", case_id, self.old_gateway_pid)
+        for index, cancel_phase in enumerate(VALIDATOR.CANCEL_PHASES):
+            self.cancellation_pair(cancel_phase, index)
+
+        self.lifecycle_probe("resource_normal", "normal-segment-start", restarted=False)
+        self.successful_trace(
+            "resource_normal", "normal-resource", self.old_gateway_pid, "length"
+        )
+
+        failed_case = "post-header-failure"
+        failed_request = f"req-{failed_case}"
+        self.event(
+            "post_header_failure",
+            failed_case,
+            failed_request,
+            "request_admitted",
+            self.old_gateway_pid,
+        )
+        self.event(
+            "post_header_failure",
+            failed_case,
+            failed_request,
+            "request_started",
+            self.old_gateway_pid,
+        )
+        fault_started = self.tick()
+        fault_completed = self.tick()
+        self.add(
+            "fault_injection",
+            "post_header_failure",
+            failed_case,
+            injection="post_header_worker_kill",
+            target_pid=self.old_worker_pid,
+            target_starttime_ticks=10_001,
+            signal="SIGKILL",
+            started_monotonic_ns=fault_started,
+            completed_monotonic_ns=fault_completed,
+        )
+        self.event(
+            "post_header_failure",
+            failed_case,
+            failed_request,
+            "worker_fatal",
+            self.old_gateway_pid,
+        )
+        self.lifecycle_probe(
+            "post_header_failure", "post-header-restart-ready", restarted=True
+        )
+        self.successful_trace(
+            "post_header_failure",
+            "post-header-recovery",
+            self.new_gateway_pid,
+        )
+
+        self.lifecycle_probe(
+            "resource_restart", "restart-segment-start", restarted=True
+        )
+        self.successful_trace(
+            "resource_restart", "restart-resource", self.new_gateway_pid, "length"
+        )
+        self.successful_trace(
+            "latency", "latency-matrix", self.new_gateway_pid, "length"
+        )
+        self.lifecycle_probe("final", "final-service-ready", restarted=True)
+        self.add("run_end", "final", None)
+        return self.records
+
+
+def resequence_full_campaign(records) -> None:
+    for sequence, record in enumerate(records):
+        record["sequence"] = sequence
+
+
+class FullCampaignOrderTest(unittest.TestCase):
+    def setUp(self):
+        self.records = FullCampaignOrderFixture().build()
+
+    def validate(self):
+        return VALIDATOR.validate_full_campaign_order(self.records)
+
+    def assert_invalid(self, text: str):
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
+            self.validate()
+
+    def test_valid_full_campaign_fixes_order_cardinality_and_epochs(self):
+        result = self.validate()
+        self.assertEqual(result.phases, VALIDATOR.FULL_CAMPAIGN_PHASE_ORDER)
+        self.assertEqual(result.openwebui_successful_requests, 21)
+        self.assertEqual(result.cancellation_phases, VALIDATOR.CANCEL_PHASES)
+        self.assertEqual(
+            (result.normal_gateway_pid, result.restart_gateway_pid), (1200, 2200)
+        )
+        self.assertEqual(
+            (result.normal_worker_pid, result.restart_worker_pid), (1201, 2201)
+        )
+        self.assertEqual(
+            (result.restart_count_before, result.restart_count_after), (2, 3)
+        )
+
+    def test_phase_block_cannot_regress(self):
+        target = next(
+            record
+            for record in self.records
+            if record["phase"] == "resource_restart"
+            and record["record_type"] == "gateway_event"
+        )
+        target["phase"] = "resource_normal"
+        self.assert_invalid("phase order regresses")
+
+    def test_full_campaign_cannot_omit_api_phase(self):
+        self.records[:] = [
+            record for record in self.records if record["phase"] != "api_contract"
+        ]
+        resequence_full_campaign(self.records)
+        self.assert_invalid("phase set/order differs")
+
+    def test_openwebui_soak_requires_exactly_twenty_after_smoke(self):
+        self.records[:] = [
+            record
+            for record in self.records
+            if record.get("case_id") != "openwebui-soak-20"
+        ]
+        resequence_full_campaign(self.records)
+        self.assert_invalid("smoke/20-chat cardinality")
+
+    def test_cancellation_trigger_order_is_derived_from_events(self):
+        target = next(
+            record
+            for record in self.records
+            if record.get("case_id") == "cancel-target-1"
+            and record.get("record_type") == "gateway_event"
+            and record["event"]["event"] == "request_progress"
+        )
+        target["event"]["processed_prompt_tokens"] = 2048
+        self.assert_invalid("cancellation phase order differs")
+
+    def test_each_cancellation_requires_immediate_successful_recovery(self):
+        target = next(
+            record
+            for record in self.records
+            if record.get("case_id") == "cancel-recovery-0"
+            and record.get("record_type") == "gateway_event"
+            and record["event"]["event"] == "request_released"
+        )
+        target["event"]["outcome"] = "cancelled"
+        self.assert_invalid("immediate successful recovery")
+
+    def test_first_four_cancellations_require_direct_http_transport(self):
+        self.records[:] = [
+            record
+            for record in self.records
+            if not (
+                record.get("case_id") == "cancel-target-0"
+                and record.get("record_type") == "http_request"
+            )
+        ]
+        resequence_full_campaign(self.records)
+        self.assert_invalid("direct cancellation transport differs")
+
+    def test_stop_case_requires_visible_then_click_before_cancel(self):
+        self.records[:] = [
+            record
+            for record in self.records
+            if not (
+                record.get("case_id") == "cancel-target-4"
+                and record.get("record_type") == "browser_action"
+                and record.get("action") == "click_stop"
+            )
+        ]
+        resequence_full_campaign(self.records)
+        self.assert_invalid("Stop action order differs")
+
+    def test_restart_count_must_increment_exactly_once(self):
+        for record in self.records:
+            if (
+                record.get("record_type") == "lifecycle_probe"
+                and record.get("probe") != "normal-segment-start"
+            ):
+                record["n_restarts"] = 4
+        self.assert_invalid("restart identity/count boundary differs")
+
+    def test_restart_must_change_both_process_identities(self):
+        for record in self.records:
+            if (
+                record.get("record_type") == "lifecycle_probe"
+                and record.get("probe") != "normal-segment-start"
+            ):
+                record["gateway_pid"] = 1200
+                record["gateway_starttime_ticks"] = 10_000
+                record["worker_pid"] = 1201
+                record["worker_starttime_ticks"] = 10_001
+        self.assert_invalid("restart identity/count boundary differs")
+
+    def test_fault_target_is_bound_to_old_worker_identity(self):
+        target = next(
+            record
+            for record in self.records
+            if record.get("record_type") == "fault_injection"
+        )
+        target["target_starttime_ticks"] += 1
+        self.assert_invalid("fault identity/order differs")
+
+    def test_gateway_epoch_cannot_cross_the_restart_boundary(self):
+        for record in self.records:
+            if (
+                record.get("phase") == "resource_restart"
+                and record.get("record_type") == "gateway_event"
+            ):
+                record["journal_pid"] = 1200
+        self.assert_invalid("journal PID differs from its lifecycle probe epoch")
+
+    def test_no_second_worker_fatal_is_accepted(self):
+        target = next(
+            record
+            for record in self.records
+            if record.get("phase") == "latency"
+            and record.get("record_type") == "gateway_event"
+            and record["event"]["event"] == "request_released"
+        )
+        target["event"]["event"] = "worker_fatal"
+        self.assert_invalid("sole planned|exactly one")
+
+    def test_post_header_recovery_must_follow_ready_probe(self):
+        probe_index = next(
+            index
+            for index, record in enumerate(self.records)
+            if record.get("probe") == "post-header-restart-ready"
+        )
+        probe = self.records.pop(probe_index)
+        insertion = next(
+            index
+            for index, record in enumerate(self.records)
+            if record.get("phase") == "resource_restart"
+        )
+        self.records.insert(insertion, probe)
+        resequence_full_campaign(self.records)
+        self.assert_invalid("failure/recovery order differs")
+
+
 class ValidatorTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
