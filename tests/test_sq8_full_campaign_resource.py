@@ -397,7 +397,7 @@ class FullCampaignResourceTests(unittest.TestCase):
                 self.artifacts,
                 self.independent_identity,
                 self.independent_validator,
-                forbidden_values=(b"synthetic resource probe",),
+                forbidden_values=(b"requested sequence exactly",),
             )
 
         with (

@@ -215,9 +215,14 @@ def _fixture() -> dict[str, Any]:
         "messages": [
             {
                 "role": "system",
-                "content": "Answer the synthetic resource probe concisely.",
+                "content": "Repeat the requested sequence exactly and completely.",
             },
-            {"role": "user", "content": "Reply with the word ready."},
+            {
+                "role": "user",
+                "content": (
+                    "Reply with exactly: alpha beta gamma delta epsilon zeta eta theta."
+                ),
+            },
         ],
     }
 
