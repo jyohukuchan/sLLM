@@ -1,0 +1,8 @@
+table inet ullm_openai {
+    chain input {
+        type filter hook input priority -5; policy accept;
+
+        ip daddr 172.20.0.1 tcp dport 8000 iifname != "br-79bb7cfca31c" counter drop
+        ip daddr 172.20.0.1 tcp dport 8000 iifname "br-79bb7cfca31c" ip saddr != 172.20.0.0/16 counter drop
+    }
+}

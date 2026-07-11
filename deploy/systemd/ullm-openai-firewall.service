@@ -1,0 +1,15 @@
+[Unit]
+Description=Firewall for the uLLM OpenWebUI bridge endpoint
+Documentation=file:///home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/README.md
+Requires=docker.service
+After=docker.service
+Before=ullm-openai.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ullm-openai-firewall install
+ExecStop=/usr/local/libexec/ullm-openai-firewall remove
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

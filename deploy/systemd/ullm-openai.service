@@ -1,0 +1,57 @@
+[Unit]
+Description=uLLM single-worker OpenAI gateway
+Documentation=file:///home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/README.md
+Wants=network-online.target
+After=network-online.target docker.service ullm-openai-firewall.service
+Requires=docker.service ullm-openai-firewall.service
+RequiresMountsFor=/home/homelab1/datapool
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=homelab1
+Group=homelab1
+SupplementaryGroups=video render
+WorkingDirectory=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway
+EnvironmentFile=/etc/ullm/openai-gateway.env
+Environment=HOME=/var/cache/ullm
+Environment=XDG_CACHE_HOME=/var/cache/ullm
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+RuntimeDirectory=ullm
+RuntimeDirectoryMode=0750
+CacheDirectory=ullm
+CacheDirectoryMode=0750
+ExecStartPre=/usr/bin/test -x /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+ExecStart=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=650s
+TimeoutStopSec=15s
+KillMode=control-group
+SendSIGKILL=yes
+OOMPolicy=stop
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/ullm /var/cache/ullm
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ullm-openai
+
+[Install]
+WantedBy=multi-user.target

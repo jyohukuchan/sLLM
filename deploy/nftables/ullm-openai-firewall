@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+NFT=/usr/sbin/nft
+TABLE=ullm_openai
+RULES=/etc/ullm/ullm-openai.nft
+
+remove_table() {
+    if "$NFT" list table inet "$TABLE" >/dev/null 2>&1; then
+        "$NFT" delete table inet "$TABLE"
+    fi
+}
+
+case "${1:-}" in
+    install)
+        remove_table
+        "$NFT" --check --file "$RULES"
+        "$NFT" --file "$RULES"
+        "$NFT" list table inet "$TABLE"
+        ;;
+    remove)
+        remove_table
+        ;;
+    *)
+        echo "usage: $0 {install|remove}" >&2
+        exit 64
+        ;;
+esac
