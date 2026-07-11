@@ -30,6 +30,31 @@ RESOURCE_SCHEMA = "ullm.sq8.release_measurement.raw.v1"
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 MATRIX_SCHEMA = "ullm.sq8.openwebui_release.matrix.v1"
 PHASE1_REPORT_SCHEMA = "ullm.sq8.openwebui_release.validation.phase1.v1"
+API_CONTRACT_MODEL_ID = "ullm-qwen3-14b-sq8"
+API_CONTRACT_MAX_RESPONSE_BYTES = 1024 * 1024
+API_CONTRACT_INVALID_KEY_MESSAGE = "The supplied API key is invalid."
+API_CONTRACT_QUERY_MESSAGE = "Query parameters are not supported."
+API_CONTRACT_INVALID_JSON_MESSAGE = "The request body is not valid JSON."
+API_CONTRACT_UNSUPPORTED_MESSAGE = "The requested parameter is not supported."
+API_CONTRACT_MODEL_NOT_FOUND_MESSAGE = "The requested model does not exist."
+
+API_CONTRACT_CANONICAL_BODY = (
+    b'{"messages":[{"content":"API contract preflight","role":"user"}],'
+    b'"model":"ullm-qwen3-14b-sq8"}'
+)
+API_CONTRACT_MALFORMED_BODY = b'{"broken":'
+API_CONTRACT_DUPLICATE_KEY_BODY = (
+    b'{"model":"ullm-qwen3-14b-sq8","model":"ullm-qwen3-14b-sq8",'
+    b'"messages":[{"role":"user","content":"API contract preflight"}]}'
+)
+API_CONTRACT_UNSUPPORTED_N_BODY = (
+    b'{"messages":[{"content":"API contract preflight","role":"user"}],'
+    b'"model":"ullm-qwen3-14b-sq8","n":2}'
+)
+API_CONTRACT_MISSING_MODEL_BODY = (
+    b'{"messages":[{"content":"API contract preflight","role":"user"}],'
+    b'"model":"missing"}'
+)
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
@@ -942,6 +967,143 @@ class HttpValidationState:
     fixture_messages: list[Any] | None = None
 
 
+@dataclass(frozen=True)
+class ApiContractCase:
+    case_id: str
+    method: str
+    target: str
+    body: bytes
+    authorization_mode: str
+    expected_status: int
+    expected_code: str | None
+    expected_param: str | None
+    expected_message: str | None
+    expect_models: bool = False
+
+
+API_CONTRACT_CASES = (
+    ApiContractCase(
+        "models-valid",
+        "GET",
+        "/v1/models",
+        b"",
+        "valid_bearer",
+        200,
+        None,
+        None,
+        None,
+        True,
+    ),
+    ApiContractCase(
+        "models-missing-auth",
+        "GET",
+        "/v1/models",
+        b"",
+        "missing",
+        401,
+        "invalid_api_key",
+        None,
+        API_CONTRACT_INVALID_KEY_MESSAGE,
+    ),
+    ApiContractCase(
+        "models-invalid-auth",
+        "GET",
+        "/v1/models",
+        b"",
+        "invalid_bearer",
+        401,
+        "invalid_api_key",
+        None,
+        API_CONTRACT_INVALID_KEY_MESSAGE,
+    ),
+    ApiContractCase(
+        "models-query",
+        "GET",
+        "/v1/models?x=1",
+        b"",
+        "valid_bearer",
+        400,
+        "invalid_request_error",
+        None,
+        API_CONTRACT_QUERY_MESSAGE,
+    ),
+    ApiContractCase(
+        "chat-malformed-missing-auth",
+        "POST",
+        "/v1/chat/completions",
+        API_CONTRACT_MALFORMED_BODY,
+        "missing",
+        401,
+        "invalid_api_key",
+        None,
+        API_CONTRACT_INVALID_KEY_MESSAGE,
+    ),
+    ApiContractCase(
+        "chat-invalid-auth",
+        "POST",
+        "/v1/chat/completions",
+        API_CONTRACT_CANONICAL_BODY,
+        "invalid_bearer",
+        401,
+        "invalid_api_key",
+        None,
+        API_CONTRACT_INVALID_KEY_MESSAGE,
+    ),
+    ApiContractCase(
+        "chat-malformed-valid-auth",
+        "POST",
+        "/v1/chat/completions",
+        API_CONTRACT_MALFORMED_BODY,
+        "valid_bearer",
+        400,
+        "invalid_request_error",
+        None,
+        API_CONTRACT_INVALID_JSON_MESSAGE,
+    ),
+    ApiContractCase(
+        "chat-duplicate-key",
+        "POST",
+        "/v1/chat/completions",
+        API_CONTRACT_DUPLICATE_KEY_BODY,
+        "valid_bearer",
+        400,
+        "invalid_request_error",
+        None,
+        API_CONTRACT_INVALID_JSON_MESSAGE,
+    ),
+    ApiContractCase(
+        "chat-unsupported-n",
+        "POST",
+        "/v1/chat/completions",
+        API_CONTRACT_UNSUPPORTED_N_BODY,
+        "valid_bearer",
+        400,
+        "unsupported_parameter",
+        "n",
+        API_CONTRACT_UNSUPPORTED_MESSAGE,
+    ),
+    ApiContractCase(
+        "chat-missing-model",
+        "POST",
+        "/v1/chat/completions",
+        API_CONTRACT_MISSING_MODEL_BODY,
+        "valid_bearer",
+        404,
+        "model_not_found",
+        "model",
+        API_CONTRACT_MODEL_NOT_FOUND_MESSAGE,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ApiContractValidationResult:
+    case_ids: tuple[str, ...]
+    request_keys: tuple[str, ...]
+    statuses: tuple[int, ...]
+    cases: tuple[dict[str, Any], ...]
+
+
 @dataclass
 class SessionData:
     run_id: str
@@ -1482,7 +1644,17 @@ def _validate_http_record(
             fail(f"{label}.request_key is duplicated")
         if state.active_key is not None:
             fail(f"{label} overlaps another active raw HTTP request")
-        if record["method"] != "POST" or record["target"] != "/v1/chat/completions":
+        phase = record["phase"]
+        method = string(record["method"], f"{label}.method")
+        target = string(record["target"], f"{label}.target")
+        if phase == "api_contract":
+            if (method, target) not in {
+                ("GET", "/v1/models"),
+                ("GET", "/v1/models?x=1"),
+                ("POST", "/v1/chat/completions"),
+            }:
+                fail(f"{label} API contract method/target differs")
+        elif method != "POST" or target != "/v1/chat/completions":
             fail(f"{label} method/target differs")
         headers = exact_fields(
             record["headers"],
@@ -1497,13 +1669,20 @@ def _validate_http_record(
         authorization_mode = string(
             headers["authorization_mode"], f"{label}.headers.authorization_mode"
         )
-        if authorization_mode != "valid_bearer":
+        allowed_authorization_modes = (
+            {"valid_bearer", "missing", "invalid_bearer"}
+            if phase == "api_contract"
+            else {"valid_bearer"}
+        )
+        if authorization_mode not in allowed_authorization_modes:
             fail(f"{label}.headers.authorization_mode differs")
         raw = validate_hash_bound_bytes(
             record["body_base64"], record["body_bytes"], record["body_sha256"], label
         )
         if content_length != len(raw):
             fail(f"{label}.headers.content_length differs")
+        if phase == "api_contract" and ((method == "GET") != (raw == b"")):
+            fail(f"{label} API contract method/body shape differs")
         connect = integer(
             record["connect_completed_monotonic_ns"],
             f"{label}.connect_completed_monotonic_ns",
@@ -1519,21 +1698,29 @@ def _validate_http_record(
             fail(f"{label} request timing order differs")
         if connect < state.last_response_end_ns:
             fail(f"{label} begins before the prior HTTP response ended")
-        if record["phase"] in {"resource_normal", "resource_restart"}:
+        if phase in {"resource_normal", "resource_restart"}:
             if record["case_id"].startswith("negative-after-"):
                 kind = _validate_negative_resource_body(raw, record, state, label)
             else:
                 kind = _validate_positive_resource_body(raw, record, state, label)
+        elif phase == "api_contract":
+            kind = "api_contract"
         else:
             kind = "other"
         state.requests[key] = {
-            "phase": record["phase"],
+            "phase": phase,
             "case_id": record["case_id"],
             "request_index": record["request_index"],
             "kind": kind,
             "connect_ns": connect,
+            "write_ns": started,
             "sent_ns": sent,
+            "method": method,
+            "target": target,
+            "authorization_mode": authorization_mode,
         }
+        if phase == "api_contract":
+            state.requests[key]["request_body"] = raw
         state.ordered_keys.append(key)
         state.bodies[key] = HttpBodyState(hashlib.sha256(), 0, 0, bytearray(), sent)
         state.active_key = key
@@ -1549,17 +1736,25 @@ def _validate_http_record(
         headers = record["headers"]
         if type(headers) is not list:
             fail(f"{label}.headers must be an array")
+        parsed_headers: list[tuple[str, str]] = []
         for index, pair in enumerate(headers):
             if type(pair) is not list or len(pair) != 2:
                 fail(f"{label}.headers[{index}] must be a two-string array")
-            string(pair[0], f"{label}.headers[{index}][0]")
-            string(pair[1], f"{label}.headers[{index}][1]", nonempty=False)
+            name = string(pair[0], f"{label}.headers[{index}][0]")
+            value = string(pair[1], f"{label}.headers[{index}][1]", nonempty=False)
+            parsed_headers.append((name, value))
         content_types = [
             value.split(";", 1)[0].strip().lower()
             for name, value in headers
             if name.lower() == "content-type"
         ]
-        expected_media = "text/event-stream" if status == 200 else "application/json"
+        expected_media = (
+            "application/json"
+            if state.requests[key]["phase"] == "api_contract"
+            else "text/event-stream"
+            if status == 200
+            else "application/json"
+        )
         if content_types != [expected_media]:
             fail(f"{label} response Content-Type differs")
         observed = integer(
@@ -1570,6 +1765,8 @@ def _validate_http_record(
             fail(f"{label} response start precedes request send")
         body_state.last_observed_ns = observed
         state.requests[key]["status"] = status
+        state.requests[key]["response_headers"] = tuple(parsed_headers)
+        state.requests[key]["response_started_ns"] = observed
         state.response_started.add(key)
     elif record_type == "http_body_chunk":
         key = string(record["request_key"], f"{label}.request_key")
@@ -1584,7 +1781,15 @@ def _validate_http_record(
         raw = validate_hash_bound_bytes(
             record["body_base64"], record["body_bytes"], record["body_sha256"], label
         )
-        if body_state.byte_count + len(raw) > MAX_JSON_BYTES:
+        request = state.requests[key]
+        response_limit = (
+            API_CONTRACT_MAX_RESPONSE_BYTES
+            if request["phase"] == "api_contract"
+            else MAX_JSON_BYTES
+        )
+        if request["phase"] == "api_contract" and not raw:
+            fail(f"{label} API contract body chunk is empty")
+        if body_state.byte_count + len(raw) > response_limit:
             fail(f"{label} complete response exceeds its size limit")
         body_state.digest.update(raw)
         body_state.raw.extend(raw)
@@ -1623,6 +1828,12 @@ def _validate_http_record(
         if observed < body_state.last_observed_ns:
             fail(f"{label} response end timestamp regresses")
         request = state.requests[key]
+        if request["phase"] == "api_contract":
+            if outcome != "eof" or error is not None:
+                fail(f"{label} API contract response did not terminate at EOF")
+            request["response_body"] = bytes(body_state.raw)
+            request["response_chunk_count"] = body_state.next_index
+            request["outcome"] = outcome
         if request["kind"] in {
             "normal_warmup",
             "normal_measured",
@@ -1648,6 +1859,189 @@ def _validate_http_record(
         del state.bodies[key]
         state.active_key = None
         state.last_response_end_ns = observed
+
+
+def _api_contract_header_values(
+    headers: tuple[tuple[str, str], ...], name: str
+) -> list[str]:
+    return [value for key, value in headers if key.lower() == name.lower()]
+
+
+def _validate_api_contract_response(
+    case: ApiContractCase, request: dict[str, Any], label: str
+) -> dict[str, Any]:
+    status = integer(request.get("status"), f"{label}.status", minimum=100, maximum=599)
+    if status != case.expected_status:
+        fail(f"{label} status differs from the frozen API contract")
+    if request.get("outcome") != "eof":
+        fail(f"{label} response outcome differs from the frozen API contract")
+    headers_value = request.get("response_headers")
+    if type(headers_value) is not tuple or any(
+        type(pair) is not tuple
+        or len(pair) != 2
+        or type(pair[0]) is not str
+        or type(pair[1]) is not str
+        for pair in headers_value
+    ):
+        fail(f"{label} response headers are incomplete")
+    headers = cast(tuple[tuple[str, str], ...], headers_value)
+    content_types = _api_contract_header_values(headers, "Content-Type")
+    if content_types != ["application/json"]:
+        fail(f"{label} response Content-Type differs")
+    authenticate = _api_contract_header_values(headers, "WWW-Authenticate")
+    expected_authenticate = ["Bearer"] if status == 401 else []
+    if authenticate != expected_authenticate:
+        fail(f"{label} WWW-Authenticate header differs")
+    if _api_contract_header_values(headers, "Retry-After"):
+        fail(f"{label} non-busy response contains Retry-After")
+    if _api_contract_header_values(headers, "Transfer-Encoding"):
+        fail(f"{label} response unexpectedly uses Transfer-Encoding")
+
+    body_value = request.get("response_body")
+    if type(body_value) is not bytes:
+        fail(f"{label} response body is incomplete")
+    body = cast(bytes, body_value)
+    if not body or len(body) > API_CONTRACT_MAX_RESPONSE_BYTES:
+        fail(f"{label} response body size differs")
+    content_lengths = _api_contract_header_values(headers, "Content-Length")
+    if content_lengths != [str(len(body))]:
+        fail(f"{label} response Content-Length differs")
+    if integer(
+        request.get("response_chunk_count"), f"{label}.response_chunk_count"
+    ) not in range(1, 126):
+        fail(f"{label} response chunk count differs")
+
+    value = decode_json_bytes(
+        body,
+        f"{label}.response_body",
+        allow_outer_whitespace=True,
+    )
+    error_summary: dict[str, Any] | None = None
+    if case.expect_models:
+        expected_models = {
+            "object": "list",
+            "data": [
+                {
+                    "id": API_CONTRACT_MODEL_ID,
+                    "object": "model",
+                    "owned_by": "ullm",
+                }
+            ],
+        }
+        if not json_equal(value, expected_models):
+            fail(f"{label} model list differs")
+    else:
+        envelope = exact_fields(value, {"error"}, f"{label}.response_body")
+        error = exact_fields(
+            envelope["error"],
+            {"message", "type", "param", "code"},
+            f"{label}.response_body.error",
+        )
+        message = string(error["message"], f"{label}.response_body.error.message")
+        if (
+            error["type"] != "invalid_request_error"
+            or error["code"] != case.expected_code
+            or error["param"] != case.expected_param
+            or message != case.expected_message
+        ):
+            fail(f"{label} error message, type, code, or param differs")
+        message_raw = message.encode("utf-8")
+        error_summary = {
+            "type": error["type"],
+            "code": error["code"],
+            "param": error["param"],
+            "message_utf8_bytes": len(message_raw),
+            "message_sha256": hashlib.sha256(message_raw).hexdigest(),
+        }
+    return {
+        "content_type": content_types[0],
+        "content_length": len(body),
+        "www_authenticate": authenticate,
+        "response_body_bytes": len(body),
+        "response_body_sha256": hashlib.sha256(body).hexdigest(),
+        "error": error_summary,
+    }
+
+
+def validate_api_contract_http(
+    source: SessionData | HttpValidationState,
+) -> ApiContractValidationResult:
+    """Reconstruct the exact ten-case API contract from raw HTTP records.
+
+    Phase-1 validation intentionally does not call this helper.  The full release
+    validator must call it explicitly after ``validate_session`` so a partial
+    resource-only bundle does not acquire a completed API-contract claim.
+    """
+
+    if isinstance(source, SessionData):
+        requests = source.http_requests
+        ordered_keys = source.ordered_http_keys
+    else:
+        requests = source.requests
+        ordered_keys = source.ordered_keys
+    api_keys = [key for key in ordered_keys if requests[key]["phase"] == "api_contract"]
+    if len(api_keys) != len(API_CONTRACT_CASES):
+        fail("API contract raw HTTP request count differs from the frozen schedule")
+
+    statuses: list[int] = []
+    case_results: list[dict[str, Any]] = []
+    for case_index, (key, case) in enumerate(
+        zip(api_keys, API_CONTRACT_CASES, strict=True), start=1
+    ):
+        request = requests[key]
+        expected_key = f"api-contract-{case_index:02d}-{case.case_id}"
+        label = f"API contract case {case_index} ({case.case_id})"
+        if (
+            key != expected_key
+            or request.get("phase") != "api_contract"
+            or request.get("case_id") != case.case_id
+            or request.get("request_index") != case_index
+            or request.get("kind") != "api_contract"
+            or request.get("method") != case.method
+            or request.get("target") != case.target
+            or request.get("authorization_mode") != case.authorization_mode
+            or request.get("request_body") != case.body
+        ):
+            fail(f"{label} request identity, order, authorization, or body differs")
+        response = _validate_api_contract_response(case, request, label)
+        status = integer(request["status"], f"{label}.status")
+        statuses.append(status)
+        case_results.append(
+            {
+                "case_index": case_index,
+                "case_id": case.case_id,
+                "method": case.method,
+                "target": case.target,
+                "authorization_mode": case.authorization_mode,
+                "request_body_bytes": len(case.body),
+                "request_body_sha256": hashlib.sha256(case.body).hexdigest(),
+                "connect_completed_monotonic_ns": integer(
+                    request.get("connect_ns"), f"{label}.connect_ns"
+                ),
+                "write_started_monotonic_ns": integer(
+                    request.get("write_ns"), f"{label}.write_ns"
+                ),
+                "last_body_byte_sent_monotonic_ns": integer(
+                    request.get("sent_ns"), f"{label}.sent_ns"
+                ),
+                "status": status,
+                "response_started_monotonic_ns": integer(
+                    request.get("response_started_ns"),
+                    f"{label}.response_started_ns",
+                ),
+                "response_end_monotonic_ns": integer(
+                    request.get("response_end_ns"), f"{label}.response_end_ns"
+                ),
+                **response,
+            }
+        )
+
+    return ApiContractValidationResult(
+        case_ids=tuple(case.case_id for case in API_CONTRACT_CASES),
+        request_keys=tuple(api_keys),
+        statuses=tuple(statuses),
+        cases=tuple(case_results),
+    )
 
 
 def _add_lifecycle_event(
@@ -2203,6 +2597,9 @@ def validate_full_campaign_order(
         if observed_times != sorted(observed_times):
             fail("full campaign request lifecycle timestamps regress")
         _campaign_terminal(trace)
+
+    if any(trace.phase == "api_contract" for trace in ordered_traces):
+        fail("full campaign API contract phase produced a worker lifecycle admission")
 
     openwebui_traces = [trace for trace in ordered_traces if trace.phase == "openwebui"]
     if (

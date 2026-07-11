@@ -1167,6 +1167,21 @@ class FullCampaignOrderTest(unittest.TestCase):
         resequence_full_campaign(self.records)
         self.assert_invalid("phase set/order differs")
 
+    def test_api_contract_phase_cannot_admit_a_worker_request(self):
+        insert_at = next(
+            index
+            for index, record in enumerate(self.records)
+            if record["phase"] == "openwebui"
+        )
+        fixture = FullCampaignOrderFixture()
+        fixture.records = []
+        fixture.successful_trace(
+            "api_contract", "unexpected-api-admission", 1200, "length"
+        )
+        self.records[insert_at:insert_at] = fixture.records
+        resequence_full_campaign(self.records)
+        self.assert_invalid("API contract phase produced a worker lifecycle admission")
+
     def test_openwebui_soak_requires_exactly_twenty_after_smoke(self):
         self.records[:] = [
             record
@@ -1288,6 +1303,491 @@ class FullCampaignOrderTest(unittest.TestCase):
         self.records.insert(insertion, probe)
         resequence_full_campaign(self.records)
         self.assert_invalid("failure/recovery order differs")
+
+
+def api_contract_response_body(case) -> bytes:
+    if case.expect_models:
+        value = {
+            "object": "list",
+            "data": [
+                {
+                    "id": VALIDATOR.API_CONTRACT_MODEL_ID,
+                    "object": "model",
+                    "owned_by": "ullm",
+                }
+            ],
+        }
+    else:
+        value = {
+            "error": {
+                "message": case.expected_message,
+                "type": "invalid_request_error",
+                "param": case.expected_param,
+                "code": case.expected_code,
+            }
+        }
+    return compact_json(value).encode("utf-8")
+
+
+def build_api_contract_http_records() -> list[dict]:
+    records = []
+    now = 1_000_000
+    for case_index, case in enumerate(VALIDATOR.API_CONTRACT_CASES, start=1):
+        key = f"api-contract-{case_index:02d}-{case.case_id}"
+        response = api_contract_response_body(case)
+        common = {
+            "schema_version": VALIDATOR.SESSION_SCHEMA,
+            "phase": "api_contract",
+            "case_id": case.case_id,
+        }
+        records.extend(
+            [
+                {
+                    **common,
+                    "record_type": "http_request",
+                    "request_index": case_index,
+                    "request_key": key,
+                    "method": case.method,
+                    "target": case.target,
+                    "headers": {
+                        "content_type": "application/json",
+                        "content_length": len(case.body),
+                        "authorization_mode": case.authorization_mode,
+                    },
+                    "body_base64": base64.b64encode(case.body).decode("ascii"),
+                    "body_sha256": sha256_bytes(case.body),
+                    "body_bytes": len(case.body),
+                    "connect_completed_monotonic_ns": now,
+                    "write_started_monotonic_ns": now + 1,
+                    "last_body_byte_sent_monotonic_ns": now + 2,
+                },
+                {
+                    **common,
+                    "record_type": "http_response_start",
+                    "request_key": key,
+                    "status": case.expected_status,
+                    "headers": [
+                        ["Content-Type", "application/json"],
+                        ["Content-Length", str(len(response))],
+                        ["Server", "synthetic"],
+                        *(
+                            [["WWW-Authenticate", "Bearer"]]
+                            if case.expected_status == 401
+                            else []
+                        ),
+                    ],
+                    "observed_monotonic_ns": now + 3,
+                },
+                {
+                    **common,
+                    "record_type": "http_body_chunk",
+                    "request_key": key,
+                    "chunk_index": 0,
+                    "body_base64": base64.b64encode(response).decode("ascii"),
+                    "body_sha256": sha256_bytes(response),
+                    "body_bytes": len(response),
+                    "observed_monotonic_ns": now + 4,
+                },
+                {
+                    **common,
+                    "record_type": "http_response_end",
+                    "request_key": key,
+                    "outcome": "eof",
+                    "error": None,
+                    "body_bytes": len(response),
+                    "body_sha256": sha256_bytes(response),
+                    "observed_monotonic_ns": now + 5,
+                },
+            ]
+        )
+        now += 10
+    return records
+
+
+def replace_api_contract_response(
+    records: list[dict], case_id: str, raw: bytes
+) -> None:
+    chunk = next(
+        record
+        for record in records
+        if record["case_id"] == case_id and record["record_type"] == "http_body_chunk"
+    )
+    chunk["body_base64"] = base64.b64encode(raw).decode("ascii")
+    chunk["body_sha256"] = sha256_bytes(raw)
+    chunk["body_bytes"] = len(raw)
+    end = next(
+        record
+        for record in records
+        if record["case_id"] == case_id and record["record_type"] == "http_response_end"
+    )
+    end["body_sha256"] = sha256_bytes(raw)
+    end["body_bytes"] = len(raw)
+    start = next(
+        record
+        for record in records
+        if record["case_id"] == case_id
+        and record["record_type"] == "http_response_start"
+    )
+    next(pair for pair in start["headers"] if pair[0] == "Content-Length")[1] = str(
+        len(raw)
+    )
+
+
+class ApiContractHttpValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.records = build_api_contract_http_records()
+
+    def validate(self, records=None):
+        state = VALIDATOR.HttpValidationState(
+            fixture_seal=VALIDATOR.InputSeal(size=2, sha256=sha256_bytes(b"{}")),
+            requests={},
+            response_started=set(),
+            response_ended=set(),
+            bodies={},
+            ordered_keys=[],
+        )
+        for index, record in enumerate(self.records if records is None else records):
+            VALIDATOR._validate_http_record(record, f"API test record {index}", state)
+        return VALIDATOR.validate_api_contract_http(state)
+
+    def assert_invalid(self, text: str, records=None):
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
+            self.validate(records)
+
+    def record(self, records, case_id: str, record_type: str):
+        return next(
+            record
+            for record in records
+            if record["case_id"] == case_id and record["record_type"] == record_type
+        )
+
+    def test_exact_ten_case_contract_is_reconstructed(self):
+        result = self.validate()
+        self.assertEqual(
+            result.case_ids,
+            tuple(case.case_id for case in VALIDATOR.API_CONTRACT_CASES),
+        )
+        self.assertEqual(
+            result.statuses,
+            tuple(case.expected_status for case in VALIDATOR.API_CONTRACT_CASES),
+        )
+        self.assertEqual(len(result.request_keys), 10)
+        self.assertEqual(len(result.cases), 10)
+        self.assertEqual(
+            result.cases[0],
+            {
+                "case_index": 1,
+                "case_id": "models-valid",
+                "method": "GET",
+                "target": "/v1/models",
+                "authorization_mode": "valid_bearer",
+                "request_body_bytes": 0,
+                "request_body_sha256": sha256_bytes(b""),
+                "connect_completed_monotonic_ns": 1_000_000,
+                "write_started_monotonic_ns": 1_000_001,
+                "last_body_byte_sent_monotonic_ns": 1_000_002,
+                "status": 200,
+                "response_started_monotonic_ns": 1_000_003,
+                "response_end_monotonic_ns": 1_000_005,
+                "content_type": "application/json",
+                "content_length": len(
+                    api_contract_response_body(VALIDATOR.API_CONTRACT_CASES[0])
+                ),
+                "www_authenticate": [],
+                "response_body_bytes": len(
+                    api_contract_response_body(VALIDATOR.API_CONTRACT_CASES[0])
+                ),
+                "response_body_sha256": sha256_bytes(
+                    api_contract_response_body(VALIDATOR.API_CONTRACT_CASES[0])
+                ),
+                "error": None,
+            },
+        )
+        self.assertEqual(
+            result.cases[1]["error"],
+            {
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+                "param": None,
+                "message_utf8_bytes": len(
+                    "The supplied API key is invalid.".encode("utf-8")
+                ),
+                "message_sha256": sha256_bytes(
+                    "The supplied API key is invalid.".encode("utf-8")
+                ),
+            },
+        )
+
+    def test_validator_schedule_is_frozen_independently_of_the_gate_module(self):
+        observed = tuple(
+            (
+                case.case_id,
+                case.method,
+                case.target,
+                case.body,
+                case.authorization_mode,
+                case.expected_status,
+                case.expected_code,
+                case.expected_param,
+                case.expected_message,
+                case.expect_models,
+            )
+            for case in VALIDATOR.API_CONTRACT_CASES
+        )
+        expected = (
+            (
+                "models-valid",
+                "GET",
+                "/v1/models",
+                b"",
+                "valid_bearer",
+                200,
+                None,
+                None,
+                None,
+                True,
+            ),
+            (
+                "models-missing-auth",
+                "GET",
+                "/v1/models",
+                b"",
+                "missing",
+                401,
+                "invalid_api_key",
+                None,
+                "The supplied API key is invalid.",
+                False,
+            ),
+            (
+                "models-invalid-auth",
+                "GET",
+                "/v1/models",
+                b"",
+                "invalid_bearer",
+                401,
+                "invalid_api_key",
+                None,
+                "The supplied API key is invalid.",
+                False,
+            ),
+            (
+                "models-query",
+                "GET",
+                "/v1/models?x=1",
+                b"",
+                "valid_bearer",
+                400,
+                "invalid_request_error",
+                None,
+                "Query parameters are not supported.",
+                False,
+            ),
+            (
+                "chat-malformed-missing-auth",
+                "POST",
+                "/v1/chat/completions",
+                b'{"broken":',
+                "missing",
+                401,
+                "invalid_api_key",
+                None,
+                "The supplied API key is invalid.",
+                False,
+            ),
+            (
+                "chat-invalid-auth",
+                "POST",
+                "/v1/chat/completions",
+                b'{"messages":[{"content":"API contract preflight","role":"user"}],'
+                b'"model":"ullm-qwen3-14b-sq8"}',
+                "invalid_bearer",
+                401,
+                "invalid_api_key",
+                None,
+                "The supplied API key is invalid.",
+                False,
+            ),
+            (
+                "chat-malformed-valid-auth",
+                "POST",
+                "/v1/chat/completions",
+                b'{"broken":',
+                "valid_bearer",
+                400,
+                "invalid_request_error",
+                None,
+                "The request body is not valid JSON.",
+                False,
+            ),
+            (
+                "chat-duplicate-key",
+                "POST",
+                "/v1/chat/completions",
+                b'{"model":"ullm-qwen3-14b-sq8","model":"ullm-qwen3-14b-sq8",'
+                b'"messages":[{"role":"user","content":"API contract preflight"}]}',
+                "valid_bearer",
+                400,
+                "invalid_request_error",
+                None,
+                "The request body is not valid JSON.",
+                False,
+            ),
+            (
+                "chat-unsupported-n",
+                "POST",
+                "/v1/chat/completions",
+                b'{"messages":[{"content":"API contract preflight","role":"user"}],'
+                b'"model":"ullm-qwen3-14b-sq8","n":2}',
+                "valid_bearer",
+                400,
+                "unsupported_parameter",
+                "n",
+                "The requested parameter is not supported.",
+                False,
+            ),
+            (
+                "chat-missing-model",
+                "POST",
+                "/v1/chat/completions",
+                b'{"messages":[{"content":"API contract preflight","role":"user"}],'
+                b'"model":"missing"}',
+                "valid_bearer",
+                404,
+                "model_not_found",
+                "model",
+                "The requested model does not exist.",
+                False,
+            ),
+        )
+        self.assertEqual(observed, expected)
+
+    def test_full_helper_rejects_an_absent_or_incomplete_schedule(self):
+        self.assert_invalid("request count", [])
+        self.assert_invalid("request count", self.records[:-4])
+
+    def test_request_identity_order_authorization_and_body_are_exact(self):
+        mutations = {
+            "index": lambda request: request.update({"request_index": 2}),
+            "case": lambda request: request.update({"case_id": "models-query"}),
+            "target": lambda request: request.update({"target": "/v1/models?x=1"}),
+            "authorization": lambda request: request["headers"].update(
+                {"authorization_mode": "missing"}
+            ),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                records = deepcopy(self.records)
+                mutation(self.record(records, "models-valid", "http_request"))
+                self.assert_invalid(
+                    "request identity, order, authorization, or body", records
+                )
+
+        records = deepcopy(self.records)
+        request = self.record(records, "chat-invalid-auth", "http_request")
+        replace_request_body(request, VALIDATOR.API_CONTRACT_MISSING_MODEL_BODY)
+        self.assert_invalid("request identity, order, authorization, or body", records)
+
+    def test_method_body_shape_is_phase_specific(self):
+        records = deepcopy(self.records)
+        request = self.record(records, "models-valid", "http_request")
+        replace_request_body(request, b"{}")
+        self.assert_invalid("method/body shape", records)
+
+    def test_status_is_exact_for_every_case(self):
+        records = deepcopy(self.records)
+        self.record(records, "chat-missing-model", "http_response_start")["status"] = (
+            400
+        )
+        self.assert_invalid("status differs", records)
+
+    def test_response_protocol_headers_are_reconstructed(self):
+        mutations = {
+            "content-type": (
+                "models-valid",
+                lambda headers: headers.__setitem__(
+                    0, ["Content-Type", "application/json; charset=utf-8"]
+                ),
+                "Content-Type",
+            ),
+            "content-length": (
+                "models-valid",
+                lambda headers: headers.__setitem__(1, ["Content-Length", "1"]),
+                "Content-Length",
+            ),
+            "missing-authenticate": (
+                "models-missing-auth",
+                lambda headers: headers.__setitem__(
+                    slice(None),
+                    [pair for pair in headers if pair[0] != "WWW-Authenticate"],
+                ),
+                "WWW-Authenticate",
+            ),
+            "unexpected-authenticate": (
+                "models-valid",
+                lambda headers: headers.append(["WWW-Authenticate", "Bearer"]),
+                "WWW-Authenticate",
+            ),
+            "retry-after": (
+                "models-valid",
+                lambda headers: headers.append(["Retry-After", "1"]),
+                "Retry-After",
+            ),
+            "transfer-encoding": (
+                "models-valid",
+                lambda headers: headers.append(["Transfer-Encoding", "chunked"]),
+                "Transfer-Encoding",
+            ),
+        }
+        for name, (case_id, mutation, expected) in mutations.items():
+            with self.subTest(name=name):
+                records = deepcopy(self.records)
+                start = self.record(records, case_id, "http_response_start")
+                mutation(start["headers"])
+                self.assert_invalid(expected, records)
+
+    def test_model_list_is_exact(self):
+        records = deepcopy(self.records)
+        raw = api_contract_response_body(VALIDATOR.API_CONTRACT_CASES[0]).replace(
+            VALIDATOR.API_CONTRACT_MODEL_ID.encode("ascii"), b"other-model"
+        )
+        replace_api_contract_response(records, "models-valid", raw)
+        self.assert_invalid("model list differs", records)
+
+    def test_error_envelope_message_type_code_and_param_are_exact(self):
+        for field, replacement in (
+            ("message", "different"),
+            ("type", "authentication_error"),
+            ("code", "different"),
+            ("param", "authorization"),
+        ):
+            with self.subTest(field=field):
+                records = deepcopy(self.records)
+                body = json.loads(
+                    api_contract_response_body(VALIDATOR.API_CONTRACT_CASES[1])
+                )
+                body["error"][field] = replacement
+                replace_api_contract_response(
+                    records,
+                    "models-missing-auth",
+                    compact_json(body).encode("utf-8"),
+                )
+                self.assert_invalid("error message, type, code, or param", records)
+
+    def test_response_json_duplicate_keys_are_rejected(self):
+        records = deepcopy(self.records)
+        raw = (
+            b'{"object":"list","object":"list","data":[{"id":"'
+            + VALIDATOR.API_CONTRACT_MODEL_ID.encode("ascii")
+            + b'","object":"model","owned_by":"ullm"}]}'
+        )
+        replace_api_contract_response(records, "models-valid", raw)
+        self.assert_invalid("duplicate JSON key", records)
+
+    def test_empty_api_response_chunk_is_rejected(self):
+        records = deepcopy(self.records)
+        replace_api_contract_response(records, "models-valid", b"")
+        self.assert_invalid("body chunk is empty", records)
 
 
 class ValidatorTest(unittest.TestCase):
