@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import dataclasses
+import hashlib
 import os
 import signal
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -18,6 +21,16 @@ assert SPEC is not None and SPEC.loader is not None
 BACKEND = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = BACKEND
 SPEC.loader.exec_module(BACKEND)
+
+
+def load_tool(name: str) -> Any:
+    path = TOOLS / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"test_{name}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class FakeProcess:
@@ -143,6 +156,10 @@ class Bindings:
         self.events.append(f"bind:{gate}")
         return str(gate)
 
+    def confirm_failure(self, result: Any, work_dir: Path) -> Path:
+        self.events.append("confirm:failure")
+        return Path("/run/user/1000/restart-epoch.json")
+
 
 class Collector:
     def collect_normal(self, *, expected_identity: Any = None) -> str:
@@ -152,6 +169,57 @@ class Collector:
         self, normal_identity: Any, *, expected_identity: Any = None
     ) -> str:
         return "restart"
+
+
+def bridge_fixture(
+    secret_owner: Any,
+    snapshots: Any,
+    runtime: Any,
+    *,
+    runtime_config: Any | None = None,
+) -> tuple[Any, Any]:
+    class Guard:
+        def __init__(self, secret: bytes) -> None:
+            self.secret = secret
+
+    class Anchor:
+        commit = "a" * 40
+        status_raw = b""
+
+        def revalidate(self) -> None:
+            pass
+
+    client = b"print('trusted client')\n"
+    resource = SimpleNamespace(session_header_fields={"identities": {}})
+    inputs = BACKEND.SystemBridgeInputs(
+        SimpleNamespace(),
+        resource,
+        Anchor(),
+        secret_owner,
+        client,
+        hashlib.sha256(client).hexdigest(),
+        ROOT,
+        "/opt/rocm/bin/amd-smi",
+    )
+    config_factory = (
+        (lambda identities, amd_smi: object())
+        if runtime_config is None
+        else runtime_config
+    )
+    factories = BACKEND.SystemBridgeFactories(
+        secret_guard=Guard,
+        runtime_snapshots=lambda source, secret: snapshots,
+        runtime_config=config_factory,
+        system_runtime=lambda config, root, guard, owner, capture_journal: runtime,
+        session_writer=lambda path, guard: object(),
+        resource_writer=lambda path, guard: object(),
+        journal_capture=lambda *args, **kwargs: object(),
+        resource_claims=lambda *args: object(),
+        resource_collector=lambda *args: object(),
+        preflight_result=lambda *args: object(),
+        final_result=lambda *args: object(),
+    )
+    return inputs, factories
 
 
 class BackendTests(unittest.TestCase):
@@ -232,8 +300,8 @@ class BackendTests(unittest.TestCase):
             runner.run_gate(
                 "api_contract", Path("/tmp/api"), self.secrets, self.deployment
             )
-            self.assertTrue(process.waited)
-            self.assertEqual(kills, [])
+        self.assertTrue(process.waited)
+        self.assertEqual(kills, [])
 
     def test_successful_sigkill_retries_interrupted_unbounded_reap(self) -> None:
         process = FakeProcess(fileno_error=KeyboardInterrupt(), wait_interrupts=1)
@@ -324,7 +392,9 @@ class BackendTests(unittest.TestCase):
                 item
                 for gate in BACKEND.GATE_ORDER
                 for item in (f"bind:{gate}", f"ingest:{gate}")
-            ],
+            ][:10]
+            + ["confirm:failure"]
+            + ["bind:latency", "ingest:latency"],
         )
         self.assertEqual(self.secret_owner.revalidations, 1 + len(BACKEND.GATE_ORDER))
 
@@ -385,6 +455,375 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(adapter.collect_restart(object()), "restart")
         adapter.close()
         self.assertEqual(events, ["two", "one"])
+
+    def test_binding_factory_pins_failure_epoch_before_latency(self) -> None:
+        contexts: list[Any] = []
+
+        def build(context: Any) -> Any:
+            contexts.append(context)
+            return context.gate
+
+        factory = BACKEND.ProductionGateBindingsFactory(
+            "normal",
+            {gate: build for gate in BACKEND.GATE_ORDER},
+            lambda result, work: (
+                "restart",
+                Path("/run/user/1000/restart-epoch.json"),
+                "a" * 64,
+            ),
+        )
+        with self.assertRaises(BACKEND.ProductionBackendError):
+            factory.build("latency", Path("/tmp/latency"))
+        epoch = factory.confirm_failure("failure", Path("/tmp/failure"))
+        self.assertEqual(epoch, Path("/run/user/1000/restart-epoch.json"))
+        self.assertEqual(factory.build("latency", Path("/tmp/latency")), "latency")
+        self.assertEqual(contexts[-1].restart_identity, "restart")
+        with self.assertRaises(BACKEND.ProductionBackendError):
+            factory.confirm_failure("failure", Path("/tmp/failure"))
+
+    def test_ingestor_factory_maps_all_six_existing_adapters(self) -> None:
+        def passthrough(bundle: Path, bindings: Any) -> tuple[Path, Any]:
+            return bundle, bindings
+
+        def module(name: str) -> SimpleNamespace:
+            return SimpleNamespace(**{name: passthrough})
+
+        def combined(bundle: Path, bindings: Any) -> str:
+            return "combined"
+
+        def direct(bundle: Path, bindings: Any) -> str:
+            return "direct"
+
+        ingestors = BACKEND.production_gate_ingestors(
+            BACKEND.IngestorModules(
+                module("ingest_api_contract_bundle"),
+                SimpleNamespace(
+                    ingest_combined_soak_bundle=combined,
+                    ingest_direct_cancel_bundle=direct,
+                ),
+                module("ingest_stop_gate_bundle"),
+                module("ingest_failure_gate_bundle"),
+                module("ingest_latency_gate_bundle"),
+            )
+        )
+        self.assertEqual(ingestors.combined(Path("/tmp/x"), object()), "combined")
+        self.assertEqual(ingestors.direct_cancel(Path("/tmp/x"), object()), "direct")
+
+    def test_complete_phase_binding_field_contract_matches_real_ingestors(self) -> None:
+        sys.path.insert(0, str(TOOLS))
+        try:
+            api = load_tool("sq8_api_contract_gate_ingest")
+            openwebui = load_tool("sq8_openwebui_gate_ingest")
+            stop = load_tool("sq8_openwebui_stop_gate_ingest")
+            failure = load_tool("sq8_openwebui_failure_gate_ingest")
+            latency = load_tool("sq8_http_latency_gate_ingest")
+        finally:
+            sys.path.remove(str(TOOLS))
+        types = {
+            "api_contract": api.ApiContractInputBindings,
+            "combined": openwebui.GateInputBindings,
+            "direct_cancel": openwebui.DirectCancelInputBindings,
+            "stop": stop.StopGateInputBindings,
+            "failure": failure.FailureGateInputBindings,
+            "latency": latency.LatencyGateInputBindings,
+        }
+        for gate, binding_type in types.items():
+            self.assertEqual(
+                tuple(field.name for field in dataclasses.fields(binding_type)),
+                BACKEND.EXPECTED_BINDING_FIELDS[gate],
+            )
+
+    def test_system_bridge_uses_secret_callback_cached_evidence_and_reverse_close(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class SecretUser:
+            def use_api_secret(self, callback: Any) -> Any:
+                events.append("secret")
+                return callback(b"s" * 32)
+
+        class Guard:
+            def __init__(self, secret: bytes) -> None:
+                self.secret = secret
+
+            def reject(self, raw: bytes, label: str) -> None:
+                if self.secret in raw:
+                    raise AssertionError(label)
+
+        class Closable:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def close(self) -> None:
+                events.append(self.name)
+
+        @dataclasses.dataclass
+        class Identity:
+            control_group: str = "/ullm"
+            gateway_pid: int = 1
+            gateway_starttime_ticks: int = 2
+            worker_pid: int = 3
+            worker_starttime_ticks: int = 4
+            n_restarts: int = 1
+
+        class Runtime(Closable):
+            def start(self) -> None:
+                events.append("start")
+
+            def now_ns(self) -> int:
+                return 10
+
+            def wait_until(self, deadline: int) -> None:
+                pass
+
+            def lifecycle_probe(self) -> Any:
+                return SimpleNamespace(
+                    observed_monotonic_ns=9,
+                    service_active=True,
+                    ready_http_status=200,
+                    identity=Identity(),
+                )
+
+        class Anchor:
+            commit = "a" * 40
+            status_raw = b"?? backend\0"
+
+            def revalidate(self) -> None:
+                events.append("git")
+
+        client = b"print('trusted client')\n"
+        artifacts = SimpleNamespace(
+            environment_bytes=b"{}\n", model_identity_bytes=b"{}\n"
+        )
+        identity = SimpleNamespace(identity_artifacts=artifacts)
+        resource = SimpleNamespace(
+            session_header_fields={"identities": {"worker_binary_sha256": "b" * 64}},
+            resource_header={"record_type": "header"},
+            segment_config=object(),
+        )
+        snapshots = Closable("snapshots")
+        runtime = Runtime("runtime")
+        factories = BACKEND.SystemBridgeFactories(
+            secret_guard=Guard,
+            runtime_snapshots=lambda source, secret: snapshots,
+            runtime_config=lambda identities, amd_smi: object(),
+            system_runtime=lambda config, root, guard, owner, capture_journal: runtime,
+            session_writer=lambda path, guard: (path, guard),
+            resource_writer=lambda path, guard: (path, guard),
+            journal_capture=lambda *args, **kwargs: (args, kwargs),
+            resource_claims=lambda *args: object(),
+            resource_collector=lambda *args: Collector(),
+            preflight_result=lambda environment, model, header, resource_header: (
+                environment,
+                model,
+                header,
+                resource_header,
+            ),
+            final_result=lambda *args: args,
+        )
+        bridge = BACKEND.SystemCampaignBridge(
+            BACKEND.SystemBridgeInputs(
+                identity,
+                resource,
+                Anchor(),
+                SecretUser(),
+                client,
+                hashlib.sha256(client).hexdigest(),
+                ROOT,
+                "/opt/rocm/bin/amd-smi",
+            ),
+            factories,
+            scan_evidence=lambda raw, label: None,
+        )
+        self.assertEqual(events, [])
+        preflight = bridge.preflight(Path("/tmp/preflight"))
+        self.assertEqual(preflight[:2], (b"{}\n", b"{}\n"))
+        final = bridge.final(Path("/tmp/final"))
+        self.assertEqual(final[-2:], ("a" * 40, "?? backend\0"))
+        bridge.close()
+        self.assertEqual(events[-2:], ["runtime", "snapshots"])
+
+    def test_system_bridge_cleans_owners_when_secret_owner_raises_after_callback(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class RaisingSecretOwner:
+            def use_api_secret(self, callback: Any) -> Any:
+                callback(b"s" * 32)
+                raise RuntimeError("post-use failure")
+
+        class Closable:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def close(self) -> None:
+                events.append(self.name)
+
+        class Guard:
+            def __init__(self, secret: bytes) -> None:
+                self.secret = secret
+
+        class Anchor:
+            commit = "a" * 40
+            status_raw = b""
+
+            def revalidate(self) -> None:
+                pass
+
+        client = b"print('trusted client')\n"
+        snapshots = Closable("snapshots")
+        runtime = Closable("runtime")
+        resource = SimpleNamespace(session_header_fields={"identities": {}})
+        factories = BACKEND.SystemBridgeFactories(
+            secret_guard=Guard,
+            runtime_snapshots=lambda source, secret: snapshots,
+            runtime_config=lambda identities, amd_smi: object(),
+            system_runtime=lambda config, root, guard, owner, capture_journal: runtime,
+            session_writer=lambda path, guard: object(),
+            resource_writer=lambda path, guard: object(),
+            journal_capture=lambda *args, **kwargs: object(),
+            resource_claims=lambda *args: object(),
+            resource_collector=lambda *args: object(),
+            preflight_result=lambda *args: object(),
+            final_result=lambda *args: object(),
+        )
+        bridge = BACKEND.SystemCampaignBridge(
+            BACKEND.SystemBridgeInputs(
+                SimpleNamespace(),
+                resource,
+                Anchor(),
+                RaisingSecretOwner(),
+                client,
+                hashlib.sha256(client).hexdigest(),
+                ROOT,
+                "/opt/rocm/bin/amd-smi",
+            ),
+            factories,
+            scan_evidence=lambda raw, label: None,
+        )
+        self.assertEqual(events, [])
+        with self.assertRaisesRegex(RuntimeError, "post-use failure"):
+            bridge.make_session_writer(Path("/tmp/session"))
+        self.assertEqual(events, [])
+        bridge.close()
+        self.assertEqual(events, ["runtime", "snapshots"])
+
+    def test_config_failure_retains_snapshot_for_close_retry(self) -> None:
+        class SecretOwner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def use_api_secret(self, callback: Any) -> Any:
+                self.calls += 1
+                return callback(b"s" * 32)
+
+        class RetrySnapshot:
+            def __init__(self) -> None:
+                self.closes = 0
+
+            def close(self) -> None:
+                self.closes += 1
+                if self.closes == 1:
+                    raise RuntimeError("snapshot close")
+
+        def reject_config(identities: Any, amd_smi: str) -> Any:
+            raise ValueError("primary config")
+
+        snapshots = RetrySnapshot()
+        secret_owner = SecretOwner()
+        inputs, factories = bridge_fixture(
+            secret_owner, snapshots, object(), runtime_config=reject_config
+        )
+        bridge = BACKEND.SystemCampaignBridge(
+            inputs, factories, scan_evidence=lambda raw, label: None
+        )
+        with self.assertRaisesRegex(ValueError, "primary config"):
+            bridge.make_session_writer(Path("/tmp/session"))
+        with self.assertRaises(BACKEND.ProductionBackendError):
+            bridge.make_session_writer(Path("/tmp/session-retry"))
+        self.assertEqual(secret_owner.calls, 1)
+        self.assertEqual(snapshots.closes, 0)
+        with self.assertRaisesRegex(RuntimeError, "snapshot close"):
+            bridge.close()
+        self.assertIs(bridge.snapshots, snapshots)
+        self.assertFalse(bridge.closed)
+        bridge.close()
+        self.assertEqual(snapshots.closes, 2)
+        self.assertTrue(bridge.closed)
+
+    def test_secret_callback_must_run_exactly_once(self) -> None:
+        events: list[str] = []
+
+        class Owner:
+            def __init__(self, calls: int) -> None:
+                self.calls = calls
+
+            def use_api_secret(self, callback: Any) -> None:
+                for _index in range(self.calls):
+                    callback(b"s" * 32)
+
+        class Closable:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def close(self) -> None:
+                events.append(self.name)
+
+        for count, expected in ((0, []), (2, ["runtime", "snapshots"])):
+            events.clear()
+            inputs, factories = bridge_fixture(
+                Owner(count), Closable("snapshots"), Closable("runtime")
+            )
+            bridge = BACKEND.SystemCampaignBridge(
+                inputs, factories, scan_evidence=lambda raw, label: None
+            )
+            self.assertEqual(events, [])
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                bridge.make_session_writer(Path("/tmp/session"))
+            self.assertEqual(events, [])
+            bridge.close()
+            self.assertEqual(events, expected)
+
+    def test_normal_close_retains_only_failed_owner_for_retry(self) -> None:
+        class Owner:
+            def use_api_secret(self, callback: Any) -> Any:
+                return callback(b"s" * 32)
+
+        class Runtime:
+            def __init__(self) -> None:
+                self.closes = 0
+
+            def close(self) -> None:
+                self.closes += 1
+
+        class RetrySnapshot:
+            def __init__(self) -> None:
+                self.closes = 0
+
+            def close(self) -> None:
+                self.closes += 1
+                if self.closes == 1:
+                    raise RuntimeError("retry snapshot")
+
+        runtime = Runtime()
+        snapshots = RetrySnapshot()
+        inputs, factories = bridge_fixture(Owner(), snapshots, runtime)
+        bridge = BACKEND.SystemCampaignBridge(
+            inputs, factories, scan_evidence=lambda raw, label: None
+        )
+        bridge.make_session_writer(Path("/tmp/session"))
+        with self.assertRaisesRegex(RuntimeError, "retry snapshot"):
+            bridge.close()
+        self.assertIsNone(bridge.runtime)
+        self.assertIs(bridge.snapshots, snapshots)
+        self.assertFalse(bridge.closed)
+        bridge.close()
+        self.assertEqual(runtime.closes, 1)
+        self.assertEqual(snapshots.closes, 2)
+        self.assertIsNone(bridge.snapshots)
+        self.assertTrue(bridge.closed)
 
 
 if __name__ == "__main__":
