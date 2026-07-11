@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -18,6 +19,11 @@ GATE_TEST_PATH = ROOT / "tests" / "test_run_openwebui_soak_gate.py"
 GATE_SOURCE = ROOT / "tools" / "run-openwebui-soak-gate.py"
 SUPPORT_SOURCE = ROOT / "tools" / "run-openwebui-stop-gate.py"
 BROWSER_SCRIPT = ROOT / "deploy" / "openwebui" / "browser-soak.cjs"
+DIRECT_TEST_PATH = ROOT / "tests" / "test_run_sq8_direct_cancel_gate.py"
+DIRECT_GATE_SOURCE = ROOT / "tools" / "run-sq8-direct-cancel-gate.py"
+COLLECTOR_SOURCE = ROOT / "tools" / "collect-sq8-openwebui-release.py"
+HTTP_CLIENT_SOURCE = ROOT / "tools" / "sq8-openwebui-http-client.py"
+DIRECT_PILOT = Path("/home/homelab1/datapool/sq8-direct-cancel-formal-20260711-194417")
 
 
 def load_path(name, path):
@@ -32,6 +38,9 @@ def load_path(name, path):
 INGEST = load_path("sq8_openwebui_gate_ingest", MODULE_PATH)
 GATE_TEST = load_path("_sq8_ingest_gate_fixture", GATE_TEST_PATH)
 GATE = GATE_TEST.TOOL
+DIRECT_TEST = load_path("_sq8_direct_ingest_fixture", DIRECT_TEST_PATH)
+DIRECT_GATE = DIRECT_TEST.GATE
+assert DIRECT_GATE is not None
 
 
 def digest(raw):
@@ -259,6 +268,490 @@ class CombinedBundle:
             self.root / "service-journal.raw.jsonl",
             b"".join(GATE.compact_json(value) + b"\n" for value in values),
         )
+
+
+class DirectCancelBundle:
+    secret = b"direct-cancel-api-secret-test-value"
+    image_id = "sha256:" + "a" * 64
+    network_id = "b" * 64
+    service = "ullm-openai.service"
+    service_user = "homelab1"
+    boot_id = "c" * 32
+    control_group = "/system.slice/ullm-openai.service"
+    gateway_pid = 5200
+    worker_pid = 5201
+
+    def __init__(self, parent):
+        parent = Path(parent)
+        parent.mkdir(parents=True, exist_ok=True)
+        self.root = parent / "direct-cancel"
+        self.root.mkdir(mode=0o700)
+        fixture_root = ROOT / "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures"
+        self.fixtures = {
+            fixture_id: DIRECT_GATE.load_fixture(
+                fixture_root / f"{fixture_id}.json", fixture_id
+            )
+            for fixture_id in ("exact-p0032", "exact-p3584")
+        }
+        self.http_values = [
+            {
+                "schema_version": DIRECT_GATE.HTTP_EVENT_SCHEMA,
+                "event": "ready",
+                "observed_monotonic_ns": 1,
+            }
+        ]
+        self.observer_values = []
+        self.journal_values = []
+        self.correlation_values = []
+        self.request_summaries = []
+        sequence = 0
+        for phase in DIRECT_GATE.PHASE_ORDER:
+            for role in ("target", "recovery"):
+                request_index = len(self.request_summaries) + 1
+                base = request_index * 1_000_000
+                request_key = f"direct-{phase}-{role}"
+                request_id = f"direct-request-secret-{request_index}"
+                completion_id = f"chatcmpl-direct-secret-{request_index}"
+                if role == "target":
+                    spec = DIRECT_GATE.PHASE_SPECS[phase]
+                    fixture = self.fixtures[spec.fixture_id]
+                    max_tokens = 512
+                    events, request_summary, content_ns = self._target_trace(
+                        phase, base, request_id, completion_id
+                    )
+                else:
+                    fixture = self.fixtures["exact-p0032"]
+                    max_tokens = 2
+                    events, request_summary = self._recovery_trace(
+                        phase, base, request_id, completion_id
+                    )
+                    content_ns = None
+                body = DIRECT_GATE.request_body(fixture, max_tokens)
+                self.http_values.extend(
+                    self._http_request_values(
+                        request_key,
+                        body,
+                        base,
+                        role,
+                        completion_id,
+                        content_ns,
+                    )
+                )
+                self.request_summaries.append(request_summary)
+                for event in events:
+                    payload = DIRECT_GATE.compact_json(event)
+                    self.observer_values.append(event)
+                    monotonic_usec = (event["observed_monotonic_ns"] + 999) // 1000
+                    journal = {
+                        "__CURSOR": f"direct-cursor-{sequence:03d}",
+                        "__MONOTONIC_TIMESTAMP": str(monotonic_usec),
+                        "_BOOT_ID": self.boot_id,
+                        "_PID": str(self.gateway_pid),
+                        "_SYSTEMD_UNIT": self.service,
+                        "PRIORITY": "6",
+                        "MESSAGE": payload.decode("ascii"),
+                    }
+                    self.journal_values.append(journal)
+                    self.correlation_values.append(
+                        {
+                            "schema_version": DIRECT_GATE.GATE_SCHEMA,
+                            "sequence": sequence,
+                            "cursor": journal["__CURSOR"],
+                            "journal_monotonic_usec": journal["__MONOTONIC_TIMESTAMP"],
+                            "journal_pid": journal["_PID"],
+                            "observer_received_monotonic_ns": event[
+                                "observed_monotonic_ns"
+                            ]
+                            + 10,
+                            "observer_sender_pid": self.gateway_pid,
+                            "observer_sender_uid": os.getuid(),
+                            "observer_sender_gid": os.getgid(),
+                            "payload_sha256": digest(payload),
+                            "payload_bytes": len(payload),
+                        }
+                    )
+                    sequence += 1
+        self.http_values.append(
+            {
+                "schema_version": DIRECT_GATE.HTTP_EVENT_SCHEMA,
+                "event": "shutdown_complete",
+                "observed_monotonic_ns": 9_000_000,
+            }
+        )
+        self._write_jsonl("http-client.raw.jsonl", self.http_values)
+        self._write_jsonl("observer.raw.jsonl", self.observer_values)
+        self._write_jsonl("service-journal.raw.jsonl", self.journal_values)
+        self._write_jsonl(
+            "observer-journal-correlation.raw.jsonl", self.correlation_values
+        )
+        self.manifest = self._manifest()
+        self._write_document("input-manifest.json", self.manifest)
+        self.summary = self._summary()
+        self._write_document("summary.json", self.summary)
+
+    def _target_trace(self, phase, base, request_id, completion_id):
+        prompt_tokens = DIRECT_TEST.TARGET_PROMPT_TOKENS[phase]
+        admitted_at = base + 100
+        events = [
+            DIRECT_TEST.admitted(
+                admitted_at,
+                prompt_tokens,
+                512,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+            DIRECT_TEST.started(
+                admitted_at + 1,
+                prompt_tokens,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+        ]
+        progress_values = []
+        if phase == "prefill_after_128":
+            progress_values = [128]
+        elif phase == "prefill_after_2048":
+            progress_values = list(range(128, 2049, 128))
+        elif phase == "decode_after_first_content":
+            progress_values = [32]
+        for offset, processed in enumerate(progress_values, start=2):
+            events.append(
+                DIRECT_TEST.progress(
+                    admitted_at + offset,
+                    processed,
+                    prompt_tokens,
+                    request_id=request_id,
+                    completion_id=completion_id,
+                )
+            )
+        if phase == "decode_after_first_content":
+            events.append(
+                DIRECT_TEST.first_token(
+                    admitted_at + 3,
+                    request_id=request_id,
+                    completion_id=completion_id,
+                )
+            )
+            trigger_ns = admitted_at + 4
+            completion_tokens = 1
+        elif progress_values:
+            trigger_ns = events[-1]["observed_monotonic_ns"]
+            completion_tokens = 0
+        else:
+            trigger_ns = admitted_at + 1
+            completion_tokens = 0
+        cancel_ns = trigger_ns + 1
+        release_ns = cancel_ns + 1
+        events.extend(
+            (
+                DIRECT_TEST.cancel_requested(
+                    cancel_ns,
+                    admitted_at=admitted_at,
+                    request_id=request_id,
+                    completion_id=completion_id,
+                ),
+                DIRECT_TEST.released(
+                    release_ns,
+                    prompt_tokens,
+                    cancelled=True,
+                    completion_tokens=completion_tokens,
+                    admitted_at=admitted_at,
+                    request_id=request_id,
+                    completion_id=completion_id,
+                ),
+            )
+        )
+        summary = {
+            "phase": phase,
+            "role": "target",
+            "request_id": request_id,
+            "completion_id": completion_id,
+            "trigger_observed_monotonic_ns": trigger_ns,
+            "client_close_monotonic_ns": trigger_ns,
+            "cancel_observed_monotonic_ns": cancel_ns,
+            "release_observed_monotonic_ns": release_ns,
+            "progress": progress_values,
+            "completion_tokens": completion_tokens,
+        }
+        return (
+            events,
+            summary,
+            trigger_ns if phase == "decode_after_first_content" else None,
+        )
+
+    def _recovery_trace(self, phase, base, request_id, completion_id):
+        admitted_at = base + 100
+        events = [
+            DIRECT_TEST.admitted(
+                admitted_at,
+                32,
+                2,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+            DIRECT_TEST.started(
+                admitted_at + 1,
+                32,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+            DIRECT_TEST.progress(
+                admitted_at + 2,
+                32,
+                32,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+            DIRECT_TEST.first_token(
+                admitted_at + 3,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+            DIRECT_TEST.released(
+                admitted_at + 4,
+                32,
+                cancelled=False,
+                completion_tokens=2,
+                admitted_at=admitted_at,
+                request_id=request_id,
+                completion_id=completion_id,
+            ),
+        ]
+        return events, {
+            "phase": phase,
+            "role": "recovery",
+            "request_id": request_id,
+            "completion_id": completion_id,
+            "release_observed_monotonic_ns": admitted_at + 4,
+        }
+
+    def _http_request_values(
+        self, request_key, body, base, role, completion_id, content_ns
+    ):
+        request = {
+            "schema_version": DIRECT_GATE.HTTP_EVENT_SCHEMA,
+            "event": "http_request",
+            "request_key": request_key,
+            "method": "POST",
+            "target": DIRECT_GATE.HTTP_TARGET,
+            "headers": {
+                "content_type": "application/json",
+                "content_length": len(body),
+                "authorization_mode": "valid_bearer",
+            },
+            "body_base64": base64.b64encode(body).decode("ascii"),
+            "body_sha256": digest(body),
+            "body_bytes": len(body),
+            "connect_completed_monotonic_ns": base + 1,
+            "write_started_monotonic_ns": base + 2,
+            "last_body_byte_sent_monotonic_ns": base + 3,
+        }
+        start = {
+            "schema_version": DIRECT_GATE.HTTP_EVENT_SCHEMA,
+            "event": "http_response_start",
+            "request_key": request_key,
+            "status": 200,
+            "headers": [["Content-Type", "text/event-stream"]],
+            "observed_monotonic_ns": base + 4,
+        }
+        if role == "target" and content_ns is None:
+            response = b": hold\n\n"
+            chunk_ns = base + 5
+        elif role == "target":
+            response = self._sse(
+                {
+                    "id": completion_id,
+                    "choices": [{"delta": {"content": "x"}, "finish_reason": None}],
+                }
+            )
+            chunk_ns = content_ns
+        else:
+            response = b"".join(
+                (
+                    self._sse(
+                        {
+                            "id": completion_id,
+                            "choices": [
+                                {
+                                    "delta": {"content": "ok"},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    ),
+                    self._sse(
+                        {
+                            "id": completion_id,
+                            "choices": [{"delta": {}, "finish_reason": "length"}],
+                        }
+                    ),
+                    self._sse(
+                        {
+                            "id": completion_id,
+                            "choices": [],
+                            "usage": {"completion_tokens": 2},
+                        }
+                    ),
+                    b"data: [DONE]\n\n",
+                )
+            )
+            chunk_ns = base + 200
+        chunk = {
+            "schema_version": DIRECT_GATE.HTTP_EVENT_SCHEMA,
+            "event": "http_body_chunk",
+            "request_key": request_key,
+            "chunk_index": 0,
+            "body_base64": base64.b64encode(response).decode("ascii"),
+            "body_sha256": digest(response),
+            "body_bytes": len(response),
+            "observed_monotonic_ns": chunk_ns,
+        }
+        end = {
+            "schema_version": DIRECT_GATE.HTTP_EVENT_SCHEMA,
+            "event": "http_response_end",
+            "request_key": request_key,
+            "outcome": "client_closed" if role == "target" else "eof",
+            "error": None,
+            "body_bytes": len(response),
+            "body_sha256": digest(response),
+            "observed_monotonic_ns": base + 500,
+        }
+        return [request, start, chunk, end]
+
+    @staticmethod
+    def _sse(value):
+        return b"data: " + DIRECT_GATE.compact_json(value) + b"\n\n"
+
+    def _manifest(self):
+        source_values = (
+            ("tools/run-sq8-direct-cancel-gate.py", DIRECT_GATE_SOURCE),
+            ("tools/collect-sq8-openwebui-release.py", COLLECTOR_SOURCE),
+            ("tools/sq8-openwebui-http-client.py", HTTP_CLIENT_SOURCE),
+        )
+        fixture_values = [
+            (
+                "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/"
+                f"{fixture_id}.json",
+                self.fixtures[fixture_id].raw,
+            )
+            for fixture_id in ("exact-p0032", "exact-p3584")
+        ]
+        return {
+            "schema_version": DIRECT_GATE.GATE_SCHEMA,
+            "record_type": "input_manifest",
+            "inputs": [
+                {
+                    "path": path,
+                    "bytes": len(raw),
+                    "sha256": digest(raw),
+                }
+                for path, raw in [
+                    *((path, source.read_bytes()) for path, source in source_values),
+                    *fixture_values,
+                ]
+            ],
+            "request_bodies": [
+                {
+                    "fixture_id": fixture_id,
+                    "max_tokens": max_tokens,
+                    "bytes": len(
+                        DIRECT_GATE.request_body(self.fixtures[fixture_id], max_tokens)
+                    ),
+                    "sha256": digest(
+                        DIRECT_GATE.request_body(self.fixtures[fixture_id], max_tokens)
+                    ),
+                }
+                for fixture_id, max_tokens in (
+                    ("exact-p3584", 512),
+                    ("exact-p0032", 512),
+                    ("exact-p0032", 2),
+                )
+            ],
+        }
+
+    def _summary(self):
+        artifact_names = (
+            "http-client.raw.jsonl",
+            "observer.raw.jsonl",
+            "service-journal.raw.jsonl",
+            "observer-journal-correlation.raw.jsonl",
+        )
+        return {
+            "schema_version": DIRECT_GATE.GATE_SCHEMA,
+            "record_type": "summary",
+            "phase_order": list(DIRECT_GATE.PHASE_ORDER),
+            "request_count": 8,
+            "max_active": 1,
+            "service_identity": {
+                "unit": self.service,
+                "user": self.service_user,
+                "uid": os.getuid(),
+                "gid": os.getgid(),
+                "control_group": self.control_group,
+                "gateway_pid": self.gateway_pid,
+                "gateway_starttime_ticks": 100_000,
+                "worker_pid": self.worker_pid,
+                "worker_starttime_ticks": 100_001,
+                "n_restarts": 2,
+                "boot_id": self.boot_id,
+            },
+            "http_image_id": self.image_id,
+            "docker_network_name": DIRECT_GATE.HTTP_NETWORK_NAME,
+            "docker_network_id": self.network_id,
+            "observer_socket": os.fspath(DIRECT_GATE.OBSERVER_SOCKET),
+            "observer_event_count": 55,
+            "journal_correlation_count": 55,
+            "requests": copy.deepcopy(self.request_summaries),
+            "artifacts": {
+                name: {
+                    "bytes": len((self.root / name).read_bytes()),
+                    "lines": len((self.root / name).read_bytes().splitlines()),
+                    "sha256": digest((self.root / name).read_bytes()),
+                }
+                for name in artifact_names
+            },
+        }
+
+    def bindings(self, *, forbidden_values=None):
+        return INGEST.DirectCancelInputBindings(
+            gate_source=DIRECT_GATE_SOURCE,
+            gate_source_sha256=digest(DIRECT_GATE_SOURCE.read_bytes()),
+            collector_source=COLLECTOR_SOURCE,
+            collector_source_sha256=digest(COLLECTOR_SOURCE.read_bytes()),
+            http_client_source=HTTP_CLIENT_SOURCE,
+            http_client_source_sha256=digest(HTTP_CLIENT_SOURCE.read_bytes()),
+            http_image_id=self.image_id,
+            docker_network_id=self.network_id,
+            service_unit=self.service,
+            service_user=self.service_user,
+            boot_id=self.boot_id,
+            control_group=self.control_group,
+            gateway_pid=self.gateway_pid,
+            gateway_starttime_ticks=100_000,
+            worker_pid=self.worker_pid,
+            worker_starttime_ticks=100_001,
+            restart_count=2,
+            uid=os.getuid(),
+            gid=os.getgid(),
+            forbidden_values=(self.secret,)
+            if forbidden_values is None
+            else forbidden_values,
+        )
+
+    def _write_jsonl(self, name, values):
+        write_private(
+            self.root / name,
+            b"".join(DIRECT_GATE.compact_json(value) + b"\n" for value in values),
+        )
+
+    def _write_document(self, name, value):
+        write_private(self.root / name, DIRECT_GATE.compact_json(value) + b"\n")
+
+    def rewrite_summary(self):
+        self._write_document("summary.json", self.summary)
+
+    def rewrite_manifest(self):
+        self._write_document("input-manifest.json", self.manifest)
 
 
 class CombinedIngestTests(unittest.TestCase):
@@ -584,6 +1077,329 @@ class CombinedIngestTests(unittest.TestCase):
         )
         with self.assertRaises(INGEST.GateIngestError):
             self.ingest(bindings)
+
+
+class DirectCancelPublicContractTests(unittest.TestCase):
+    def test_direct_cancel_ingest_contract_is_exposed(self):
+        self.assertTrue(hasattr(INGEST, "DirectCancelInputBindings"))
+        self.assertTrue(hasattr(INGEST, "DirectCancelIngestResult"))
+        self.assertTrue(hasattr(INGEST, "ingest_direct_cancel_bundle"))
+
+
+class DirectCancelIngestTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture = DirectCancelBundle(self.temporary.name)
+
+    def ingest(self, bindings=None):
+        return INGEST.ingest_direct_cancel_bundle(
+            self.fixture.root,
+            self.fixture.bindings() if bindings is None else bindings,
+        )
+
+    def fresh(self, name):
+        self.fixture = DirectCancelBundle(Path(self.temporary.name) / name)
+        return self.fixture
+
+    def test_exact_direct_bundle_converts_http_claims_and_redacted_view(self):
+        http_records, claims, view = self.ingest()
+        self.assertEqual(len(http_records), 32)
+        requests = [
+            record for record in http_records if record["record_type"] == "http_request"
+        ]
+        self.assertEqual(
+            [record["fields"]["request_index"] for record in requests],
+            list(range(1, 9)),
+        )
+        self.assertEqual(
+            [record["case_id"] for record in requests],
+            [
+                f"direct-{phase}-{role}"
+                for phase in DIRECT_GATE.PHASE_ORDER
+                for role in ("target", "recovery")
+            ],
+        )
+        self.assertTrue(
+            all(record["phase"] == "cancellation" for record in http_records)
+        )
+        self.assertEqual(len(claims), 55)
+        expected_claim_counts = [4, 5, 5, 5, 20, 5, 6, 5]
+        offset = 0
+        for request, count in zip(requests, expected_claim_counts, strict=True):
+            self.assertEqual(
+                {claim.case_id for claim in claims[offset : offset + count]},
+                {request["case_id"]},
+            )
+            offset += count
+        self.assertTrue(all(claim.phase == "cancellation" for claim in claims))
+        self.assertTrue(all(b"\n" not in claim.raw for claim in claims))
+        self.assertEqual(view["request_count"], 8)
+        self.assertEqual(view["lifecycle_record_count"], 55)
+        self.assertEqual(len(view["cases"]), 8)
+        encoded = DIRECT_GATE.compact_json(view)
+        for forbidden in (
+            self.fixture.secret,
+            b"direct-request-secret-",
+            b"chatcmpl-direct-secret-",
+            DIRECT_GATE.request_body(self.fixture.fixtures["exact-p3584"], 512),
+            base64.b64decode(self.fixture.http_values[3]["body_base64"], validate=True),
+            os.fspath(DIRECT_GATE_SOURCE).encode(),
+            self.fixture.boot_id.encode(),
+            self.fixture.control_group.encode(),
+        ):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_direct_claims_are_consumed_by_campaign_capture(self):
+        _http, claims, _view = self.ingest()
+        campaign = sys.modules["sq8_openwebui_campaign"]
+
+        class StaticJournalSource:
+            def __init__(self, rows):
+                self.rows = iter(rows)
+
+            def open_after(self, _unit, _boot_id):
+                return "direct-campaign-anchor"
+
+            def read_next(self, timeout_usec):
+                try:
+                    return next(self.rows)
+                except StopIteration:
+                    time.sleep(min(timeout_usec / 1_000_000, 0.001))
+                    return None
+
+            def close(self):
+                return None
+
+        capture = campaign.CampaignJournalCapture(
+            Path(self.temporary.name) / "direct-campaign-journal.raw.jsonl",
+            self.fixture.boot_id,
+            campaign.PidEpoch(self.fixture.gateway_pid, self.fixture.worker_pid),
+            scan_raw=lambda _raw, _label: None,
+            source=StaticJournalSource([claim.raw for claim in claims]),
+        )
+        self.addCleanup(capture.abort)
+        capture.start()
+        claimed = capture.claim_bundle_records(
+            claims, time.monotonic_ns() + 2_000_000_000
+        )
+        self.assertEqual(len(claimed), 55)
+        self.assertEqual(claimed[0].phase, "cancellation")
+        self.assertEqual(
+            claimed[0].case_id, "direct-after_started_before_progress-target"
+        )
+        self.assertEqual(
+            claimed[-1].case_id, "direct-decode_after_first_content-recovery"
+        )
+
+    def test_exact_http_schedule_and_request_body_are_fail_closed(self):
+        self.fixture.http_values[1]["request_key"] = "direct-unknown-target"
+        self.fixture._write_jsonl("http-client.raw.jsonl", self.fixture.http_values)
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+        self.fresh("body")
+        request = self.fixture.http_values[1]
+        changed = DIRECT_GATE.request_body(self.fixture.fixtures["exact-p0032"], 512)
+        request["body_base64"] = base64.b64encode(changed).decode("ascii")
+        request["body_bytes"] = len(changed)
+        request["body_sha256"] = digest(changed)
+        request["headers"]["content_length"] = len(changed)
+        self.fixture._write_jsonl("http-client.raw.jsonl", self.fixture.http_values)
+        self.fixture.summary = self.fixture._summary()
+        self.fixture.rewrite_summary()
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+    def test_lifecycle_semantic_and_case_mapping_mutation_is_rejected(self):
+        mutation_index = 2
+        event = self.fixture.observer_values[mutation_index]
+        self.assertEqual(event["event"], "request_cancel_requested")
+        event["reason"] = "server_shutdown"
+        payload = DIRECT_GATE.compact_json(event)
+        self.fixture.journal_values[mutation_index]["MESSAGE"] = payload.decode("ascii")
+        correlation = self.fixture.correlation_values[mutation_index]
+        correlation["payload_bytes"] = len(payload)
+        correlation["payload_sha256"] = digest(payload)
+        self.fixture._write_jsonl("observer.raw.jsonl", self.fixture.observer_values)
+        self.fixture._write_jsonl(
+            "service-journal.raw.jsonl", self.fixture.journal_values
+        )
+        self.fixture._write_jsonl(
+            "observer-journal-correlation.raw.jsonl",
+            self.fixture.correlation_values,
+        )
+        self.fixture.summary = self.fixture._summary()
+        self.fixture.rewrite_summary()
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+    def test_manifest_summary_and_source_bindings_are_fail_closed(self):
+        self.fixture.manifest["inputs"][0]["sha256"] = "0" * 64
+        self.fixture.rewrite_manifest()
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+        self.fresh("summary")
+        self.fixture.summary["phase_order"] = list(
+            reversed(self.fixture.summary["phase_order"])
+        )
+        self.fixture.rewrite_summary()
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+        self.fresh("source")
+        bindings = dataclass_replace(
+            self.fixture.bindings(), collector_source_sha256="f" * 64
+        )
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest(bindings)
+
+        self.fresh("close-boundary")
+        self.fixture.summary["requests"][0]["client_close_monotonic_ns"] = 0
+        self.fixture.rewrite_summary()
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+    def test_correlation_payload_cursor_and_sender_mutations_are_rejected(self):
+        mutations = (
+            ("payload_sha256", "0" * 64),
+            ("cursor", "other-cursor"),
+            ("observer_sender_pid", self.fixture.gateway_pid + 1),
+        )
+        for index, (field, replacement) in enumerate(mutations):
+            with self.subTest(field=field):
+                self.fixture.correlation_values[0][field] = replacement
+                self.fixture._write_jsonl(
+                    "observer-journal-correlation.raw.jsonl",
+                    self.fixture.correlation_values,
+                )
+                with self.assertRaises(INGEST.GateIngestError):
+                    self.ingest()
+                self.fresh(f"correlation-{index}")
+
+    def test_direct_bundle_toctou_symlink_hardlink_mode_and_extra_are_rejected(self):
+        snapshot = INGEST._DirectBundleSnapshot(
+            self.fixture.root,
+            uid=os.getuid(),
+            gid=os.getgid(),
+            forbidden_values=(self.fixture.secret,),
+        )
+        self.addCleanup(snapshot.close)
+        for name in ("input-manifest.json", "summary.json"):
+            snapshot.read_small(name)
+        for name in (
+            "http-client.raw.jsonl",
+            "observer.raw.jsonl",
+            "service-journal.raw.jsonl",
+            "observer-journal-correlation.raw.jsonl",
+        ):
+            list(snapshot.iter_lines(name))
+        target = self.fixture.root / "summary.json"
+        replacement = self.fixture.root / "replacement"
+        write_private(replacement, target.read_bytes())
+        os.replace(replacement, target)
+        with self.assertRaises(INGEST.GateIngestError):
+            snapshot.seal()
+
+        self.fresh("extra")
+        write_private(self.fixture.root / "unexpected", b"unexpected\n")
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+        self.fresh("mode")
+        (self.fixture.root / "summary.json").chmod(0o640)
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+        self.fresh("hardlink")
+        os.link(
+            self.fixture.root / "summary.json",
+            self.fixture.root.parent / "summary-hardlink",
+        )
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+        self.fresh("symlink")
+        summary = self.fixture.root / "summary.json"
+        outside = self.fixture.root.parent / "outside-summary"
+        summary.rename(outside)
+        summary.symlink_to(outside)
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+    def test_direct_secret_across_chunk_boundary_is_rejected(self):
+        path = self.fixture.root / "summary.json"
+        raw = path.read_bytes()
+        padding = b" " * (INGEST.COPY_CHUNK_BYTES - 3 - len(raw))
+        write_private(path, raw + padding + self.fixture.secret)
+        with self.assertRaises(INGEST.GateIngestError):
+            self.ingest()
+
+    def test_actual_pilot_revalidates_only_when_all_bound_sources_match(self):
+        if not DIRECT_PILOT.is_dir():
+            self.skipTest("direct cancellation pilot is not present")
+        expected_names = INGEST.DIRECT_CANCEL_FILES
+        self.assertEqual({path.name for path in DIRECT_PILOT.iterdir()}, expected_names)
+        self.assertEqual(DIRECT_PILOT.stat().st_mode & 0o777, 0o700)
+        self.assertTrue(
+            all(
+                path.stat().st_mode & 0o777 == 0o600 and path.stat().st_nlink == 1
+                for path in DIRECT_PILOT.iterdir()
+            )
+        )
+        manifest = json.loads((DIRECT_PILOT / "input-manifest.json").read_bytes())
+        manifest_hashes = {
+            value["path"]: value["sha256"] for value in manifest["inputs"]
+        }
+        current_hashes = {
+            "tools/run-sq8-direct-cancel-gate.py": digest(
+                DIRECT_GATE_SOURCE.read_bytes()
+            ),
+            "tools/collect-sq8-openwebui-release.py": digest(
+                COLLECTOR_SOURCE.read_bytes()
+            ),
+            "tools/sq8-openwebui-http-client.py": digest(
+                HTTP_CLIENT_SOURCE.read_bytes()
+            ),
+        }
+        mismatches = [
+            path
+            for path, current in current_hashes.items()
+            if manifest_hashes.get(path) != current
+        ]
+        if mismatches:
+            self.skipTest("pilot source binding differs from current source")
+        summary = json.loads((DIRECT_PILOT / "summary.json").read_bytes())
+        identity = summary["service_identity"]
+        bindings = INGEST.DirectCancelInputBindings(
+            gate_source=DIRECT_GATE_SOURCE,
+            gate_source_sha256=current_hashes["tools/run-sq8-direct-cancel-gate.py"],
+            collector_source=COLLECTOR_SOURCE,
+            collector_source_sha256=current_hashes[
+                "tools/collect-sq8-openwebui-release.py"
+            ],
+            http_client_source=HTTP_CLIENT_SOURCE,
+            http_client_source_sha256=current_hashes[
+                "tools/sq8-openwebui-http-client.py"
+            ],
+            http_image_id=summary["http_image_id"],
+            docker_network_id=summary["docker_network_id"],
+            service_unit=identity["unit"],
+            service_user=identity["user"],
+            boot_id=identity["boot_id"],
+            control_group=identity["control_group"],
+            gateway_pid=identity["gateway_pid"],
+            gateway_starttime_ticks=identity["gateway_starttime_ticks"],
+            worker_pid=identity["worker_pid"],
+            worker_starttime_ticks=identity["worker_starttime_ticks"],
+            restart_count=identity["n_restarts"],
+            uid=identity["uid"],
+            gid=identity["gid"],
+            forbidden_values=(b"pilot-regression-secret-sentinel",),
+        )
+        result = INGEST.ingest_direct_cancel_bundle(DIRECT_PILOT, bindings)
+        self.assertEqual(len(result.lifecycle_claims), 55)
 
 
 def dataclass_replace(value, **changes):

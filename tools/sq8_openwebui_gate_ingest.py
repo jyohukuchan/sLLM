@@ -18,7 +18,9 @@ from typing import Any, Callable, Iterator, NamedTuple, NoReturn, Protocol, cast
 
 
 INGEST_VIEW_SCHEMA = "ullm.sq8.openwebui_gate_ingest.combined_view.v1"
+DIRECT_CANCEL_VIEW_SCHEMA = "ullm.sq8.direct_cancel_gate_ingest.view.v1"
 CAMPAIGN_PHASE = "openwebui"
+DIRECT_CANCEL_PHASE = "cancellation"
 CAMPAIGN_SERVICE_UNIT = "ullm-openai.service"
 ROOT_FILES = frozenset(
     {"observer.raw.jsonl", "service-journal.raw.jsonl", "summary.json", "browser"}
@@ -47,6 +49,33 @@ COPY_CHUNK_BYTES = 64 << 10
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 BOOT_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.service\Z")
+CONTENT_IMAGE_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+NETWORK_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
+DIRECT_CANCEL_FILES = frozenset(
+    {
+        "http-client.raw.jsonl",
+        "input-manifest.json",
+        "observer-journal-correlation.raw.jsonl",
+        "observer.raw.jsonl",
+        "service-journal.raw.jsonl",
+        "summary.json",
+    }
+)
+DIRECT_CANCEL_FILE_LIMITS = {
+    "http-client.raw.jsonl": 64 << 20,
+    "input-manifest.json": 4 << 20,
+    "observer-journal-correlation.raw.jsonl": 64 << 20,
+    "observer.raw.jsonl": 64 << 20,
+    "service-journal.raw.jsonl": 64 << 20,
+    "summary.json": 8 << 20,
+}
+DIRECT_SOURCE_LIMITS = {
+    "gate": 8 << 20,
+    "collector": 8 << 20,
+    "http_client": 8 << 20,
+    "exact-p0032": 2 << 20,
+    "exact-p3584": 2 << 20,
+}
 
 
 class GateIngestError(RuntimeError):
@@ -85,6 +114,36 @@ class GateInputBindings:
 
 class CombinedSoakIngestResult(NamedTuple):
     browser_action_records: tuple[dict[str, Any], ...]
+    lifecycle_claims: tuple[BundleLifecycleClaimProtocol, ...]
+    derived_view: dict[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class DirectCancelInputBindings:
+    gate_source: Path
+    gate_source_sha256: str
+    collector_source: Path
+    collector_source_sha256: str
+    http_client_source: Path
+    http_client_source_sha256: str
+    http_image_id: str
+    docker_network_id: str
+    service_unit: str
+    service_user: str
+    boot_id: str
+    control_group: str
+    gateway_pid: int
+    gateway_starttime_ticks: int
+    worker_pid: int
+    worker_starttime_ticks: int
+    restart_count: int
+    uid: int
+    gid: int
+    forbidden_values: tuple[bytes, ...]
+
+
+class DirectCancelIngestResult(NamedTuple):
+    http_records: tuple[dict[str, Any], ...]
     lifecycle_claims: tuple[BundleLifecycleClaimProtocol, ...]
     derived_view: dict[str, Any]
 
@@ -494,11 +553,237 @@ class BundleSnapshot:
             raise pending_error
 
 
+class _DirectBundleSnapshot:
+    """Directory-FD snapshot of the exact flat direct-cancellation bundle."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        uid: int,
+        gid: int,
+        forbidden_values: tuple[bytes, ...],
+    ) -> None:
+        self.root_path = Path(os.path.abspath(root))
+        self.uid = uid
+        self.gid = gid
+        self.forbidden_values = forbidden_values
+        self.parent_fd = -1
+        self.root_fd = -1
+        self.root_identity: _Identity | None = None
+        self.files: dict[str, _OpenedFile] = {}
+        self.sealed = False
+        self.closed = False
+        self._open()
+
+    def _open(self) -> None:
+        if (
+            type(self.uid) is not int
+            or self.uid < 0
+            or type(self.gid) is not int
+            or self.gid < 0
+        ):
+            fail("direct cancellation bundle owner binding is invalid")
+        _SecretScanner(self.forbidden_values)
+        try:
+            self.parent_fd = os.open(self.root_path.parent, _directory_flags())
+            self.root_fd = os.open(
+                self.root_path.name, _directory_flags(), dir_fd=self.parent_fd
+            )
+            root_identity = _Identity.from_stat(os.fstat(self.root_fd))
+            if _entry_identity(self.parent_fd, self.root_path.name) != root_identity:
+                fail("direct cancellation root identity changed while opening")
+            _require_directory(
+                root_identity,
+                mode=0o700,
+                uid=self.uid,
+                gid=self.gid,
+                links=2,
+            )
+            if frozenset(os.listdir(self.root_fd)) != DIRECT_CANCEL_FILES:
+                fail("direct cancellation bundle layout differs")
+            self.root_identity = root_identity
+            for name in DIRECT_CANCEL_FILES:
+                entry = _entry_identity(self.root_fd, name)
+                _require_file(
+                    entry,
+                    maximum=DIRECT_CANCEL_FILE_LIMITS[name],
+                    mode=0o600,
+                    uid=self.uid,
+                    gid=self.gid,
+                )
+                fd = os.open(name, _file_flags(), dir_fd=self.root_fd)
+                opened = _Identity.from_stat(os.fstat(fd))
+                if opened != entry:
+                    os.close(fd)
+                    fail("direct cancellation artifact changed while opening")
+                self.files[name] = _OpenedFile(
+                    key=name,
+                    name=name,
+                    parent_fd=self.root_fd,
+                    fd=fd,
+                    identity=opened,
+                    maximum=DIRECT_CANCEL_FILE_LIMITS[name],
+                )
+        except GateIngestError:
+            self.close()
+            raise
+        except OSError:
+            self.close()
+            fail("failed to open direct cancellation bundle without following links")
+
+    def _chunks(self, name: str) -> Iterator[bytes]:
+        if self.closed or self.sealed:
+            fail("direct cancellation bundle snapshot is no longer readable")
+        item = self.files.get(name)
+        if item is None or item.consumed:
+            fail("direct cancellation artifact was read outside its fixed schedule")
+        try:
+            if _Identity.from_stat(os.fstat(item.fd)) != item.identity:
+                fail("direct cancellation artifact changed before streaming")
+            os.lseek(item.fd, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            scanner = _SecretScanner(self.forbidden_values)
+            total = 0
+            while True:
+                chunk = os.read(item.fd, COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > item.maximum:
+                    fail("direct cancellation artifact exceeded its byte bound")
+                digest.update(chunk)
+                scanner.consume(chunk)
+                yield chunk
+            if (
+                total != item.identity.size
+                or _Identity.from_stat(os.fstat(item.fd)) != item.identity
+            ):
+                fail("direct cancellation artifact changed while streaming")
+            item.streamed_bytes = total
+            item.sha256 = digest.hexdigest()
+            item.consumed = True
+        except GateIngestError:
+            raise
+        except OSError:
+            fail("failed to stream a direct cancellation artifact")
+
+    def read_small(self, name: str) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in self._chunks(name):
+            total += len(chunk)
+            if total > DIRECT_CANCEL_FILE_LIMITS[name]:
+                fail("direct cancellation document exceeded its bound")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def iter_lines(self, name: str) -> Iterator[bytes]:
+        pending = bytearray()
+        for chunk in self._chunks(name):
+            pending.extend(chunk)
+            while True:
+                index = pending.find(b"\n")
+                if index < 0:
+                    if len(pending) > MAX_JSON_LINE_BYTES:
+                        fail("direct cancellation JSONL line exceeded its bound")
+                    break
+                raw = bytes(pending[:index])
+                del pending[: index + 1]
+                if not raw or raw.endswith(b"\r") or len(raw) > MAX_JSON_LINE_BYTES:
+                    fail("direct cancellation JSONL framing differs")
+                yield raw
+        if pending:
+            fail("direct cancellation JSONL artifact lacks its final LF")
+
+    def evidence(self, name: str) -> tuple[int, str]:
+        item = self.files.get(name)
+        if item is None or not item.consumed or item.sha256 is None:
+            fail("direct cancellation artifact was not fully consumed")
+        return item.streamed_bytes, item.sha256
+
+    def seal(self) -> None:
+        if self.closed or self.sealed:
+            fail("direct cancellation bundle cannot be sealed in its current state")
+        if any(not item.consumed for item in self.files.values()):
+            fail("not every direct cancellation artifact was consumed")
+        assert self.root_identity is not None
+        try:
+            if (
+                frozenset(os.listdir(self.root_fd)) != DIRECT_CANCEL_FILES
+                or _Identity.from_stat(os.fstat(self.root_fd)) != self.root_identity
+                or _entry_identity(self.parent_fd, self.root_path.name)
+                != self.root_identity
+            ):
+                fail("direct cancellation root layout or identity changed")
+            for item in self.files.values():
+                if (
+                    _Identity.from_stat(os.fstat(item.fd)) != item.identity
+                    or _entry_identity(self.root_fd, item.name) != item.identity
+                ):
+                    fail("direct cancellation artifact identity changed before seal")
+                os.lseek(item.fd, 0, os.SEEK_SET)
+                digest = hashlib.sha256()
+                scanner = _SecretScanner(self.forbidden_values)
+                total = 0
+                while True:
+                    chunk = os.read(item.fd, COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    digest.update(chunk)
+                    scanner.consume(chunk)
+                if (
+                    total != item.streamed_bytes
+                    or digest.hexdigest() != item.sha256
+                    or _Identity.from_stat(os.fstat(item.fd)) != item.identity
+                    or _entry_identity(self.root_fd, item.name) != item.identity
+                ):
+                    fail(
+                        "direct cancellation artifact hash or identity changed at seal"
+                    )
+            if _Identity.from_stat(os.fstat(self.root_fd)) != self.root_identity:
+                fail("direct cancellation root changed during final hashing")
+            self.sealed = True
+        except GateIngestError:
+            raise
+        except OSError:
+            fail("failed to seal direct cancellation bundle")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        pending: GateIngestError | None = None
+        for item in self.files.values():
+            try:
+                _safe_close(item.fd)
+            except GateIngestError as error:
+                pending = error
+        self.files.clear()
+        for fd in (self.root_fd, self.parent_fd):
+            try:
+                _safe_close(fd)
+            except GateIngestError as error:
+                pending = error
+        self.root_fd = self.parent_fd = -1
+        self.closed = True
+        if pending is not None:
+            raise pending
+
+
 class _StableSource:
-    def __init__(self, path: Path, label: str, maximum: int, expected_sha256: str):
+    def __init__(
+        self,
+        path: Path,
+        label: str,
+        maximum: int,
+        expected_sha256: str,
+        forbidden_values: tuple[bytes, ...] = (),
+    ):
         self.path = Path(os.path.abspath(path))
         self.label = label
         self.maximum = maximum
+        self.forbidden_values = forbidden_values
         self.parent_fd = -1
         self.fd = -1
         self.identity: _Identity | None = None
@@ -539,6 +824,7 @@ class _StableSource:
             os.lseek(self.fd, 0, os.SEEK_SET)
             chunks: list[bytes] = []
             digest = hashlib.sha256()
+            scanner = _SecretScanner(self.forbidden_values)
             total = 0
             while True:
                 chunk = os.read(self.fd, COPY_CHUNK_BYTES)
@@ -547,6 +833,7 @@ class _StableSource:
                 total += len(chunk)
                 if total > self.maximum:
                     fail("bound source exceeds its streaming limit")
+                scanner.consume(chunk)
                 digest.update(chunk)
                 chunks.append(chunk)
             if (
@@ -707,7 +994,10 @@ def _campaign_claim_factory() -> Callable[
 
 def _strict_object(gate: Any, raw: bytes, label: str) -> dict[str, Any]:
     try:
-        return cast(dict[str, Any], gate.strict_json_object(raw, label))
+        parser = getattr(gate, "strict_json_object", None)
+        if parser is None:
+            parser = gate.COL.strict_json_object
+        return cast(dict[str, Any], parser(raw, label))
     except Exception as error:
         raise GateIngestError(f"{label} is invalid") from error
 
@@ -1506,11 +1796,1136 @@ def ingest_combined_soak_bundle(
             raise pending
 
 
+def _direct_source_specs(
+    bindings: DirectCancelInputBindings,
+) -> dict[str, tuple[Path, str]]:
+    return {
+        "gate": (bindings.gate_source, bindings.gate_source_sha256),
+        "collector": (bindings.collector_source, bindings.collector_source_sha256),
+        "http_client": (
+            bindings.http_client_source,
+            bindings.http_client_source_sha256,
+        ),
+    }
+
+
+def _validate_direct_bindings(bindings: DirectCancelInputBindings) -> None:
+    if not isinstance(bindings, DirectCancelInputBindings):
+        fail("direct cancellation input bindings have the wrong type")
+    specs = _direct_source_specs(bindings)
+    if any(
+        not isinstance(path, os.PathLike)
+        or type(digest) is not str
+        or SHA256_RE.fullmatch(digest) is None
+        for path, digest in specs.values()
+    ):
+        fail("direct cancellation source path or SHA-256 binding differs")
+    absolute_paths = [Path(os.path.abspath(path)) for path, _digest in specs.values()]
+    if (
+        len(set(absolute_paths)) != 3
+        or absolute_paths[0].name != "run-sq8-direct-cancel-gate.py"
+        or absolute_paths[1]
+        != absolute_paths[0].with_name("collect-sq8-openwebui-release.py")
+        or absolute_paths[2]
+        != absolute_paths[0].with_name("sq8-openwebui-http-client.py")
+    ):
+        fail("direct cancellation source layout differs")
+    if (
+        type(bindings.http_image_id) is not str
+        or CONTENT_IMAGE_RE.fullmatch(bindings.http_image_id) is None
+        or type(bindings.docker_network_id) is not str
+        or NETWORK_ID_RE.fullmatch(bindings.docker_network_id) is None
+    ):
+        fail("direct cancellation HTTP image or network binding differs")
+    if bindings.service_unit != CAMPAIGN_SERVICE_UNIT:
+        fail("direct cancellation service unit differs from campaign contract")
+    if (
+        type(bindings.service_user) is not str
+        or not bindings.service_user
+        or len(bindings.service_user) > 128
+        or "\0" in bindings.service_user
+        or type(bindings.control_group) is not str
+        or not bindings.control_group.startswith("/")
+        or len(bindings.control_group) > 4096
+        or "\0" in bindings.control_group
+        or type(bindings.boot_id) is not str
+        or BOOT_ID_RE.fullmatch(bindings.boot_id) is None
+    ):
+        fail("direct cancellation service text identity differs")
+    for numeric_value, label, minimum in (
+        (bindings.gateway_pid, "gateway PID", 1),
+        (bindings.gateway_starttime_ticks, "gateway starttime", 1),
+        (bindings.worker_pid, "worker PID", 1),
+        (bindings.worker_starttime_ticks, "worker starttime", 1),
+        (bindings.restart_count, "restart count", 0),
+        (bindings.uid, "uid", 0),
+        (bindings.gid, "gid", 0),
+    ):
+        if type(numeric_value) is not int or numeric_value < minimum:
+            fail(f"direct cancellation {label} binding differs")
+    if bindings.gateway_pid == bindings.worker_pid:
+        fail("direct cancellation gateway and worker PID bindings overlap")
+    if type(bindings.forbidden_values) is not tuple or not bindings.forbidden_values:
+        fail("direct cancellation API secret bindings are absent or mutable")
+    for secret_value in bindings.forbidden_values:
+        if (
+            type(secret_value) is not bytes
+            or not 16 <= len(secret_value) <= 4096
+            or b"\0" in secret_value
+        ):
+            fail("direct cancellation API secret binding syntax differs")
+
+
+def _load_direct_gate(
+    gate_source: _StableSource,
+    collector_source: _StableSource,
+    http_client_source: _StableSource,
+) -> tuple[Any, str]:
+    module_name = f"_ullm_direct_cancel_ingest_{os.getpid()}_{id(gate_source):x}"
+    support_name = "_ullm_sq8_cancel_collector_support"
+    prior_support = sys.modules.get(support_name)
+    module = types.ModuleType(module_name)
+    module.__file__ = os.fspath(gate_source.path)
+    module.__package__ = ""
+    sys.modules[module_name] = module
+    try:
+        code = compile(
+            gate_source.raw,
+            os.fspath(gate_source.path),
+            "exec",
+            dont_inherit=True,
+        )
+        exec(code, module.__dict__)
+        if (
+            module.COLLECTOR_SUPPORT_RAW != collector_source.raw
+            or module.HTTP_CLIENT_SHA256 != http_client_source.sha256
+            or module.GATE_SCHEMA != "ullm.sq8.direct_cancel_gate.v1"
+            or module.SERVICE_UNIT != CAMPAIGN_SERVICE_UNIT
+        ):
+            fail("executed direct cancellation source binding differs")
+        return module, module_name
+    except GateIngestError:
+        sys.modules.pop(module_name, None)
+        raise
+    except Exception as error:
+        sys.modules.pop(module_name, None)
+        raise GateIngestError(
+            "failed to load bound direct cancellation gate"
+        ) from error
+    finally:
+        if prior_support is None:
+            sys.modules.pop(support_name, None)
+        else:
+            sys.modules[support_name] = prior_support
+
+
+def _direct_document(gate: Any, raw: bytes, label: str) -> dict[str, Any]:
+    if not raw.endswith(b"\n") or raw.endswith(b"\r\n") or raw.count(b"\n") != 1:
+        fail(f"{label} framing differs")
+    value = _strict_object(gate, raw[:-1], label)
+    try:
+        canonical = gate.compact_json(value) + b"\n"
+    except Exception as error:
+        raise GateIngestError(f"{label} cannot be canonically encoded") from error
+    if canonical != raw:
+        fail(f"{label} is not canonical producer JSON")
+    return value
+
+
+def _open_direct_fixtures(
+    gate: Any,
+    gate_source: _StableSource,
+    forbidden_values: tuple[bytes, ...],
+) -> tuple[dict[str, _StableSource], dict[str, Any]]:
+    fixture_root = (
+        gate_source.path.parent.parent
+        / "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures"
+    )
+    sources: dict[str, _StableSource] = {}
+    fixtures: dict[str, Any] = {}
+    try:
+        if tuple(gate.FIXTURE_IDENTITIES) != ("exact-p0032", "exact-p3584"):
+            fail("bound direct cancellation fixture schedule differs")
+        for fixture_id in ("exact-p0032", "exact-p3584"):
+            expected_prompt, expected_sha = gate.FIXTURE_IDENTITIES[fixture_id]
+            source = _StableSource(
+                fixture_root / f"{fixture_id}.json",
+                f"bound {fixture_id} fixture",
+                DIRECT_SOURCE_LIMITS[fixture_id],
+                expected_sha,
+                forbidden_values,
+            )
+            sources[fixture_id] = source
+            try:
+                fixture = gate.load_fixture(source.path, fixture_id)
+            except Exception as error:
+                raise GateIngestError(
+                    "bound direct cancellation fixture validation failed"
+                ) from error
+            if (
+                fixture.raw != source.raw
+                or fixture.sha256 != source.sha256
+                or fixture.prompt_tokens != expected_prompt
+            ):
+                fail("bound direct cancellation fixture snapshot differs")
+            fixtures[fixture_id] = fixture
+        return sources, fixtures
+    except BaseException:
+        for source in reversed(tuple(sources.values())):
+            source.close()
+        raise
+
+
+def _direct_manifest(
+    gate: Any,
+    snapshot: _DirectBundleSnapshot,
+    sources: dict[str, _StableSource],
+    fixtures: dict[str, Any],
+) -> dict[str, Any]:
+    value = _direct_document(
+        gate, snapshot.read_small("input-manifest.json"), "direct input manifest"
+    )
+    expected = {
+        "schema_version": gate.GATE_SCHEMA,
+        "record_type": "input_manifest",
+        "inputs": [
+            {
+                "path": "tools/run-sq8-direct-cancel-gate.py",
+                "bytes": len(sources["gate"].raw),
+                "sha256": sources["gate"].sha256,
+            },
+            {
+                "path": "tools/collect-sq8-openwebui-release.py",
+                "bytes": len(sources["collector"].raw),
+                "sha256": sources["collector"].sha256,
+            },
+            {
+                "path": "tools/sq8-openwebui-http-client.py",
+                "bytes": len(sources["http_client"].raw),
+                "sha256": sources["http_client"].sha256,
+            },
+            *[
+                {
+                    "path": (
+                        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/"
+                        f"{fixture_id}.json"
+                    ),
+                    "bytes": len(sources[fixture_id].raw),
+                    "sha256": sources[fixture_id].sha256,
+                }
+                for fixture_id in ("exact-p0032", "exact-p3584")
+            ],
+        ],
+        "request_bodies": [
+            {
+                "fixture_id": fixture_id,
+                "max_tokens": max_tokens,
+                "bytes": len(gate.request_body(fixtures[fixture_id], max_tokens)),
+                "sha256": _sha256(gate.request_body(fixtures[fixture_id], max_tokens)),
+            }
+            for fixture_id, max_tokens in (
+                ("exact-p3584", 512),
+                ("exact-p0032", 512),
+                ("exact-p0032", 2),
+            )
+        ],
+    }
+    if value != expected:
+        fail("direct input manifest differs from bound sources or request bodies")
+    return value
+
+
+class _DirectGuard:
+    def __init__(self, values: tuple[bytes, ...]) -> None:
+        self.values = values
+
+    def reject(self, raw: bytes, _label: str) -> None:
+        scanner = _SecretScanner(self.values)
+        scanner.consume(raw)
+
+
+@dataclasses.dataclass(frozen=True)
+class _DirectHttpCase:
+    request_index: int
+    phase: str
+    role: str
+    case_id: str
+    plan: Any
+    result: Any
+
+
+def _direct_http_records(
+    gate: Any,
+    snapshot: _DirectBundleSnapshot,
+    fixtures: dict[str, Any],
+    forbidden_values: tuple[bytes, ...],
+) -> tuple[list[dict[str, Any]], list[_DirectHttpCase], int]:
+    iterator = iter(snapshot.iter_lines("http-client.raw.jsonl"))
+    line_count = 0
+
+    def next_event(label: str) -> dict[str, Any]:
+        nonlocal line_count
+        try:
+            raw = next(iterator)
+        except StopIteration:
+            fail(f"{label} is missing")
+        line_count += 1
+        if line_count > gate.MAX_RAW_LINES:
+            fail("direct HTTP evidence exceeds its line bound")
+        return _strict_object(gate, raw, label)
+
+    ready = next_event("direct HTTP ready event")
+    _exact(
+        ready,
+        {"schema_version", "event", "observed_monotonic_ns"},
+        "direct HTTP ready event",
+    )
+    if ready["schema_version"] != gate.HTTP_EVENT_SCHEMA or ready["event"] != "ready":
+        fail("direct HTTP ready event differs")
+    ready_ns = _integer(ready["observed_monotonic_ns"], "direct HTTP ready timestamp")
+    try:
+        gate.validate_phase_order(gate.PHASE_ORDER)
+    except Exception as error:
+        raise GateIngestError("bound direct phase order validation failed") from error
+    if tuple(gate.PHASE_ORDER) != (
+        "after_started_before_progress",
+        "prefill_after_128",
+        "prefill_after_2048",
+        "decode_after_first_content",
+    ):
+        fail("bound direct cancellation phase order differs")
+
+    guard = _DirectGuard(forbidden_values)
+    offline = gate.EvidenceHttpClient((), guard, None)
+    records: list[dict[str, Any]] = []
+    cases: list[_DirectHttpCase] = []
+    for phase in gate.PHASE_ORDER:
+        for role in ("target", "recovery"):
+            request_index = len(cases) + 1
+            case_id = f"direct-{phase}-{role}"
+            spec = gate.PHASE_SPECS[phase]
+            if role == "target":
+                fixture_id = spec.fixture_id
+                max_tokens = 512
+                auto_close = spec.auto_close
+            else:
+                fixture_id = "exact-p0032"
+                max_tokens = 2
+                auto_close = False
+            plan = gate.HttpPlan(
+                request_key=case_id,
+                phase=phase,
+                role=role,
+                body=gate.request_body(fixtures[fixture_id], max_tokens),
+                auto_close=auto_close,
+            )
+            events: list[dict[str, Any]] = []
+            while True:
+                event = next_event(f"direct HTTP request {request_index} event")
+                if event.get("event") in {"ready", "shutdown_complete"}:
+                    fail("direct HTTP control event appears within a request")
+                events.append(event)
+                if len(events) > 256:
+                    fail("one direct HTTP request exceeds its event bound")
+                if event.get("event") == "http_response_end":
+                    break
+            event_index = 0
+
+            def read_event(_deadline_ns: int) -> dict[str, Any]:
+                nonlocal event_index
+                if event_index >= len(events):
+                    fail("direct HTTP request ended before response_end")
+                value = events[event_index]
+                event_index += 1
+                return value
+
+            offline.active = plan
+            offline._read_event = read_event
+            try:
+                result = offline.finish(0)
+            except GateIngestError:
+                raise
+            except Exception as error:
+                raise GateIngestError(
+                    "direct raw HTTP request validation failed"
+                ) from error
+            if event_index != len(events):
+                fail("direct HTTP request retains events after response_end")
+            request_event = events[0]
+            if request_event.get("event") != "http_request" or (
+                request_index == 1
+                and request_event["connect_completed_monotonic_ns"] < ready_ns
+            ):
+                fail("direct HTTP request does not follow ready in exact order")
+            for event in events:
+                record_type = event.get("event")
+                if record_type not in {
+                    "http_request",
+                    "http_response_start",
+                    "http_body_chunk",
+                    "http_response_end",
+                }:
+                    fail("direct HTTP request contains an unsupported session event")
+                fields = {
+                    key: copy.deepcopy(value)
+                    for key, value in event.items()
+                    if key not in {"schema_version", "event"}
+                }
+                if record_type == "http_request":
+                    fields = {"request_index": request_index, **fields}
+                records.append(
+                    {
+                        "record_type": record_type,
+                        "phase": DIRECT_CANCEL_PHASE,
+                        "case_id": case_id,
+                        "fields": fields,
+                    }
+                )
+            cases.append(
+                _DirectHttpCase(
+                    request_index,
+                    phase,
+                    role,
+                    case_id,
+                    plan,
+                    result,
+                )
+            )
+    shutdown = next_event("direct HTTP shutdown event")
+    _exact(
+        shutdown,
+        {"schema_version", "event", "observed_monotonic_ns"},
+        "direct HTTP shutdown event",
+    )
+    shutdown_ns = _integer(
+        shutdown["observed_monotonic_ns"], "direct HTTP shutdown timestamp"
+    )
+    if (
+        shutdown["schema_version"] != gate.HTTP_EVENT_SCHEMA
+        or shutdown["event"] != "shutdown_complete"
+        or shutdown_ns < offline.last_response_end_ns
+    ):
+        fail("direct HTTP shutdown acknowledgement differs or regresses")
+    try:
+        next(iterator)
+    except StopIteration:
+        pass
+    else:
+        fail("direct HTTP evidence continues after shutdown_complete")
+    if len(cases) != 8:
+        fail("direct HTTP evidence request count differs from eight")
+    return records, cases, line_count
+
+
+def _canonical_direct_claim(record: dict[str, Any]) -> bytes:
+    try:
+        return json.dumps(
+            {field: record[field] for field in REQUIRED_JOURNAL_FIELDS},
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (KeyError, TypeError, ValueError, UnicodeError, RecursionError) as error:
+        raise GateIngestError(
+            "direct lifecycle required journal fields cannot be reconstructed"
+        ) from error
+
+
+def _validate_direct_target_http(gate: Any, active: Any, result: Any) -> None:
+    if result.outcome != "client_closed" or result.status not in {None, 200}:
+        fail("direct cancellation target is not an intentional client close")
+    contents = gate.nonempty_content_items(result.items)
+    completion_ids = {
+        item.value["id"]
+        for item in result.items
+        if item.value is not None and type(item.value.get("id")) is str
+    }
+    if completion_ids and completion_ids != {active.completion_id}:
+        fail("direct cancellation target HTTP completion identity differs")
+    if active.spec.auto_close:
+        if (
+            not contents
+            or any(
+                item.value is None or item.value.get("id") != active.completion_id
+                for item in contents
+            )
+            or not result.chunks
+            or result.chunks[-1].index != contents[0].chunk_index
+            or any(item.chunk_index != contents[0].chunk_index for item in contents)
+        ):
+            fail("decode cancellation target content-trigger evidence differs")
+    elif contents:
+        fail("prefill cancellation target exposed non-empty response content")
+
+
+@dataclasses.dataclass(frozen=True)
+class _DirectLifecycleCase:
+    http: _DirectHttpCase
+    completed: dict[str, Any]
+    events: tuple[dict[str, Any], ...]
+    actual_client_close_ns: int | None
+
+
+def _direct_lifecycle_records(
+    gate: Any,
+    snapshot: _DirectBundleSnapshot,
+    bindings: DirectCancelInputBindings,
+    http_cases: list[_DirectHttpCase],
+    claim_factory: Callable[[bytes, str, str], BundleLifecycleClaimProtocol],
+) -> tuple[
+    list[BundleLifecycleClaimProtocol], list[_DirectLifecycleCase], int, int, int
+]:
+    observer_raws: list[bytes] = []
+    observer_events: list[dict[str, Any]] = []
+    last_event_ns = -1
+    for raw in snapshot.iter_lines("observer.raw.jsonl"):
+        if len(observer_raws) >= 55:
+            fail("direct observer lifecycle count exceeds 55")
+        try:
+            event = cast(
+                dict[str, Any],
+                gate.COL.decode_lifecycle_payload(raw, "direct observer lifecycle"),
+            )
+            canonical = gate.compact_json(event)
+        except Exception as error:
+            raise GateIngestError(
+                "direct observer lifecycle validation failed"
+            ) from error
+        observed_ns = _integer(
+            event["observed_monotonic_ns"], "direct lifecycle observed timestamp"
+        )
+        if canonical != raw or observed_ns < last_event_ns:
+            fail("direct observer lifecycle bytes or global timestamps differ")
+        last_event_ns = observed_ns
+        observer_raws.append(raw)
+        observer_events.append(event)
+    if len(observer_raws) != 55:
+        fail("direct observer lifecycle count differs from exact 55")
+
+    journal_raws: list[bytes] = []
+    journal_values: list[dict[str, Any]] = []
+    seen_cursors: set[str] = set()
+    last_journal_usec = -1
+    for position, raw in enumerate(snapshot.iter_lines("service-journal.raw.jsonl")):
+        if position >= 55:
+            fail("direct service journal lifecycle count exceeds 55")
+        value = _strict_object(gate, raw, "direct service journal record")
+        if set(value) != set(REQUIRED_JOURNAL_FIELDS):
+            fail("direct service journal required field set differs")
+        cursor = value.get("__CURSOR")
+        if (
+            type(cursor) is not str
+            or not cursor
+            or len(cursor) > 65_536
+            or cursor in seen_cursors
+        ):
+            fail("direct service journal cursor is invalid or duplicated")
+        monotonic = _decimal(
+            value.get("__MONOTONIC_TIMESTAMP"), "direct journal monotonic timestamp"
+        )
+        pid = _decimal(value.get("_PID"), "direct journal PID")
+        priority = _decimal(value.get("PRIORITY"), "direct journal priority")
+        if (
+            value["__MONOTONIC_TIMESTAMP"] != str(monotonic)
+            or value["_PID"] != str(pid)
+            or value["PRIORITY"] != str(priority)
+            or monotonic < last_journal_usec
+            or priority > 7
+            or pid != bindings.gateway_pid
+            or value.get("_BOOT_ID") != bindings.boot_id
+            or value.get("_SYSTEMD_UNIT") != bindings.service_unit
+            or type(value.get("MESSAGE")) is not str
+        ):
+            fail("direct service journal order or bound identity differs")
+        try:
+            event = gate.COL.decode_lifecycle_message(value["MESSAGE"])
+            payload = gate.COL.lifecycle_payload_from_message(value["MESSAGE"])
+        except Exception as error:
+            raise GateIngestError(
+                "direct journal lifecycle MESSAGE is invalid"
+            ) from error
+        if (
+            event is None
+            or position >= len(observer_raws)
+            or payload != observer_raws[position]
+            or event != observer_events[position]
+            or monotonic * 1000 < event["observed_monotonic_ns"]
+        ):
+            fail("direct journal and observer lifecycle correlation differs")
+        seen_cursors.add(cursor)
+        last_journal_usec = monotonic
+        journal_raws.append(raw)
+        journal_values.append(value)
+    if len(journal_raws) != 55:
+        fail("direct service journal lifecycle count differs from exact 55")
+
+    correlation_values: list[dict[str, Any]] = []
+    observer_records: list[Any] = []
+    for position, raw in enumerate(
+        snapshot.iter_lines("observer-journal-correlation.raw.jsonl")
+    ):
+        if position >= 55:
+            fail("direct correlation record count exceeds 55")
+        value = _strict_object(gate, raw, "direct observer journal correlation")
+        _exact(
+            value,
+            {
+                "schema_version",
+                "sequence",
+                "cursor",
+                "journal_monotonic_usec",
+                "journal_pid",
+                "observer_received_monotonic_ns",
+                "observer_sender_pid",
+                "observer_sender_uid",
+                "observer_sender_gid",
+                "payload_sha256",
+                "payload_bytes",
+            },
+            "direct observer journal correlation",
+        )
+        received = _integer(
+            value["observer_received_monotonic_ns"],
+            "direct observer received timestamp",
+        )
+        journal = journal_values[position]
+        if (
+            value["schema_version"] != gate.GATE_SCHEMA
+            or _integer(value["sequence"], "direct correlation sequence") != position
+            or value["cursor"] != journal["__CURSOR"]
+            or value["journal_monotonic_usec"] != journal["__MONOTONIC_TIMESTAMP"]
+            or value["journal_pid"] != journal["_PID"]
+            or _integer(value["observer_sender_pid"], "observer sender PID")
+            != bindings.gateway_pid
+            or _integer(value["observer_sender_uid"], "observer sender uid")
+            != bindings.uid
+            or _integer(value["observer_sender_gid"], "observer sender gid")
+            != bindings.gid
+            or received < observer_events[position]["observed_monotonic_ns"]
+            or _integer(value["payload_bytes"], "correlated payload bytes")
+            != len(observer_raws[position])
+            or _require_sha(value["payload_sha256"], "correlated payload")
+            != _sha256(observer_raws[position])
+        ):
+            fail("direct observer journal correlation identity differs")
+        observer_records.append(
+            gate.CorrelatedObserverRecord(
+                raw_payload=observer_raws[position],
+                event=copy.deepcopy(observer_events[position]),
+                received_monotonic_ns=received,
+                sender_pid=bindings.gateway_pid,
+                sender_uid=bindings.uid,
+                sender_gid=bindings.gid,
+            )
+        )
+        correlation_values.append(value)
+    if len(correlation_values) != 55:
+        fail("direct correlation record count differs from exact 55")
+    try:
+        reconstructed = gate.correlate_records(
+            observer_records, journal_raws, bindings.gateway_pid
+        )
+    except Exception as error:
+        raise GateIngestError(
+            "direct three-way lifecycle correlation failed"
+        ) from error
+    if any(
+        {"schema_version": gate.GATE_SCHEMA, **expected} != actual
+        for expected, actual in zip(reconstructed, correlation_values, strict=True)
+    ):
+        fail("direct stored correlation differs from independent reconstruction")
+
+    traces: list[list[dict[str, Any]]] = []
+    active_trace: list[dict[str, Any]] = []
+    for event in observer_events:
+        if not active_trace and event["event"] != "request_admitted":
+            fail("direct lifecycle trace does not begin with admission")
+        active_trace.append(event)
+        if event["event"] == "request_released":
+            traces.append(active_trace)
+            active_trace = []
+    if active_trace or len(traces) != 8 or len(http_cases) != 8:
+        fail("direct lifecycle trace cardinality differs from eight complete requests")
+
+    run = gate.DirectCancelRunValidator()
+    lifecycle_cases: list[_DirectLifecycleCase] = []
+    claims: list[BundleLifecycleClaimProtocol] = []
+    cursor_position = 0
+    seen_request_ids: set[str] = set()
+    seen_completion_ids: set[str] = set()
+    for http, trace in zip(http_cases, traces, strict=True):
+        if http.role == "target":
+            run.begin_target(http.phase)
+        else:
+            run.begin_recovery(http.phase)
+        active = run.active
+        if active is None:
+            fail("direct lifecycle validator lacks its active trace")
+        contents = gate.nonempty_content_items(http.result.items)
+        close_marked = False
+        derived_close_ns: int | None = None
+        for event in trace:
+            run.consume(event)
+            if http.role == "target" and not close_marked and active.trigger_reached():
+                if active.spec.auto_close:
+                    if not contents:
+                        fail("decode direct target lacks non-empty HTTP content")
+                    for item in contents:
+                        active.observe_content(
+                            item.observed_monotonic_ns, item.chunk_index
+                        )
+                    derived_close_ns = contents[0].observed_monotonic_ns
+                else:
+                    derived_close_ns = event["observed_monotonic_ns"]
+                active.mark_close(derived_close_ns)
+                close_marked = True
+        if http.role == "target":
+            _validate_direct_target_http(gate, active, http.result)
+        else:
+            try:
+                gate.DirectCancelGate._validate_recovery_http(active, http.result)
+            except Exception as error:
+                raise GateIngestError(
+                    "direct recovery HTTP/lifecycle correlation failed"
+                ) from error
+        try:
+            completed = cast(dict[str, Any], run.complete_active())
+        except Exception as error:
+            raise GateIngestError(
+                "direct lifecycle request validation failed"
+            ) from error
+        request_id = cast(str, completed["request_id"])
+        completion_id = cast(str, completed["completion_id"])
+        if request_id in seen_request_ids or completion_id in seen_completion_ids:
+            fail("direct lifecycle request or completion identity is duplicated")
+        seen_request_ids.add(request_id)
+        seen_completion_ids.add(completion_id)
+        for _event in trace:
+            claim_raw = _canonical_direct_claim(journal_values[cursor_position])
+            claims.append(claim_factory(claim_raw, DIRECT_CANCEL_PHASE, http.case_id))
+            cursor_position += 1
+        lifecycle_cases.append(
+            _DirectLifecycleCase(
+                http,
+                completed,
+                tuple(copy.deepcopy(trace)),
+                derived_close_ns,
+            )
+        )
+    try:
+        completed_run = run.finalize()
+    except Exception as error:
+        raise GateIngestError("direct lifecycle run finalization failed") from error
+    if (
+        run.max_active != 1
+        or len(completed_run) != 8
+        or len(claims) != 55
+        or cursor_position != 55
+    ):
+        fail("direct lifecycle run count, activity, or claim mapping differs")
+    return (
+        claims,
+        lifecycle_cases,
+        len(observer_raws),
+        len(journal_raws),
+        len(correlation_values),
+    )
+
+
+def _direct_service_identity(bindings: DirectCancelInputBindings) -> dict[str, Any]:
+    return {
+        "unit": bindings.service_unit,
+        "user": bindings.service_user,
+        "uid": bindings.uid,
+        "gid": bindings.gid,
+        "control_group": bindings.control_group,
+        "gateway_pid": bindings.gateway_pid,
+        "gateway_starttime_ticks": bindings.gateway_starttime_ticks,
+        "worker_pid": bindings.worker_pid,
+        "worker_starttime_ticks": bindings.worker_starttime_ticks,
+        "n_restarts": bindings.restart_count,
+        "boot_id": bindings.boot_id,
+    }
+
+
+def _validate_direct_summary_requests(
+    gate: Any,
+    values: Any,
+    lifecycle_cases: list[_DirectLifecycleCase],
+) -> None:
+    if type(values) is not list or len(values) != 8:
+        fail("direct producer summary request count differs")
+    for value, case in zip(values, lifecycle_cases, strict=True):
+        if type(value) is not dict:
+            fail("direct producer summary request is not an object")
+        completed = case.completed
+        common = {
+            "phase": case.http.phase,
+            "role": case.http.role,
+            "request_id": completed["request_id"],
+            "completion_id": completed["completion_id"],
+            "release_observed_monotonic_ns": completed["release_observed_monotonic_ns"],
+        }
+        if case.http.role == "recovery":
+            _exact(
+                value,
+                {
+                    "phase",
+                    "role",
+                    "request_id",
+                    "completion_id",
+                    "release_observed_monotonic_ns",
+                },
+                "direct recovery producer summary",
+            )
+            if value != common:
+                fail("direct recovery producer summary differs from raw lifecycle")
+            continue
+        _exact(
+            value,
+            {
+                "phase",
+                "role",
+                "request_id",
+                "completion_id",
+                "trigger_observed_monotonic_ns",
+                "client_close_monotonic_ns",
+                "cancel_observed_monotonic_ns",
+                "release_observed_monotonic_ns",
+                "progress",
+                "completion_tokens",
+            },
+            "direct target producer summary",
+        )
+        for field, expected in {
+            **common,
+            "trigger_observed_monotonic_ns": completed["trigger_observed_monotonic_ns"],
+            "cancel_observed_monotonic_ns": completed["cancel_observed_monotonic_ns"],
+            "progress": completed["progress"],
+            "completion_tokens": completed["completion_tokens"],
+        }.items():
+            if value[field] != expected:
+                fail("direct target producer summary differs from raw lifecycle")
+        close_ns = _integer(
+            value["client_close_monotonic_ns"], "direct target client close timestamp"
+        )
+        if (
+            close_ns < completed["trigger_observed_monotonic_ns"]
+            or close_ns > completed["cancel_observed_monotonic_ns"]
+            or close_ns > case.http.result.response_end_monotonic_ns
+        ):
+            fail("direct target summary client-close boundary differs")
+        if gate.PHASE_SPECS[case.http.phase].auto_close and (
+            case.actual_client_close_ns is None
+            or close_ns != case.actual_client_close_ns
+        ):
+            fail("decode target summary close differs from first HTTP content")
+
+
+def _direct_summary(
+    gate: Any,
+    snapshot: _DirectBundleSnapshot,
+    bindings: DirectCancelInputBindings,
+    lifecycle_cases: list[_DirectLifecycleCase],
+    raw_counts: dict[str, int],
+) -> tuple[dict[str, Any], bytes]:
+    raw = snapshot.read_small("summary.json")
+    value = _direct_document(gate, raw, "direct producer summary")
+    _exact(
+        value,
+        {
+            "schema_version",
+            "record_type",
+            "phase_order",
+            "request_count",
+            "max_active",
+            "service_identity",
+            "http_image_id",
+            "docker_network_name",
+            "docker_network_id",
+            "observer_socket",
+            "observer_event_count",
+            "journal_correlation_count",
+            "requests",
+            "artifacts",
+        },
+        "direct producer summary",
+    )
+    if (
+        value["schema_version"] != gate.GATE_SCHEMA
+        or value["record_type"] != "summary"
+        or value["phase_order"] != list(gate.PHASE_ORDER)
+        or _integer(value["request_count"], "direct summary request count") != 8
+        or _integer(value["max_active"], "direct summary maximum active") != 1
+        or value["service_identity"] != _direct_service_identity(bindings)
+        or value["http_image_id"] != bindings.http_image_id
+        or value["docker_network_name"] != gate.HTTP_NETWORK_NAME
+        or value["docker_network_id"] != bindings.docker_network_id
+        or value["observer_socket"] != os.fspath(gate.OBSERVER_SOCKET)
+        or _integer(value["observer_event_count"], "direct observer count") != 55
+        or _integer(
+            value["journal_correlation_count"], "direct journal correlation count"
+        )
+        != 55
+    ):
+        fail("direct producer summary identity or counts differ")
+    _validate_direct_summary_requests(gate, value["requests"], lifecycle_cases)
+    artifacts = _exact(
+        value["artifacts"],
+        {
+            "http-client.raw.jsonl",
+            "observer.raw.jsonl",
+            "service-journal.raw.jsonl",
+            "observer-journal-correlation.raw.jsonl",
+        },
+        "direct producer artifact summary",
+    )
+    for name in (
+        "http-client.raw.jsonl",
+        "observer.raw.jsonl",
+        "service-journal.raw.jsonl",
+        "observer-journal-correlation.raw.jsonl",
+    ):
+        artifact = _exact(
+            artifacts[name], {"bytes", "lines", "sha256"}, "direct raw artifact"
+        )
+        actual_bytes, actual_sha = snapshot.evidence(name)
+        if (
+            _integer(artifact["bytes"], "direct artifact bytes") != actual_bytes
+            or _integer(artifact["lines"], "direct artifact lines") != raw_counts[name]
+            or _require_sha(artifact["sha256"], "direct artifact") != actual_sha
+        ):
+            fail("direct producer artifact size, line count, or hash differs")
+    return value, raw
+
+
+def _direct_derived_view(
+    gate: Any,
+    bindings: DirectCancelInputBindings,
+    sources: dict[str, _StableSource],
+    lifecycle_cases: list[_DirectLifecycleCase],
+    http_record_count: int,
+    summary_raw: bytes,
+) -> dict[str, Any]:
+    cases: list[dict[str, Any]] = []
+    sensitive: list[bytes] = [*bindings.forbidden_values]
+    for case in lifecycle_cases:
+        completed = case.completed
+        request_id = cast(str, completed["request_id"])
+        completion_id = cast(str, completed["completion_id"])
+        sensitive.extend(
+            (
+                request_id.encode("utf-8"),
+                completion_id.encode("utf-8"),
+                cast(bytes, case.http.plan.body),
+                cast(bytes, case.http.result.response_body),
+                *(cast(bytes, chunk.raw) for chunk in case.http.result.chunks),
+                *(cast(bytes, item.raw_data) for item in case.http.result.items),
+            )
+        )
+        release = case.events[-1]
+        item: dict[str, Any] = {
+            "request_index": case.http.request_index,
+            "phase": case.http.phase,
+            "role": case.http.role,
+            "case_id": case.http.case_id,
+            "request_body_bytes": len(case.http.plan.body),
+            "request_body_sha256": _sha256(case.http.plan.body),
+            "http_status": case.http.result.status,
+            "http_outcome": case.http.result.outcome,
+            "response_body_bytes": len(case.http.result.response_body),
+            "response_body_sha256": _sha256(case.http.result.response_body),
+            "lifecycle_event_count": len(case.events),
+            "request_id_sha256": _sha256(request_id.encode("utf-8")),
+            "completion_id_sha256": _sha256(completion_id.encode("utf-8")),
+            "release_observed_monotonic_ns": completed["release_observed_monotonic_ns"],
+            "release_outcome": release["outcome"],
+            "reset_complete": release["reset_complete"],
+            "completion_tokens": release["completion_tokens"],
+        }
+        if case.http.role == "target":
+            item.update(
+                {
+                    "trigger_observed_monotonic_ns": completed[
+                        "trigger_observed_monotonic_ns"
+                    ],
+                    "cancel_observed_monotonic_ns": completed[
+                        "cancel_observed_monotonic_ns"
+                    ],
+                    "cancel_to_release_ns": (
+                        completed["release_observed_monotonic_ns"]
+                        - completed["cancel_observed_monotonic_ns"]
+                    ),
+                    "progress": copy.deepcopy(completed["progress"]),
+                }
+            )
+        cases.append(item)
+    view = {
+        "schema_version": DIRECT_CANCEL_VIEW_SCHEMA,
+        "phase_order": list(gate.PHASE_ORDER),
+        "request_count": 8,
+        "http_record_count": http_record_count,
+        "lifecycle_record_count": 55,
+        "maximum_active_requests": 1,
+        "component_summary_sha256": _sha256(summary_raw),
+        "source_bindings": {
+            **{f"{name}_sha256": source.sha256 for name, source in sources.items()},
+            "http_image_id_sha256": _sha256(bindings.http_image_id.encode("ascii")),
+            "docker_network_id_sha256": _sha256(
+                bindings.docker_network_id.encode("ascii")
+            ),
+            "service_unit_sha256": _sha256(bindings.service_unit.encode("utf-8")),
+            "service_user_sha256": _sha256(bindings.service_user.encode("utf-8")),
+            "boot_id_sha256": _sha256(bindings.boot_id.encode("ascii")),
+            "control_group_sha256": _sha256(bindings.control_group.encode("utf-8")),
+            "gateway_pid_sha256": _sha256(str(bindings.gateway_pid).encode("ascii")),
+            "gateway_starttime_sha256": _sha256(
+                str(bindings.gateway_starttime_ticks).encode("ascii")
+            ),
+            "worker_pid_sha256": _sha256(str(bindings.worker_pid).encode("ascii")),
+            "worker_starttime_sha256": _sha256(
+                str(bindings.worker_starttime_ticks).encode("ascii")
+            ),
+            "uid_sha256": _sha256(str(bindings.uid).encode("ascii")),
+            "gid_sha256": _sha256(str(bindings.gid).encode("ascii")),
+            "restart_count": bindings.restart_count,
+        },
+        "cases": cases,
+    }
+    sensitive.extend(
+        value.encode("utf-8")
+        for value in (
+            bindings.http_image_id,
+            bindings.docker_network_id,
+            bindings.service_unit,
+            bindings.service_user,
+            bindings.boot_id,
+            bindings.control_group,
+        )
+    )
+    for path, _digest in _direct_source_specs(bindings).values():
+        sensitive.append(os.fspath(path).encode("utf-8", errors="strict"))
+    try:
+        encoded = gate.compact_json(view)
+    except Exception as error:
+        raise GateIngestError("direct derived view cannot be encoded") from error
+    scanner = _SecretScanner(tuple(value for value in sensitive if len(value) >= 4))
+    scanner.consume(encoded)
+    return view
+
+
+def ingest_direct_cancel_bundle(
+    bundle: Path,
+    bindings: DirectCancelInputBindings,
+) -> DirectCancelIngestResult:
+    """Revalidate and convert one formal four-phase direct-cancel bundle."""
+
+    if not isinstance(bundle, os.PathLike):
+        fail("direct cancellation bundle path has the wrong type")
+    _validate_direct_bindings(bindings)
+    sources: dict[str, _StableSource] = {}
+    fixtures: dict[str, Any] = {}
+    snapshot: _DirectBundleSnapshot | None = None
+    module_name: str | None = None
+    try:
+        for name, (path, digest) in _direct_source_specs(bindings).items():
+            sources[name] = _StableSource(
+                path,
+                f"bound direct {name} source",
+                DIRECT_SOURCE_LIMITS[name],
+                digest,
+                bindings.forbidden_values,
+            )
+        gate, module_name = _load_direct_gate(
+            sources["gate"], sources["collector"], sources["http_client"]
+        )
+        if (
+            bindings.uid != gate.COL.HTTP_CLIENT_UID
+            or bindings.gid != gate.COL.HTTP_CLIENT_GID
+        ):
+            fail("direct cancellation uid/gid differ from the HTTP client contract")
+        try:
+            gate.COL.control_group_parts(bindings.control_group)
+        except Exception as error:
+            raise GateIngestError("direct control group binding is invalid") from error
+        fixture_sources, fixtures = _open_direct_fixtures(
+            gate, sources["gate"], bindings.forbidden_values
+        )
+        sources.update(fixture_sources)
+        claim_factory = _campaign_claim_factory()
+        snapshot = _DirectBundleSnapshot(
+            bundle,
+            uid=bindings.uid,
+            gid=bindings.gid,
+            forbidden_values=bindings.forbidden_values,
+        )
+        _direct_manifest(gate, snapshot, sources, fixtures)
+        http_records, http_cases, http_lines = _direct_http_records(
+            gate, snapshot, fixtures, bindings.forbidden_values
+        )
+        (
+            lifecycle_claims,
+            lifecycle_cases,
+            observer_lines,
+            journal_lines,
+            correlation_lines,
+        ) = _direct_lifecycle_records(
+            gate, snapshot, bindings, http_cases, claim_factory
+        )
+        raw_counts = {
+            "http-client.raw.jsonl": http_lines,
+            "observer.raw.jsonl": observer_lines,
+            "service-journal.raw.jsonl": journal_lines,
+            "observer-journal-correlation.raw.jsonl": correlation_lines,
+        }
+        _summary, summary_raw = _direct_summary(
+            gate, snapshot, bindings, lifecycle_cases, raw_counts
+        )
+        view = _direct_derived_view(
+            gate,
+            bindings,
+            sources,
+            lifecycle_cases,
+            len(http_records),
+            summary_raw,
+        )
+        snapshot.seal()
+        for source in sources.values():
+            source.seal()
+        return DirectCancelIngestResult(
+            tuple(http_records), tuple(lifecycle_claims), view
+        )
+    except GateIngestError:
+        raise
+    except Exception as error:
+        raise GateIngestError("direct cancellation bundle ingestion failed") from error
+    finally:
+        if module_name is not None:
+            sys.modules.pop(module_name, None)
+        pending: GateIngestError | None = None
+        if snapshot is not None:
+            try:
+                snapshot.close()
+            except GateIngestError as error:
+                pending = error
+        for source in reversed(tuple(sources.values())):
+            try:
+                source.close()
+            except GateIngestError as error:
+                pending = error
+        if pending is not None and sys.exc_info()[0] is None:
+            raise pending
+
+
 __all__ = [
     "BundleSnapshot",
     "CombinedSoakIngestResult",
+    "DirectCancelIngestResult",
+    "DirectCancelInputBindings",
+    "DIRECT_CANCEL_VIEW_SCHEMA",
     "GateIngestError",
     "GateInputBindings",
     "INGEST_VIEW_SCHEMA",
     "ingest_combined_soak_bundle",
+    "ingest_direct_cancel_bundle",
 ]
