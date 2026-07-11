@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-C is complete; P8-D tokenizer and non-streaming gateway implementation is next
+Status: in progress; P8-D is complete; P8-E SSE streaming and disconnect safety is next
 
 Date: 2026-07-10
 
@@ -1254,6 +1254,49 @@ Acceptance:
 Stop condition:
 
 - do not add OpenWebUI-specific workarounds if the base OpenAI contract is wrong.
+
+#### P8-D implementation and R9700 acceptance (2026-07-11)
+
+##### 前回の要点
+
+P8-C proved that the resident Rust worker was cancellable and resource-stable,
+but there was no product Python environment, tokenizer boundary, worker
+supervisor, or OpenAI HTTP endpoint.
+
+##### 今回の変更点
+
+- Added the isolated Python 3.12 package and fully locked product/dev
+  dependencies under `services/openai-gateway/` at commit
+  `9b977d98ced759a43d076d673e346ab4e74202cf`.
+- Added offline frozen-tokenizer identity checks, complete chat normalization,
+  strict bounded JSON, context reservation, stable final decoding, Bearer auth,
+  exact error/usage shapes, and non-streaming Chat Completions.
+- Added one GPU singleton owner, one resident worker, exact Ready/event/counter
+  validation, active1/waiting0 admission, all four hard watchdogs, bounded
+  TERM/KILL, fatal HTTP-attempt ordering, and nonzero fatal gateway exit.
+- Independent review found and closed tokenizer event-loop starvation,
+  cancel/terminal races, stale cancel errors, incomplete shutdown, invalid EOS
+  sequences, huge numeric JSON values, progress cadence drift, route redirects,
+  bind widening, and query-bearing access logs. The final review has no P0/P1.
+- All 85 package tests, strict mypy, Ruff check/format, lock check, and dependency
+  check pass. Frozen chat-template and actual OpenWebUI non-stream fixtures are
+  included.
+- On the physical R9700, Ready and model discovery passed. A Japanese request
+  returned `東京` in 1.475 seconds, and a second request reused worker PID
+  4031291/starttime 99154532 while all 31 active readiness probes stayed 200.
+- A real collision returned 429 with `Retry-After: 1` in 1.814 ms and was not
+  queued. The leading request and a post-collision recovery request completed.
+- Graceful shutdown removed the gateway/worker/listener/R9700 owner and released
+  the singleton lock. Structured evidence is in
+  `benchmarks/results/2026-07-11/sq8-p8d-http-smoke-v0.1/summary.json`.
+
+##### 次の行動
+
+1. Implement P8-E incremental stable decoding and exact SSE chunk order.
+2. Connect disconnect/slow-client cancellation to the existing bounded worker
+   supervisor without allowing client backpressure into either pipe pump.
+3. Pass real stream, stop, disconnect, and recovery smokes before P8-F systemd
+   and OpenWebUI deployment.
 
 ### P8-E: SSE Streaming and Disconnect Safety
 

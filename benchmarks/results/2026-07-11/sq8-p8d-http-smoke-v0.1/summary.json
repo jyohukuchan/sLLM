@@ -1,0 +1,96 @@
+{
+  "schema_version": "ullm.sq8.p8d_http_smoke.v1",
+  "recorded_at_utc": "2026-07-11T04:40:13Z",
+  "result": "pass",
+  "identity": {
+    "git_commit": "9b977d98ced759a43d076d673e346ab4e74202cf",
+    "tracked_worktree_clean": true,
+    "worker_binary_sha256": "145a5351db3957130200276314853e394d0fd206a69e2eab260c01141411b950",
+    "gateway_pyproject_sha256": "c725747de295b182598aa9f77ec4b22235c946867976ad5d876ad5534d8433cb",
+    "gateway_uv_lock_sha256": "6545c83a9ced25af8c7b3a1306ba01902af2dca20e3bc7baccb3145c3e19c8c5",
+    "model": "ullm-qwen3-14b-sq8",
+    "device": "gfx1201",
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "tokenizer_json_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "tokenizer_config_sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+  },
+  "process": {
+    "gateway_pid": 4030912,
+    "gateway_starttime_ticks": 99154355,
+    "worker_pid": 4031291,
+    "worker_starttime_ticks": 99154532,
+    "worker_executable": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-sq8-worker",
+    "worker_pid_unchanged_across_requests": true
+  },
+  "startup": {
+    "ready_poll_interval_seconds": 2,
+    "ready_observed_poll_attempt": 13,
+    "ready_status": 200,
+    "model_list_status": 200
+  },
+  "requests": {
+    "japanese_stop": {
+      "status": 200,
+      "time_to_first_byte_seconds": 1.475035,
+      "total_seconds": 1.475147,
+      "content": "\u6771\u4eac",
+      "finish_reason": "stop",
+      "prompt_tokens": 39,
+      "completion_tokens": 3,
+      "total_tokens": 42
+    },
+    "sequential_length": {
+      "status": 200,
+      "time_to_first_byte_seconds": 3.357277,
+      "total_seconds": 3.357415,
+      "finish_reason": "length",
+      "prompt_tokens": 35,
+      "completion_tokens": 64,
+      "total_tokens": 99,
+      "active_ready_200_checks": 31,
+      "active_ready_non_200_checks": 0
+    },
+    "collision": {
+      "status": 429,
+      "total_seconds": 0.001814,
+      "retry_after": "1",
+      "error_code": "request_busy",
+      "queued": false,
+      "leading_request_status": 200,
+      "leading_request_total_seconds": 5.899349,
+      "leading_request_completion_tokens": 128
+    },
+    "post_collision_recovery": {
+      "status": 200,
+      "total_seconds": 0.648689,
+      "content": "\u3053\u3093\u306b\u3061\u306f\uff01",
+      "finish_reason": "stop",
+      "prompt_tokens": 19,
+      "completion_tokens": 3,
+      "total_tokens": 22
+    },
+    "query_secret_probe": {
+      "status": 401,
+      "access_log_enabled": false,
+      "observed_server_output_bytes": 0
+    }
+  },
+  "verification": {
+    "gateway_tests_passed": 85,
+    "strict_mypy_passed": true,
+    "ruff_check_passed": true,
+    "ruff_format_check_passed": true,
+    "dependency_check_passed": true,
+    "independent_review_p0": 0,
+    "independent_review_p1": 0
+  },
+  "shutdown": {
+    "gateway_exit_code": 0,
+    "worker_process_remaining": false,
+    "gateway_process_remaining": false,
+    "port_8000_listener_remaining": false,
+    "r9700_process_remaining": false,
+    "singleton_lock_reacquired": true
+  }
+}
