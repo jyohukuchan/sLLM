@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from unittest import mock
 
 
@@ -58,7 +59,8 @@ class BundleFixture:
         for relative in BUNDLE.expected_prevalidation_paths():
             self.bundle.write_bytes(relative, b"evidence\n", scan=permit)
 
-    def add_validation(self) -> None:
+    def add_validation(self) -> Any:
+        raw = b'{"validated":true}\n'
         path = self.bundle.stage_path / BUNDLE.VALIDATION_FILE
         descriptor = os.open(
             path,
@@ -66,10 +68,11 @@ class BundleFixture:
             0o600,
         )
         try:
-            os.write(descriptor, b'{"validated":true}\n')
+            os.write(descriptor, raw)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        return BUNDLE.FileEvidence(len(raw), hashlib.sha256(raw).hexdigest())
 
 
 class FullCampaignBundleTests(unittest.TestCase):
@@ -83,10 +86,10 @@ class FullCampaignBundleTests(unittest.TestCase):
             component = fixture.bundle.component_directory("api-contract")
             (component / "temporary").write_bytes(b"not final evidence")
             fixture.populate()
-            fixture.bundle.validate_before_independent_validator()
             fixture.bundle.clear_component_work()
-            fixture.add_validation()
-            published = fixture.bundle.publish()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
+            published = fixture.bundle.publish(validation)
 
             self.assertEqual(published, fixture.final)
             self.assertTrue(fixture.bundle.published)
@@ -111,38 +114,85 @@ class FullCampaignBundleTests(unittest.TestCase):
             fixture.populate()
             fixture.bundle.validate_before_independent_validator()
             with self.assertRaises(BUNDLE.CampaignBundleError):
-                fixture.bundle.publish()
+                fixture.bundle.publish(BUNDLE.FileEvidence(1, "0" * 64))
             self.assertFalse(fixture.final.exists())
 
     def test_publish_requires_empty_external_component_work_root(self) -> None:
         with BundleFixture() as fixture:
             fixture.populate()
             fixture.bundle.component_directory("latency")
-            fixture.add_validation()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
             with self.assertRaisesRegex(
                 BUNDLE.CampaignBundleError, "work root is not empty"
             ):
-                fixture.bundle.publish()
+                fixture.bundle.publish(validation)
             self.assertFalse(fixture.final.exists())
 
     def test_post_rename_fsync_failure_rolls_back_the_public_name(self) -> None:
         with BundleFixture() as fixture:
             fixture.populate()
-            fixture.add_validation()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
             real_fsync = os.fsync
             calls = 0
 
-            def fail_fourth_fsync(descriptor: int) -> None:
+            def fail_post_rename_parent_fsync(descriptor: int) -> None:
                 nonlocal calls
                 calls += 1
-                if calls == 4:
+                if descriptor == fixture.bundle.parent_fd and fixture.final.exists():
                     raise OSError("synthetic post-rename fsync failure")
                 real_fsync(descriptor)
 
-            with mock.patch.object(BUNDLE.os, "fsync", side_effect=fail_fourth_fsync):
+            with mock.patch.object(
+                BUNDLE.os,
+                "fsync",
+                side_effect=fail_post_rename_parent_fsync,
+            ):
                 with self.assertRaises(BUNDLE.CampaignBundleError):
-                    fixture.bundle.publish()
-            self.assertGreaterEqual(calls, 5)
+                    fixture.bundle.publish(validation)
+            self.assertGreaterEqual(calls, 40)
+            self.assertFalse(fixture.final.exists())
+            self.assertTrue(fixture.bundle.stage_path.is_dir())
+
+    def test_post_rename_content_change_is_detected_and_rolled_back(self) -> None:
+        with BundleFixture() as fixture:
+            fixture.populate()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
+            real_rename = os.rename
+
+            def mutate_after_publication_rename(
+                source: str,
+                destination: str,
+                *,
+                src_dir_fd: int,
+                dst_dir_fd: int,
+            ) -> None:
+                real_rename(
+                    source,
+                    destination,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+                if (
+                    source == fixture.bundle.stage_name
+                    and destination == fixture.final.name
+                ):
+                    target = fixture.final / "environment.json"
+                    with target.open("r+b", buffering=0) as handle:
+                        handle.write(b"EVIDENCE\n")
+                        os.fsync(handle.fileno())
+
+            with mock.patch.object(
+                BUNDLE.os,
+                "rename",
+                side_effect=mutate_after_publication_rename,
+            ):
+                with self.assertRaisesRegex(
+                    BUNDLE.CampaignBundleError, "changed during publication"
+                ):
+                    fixture.bundle.publish(validation)
             self.assertFalse(fixture.final.exists())
             self.assertTrue(fixture.bundle.stage_path.is_dir())
 
@@ -292,16 +342,84 @@ class FullCampaignBundleTests(unittest.TestCase):
         for defect in defects:
             with self.subTest(defect=defect), BundleFixture() as fixture:
                 fixture.populate()
+                fixture.bundle.validate_before_independent_validator()
                 validation = fixture.bundle.stage_path / BUNDLE.VALIDATION_FILE
+                raw = b"{}\n"
                 if defect == "symlink":
                     validation.symlink_to(
                         fixture.bundle.stage_path / "environment.json"
                     )
                 else:
-                    validation.write_bytes(b"" if defect == "empty" else b"{}\n")
+                    validation.write_bytes(b"" if defect == "empty" else raw)
                     os.chmod(validation, 0o600 if defect == "empty" else 0o644)
                 with self.assertRaises(BUNDLE.CampaignBundleError):
-                    fixture.bundle.publish()
+                    fixture.bundle.publish(
+                        BUNDLE.FileEvidence(len(raw), hashlib.sha256(raw).hexdigest())
+                    )
+
+    def test_publish_rejects_same_size_in_place_prevalidation_mutation(self) -> None:
+        with BundleFixture() as fixture:
+            fixture.populate()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
+            target = fixture.bundle.artifact_path("raw-session-results.jsonl")
+            with target.open("r+b", buffering=0) as handle:
+                handle.write(b"EVIDENCE\n")
+                os.fsync(handle.fileno())
+            self.assertEqual(target.stat().st_size, len(b"evidence\n"))
+            with self.assertRaisesRegex(
+                BUNDLE.CampaignBundleError, "changed after independent validation"
+            ):
+                fixture.bundle.publish(validation)
+            self.assertFalse(fixture.final.exists())
+
+    def test_publish_binds_validation_file_bytes_and_sha256(self) -> None:
+        with BundleFixture() as fixture:
+            fixture.populate()
+            fixture.bundle.validate_before_independent_validator()
+            evidence = fixture.add_validation()
+            validation = fixture.bundle.stage_path / BUNDLE.VALIDATION_FILE
+            replacement = b'{"validated":fals}\n'
+            self.assertEqual(len(replacement), evidence.bytes)
+            with validation.open("r+b", buffering=0) as handle:
+                handle.write(replacement)
+                os.fsync(handle.fileno())
+            with self.assertRaisesRegex(
+                BUNDLE.CampaignBundleError,
+                "validation artifact differs from its evidence",
+            ):
+                fixture.bundle.publish(evidence)
+            self.assertFalse(fixture.final.exists())
+
+    def test_context_exit_preserves_active_error_when_abort_also_fails(self) -> None:
+        with BundleFixture() as fixture:
+            active = RuntimeError("synthetic phase failure")
+            with mock.patch.object(
+                fixture.bundle,
+                "abort",
+                side_effect=BUNDLE.CampaignBundleError("sensitive abort detail"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "synthetic phase failure"
+                ) as caught:
+                    with fixture.bundle:
+                        raise active
+            self.assertIs(caught.exception, active)
+            self.assertEqual(
+                getattr(caught.exception, "__notes__", []),
+                ["campaign bundle abort also failed while preserving the active error"],
+            )
+
+    def test_context_exit_raises_abort_failure_without_an_active_error(self) -> None:
+        with BundleFixture() as fixture:
+            abort_error = BUNDLE.CampaignBundleError("synthetic abort failure")
+            with mock.patch.object(fixture.bundle, "abort", side_effect=abort_error):
+                with self.assertRaisesRegex(
+                    BUNDLE.CampaignBundleError, "synthetic abort failure"
+                ) as caught:
+                    with fixture.bundle:
+                        pass
+            self.assertIs(caught.exception, abort_error)
 
 
 if __name__ == "__main__":

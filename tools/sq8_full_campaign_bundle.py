@@ -89,6 +89,12 @@ class _Identity:
         return (self.device, self.inode, self.mode, self.uid, self.gid)
 
 
+@dataclasses.dataclass(frozen=True)
+class _ImmutableFileSeal:
+    identity: _Identity
+    sha256: str
+
+
 def _directory_flags() -> int:
     if not hasattr(os, "O_NOFOLLOW"):
         fail("O_NOFOLLOW is required for full campaign publication")
@@ -186,6 +192,9 @@ class AtomicCampaignDirectory:
         self.published = False
         self.closed = False
         self._components: set[str] = set()
+        self._prevalidation_seals: tuple[tuple[str, _ImmutableFileSeal], ...] | None = (
+            None
+        )
         nonce = secrets.token_hex(12)
         self.stage_name = f".{absolute_final.name}.incomplete-{nonce}"
         self.work_name = f".{absolute_final.name}.work-{nonce}"
@@ -240,9 +249,21 @@ class AtomicCampaignDirectory:
     def __enter__(self) -> AtomicCampaignDirectory:
         return self
 
-    def __exit__(self, exc_type: object, _exc: object, _tb: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        error: BaseException | None,
+        _tb: object,
+    ) -> None:
         if exc_type is not None or not self.published:
-            self.abort()
+            try:
+                self.abort()
+            except BaseException:
+                if error is None:
+                    raise
+                error.add_note(
+                    "campaign bundle abort also failed while preserving the active error"
+                )
         else:
             self.close()
 
@@ -463,16 +484,17 @@ class AtomicCampaignDirectory:
                 except OSError:
                     fail("failed to remove an incomplete copied artifact")
 
-    def _validate_anchor(self) -> None:
+    def _validate_anchor(self, *, stage_entry_name: str | None = None) -> None:
         assert self.parent_identity is not None
         assert self.stage_identity is not None
         assert self.browser_identity is not None
+        entry_name = self.stage_name if stage_entry_name is None else stage_entry_name
         if (
             _Identity.from_stat(os.fstat(self.parent_fd)).directory_anchor()
             != self.parent_identity.directory_anchor()
             or _Identity.from_stat(os.fstat(self.stage_fd)).directory_anchor()
             != self.stage_identity.directory_anchor()
-            or _entry_identity(self.parent_fd, self.stage_name).directory_anchor()
+            or _entry_identity(self.parent_fd, entry_name).directory_anchor()
             != self.stage_identity.directory_anchor()
             or _Identity.from_stat(os.fstat(self.browser_fd)).directory_anchor()
             != self.browser_identity.directory_anchor()
@@ -481,8 +503,13 @@ class AtomicCampaignDirectory:
         ):
             fail("campaign directory identity changed")
 
-    def _validate_files(self, *, include_validation: bool) -> None:
-        self._validate_anchor()
+    def _validate_files(
+        self,
+        *,
+        include_validation: bool,
+        stage_entry_name: str | None = None,
+    ) -> None:
+        self._validate_anchor(stage_entry_name=stage_entry_name)
         expected_root = set(PREVALIDATION_ROOT_FILES) | {"browser"}
         if include_validation:
             expected_root.add(VALIDATION_FILE)
@@ -521,9 +548,85 @@ class AtomicCampaignDirectory:
         except OSError:
             fail("failed to validate the campaign bundle layout")
 
+    def _snapshot_file(
+        self,
+        parent_fd: int,
+        name: str,
+        label: str,
+    ) -> _ImmutableFileSeal:
+        descriptor = -1
+        try:
+            entry = _entry_identity(parent_fd, name)
+            if (
+                not stat.S_ISREG(entry.mode)
+                or stat.S_IMODE(entry.mode) != 0o600
+                or entry.links != 1
+                or entry.uid != self.uid
+                or entry.gid != self.gid
+                or entry.size < 1
+            ):
+                fail(f"{label} identity differs")
+            descriptor = os.open(name, _file_read_flags(), dir_fd=parent_fd)
+            if _Identity.from_stat(os.fstat(descriptor)) != entry:
+                fail(f"{label} changed while opening")
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                chunk = os.read(descriptor, COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+            os.fsync(descriptor)
+            if (
+                total != entry.size
+                or _Identity.from_stat(os.fstat(descriptor)) != entry
+                or _entry_identity(parent_fd, name) != entry
+            ):
+                fail(f"{label} changed while snapshotting")
+            return _ImmutableFileSeal(entry, digest.hexdigest())
+        except CampaignBundleError:
+            raise
+        except OSError:
+            fail(f"failed to snapshot {label}")
+        finally:
+            if descriptor >= 0:
+                _safe_close(descriptor)
+
+    def _snapshot_prevalidation_files(
+        self,
+        *,
+        include_validation: bool,
+        stage_entry_name: str | None = None,
+    ) -> tuple[tuple[str, _ImmutableFileSeal], ...]:
+        self._validate_files(
+            include_validation=include_validation,
+            stage_entry_name=stage_entry_name,
+        )
+        snapshots: list[tuple[str, _ImmutableFileSeal]] = []
+        for relative in expected_prevalidation_paths():
+            browser, name = _relative_target(relative)
+            parent_fd = self.browser_fd if browser else self.stage_fd
+            snapshots.append(
+                (
+                    relative,
+                    self._snapshot_file(
+                        parent_fd,
+                        name,
+                        f"campaign prevalidation artifact {relative}",
+                    ),
+                )
+            )
+        self._validate_anchor(stage_entry_name=stage_entry_name)
+        return tuple(snapshots)
+
     def validate_before_independent_validator(self) -> None:
         self._require_open()
-        self._validate_files(include_validation=False)
+        if self._prevalidation_seals is not None:
+            fail("campaign prevalidation inputs were already sealed")
+        self._prevalidation_seals = self._snapshot_prevalidation_files(
+            include_validation=False
+        )
 
     def _rollback_renamed_stage(self) -> None:
         assert self.stage_identity is not None
@@ -543,9 +646,17 @@ class AtomicCampaignDirectory:
         except OSError:
             fail("failed to roll back an incomplete campaign publication")
 
-    def publish(self) -> Path:
+    def publish(self, validation_evidence: FileEvidence) -> Path:
         self._require_open()
-        self._validate_files(include_validation=True)
+        if self._prevalidation_seals is None:
+            fail("campaign prevalidation inputs were not sealed")
+        if (
+            not isinstance(validation_evidence, FileEvidence)
+            or type(validation_evidence.bytes) is not int
+            or validation_evidence.bytes < 1
+            or SHA256_RE.fullmatch(validation_evidence.sha256) is None
+        ):
+            fail("campaign validation evidence binding differs")
         renamed = False
         try:
             if os.listdir(self.work_fd):
@@ -553,8 +664,23 @@ class AtomicCampaignDirectory:
             os.fsync(self.browser_fd)
             os.fsync(self.stage_fd)
             os.fsync(self.parent_fd)
-            _safe_close(self.browser_fd)
-            self.browser_fd = -1
+            current_seals = self._snapshot_prevalidation_files(include_validation=True)
+            if current_seals != self._prevalidation_seals:
+                fail(
+                    "campaign prevalidation input changed after independent validation"
+                )
+            validation_seal = self._snapshot_file(
+                self.stage_fd,
+                VALIDATION_FILE,
+                "campaign independent validation artifact",
+            )
+            if (
+                FileEvidence(validation_seal.identity.size, validation_seal.sha256)
+                != validation_evidence
+            ):
+                fail(
+                    "campaign independent validation artifact differs from its evidence"
+                )
             _safe_close(self.work_fd)
             self.work_fd = -1
             os.rmdir(self.work_name, dir_fd=self.parent_fd)
@@ -572,8 +698,33 @@ class AtomicCampaignDirectory:
                 != self.stage_identity.directory_anchor()
             ):
                 fail("published campaign directory identity differs")
+            if (
+                self._snapshot_prevalidation_files(
+                    include_validation=True,
+                    stage_entry_name=self.final_path.name,
+                )
+                != self._prevalidation_seals
+            ):
+                fail("campaign prevalidation input changed during publication")
+            published_validation = self._snapshot_file(
+                self.stage_fd,
+                VALIDATION_FILE,
+                "published campaign independent validation artifact",
+            )
+            if (
+                FileEvidence(
+                    published_validation.identity.size,
+                    published_validation.sha256,
+                )
+                != validation_evidence
+            ):
+                fail(
+                    "campaign independent validation artifact changed during publication"
+                )
             os.fsync(self.parent_fd)
             self.published = True
+            _safe_close(self.browser_fd)
+            self.browser_fd = -1
             _safe_close(self.stage_fd)
             self.stage_fd = -1
             self.close()
