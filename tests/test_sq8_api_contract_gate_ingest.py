@@ -374,6 +374,17 @@ class GateBundle:
         self.rebuild_checksums()
         self.seal_layout()
 
+    def use_quiet_service_journal(self, cursor: str = "initial-cursor") -> None:
+        records = copy.deepcopy(self.quiet_records)
+        for record in records:
+            record["new_journal_record_count"] = 0
+            record["journal_record_count"] = 0
+            record["journal_cursor"] = cursor
+        self.journal_records = []
+        self.quiet_records = records
+        self.replace_raw("service-journal.raw.jsonl", b"")
+        self.replace_raw("lifecycle-quiet.raw.jsonl", json_lines(records))
+
 
 class ApiContractGateIngestTests(unittest.TestCase):
     def ingest(self, fixture: GateBundle, bindings: Any | None = None) -> Any:
@@ -444,6 +455,41 @@ class ApiContractGateIngestTests(unittest.TestCase):
         ):
             self.assertEqual(record["fields"]["request_index"], index)
             self.assertEqual(record["fields"]["request_key"], request_key(case, index))
+
+    def test_zero_service_journal_accepts_one_bounded_initial_cursor(self) -> None:
+        with GateBundle() as fixture:
+            fixture.use_quiet_service_journal("bounded-initial-cursor")
+            result = self.ingest(fixture)
+
+        self.assertEqual(result.journal_records, ())
+        self.assertEqual(result.final_journal_cursor, "bounded-initial-cursor")
+        self.assertEqual(result.derived_view["journal_record_count"], 0)
+        self.assertEqual(len(result.quiet_check_records), 13)
+        for record in result.quiet_check_records:
+            self.assertEqual(record["fields"]["observer_event_count"], 0)
+            self.assertEqual(record["fields"]["journal_record_count"], 0)
+            self.assertEqual(record["fields"]["new_journal_record_count"], 0)
+            self.assertEqual(
+                record["fields"]["journal_cursor"], "bounded-initial-cursor"
+            )
+
+    def test_zero_service_journal_cursor_and_count_mutations_are_rejected(self) -> None:
+        def changed_cursor(records: list[dict[str, Any]]) -> None:
+            records[6]["journal_cursor"] = "different-initial-cursor"
+
+        def positive_count(records: list[dict[str, Any]]) -> None:
+            records[6]["journal_record_count"] = 1
+
+        def inconsistent_new_count(records: list[dict[str, Any]]) -> None:
+            records[6]["new_journal_record_count"] = 1
+
+        for mutation in (changed_cursor, positive_count, inconsistent_new_count):
+            with self.subTest(mutation=mutation), GateBundle() as fixture:
+                fixture.use_quiet_service_journal()
+                records = copy.deepcopy(fixture.quiet_records)
+                mutation(records)
+                fixture.replace_raw("lifecycle-quiet.raw.jsonl", json_lines(records))
+                self.assert_rejected(fixture)
 
     def test_derived_view_excludes_cleartext_messages_prompts_and_paths(self) -> None:
         secret = b"adapter-bound-secret"

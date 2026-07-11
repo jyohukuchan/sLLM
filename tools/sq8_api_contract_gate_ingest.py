@@ -906,8 +906,6 @@ def _journal_records(
             }
         )
         last_monotonic = monotonic
-    if not cursors:
-        fail("service journal contains no authoritative API access records")
     return cursors, monotonic_values, campaign_records, count
 
 
@@ -917,7 +915,7 @@ def _quiet_checks(
     cursors: Sequence[str],
     journal_count: int,
     case_end_times: Sequence[int],
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, str]:
     labels = [case.case_id for case in gate.FROZEN_SCHEDULE] + [
         "http-client-shutdown",
         "post-observer-close",
@@ -926,6 +924,7 @@ def _quiet_checks(
     checks: list[dict[str, Any]] = []
     prior_count = 0
     prior_checked_ns = -1
+    initial_cursor: str | None = None
     line_count = 0
     for raw in snapshot.iter_lines("lifecycle-quiet.raw.jsonl"):
         line_count += 1
@@ -959,8 +958,11 @@ def _quiet_checks(
         observer_event_count = _integer(
             value["observer_event_count"], "quiet observer event count"
         )
+        journal_cursor = _text(
+            value["journal_cursor"], "quiet journal cursor", maximum=65_536
+        )
         expected_open = sequence <= 10
-        if (
+        common_invalid = (
             value["schema_version"] != GATE_SCHEMA
             or value["record_type"] != "lifecycle_quiet_check"
             or sequence != line_count - 1
@@ -969,21 +971,36 @@ def _quiet_checks(
             or value["observer_open"] is not expected_open
             or observer_event_count != 0
             or checked_ns < prior_checked_ns
-            or current_count <= 0
-            or current_count > journal_count
-            or current_count < prior_count
-            or new_count != current_count - prior_count
-            or value["journal_cursor"] != cursors[current_count - 1]
-        ):
+        )
+        if journal_count == 0:
+            if initial_cursor is None:
+                initial_cursor = journal_cursor
+            count_invalid = (
+                current_count != 0 or new_count != 0 or journal_cursor != initial_cursor
+            )
+        else:
+            count_invalid = (
+                current_count <= 0
+                or current_count > journal_count
+                or current_count < prior_count
+                or new_count != current_count - prior_count
+                or journal_cursor != cursors[current_count - 1]
+            )
+        if common_invalid or count_invalid:
             fail("lifecycle quiet check order, identity, or count differs")
         if sequence < 10 and checked_ns < case_end_times[sequence]:
             fail("lifecycle quiet check precedes its HTTP response end")
         prior_count = current_count
         prior_checked_ns = checked_ns
         checks.append(value)
-    if line_count != 13 or prior_count != journal_count:
+    if (
+        line_count != 13
+        or prior_count != journal_count
+        or (journal_count == 0 and initial_cursor is None)
+    ):
         fail("lifecycle quiet checks do not cover the complete journal")
-    return checks, line_count
+    final_cursor = cursors[-1] if cursors else cast(str, initial_cursor)
+    return checks, line_count, final_cursor
 
 
 def _campaign_quiet_check_records(
@@ -1229,7 +1246,7 @@ def ingest_api_contract_bundle(
         cursors, _journal_monotonic, journal_records, journal_lines = _journal_records(
             gate, snapshot, bindings
         )
-        checks, quiet_lines = _quiet_checks(
+        checks, quiet_lines, final_journal_cursor = _quiet_checks(
             gate,
             snapshot,
             cursors,
@@ -1260,7 +1277,7 @@ def ingest_api_contract_bundle(
             tuple(journal_records),
             _campaign_quiet_check_records(checks),
             view,
-            cursors[-1],
+            final_journal_cursor,
         )
     except ApiContractIngestError:
         raise
