@@ -735,6 +735,34 @@ class CampaignJournalCapture:
                     fail("resource lifecycle trace claim timed out")
                 self._condition.wait(remaining / 1_000_000_000)
 
+    def wait_quiet(self, deadline_ns: int) -> str:
+        """Wait through a negative-request quiet window without advancing phase."""
+
+        with self._condition:
+            self._require_running_locked()
+            target_empty_polls: int | None = None
+            while True:
+                self._raise_thread_error_locked()
+                if self._pending:
+                    fail("campaign quiet window contains an unclaimed lifecycle event")
+                remaining = deadline_ns - time.monotonic_ns()
+                if remaining <= 0 and target_empty_polls is None:
+                    target_empty_polls = self._empty_polls + CHECKPOINT_EMPTY_POLLS
+                if (
+                    target_empty_polls is not None
+                    and self._empty_polls >= target_empty_polls
+                ):
+                    cursor = self._last_cursor or self._start_cursor
+                    if cursor is None:
+                        fail("campaign quiet window has no journal boundary cursor")
+                    return cursor
+                wait_seconds = (
+                    remaining / 1_000_000_000
+                    if remaining > 0
+                    else SOURCE_WAIT_USEC / 1_000_000
+                )
+                self._condition.wait(wait_seconds)
+
     def checkpoint(self, phase: str, deadline_ns: int) -> str:
         if phase not in PHASE_ORDER:
             fail("campaign checkpoint phase is invalid")

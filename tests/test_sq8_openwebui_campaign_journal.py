@@ -531,6 +531,23 @@ class CampaignJournalTest(unittest.TestCase):
         with self.assertRaisesRegex(CAMPAIGN.CampaignJournalError, "unclaimed"):
             capture.checkpoint("preflight", time.monotonic_ns() + 2_000_000_000)
 
+    def test_quiet_window_does_not_advance_phase_and_rejects_racing_lifecycle(self):
+        capture, source = self.make_capture()
+        start_cursor = capture.wait_quiet(time.monotonic_ns() + 60_000_000)
+        self.assertEqual(start_cursor, "anchor-cursor")
+        capture.checkpoint("preflight", time.monotonic_ns() + 2_000_000_000)
+
+        source.feed(
+            event_line(
+                "quiet-race",
+                1000,
+                NORMAL_GATEWAY_PID,
+                lifecycle("request_admitted", observed_ns=999_999),
+            )
+        )
+        with self.assertRaisesRegex(CAMPAIGN.CampaignJournalError, "quiet window"):
+            capture.wait_quiet(time.monotonic_ns() + 2_000_000_000)
+
     def test_pending_queue_event_and_byte_bounds_fail_closed(self):
         for bound_name, bound_value in (
             ("max_pending_events", 1),
