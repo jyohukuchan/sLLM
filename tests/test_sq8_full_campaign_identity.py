@@ -578,6 +578,16 @@ class FullCampaignIdentityTests(unittest.TestCase):
             artifacts.environment["host"]["tools"]["python_version_line"],
             "Python 3.12.3",
         )
+
+    def test_worker_binary_allows_the_cargo_release_hardlink(self) -> None:
+        with IdentityFixture() as fixture:
+            cargo_artifact = fixture.worker.parent / "worker-build-artifact"
+            os.link(fixture.worker, cargo_artifact)
+            artifacts = IDENTITY.build_identity_artifacts(fixture.inputs, fixture.live)
+            self.assertEqual(
+                artifacts.model_identity["worker"]["binary_sha256"],
+                fixture.live.worker.executable_sha256,
+            )
         self.assertTrue(
             artifacts.environment["host"]["tools"]["rustc_version_line"].startswith(
                 "rustc 1.96.0 "

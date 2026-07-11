@@ -484,12 +484,14 @@ class _PinnedFile:
         forbidden_values: tuple[bytes, ...],
         retain: bool,
         expected_sha256: str | None = None,
+        require_single_link: bool = True,
     ):
         self.path = Path(os.path.abspath(path))
         self.maximum = maximum
         self.forbidden_values = forbidden_values
         self.retain = retain
         self.expected_sha256 = expected_sha256
+        self.require_single_link = require_single_link
         self.parent_fd = -1
         self.fd = -1
         self.identity: _FileIdentity | None = None
@@ -505,7 +507,8 @@ class _PinnedFile:
             )
             if (
                 not stat.S_ISREG(entry.mode)
-                or entry.links != 1
+                or (require_single_link and entry.links != 1)
+                or (not require_single_link and entry.links < 1)
                 or entry.size < 1
                 or entry.size > maximum
             ):
@@ -2453,6 +2456,7 @@ def build_identity_artifacts(
             maximum=MAX_WORKER_BINARY_BYTES,
             forbidden_values=inputs.forbidden_values,
             retain=False,
+            require_single_link=False,
         )
         if (
             worker_binary.sha256 != live.worker.executable_sha256
