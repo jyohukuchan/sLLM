@@ -921,7 +921,7 @@ def production_binding_builders(
                     sources,
                     {
                         "gate": "gate_openwebui_soak",
-                        "support": "campaign_journal",
+                        "support": "gate_openwebui_stop",
                     },
                 ),
                 "browser_script": sources["browser_soak"][0],

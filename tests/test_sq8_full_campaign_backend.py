@@ -1004,6 +1004,7 @@ class BackendTests(unittest.TestCase):
     def test_production_binding_builders_fill_all_six_exact_dataclasses(self) -> None:
         inputs = self.production_binding_inputs(ROOT)
         builders = BACKEND.production_binding_builders(inputs)
+        combined = None
         for gate in BACKEND.GATE_ORDER:
             context = BACKEND.GateBindingContext(
                 gate,
@@ -1018,6 +1019,13 @@ class BackendTests(unittest.TestCase):
                 tuple(field.name for field in dataclasses.fields(binding)),
                 BACKEND.EXPECTED_BINDING_FIELDS[gate],
             )
+            if gate == "combined":
+                combined = binding
+        self.assertIsNotNone(combined)
+        self.assertEqual(
+            combined.support_source,
+            ROOT / "tools/gate_openwebui_stop.source",
+        )
         failure = builders["failure"](
             BACKEND.GateBindingContext(
                 "failure",
