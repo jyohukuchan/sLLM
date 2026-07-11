@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C implementation and the R9700 functional smoke are complete; the formal cancel-latency and 100-request resource gates are next
+Status: in progress; P8-C is complete; P8-D tokenizer and non-streaming gateway implementation is next
 
 Date: 2026-07-10
 
@@ -1173,6 +1173,37 @@ no fail-closed producer or independent validator.
    R9700 with all ten required HIP guards.
 3. Validate the published raw evidence independently. Advance to P8-D only when
    cancellation, recovery, process, RSS, and VRAM gates all pass.
+
+#### P8-C formal acceptance result (2026-07-11)
+
+##### 前回の要点
+
+The v0.2 producer and validator closed the transient KFD observation race while
+remaining fail-closed for positive owners, required-worker loss, PID reuse, and
+partial VRAM reads. The complete R9700 schedule still had to pass before P8-D.
+
+##### 今回の変更点
+
+- Ran the standalone v0.2 schedule from clean commit
+  `4e627bc537ce493cbe6a7387144229331d943b03` with release-worker SHA-256
+  `145a5351db3957130200276314853e394d0fd206a69e2eab260c01141411b950`.
+- The independent validator passed with no gate errors: measured cancellation
+  upper-bound p95 was `145,297,962.95 ns`, and the maximum of all 34
+  cancellations was `298,216,883 ns`.
+- All 100 resource requests and 505 post-release samples passed. Final worker
+  RSS and R9700 VRAM deltas were both zero; both Theil-Sen slopes were also zero.
+- The worker exited with code zero in `62,034,509 ns`. All 641 stable KFD
+  snapshots succeeded without retry, and start/final Git identities matched.
+- Published raw evidence, worker stderr, independent validation, and checksums
+  under `benchmarks/results/2026-07-11/sq8-worker-acceptance-v0.2/`.
+
+##### 次の行動
+
+1. Begin P8-D with the dedicated offline-tokenizer Python package and its
+   contract tests.
+2. Add one fail-closed resident-worker supervisor and the non-streaming OpenAI
+   endpoints without a waiting queue.
+3. Prove one complete Japanese response over HTTP before adding SSE in P8-E.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

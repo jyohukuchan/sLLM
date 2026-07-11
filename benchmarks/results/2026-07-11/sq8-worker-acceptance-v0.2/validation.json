@@ -1,0 +1,55 @@
+{
+  "build_identity": {
+    "binary_sha256": "145a5351db3957130200276314853e394d0fd206a69e2eab260c01141411b950",
+    "git_commit": "4e627bc537ce493cbe6a7387144229331d943b03",
+    "tracked_clean": true
+  },
+  "cancellation": {
+    "all_samples": 34,
+    "maximum_upper_bound_ns": 298216883,
+    "measured_samples": 10,
+    "measured_upper_bound_p50_ns": 88639018.5,
+    "measured_upper_bound_p95_ns": 145297962.95,
+    "non_latency_warmup_samples": 32,
+    "warmup_samples": 2
+  },
+  "counts": {
+    "all_cancellations": 34,
+    "commands": 169,
+    "gpu_metrics": 2,
+    "isolation_checks": 135,
+    "kfd_attempts": 641,
+    "kfd_retries": 0,
+    "kfd_snapshots": 641,
+    "non_latency_warmup_cancellations": 32,
+    "releases": 134,
+    "resource_points": 100,
+    "resource_samples": 505,
+    "theil_sen_pairs_per_series": 4950,
+    "worker_events": 603
+  },
+  "evidence": {
+    "raw_file": "/home/homelab1/datapool/ullm/evidence/sq8-worker-acceptance-v2-4e627bc-2026-07-11/raw.jsonl",
+    "raw_sha256": "fb52f5e172196d8ccc4b41caa7c0ff6aede9f41e32f09d0526a874b93722a8ab",
+    "stderr_file": "/home/homelab1/datapool/ullm/evidence/sq8-worker-acceptance-v2-4e627bc-2026-07-11/worker-stderr.jsonl",
+    "stderr_sha256": "305eb3d3e1009f7ce05f0e956c3f735c4f3c4da4e34d87a2c854d3d56f51ea3c"
+  },
+  "gate_errors": [],
+  "passed": true,
+  "process": {
+    "exit_code": 0,
+    "exit_observed_monotonic_ns": 960626249554025,
+    "final_git_commit": "4e627bc537ce493cbe6a7387144229331d943b03",
+    "shutdown_duration_ns": 62034509,
+    "stdout_eof_monotonic_ns": 960626249379622
+  },
+  "resources": {
+    "baseline_vram_bytes": 18276048896,
+    "baseline_worker_rss_bytes": 175079424,
+    "final_vram_delta_bytes": 0,
+    "final_worker_rss_delta_bytes": 0,
+    "vram_theil_sen_bytes_per_request": 0,
+    "worker_rss_theil_sen_bytes_per_request": 0
+  },
+  "schema_version": "ullm.sq8.worker_acceptance.validation.v2"
+}
