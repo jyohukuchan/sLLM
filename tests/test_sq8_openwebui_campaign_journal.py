@@ -273,8 +273,8 @@ class FakeDirectJournalReader:
     def get_next(self):
         return self._act("next", None)
 
-    def wait(self, timeout_msec):
-        self.waited.append(timeout_msec)
+    def wait(self, timeout_seconds):
+        self.waited.append(timeout_seconds)
         return self._act("wait", None)
 
     def _act(self, expected, default):
@@ -400,7 +400,7 @@ class SystemdJournalSourceTest(unittest.TestCase):
         with self.assertRaises(CAMPAIGN.CampaignJournalError):
             source.read_next(1)
 
-    def test_wait_converts_microseconds_to_rounded_up_milliseconds(self):
+    def test_wait_converts_microseconds_to_float_seconds(self):
         source, reader = self.open_source(
             [
                 ("seek", None),
@@ -413,7 +413,8 @@ class SystemdJournalSourceTest(unittest.TestCase):
         )
         self.assertIsNone(source.read_next(50_000))
         self.assertIsNone(source.read_next(1))
-        self.assertEqual(reader.waited, [50, 1])
+        self.assertEqual(reader.waited, [0.05, 0.000001])
+        self.assertTrue(all(type(value) is float for value in reader.waited))
 
     def test_wait_rejects_invalid_microsecond_timeout(self):
         source, reader = self.open_source(

@@ -496,7 +496,7 @@ class SystemdJournalSource:
             or timeout_usec > MAX_SOURCE_WAIT_USEC
         ):
             fail("direct sd-journal timeout is not bounded positive microseconds")
-        timeout_msec = max(1, (timeout_usec + 999) // 1000)
+        timeout_seconds = timeout_usec / 1_000_000
         reader = self._reader
         journal = self._journal
         boot_id = self._boot_id
@@ -508,7 +508,7 @@ class SystemdJournalSource:
             entry = reader.get_next()
             if entry:
                 return self._entry_bytes(entry, boot_id)
-            result = reader.wait(timeout_msec)
+            result = reader.wait(timeout_seconds)
         except (OSError, ValueError):
             fail("direct sd-journal read failed")
         if result == journal.INVALIDATE:
