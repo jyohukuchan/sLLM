@@ -18,7 +18,7 @@ import re
 import stat
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -72,6 +72,18 @@ BDF_RE = re.compile(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_IDENTITY_JSON_BYTES = 2 * 1024 * 1024
+MAX_SESSION_RECORDS = 16_384
+MAX_SSE_ITEMS_PER_RESPONSE = 2_048
+MAX_SESSION_SSE_ITEMS = 32_768
+MAX_SSE_LINE_BYTES = 1024 * 1024
+MAX_SSE_EVENT_BYTES = 2 * 1024 * 1024
+MAX_SSE_FINISH_REASON_BYTES = 64
+MAX_BROWSER_SELECTOR_BYTES = 4096
+MAX_SESSION_IDENTIFIER_BYTES = 512
+MAX_HTTP_RESPONSE_HEADER_COUNT = 128
+MAX_HTTP_HEADER_NAME_BYTES = 256
+MAX_HTTP_HEADER_VALUE_BYTES = 8192
+MAX_HTTP_RESPONSE_HEADER_BYTES = 64 * 1024
 U64_MAX = (1 << 64) - 1
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 RESOURCE_FIXTURE_INPUT_PATH = "collector/resource-chat-fixture.json"
@@ -853,6 +865,15 @@ def nullable_string(value: Any, label: str) -> str | None:
     if value is None:
         return None
     return string(value, label)
+
+
+def bounded_utf8_string(
+    value: Any, label: str, *, maximum_bytes: int, nonempty: bool = True
+) -> str:
+    result = string(value, label, nonempty=nonempty)
+    if len(result.encode("utf-8")) > maximum_bytes:
+        fail(f"{label} exceeds its UTF-8 byte bound")
+    return result
 
 
 def sha256_value(value: Any, label: str) -> str:
@@ -2043,6 +2064,253 @@ class InputSeal:
     sha256: str
 
 
+@dataclass(frozen=True)
+class HttpSseItem:
+    chunk_index: int
+    observed_monotonic_ns: int
+    done: bool
+    completion_id_utf8_bytes: int | None
+    completion_id_sha256: str | None
+    content_utf8_bytes: int | None
+    content_sha256: str | None
+    finish_reason: str | None
+    usage_present: bool
+    usage_is_object: bool | None
+    completion_tokens: int | None
+
+
+@dataclass(frozen=True)
+class HttpSseMetadata:
+    chunk_count: int
+    first_chunk_monotonic_ns: int | None
+    last_chunk_monotonic_ns: int | None
+    items: tuple[HttpSseItem, ...]
+
+
+@dataclass(frozen=True)
+class HttpCompactResult:
+    phase: str
+    case_id: str
+    request_index: int
+    request_key: str
+    method: str
+    target: str
+    status: int
+    outcome: str
+    request_body_bytes: int
+    request_body_sha256: str
+    response_body_bytes: int
+    response_body_sha256: str
+    connect_completed_monotonic_ns: int
+    write_started_monotonic_ns: int
+    last_body_byte_sent_monotonic_ns: int
+    response_started_monotonic_ns: int
+    response_end_monotonic_ns: int
+    sse: HttpSseMetadata | None
+
+
+@dataclass(frozen=True)
+class BrowserActionData:
+    phase: str
+    case_id: str
+    browser_case: str
+    action_index: int
+    action: str
+    selector: str | None
+    input_sha256: str | None
+    started_monotonic_ns: int
+    completed_monotonic_ns: int
+    result_visible: bool | None
+    result_enabled: bool | None
+    result_text_utf8_bytes: int | None
+    result_text_sha256: str | None
+    screenshot_file: str | None
+    screenshot_sha256: str | None
+
+
+@dataclass(frozen=True)
+class FaultInjectionData:
+    phase: str
+    case_id: str
+    injection: str
+    target_pid: int
+    target_starttime_ticks: int
+    signal: str
+    command_utf8_bytes: int
+    command_sha256: str
+    started_monotonic_ns: int
+    completed_monotonic_ns: int
+
+
+class _CompactSseParser:
+    """Retain only bounded timing and semantic metadata from one SSE response."""
+
+    def __init__(self) -> None:
+        self.line = bytearray()
+        self.data_lines: list[bytes] = []
+        self.items: list[HttpSseItem] = []
+        self.previous_cr = False
+        self.event_bytes = 0
+        self.last_chunk_index = -1
+        self.last_timestamp = -1
+        self.first_timestamp: int | None = None
+
+    def feed(self, raw: bytes, chunk_index: int, observed_ns: int) -> None:
+        if (
+            chunk_index != self.last_chunk_index + 1
+            or observed_ns < self.last_timestamp
+        ):
+            fail("compact SSE chunk identity or timestamps regress")
+        if self.first_timestamp is None:
+            self.first_timestamp = observed_ns
+        self.last_chunk_index = chunk_index
+        self.last_timestamp = observed_ns
+        for byte in raw:
+            if self.previous_cr:
+                self.previous_cr = False
+                if byte == 0x0A:
+                    continue
+            if byte == 0x0D:
+                self._finish_line(chunk_index, observed_ns)
+                self.previous_cr = True
+            elif byte == 0x0A:
+                self._finish_line(chunk_index, observed_ns)
+            else:
+                self.line.append(byte)
+                if len(self.line) > MAX_SSE_LINE_BYTES:
+                    fail("compact SSE line exceeds its size bound")
+
+    def finish(self, *, allow_incomplete: bool) -> HttpSseMetadata:
+        self.previous_cr = False
+        if self.line:
+            if self.last_chunk_index < 0:
+                fail("compact SSE response lacks a final chunk")
+            self._finish_line(self.last_chunk_index, self.last_timestamp)
+        if self.data_lines:
+            if allow_incomplete:
+                self.data_lines.clear()
+                self.event_bytes = 0
+            else:
+                self._dispatch(self.last_chunk_index, self.last_timestamp)
+        return HttpSseMetadata(
+            chunk_count=self.last_chunk_index + 1,
+            first_chunk_monotonic_ns=self.first_timestamp,
+            last_chunk_monotonic_ns=(
+                None if self.last_chunk_index < 0 else self.last_timestamp
+            ),
+            items=tuple(self.items),
+        )
+
+    def _finish_line(self, chunk_index: int, observed_ns: int) -> None:
+        line = bytes(self.line)
+        self.line.clear()
+        if not line:
+            self._dispatch(chunk_index, observed_ns)
+            return
+        if line.startswith(b":"):
+            return
+        field_name, separator, value = line.partition(b":")
+        if separator and value.startswith(b" "):
+            value = value[1:]
+        if field_name == b"data":
+            self.event_bytes += len(value) + (1 if self.data_lines else 0)
+            if self.event_bytes > MAX_SSE_EVENT_BYTES:
+                fail("compact SSE event exceeds its size bound")
+            self.data_lines.append(value)
+
+    def _dispatch(self, chunk_index: int, observed_ns: int) -> None:
+        if not self.data_lines:
+            self.event_bytes = 0
+            return
+        raw = b"\n".join(self.data_lines)
+        self.data_lines.clear()
+        self.event_bytes = 0
+        if len(self.items) >= MAX_SSE_ITEMS_PER_RESPONSE:
+            fail("compact SSE item count exceeds its bound")
+        if raw == b"[DONE]":
+            self.items.append(
+                HttpSseItem(
+                    chunk_index=chunk_index,
+                    observed_monotonic_ns=observed_ns,
+                    done=True,
+                    completion_id_utf8_bytes=None,
+                    completion_id_sha256=None,
+                    content_utf8_bytes=None,
+                    content_sha256=None,
+                    finish_reason=None,
+                    usage_present=False,
+                    usage_is_object=None,
+                    completion_tokens=None,
+                )
+            )
+            return
+        value = cast(dict[str, Any], decode_json_bytes(raw, "compact SSE data object"))
+        completion_id_value = value.get("id")
+        if completion_id_value is not None and type(completion_id_value) is not str:
+            fail("compact SSE completion id is not a string")
+        completion_id_raw = (
+            completion_id_value.encode("utf-8")
+            if type(completion_id_value) is str
+            else None
+        )
+        content: str | None = None
+        finish_reason: str | None = None
+        choices = value.get("choices")
+        if type(choices) is list and choices and type(choices[0]) is dict:
+            first_choice = cast(dict[str, Any], choices[0])
+            delta = first_choice.get("delta")
+            if type(delta) is dict:
+                content_value = delta.get("content")
+                if content_value is not None and type(content_value) is not str:
+                    fail("compact SSE content is not a string or null")
+                if type(content_value) is str and content_value:
+                    content = content_value
+            finish_value = first_choice.get("finish_reason")
+            if finish_value is not None:
+                finish_reason = bounded_utf8_string(
+                    finish_value,
+                    "compact SSE finish_reason",
+                    maximum_bytes=MAX_SSE_FINISH_REASON_BYTES,
+                    nonempty=False,
+                )
+        usage_present = "usage" in value
+        usage_value = value.get("usage")
+        usage_is_object = type(usage_value) is dict if usage_present else None
+        completion_tokens: int | None = None
+        if type(usage_value) is dict and "completion_tokens" in usage_value:
+            completion_tokens = integer(
+                usage_value["completion_tokens"], "compact SSE completion_tokens"
+            )
+        content_raw = content.encode("utf-8") if content is not None else None
+        self.items.append(
+            HttpSseItem(
+                chunk_index=chunk_index,
+                observed_monotonic_ns=observed_ns,
+                done=False,
+                completion_id_utf8_bytes=(
+                    len(completion_id_raw) if completion_id_raw is not None else None
+                ),
+                completion_id_sha256=(
+                    hashlib.sha256(completion_id_raw).hexdigest()
+                    if completion_id_raw is not None
+                    else None
+                ),
+                content_utf8_bytes=(
+                    len(content_raw) if content_raw is not None else None
+                ),
+                content_sha256=(
+                    hashlib.sha256(content_raw).hexdigest()
+                    if content_raw is not None
+                    else None
+                ),
+                finish_reason=finish_reason,
+                usage_present=usage_present,
+                usage_is_object=usage_is_object,
+                completion_tokens=completion_tokens,
+            )
+        )
+
+
 @dataclass
 class HttpBodyState:
     digest: Any
@@ -2050,6 +2318,7 @@ class HttpBodyState:
     next_index: int
     raw: bytearray
     last_observed_ns: int
+    sse_parser: _CompactSseParser | None = None
 
 
 @dataclass
@@ -2060,10 +2329,14 @@ class HttpValidationState:
     response_ended: set[str]
     bodies: dict[str, HttpBodyState]
     ordered_keys: list[str]
+    completed_results: dict[str, HttpCompactResult] = dataclass_field(
+        default_factory=dict
+    )
     active_key: str | None = None
     last_response_end_ns: int = -1
     fixture_model: str | None = None
     fixture_messages: list[Any] | None = None
+    total_sse_items: int = 0
 
 
 @dataclass(frozen=True)
@@ -2217,6 +2490,12 @@ class SessionData:
     http_requests: dict[str, dict[str, Any]]
     ordered_http_keys: list[str]
     probes: dict[str, dict[str, Any]]
+    raw_order_projection: tuple[dict[str, Any], ...]
+    http_results: tuple[HttpCompactResult, ...]
+    browser_actions: tuple[BrowserActionData, ...]
+    fault_injection: FaultInjectionData | None
+    full_campaign_order: FullCampaignOrderResult | None
+    api_contract: ApiContractValidationResult | None
 
 
 @dataclass(frozen=True)
@@ -2281,8 +2560,16 @@ def validate_lifecycle(value: Any, label: str) -> dict[str, Any]:
         if completion_id_value is not None or value["admit_to_fatal_ns"] is not None:
             fail(f"{label} nullable worker_fatal fields must be null together")
     else:
-        string(request_id_value, f"{label}.request_id")
-        string(completion_id_value, f"{label}.completion_id")
+        bounded_utf8_string(
+            request_id_value,
+            f"{label}.request_id",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
+        bounded_utf8_string(
+            completion_id_value,
+            f"{label}.completion_id",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
 
     if event_name == "request_admitted":
         boolean(value["stream"], f"{label}.stream")
@@ -2738,12 +3025,21 @@ def _validate_http_record(
     record_type = record["record_type"]
     if record_type == "http_request":
         integer(record["request_index"], f"{label}.request_index")
-        key = string(record["request_key"], f"{label}.request_key")
+        key = bounded_utf8_string(
+            record["request_key"],
+            f"{label}.request_key",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
         if key in state.requests:
             fail(f"{label}.request_key is duplicated")
         if state.active_key is not None:
             fail(f"{label} overlaps another active raw HTTP request")
         phase = record["phase"]
+        case_id = bounded_utf8_string(
+            record["case_id"],
+            f"{label}.case_id",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
         method = string(record["method"], f"{label}.method")
         target = string(record["target"], f"{label}.target")
         if phase == "api_contract":
@@ -2808,7 +3104,7 @@ def _validate_http_record(
             kind = "other"
         state.requests[key] = {
             "phase": phase,
-            "case_id": record["case_id"],
+            "case_id": case_id,
             "request_index": record["request_index"],
             "kind": kind,
             "connect_ns": connect,
@@ -2817,14 +3113,18 @@ def _validate_http_record(
             "method": method,
             "target": target,
             "authorization_mode": authorization_mode,
+            "request_body_bytes": len(raw),
+            "request_body_sha256": hashlib.sha256(raw).hexdigest(),
         }
-        if phase == "api_contract":
-            state.requests[key]["request_body"] = raw
         state.ordered_keys.append(key)
         state.bodies[key] = HttpBodyState(hashlib.sha256(), 0, 0, bytearray(), sent)
         state.active_key = key
     elif record_type == "http_response_start":
-        key = string(record["request_key"], f"{label}.request_key")
+        key = bounded_utf8_string(
+            record["request_key"],
+            f"{label}.request_key",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
         if (
             key not in state.requests
             or key in state.response_started
@@ -2835,16 +3135,31 @@ def _validate_http_record(
         headers = record["headers"]
         if type(headers) is not list:
             fail(f"{label}.headers must be an array")
+        if len(headers) > MAX_HTTP_RESPONSE_HEADER_COUNT:
+            fail(f"{label}.headers exceeds its count bound")
         parsed_headers: list[tuple[str, str]] = []
+        header_bytes = 0
         for index, pair in enumerate(headers):
             if type(pair) is not list or len(pair) != 2:
                 fail(f"{label}.headers[{index}] must be a two-string array")
-            name = string(pair[0], f"{label}.headers[{index}][0]")
-            value = string(pair[1], f"{label}.headers[{index}][1]", nonempty=False)
+            name = bounded_utf8_string(
+                pair[0],
+                f"{label}.headers[{index}][0]",
+                maximum_bytes=MAX_HTTP_HEADER_NAME_BYTES,
+            )
+            value = bounded_utf8_string(
+                pair[1],
+                f"{label}.headers[{index}][1]",
+                maximum_bytes=MAX_HTTP_HEADER_VALUE_BYTES,
+                nonempty=False,
+            )
+            header_bytes += len(name.encode("utf-8")) + len(value.encode("utf-8"))
+            if header_bytes > MAX_HTTP_RESPONSE_HEADER_BYTES:
+                fail(f"{label}.headers exceeds its aggregate byte bound")
             parsed_headers.append((name, value))
         content_types = [
             value.split(";", 1)[0].strip().lower()
-            for name, value in headers
+            for name, value in parsed_headers
             if name.lower() == "content-type"
         ]
         expected_media = (
@@ -2864,11 +3179,18 @@ def _validate_http_record(
             fail(f"{label} response start precedes request send")
         body_state.last_observed_ns = observed
         state.requests[key]["status"] = status
-        state.requests[key]["response_headers"] = tuple(parsed_headers)
+        if state.requests[key]["phase"] == "api_contract":
+            state.requests[key]["response_headers"] = tuple(parsed_headers)
         state.requests[key]["response_started_ns"] = observed
+        if expected_media == "text/event-stream":
+            body_state.sse_parser = _CompactSseParser()
         state.response_started.add(key)
     elif record_type == "http_body_chunk":
-        key = string(record["request_key"], f"{label}.request_key")
+        key = bounded_utf8_string(
+            record["request_key"],
+            f"{label}.request_key",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
         if key not in state.response_started or key in state.response_ended:
             fail(f"{label} chunk has no active response")
         body_state = state.bodies[key]
@@ -2888,6 +3210,8 @@ def _validate_http_record(
         )
         if request["phase"] == "api_contract" and not raw:
             fail(f"{label} API contract body chunk is empty")
+        if body_state.sse_parser is not None and not raw:
+            fail(f"{label} SSE body chunk is empty")
         if body_state.byte_count + len(raw) > response_limit:
             fail(f"{label} complete response exceeds its size limit")
         body_state.digest.update(raw)
@@ -2899,9 +3223,15 @@ def _validate_http_record(
         )
         if observed < body_state.last_observed_ns:
             fail(f"{label} body chunk timestamps regress")
+        if body_state.sse_parser is not None:
+            body_state.sse_parser.feed(raw, body_state.next_index - 1, observed)
         body_state.last_observed_ns = observed
     elif record_type == "http_response_end":
-        key = string(record["request_key"], f"{label}.request_key")
+        key = bounded_utf8_string(
+            record["request_key"],
+            f"{label}.request_key",
+            maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+        )
         if key not in state.response_started or key in state.response_ended:
             fail(f"{label} response end has no active response")
         outcome = string(record["outcome"], f"{label}.outcome")
@@ -2927,12 +3257,41 @@ def _validate_http_record(
         if observed < body_state.last_observed_ns:
             fail(f"{label} response end timestamp regresses")
         request = state.requests[key]
+        request["outcome"] = outcome
+        needs_body_validation = request["phase"] == "api_contract" or request[
+            "kind"
+        ] in {
+            "normal_warmup",
+            "normal_measured",
+            "restart_warmup",
+            "restart_measured",
+            "context_overflow",
+            "malformed_json",
+        }
+        response_body = bytes(body_state.raw) if needs_body_validation else None
         if request["phase"] == "api_contract":
             if outcome != "eof" or error is not None:
                 fail(f"{label} API contract response did not terminate at EOF")
-            request["response_body"] = bytes(body_state.raw)
-            request["response_chunk_count"] = body_state.next_index
-            request["outcome"] = outcome
+            api_position = sum(
+                state.requests[ordered_key]["phase"] == "api_contract"
+                for ordered_key in state.ordered_keys
+                if ordered_key in state.response_ended or ordered_key == key
+            )
+            if api_position not in range(1, len(API_CONTRACT_CASES) + 1):
+                request["api_response"] = None
+            else:
+                case = API_CONTRACT_CASES[api_position - 1]
+                expected_key = f"api-contract-{api_position:02d}-{case.case_id}"
+                if key == expected_key:
+                    assert response_body is not None
+                    request["response_body"] = response_body
+                    request["response_chunk_count"] = body_state.next_index
+                    try:
+                        request["api_response"] = _validate_api_contract_response(
+                            case, request, label
+                        )
+                    finally:
+                        request.pop("response_body", None)
         if request["kind"] in {
             "normal_warmup",
             "normal_measured",
@@ -2941,8 +3300,9 @@ def _validate_http_record(
         }:
             if request.get("status") != 200 or outcome != "eof":
                 fail(f"{label} positive resource HTTP outcome differs")
+            assert response_body is not None
             request["completion_id"] = _parse_resource_sse(
-                bytes(body_state.raw), f"{label}.body"
+                response_body, f"{label}.body"
             )
         elif request["kind"] in {"context_overflow", "malformed_json"}:
             if request.get("status") != 400 or outcome != "eof":
@@ -2952,9 +3312,56 @@ def _validate_http_record(
                 if request["kind"] == "context_overflow"
                 else "invalid_request_error"
             )
-            _parse_error_envelope(bytes(body_state.raw), expected_code, f"{label}.body")
+            assert response_body is not None
+            _parse_error_envelope(response_body, expected_code, f"{label}.body")
+        sse = (
+            body_state.sse_parser.finish(allow_incomplete=outcome == "client_closed")
+            if body_state.sse_parser is not None
+            else None
+        )
+        if sse is not None:
+            state.total_sse_items += len(sse.items)
+            if state.total_sse_items > MAX_SESSION_SSE_ITEMS:
+                fail("compact session SSE item count exceeds its bound")
         request["response_end_ns"] = observed
+        status = integer(request.get("status"), f"{label}.status", 100, 599)
+        state.completed_results[key] = HttpCompactResult(
+            phase=string(request.get("phase"), f"{label}.phase"),
+            case_id=string(request.get("case_id"), f"{label}.case_id"),
+            request_index=integer(
+                request.get("request_index"), f"{label}.request_index"
+            ),
+            request_key=key,
+            method=string(request.get("method"), f"{label}.method"),
+            target=string(request.get("target"), f"{label}.target"),
+            status=status,
+            outcome=outcome,
+            request_body_bytes=integer(
+                request.get("request_body_bytes"), f"{label}.request_body_bytes"
+            ),
+            request_body_sha256=sha256_value(
+                request.get("request_body_sha256"), f"{label}.request_body_sha256"
+            ),
+            response_body_bytes=body_state.byte_count,
+            response_body_sha256=body_state.digest.hexdigest(),
+            connect_completed_monotonic_ns=integer(
+                request.get("connect_ns"), f"{label}.connect_ns"
+            ),
+            write_started_monotonic_ns=integer(
+                request.get("write_ns"), f"{label}.write_ns"
+            ),
+            last_body_byte_sent_monotonic_ns=integer(
+                request.get("sent_ns"), f"{label}.sent_ns"
+            ),
+            response_started_monotonic_ns=integer(
+                request.get("response_started_ns"), f"{label}.response_started_ns"
+            ),
+            response_end_monotonic_ns=observed,
+            sse=sse,
+        )
         state.response_ended.add(key)
+        response_body = None
+        body_state.raw.clear()
         del state.bodies[key]
         state.active_key = None
         state.last_response_end_ns = observed
@@ -2997,7 +3404,7 @@ def _validate_api_contract_response(
         fail(f"{label} response unexpectedly uses Transfer-Encoding")
 
     body_value = request.get("response_body")
-    if type(body_value) is not bytes:
+    if type(body_value) not in {bytes, bytearray}:
         fail(f"{label} response body is incomplete")
     body = cast(bytes, body_value)
     if not body or len(body) > API_CONTRACT_MAX_RESPONSE_BYTES:
@@ -3099,10 +3506,15 @@ def validate_api_contract_http(
             or request.get("method") != case.method
             or request.get("target") != case.target
             or request.get("authorization_mode") != case.authorization_mode
-            or request.get("request_body") != case.body
+            or request.get("request_body_bytes") != len(case.body)
+            or request.get("request_body_sha256")
+            != hashlib.sha256(case.body).hexdigest()
         ):
             fail(f"{label} request identity, order, authorization, or body differs")
-        response = _validate_api_contract_response(case, request, label)
+        response_value = request.get("api_response")
+        if type(response_value) is not dict:
+            fail(f"{label} validated response summary is absent")
+        response = cast(dict[str, Any], response_value)
         status = integer(request["status"], f"{label}.status")
         statuses.append(status)
         case_results.append(
@@ -3990,6 +4402,233 @@ def _validate_resource_http_schedule(
         fail("resource HTTP schedule lacks its header-bound fixture")
 
 
+def _compact_session_order_record(record: dict[str, Any]) -> dict[str, Any]:
+    record_type = cast(str, record["record_type"])
+    compact: dict[str, Any] = {
+        "schema_version": record["schema_version"],
+        "record_type": record_type,
+        "sequence": record["sequence"],
+        "phase": record["phase"],
+        "case_id": record["case_id"],
+    }
+    if record_type == "gateway_event":
+        event = cast(dict[str, Any], record["event"])
+        compact["journal_pid"] = record["journal_pid"]
+        compact["event"] = {
+            key: event[key]
+            for key in (
+                "event",
+                "observed_monotonic_ns",
+                "request_id",
+                "completion_id",
+                "processed_prompt_tokens",
+                "outcome",
+                "reset_complete",
+            )
+            if key in event
+        }
+    elif record_type == "browser_action":
+        compact["action"] = record["action"]
+        compact["completed_monotonic_ns"] = record["completed_monotonic_ns"]
+    elif record_type == "lifecycle_probe":
+        compact.update(
+            {
+                key: record[key]
+                for key in (
+                    "probe",
+                    "observed_monotonic_ns",
+                    "service_active",
+                    "ready_http_status",
+                    "control_group",
+                    "gateway_pid",
+                    "gateway_starttime_ticks",
+                    "worker_pid",
+                    "worker_starttime_ticks",
+                    "n_restarts",
+                )
+            }
+        )
+    elif record_type == "fault_injection":
+        compact.update(
+            {
+                key: record[key]
+                for key in (
+                    "injection",
+                    "target_pid",
+                    "target_starttime_ticks",
+                    "signal",
+                    "started_monotonic_ns",
+                    "completed_monotonic_ns",
+                )
+            }
+        )
+    return compact
+
+
+def _claims_full_campaign(records: Iterable[dict[str, Any]]) -> bool:
+    """Identify evidence produced by the browser/fault full-run orchestrator.
+
+    The complete validator must reject a ``None`` order result.  This narrower
+    discriminator preserves phase-1's foreign-phase resource-window negatives.
+    """
+
+    return any(
+        record["record_type"] in {"browser_action", "fault_injection"}
+        for record in records
+    )
+
+
+def _validate_browser_action_order(actions: Iterable[BrowserActionData]) -> None:
+    prior_completed = -1
+    prior_index: dict[tuple[str, str], int] = {}
+    for action in actions:
+        identity = (action.phase, action.browser_case)
+        if action.started_monotonic_ns < prior_completed:
+            fail("raw browser action timestamps regress or overlap")
+        expected_index = prior_index.get(identity, -1) + 1
+        if action.action_index != expected_index:
+            fail("raw browser action indices are not contiguous per browser case")
+        prior_index[identity] = action.action_index
+        prior_completed = action.completed_monotonic_ns
+
+
+def _validate_browser_action_data(
+    record: dict[str, Any], phase: str, case_id: str, label: str
+) -> BrowserActionData:
+    browser_case = bounded_utf8_string(
+        record["browser_case"],
+        f"{label}.browser_case",
+        maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+    )
+    action_index = integer(record["action_index"], f"{label}.action_index")
+    action = string(record["action"], f"{label}.action")
+    if action not in {
+        "navigate",
+        "select_model",
+        "submit_chat",
+        "wait_visible",
+        "click_stop",
+        "wait_failed",
+        "wait_ready",
+    }:
+        fail(f"{label}.action differs")
+    selector = (
+        None
+        if record["selector"] is None
+        else bounded_utf8_string(
+            record["selector"],
+            f"{label}.selector",
+            maximum_bytes=MAX_BROWSER_SELECTOR_BYTES,
+        )
+    )
+    input_sha256 = (
+        None
+        if record["input_sha256"] is None
+        else sha256_value(record["input_sha256"], f"{label}.input_sha256")
+    )
+    started = integer(record["started_monotonic_ns"], f"{label}.started_monotonic_ns")
+    completed = integer(
+        record["completed_monotonic_ns"], f"{label}.completed_monotonic_ns"
+    )
+    if completed < started:
+        fail(f"{label} browser timing order differs")
+    result = exact_fields(
+        record["result"],
+        {"visible", "enabled", "text_utf8_bytes", "text_sha256"},
+        f"{label}.result",
+    )
+    visible = (
+        None
+        if result["visible"] is None
+        else boolean(result["visible"], f"{label}.result.visible")
+    )
+    enabled = (
+        None
+        if result["enabled"] is None
+        else boolean(result["enabled"], f"{label}.result.enabled")
+    )
+    if result["text_utf8_bytes"] is None:
+        if result["text_sha256"] is not None:
+            fail(f"{label}.result text fields must be null together")
+        text_utf8_bytes = None
+        text_sha256 = None
+    else:
+        text_utf8_bytes = integer(
+            result["text_utf8_bytes"], f"{label}.result.text_utf8_bytes"
+        )
+        text_sha256 = sha256_value(result["text_sha256"], f"{label}.result.text_sha256")
+    screenshot_value = record["screenshot_file"]
+    screenshot_sha_value = record["screenshot_sha256"]
+    if screenshot_value is None:
+        if screenshot_sha_value is not None:
+            fail(f"{label} screenshot fields must be null together")
+        screenshot_file = None
+        screenshot_sha256 = None
+    else:
+        screenshot_file = string(screenshot_value, f"{label}.screenshot_file")
+        if screenshot_file not in {
+            "browser/openwebui-stop-before.png",
+            "browser/post-header-failure.png",
+        }:
+            fail(f"{label}.screenshot_file differs")
+        screenshot_sha256 = sha256_value(
+            screenshot_sha_value, f"{label}.screenshot_sha256"
+        )
+    return BrowserActionData(
+        phase=phase,
+        case_id=case_id,
+        browser_case=browser_case,
+        action_index=action_index,
+        action=action,
+        selector=selector,
+        input_sha256=input_sha256,
+        started_monotonic_ns=started,
+        completed_monotonic_ns=completed,
+        result_visible=visible,
+        result_enabled=enabled,
+        result_text_utf8_bytes=text_utf8_bytes,
+        result_text_sha256=text_sha256,
+        screenshot_file=screenshot_file,
+        screenshot_sha256=screenshot_sha256,
+    )
+
+
+def _validate_fault_injection_data(
+    record: dict[str, Any], phase: str, case_id: str, label: str
+) -> FaultInjectionData:
+    if (
+        record["injection"] != "post_header_worker_kill"
+        or record["signal"] != "SIGKILL"
+    ):
+        fail(f"{label} fault identity differs")
+    target_pid = integer(record["target_pid"], f"{label}.target_pid", minimum=1)
+    target_starttime_ticks = integer(
+        record["target_starttime_ticks"],
+        f"{label}.target_starttime_ticks",
+        minimum=1,
+    )
+    command = string(record["command"], f"{label}.command")
+    command_raw = command.encode("utf-8")
+    started = integer(record["started_monotonic_ns"], f"{label}.started_monotonic_ns")
+    completed = integer(
+        record["completed_monotonic_ns"], f"{label}.completed_monotonic_ns"
+    )
+    if completed < started:
+        fail(f"{label} fault timing order differs")
+    return FaultInjectionData(
+        phase=phase,
+        case_id=case_id,
+        injection="post_header_worker_kill",
+        target_pid=target_pid,
+        target_starttime_ticks=target_starttime_ticks,
+        signal="SIGKILL",
+        command_utf8_bytes=len(command_raw),
+        command_sha256=hashlib.sha256(command_raw).hexdigest(),
+        started_monotonic_ns=started,
+        completed_monotonic_ns=completed,
+    )
+
+
 def validate_session(
     root: Path,
     matrix: MatrixData,
@@ -4002,6 +4641,9 @@ def validate_session(
     journal_events: dict[str, GatewayEvidence] = {}
     http_state: HttpValidationState | None = None
     probes: dict[str, dict[str, Any]] = {}
+    order_projection: list[dict[str, Any]] = []
+    browser_actions: list[BrowserActionData] = []
+    fault_injection: FaultInjectionData | None = None
     counts: Counter[str] = Counter()
     run_id: str | None = None
     boot_id: str | None = None
@@ -4014,6 +4656,8 @@ def validate_session(
         root / "raw-session-results.jsonl", "raw-session-results.jsonl"
     ):
         label = f"raw-session-results.jsonl line {line_number}"
+        if line_number > MAX_SESSION_RECORDS:
+            fail("raw-session-results.jsonl exceeds its record-count bound")
         reject_key_recursive(record, "passed", label)
         record_type = record.get("record_type")
         if type(record_type) is not str or record_type not in SESSION_FIELDS:
@@ -4026,12 +4670,18 @@ def validate_session(
         phase = record["phase"]
         if type(phase) is not str or phase not in PHASES:
             fail(f"{label}.phase is invalid")
-        case_id = record["case_id"]
+        case_value = record["case_id"]
+        case_id: str | None
         if record_type in {"header", "run_end"}:
-            if case_id is not None:
+            if case_value is not None:
                 fail(f"{label}.case_id must be null")
+            case_id = None
         else:
-            string(case_id, f"{label}.case_id")
+            case_id = bounded_utf8_string(
+                case_value,
+                f"{label}.case_id",
+                maximum_bytes=MAX_SESSION_IDENTIFIER_BYTES,
+            )
         if saw_run_end:
             fail(f"{label} appears after run_end")
         counts[record_type] += 1
@@ -4080,72 +4730,31 @@ def validate_session(
             if observed < last_gateway_observed:
                 fail(f"{label} gateway events are not in monotonic order")
             last_gateway_observed = observed
-            _add_lifecycle_event(traces, completion_ids, phase, case_id, event, label)
+            _add_lifecycle_event(
+                traces, completion_ids, phase, cast(str, case_id), event, label
+            )
             if name == "request_released":
                 releases_by_phase[phase].append(event)
             journal_events[cursor] = GatewayEvidence(
                 cursor, usec, journal_pid, message, message_digest, event, phase
             )
         elif record_type == "browser_action":
-            string(record["browser_case"], f"{label}.browser_case")
-            integer(record["action_index"], f"{label}.action_index")
-            action = string(record["action"], f"{label}.action")
-            if action not in {
-                "navigate",
-                "select_model",
-                "submit_chat",
-                "wait_visible",
-                "click_stop",
-                "wait_failed",
-                "wait_ready",
-            }:
-                fail(f"{label}.action differs")
-            nullable_string(record["selector"], f"{label}.selector")
-            if record["input_sha256"] is not None:
-                sha256_value(record["input_sha256"], f"{label}.input_sha256")
-            started = integer(
-                record["started_monotonic_ns"], f"{label}.started_monotonic_ns"
+            browser_action = _validate_browser_action_data(
+                record, phase, cast(str, case_id), label
             )
-            completed = integer(
-                record["completed_monotonic_ns"], f"{label}.completed_monotonic_ns"
-            )
-            if completed < started:
-                fail(f"{label} browser timing order differs")
-            result = exact_fields(
-                record["result"],
-                {"visible", "enabled", "text_utf8_bytes", "text_sha256"},
-                f"{label}.result",
-            )
-            for key in ("visible", "enabled"):
-                if result[key] is not None:
-                    boolean(result[key], f"{label}.result.{key}")
-            if result["text_utf8_bytes"] is not None:
-                integer(result["text_utf8_bytes"], f"{label}.result.text_utf8_bytes")
-                sha256_value(result["text_sha256"], f"{label}.result.text_sha256")
-            elif result["text_sha256"] is not None:
-                fail(f"{label}.result text fields must be null together")
-            screenshot = record["screenshot_file"]
-            screenshot_sha = record["screenshot_sha256"]
-            if screenshot is None:
-                if screenshot_sha is not None:
-                    fail(f"{label} screenshot fields must be null together")
-            else:
-                screenshot_path = string(screenshot, f"{label}.screenshot_file")
-                if screenshot_path not in {
-                    "browser/openwebui-stop-before.png",
-                    "browser/post-header-failure.png",
-                }:
-                    fail(f"{label}.screenshot_file differs")
-                expected_sha = sha256_value(
-                    screenshot_sha, f"{label}.screenshot_sha256"
-                )
+            if browser_action.screenshot_file is not None:
                 if (
                     sha256_file(
-                        safe_relative_file(root, screenshot_path, screenshot_path)
+                        safe_relative_file(
+                            root,
+                            browser_action.screenshot_file,
+                            browser_action.screenshot_file,
+                        )
                     )
-                    != expected_sha
+                    != browser_action.screenshot_sha256
                 ):
                     fail(f"{label}.screenshot_sha256 differs")
+            browser_actions.append(browser_action)
         elif record_type == "lifecycle_probe":
             probe_name = string(record["probe"], f"{label}.probe")
             expected_probe_phases = {
@@ -4176,26 +4785,11 @@ def validate_session(
             integer(record["n_restarts"], f"{label}.n_restarts")
             probes[probe_name] = record
         elif record_type == "fault_injection":
-            if (
-                record["injection"] != "post_header_worker_kill"
-                or record["signal"] != "SIGKILL"
-            ):
-                fail(f"{label} fault identity differs")
-            integer(record["target_pid"], f"{label}.target_pid", minimum=1)
-            integer(
-                record["target_starttime_ticks"],
-                f"{label}.target_starttime_ticks",
-                minimum=1,
+            if fault_injection is not None:
+                fail(f"{label} fault_injection is duplicated")
+            fault_injection = _validate_fault_injection_data(
+                record, phase, cast(str, case_id), label
             )
-            string(record["command"], f"{label}.command")
-            started = integer(
-                record["started_monotonic_ns"], f"{label}.started_monotonic_ns"
-            )
-            completed = integer(
-                record["completed_monotonic_ns"], f"{label}.completed_monotonic_ns"
-            )
-            if completed < started:
-                fail(f"{label} fault timing order differs")
         elif record_type == "run_end":
             saw_run_end = True
             if phase != "final" or counts[record_type] != 1:
@@ -4226,6 +4820,7 @@ def validate_session(
             final_cursor = string(
                 record["final_journal_cursor"], f"{label}.final_journal_cursor"
             )
+        order_projection.append(_compact_session_order_record(record))
 
     if (
         run_id is None
@@ -4235,12 +4830,17 @@ def validate_session(
         or declared_counts is None
     ):
         fail("raw-session-results.jsonl lacks header or run_end")
+    assert run_id is not None
+    assert boot_id is not None
+    assert final_cursor is not None
+    assert declared_counts is not None
     if any(
         type(value) is not int for value in declared_counts.values()
     ) or declared_counts != dict(counts):
         fail("run_end.record_counts differs from independently counted raw records")
     if http_state is None:
         fail("raw-session-results.jsonl lacks initialized HTTP validation state")
+    assert http_state is not None
     if (
         set(http_state.requests) != http_state.response_ended
         or http_state.bodies
@@ -4289,6 +4889,17 @@ def validate_session(
         post_header_epoch_end_ns,
     )
     _validate_resource_http_schedule(http_state, traces)
+    _validate_browser_action_order(browser_actions)
+    full_campaign_order = (
+        validate_full_campaign_order(order_projection)
+        if _claims_full_campaign(order_projection)
+        else None
+    )
+    api_contract = (
+        validate_api_contract_http(http_state)
+        if full_campaign_order is not None
+        else None
+    )
     validate_service_journal(root, journal_events, boot_id, final_cursor)
     return SessionData(
         run_id=run_id,
@@ -4303,6 +4914,14 @@ def validate_session(
         http_requests=http_state.requests,
         ordered_http_keys=http_state.ordered_keys,
         probes=probes,
+        raw_order_projection=tuple(order_projection),
+        http_results=tuple(
+            http_state.completed_results[key] for key in http_state.ordered_keys
+        ),
+        browser_actions=tuple(browser_actions),
+        fault_injection=fault_injection,
+        full_campaign_order=full_campaign_order,
+        api_contract=api_contract,
     )
 
 

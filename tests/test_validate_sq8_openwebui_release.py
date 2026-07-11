@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -11,6 +12,7 @@ from collections import Counter
 from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1408,6 +1410,201 @@ class FullCampaignOrderTest(unittest.TestCase):
             (result.restart_count_before, result.restart_count_after), (2, 3)
         )
 
+    def test_compact_projection_retains_only_order_required_fields(self) -> None:
+        compact = [
+            VALIDATOR._compact_session_order_record(record) for record in self.records
+        ]
+        result = VALIDATOR.validate_full_campaign_order(compact)
+        self.assertEqual(result.phases, VALIDATOR.FULL_CAMPAIGN_PHASE_ORDER)
+        self.assertTrue(VALIDATOR._claims_full_campaign(compact))
+        browser = next(
+            record for record in compact if record["record_type"] == "browser_action"
+        )
+        self.assertEqual(
+            set(browser),
+            {
+                "schema_version",
+                "record_type",
+                "sequence",
+                "phase",
+                "case_id",
+                "action",
+                "completed_monotonic_ns",
+            },
+        )
+
+    def test_compact_projection_rejects_a_missing_full_phase(self) -> None:
+        self.records[:] = [
+            record for record in self.records if record["phase"] != "latency"
+        ]
+        resequence_full_campaign(self.records)
+        compact = [
+            VALIDATOR._compact_session_order_record(record) for record in self.records
+        ]
+        self.assertTrue(VALIDATOR._claims_full_campaign(compact))
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "phase set/order differs"
+        ):
+            VALIDATOR.validate_full_campaign_order(compact)
+
+    def test_second_fault_is_rejected(self) -> None:
+        fault_index = next(
+            index
+            for index, record in enumerate(self.records)
+            if record["record_type"] == "fault_injection"
+        )
+        self.records.insert(fault_index + 1, deepcopy(self.records[fault_index]))
+        resequence_full_campaign(self.records)
+        self.assert_invalid("exactly one fault")
+
+    def test_browser_action_compact_order_is_strict(self) -> None:
+        actions = (
+            VALIDATOR.BrowserActionData(
+                phase="openwebui",
+                case_id="case-1",
+                browser_case="browser-1",
+                action_index=0,
+                action="navigate",
+                selector=None,
+                input_sha256=None,
+                started_monotonic_ns=10,
+                completed_monotonic_ns=20,
+                result_visible=None,
+                result_enabled=None,
+                result_text_utf8_bytes=None,
+                result_text_sha256=None,
+                screenshot_file=None,
+                screenshot_sha256=None,
+            ),
+            VALIDATOR.BrowserActionData(
+                phase="openwebui",
+                case_id="case-1",
+                browser_case="browser-1",
+                action_index=1,
+                action="select_model",
+                selector=None,
+                input_sha256=None,
+                started_monotonic_ns=19,
+                completed_monotonic_ns=30,
+                result_visible=None,
+                result_enabled=None,
+                result_text_utf8_bytes=None,
+                result_text_sha256=None,
+                screenshot_file=None,
+                screenshot_sha256=None,
+            ),
+        )
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "timestamps regress or overlap"
+        ):
+            VALIDATOR._validate_browser_action_order(actions)
+        broken_index = (
+            actions[0],
+            dataclasses.replace(actions[1], action_index=2, started_monotonic_ns=20),
+        )
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "indices are not contiguous"
+        ):
+            VALIDATOR._validate_browser_action_order(broken_index)
+
+    def test_browser_and_fault_compact_data_retains_validated_fields(self) -> None:
+        input_raw = b"http://open-webui/"
+        text_raw = "表示済み".encode("utf-8")
+        browser = VALIDATOR._validate_browser_action_data(
+            {
+                "browser_case": "browser-1",
+                "action_index": 0,
+                "action": "navigate",
+                "selector": "#chat-input",
+                "input_sha256": sha256_bytes(input_raw),
+                "started_monotonic_ns": 10,
+                "completed_monotonic_ns": 20,
+                "result": {
+                    "visible": True,
+                    "enabled": False,
+                    "text_utf8_bytes": len(text_raw),
+                    "text_sha256": sha256_bytes(text_raw),
+                },
+                "screenshot_file": None,
+                "screenshot_sha256": None,
+            },
+            "openwebui",
+            "case-1",
+            "browser compact test",
+        )
+        self.assertEqual(browser.selector, "#chat-input")
+        self.assertEqual(browser.input_sha256, sha256_bytes(input_raw))
+        self.assertIs(browser.result_visible, True)
+        self.assertIs(browser.result_enabled, False)
+        self.assertEqual(browser.result_text_utf8_bytes, len(text_raw))
+        self.assertEqual(browser.result_text_sha256, sha256_bytes(text_raw))
+
+        command_raw = b"kill --signal KILL -- 1201"
+        fault = VALIDATOR._validate_fault_injection_data(
+            {
+                "injection": "post_header_worker_kill",
+                "target_pid": 1201,
+                "target_starttime_ticks": 10_001,
+                "signal": "SIGKILL",
+                "command": command_raw.decode("ascii"),
+                "started_monotonic_ns": 30,
+                "completed_monotonic_ns": 40,
+            },
+            "post_header_failure",
+            "post-header-failure",
+            "fault compact test",
+        )
+        self.assertEqual(fault.command_utf8_bytes, len(command_raw))
+        self.assertEqual(fault.command_sha256, sha256_bytes(command_raw))
+
+    def test_browser_selector_is_bounded_before_compact_retention(self) -> None:
+        record = {
+            "browser_case": "browser-1",
+            "action_index": 0,
+            "action": "navigate",
+            "selector": "x" * (VALIDATOR.MAX_BROWSER_SELECTOR_BYTES + 1),
+            "input_sha256": None,
+            "started_monotonic_ns": 10,
+            "completed_monotonic_ns": 20,
+            "result": {
+                "visible": None,
+                "enabled": None,
+                "text_utf8_bytes": None,
+                "text_sha256": None,
+            },
+            "screenshot_file": None,
+            "screenshot_sha256": None,
+        }
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "UTF-8 byte bound"):
+            VALIDATOR._validate_browser_action_data(
+                record, "openwebui", "case-1", "browser compact test"
+            )
+
+        record["selector"] = None
+        record["browser_case"] = "x" * (VALIDATOR.MAX_SESSION_IDENTIFIER_BYTES + 1)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "UTF-8 byte bound"):
+            VALIDATOR._validate_browser_action_data(
+                record, "openwebui", "case-1", "browser compact test"
+            )
+
+    def test_lifecycle_request_and_completion_ids_are_bounded(self) -> None:
+        event = {
+            "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+            "event": "request_admitted",
+            "observed_monotonic_ns": 1,
+            "request_id": "r" * (VALIDATOR.MAX_SESSION_IDENTIFIER_BYTES + 1),
+            "completion_id": "chatcmpl-bounded",
+            "stream": True,
+            "prompt_tokens": 1,
+            "max_completion_tokens": 1,
+        }
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "UTF-8 byte bound"):
+            VALIDATOR.validate_lifecycle(event, "bounded lifecycle")
+        event["request_id"] = "request-bounded"
+        event["completion_id"] = "c" * (VALIDATOR.MAX_SESSION_IDENTIFIER_BYTES + 1)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "UTF-8 byte bound"):
+            VALIDATOR.validate_lifecycle(event, "bounded lifecycle")
+
     def test_phase_block_cannot_regress(self):
         target = next(
             record
@@ -1691,11 +1888,272 @@ def replace_api_contract_response(
     )
 
 
+class HttpCompactProjectionTest(unittest.TestCase):
+    def state(self) -> Any:
+        return VALIDATOR.HttpValidationState(
+            fixture_seal=VALIDATOR.InputSeal(size=2, sha256=sha256_bytes(b"{}")),
+            requests={},
+            response_started=set(),
+            response_ended=set(),
+            bodies={},
+            ordered_keys=[],
+        )
+
+    def records(
+        self, chunks: list[bytes], *, outcome: str = "eof"
+    ) -> list[dict[str, Any]]:
+        request_body = b"{}"
+        response_body = b"".join(chunks)
+        common = {
+            "schema_version": VALIDATOR.SESSION_SCHEMA,
+            "phase": "latency",
+            "case_id": "compact-sse",
+        }
+        records: list[dict[str, Any]] = [
+            {
+                **common,
+                "record_type": "http_request",
+                "request_index": 1,
+                "request_key": "compact-sse",
+                "method": "POST",
+                "target": "/v1/chat/completions",
+                "headers": {
+                    "content_type": "application/json",
+                    "content_length": len(request_body),
+                    "authorization_mode": "valid_bearer",
+                },
+                "body_base64": base64.b64encode(request_body).decode("ascii"),
+                "body_sha256": sha256_bytes(request_body),
+                "body_bytes": len(request_body),
+                "connect_completed_monotonic_ns": 10,
+                "write_started_monotonic_ns": 11,
+                "last_body_byte_sent_monotonic_ns": 12,
+            },
+            {
+                **common,
+                "record_type": "http_response_start",
+                "request_key": "compact-sse",
+                "status": 200,
+                "headers": [["Content-Type", "text/event-stream"]],
+                "observed_monotonic_ns": 13,
+            },
+        ]
+        for index, chunk in enumerate(chunks):
+            records.append(
+                {
+                    **common,
+                    "record_type": "http_body_chunk",
+                    "request_key": "compact-sse",
+                    "chunk_index": index,
+                    "body_base64": base64.b64encode(chunk).decode("ascii"),
+                    "body_sha256": sha256_bytes(chunk),
+                    "body_bytes": len(chunk),
+                    "observed_monotonic_ns": 20 + index,
+                }
+            )
+        records.append(
+            {
+                **common,
+                "record_type": "http_response_end",
+                "request_key": "compact-sse",
+                "outcome": outcome,
+                "error": None,
+                "body_bytes": len(response_body),
+                "body_sha256": sha256_bytes(response_body),
+                "observed_monotonic_ns": 30 + len(chunks),
+            }
+        )
+        return records
+
+    def validate(self, records: list[dict[str, Any]]) -> Any:
+        state = self.state()
+        for index, record in enumerate(records):
+            VALIDATOR._validate_http_record(
+                record, f"compact HTTP record {index}", state
+            )
+        return state
+
+    def test_crlf_boundary_and_multiline_data_are_compacted(self) -> None:
+        first = (
+            b'data: {"id":"chatcmpl-compact","choices":[{"delta":{"content":"x"}}]}\r'
+        )
+        second = (
+            b'\n\r\ndata: {"id":"chatcmpl-compact",\r\n'
+            b'data: "choices":[],"usage":{"completion_tokens":2}}\r\n\r\n'
+            b"data: [DONE]\r\n\r\n"
+        )
+        state = self.validate(self.records([first, second]))
+        self.assertFalse(state.bodies)
+        self.assertNotIn("response_body", state.requests["compact-sse"])
+        result = state.completed_results["compact-sse"]
+        self.assertEqual(result.request_body_bytes, 2)
+        self.assertEqual(result.response_body_bytes, len(first) + len(second))
+        self.assertEqual(result.response_started_monotonic_ns, 13)
+        self.assertEqual(result.response_end_monotonic_ns, 32)
+        self.assertIsNotNone(result.sse)
+        assert result.sse is not None
+        self.assertEqual(result.sse.chunk_count, 2)
+        self.assertEqual(result.sse.first_chunk_monotonic_ns, 20)
+        self.assertEqual(result.sse.last_chunk_monotonic_ns, 21)
+        self.assertEqual(len(result.sse.items), 3)
+        completion_id = b"chatcmpl-compact"
+        self.assertEqual(
+            result.sse.items[0].completion_id_utf8_bytes, len(completion_id)
+        )
+        self.assertEqual(
+            result.sse.items[0].completion_id_sha256, sha256_bytes(completion_id)
+        )
+        self.assertEqual(result.sse.items[0].content_utf8_bytes, 1)
+        self.assertEqual(result.sse.items[1].completion_tokens, 2)
+        self.assertTrue(result.sse.items[1].usage_present)
+        self.assertIs(result.sse.items[1].usage_is_object, True)
+        self.assertTrue(result.sse.items[2].done)
+        self.assertNotIn("response_headers", state.requests["compact-sse"])
+
+    def test_client_closed_discards_incomplete_sse_tail(self) -> None:
+        state = self.validate(
+            self.records([b'data: {"id":"unfinished"'], outcome="client_closed")
+        )
+        result = state.completed_results["compact-sse"]
+        assert result.sse is not None
+        self.assertEqual(result.sse.items, ())
+
+    def test_eof_rejects_incomplete_sse_tail(self) -> None:
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "compact SSE data object"
+        ):
+            self.validate(self.records([b'data: {"id":"unfinished"']))
+
+    def test_empty_sse_body_chunk_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "SSE body chunk is empty"
+        ):
+            self.validate(self.records([b""]))
+
+    def test_sse_usage_shape_is_retained_without_raw_objects(self) -> None:
+        parser = VALIDATOR._CompactSseParser()
+        payloads: tuple[dict[str, Any], ...] = (
+            {"choices": []},
+            {"choices": [], "usage": {}},
+            {"choices": [], "usage": "not-an-object"},
+        )
+        raw = b"".join(
+            b"data: " + compact_json(payload).encode("ascii") + b"\n\n"
+            for payload in payloads
+        )
+        parser.feed(raw, 0, 1)
+        items = parser.finish(allow_incomplete=False).items
+        self.assertEqual(
+            [
+                (item.usage_present, item.usage_is_object, item.completion_tokens)
+                for item in items
+            ],
+            [(False, None, None), (True, True, None), (True, False, None)],
+        )
+
+    def test_http_case_and_request_key_are_bounded(self) -> None:
+        for field in ("case_id", "request_key"):
+            with self.subTest(field=field):
+                records = self.records([b"data: [DONE]\n\n"])
+                oversized = "x" * (VALIDATOR.MAX_SESSION_IDENTIFIER_BYTES + 1)
+                for record in records:
+                    if field == "case_id" or "request_key" in record:
+                        record[field] = oversized
+                with self.assertRaisesRegex(
+                    VALIDATOR.ValidationError, "UTF-8 byte bound"
+                ):
+                    self.validate(records)
+
+    def test_http_response_headers_are_bounded(self) -> None:
+        cases = {
+            "name": [
+                ["x" * (VALIDATOR.MAX_HTTP_HEADER_NAME_BYTES + 1), "value"],
+                ["Content-Type", "text/event-stream"],
+            ],
+            "value": [
+                ["Content-Type", "text/event-stream"],
+                ["X-Test", "x" * (VALIDATOR.MAX_HTTP_HEADER_VALUE_BYTES + 1)],
+            ],
+            "aggregate": [
+                ["Content-Type", "text/event-stream"],
+                *[
+                    [f"X-Test-{index}", "x" * VALIDATOR.MAX_HTTP_HEADER_VALUE_BYTES]
+                    for index in range(8)
+                ],
+            ],
+        }
+        for name, headers in cases.items():
+            with self.subTest(name=name):
+                records = self.records([b"data: [DONE]\n\n"])
+                start = next(
+                    record
+                    for record in records
+                    if record["record_type"] == "http_response_start"
+                )
+                start["headers"] = headers
+                with self.assertRaisesRegex(
+                    VALIDATOR.ValidationError,
+                    "UTF-8 byte bound|aggregate byte bound",
+                ):
+                    self.validate(records)
+
+        records = self.records([b"data: [DONE]\n\n"])
+        start = next(
+            record
+            for record in records
+            if record["record_type"] == "http_response_start"
+        )
+        start["headers"] = [
+            ["Content-Type", "text/event-stream"],
+            *[
+                [f"X-{index}", "x"]
+                for index in range(VALIDATOR.MAX_HTTP_RESPONSE_HEADER_COUNT)
+            ],
+        ]
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "count bound"):
+            self.validate(records)
+
+    def test_sse_item_count_is_bounded(self) -> None:
+        parser = VALIDATOR._CompactSseParser()
+        raw = b"data: {}\n\n" * (VALIDATOR.MAX_SSE_ITEMS_PER_RESPONSE + 1)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "item count exceeds"):
+            parser.feed(raw, 0, 1)
+
+    def test_session_sse_item_count_is_bounded(self) -> None:
+        original = VALIDATOR.MAX_SESSION_SSE_ITEMS
+        VALIDATOR.MAX_SESSION_SSE_ITEMS = 2
+        try:
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "session SSE item count exceeds"
+            ):
+                self.validate(
+                    self.records(
+                        [
+                            b"data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        ]
+                    )
+                )
+        finally:
+            VALIDATOR.MAX_SESSION_SSE_ITEMS = original
+
+    def test_sse_finish_reason_is_bounded_before_retention(self) -> None:
+        parser = VALIDATOR._CompactSseParser()
+        payload = compact_json(
+            {
+                "choices": [
+                    {"finish_reason": "x" * (VALIDATOR.MAX_SSE_FINISH_REASON_BYTES + 1)}
+                ]
+            }
+        ).encode("ascii")
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "UTF-8 byte bound"):
+            parser.feed(b"data: " + payload + b"\n\n", 0, 1)
+
+
 class ApiContractHttpValidationTest(unittest.TestCase):
     def setUp(self):
         self.records = build_api_contract_http_records()
 
-    def validate(self, records=None):
+    def state(self, records: list[dict[str, Any]] | None = None) -> Any:
         state = VALIDATOR.HttpValidationState(
             fixture_seal=VALIDATOR.InputSeal(size=2, sha256=sha256_bytes(b"{}")),
             requests={},
@@ -1706,13 +2164,21 @@ class ApiContractHttpValidationTest(unittest.TestCase):
         )
         for index, record in enumerate(self.records if records is None else records):
             VALIDATOR._validate_http_record(record, f"API test record {index}", state)
+        return state
+
+    def validate(self, records: list[dict[str, Any]] | None = None) -> Any:
+        state = self.state(records)
         return VALIDATOR.validate_api_contract_http(state)
 
-    def assert_invalid(self, text: str, records=None):
+    def assert_invalid(
+        self, text: str, records: list[dict[str, Any]] | None = None
+    ) -> None:
         with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
             self.validate(records)
 
-    def record(self, records, case_id: str, record_type: str):
+    def record(
+        self, records: list[dict[str, Any]], case_id: str, record_type: str
+    ) -> dict[str, Any]:
         return next(
             record
             for record in records
@@ -1761,6 +2227,18 @@ class ApiContractHttpValidationTest(unittest.TestCase):
                 "error": None,
             },
         )
+
+    def test_api_bodies_are_released_after_compact_summary(self) -> None:
+        state = self.state()
+        result = VALIDATOR.validate_api_contract_http(state)
+        self.assertEqual(len(result.cases), 10)
+        self.assertFalse(state.bodies)
+        self.assertEqual(len(state.completed_results), 10)
+        for request in state.requests.values():
+            self.assertNotIn("request_body", request)
+            self.assertNotIn("response_body", request)
+            self.assertIsInstance(request.get("api_response"), dict)
+            self.assertIsInstance(request.get("response_headers"), tuple)
         self.assertEqual(
             result.cases[1]["error"],
             {
@@ -2403,6 +2881,17 @@ class ValidatorTest(unittest.TestCase):
             expected_worker_binary_sha256=WORKER_SHA256,
         )
 
+    def session(self) -> Any:
+        VALIDATOR.validate_bundle_layout(self.root)
+        VALIDATOR.validate_sha256sums(self.root)
+        matrix = VALIDATOR.validate_matrix(self.root)
+        return VALIDATOR.validate_session(
+            self.root,
+            matrix,
+            GIT_COMMIT,
+            WORKER_SHA256,
+        )
+
     def assert_invalid(self, text: str):
         with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
             self.validate()
@@ -2415,6 +2904,42 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(result["resource_segments"]["normal"]["point_count"], 100)
         self.assertEqual(result["resource_segments"]["restart"]["point_count"], 20)
         self.assertGreater(len(result["unimplemented_release_gates"]), 0)
+
+    def test_legacy_phase1_session_keeps_bounded_compact_results(self) -> None:
+        session = self.session()
+        self.assertIsNone(session.full_campaign_order)
+        self.assertIsNone(session.api_contract)
+        self.assertFalse(VALIDATOR._claims_full_campaign(session.raw_order_projection))
+        self.assertEqual(
+            len(session.raw_order_projection), sum(session.record_counts.values())
+        )
+        self.assertTrue(
+            all("body_base64" not in record for record in session.raw_order_projection)
+        )
+        self.assertEqual(len(session.http_results), 143)
+        self.assertTrue(
+            all(
+                "request_body" not in request and "response_body" not in request
+                for request in session.http_requests.values()
+            )
+        )
+        first = session.http_results[0]
+        self.assertEqual(first.status, 200)
+        self.assertEqual(first.outcome, "eof")
+        self.assertIsNotNone(first.sse)
+        assert first.sse is not None
+        self.assertEqual(len(first.sse.items), 3)
+
+    def test_session_record_count_is_bounded(self) -> None:
+        original = VALIDATOR.MAX_SESSION_RECORDS
+        VALIDATOR.MAX_SESSION_RECORDS = 1
+        try:
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "record-count bound"
+            ):
+                self.session()
+        finally:
+            VALIDATOR.MAX_SESSION_RECORDS = original
 
     def test_fraction_percentile_uses_linear_interpolation(self):
         self.assertEqual(
