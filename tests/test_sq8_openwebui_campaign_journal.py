@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "tools" / "sq8_openwebui_campaign.py"
+COLLECTOR_PATH = ROOT / "tools" / "collect-sq8-openwebui-release.py"
 BOOT_ID = "5" * 32
 NORMAL_GATEWAY_PID = 1200
 NORMAL_WORKER_PID = 1201
@@ -28,6 +29,19 @@ def load_module():
 
 
 CAMPAIGN = load_module()
+
+
+def load_collector_module():
+    name = "collect_sq8_openwebui_release_for_campaign_adapter"
+    spec = importlib.util.spec_from_file_location(name, COLLECTOR_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+COLLECTOR = load_collector_module()
 
 
 def compact(value):
@@ -366,6 +380,66 @@ class CampaignJournalTest(unittest.TestCase):
         self.assertEqual(records[0]["record_type"], "gateway_event")
         self.assertEqual(records[0]["phase"], "resource_normal")
         self.assertEqual(records[0]["fields"]["journal_cursor"], "race-0")
+
+    def test_resource_adapter_claims_the_real_capture_into_the_session_writer(self):
+        capture, source = self.make_capture()
+        output = self.root / "adapter-session.jsonl"
+        session = COLLECTOR.SessionWriter(
+            output, COLLECTOR.SecretGuard(b"campaign-adapter-test-secret-0123456789")
+        )
+        self.addCleanup(session.writer.abort_close)
+        identity = COLLECTOR.ProcessIdentity(
+            "/system.slice/ullm-openai.service",
+            NORMAL_GATEWAY_PID,
+            10_000,
+            NORMAL_WORKER_PID,
+            10_001,
+            2,
+        )
+        adapter = COLLECTOR.CampaignResourceLifecycleClaims(
+            capture,
+            session,
+            time.monotonic_ns,
+            lambda deadline_ns: time.sleep(
+                max(0, deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            ),
+        )
+        lines = trace_lines(
+            "adapter",
+            1000,
+            NORMAL_GATEWAY_PID,
+            "req-adapter",
+            "chatcmpl-adapter",
+        )
+        source.feed(*lines)
+        events = adapter.consume(
+            "resource_normal",
+            "normal-measured-001",
+            identity,
+            "chatcmpl-adapter",
+        )
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "request_admitted",
+                "request_started",
+                "request_first_token",
+                "request_released",
+            ],
+        )
+        session.writer.file.sync()
+        records = [
+            json.loads(raw)
+            for raw in session.writer.file.incomplete_path.read_text().splitlines()
+        ]
+        self.assertEqual([record["sequence"] for record in records], list(range(4)))
+        self.assertEqual(
+            [record["journal_cursor"] for record in records],
+            [f"adapter-{index}" for index in range(4)],
+        )
+        self.assertTrue(
+            all(record["record_type"] == "gateway_event" for record in records)
+        )
 
     def test_checkpoint_drains_a_racing_row_and_rejects_it_unclaimed(self):
         capture, source = self.make_capture()
