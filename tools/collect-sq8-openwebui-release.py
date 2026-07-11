@@ -58,6 +58,7 @@ COPY_CHUNK_BYTES = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 30.0
 HTTP_REQUEST_TIMEOUT_SECONDS = 240.0
 RELEASE_TIMEOUT_NS = 5_000_000_000
+CAMPAIGN_CAPTURE_TIMEOUT_NS = 30_000_000_000
 RESTART_TIMEOUT_NS = 600_000_000_000
 NEGATIVE_QUIET_NS = 250_000_000
 JOURNAL_POLL_NS = 50_000_000
@@ -2031,7 +2032,7 @@ class CampaignResourceLifecycleClaims:
         key = (phase, case_id)
         if key in self._claimed_cases:
             fail("campaign resource case was claimed twice")
-        deadline_ns = self.now_ns() + RELEASE_TIMEOUT_NS
+        deadline_ns = self.now_ns() + CAMPAIGN_CAPTURE_TIMEOUT_NS
         claimed = self.capture.claim_completion_trace(
             completion_id,
             phase,

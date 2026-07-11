@@ -662,7 +662,7 @@ class CampaignResourceLifecycleClaimsTests(unittest.TestCase):
                     "chatcmpl-1",
                     "resource_normal",
                     "normal-measured-001",
-                    self.now + COLLECTOR.RELEASE_TIMEOUT_NS,
+                    self.now + COLLECTOR.CAMPAIGN_CAPTURE_TIMEOUT_NS,
                 )
             ],
         )
