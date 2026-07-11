@@ -4,11 +4,13 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import sys
 from pathlib import Path
 
 import pytest
 
+from ullm_openai_gateway import worker as worker_module
 from ullm_openai_gateway.app import _cancel_stream_and_drain
 from ullm_openai_gateway.schemas import EOS_TOKEN_IDS
 from ullm_openai_gateway.worker import (
@@ -276,6 +278,64 @@ def test_release_log_is_structured_and_omits_content(
     serialized = json.dumps(records, sort_keys=True)
     for forbidden in ("prompt_token_ids", "token_ids", "test-secret"):
         assert forbidden not in serialized
+
+
+def test_lifecycle_observer_receives_exact_logged_json(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observer_path = tmp_path / "lifecycle.sock"
+    monkeypatch.setattr(worker_module, "LIFECYCLE_OBSERVER_SOCKET", observer_path)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(os.fspath(observer_path))
+        receiver.settimeout(1.0)
+        caplog.set_level(logging.INFO, logger="uvicorn.error")
+        worker_module._log_lifecycle(
+            "request_progress",
+            request_id="req-observer",
+            completion_id="chatcmpl-observer",
+            phase="prefill",
+            processed_prompt_tokens=128,
+            prompt_tokens=3584,
+        )
+        observed = receiver.recv(4096)
+
+    logged = caplog.records[-1].getMessage().encode("ascii")
+    assert observed == logged
+    value = json.loads(observed)
+    assert value == {
+        "schema_version": "ullm.gateway.lifecycle.v1",
+        "event": "request_progress",
+        "observed_monotonic_ns": value["observed_monotonic_ns"],
+        "request_id": "req-observer",
+        "completion_id": "chatcmpl-observer",
+        "phase": "prefill",
+        "processed_prompt_tokens": 128,
+        "prompt_tokens": 3584,
+    }
+    assert value["observed_monotonic_ns"] > 0
+
+
+def test_missing_lifecycle_observer_never_breaks_logging(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        worker_module,
+        "LIFECYCLE_OBSERVER_SOCKET",
+        tmp_path / "missing" / "lifecycle.sock",
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    worker_module._log_lifecycle(
+        "worker_fatal",
+        request_id=None,
+        completion_id=None,
+        reason="test-only",
+        admit_to_fatal_ns=None,
+    )
+    assert json.loads(caplog.records[-1].getMessage())["event"] == "worker_fatal"
 
 
 def test_cancel_log_precedes_matching_cancelled_release(

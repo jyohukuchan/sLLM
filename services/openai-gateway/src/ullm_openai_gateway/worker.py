@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import stat
 import time
 import uuid
@@ -39,6 +40,7 @@ KILL_WAIT_SECONDS = 2.0
 PREFILL_PROGRESS_TOKENS = 128
 STREAM_TOKEN_QUEUE_SIZE = 32
 LIFECYCLE_LOG_SCHEMA = "ullm.gateway.lifecycle.v1"
+LIFECYCLE_OBSERVER_SOCKET = Path("/run/ullm/lifecycle-observer.sock")
 
 _LIFECYCLE_LOGGER = logging.getLogger("uvicorn.error")
 
@@ -928,16 +930,26 @@ def _log_lifecycle(event: str, **fields: Any) -> None:
         "observed_monotonic_ns": time.monotonic_ns(),
         **fields,
     }
-    _LIFECYCLE_LOGGER.info(
-        "%s",
-        json.dumps(
-            value,
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
+    _LIFECYCLE_LOGGER.info("%s", payload)
+    _notify_lifecycle_observer(payload.encode("ascii"))
+
+
+def _notify_lifecycle_observer(payload: bytes) -> None:
+    """Best-effort low-latency mirror; the systemd journal remains authoritative."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as observer:
+            observer.setblocking(False)
+            observer.sendto(payload, os.fspath(LIFECYCLE_OBSERVER_SOCKET))
+    except OSError:
+        # No observer is the normal product state and must not affect inference.
+        return
 
 
 def _acquire_singleton_lock(path: Path) -> int:
