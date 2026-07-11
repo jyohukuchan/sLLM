@@ -1548,10 +1548,10 @@ def ingest_failure_gate_bundle(
             {
                 "record_type": "browser_action",
                 "phase": CAMPAIGN_PHASE,
-                "case_id": FAILURE_CASE,
+                "case_id": FAILURE_CASE if index < 5 else RECOVERY_CASE,
                 "fields": hook.action_hook_fields(action),
             }
-            for action in actions
+            for index, action in enumerate(actions)
         )
         fault_record = {
             "record_type": "fault_injection",

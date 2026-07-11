@@ -498,6 +498,10 @@ class FailureGateIngestTests(unittest.TestCase):
         result = self.ingest(bundle)
         self.assertEqual(len(result.browser_action_records), 9)
         self.assertEqual(
+            [record["case_id"] for record in result.browser_action_records],
+            ["post-header-failure"] * 5 + ["post-header-recovery"] * 4,
+        )
+        self.assertEqual(
             result.fault_injection_record["case_id"], "post-header-failure"
         )
         self.assertEqual(len(result.lifecycle_claims), 10)
