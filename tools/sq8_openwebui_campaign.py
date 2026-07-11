@@ -27,6 +27,7 @@ DEFAULT_MAX_JOURNAL_ROWS = 16_384
 DEFAULT_MAX_PENDING_EVENTS = 2_048
 DEFAULT_MAX_PENDING_BYTES = 16 << 20
 SOURCE_WAIT_USEC = 50_000
+MAX_SOURCE_WAIT_USEC = 2_147_483_647_000
 CHECKPOINT_EMPTY_POLLS = 2
 
 REQUIRED_JOURNAL_FIELDS = (
@@ -489,6 +490,13 @@ class SystemdJournalSource:
         return None
 
     def read_next(self, timeout_usec: int) -> bytes | None:
+        if (
+            type(timeout_usec) is not int
+            or timeout_usec < 1
+            or timeout_usec > MAX_SOURCE_WAIT_USEC
+        ):
+            fail("direct sd-journal timeout is not bounded positive microseconds")
+        timeout_msec = max(1, (timeout_usec + 999) // 1000)
         reader = self._reader
         journal = self._journal
         boot_id = self._boot_id
@@ -500,7 +508,7 @@ class SystemdJournalSource:
             entry = reader.get_next()
             if entry:
                 return self._entry_bytes(entry, boot_id)
-            result = reader.wait(timeout_usec)
+            result = reader.wait(timeout_msec)
         except (OSError, ValueError):
             fail("direct sd-journal read failed")
         if result == journal.INVALIDATE:

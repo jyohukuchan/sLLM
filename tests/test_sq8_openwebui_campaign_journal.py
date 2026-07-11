@@ -250,6 +250,7 @@ class FakeDirectJournalReader:
         self.actions = deque(actions)
         self.seeked = []
         self.matches = []
+        self.waited = []
         self.tail_seeked = False
         self.boot_selected = False
 
@@ -272,7 +273,8 @@ class FakeDirectJournalReader:
     def get_next(self):
         return self._act("next", None)
 
-    def wait(self, timeout_usec):
+    def wait(self, timeout_msec):
+        self.waited.append(timeout_msec)
         return self._act("wait", None)
 
     def _act(self, expected, default):
@@ -397,6 +399,34 @@ class SystemdJournalSourceTest(unittest.TestCase):
         source.close()
         with self.assertRaises(CAMPAIGN.CampaignJournalError):
             source.read_next(1)
+
+    def test_wait_converts_microseconds_to_rounded_up_milliseconds(self):
+        source, reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", None),
+                ("wait", self.NOP),
+                ("next", None),
+                ("wait", self.NOP),
+            ]
+        )
+        self.assertIsNone(source.read_next(50_000))
+        self.assertIsNone(source.read_next(1))
+        self.assertEqual(reader.waited, [50, 1])
+
+    def test_wait_rejects_invalid_microsecond_timeout(self):
+        source, reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+            ]
+        )
+        for timeout in (0, -1, True, "1", CAMPAIGN.MAX_SOURCE_WAIT_USEC + 1):
+            with self.subTest(timeout=timeout):
+                with self.assertRaises(CAMPAIGN.CampaignJournalError):
+                    source.read_next(timeout)
+        self.assertEqual(reader.waited, [])
 
 
 class CampaignJournalTest(unittest.TestCase):
