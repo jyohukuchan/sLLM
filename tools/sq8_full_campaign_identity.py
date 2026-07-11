@@ -76,6 +76,24 @@ SOURCE_ROLE_PATHS = {
     "release_validator": "tools/validate-sq8-openwebui-release.py",
     "release_collector": "tools/collect-sq8-openwebui-release.py",
     "campaign_journal": "tools/sq8_openwebui_campaign.py",
+    "campaign_bundle": "tools/sq8_full_campaign_bundle.py",
+    "campaign_independent_metrics": "tools/sq8_full_campaign_independent_metrics.py",
+    "campaign_independent_views": "tools/sq8_full_campaign_independent_views.py",
+    "campaign_orchestrator": "tools/run-sq8-full-openwebui-campaign.py",
+    "campaign_renderer": "tools/sq8_full_campaign_renderer.py",
+    "campaign_views": "tools/sq8_full_campaign_views.py",
+    "gate_api_contract": "tools/run-sq8-api-contract-gate.py",
+    "ingest_api_contract": "tools/sq8_api_contract_gate_ingest.py",
+    "gate_openwebui_stop": "tools/run-openwebui-stop-gate.py",
+    "ingest_openwebui_stop": "tools/sq8_openwebui_stop_gate_ingest.py",
+    "gate_openwebui_soak": "tools/run-openwebui-soak-gate.py",
+    "ingest_openwebui_gate": "tools/sq8_openwebui_gate_ingest.py",
+    "gate_direct_cancel": "tools/run-sq8-direct-cancel-gate.py",
+    "gate_openwebui_failure": "tools/run-openwebui-failure-gate.py",
+    "gate_openwebui_failure_hook": "tools/run-openwebui-failure-hook.py",
+    "ingest_openwebui_failure": "tools/sq8_openwebui_failure_gate_ingest.py",
+    "gate_http_latency": "tools/run-sq8-http-latency-gate.py",
+    "ingest_http_latency": "tools/sq8_http_latency_gate_ingest.py",
     "http_client": "tools/sq8-openwebui-http-client.py",
     "browser_smoke": "deploy/openwebui/browser-smoke.cjs",
     "browser_stop": "deploy/openwebui/browser-stop-smoke.cjs",
@@ -112,28 +130,134 @@ SOURCE_ROLE_PATHS = {
     "runtime_oracle_validation": (
         "benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-validation.json"
     ),
+    "spec_release": "docs/specs/sq8-openwebui-release-v0.1.md",
+    "spec_openai_chat_subset": "docs/specs/openai-chat-subset-v0.1.md",
+    "spec_worker_protocol": "docs/specs/sq8-worker-protocol-v0.1.md",
+    "fixture_ttft_p0032": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p0032.json"
+    ),
+    "fixture_ttft_p0128": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p0128.json"
+    ),
+    "fixture_ttft_p0512": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p0512.json"
+    ),
+    "fixture_ttft_p2048": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p2048.json"
+    ),
+    "fixture_ttft_p3584": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p3584.json"
+    ),
 }
 
 SOURCE_GROUPS = {
-    "gateway": tuple(role for role in SOURCE_ROLE_PATHS if role.startswith("gateway_")),
-    "worker": tuple(
-        role
-        for role in SOURCE_ROLE_PATHS
-        if role.startswith("worker_") or role in {"engine_library", "workspace_lock"}
+    "gateway": (
+        "gateway_pyproject",
+        "gateway_lock",
+        "gateway_init",
+        "gateway_main",
+        "gateway_app",
+        "gateway_errors",
+        "gateway_schemas",
+        "gateway_settings",
+        "gateway_tokenizer",
+        "gateway_worker",
+    ),
+    "worker": (
+        "worker_cargo_manifest",
+        "worker_entrypoint",
+        "worker_backend",
+        "worker_protocol",
+        "worker_runtime",
+        "engine_library",
+        "workspace_lock",
     ),
     "collector": ("release_collector", "campaign_journal"),
     "browser": ("browser_smoke", "browser_stop", "browser_failure", "browser_soak"),
     "http_client": ("http_client",),
-    "deployment": tuple(
-        role
-        for role in SOURCE_ROLE_PATHS
-        if role.startswith("openwebui_") or role.startswith("systemd_")
+    "deployment": (
+        "openwebui_dockerfile",
+        "openwebui_compose",
+        "openwebui_configure",
+        "openwebui_patch",
+        "openwebui_image_validator",
+        "systemd_service",
+        "systemd_environment_contract",
     ),
     "oracle": (
         "serving_fixture_manifest",
         "chat_template_fixture_manifest",
         "runtime_oracle_validation",
     ),
+    "campaign": (
+        "identity_generator",
+        "product_promotion_validator",
+        "release_validator",
+        "release_collector",
+        "campaign_journal",
+        "campaign_bundle",
+        "campaign_independent_metrics",
+        "campaign_independent_views",
+        "campaign_orchestrator",
+        "campaign_renderer",
+        "campaign_views",
+        "gate_api_contract",
+        "ingest_api_contract",
+        "gate_openwebui_stop",
+        "ingest_openwebui_stop",
+        "gate_openwebui_soak",
+        "ingest_openwebui_gate",
+        "gate_direct_cancel",
+        "gate_openwebui_failure",
+        "gate_openwebui_failure_hook",
+        "ingest_openwebui_failure",
+        "gate_http_latency",
+        "ingest_http_latency",
+        "http_client",
+        "browser_smoke",
+        "browser_stop",
+        "browser_failure",
+        "browser_soak",
+    ),
+    "spec": ("spec_release", "spec_openai_chat_subset", "spec_worker_protocol"),
+    "fixture": (
+        "serving_fixture_manifest",
+        "chat_template_fixture_manifest",
+        "fixture_ttft_p0032",
+        "fixture_ttft_p0128",
+        "fixture_ttft_p0512",
+        "fixture_ttft_p2048",
+        "fixture_ttft_p3584",
+    ),
+    "all": tuple(SOURCE_ROLE_PATHS),
+}
+
+TTFT_FIXTURE_IDENTITIES = {
+    "fixture_ttft_p0032": {
+        "path": SOURCE_ROLE_PATHS["fixture_ttft_p0032"],
+        "bytes": 1_333,
+        "sha256": "c660c7fb3c25d2a3e25693e2beb2abc10295a06935772d17d23cedab04f24c07",
+    },
+    "fixture_ttft_p0128": {
+        "path": SOURCE_ROLE_PATHS["fixture_ttft_p0128"],
+        "bytes": 2_776,
+        "sha256": "f8fe81bacb8761f3aa10cce1c333a51f9a85d65b5bfc7b02499886fb9f550a37",
+    },
+    "fixture_ttft_p0512": {
+        "path": SOURCE_ROLE_PATHS["fixture_ttft_p0512"],
+        "bytes": 8_538,
+        "sha256": "e2f53c514a228e9e10871fc0df1867394aae12416215c9716770d2b420a3480f",
+    },
+    "fixture_ttft_p2048": {
+        "path": SOURCE_ROLE_PATHS["fixture_ttft_p2048"],
+        "bytes": 31_581,
+        "sha256": "cd04c3339542f07731074ac0e00740a83061e620f6caff9c2a7e5316df1ccdcf",
+    },
+    "fixture_ttft_p3584": {
+        "path": SOURCE_ROLE_PATHS["fixture_ttft_p3584"],
+        "bytes": 54_622,
+        "sha256": "e3cd6c722302f73d688492b73a182298f34cc0a1498def209c262e5e9aa92912",
+    },
 }
 
 TOKENIZER_FILES = (
@@ -670,7 +794,55 @@ class IdentityProbe(Protocol):
     def amd_smi_list(self) -> bytes: ...
 
 
+def _validate_source_contract(
+    role_paths: dict[str, str] | None = None,
+    groups: dict[str, tuple[str, ...]] | None = None,
+) -> None:
+    checked_paths = SOURCE_ROLE_PATHS if role_paths is None else role_paths
+    checked_groups = SOURCE_GROUPS if groups is None else groups
+    if type(checked_paths) is not dict or not checked_paths:
+        fail("source role contract differs")
+    paths: list[str] = []
+    for role, path in checked_paths.items():
+        pure = PurePosixPath(path) if type(path) is str else None
+        if (
+            type(role) is not str
+            or not role
+            or pure is None
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or "\\" in path
+        ):
+            fail("source role or path contract differs")
+        paths.append(path)
+    if len(paths) != len(set(paths)):
+        fail("source role paths are not unique")
+    if (
+        type(checked_groups) is not dict
+        or not checked_groups
+        or "all" not in checked_groups
+    ):
+        fail("source group contract differs")
+    known_roles = set(checked_paths)
+    semantic_roles: set[str] = set()
+    for group, roles in checked_groups.items():
+        if (
+            type(group) is not str
+            or not group
+            or type(roles) is not tuple
+            or not roles
+            or len(roles) != len(set(roles))
+            or any(type(role) is not str or role not in known_roles for role in roles)
+        ):
+            fail("source group roles differ")
+        if group != "all":
+            semantic_roles.update(roles)
+    if checked_groups["all"] != tuple(checked_paths) or semantic_roles != known_roles:
+        fail("source group coverage differs")
+
+
 def default_source_specs(repo_root: Path) -> tuple[SourceFileSpec, ...]:
+    _validate_source_contract()
     root = Path(os.path.abspath(repo_root))
     return tuple(
         SourceFileSpec(role, relative, root / relative)
@@ -1490,6 +1662,7 @@ def _source_aggregate(
 def _validate_source_specs(
     inputs: IdentityBuildInputs,
 ) -> tuple[SourceFileSpec, ...]:
+    _validate_source_contract()
     if type(inputs.source_specs) is not tuple:
         fail("source specs must be an immutable tuple")
     roles = [spec.role for spec in inputs.source_specs]
@@ -2390,6 +2563,7 @@ def _validate_process_document(value: Any, label: str) -> dict[str, Any]:
 
 
 def validate_environment_document(value: Any) -> dict[str, Any]:
+    _validate_source_contract()
     document = _exact(
         value,
         {
@@ -2449,6 +2623,10 @@ def validate_environment_document(value: Any) -> dict[str, Any]:
         paths, key=lambda item: item.encode("utf-8")
     ):
         fail("environment sources are not the exact bytewise-sorted set")
+    for role, expected in TTFT_FIXTURE_IDENTITIES.items():
+        source = by_role[role]
+        if any(source[key] != expected[key] for key in ("path", "bytes", "sha256")):
+            fail("environment TTFT fixture source differs")
     source_sets = _exact(
         document["source_sets"], set(SOURCE_GROUPS), "environment source sets"
     )

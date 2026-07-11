@@ -15,15 +15,18 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import stat
+import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Iterable, Iterator, cast
+from typing import IO, Any, BinaryIO, Iterable, Iterator, cast
 
 
 SESSION_SCHEMA = "ullm.sq8.openwebui_release.raw.v1"
@@ -84,6 +87,10 @@ MAX_HTTP_RESPONSE_HEADER_COUNT = 128
 MAX_HTTP_HEADER_NAME_BYTES = 256
 MAX_HTTP_HEADER_VALUE_BYTES = 8192
 MAX_HTTP_RESPONSE_HEADER_BYTES = 64 * 1024
+SOURCE_COPY_CHUNK_BYTES = 64 * 1024
+MAX_SOURCE_BYTES = 32 * 1024 * 1024
+MAX_GIT_CONTROL_OUTPUT_BYTES = 4096
+SOURCE_COMMAND_TIMEOUT_SECONDS = 15.0
 U64_MAX = (1 << 64) - 1
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 RESOURCE_FIXTURE_INPUT_PATH = "collector/resource-chat-fixture.json"
@@ -153,6 +160,24 @@ EXPECTED_SOURCE_ROLE_PATHS = {
     "release_validator": "tools/validate-sq8-openwebui-release.py",
     "release_collector": "tools/collect-sq8-openwebui-release.py",
     "campaign_journal": "tools/sq8_openwebui_campaign.py",
+    "campaign_bundle": "tools/sq8_full_campaign_bundle.py",
+    "campaign_independent_metrics": "tools/sq8_full_campaign_independent_metrics.py",
+    "campaign_independent_views": "tools/sq8_full_campaign_independent_views.py",
+    "campaign_orchestrator": "tools/run-sq8-full-openwebui-campaign.py",
+    "campaign_renderer": "tools/sq8_full_campaign_renderer.py",
+    "campaign_views": "tools/sq8_full_campaign_views.py",
+    "gate_api_contract": "tools/run-sq8-api-contract-gate.py",
+    "ingest_api_contract": "tools/sq8_api_contract_gate_ingest.py",
+    "gate_openwebui_stop": "tools/run-openwebui-stop-gate.py",
+    "ingest_openwebui_stop": "tools/sq8_openwebui_stop_gate_ingest.py",
+    "gate_openwebui_soak": "tools/run-openwebui-soak-gate.py",
+    "ingest_openwebui_gate": "tools/sq8_openwebui_gate_ingest.py",
+    "gate_direct_cancel": "tools/run-sq8-direct-cancel-gate.py",
+    "gate_openwebui_failure": "tools/run-openwebui-failure-gate.py",
+    "gate_openwebui_failure_hook": "tools/run-openwebui-failure-hook.py",
+    "ingest_openwebui_failure": "tools/sq8_openwebui_failure_gate_ingest.py",
+    "gate_http_latency": "tools/run-sq8-http-latency-gate.py",
+    "ingest_http_latency": "tools/sq8_http_latency_gate_ingest.py",
     "http_client": "tools/sq8-openwebui-http-client.py",
     "browser_smoke": "deploy/openwebui/browser-smoke.cjs",
     "browser_stop": "deploy/openwebui/browser-stop-smoke.cjs",
@@ -188,6 +213,24 @@ EXPECTED_SOURCE_ROLE_PATHS = {
     ),
     "runtime_oracle_validation": (
         "benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-validation.json"
+    ),
+    "spec_release": "docs/specs/sq8-openwebui-release-v0.1.md",
+    "spec_openai_chat_subset": "docs/specs/openai-chat-subset-v0.1.md",
+    "spec_worker_protocol": "docs/specs/sq8-worker-protocol-v0.1.md",
+    "fixture_ttft_p0032": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p0032.json"
+    ),
+    "fixture_ttft_p0128": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p0128.json"
+    ),
+    "fixture_ttft_p0512": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p0512.json"
+    ),
+    "fixture_ttft_p2048": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p2048.json"
+    ),
+    "fixture_ttft_p3584": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures/exact-p3584.json"
     ),
 }
 
@@ -235,6 +278,47 @@ EXPECTED_SOURCE_GROUPS = {
         "chat_template_fixture_manifest",
         "runtime_oracle_validation",
     ),
+    "campaign": (
+        "identity_generator",
+        "product_promotion_validator",
+        "release_validator",
+        "release_collector",
+        "campaign_journal",
+        "campaign_bundle",
+        "campaign_independent_metrics",
+        "campaign_independent_views",
+        "campaign_orchestrator",
+        "campaign_renderer",
+        "campaign_views",
+        "gate_api_contract",
+        "ingest_api_contract",
+        "gate_openwebui_stop",
+        "ingest_openwebui_stop",
+        "gate_openwebui_soak",
+        "ingest_openwebui_gate",
+        "gate_direct_cancel",
+        "gate_openwebui_failure",
+        "gate_openwebui_failure_hook",
+        "ingest_openwebui_failure",
+        "gate_http_latency",
+        "ingest_http_latency",
+        "http_client",
+        "browser_smoke",
+        "browser_stop",
+        "browser_failure",
+        "browser_soak",
+    ),
+    "spec": ("spec_release", "spec_openai_chat_subset", "spec_worker_protocol"),
+    "fixture": (
+        "serving_fixture_manifest",
+        "chat_template_fixture_manifest",
+        "fixture_ttft_p0032",
+        "fixture_ttft_p0128",
+        "fixture_ttft_p0512",
+        "fixture_ttft_p2048",
+        "fixture_ttft_p3584",
+    ),
+    "all": tuple(EXPECTED_SOURCE_ROLE_PATHS),
 }
 
 EXPECTED_ARTIFACT_IDENTITY = {
@@ -315,6 +399,33 @@ EXPECTED_ORACLE_FILE_IDENTITIES: dict[str, dict[str, Any]] = {
         "path": EXPECTED_SOURCE_ROLE_PATHS["runtime_oracle_validation"],
         "bytes": 17_334,
         "sha256": "2612a4b434b6f5a15ab0c94d4465ee232a999a854a56a374b88904bdc54524aa",
+    },
+}
+EXPECTED_TTFT_FIXTURE_IDENTITIES: dict[str, dict[str, Any]] = {
+    "fixture_ttft_p0032": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["fixture_ttft_p0032"],
+        "bytes": 1_333,
+        "sha256": "c660c7fb3c25d2a3e25693e2beb2abc10295a06935772d17d23cedab04f24c07",
+    },
+    "fixture_ttft_p0128": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["fixture_ttft_p0128"],
+        "bytes": 2_776,
+        "sha256": "f8fe81bacb8761f3aa10cce1c333a51f9a85d65b5bfc7b02499886fb9f550a37",
+    },
+    "fixture_ttft_p0512": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["fixture_ttft_p0512"],
+        "bytes": 8_538,
+        "sha256": "e2f53c514a228e9e10871fc0df1867394aae12416215c9716770d2b420a3480f",
+    },
+    "fixture_ttft_p2048": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["fixture_ttft_p2048"],
+        "bytes": 31_581,
+        "sha256": "cd04c3339542f07731074ac0e00740a83061e620f6caff9c2a7e5316df1ccdcf",
+    },
+    "fixture_ttft_p3584": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["fixture_ttft_p3584"],
+        "bytes": 54_622,
+        "sha256": "e3cd6c722302f73d688492b73a182298f34cc0a1498def209c262e5e9aa92912",
     },
 }
 EXPECTED_VLLM_IDENTITY = {
@@ -1094,6 +1205,301 @@ def _identity_source_aggregate(
     return hashlib.sha256(_identity_canonical_bytes(entries)).hexdigest()
 
 
+def _validate_identity_source_contract(
+    role_paths: dict[str, str] | None = None,
+    groups: dict[str, tuple[str, ...]] | None = None,
+) -> None:
+    checked_paths = EXPECTED_SOURCE_ROLE_PATHS if role_paths is None else role_paths
+    checked_groups = EXPECTED_SOURCE_GROUPS if groups is None else groups
+    if type(checked_paths) is not dict or not checked_paths:
+        fail("source role contract differs")
+    paths: list[str] = []
+    for role, path in checked_paths.items():
+        pure = PurePosixPath(path) if type(path) is str else None
+        if (
+            type(role) is not str
+            or not role
+            or pure is None
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or "\\" in path
+        ):
+            fail("source role or path contract differs")
+        paths.append(path)
+    if len(paths) != len(set(paths)):
+        fail("source role paths are not unique")
+    if (
+        type(checked_groups) is not dict
+        or not checked_groups
+        or "all" not in checked_groups
+    ):
+        fail("source group contract differs")
+    known_roles = set(checked_paths)
+    semantic_roles: set[str] = set()
+    for group, roles in checked_groups.items():
+        if (
+            type(group) is not str
+            or not group
+            or type(roles) is not tuple
+            or not roles
+            or len(roles) != len(set(roles))
+            or any(type(role) is not str or role not in known_roles for role in roles)
+        ):
+            fail("source group roles differ")
+        if group != "all":
+            semantic_roles.update(roles)
+    if checked_groups["all"] != tuple(checked_paths) or semantic_roles != known_roles:
+        fail("source group coverage differs")
+
+
+@dataclass(frozen=True)
+class _SourceDigest:
+    byte_count: int
+    sha256: str
+    raw: bytes | None = None
+
+
+def _stop_source_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_bounded_source_command(
+    command: tuple[str, ...], *, maximum: int, retain: bool
+) -> _SourceDigest:
+    if (
+        type(command) is not tuple
+        or not command
+        or not 0 <= maximum <= MAX_SOURCE_BYTES
+    ):
+        fail("source command contract differs")
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    stdout: IO[bytes] | None = None
+    raw = bytearray() if retain else None
+    total = 0
+    digest = hashlib.sha256()
+    deadline = time.monotonic() + SOURCE_COMMAND_TIMEOUT_SECONDS
+    command_environment = os.environ.copy()
+    command_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    command_environment["GIT_OPTIONAL_LOCKS"] = "0"
+    command_environment["LC_ALL"] = "C"
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            env=command_environment,
+        )
+        stdout = process.stdout
+        if stdout is None:
+            fail("source command stdout is unavailable")
+            raise AssertionError("unreachable")
+        selector = selectors.DefaultSelector()
+        selector.register(stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fail("source command exceeded its deadline")
+            if not selector.select(remaining):
+                fail("source command exceeded its deadline")
+            chunk = os.read(
+                stdout.fileno(),
+                min(SOURCE_COPY_CHUNK_BYTES, maximum + 1 - total),
+            )
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                fail("source command stdout exceeded its bound")
+            digest.update(chunk)
+            if raw is not None:
+                raw.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            fail("source command exceeded its deadline")
+        if process.wait(timeout=remaining) != 0:
+            fail("source command failed")
+        return _SourceDigest(
+            total, digest.hexdigest(), bytes(raw) if raw is not None else None
+        )
+    except ValidationError:
+        if process is not None:
+            _stop_source_process(process)
+        raise
+    except (OSError, subprocess.SubprocessError):
+        if process is not None:
+            _stop_source_process(process)
+        fail("source command execution failed")
+        raise AssertionError("unreachable")
+    finally:
+        if selector is not None:
+            selector.close()
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+
+
+def _source_directory_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("O_NOFOLLOW is required for source validation")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+def _source_file_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("O_NOFOLLOW is required for source validation")
+    return os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+def _source_stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+@dataclass(frozen=True)
+class _OpenedSource:
+    descriptor: int
+    parent_fd: int
+    name: str
+    identity: tuple[int, ...]
+
+
+def _open_source_from_root(root_fd: int, relative: str) -> _OpenedSource:
+    parts = relative.split("/")
+    current_fd = -1
+    try:
+        current_fd = os.dup(root_fd)
+        for component in parts[:-1]:
+            next_fd = os.open(component, _source_directory_flags(), dir_fd=current_fd)
+            if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                os.close(next_fd)
+                fail("source path parent is not a directory")
+            os.close(current_fd)
+            current_fd = next_fd
+        entry = os.stat(parts[-1], dir_fd=current_fd, follow_symlinks=False)
+        descriptor = os.open(parts[-1], _source_file_flags(), dir_fd=current_fd)
+        identity = _source_stat_identity(entry)
+        if _source_stat_identity(os.fstat(descriptor)) != identity:
+            os.close(descriptor)
+            fail("source file changed while opening")
+        result = _OpenedSource(descriptor, current_fd, parts[-1], identity)
+        current_fd = -1
+        return result
+    except ValidationError:
+        raise
+    except OSError:
+        fail("failed to open a source file without following links")
+        raise AssertionError("unreachable")
+    finally:
+        if current_fd >= 0:
+            os.close(current_fd)
+
+
+def _hash_worktree_source(root_fd: int, relative: str) -> _SourceDigest:
+    opened: _OpenedSource | None = None
+    try:
+        opened = _open_source_from_root(root_fd, relative)
+        before = os.fstat(opened.descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 1 <= before.st_size <= MAX_SOURCE_BYTES
+        ):
+            fail("source file is not one bounded regular file")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(opened.descriptor, SOURCE_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SOURCE_BYTES:
+                fail("source file exceeded its streaming bound")
+            digest.update(chunk)
+        if (
+            total != before.st_size
+            or _source_stat_identity(os.fstat(opened.descriptor)) != opened.identity
+            or _source_stat_identity(
+                os.stat(opened.name, dir_fd=opened.parent_fd, follow_symlinks=False)
+            )
+            != opened.identity
+        ):
+            fail("source file changed while hashing")
+        return _SourceDigest(total, digest.hexdigest())
+    except ValidationError:
+        raise
+    except OSError:
+        fail("failed to hash a source file")
+        raise AssertionError("unreachable")
+    finally:
+        if opened is not None:
+            os.close(opened.descriptor)
+            os.close(opened.parent_fd)
+
+
+def _git_source_digest(repo_root: Path, commit: str, relative: str) -> _SourceDigest:
+    object_name = f"{commit}:{relative}"
+    size_result = _run_bounded_source_command(
+        (
+            "git",
+            "--no-pager",
+            "-C",
+            os.fspath(repo_root),
+            "cat-file",
+            "-s",
+            object_name,
+        ),
+        maximum=MAX_GIT_CONTROL_OUTPUT_BYTES,
+        retain=True,
+    )
+    if size_result.raw is None:
+        fail("Git source blob size output is unavailable")
+        raise AssertionError("unreachable")
+    try:
+        size_text = size_result.raw.decode("ascii", errors="strict")
+        if not size_text.endswith("\n") or not size_text[:-1].isdecimal():
+            fail("Git source blob size output differs")
+        size = int(size_text[:-1], 10)
+    except UnicodeError:
+        fail("Git source blob size output differs")
+    if not 1 <= size <= MAX_SOURCE_BYTES:
+        fail("Git source blob size exceeds its bound")
+    result = _run_bounded_source_command(
+        (
+            "git",
+            "--no-pager",
+            "-C",
+            os.fspath(repo_root),
+            "cat-file",
+            "blob",
+            object_name,
+        ),
+        maximum=size,
+        retain=False,
+    )
+    if result.byte_count != size:
+        fail("Git source blob size changed while reading")
+    return result
+
+
 def _validate_environment_identity(
     document: dict[str, Any], expected_commit: str
 ) -> tuple[
@@ -1103,6 +1509,7 @@ def _validate_environment_identity(
     dict[str, Any],
     dict[str, Any],
 ]:
+    _validate_identity_source_contract()
     exact_fields(
         document,
         {
@@ -1170,6 +1577,10 @@ def _validate_environment_identity(
         source = by_role[role]
         if any(source[key] != expected[key] for key in ("path", "bytes", "sha256")):
             fail(f"environment.json oracle source {role} differs")
+    for role, expected in EXPECTED_TTFT_FIXTURE_IDENTITIES.items():
+        source = by_role[role]
+        if any(source[key] != expected[key] for key in ("path", "bytes", "sha256")):
+            fail(f"environment.json TTFT fixture source {role} differs")
 
     source_sets_raw = exact_fields(
         document["source_sets"],
@@ -1749,6 +2160,38 @@ class IdentityData:
         ):
             fail("run_end Git status differs from environment.json")
 
+    def validate_header_source_inputs(self, input_files: Any) -> None:
+        if type(input_files) is not list:
+            fail("raw-session header input_files must be an array")
+        by_path: dict[str, dict[str, Any]] = {}
+        ordered_paths: list[str] = []
+        for index, raw in enumerate(input_files):
+            label = f"raw-session header.input_files[{index}]"
+            item = exact_fields(raw, {"path", "bytes", "sha256"}, label)
+            path = string(item["path"], f"{label}.path")
+            pure = PurePosixPath(path)
+            if (
+                pure.is_absolute()
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or "\\" in path
+                or path in by_path
+            ):
+                fail("raw-session header input source path differs")
+            integer(item["bytes"], f"{label}.bytes", minimum=1)
+            sha256_value(item["sha256"], f"{label}.sha256")
+            by_path[path] = item
+            ordered_paths.append(path)
+        if ordered_paths != sorted(
+            ordered_paths, key=lambda value: value.encode("utf-8")
+        ):
+            fail("raw-session header input sources are not bytewise sorted")
+        for source in self.source_by_role.values():
+            bound = by_path.get(source["path"])
+            if bound is None or any(
+                bound[key] != source[key] for key in ("path", "bytes", "sha256")
+            ):
+                fail("raw-session header lacks an exact campaign source input")
+
 
 def validate_campaign_identity(
     bundle: Path,
@@ -1808,6 +2251,104 @@ def validate_campaign_identity(
         openwebui=openwebui,
         model_worker=model_worker,
     )
+
+
+@dataclass(frozen=True)
+class SourceCheckoutData:
+    git_commit: str
+    source_count: int
+    all_source_sha256: str
+
+
+def validate_campaign_source_checkout(
+    identity: IdentityData, *, repo_root: Path
+) -> SourceCheckoutData:
+    """Bind recorded source entries to one Git commit and its current worktree files."""
+
+    if not isinstance(identity, IdentityData) or not isinstance(repo_root, os.PathLike):
+        fail("campaign source checkout arguments differ")
+    _validate_identity_source_contract()
+    root = Path(os.path.abspath(repo_root))
+    root_fd = -1
+    try:
+        root_fd = os.open(root, _source_directory_flags())
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            fail("campaign source checkout is not a directory")
+        top_level = _run_bounded_source_command(
+            (
+                "git",
+                "--no-pager",
+                "-C",
+                os.fspath(root),
+                "rev-parse",
+                "--show-toplevel",
+            ),
+            maximum=MAX_GIT_CONTROL_OUTPUT_BYTES,
+            retain=True,
+        )
+        if top_level.raw is None:
+            fail("campaign Git top-level output is unavailable")
+            raise AssertionError("unreachable")
+        if top_level.raw != os.fsencode(root) + b"\n":
+            fail("campaign source checkout is not the Git top level")
+        resolved_commit = _run_bounded_source_command(
+            (
+                "git",
+                "--no-pager",
+                "-C",
+                os.fspath(root),
+                "rev-parse",
+                "--verify",
+                f"{identity.expected_commit}^{{commit}}",
+            ),
+            maximum=MAX_GIT_CONTROL_OUTPUT_BYTES,
+            retain=True,
+        )
+        if resolved_commit.raw is None:
+            fail("trusted campaign Git commit output is unavailable")
+            raise AssertionError("unreachable")
+        if resolved_commit.raw != identity.expected_commit.encode("ascii") + b"\n":
+            fail("trusted campaign Git commit does not resolve exactly")
+
+        if set(identity.source_by_role) != set(EXPECTED_SOURCE_ROLE_PATHS):
+            fail("campaign source identity role set differs")
+        git_entries: dict[str, dict[str, Any]] = {}
+        for role, relative in EXPECTED_SOURCE_ROLE_PATHS.items():
+            source = identity.source_by_role[role]
+            if set(source) != {"role", "path", "bytes", "sha256"}:
+                fail("campaign source identity fields differ")
+            git_digest = _git_source_digest(root, identity.expected_commit, relative)
+            worktree_digest = _hash_worktree_source(root_fd, relative)
+            expected = {
+                "role": role,
+                "path": relative,
+                "bytes": git_digest.byte_count,
+                "sha256": git_digest.sha256,
+            }
+            if source != expected or worktree_digest != git_digest:
+                fail("campaign source differs from its trusted Git blob")
+            git_entries[role] = expected
+
+        if set(identity.source_sets) != set(EXPECTED_SOURCE_GROUPS):
+            fail("campaign source aggregate set differs")
+        for group, roles in EXPECTED_SOURCE_GROUPS.items():
+            if identity.source_sets[group] != _identity_source_aggregate(
+                git_entries, roles
+            ):
+                fail("campaign source aggregate differs from trusted Git blobs")
+        return SourceCheckoutData(
+            git_commit=identity.expected_commit,
+            source_count=len(git_entries),
+            all_source_sha256=identity.source_sets["all"],
+        )
+    except ValidationError:
+        raise
+    except OSError:
+        fail("failed to validate the campaign source checkout")
+        raise AssertionError("unreachable")
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
 
 
 def median(values: Iterable[int | Fraction]) -> Fraction:

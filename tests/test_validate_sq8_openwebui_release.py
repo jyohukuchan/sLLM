@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
+from collections.abc import Callable
 from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
@@ -108,11 +109,15 @@ def identity_canonical(value) -> bytes:
     )
 
 
-def build_identity_documents():
+def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
     source_entries = []
+    fixed_sources = {
+        **VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES,
+        **VALIDATOR.EXPECTED_TTFT_FIXTURE_IDENTITIES,
+    }
     for role, path in VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS.items():
-        if role in VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES:
-            expected = VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES[role]
+        if role in fixed_sources:
+            expected = fixed_sources[role]
             entry = {
                 "role": role,
                 "path": expected["path"],
@@ -2527,17 +2532,17 @@ class ApiContractHttpValidationTest(unittest.TestCase):
 
 
 class CampaignIdentityValidationTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "identity-bundle"
         self.root.mkdir()
         self.environment, self.model_identity = build_identity_documents()
         self.write_documents()
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def write_documents(self):
+    def write_documents(self) -> None:
         (self.root / "environment.json").write_bytes(
             identity_canonical(self.environment)
         )
@@ -2545,18 +2550,70 @@ class CampaignIdentityValidationTest(unittest.TestCase):
             identity_canonical(self.model_identity)
         )
 
-    def validate(self, *, commit=GIT_COMMIT, worker_sha=WORKER_SHA256):
+    def refresh_source_sets(self) -> None:
+        by_role = {item["role"]: item for item in self.environment["sources"]}
+        self.environment["source_sets"] = {
+            group: sha256_bytes(
+                identity_canonical([by_role[role] for role in sorted(roles)])
+            )
+            for group, roles in VALIDATOR.EXPECTED_SOURCE_GROUPS.items()
+        }
+
+    def build_source_checkout(self) -> tuple[Path, str]:
+        repo = Path(self.temporary.name) / "source-checkout"
+        fixed_sources = {
+            **VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES,
+            **VALIDATOR.EXPECTED_TTFT_FIXTURE_IDENTITIES,
+        }
+        for role, relative in VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS.items():
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            raw = (
+                (REPO_ROOT / relative).read_bytes()
+                if role in fixed_sources
+                else f"synthetic source {role}\n".encode("ascii")
+            )
+            path.write_bytes(raw)
+        commands = (
+            ("init", "-q"),
+            ("config", "user.email", "source-test@example.invalid"),
+            ("config", "user.name", "Source Test"),
+            ("add", "."),
+            ("commit", "-q", "-m", "source fixture"),
+        )
+        for arguments in commands:
+            subprocess.run(
+                ("git", "-C", str(repo), *arguments),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        commit = (
+            subprocess.run(
+                ("git", "-C", str(repo), "rev-parse", "HEAD"),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            .stdout.decode("ascii")
+            .strip()
+        )
+        return repo, commit
+
+    def validate(
+        self, *, commit: str = GIT_COMMIT, worker_sha: str = WORKER_SHA256
+    ) -> Any:
         return VALIDATOR.validate_campaign_identity(
             self.root,
             expected_commit=commit,
             expected_worker_binary_sha256=worker_sha,
         )
 
-    def assert_invalid(self, text: str):
+    def assert_invalid(self, text: str) -> None:
         with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
             self.validate()
 
-    def test_valid_identity_reconstructs_fixed_contract(self):
+    def test_valid_identity_reconstructs_fixed_contract(self) -> None:
         result = self.validate()
         self.assertIsInstance(result, VALIDATOR.IdentityData)
         self.assertEqual(result.expected_commit, GIT_COMMIT)
@@ -2570,13 +2627,12 @@ class CampaignIdentityValidationTest(unittest.TestCase):
             sha256_file(self.root / "environment.json"),
         )
 
-    def test_source_contract_map_and_groups_match_producer(self):
+    def test_source_contract_map_and_groups_match_producer(self) -> None:
         generator_path = REPO_ROOT / "tools" / "sq8_full_campaign_identity.py"
         spec = importlib.util.spec_from_file_location(
             "identity_source_contract_parity", generator_path
         )
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -2588,6 +2644,105 @@ class CampaignIdentityValidationTest(unittest.TestCase):
             VALIDATOR.EXPECTED_SOURCE_GROUPS,
             module.SOURCE_GROUPS,
         )
+        self.assertEqual(
+            VALIDATOR.EXPECTED_TTFT_FIXTURE_IDENTITIES,
+            module.TTFT_FIXTURE_IDENTITIES,
+        )
+
+    def test_source_contract_rejects_unknown_duplicate_and_missing_roles(self) -> None:
+        self.assertEqual(len(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS), 63)
+        VALIDATOR._validate_identity_source_contract()
+        duplicate_paths = dict(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS)
+        duplicate_paths["campaign_views"] = duplicate_paths["campaign_renderer"]
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "paths are not unique"):
+            VALIDATOR._validate_identity_source_contract(
+                duplicate_paths, VALIDATOR.EXPECTED_SOURCE_GROUPS
+            )
+
+        mutations = []
+        unknown = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
+        unknown["campaign"] = (*unknown["campaign"], "unknown_source")
+        mutations.append(unknown)
+        duplicate = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
+        duplicate["campaign"] = (*duplicate["campaign"], duplicate["campaign"][0])
+        mutations.append(duplicate)
+        missing = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
+        missing["all"] = missing["all"][:-1]
+        mutations.append(missing)
+        unclassified = dict(VALIDATOR.EXPECTED_SOURCE_GROUPS)
+        unclassified["fixture"] = tuple(
+            role for role in unclassified["fixture"] if role != "fixture_ttft_p3584"
+        )
+        mutations.append(unclassified)
+        for groups in mutations:
+            with (
+                self.subTest(groups=groups),
+                self.assertRaises(VALIDATOR.ValidationError),
+            ):
+                VALIDATOR._validate_identity_source_contract(
+                    VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS, groups
+                )
+
+    def test_environment_source_set_rejects_missing_extra_and_ttft_mutation(
+        self,
+    ) -> None:
+        pristine = deepcopy(self.environment)
+        mutations: tuple[Callable[[dict[str, Any]], object], ...] = (
+            lambda value: value["sources"].pop(),
+            lambda value: value["sources"].append(
+                {
+                    "role": "extra",
+                    "path": "tools/extra.py",
+                    "bytes": 1,
+                    "sha256": sha256_bytes(b"x"),
+                }
+            ),
+            lambda value: next(
+                item
+                for item in value["sources"]
+                if item["role"] == "fixture_ttft_p0032"
+            ).__setitem__("sha256", "0" * 64),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.environment = deepcopy(pristine)
+                mutation(self.environment)
+                self.write_documents()
+                with self.assertRaises(VALIDATOR.ValidationError):
+                    self.validate()
+
+    def test_trusted_git_blob_and_worktree_sources_are_streamed_and_bound(
+        self,
+    ) -> None:
+        repo, commit = self.build_source_checkout()
+        self.environment["git"]["commit"] = commit
+        self.write_documents()
+        identity = self.validate(commit=commit)
+        result = VALIDATOR.validate_campaign_source_checkout(identity, repo_root=repo)
+        self.assertEqual(result.git_commit, commit)
+        self.assertEqual(result.source_count, len(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS))
+        self.assertEqual(result.all_source_sha256, identity.source_sets["all"])
+
+        (repo / "unrelated-dirty-file").write_bytes(b"unrelated\n")
+        VALIDATOR.validate_campaign_source_checkout(identity, repo_root=repo)
+
+    def test_trusted_git_blob_rejects_a_recorded_worktree_substitution(self) -> None:
+        repo, commit = self.build_source_checkout()
+        role = "gate_api_contract"
+        path = repo / VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS[role]
+        replacement = b"substituted gate source\n"
+        path.write_bytes(replacement)
+        source = next(
+            item for item in self.environment["sources"] if item["role"] == role
+        )
+        source["bytes"] = len(replacement)
+        source["sha256"] = sha256_bytes(replacement)
+        self.refresh_source_sets()
+        self.environment["git"]["commit"] = commit
+        self.write_documents()
+        identity = self.validate(commit=commit)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "trusted Git blob"):
+            VALIDATOR.validate_campaign_source_checkout(identity, repo_root=repo)
 
     def test_identity_json_must_be_canonical_and_forbid_passed(self):
         path = self.root / "environment.json"
@@ -2798,6 +2953,26 @@ class CampaignIdentityValidationTest(unittest.TestCase):
 
     def test_identity_data_binds_header_initial_probe_and_run_end(self):
         identity = self.validate()
+        source_inputs = sorted(
+            (
+                {key: source[key] for key in ("path", "bytes", "sha256")}
+                for source in identity.source_by_role.values()
+            ),
+            key=lambda item: item["path"].encode("utf-8"),
+        )
+        identity.validate_header_source_inputs(source_inputs)
+        missing_source = deepcopy(source_inputs[1:])
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "lacks an exact campaign source"
+        ):
+            identity.validate_header_source_inputs(missing_source)
+        changed_source = deepcopy(source_inputs)
+        changed_source[0]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "lacks an exact campaign source"
+        ):
+            identity.validate_header_source_inputs(changed_source)
+
         header = {
             "started_utc": "2026-07-11T12:00:01Z",
             "boot_id": BOOT_ID,

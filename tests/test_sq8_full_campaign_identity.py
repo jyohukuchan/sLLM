@@ -148,7 +148,9 @@ class IdentityFixture:
         for role, relative in IDENTITY.SOURCE_ROLE_PATHS.items():
             if role in oracle_roles:
                 continue
-            if role == "systemd_service":
+            if role in IDENTITY.TTFT_FIXTURE_IDENTITIES:
+                raw = (ROOT / relative).read_bytes()
+            elif role == "systemd_service":
                 raw = b"[Service]\nUser=homelab1\nUMask=0077\n"
             elif role == "systemd_environment_contract":
                 raw = self._runtime_environment()
@@ -504,6 +506,46 @@ class FakeProbe:
 
 
 class FullCampaignIdentityTests(unittest.TestCase):
+    def test_source_contract_has_exact_unique_group_coverage(self) -> None:
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 63)
+        self.assertEqual(
+            IDENTITY.SOURCE_GROUPS["all"], tuple(IDENTITY.SOURCE_ROLE_PATHS)
+        )
+        semantic = set().union(
+            *(
+                set(roles)
+                for group, roles in IDENTITY.SOURCE_GROUPS.items()
+                if group != "all"
+            )
+        )
+        self.assertEqual(semantic, set(IDENTITY.SOURCE_ROLE_PATHS))
+        IDENTITY._validate_source_contract()
+
+    def test_source_contract_rejects_duplicate_paths_and_bad_groups(self) -> None:
+        duplicate_paths = dict(IDENTITY.SOURCE_ROLE_PATHS)
+        duplicate_paths["campaign_views"] = duplicate_paths["campaign_renderer"]
+        with self.assertRaisesRegex(IDENTITY.IdentityError, "paths are not unique"):
+            IDENTITY._validate_source_contract(duplicate_paths, IDENTITY.SOURCE_GROUPS)
+
+        mutations = []
+        unknown = dict(IDENTITY.SOURCE_GROUPS)
+        unknown["campaign"] = (*unknown["campaign"], "unknown_source")
+        mutations.append(unknown)
+        duplicate = dict(IDENTITY.SOURCE_GROUPS)
+        duplicate["campaign"] = (*duplicate["campaign"], duplicate["campaign"][0])
+        mutations.append(duplicate)
+        missing = dict(IDENTITY.SOURCE_GROUPS)
+        missing["all"] = missing["all"][:-1]
+        mutations.append(missing)
+        unclassified = dict(IDENTITY.SOURCE_GROUPS)
+        unclassified["fixture"] = tuple(
+            role for role in unclassified["fixture"] if role != "fixture_ttft_p3584"
+        )
+        mutations.append(unclassified)
+        for groups in mutations:
+            with self.subTest(groups=groups), self.assertRaises(IDENTITY.IdentityError):
+                IDENTITY._validate_source_contract(IDENTITY.SOURCE_ROLE_PATHS, groups)
+
     def test_fake_live_capture_builds_both_strict_identity_artifacts(self) -> None:
         with IdentityFixture() as fixture:
             artifacts = IDENTITY.build_identity_artifacts(fixture.inputs, fixture.live)
@@ -639,6 +681,16 @@ class FullCampaignIdentityTests(unittest.TestCase):
                     inputs = fixture.inputs
                 with self.assertRaises(IDENTITY.IdentityError):
                     IDENTITY.build_identity_artifacts(inputs, fixture.live)
+
+    def test_ttft_fixture_source_mutation_is_rejected(self) -> None:
+        with IdentityFixture() as fixture:
+            role = "fixture_ttft_p0032"
+            path = fixture.repo / IDENTITY.SOURCE_ROLE_PATHS[role]
+            path.write_bytes(path.read_bytes() + b"\n")
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityError, "TTFT fixture source differs"
+            ):
+                IDENTITY.build_identity_artifacts(fixture.inputs, fixture.live)
 
     def test_pinned_file_detects_same_byte_entry_replacement_at_seal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
