@@ -525,9 +525,28 @@ class AtomicCampaignDirectory:
         self._require_open()
         self._validate_files(include_validation=False)
 
+    def _rollback_renamed_stage(self) -> None:
+        assert self.stage_identity is not None
+        try:
+            current = _entry_identity(self.parent_fd, self.final_path.name)
+            if current.directory_anchor() != self.stage_identity.directory_anchor():
+                fail("refusing to roll back a replaced campaign destination")
+            os.rename(
+                self.final_path.name,
+                self.stage_name,
+                src_dir_fd=self.parent_fd,
+                dst_dir_fd=self.parent_fd,
+            )
+            os.fsync(self.parent_fd)
+        except CampaignBundleError:
+            raise
+        except OSError:
+            fail("failed to roll back an incomplete campaign publication")
+
     def publish(self) -> Path:
         self._require_open()
         self._validate_files(include_validation=True)
+        renamed = False
         try:
             if os.listdir(self.work_fd):
                 fail("campaign work root is not empty before publication")
@@ -545,6 +564,7 @@ class AtomicCampaignDirectory:
                 src_dir_fd=self.parent_fd,
                 dst_dir_fd=self.parent_fd,
             )
+            renamed = True
             published_identity = _entry_identity(self.parent_fd, self.final_path.name)
             assert self.stage_identity is not None
             if (
@@ -558,10 +578,17 @@ class AtomicCampaignDirectory:
             self.stage_fd = -1
             self.close()
             return self.final_path
-        except CampaignBundleError:
+        except BaseException as error:
+            if renamed and not self.published:
+                try:
+                    self._rollback_renamed_stage()
+                except CampaignBundleError as rollback_error:
+                    raise rollback_error from error
+            if isinstance(error, CampaignBundleError):
+                raise
+            if isinstance(error, OSError):
+                fail("failed to publish the validated campaign bundle")
             raise
-        except OSError:
-            fail("failed to publish the validated campaign bundle")
 
     def clear_component_work(self) -> None:
         self._require_open()

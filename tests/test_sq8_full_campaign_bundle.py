@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +124,27 @@ class FullCampaignBundleTests(unittest.TestCase):
             ):
                 fixture.bundle.publish()
             self.assertFalse(fixture.final.exists())
+
+    def test_post_rename_fsync_failure_rolls_back_the_public_name(self) -> None:
+        with BundleFixture() as fixture:
+            fixture.populate()
+            fixture.add_validation()
+            real_fsync = os.fsync
+            calls = 0
+
+            def fail_fourth_fsync(descriptor: int) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 4:
+                    raise OSError("synthetic post-rename fsync failure")
+                real_fsync(descriptor)
+
+            with mock.patch.object(BUNDLE.os, "fsync", side_effect=fail_fourth_fsync):
+                with self.assertRaises(BUNDLE.CampaignBundleError):
+                    fixture.bundle.publish()
+            self.assertGreaterEqual(calls, 5)
+            self.assertFalse(fixture.final.exists())
+            self.assertTrue(fixture.bundle.stage_path.is_dir())
 
     def test_layout_rejects_missing_extra_wrong_mode_and_symlink(self) -> None:
         defects = ("missing", "extra", "mode", "symlink")
