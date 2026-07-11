@@ -35,8 +35,8 @@ def load_tool() -> Any:
 TOOL = load_tool()
 
 CONTAINER_ID = "1" * 64
-IMAGE_ID = "sha256:" + "2" * 64
-NETWORK_ID = "3" * 64
+IMAGE_ID = TOOL.OPENWEBUI_IMAGE_ID
+NETWORK_ID = TOOL.OPENWEBUI_NETWORK_ID
 GATEWAY_URL = "http://172.20.0.1:8000/readyz"
 OPENWEBUI_URL = "http://127.0.0.1:3000/health"
 
@@ -204,17 +204,9 @@ class FakeCommands:
 class FakeHttp:
     def __init__(
         self,
-        ready: list[Any] | None = None,
         health: list[Any] | None = None,
     ) -> None:
         self.responses = {
-            GATEWAY_URL: list(
-                ready
-                or [
-                    TOOL.HttpResponse(GATEWAY_URL, 200, TOOL.GATEWAY_READY_BODY),
-                    TOOL.HttpResponse(GATEWAY_URL, 200, TOOL.GATEWAY_READY_BODY),
-                ]
-            ),
             OPENWEBUI_URL: list(
                 health
                 or [
@@ -237,6 +229,30 @@ class FakeHttp:
         if not values:
             raise AssertionError(f"unexpected or exhausted HTTP GET: {url}")
         return values.pop(0)
+
+
+class FakeGatewayHttp:
+    def __init__(self, ready: list[Any] | None = None) -> None:
+        self.responses = list(
+            ready
+            or [
+                TOOL.HttpResponse(GATEWAY_URL, 200, TOOL.GATEWAY_READY_BODY),
+                TOOL.HttpResponse(GATEWAY_URL, 200, TOOL.GATEWAY_READY_BODY),
+            ]
+        )
+        self.calls: list[tuple[int, float, int]] = []
+
+    def get(
+        self,
+        container_pid: int,
+        *,
+        timeout_seconds: float,
+        maximum_body_bytes: int,
+    ) -> Any:
+        self.calls.append((container_pid, timeout_seconds, maximum_body_bytes))
+        if not self.responses:
+            raise AssertionError("gateway HTTP fixture exhausted")
+        return self.responses.pop(0)
 
 
 class FakeObserverHandle:
@@ -295,6 +311,7 @@ def dependencies(
     *,
     commands: Any | None = None,
     http: Any | None = None,
+    gateway_http: Any | None = None,
     observer: Any | None = None,
     gpu: Any | None = None,
     clock: Callable[[], int] | None = None,
@@ -302,6 +319,7 @@ def dependencies(
     return TOOL.OperationalDependencies(
         commands or FakeCommands(),
         http or FakeHttp(),
+        gateway_http or FakeGatewayHttp(),
         observer or FakeObserverReader(),
         gpu or FakeGpu(),
         clock or FakeClock(),
@@ -309,14 +327,113 @@ def dependencies(
 
 
 class OperationalPreflightTests(unittest.TestCase):
+    def test_production_container_discovery_allowlist_is_one_inspect(self) -> None:
+        commands = TOOL.production_container_discovery_commands()
+        self.assertEqual(
+            commands,
+            frozenset({TOOL._docker_command(TOOL.OPENWEBUI_CONTAINER_NAME)}),
+        )
+        flattened = " ".join(next(iter(commands)))
+        self.assertNotIn(" run ", f" {flattened} ")
+        self.assertNotIn(" exec ", f" {flattened} ")
+
+    def test_production_container_discovery_feeds_full_preflight_identity(self) -> None:
+        commands = FakeCommands(
+            container=[
+                compact(container_document()),
+                compact(container_document()),
+                compact(container_document()),
+            ]
+        )
+        discovered = TOOL.discover_production_openwebui_container(commands)
+        self.assertEqual(discovered.container_id, CONTAINER_ID)
+        self.assertEqual(discovered.image_id, TOOL.OPENWEBUI_IMAGE_ID)
+        self.assertEqual(
+            discovered.network_ids,
+            ((TOOL.OPENWEBUI_NETWORK_NAME, TOOL.OPENWEBUI_NETWORK_ID),),
+        )
+        self.assertEqual(discovered.pid, 404)
+        self.assertEqual(discovered.restart_count, 0)
+        self.assertEqual(discovered.started_at, "2026-07-11T12:00:00.000000000Z")
+
+        bound = dataclasses.replace(expectation(), container_id=discovered.container_id)
+        result = TOOL.run_operational_preflight(
+            bound,
+            dependencies(commands=commands),
+        )
+        self.assertEqual(result.container, discovered)
+        docker_calls = [
+            call[0] for call in commands.calls if call[0][0] == TOOL.DOCKER_BIN
+        ]
+        self.assertEqual(
+            docker_calls,
+            [TOOL._docker_command(TOOL.OPENWEBUI_CONTAINER_NAME)] * 3,
+        )
+        flattened = " ".join(item for call in docker_calls for item in call)
+        self.assertNotIn(" run ", f" {flattened} ")
+        self.assertNotIn(" exec ", f" {flattened} ")
+
+    def test_production_container_discovery_rejects_identity_or_state_drift(
+        self,
+    ) -> None:
+        cases: tuple[tuple[str, Callable[[dict[str, Any]], None], str], ...] = (
+            (
+                "container-id",
+                lambda item: item.__setitem__("Id", "not-an-id"),
+                "container or image",
+            ),
+            (
+                "image",
+                lambda item: item.__setitem__("Image", "sha256:" + "f" * 64),
+                "container or image",
+            ),
+            (
+                "network",
+                lambda item: item["NetworkSettings"]["Networks"][
+                    "open-webui-network"
+                ].__setitem__("NetworkID", "f" * 64),
+                "network content",
+            ),
+            (
+                "restarting",
+                lambda item: item["State"].__setitem__("Restarting", True),
+                "running and healthy",
+            ),
+            (
+                "oom",
+                lambda item: item["State"].__setitem__("OOMKilled", True),
+                "running and healthy",
+            ),
+        )
+        for label, mutate, message in cases:
+            document = container_document()
+            mutate(document[0])
+            commands = FakeCommands(container=[compact(document)])
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(TOOL.OperationalError, message),
+            ):
+                TOOL.discover_production_openwebui_container(commands)
+            self.assertEqual(
+                [call[0] for call in commands.calls],
+                [TOOL._docker_command("open-webui")],
+            )
+
     def test_success_is_bounded_read_only_and_double_checked(self) -> None:
         commands = FakeCommands()
         http = FakeHttp()
+        gateway_http = FakeGatewayHttp()
         observer = FakeObserverReader()
         gpu = FakeGpu()
         result = TOOL.run_operational_preflight(
             expectation(),
-            dependencies(commands=commands, http=http, observer=observer, gpu=gpu),
+            dependencies(
+                commands=commands,
+                http=http,
+                gateway_http=gateway_http,
+                observer=observer,
+                gpu=gpu,
+            ),
         )
 
         self.assertEqual(result.systemd.main_pid, 101)
@@ -337,11 +454,12 @@ class OperationalPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             [call[0] for call in http.calls],
-            [GATEWAY_URL, OPENWEBUI_URL, OPENWEBUI_URL, GATEWAY_URL],
+            [OPENWEBUI_URL, OPENWEBUI_URL],
         )
         self.assertTrue(
             all(call[1] == TOOL.HTTP_TIMEOUT_SECONDS for call in http.calls)
         )
+        self.assertEqual([call[0] for call in gateway_http.calls], [404, 404])
         self.assertEqual(observer.paths, [Path("/run/ullm/lifecycle-observer.sock")])
         self.assertEqual(observer.handle.closed, 1)
         flattened = " ".join(item for call in commands.calls for item in call[0])
@@ -351,13 +469,13 @@ class OperationalPreflightTests(unittest.TestCase):
     def test_gateway_and_openwebui_require_exact_200_bodies(self) -> None:
         cases = (
             (
-                FakeHttp(
+                FakeGatewayHttp(
                     ready=[TOOL.HttpResponse(GATEWAY_URL, 503, TOOL.GATEWAY_READY_BODY)]
                 ),
                 "gateway readiness",
             ),
             (
-                FakeHttp(
+                FakeGatewayHttp(
                     ready=[TOOL.HttpResponse(GATEWAY_URL, 200, b'{"status": "ready"}')]
                 ),
                 "gateway readiness",
@@ -373,12 +491,19 @@ class OperationalPreflightTests(unittest.TestCase):
                 "OpenWebUI health",
             ),
         )
-        for http, message in cases:
+        for reader, message in cases:
             with self.subTest(message=message):
                 observer = FakeObserverReader()
                 with self.assertRaisesRegex(TOOL.OperationalError, message):
                     TOOL.run_operational_preflight(
-                        expectation(), dependencies(http=http, observer=observer)
+                        expectation(),
+                        dependencies(
+                            http=reader if isinstance(reader, FakeHttp) else None,
+                            gateway_http=(
+                                reader if isinstance(reader, FakeGatewayHttp) else None
+                            ),
+                            observer=observer,
+                        ),
                     )
                 self.assertEqual(observer.handle.closed, 1)
 
@@ -575,7 +700,7 @@ class OperationalPreflightTests(unittest.TestCase):
         handle = FakeObserverHandle(
             close_error=TOOL.OperationalError("observer cleanup sentinel")
         )
-        http = FakeHttp(
+        gateway_http = FakeGatewayHttp(
             ready=[TOOL.HttpResponse(GATEWAY_URL, 503, TOOL.GATEWAY_READY_BODY)]
         )
         with self.assertRaisesRegex(
@@ -583,7 +708,10 @@ class OperationalPreflightTests(unittest.TestCase):
         ) as caught:
             TOOL.run_operational_preflight(
                 expectation(),
-                dependencies(http=http, observer=FakeObserverReader(handle)),
+                dependencies(
+                    gateway_http=gateway_http,
+                    observer=FakeObserverReader(handle),
+                ),
             )
         self.assertTrue(
             any(
@@ -896,6 +1024,165 @@ class BoundedDependencyTests(unittest.TestCase):
                 timeout_seconds=1,
                 maximum_body_bytes=100,
             )
+
+    def run_fake_gateway_process(
+        self, process: FakePopenProcess
+    ) -> tuple[Any, FakePopenFactory, Any]:
+        factory = FakePopenFactory(process)
+        killpg = mock.Mock()
+        with (
+            mock.patch.object(TOOL.subprocess, "Popen", factory),
+            mock.patch.object(TOOL.os, "killpg", killpg),
+        ):
+            response = TOOL.ProductionGatewayNamespaceReader().get(
+                404,
+                timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
+                maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
+            )
+        return response, factory, killpg
+
+    def test_gateway_namespace_reader_uses_only_the_fixed_get_vector(self) -> None:
+        process = FakePopenProcess(stdout=TOOL.GATEWAY_NAMESPACE_OUTPUT)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            response, factory, killpg = self.run_fake_gateway_process(process)
+            gc.collect()
+
+        self.assertEqual(
+            response,
+            TOOL.HttpResponse(GATEWAY_URL, 200, TOOL.GATEWAY_READY_BODY),
+        )
+        self.assertEqual(
+            factory.calls[0][0],
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/bin/nsenter",
+                "--target",
+                "404",
+                "--net",
+                "--setgid",
+                "1000",
+                "--setuid",
+                "1000",
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                TOOL.GATEWAY_NAMESPACE_SOURCE,
+            ],
+        )
+        source = factory.calls[0][0][-1]
+        self.assertIn("HTTPConnection('172.20.0.1',8000,timeout=5.0)", source)
+        self.assertIn("c.request('GET','/readyz'", source)
+        flattened = " ".join(factory.calls[0][0])
+        for forbidden in ("docker run", "docker exec", " restart ", " kill "):
+            self.assertNotIn(forbidden, flattened)
+        self.assertEqual(dataclasses.fields(TOOL.ProductionGatewayNamespaceReader), ())
+        self.assertIs(factory.calls[0][1]["stdin"], TOOL.subprocess.DEVNULL)
+        self.assertEqual(factory.calls[0][1]["env"], dict(TOOL.COMMAND_ENVIRONMENT))
+        self.assertFalse(factory.calls[0][1]["start_new_session"])
+        self.assertEqual(factory.calls[0][1]["process_group"], 0)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        killpg.assert_not_called()
+
+    def test_gateway_namespace_reader_rejects_pid_and_limit_drift(self) -> None:
+        reader = TOOL.ProductionGatewayNamespaceReader()
+        cases = (
+            (False, TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "PID"),
+            (0, TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "PID"),
+            (404, 9.0, TOOL.MAX_HTTP_BODY_BYTES, "timeout"),
+            (404, TOOL.HTTP_TIMEOUT_SECONDS, 4095, "body bound"),
+        )
+        for pid, timeout, maximum, message in cases:
+            with (
+                self.subTest(pid=pid, timeout=timeout, maximum=maximum),
+                mock.patch.object(TOOL.subprocess, "Popen") as popen,
+                self.assertRaisesRegex(TOOL.OperationalError, message),
+            ):
+                reader.get(
+                    pid,
+                    timeout_seconds=timeout,
+                    maximum_body_bytes=maximum,
+                )
+            popen.assert_not_called()
+
+    def test_gateway_namespace_reader_rejects_output_and_stderr_drift(self) -> None:
+        cases = (
+            (
+                FakePopenProcess(stdout=b'201\n{"status":"ready"}'),
+                "output differs",
+            ),
+            (
+                FakePopenProcess(
+                    stdout=TOOL.GATEWAY_NAMESPACE_OUTPUT, stderr=b"warning"
+                ),
+                "emitted stderr",
+            ),
+        )
+        for process, message in cases:
+            factory = FakePopenFactory(process)
+            with (
+                self.subTest(message=message),
+                warnings.catch_warnings(),
+                mock.patch.object(TOOL.subprocess, "Popen", factory),
+                mock.patch.object(TOOL.os, "killpg") as killpg,
+                self.assertRaisesRegex(TOOL.OperationalError, message),
+            ):
+                warnings.simplefilter("error", ResourceWarning)
+                TOOL.ProductionGatewayNamespaceReader().get(
+                    404,
+                    timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
+                    maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
+                )
+            gc.collect()
+            self.assertTrue(process.stdout.closed)
+            self.assertTrue(process.stderr.closed)
+            killpg.assert_not_called()
+
+    def test_gateway_namespace_reader_preserves_interrupt_and_cleans_process(
+        self,
+    ) -> None:
+        process = FakePopenProcess(running=True, hold_pipes_open=True)
+        factory = FakePopenFactory(process)
+        with (
+            mock.patch.object(TOOL.subprocess, "Popen", factory),
+            mock.patch.object(
+                TOOL.selectors.DefaultSelector,
+                "select",
+                side_effect=KeyboardInterrupt,
+            ),
+            mock.patch.object(TOOL.os, "killpg") as killpg,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            TOOL.ProductionGatewayNamespaceReader().get(
+                404,
+                timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
+                maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
+            )
+        killpg.assert_called_once_with(process.pid, TOOL.signal.SIGKILL)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_gateway_namespace_reader_rejects_sudo_or_nsenter_failure(self) -> None:
+        process = FakePopenProcess(
+            stderr=b"sudo or nsenter failed",
+            return_code=1,
+        )
+        factory = FakePopenFactory(process)
+        with (
+            mock.patch.object(TOOL.subprocess, "Popen", factory),
+            mock.patch.object(TOOL.os, "killpg") as killpg,
+            self.assertRaisesRegex(TOOL.OperationalError, "exited 1"),
+        ):
+            TOOL.ProductionGatewayNamespaceReader().get(
+                404,
+                timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
+                maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
+            )
+        killpg.assert_not_called()
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
 
 
 def collector_capture(

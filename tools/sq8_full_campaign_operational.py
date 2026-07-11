@@ -44,6 +44,19 @@ KFD_GPU_ID = 51_545
 AMD_SMI_BIN = "/opt/rocm/bin/amd-smi"
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
 DOCKER_BIN = "/usr/bin/docker"
+SUDO_BIN = "/usr/bin/sudo"
+NSENTER_BIN = "/usr/bin/nsenter"
+PYTHON_BIN = "/usr/bin/python3"
+EXECUTION_UID = 1000
+EXECUTION_GID = 1000
+OPENWEBUI_CONTAINER_NAME = "open-webui"
+OPENWEBUI_IMAGE_ID = (
+    "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
+)
+OPENWEBUI_NETWORK_NAME = "open-webui-network"
+OPENWEBUI_NETWORK_ID = (
+    "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8"
+)
 COMMAND_ENVIRONMENT = (
     ("HOME", "/"),
     ("LANG", "C"),
@@ -55,6 +68,14 @@ COMMAND_ENVIRONMENT = (
 
 GATEWAY_READY_BODY = b'{"status":"ready"}'
 OPENWEBUI_HEALTH_BODY = b'{"status":true}'
+GATEWAY_NAMESPACE_OUTPUT = b'200\n{"status":"ready"}'
+GATEWAY_NAMESPACE_SOURCE = (
+    "import http.client,sys;"
+    "c=http.client.HTTPConnection('172.20.0.1',8000,timeout=5.0);"
+    "c.request('GET','/readyz',headers={'Accept':'application/json',"
+    "'Connection':'close'});r=c.getresponse();b=r.read(4097);c.close();"
+    "sys.stdout.buffer.write(str(r.status).encode('ascii')+b'\\n'+b)"
+)
 
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -210,6 +231,16 @@ class HttpReader(Protocol):
     ) -> HttpResponse: ...
 
 
+class GatewayNamespaceReader(Protocol):
+    def get(
+        self,
+        container_pid: int,
+        *,
+        timeout_seconds: float,
+        maximum_body_bytes: int,
+    ) -> HttpResponse: ...
+
+
 class ObserverPathHandle(Protocol):
     def snapshot(self) -> ObserverPathSnapshot: ...
 
@@ -228,6 +259,7 @@ class GpuIsolationReader(Protocol):
 class OperationalDependencies:
     commands: CommandReader
     http: HttpReader
+    gateway_http: GatewayNamespaceReader
     observer_paths: ObserverPathReader
     gpu: GpuIsolationReader
     monotonic_ns: Callable[[], int]
@@ -322,7 +354,10 @@ def _run_bounded_read_only_process(
     label: str,
     timeout_seconds: float,
     maximum_stdout_bytes: int,
+    preserve_controlling_tty: bool = False,
 ) -> bytes:
+    if type(preserve_controlling_tty) is not bool:
+        fail(f"{label} controlling TTY binding differs")
     try:
         process = subprocess.Popen(
             list(arguments),
@@ -330,7 +365,8 @@ def _run_bounded_read_only_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True,
-            start_new_session=True,
+            start_new_session=not preserve_controlling_tty,
+            process_group=0 if preserve_controlling_tty else None,
             env=dict(COMMAND_ENVIRONMENT),
         )
     except (OSError, subprocess.SubprocessError):
@@ -469,6 +505,51 @@ class BoundedHttpReader:
         if len(body) > maximum_body_bytes:
             fail("HTTP response body exceeds its byte bound")
         return HttpResponse(url, status, body)
+
+
+@dataclasses.dataclass(frozen=True)
+class ProductionGatewayNamespaceReader:
+    """Read gateway readiness through an existing container network namespace."""
+
+    def get(
+        self,
+        container_pid: int,
+        *,
+        timeout_seconds: float,
+        maximum_body_bytes: int,
+    ) -> HttpResponse:
+        if type(container_pid) is not int or container_pid <= 0:
+            fail("gateway namespace PID differs")
+        if timeout_seconds != HTTP_TIMEOUT_SECONDS:
+            fail("gateway namespace timeout differs")
+        if maximum_body_bytes != MAX_HTTP_BODY_BYTES:
+            fail("gateway namespace body bound differs")
+        arguments = (
+            SUDO_BIN,
+            "-n",
+            NSENTER_BIN,
+            "--target",
+            str(container_pid),
+            "--net",
+            "--setgid",
+            str(EXECUTION_GID),
+            "--setuid",
+            str(EXECUTION_UID),
+            PYTHON_BIN,
+            "-I",
+            "-c",
+            GATEWAY_NAMESPACE_SOURCE,
+        )
+        raw = _run_bounded_read_only_process(
+            arguments,
+            label="gateway namespace readiness GET",
+            timeout_seconds=HTTP_TIMEOUT_SECONDS,
+            maximum_stdout_bytes=len(GATEWAY_NAMESPACE_OUTPUT),
+            preserve_controlling_tty=True,
+        )
+        if raw != GATEWAY_NAMESPACE_OUTPUT:
+            fail("gateway namespace readiness output differs")
+        return HttpResponse("http://172.20.0.1:8000/readyz", 200, GATEWAY_READY_BODY)
 
 
 class _OsObserverPathHandle:
@@ -891,11 +972,26 @@ def production_read_only_commands(
     return commands
 
 
-def _capture_container(
-    commands: CommandReader, expectation: OperationalExpectation
+def production_container_discovery_commands() -> frozenset[tuple[str, ...]]:
+    """Return the sole command allowed before the container ID is known."""
+
+    command = _docker_command(OPENWEBUI_CONTAINER_NAME)
+    if not _is_read_only_command(command):
+        fail("production container discovery command is not read-only")
+    return frozenset({command})
+
+
+def _capture_container_identity(
+    commands: CommandReader,
+    *,
+    container_name: str,
+    container_id: str | None,
+    image_id: str,
+    network_name: str,
+    network_id: str,
 ) -> ContainerSnapshot:
     raw = commands.run(
-        _docker_command(expectation.container_name),
+        _docker_command(container_name),
         label="OpenWebUI container inspection",
         timeout_seconds=COMMAND_TIMEOUT_SECONDS,
         maximum_stdout_bytes=MAX_COMMAND_STDOUT_BYTES,
@@ -904,10 +1000,13 @@ def _capture_container(
     if type(value) is not list or len(value) != 1 or type(value[0]) is not dict:
         fail("OpenWebUI container inspection shape differs")
     container = cast(dict[str, Any], value[0])
+    observed_container_id = container.get("Id")
     if (
-        container.get("Id") != expectation.container_id
-        or container.get("Name") != f"/{expectation.container_name}"
-        or container.get("Image") != expectation.image_id
+        type(observed_container_id) is not str
+        or CONTAINER_ID_RE.fullmatch(observed_container_id) is None
+        or (container_id is not None and observed_container_id != container_id)
+        or container.get("Name") != f"/{container_name}"
+        or container.get("Image") != image_id
     ):
         fail("OpenWebUI container or image content identity differs")
     state = container.get("State")
@@ -931,21 +1030,46 @@ def _capture_container(
     networks = (
         network_settings.get("Networks") if type(network_settings) is dict else None
     )
-    if type(networks) is not dict or set(networks) != {expectation.network_name}:
+    if type(networks) is not dict or set(networks) != {network_name}:
         fail("OpenWebUI Docker network attachment set differs")
-    attachment = networks[expectation.network_name]
-    if (
-        type(attachment) is not dict
-        or attachment.get("NetworkID") != expectation.network_id
-    ):
+    attachment = networks[network_name]
+    if type(attachment) is not dict or attachment.get("NetworkID") != network_id:
         fail("OpenWebUI Docker network content identity differs")
     return ContainerSnapshot(
-        expectation.container_id,
-        expectation.image_id,
+        observed_container_id,
+        image_id,
         pid,
         restart_count,
         started_at,
-        ((expectation.network_name, expectation.network_id),),
+        ((network_name, network_id),),
+    )
+
+
+def _capture_container(
+    commands: CommandReader, expectation: OperationalExpectation
+) -> ContainerSnapshot:
+    return _capture_container_identity(
+        commands,
+        container_name=expectation.container_name,
+        container_id=expectation.container_id,
+        image_id=expectation.image_id,
+        network_name=expectation.network_name,
+        network_id=expectation.network_id,
+    )
+
+
+def discover_production_openwebui_container(
+    commands: CommandReader,
+) -> ContainerSnapshot:
+    """Discover the current fixed production OpenWebUI container identity."""
+
+    return _capture_container_identity(
+        commands,
+        container_name=OPENWEBUI_CONTAINER_NAME,
+        container_id=None,
+        image_id=OPENWEBUI_IMAGE_ID,
+        network_name=OPENWEBUI_NETWORK_NAME,
+        network_id=OPENWEBUI_NETWORK_ID,
     )
 
 
@@ -1128,6 +1252,18 @@ def _http_get(http: HttpReader, url: str, body: bytes, label: str) -> HttpRespon
     return response
 
 
+def _gateway_get(
+    gateway_http: GatewayNamespaceReader, container_pid: int, url: str, label: str
+) -> HttpResponse:
+    response = gateway_http.get(
+        container_pid,
+        timeout_seconds=HTTP_TIMEOUT_SECONDS,
+        maximum_body_bytes=MAX_HTTP_BODY_BYTES,
+    )
+    _require_http(response, url, GATEWAY_READY_BODY, label)
+    return response
+
+
 def _validate_expectation(value: OperationalExpectation) -> None:
     if (
         type(value) is not OperationalExpectation
@@ -1148,6 +1284,7 @@ def _validate_expectation(value: OperationalExpectation) -> None:
         or value.observer_parent_gid < 0
         or type(value.observer_parent_mode) is not int
         or value.observer_parent_mode != 0o750
+        or value.gateway_ready_url != "http://172.20.0.1:8000/readyz"
     ):
         fail("operational expectation binding differs")
     _observer_path(value.observer_socket)
@@ -1199,10 +1336,10 @@ def run_operational_preflight(
             dependencies.monotonic_ns,
         )
         container_before = _capture_container(dependencies.commands, expectation)
-        ready = _http_get(
-            dependencies.http,
+        ready = _gateway_get(
+            dependencies.gateway_http,
+            container_before.pid,
             expectation.gateway_ready_url,
-            GATEWAY_READY_BODY,
             "gateway readiness",
         )
         health = _http_get(
@@ -1219,10 +1356,10 @@ def run_operational_preflight(
             OPENWEBUI_HEALTH_BODY,
             "final OpenWebUI health",
         )
-        _http_get(
-            dependencies.http,
+        _gateway_get(
+            dependencies.gateway_http,
+            container_before.pid,
             expectation.gateway_ready_url,
-            GATEWAY_READY_BODY,
             "final gateway readiness",
         )
         gpu_after = dependencies.gpu.capture(expectation.worker_pid)
