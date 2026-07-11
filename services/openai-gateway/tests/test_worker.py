@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from ullm_openai_gateway.app import _cancel_stream_and_drain
 from ullm_openai_gateway.schemas import EOS_TOKEN_IDS
 from ullm_openai_gateway.worker import (
     WorkerBusy,
     WorkerConfig,
     WorkerFatal,
     WorkerGenerationRequest,
+    WorkerNotReady,
     WorkerSupervisor,
 )
 
@@ -162,13 +164,16 @@ def config(
     )
 
 
-def generation(maximum: int = 2, prompt_tokens: int = 3) -> WorkerGenerationRequest:
+def generation(
+    maximum: int = 2, prompt_tokens: int = 3, *, stream: bool = False
+) -> WorkerGenerationRequest:
     return WorkerGenerationRequest(
         prompt_token_ids=tuple(range(prompt_tokens)),
         max_new_tokens=maximum,
         temperature=0.0,
         top_p=1.0,
         seed=0,
+        stream=stream,
     )
 
 
@@ -456,6 +461,134 @@ def test_fatal_cleanup_waits_for_http_error_attempt_ack(tmp_path: Path) -> None:
                 break
             await asyncio.sleep(0.01)
         assert exits == [1]
+        await supervisor.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_idle_fatal_still_waits_for_http_lifecycle_ack(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        exits: list[int] = []
+        supervisor = WorkerSupervisor(config(tmp_path), fatal_exit=exits.append)
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        fatal = asyncio.create_task(supervisor._fatal("injected idle failure"))
+        await supervisor.wait_fatal()
+        await asyncio.sleep(0.05)
+        assert exits == []
+        await supervisor.acknowledge_fatal_response()
+        await fatal
+        assert exits == [1]
+        await supervisor.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_gateway_fatal_request_poison_is_synchronous_after_release(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        exits: list[int] = []
+        supervisor = WorkerSupervisor(config(tmp_path), fatal_exit=exits.append)
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        handle = await supervisor.admit(generation())
+        assert (await supervisor.wait(handle)).outcome == "stop"
+        supervisor.request_fatal("injected post-release gateway failure")
+        assert supervisor.failed
+        assert not supervisor.ready
+        with pytest.raises(WorkerNotReady):
+            await supervisor.admit(generation())
+        await supervisor.acknowledge_fatal_response()
+        for _ in range(100):
+            if exits:
+                break
+            await asyncio.sleep(0.01)
+        assert exits == [1]
+        await supervisor.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_stream_queue_overflow_requests_immediate_slow_client_cancel(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        supervisor = WorkerSupervisor(
+            config(tmp_path, mode="cancel_hang"), fatal_exit=lambda _: None
+        )
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        handle = await supervisor.admit(generation(maximum=64, stream=True))
+        await supervisor.wait_started(handle)
+        assert handle.stream_state is not None
+        for _ in range(100):
+            active = supervisor._active
+            if active is not None and active.processed_prompt_tokens == 3:
+                break
+            await asyncio.sleep(0.01)
+        assert supervisor._active is not None
+        assert supervisor._active.processed_prompt_tokens == 3
+        for index in range(33):
+            await supervisor._handle_event(
+                {
+                    "schema_version": "ullm.worker.v1",
+                    "type": "token",
+                    "request_id": handle.request_id,
+                    "index": index,
+                    "token_id": 42,
+                }
+            )
+        for _ in range(100):
+            active = supervisor._active
+            if active is not None and active.cancel_reason == "slow_client":
+                break
+            await asyncio.sleep(0.01)
+        assert handle.stream_state.token_queue.qsize() == 32
+        assert handle.stream_state.aborted_reason == "slow_client"
+        assert handle.stream_state.aborted.is_set()
+        assert supervisor._active is not None
+        assert supervisor._active.cancel_reason == "slow_client"
+        await supervisor.shutdown()
+        if handle._future.done():
+            handle._future.exception()
+
+    asyncio.run(scenario())
+
+
+def test_stream_queue_abort_and_http_cleanup_share_slow_client_reason(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        supervisor = WorkerSupervisor(
+            config(tmp_path, mode="wait_cancel"), fatal_exit=lambda _: None
+        )
+        cancel_commands: list[dict[str, object]] = []
+        original_write = supervisor._write_command
+
+        async def record_write(command: dict[str, object]) -> None:
+            if command.get("type") == "cancel":
+                cancel_commands.append(command)
+            await original_write(command)
+
+        supervisor._write_command = record_write  # type: ignore[method-assign]
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        handle = await supervisor.admit(generation(maximum=64, stream=True))
+        await supervisor.wait_started(handle)
+        assert handle.stream_state is not None
+        for _ in range(32):
+            handle.stream_state.token_queue.put_nowait(42)
+        active = supervisor._active
+        assert active is not None
+        supervisor._publish_stream_token(active, 42)
+        assert handle.stream_state.aborted_reason == "slow_client"
+        cleanup = asyncio.create_task(_cancel_stream_and_drain(supervisor, handle))
+        result = await asyncio.wait_for(supervisor.wait(handle), timeout=1.0)
+        await cleanup
+        assert result.outcome == "cancelled"
+        assert len(cancel_commands) == 1
+        assert cancel_commands[0]["reason"] == "slow_client"
         await supervisor.shutdown()
 
     asyncio.run(scenario())

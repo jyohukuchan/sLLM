@@ -122,6 +122,46 @@ class FrozenQwen3Tokenizer:
         return value
 
 
+class StableIncrementalDecoder:
+    """Emit only decoded prefixes that cannot contain incomplete UTF-8."""
+
+    def __init__(self, tokenizer: FrozenQwen3Tokenizer) -> None:
+        self._tokenizer = tokenizer
+        self._token_ids: list[int] = []
+        self._emitted = ""
+        self._finished = False
+
+    def push(self, token_id: int) -> str:
+        if self._finished:
+            raise TokenizerError("incremental decoder is already finished")
+        if isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0:
+            raise TokenizerError("incremental decoder received an invalid token ID")
+        self._token_ids.append(token_id)
+        decoded = self._tokenizer.decode(self._token_ids)
+        if not decoded.startswith(self._emitted):
+            raise TokenizerError("incremental decode changed an emitted prefix")
+        replacement = decoded.find("\ufffd", len(self._emitted))
+        stable = decoded if replacement < 0 else decoded[:replacement]
+        suffix = stable[len(self._emitted) :]
+        self._emitted = stable
+        return suffix
+
+    def finish(self) -> str:
+        if self._finished:
+            raise TokenizerError("incremental decoder is already finished")
+        self._finished = True
+        decoded = self._tokenizer.decode(self._token_ids)
+        if not decoded.startswith(self._emitted):
+            raise TokenizerError("final decode changed an emitted prefix")
+        suffix = decoded[len(self._emitted) :]
+        self._emitted = decoded
+        return suffix
+
+    @property
+    def text(self) -> str:
+        return self._emitted
+
+
 def _validate_files(directory: Path) -> None:
     if not directory.is_dir():
         raise TokenizerError("tokenizer directory is absent")

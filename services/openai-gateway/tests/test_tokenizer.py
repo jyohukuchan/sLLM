@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from ullm_openai_gateway.schemas import MODEL_ID, normalize_chat_request
-from ullm_openai_gateway.tokenizer import FrozenQwen3Tokenizer
+from ullm_openai_gateway.tokenizer import (
+    FrozenQwen3Tokenizer,
+    StableIncrementalDecoder,
+    TokenizerError,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -55,3 +59,59 @@ def test_final_decode_is_stable_for_multilingual_text(
     raw = tokenizer._tokenizer(text, add_special_tokens=False).input_ids
     assert tokenizer.decode(raw) == expected
     assert tokenizer.decode(raw) == tokenizer.decode(raw)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "日本語の応答です。",
+        "emoji: 😀🚀",
+        "combining: e\u0301",
+        "```python\nprint('hello')\n```",
+    ],
+)
+def test_incremental_suffixes_equal_final_decode(
+    tokenizer: FrozenQwen3Tokenizer, text: str
+) -> None:
+    token_ids = tokenizer._tokenizer(text, add_special_tokens=False).input_ids
+    decoder = StableIncrementalDecoder(tokenizer)
+    chunks = [decoder.push(token_id) for token_id in token_ids]
+    chunks.append(decoder.finish())
+    assert "".join(chunks) == tokenizer.decode(token_ids)
+    assert all("\ufffd" not in chunk for chunk in chunks[:-1])
+
+
+def test_incremental_decoder_holds_replacement_until_sequence_is_stable() -> None:
+    class ByteFallbackTokenizer:
+        def decode(self, token_ids: list[int]) -> str:
+            return {(1,): "a\ufffd", (1, 2): "aあ"}[tuple(token_ids)]
+
+    decoder = StableIncrementalDecoder(ByteFallbackTokenizer())  # type: ignore[arg-type]
+    assert decoder.push(1) == "a"
+    assert decoder.push(2) == "あ"
+    assert decoder.finish() == ""
+
+
+def test_incremental_decoder_rejects_changed_emitted_prefix() -> None:
+    class UnstableTokenizer:
+        def decode(self, token_ids: list[int]) -> str:
+            return {(1,): "stable", (1, 2): "changed"}[tuple(token_ids)]
+
+    decoder = StableIncrementalDecoder(UnstableTokenizer())  # type: ignore[arg-type]
+    assert decoder.push(1) == "stable"
+    with pytest.raises(TokenizerError, match="changed an emitted prefix"):
+        decoder.push(2)
+
+
+def test_incremental_decoder_rejects_invalid_or_post_finish_push() -> None:
+    class EmptyTokenizer:
+        def decode(self, _: list[int]) -> str:
+            return ""
+
+    invalid = StableIncrementalDecoder(EmptyTokenizer())  # type: ignore[arg-type]
+    with pytest.raises(TokenizerError, match="invalid token ID"):
+        invalid.push(-1)
+    finished = StableIncrementalDecoder(EmptyTokenizer())  # type: ignore[arg-type]
+    assert finished.finish() == ""
+    with pytest.raises(TokenizerError, match="already finished"):
+        finished.push(1)

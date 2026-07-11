@@ -658,6 +658,7 @@ name = "ullm-openai-gateway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "transformers" },
@@ -674,6 +675,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = "==4.14.1" },
     { name = "fastapi", specifier = "==0.116.1" },
     { name = "jinja2", specifier = "==3.1.6" },
     { name = "transformers", specifier = "==5.12.1" },

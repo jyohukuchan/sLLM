@@ -35,6 +35,7 @@ WRITE_TIMEOUT_SECONDS = 5.0
 FATAL_RESPONSE_ATTEMPT_SECONDS = 0.25
 KILL_WAIT_SECONDS = 2.0
 PREFILL_PROGRESS_TOKENS = 128
+STREAM_TOKEN_QUEUE_SIZE = 32
 
 HIP_GUARDS = (
     "ULLM_REQUIRE_HIP_ADD_KERNEL",
@@ -107,6 +108,7 @@ class WorkerGenerationRequest:
     temperature: float
     top_p: float
     seed: int
+    stream: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,11 +119,25 @@ class WorkerGenerationResult:
     token_ids: tuple[int, ...]
 
 
+@dataclass(slots=True)
+class WorkerStreamState:
+    token_queue: asyncio.Queue[int]
+    aborted_reason: str | None = None
+    aborted: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def abort(self, reason: str) -> None:
+        if self.aborted_reason is None:
+            self.aborted_reason = reason
+            self.aborted.set()
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationHandle:
     request_id: str
     _generation: int
     _future: asyncio.Future[WorkerGenerationResult]
+    _started_future: asyncio.Future[None] | None = None
+    stream_state: WorkerStreamState | None = None
 
 
 @dataclass(slots=True)
@@ -130,6 +146,8 @@ class _ActiveRequest:
     generation: int
     request: WorkerGenerationRequest
     future: asyncio.Future[WorkerGenerationResult]
+    started_future: asyncio.Future[None]
+    stream_state: WorkerStreamState | None
     started: bool = False
     processed_prompt_tokens: int = 0
     token_ids: list[int] = field(default_factory=list)
@@ -158,6 +176,8 @@ class WorkerSupervisor:
         self._write_lock = asyncio.Lock()
         self._fatal_lock = asyncio.Lock()
         self._fatal_started = False
+        self._fatal_reserved = False
+        self._fatal_event = asyncio.Event()
         self._stopping = False
         self._active: _ActiveRequest | None = None
         self._generation = 0
@@ -169,11 +189,19 @@ class WorkerSupervisor:
 
     @property
     def ready(self) -> bool:
-        return self._state == "ready" and not self._fatal_started
+        return (
+            self._state == "ready"
+            and not self._fatal_reserved
+            and not self._fatal_started
+        )
 
     @property
     def process_id(self) -> int | None:
         return self._process.pid if self._process is not None else None
+
+    @property
+    def failed(self) -> bool:
+        return self._fatal_reserved or self._fatal_started
 
     async def launch(self) -> None:
         if self._process is not None:
@@ -214,14 +242,23 @@ class WorkerSupervisor:
                 raise WorkerNotReady("worker is not ready")
             if self._active is not None:
                 raise WorkerBusy("worker already has an active request")
+            self._fatal_response_attempted.clear()
             self._generation += 1
             request_id = f"req-{uuid.uuid4().hex}"
             future: asyncio.Future[WorkerGenerationResult] = loop.create_future()
+            started_future: asyncio.Future[None] = loop.create_future()
+            stream_state = (
+                WorkerStreamState(asyncio.Queue(maxsize=STREAM_TOKEN_QUEUE_SIZE))
+                if request.stream
+                else None
+            )
             active = _ActiveRequest(
                 request_id=request_id,
                 generation=self._generation,
                 request=request,
                 future=future,
+                started_future=started_future,
+                stream_state=stream_state,
                 last_progress=loop.time(),
             )
             self._active = active
@@ -246,19 +283,34 @@ class WorkerSupervisor:
         try:
             await self._write_command(command)
         except BaseException as error:
-            self._track(
-                self._fatal("worker command write failed"),
-                "ullm-worker-command-write-fatal",
-            )
+            if self._reserve_fatal():
+                self._track(
+                    self._fatal("worker command write failed"),
+                    "ullm-worker-command-write-fatal",
+                )
             raise WorkerFatal("worker command write failed") from error
         active.progress_watchdog = self._track(
             self._progress_watchdog(request_id, active.generation),
             f"ullm-request-{active.generation}-progress",
         )
-        return GenerationHandle(request_id, active.generation, future)
+        return GenerationHandle(
+            request_id,
+            active.generation,
+            future,
+            started_future,
+            stream_state,
+        )
 
     async def wait(self, handle: GenerationHandle) -> WorkerGenerationResult:
         return await asyncio.shield(handle._future)
+
+    async def wait_started(self, handle: GenerationHandle) -> None:
+        if handle._started_future is None:
+            return
+        await asyncio.shield(handle._started_future)
+
+    async def wait_fatal(self) -> None:
+        await self._fatal_event.wait()
 
     async def cancel(self, handle: GenerationHandle, reason: str) -> None:
         if reason not in {"client_disconnect", "slow_client", "shutdown", "operator"}:
@@ -287,10 +339,11 @@ class WorkerSupervisor:
                     }
                 )
             except BaseException as error:
-                self._track(
-                    self._fatal("worker cancel write failed"),
-                    "ullm-worker-cancel-write-fatal",
-                )
+                if self._reserve_fatal():
+                    self._track(
+                        self._fatal("worker cancel write failed"),
+                        "ullm-worker-cancel-write-fatal",
+                    )
                 raise WorkerFatal("worker cancel write failed") from error
             active.cancel_reason = reason
             active.cancel_watchdog = self._track(
@@ -300,6 +353,15 @@ class WorkerSupervisor:
 
     async def acknowledge_fatal_response(self) -> None:
         self._fatal_response_attempted.set()
+
+    def request_fatal(self, reason: str) -> None:
+        if not self._reserve_fatal():
+            return
+        self._fatal_response_attempted.clear()
+        self._track(
+            self._fatal(reason),
+            "ullm-gateway-requested-fatal",
+        )
 
     async def shutdown(self) -> None:
         if self._process is None:
@@ -330,6 +392,8 @@ class WorkerSupervisor:
             active = self._active
             if active is not None and not active.future.done():
                 active.future.set_exception(WorkerFatal("gateway shut down"))
+            if active is not None and not active.started_future.done():
+                active.started_future.set_exception(WorkerFatal("gateway shut down"))
             self._active = None
             self._close_worker_stdin()
             if self._process.returncode is not None:
@@ -504,6 +568,9 @@ class WorkerSupervisor:
         if _integer(value.get("prompt_tokens")) != len(active.request.prompt_token_ids):
             raise WorkerProtocolError("worker started prompt count differs")
         active.started = True
+        if active.started_future.done():
+            raise WorkerProtocolError("worker started future completed too early")
+        active.started_future.set_result(None)
         self._mark_progress(active)
 
     def _handle_progress(self, value: dict[str, Any]) -> None:
@@ -554,6 +621,7 @@ class WorkerSupervisor:
             active.terminal_outcome = "stop"
         elif len(active.token_ids) == active.request.max_new_tokens:
             active.terminal_outcome = "length"
+        self._publish_stream_token(active, token_id)
         self._mark_progress(active)
 
     async def _handle_released(self, value: dict[str, Any]) -> None:
@@ -632,6 +700,32 @@ class WorkerSupervisor:
         active.last_progress = asyncio.get_running_loop().time()
         active.progress_wakeup.set()
 
+    def _publish_stream_token(self, active: _ActiveRequest, token_id: int) -> None:
+        stream = active.stream_state
+        if stream is None or stream.aborted_reason is not None:
+            return
+        try:
+            stream.token_queue.put_nowait(token_id)
+        except asyncio.QueueFull:
+            stream.abort("slow_client")
+            self._track(
+                self._cancel_slow_client(active),
+                f"ullm-request-{active.generation}-slow-client",
+            )
+
+    async def _cancel_slow_client(self, active: _ActiveRequest) -> None:
+        handle = GenerationHandle(
+            active.request_id,
+            active.generation,
+            active.future,
+            active.started_future,
+            active.stream_state,
+        )
+        try:
+            await self.cancel(handle, "slow_client")
+        except WorkerError:
+            return
+
     def _matches_active(self, request_id: str, generation: int) -> bool:
         return self._matching_active(request_id, generation) is not None
 
@@ -652,7 +746,9 @@ class WorkerSupervisor:
         async with self._fatal_lock:
             if self._fatal_started:
                 return
+            self._fatal_reserved = True
             self._fatal_started = True
+            self._fatal_event.set()
             self._state = "failed"
             ready = self._ready_future
             if ready is not None and not ready.done():
@@ -660,18 +756,29 @@ class WorkerSupervisor:
             active = self._active
             if active is not None and not active.future.done():
                 active.future.set_exception(WorkerFatal("resident worker failed"))
-        if active is not None:
-            try:
-                await asyncio.wait_for(
-                    self._fatal_response_attempted.wait(),
-                    FATAL_RESPONSE_ATTEMPT_SECONDS,
+            if active is not None and not active.started_future.done():
+                active.started_future.set_exception(
+                    WorkerFatal("resident worker failed before start")
                 )
-            except asyncio.TimeoutError:
-                pass
+        try:
+            await asyncio.wait_for(
+                self._fatal_response_attempted.wait(),
+                FATAL_RESPONSE_ATTEMPT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            pass
         try:
             await self._terminate_worker()
         finally:
             self._fatal_exit(1)
+
+    def _reserve_fatal(self) -> bool:
+        if self._fatal_reserved or self._fatal_started:
+            return False
+        self._fatal_reserved = True
+        self._state = "failed"
+        self._fatal_event.set()
+        return True
 
     async def _terminate_worker(self) -> None:
         process = self._process
@@ -772,6 +879,7 @@ def _validate_generation_request(request: WorkerGenerationRequest) -> None:
         or isinstance(request.seed, bool)
         or not isinstance(request.seed, int)
         or not -(2**63) <= request.seed < 2**63
+        or not isinstance(request.stream, bool)
     ):
         raise WorkerProtocolError("generation request violates worker limits")
 

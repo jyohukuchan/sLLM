@@ -1,19 +1,22 @@
 # uLLM OpenAI gateway
 
 This package is the single-process OpenAI Chat Completions gateway for the
-resident `ullm-sq8-worker`. P8-D supports non-streaming requests only. A
-`stream=true` request is rejected instead of being silently converted to a
-non-streaming request; SSE is added separately in P8-E.
+resident `ullm-sq8-worker`. It supports both JSON responses and OpenAI-compatible
+server-sent event (SSE) streaming without a request batch or waiting queue.
 
 ## Runtime contract
 
 - Python 3.12
 - one Uvicorn process and one resident Rust worker
 - one active request and no waiting queue
+- `429 request_busy` with no admission queue for a concurrent valid chat request
+- request slot release only after worker release and HTTP terminal output or close
 - frozen local Qwen3 tokenizer with network access disabled
 - fixed public model ID `ullm-qwen3-14b-sq8`
 - Bearer authentication on both `/v1` endpoints
 - fail-closed worker identity, JSONL ordering, singleton lock, and watchdogs
+- bounded stream buffering, send timeouts, and worker cancellation on disconnect
+- an isolated tokenizer/executor for incremental stream decoding
 
 ## Install
 
@@ -51,6 +54,18 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"ullm-qwen3-14b-sq8","messages":[{"role":"user","content":"日本語で短く挨拶してください。"}],"stream":false,"max_tokens":32}'
 ```
+
+For SSE streaming, set `stream` and optionally request the terminal usage chunk:
+
+```bash
+curl -N -sS http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $(<"$ULLM_API_KEY_FILE")" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"ullm-qwen3-14b-sq8","messages":[{"role":"user","content":"日本語で短く挨拶してください。"}],"stream":true,"stream_options":{"include_usage":true},"max_tokens":32}'
+```
+
+The stream emits the assistant role, stable nonempty content deltas, a terminal
+finish-reason chunk, the optional usage chunk, and finally `data: [DONE]`.
 
 ## Verification
 
