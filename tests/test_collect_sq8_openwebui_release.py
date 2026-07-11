@@ -604,6 +604,16 @@ class CollectorTestCase(unittest.TestCase):
             runtime,
         )
 
+    def test_readiness_url_is_the_deployed_readyz_endpoint(self):
+        self.assertEqual(COLLECTOR.HTTP_READY_URL, "http://172.20.0.1:8000/readyz")
+        document = self._valid_config_document()
+        document["ready_url"] = "http://172.20.0.1:8000/ready"
+        path = self._write("wrong-ready-config.json", compact(document))
+        with self.assertRaisesRegex(
+            COLLECTOR.CollectorError, "fixed bridge readiness URL"
+        ):
+            COLLECTOR.load_config(path)
+
     def test_synthetic_phase1_bundle_passes_independent_validator(self):
         runtime = FakeRuntime()
         result = self._collector(runtime).run()
