@@ -118,6 +118,7 @@ SCHEDULE = {
     "samples_per_point": 5,
     "sample_interval_ms": 1000,
 }
+SAMPLED_NORMAL_INDICES = frozenset(range(5, 101, 5))
 RESOURCE_SCHEDULE = {
     "normal_warmups": 10,
     "normal_requests": 100,
@@ -1685,6 +1686,22 @@ class Runtime(Protocol):
     def resource_header(self) -> dict[str, Any]: ...
 
 
+class ResourceLifecycleClaims(Protocol):
+    def consume(
+        self, phase: str, case_id: str, expected_identity: ProcessIdentity
+    ) -> list[dict[str, Any]]: ...
+
+    def wait(self, deadline_ns: int) -> None: ...
+
+    def require_quiet(
+        self,
+        phase: str,
+        case_id: str,
+        expected_identity: ProcessIdentity,
+        deadline_ns: int,
+    ) -> None: ...
+
+
 @dataclasses.dataclass
 class JournalState:
     boot_id: str
@@ -1777,6 +1794,41 @@ class JournalState:
                 )
                 lifecycle.append(event)
         return lifecycle
+
+
+class Phase1ResourceLifecycleClaims:
+    """Adapt the phase-1 polling journal path to resource lifecycle claims."""
+
+    def __init__(self, runtime: Runtime, journal: JournalState):
+        self.runtime = runtime
+        self.journal = journal
+
+    def consume(
+        self, phase: str, case_id: str, expected_identity: ProcessIdentity
+    ) -> list[dict[str, Any]]:
+        return self.journal.consume(
+            self.runtime.poll_journal(),
+            phase,
+            case_id,
+            expected_gateway_pids=frozenset({expected_identity.gateway_pid}),
+        )
+
+    def wait(self, deadline_ns: int) -> None:
+        self.runtime.wait_for_journal(deadline_ns)
+
+    def require_quiet(
+        self,
+        phase: str,
+        case_id: str,
+        expected_identity: ProcessIdentity,
+        deadline_ns: int,
+    ) -> None:
+        while True:
+            if self.consume(phase, case_id, expected_identity):
+                fail("negative request produced a gateway lifecycle admission/event")
+            if self.runtime.now_ns() >= deadline_ns:
+                return
+            self.wait(min(deadline_ns, self.runtime.now_ns() + JOURNAL_POLL_NS))
 
 
 def decode_lifecycle_message(message: str) -> dict[str, Any] | None:
@@ -1883,6 +1935,536 @@ def validate_lifecycle_value(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+@dataclasses.dataclass(frozen=True)
+class ResourceSegmentConfig:
+    target: str
+    resource_body_template: dict[str, Any]
+    negative_cases: tuple[NegativeCase, ...]
+
+    @classmethod
+    def from_collector_config(cls, config: CollectorConfig) -> ResourceSegmentConfig:
+        return cls(
+            target=config.target,
+            resource_body_template=config.resource_body_template,
+            negative_cases=config.negative_cases,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class ResourceSegmentResult:
+    segment: str
+    identity: ProcessIdentity
+    warmup_requests: int
+    measured_requests: int
+    negative_requests: int
+    resource_samples: int
+    gpu_metrics: int
+
+
+class ResourceSegmentCollector:
+    """Collect one fixed resource segment into an existing campaign stream."""
+
+    def __init__(
+        self,
+        config: ResourceSegmentConfig,
+        output_dir: Path,
+        guard: SecretGuard,
+        runtime: Runtime,
+        session: SessionWriter,
+        resource: AtomicJsonlWriter,
+        lifecycle_claims: ResourceLifecycleClaims,
+    ):
+        template_snapshot = strict_json_object(
+            compact_json(config.resource_body_template),
+            "resource segment body template snapshot",
+            maximum=MAX_HTTP_BODY_BYTES,
+        )
+        self.config = ResourceSegmentConfig(
+            target=config.target,
+            resource_body_template=template_snapshot,
+            negative_cases=tuple(config.negative_cases),
+        )
+        self.output_dir = output_dir
+        self.guard = guard
+        self.runtime = runtime
+        self.session = session
+        self.resource = resource
+        self.lifecycle_claims = lifecycle_claims
+        self._completed_segments: set[str] = set()
+        self._segment_active = False
+        self._http_active = False
+        self._validate_config()
+
+    def collect_normal(
+        self, *, expected_identity: ProcessIdentity | None = None
+    ) -> ResourceSegmentResult:
+        return self._collect(
+            "normal",
+            warmups=10,
+            measured=100,
+            normal_identity=None,
+            expected_identity=expected_identity,
+        )
+
+    def collect_restart(
+        self,
+        normal_identity: ProcessIdentity,
+        *,
+        expected_identity: ProcessIdentity | None = None,
+    ) -> ResourceSegmentResult:
+        return self._collect(
+            "restart",
+            warmups=10,
+            measured=20,
+            normal_identity=normal_identity,
+            expected_identity=expected_identity,
+        )
+
+    def _validate_config(self) -> None:
+        target = nonempty_string(self.config.target, "resource segment target")
+        try:
+            target.encode("ascii", errors="strict")
+        except UnicodeError:
+            fail("resource segment target must be ASCII")
+        if not target.startswith("/") or target.startswith("//") or "#" in target:
+            fail("resource segment target is not an origin-form target")
+        template = exact_keys(
+            self.config.resource_body_template,
+            {"model", "messages"},
+            "resource segment body template",
+        )
+        nonempty_string(template["model"], "resource segment body template model")
+        if type(template["messages"]) is not list or not template["messages"]:
+            fail("resource segment messages must be a non-empty array")
+        for index, message in enumerate(template["messages"]):
+            exact_keys(
+                message,
+                {"role", "content"},
+                f"resource segment messages[{index}]",
+            )
+            if message["role"] not in {"system", "user", "assistant"}:
+                fail(f"resource segment messages[{index}].role differs")
+            nonempty_string(
+                message["content"], f"resource segment messages[{index}].content"
+            )
+        if len(compact_json(template)) > MAX_HTTP_BODY_BYTES:
+            fail("resource segment body template is too large")
+        if [(item.after_request, item.name) for item in self.config.negative_cases] != [
+            (25, "context_overflow_1"),
+            (50, "malformed_json"),
+            (75, "context_overflow_2"),
+        ] or any(
+            item.expected_status != 400 or not item.body
+            for item in self.config.negative_cases
+        ):
+            fail("resource segment negative schedule differs")
+        for item in self.config.negative_cases:
+            if item.name == "malformed_json":
+                require_malformed_json(item.body, "resource segment malformed JSON")
+            else:
+                validate_overflow_request_body(
+                    item.body,
+                    template,
+                    item.name,
+                    f"resource segment context overflow {item.name}",
+                )
+
+    def _collect(
+        self,
+        segment: str,
+        *,
+        warmups: int,
+        measured: int,
+        normal_identity: ProcessIdentity | None,
+        expected_identity: ProcessIdentity | None,
+    ) -> ResourceSegmentResult:
+        if segment not in {"normal", "restart"}:
+            fail("resource segment name differs")
+        if (
+            segment in self._completed_segments
+            or self._segment_active
+            or self._http_active
+        ):
+            fail("resource segment was duplicated or began during an HTTP request")
+        if (segment, warmups, measured) not in {
+            ("normal", 10, 100),
+            ("restart", 10, 20),
+        }:
+            fail("resource segment schedule differs")
+        self._segment_active = True
+        phase = "resource_normal" if segment == "normal" else "resource_restart"
+        probe = self.runtime.lifecycle_probe()
+        self._append_probe(phase, f"{segment}-segment-start", probe)
+        if not probe.service_active or probe.ready_http_status != 200:
+            fail(f"{segment} segment service is not ready")
+        identity = probe.identity
+        if expected_identity is not None and identity != expected_identity:
+            fail("resource segment start identity differs from the campaign epoch")
+        if segment == "restart":
+            if normal_identity is None:
+                fail("restart resource segment lacks the normal identity")
+            assert normal_identity is not None
+            self._validate_restart_identity(normal_identity, identity)
+
+        self._capture_metric(segment, "before")
+        last_release: dict[str, Any] | None = None
+        for index in range(1, warmups + 1):
+            case_id = f"{segment}-warmup-{index:02d}"
+            last_release = self._run_positive_request(
+                segment,
+                phase,
+                case_id,
+                identity,
+                request_index=index,
+                measured=False,
+            )
+        if last_release is None:
+            fail("resource segment lacks warmup releases")
+        assert last_release is not None
+        baseline_start = max(
+            self.runtime.now_ns(), last_release["observed_monotonic_ns"]
+        )
+        self._sample_point(segment, identity, None, None, baseline_start)
+
+        negatives = {item.after_request: item for item in self.config.negative_cases}
+        negative_count = 0
+        for index in range(1, measured + 1):
+            case_id = f"{segment}-measured-{index:03d}"
+            release = self._run_positive_request(
+                segment,
+                phase,
+                case_id,
+                identity,
+                request_index=index,
+                measured=True,
+            )
+            settle_start = max(self.runtime.now_ns(), release["observed_monotonic_ns"])
+            self._sample_point(segment, identity, index, release, settle_start)
+            if segment == "normal" and index in negatives:
+                self._run_negative_request(phase, identity, negatives[index])
+                negative_count += 1
+        self._capture_metric(segment, "after")
+        self._completed_segments.add(segment)
+        self._segment_active = False
+        return ResourceSegmentResult(
+            segment=segment,
+            identity=identity,
+            warmup_requests=warmups,
+            measured_requests=measured,
+            negative_requests=negative_count,
+            resource_samples=(measured + 1) * 5,
+            gpu_metrics=2,
+        )
+
+    def _resource_body(self, segment: str, index: int, measured: bool) -> bytes:
+        body = {
+            "model": self.config.resource_body_template["model"],
+            "messages": self.config.resource_body_template["messages"],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "max_tokens": 2,
+            "temperature": 0,
+            "top_p": 1,
+            "seed": 0,
+        }
+        if segment == "normal" and measured and index in SAMPLED_NORMAL_INDICES:
+            body["temperature"] = 0.6
+            body["top_p"] = 0.95
+            body["seed"] = index
+        raw = compact_json(body)
+        if len(raw) > MAX_HTTP_BODY_BYTES:
+            fail("resource request body exceeds the HTTP client limit")
+        self.guard.reject(raw, "resource request body")
+        return raw
+
+    def _run_positive_request(
+        self,
+        segment: str,
+        phase: str,
+        case_id: str,
+        identity: ProcessIdentity,
+        *,
+        request_index: int,
+        measured: bool,
+    ) -> dict[str, Any]:
+        plan = HttpPlan(
+            phase=phase,
+            case_id=case_id,
+            request_index=request_index,
+            request_key=f"p8f-{case_id}",
+            target=self.config.target,
+            body=self._resource_body(segment, request_index, measured),
+            expected_status=200,
+            expect_release=True,
+        )
+        observation = self._run_http(plan)
+        if (
+            observation.status != 200
+            or observation.outcome != "eof"
+            or observation.completion_id is None
+        ):
+            fail("resource HTTP request did not complete as a successful SSE response")
+        completion_id = observation.completion_id
+        assert completion_id is not None
+        release = self._wait_for_release(plan, completion_id, identity)
+        if (
+            release["outcome"] != "length"
+            or release["completion_tokens"] != 2
+            or release["reset_complete"] is not True
+        ):
+            fail("resource request release differs from length/two/reset-complete")
+        return release
+
+    def _run_negative_request(
+        self, phase: str, identity: ProcessIdentity, negative: NegativeCase
+    ) -> None:
+        case_id = f"negative-after-{negative.after_request:03d}-{negative.name}"
+        plan = HttpPlan(
+            phase=phase,
+            case_id=case_id,
+            request_index=negative.after_request,
+            request_key=f"p8f-{case_id}",
+            target=self.config.target,
+            body=negative.body,
+            expected_status=negative.expected_status,
+            expect_release=False,
+            expected_error_code=(
+                "invalid_request_error"
+                if negative.name == "malformed_json"
+                else "context_length_exceeded"
+            ),
+        )
+        self.guard.reject(plan.body, "negative request body")
+        observation = self._run_http(plan)
+        if (
+            observation.status != negative.expected_status
+            or observation.outcome != "eof"
+        ):
+            fail("negative request HTTP outcome differs")
+        deadline = self.runtime.now_ns() + NEGATIVE_QUIET_NS
+        self.lifecycle_claims.require_quiet(phase, case_id, identity, deadline)
+
+    def _run_http(self, plan: HttpPlan) -> HttpObservation:
+        if self._http_active:
+            fail("resource segment attempted overlapping HTTP requests")
+        self._http_active = True
+        try:
+            return self.runtime.run_http(
+                plan, lambda event, fields: self._append_http(plan, event, fields)
+            )
+        finally:
+            self._http_active = False
+
+    def _append_http(self, plan: HttpPlan, event: str, fields: dict[str, Any]) -> None:
+        record_fields = dict(fields)
+        if event == "http_request":
+            record_fields = {"request_index": plan.request_index, **record_fields}
+        self.session.append(event, plan.phase, plan.case_id, **record_fields)
+
+    def _wait_for_release(
+        self, plan: HttpPlan, completion_id: str, identity: ProcessIdentity
+    ) -> dict[str, Any]:
+        deadline = self.runtime.now_ns() + RELEASE_TIMEOUT_NS
+        admitted_request_id: str | None = None
+        started = False
+        first_token = False
+        last_progress = 0
+        while True:
+            release_result: dict[str, Any] | None = None
+            for event in self.lifecycle_claims.consume(
+                plan.phase, plan.case_id, identity
+            ):
+                if release_result is not None:
+                    fail("gateway lifecycle event appears after resource release")
+                name = event["event"]
+                if event.get("completion_id") != completion_id:
+                    fail(
+                        "journal lifecycle completion ID differs from the active HTTP request"
+                    )
+                if name == "request_admitted":
+                    if (
+                        admitted_request_id is not None
+                        or event["max_completion_tokens"] != 2
+                    ):
+                        fail(
+                            "resource request admission is duplicated or has the wrong limit"
+                        )
+                    admitted_request_id = event["request_id"]
+                elif (
+                    admitted_request_id is None
+                    or event["request_id"] != admitted_request_id
+                ):
+                    fail("resource lifecycle event precedes or differs from admission")
+                if name == "request_started":
+                    if started:
+                        fail("resource request has duplicate start events")
+                    started = True
+                elif name == "request_progress":
+                    if (
+                        not started
+                        or first_token
+                        or event["processed_prompt_tokens"] <= last_progress
+                    ):
+                        fail("resource progress event order differs")
+                    last_progress = event["processed_prompt_tokens"]
+                elif name == "request_first_token":
+                    if not started or first_token:
+                        fail("resource first-token event order differs")
+                    first_token = True
+                elif name in {"request_cancel_requested", "worker_fatal"}:
+                    fail("resource request was cancelled or fatally terminated")
+                elif name == "request_released":
+                    if (
+                        not started
+                        or not first_token
+                        or event["reset_complete"] is not True
+                    ):
+                        fail(
+                            "resource release precedes start or lacks reset acknowledgement"
+                        )
+                    if release_result is not None:
+                        fail("resource request has duplicate release events")
+                    release_result = event
+            if release_result is not None:
+                return release_result
+            if self.runtime.now_ns() >= deadline:
+                fail(
+                    "timed out waiting for journal request_released(reset_complete=true)"
+                )
+            self.lifecycle_claims.wait(
+                min(deadline, self.runtime.now_ns() + JOURNAL_POLL_NS)
+            )
+
+    def _sample_point(
+        self,
+        segment: str,
+        identity: ProcessIdentity,
+        request_index: int | None,
+        release: dict[str, Any] | None,
+        settle_start: int,
+    ) -> None:
+        prior_sample: int | None = None
+        for sample_index in range(5):
+            if sample_index == 0:
+                deadline = settle_start + IDLE_SETTLE_NS
+            else:
+                assert prior_sample is not None
+                deadline = prior_sample + SAMPLE_INTERVAL_NS
+            self.runtime.wait_until(deadline)
+            capture = self.runtime.capture_resource()
+            self._validate_capture_identity(capture, identity)
+            if capture.sample_monotonic_ns < deadline:
+                fail("resource sample was captured before its scheduled boundary")
+            record = {
+                "schema_version": RESOURCE_SCHEMA,
+                "record_type": "resource_sample",
+                "segment": segment,
+                "phase": "baseline" if release is None else "post_release",
+                "request_index": request_index,
+                "request_id": None if release is None else release["request_id"],
+                "release_outcome": None if release is None else release["outcome"],
+                "release_observed_monotonic_ns": None
+                if release is None
+                else release["observed_monotonic_ns"],
+                "reset_complete": None
+                if release is None
+                else release["reset_complete"],
+                "idle_settle_started_monotonic_ns": settle_start,
+                "sample_index": sample_index,
+                "sample_monotonic_ns": capture.sample_monotonic_ns,
+                "systemd": capture.systemd,
+                "host": capture.host,
+                "gateway": capture.gateway,
+                "worker": capture.worker,
+                "gpu": capture.gpu,
+            }
+            reject_forbidden_passed(record, "resource sample")
+            self.resource.write_value(record)
+            prior_sample = capture.sample_monotonic_ns
+
+    def _capture_metric(self, segment: str, boundary: str) -> None:
+        capture = self.runtime.capture_metric(segment, boundary)
+        strict_json_bytes(capture.raw, f"amd-smi metric {segment} {boundary}")
+        self.guard.reject(capture.raw, "AMD SMI metric output")
+        relative = f"amd-smi-metric-{segment}-{boundary}.json"
+        atomic = AtomicFile(self.output_dir / relative)
+        atomic.write(capture.raw)
+        atomic.commit()
+        self.resource.write_value(
+            {
+                "schema_version": RESOURCE_SCHEMA,
+                "record_type": "gpu_metric",
+                "segment": segment,
+                "boundary": boundary,
+                "captured_monotonic_ns": capture.captured_monotonic_ns,
+                "gpu_index": GPU_INDEX,
+                "raw_output_file": relative,
+                "raw_output_sha256": sha256_bytes(capture.raw),
+            }
+        )
+
+    def _append_probe(self, phase: str, probe_name: str, probe: LifecycleProbe) -> None:
+        identity = probe.identity
+        self.session.append(
+            "lifecycle_probe",
+            phase,
+            probe_name,
+            probe=probe_name,
+            observed_monotonic_ns=probe.observed_monotonic_ns,
+            service_active=probe.service_active,
+            ready_http_status=probe.ready_http_status,
+            control_group=identity.control_group,
+            gateway_pid=identity.gateway_pid,
+            gateway_starttime_ticks=identity.gateway_starttime_ticks,
+            worker_pid=identity.worker_pid,
+            worker_starttime_ticks=identity.worker_starttime_ticks,
+            n_restarts=identity.n_restarts,
+        )
+
+    @staticmethod
+    def _validate_restart_identity(
+        normal: ProcessIdentity, restart: ProcessIdentity
+    ) -> None:
+        if normal.control_group != restart.control_group:
+            fail("systemd ControlGroup changed across the planned restart")
+        if (normal.gateway_pid, normal.gateway_starttime_ticks) == (
+            restart.gateway_pid,
+            restart.gateway_starttime_ticks,
+        ) or (normal.worker_pid, normal.worker_starttime_ticks) == (
+            restart.worker_pid,
+            restart.worker_starttime_ticks,
+        ):
+            fail(
+                "gateway and worker identities must both change across the planned restart"
+            )
+        if restart.n_restarts != normal.n_restarts + 1:
+            fail("systemd restart count did not increase exactly once")
+
+    @staticmethod
+    def _validate_capture_identity(
+        capture: ResourceCapture, expected: ProcessIdentity
+    ) -> None:
+        systemd_value = capture.systemd
+        if (
+            systemd_value.get("control_group_before") != expected.control_group
+            or systemd_value.get("control_group_after") != expected.control_group
+            or systemd_value.get("main_pid_before") != expected.gateway_pid
+            or systemd_value.get("main_pid_after") != expected.gateway_pid
+        ):
+            fail("resource sample systemd identity changed")
+        gateway = capture.gateway
+        worker = capture.worker
+        if (
+            gateway.get("pid") != expected.gateway_pid
+            or gateway.get("starttime_ticks_before") != expected.gateway_starttime_ticks
+            or gateway.get("starttime_ticks_after") != expected.gateway_starttime_ticks
+            or worker.get("pid") != expected.worker_pid
+            or worker.get("starttime_ticks_before") != expected.worker_starttime_ticks
+            or worker.get("starttime_ticks_after") != expected.worker_starttime_ticks
+        ):
+            fail("resource sample process identity changed")
+
+
 class Phase1Collector:
     def __init__(
         self,
@@ -1906,6 +2488,7 @@ class Phase1Collector:
         self.session: SessionWriter | None = None
         self.resource: AtomicJsonlWriter | None = None
         self.journal: JournalState | None = None
+        self.resource_segments: ResourceSegmentCollector | None = None
         self.normal_identity: ProcessIdentity | None = None
         self.restart_identity: ProcessIdentity | None = None
         self.staged_artifacts: dict[str, FileSeal] = {}
@@ -1918,9 +2501,15 @@ class Phase1Collector:
             self.runtime.start()
             self._start_raw_files()
             self._write_header()
-            self._run_segment("normal", warmups=10, measured=100)
+            assert self.resource_segments is not None
+            normal_result = self.resource_segments.collect_normal()
+            self.normal_identity = normal_result.identity
             self._run_restart_boundary()
-            self._run_segment("restart", warmups=10, measured=20)
+            restart_result = self.resource_segments.collect_restart(
+                self.normal_identity,
+                expected_identity=self.restart_identity,
+            )
+            self.restart_identity = restart_result.identity
             self.runtime.close()
             self._finalize()
             self._completed = True
@@ -2066,6 +2655,15 @@ class Phase1Collector:
             ),
             session=self.session,
         )
+        self.resource_segments = ResourceSegmentCollector(
+            ResourceSegmentConfig.from_collector_config(self.config),
+            self.output_dir,
+            self.guard,
+            self.runtime,
+            self.session,
+            self.resource,
+            Phase1ResourceLifecycleClaims(self.runtime, self.journal),
+        )
 
     def _write_header(self) -> None:
         assert self.session is not None
@@ -2115,230 +2713,6 @@ class Phase1Collector:
         assert self.resource is not None
         self.resource.write_value(header)
 
-    def _run_segment(self, segment: str, *, warmups: int, measured: int) -> None:
-        phase = "resource_normal" if segment == "normal" else "resource_restart"
-        probe = self.runtime.lifecycle_probe()
-        self._append_probe(phase, f"{segment}-segment-start", probe)
-        if not probe.service_active or probe.ready_http_status != 200:
-            fail(f"{segment} segment service is not ready")
-        if segment == "normal":
-            self.normal_identity = probe.identity
-        else:
-            self.restart_identity = probe.identity
-            self._validate_restart_identity()
-
-        self._capture_metric(segment, "before")
-        last_release: dict[str, Any] | None = None
-        for index in range(1, warmups + 1):
-            case_id = f"{segment}-warmup-{index:02d}"
-            last_release = self._run_positive_request(
-                segment,
-                phase,
-                case_id,
-                request_index=index,
-                measured=False,
-            )
-        if last_release is None:
-            fail("resource segment lacks warmup releases")
-        baseline_start = max(
-            self.runtime.now_ns(), last_release["observed_monotonic_ns"]
-        )
-        self._sample_point(segment, None, None, baseline_start)
-
-        negatives = {item.after_request: item for item in self.config.negative_cases}
-        for index in range(1, measured + 1):
-            case_id = f"{segment}-measured-{index:03d}"
-            release = self._run_positive_request(
-                segment,
-                phase,
-                case_id,
-                request_index=index,
-                measured=True,
-            )
-            settle_start = max(self.runtime.now_ns(), release["observed_monotonic_ns"])
-            self._sample_point(segment, index, release, settle_start)
-            if segment == "normal" and index in negatives:
-                self._run_negative_request(phase, negatives[index])
-        self._capture_metric(segment, "after")
-
-    def _resource_body(self, segment: str, index: int, measured: bool) -> bytes:
-        body = {
-            "model": self.config.resource_body_template["model"],
-            "messages": self.config.resource_body_template["messages"],
-            "stream": True,
-            "stream_options": {"include_usage": True},
-            "max_tokens": 2,
-            "temperature": 0,
-            "top_p": 1,
-            "seed": 0,
-        }
-        if (
-            segment == "normal"
-            and measured
-            and index in SCHEDULE["sampled_normal_indices"]
-        ):
-            body["temperature"] = 0.6
-            body["top_p"] = 0.95
-            body["seed"] = index
-        raw = compact_json(body)
-        if len(raw) > MAX_HTTP_BODY_BYTES:
-            fail("resource request body exceeds the HTTP client limit")
-        self.guard.reject(raw, "resource request body")
-        return raw
-
-    def _run_positive_request(
-        self,
-        segment: str,
-        phase: str,
-        case_id: str,
-        *,
-        request_index: int,
-        measured: bool,
-    ) -> dict[str, Any]:
-        key = f"p8f-{case_id}"
-        plan = HttpPlan(
-            phase=phase,
-            case_id=case_id,
-            request_index=request_index,
-            request_key=key,
-            target=self.config.target,
-            body=self._resource_body(segment, request_index, measured),
-            expected_status=200,
-            expect_release=True,
-        )
-        observation = self.runtime.run_http(
-            plan, lambda event, fields: self._append_http(plan, event, fields)
-        )
-        if (
-            observation.status != 200
-            or observation.outcome != "eof"
-            or observation.completion_id is None
-        ):
-            fail("resource HTTP request did not complete as a successful SSE response")
-        release = self._wait_for_release(plan, observation.completion_id)
-        if (
-            release["outcome"] != "length"
-            or release["completion_tokens"] != 2
-            or release["reset_complete"] is not True
-        ):
-            fail("resource request release differs from length/two/reset-complete")
-        return release
-
-    def _run_negative_request(self, phase: str, negative: NegativeCase) -> None:
-        case_id = f"negative-after-{negative.after_request:03d}-{negative.name}"
-        plan = HttpPlan(
-            phase=phase,
-            case_id=case_id,
-            request_index=negative.after_request,
-            request_key=f"p8f-{case_id}",
-            target=self.config.target,
-            body=negative.body,
-            expected_status=negative.expected_status,
-            expect_release=False,
-            expected_error_code=(
-                "invalid_request_error"
-                if negative.name == "malformed_json"
-                else "context_length_exceeded"
-            ),
-        )
-        self.guard.reject(plan.body, "negative request body")
-        observation = self.runtime.run_http(
-            plan, lambda event, fields: self._append_http(plan, event, fields)
-        )
-        if (
-            observation.status != negative.expected_status
-            or observation.outcome != "eof"
-        ):
-            fail("negative request HTTP outcome differs")
-        deadline = self.runtime.now_ns() + NEGATIVE_QUIET_NS
-        while True:
-            events = self._consume_journal(phase, case_id)
-            if events:
-                fail("negative request produced a gateway lifecycle admission/event")
-            if self.runtime.now_ns() >= deadline:
-                break
-            self.runtime.wait_for_journal(
-                min(deadline, self.runtime.now_ns() + JOURNAL_POLL_NS)
-            )
-
-    def _append_http(self, plan: HttpPlan, event: str, fields: dict[str, Any]) -> None:
-        assert self.session is not None
-        record_fields = dict(fields)
-        if event == "http_request":
-            record_fields = {"request_index": plan.request_index, **record_fields}
-        self.session.append(event, plan.phase, plan.case_id, **record_fields)
-
-    def _wait_for_release(self, plan: HttpPlan, completion_id: str) -> dict[str, Any]:
-        deadline = self.runtime.now_ns() + RELEASE_TIMEOUT_NS
-        admitted_request_id: str | None = None
-        started = False
-        first_token = False
-        last_progress = 0
-        while True:
-            release_result: dict[str, Any] | None = None
-            for event in self._consume_journal(plan.phase, plan.case_id):
-                if release_result is not None:
-                    fail("gateway lifecycle event appears after resource release")
-                name = event["event"]
-                event_completion = event.get("completion_id")
-                if event_completion != completion_id:
-                    fail(
-                        "journal lifecycle completion ID differs from the active HTTP request"
-                    )
-                if name == "request_admitted":
-                    if (
-                        admitted_request_id is not None
-                        or event["max_completion_tokens"] != 2
-                    ):
-                        fail(
-                            "resource request admission is duplicated or has the wrong limit"
-                        )
-                    admitted_request_id = event["request_id"]
-                elif (
-                    admitted_request_id is None
-                    or event["request_id"] != admitted_request_id
-                ):
-                    fail("resource lifecycle event precedes or differs from admission")
-                if name == "request_started":
-                    if started:
-                        fail("resource request has duplicate start events")
-                    started = True
-                elif name == "request_progress":
-                    if (
-                        not started
-                        or first_token
-                        or event["processed_prompt_tokens"] <= last_progress
-                    ):
-                        fail("resource progress event order differs")
-                    last_progress = event["processed_prompt_tokens"]
-                elif name == "request_first_token":
-                    if not started or first_token:
-                        fail("resource first-token event order differs")
-                    first_token = True
-                elif name in {"request_cancel_requested", "worker_fatal"}:
-                    fail("resource request was cancelled or fatally terminated")
-                elif name == "request_released":
-                    if (
-                        not started
-                        or not first_token
-                        or event["reset_complete"] is not True
-                    ):
-                        fail(
-                            "resource release precedes start or lacks reset acknowledgement"
-                        )
-                    if release_result is not None:
-                        fail("resource request has duplicate release events")
-                    release_result = event
-            if release_result is not None:
-                return release_result
-            if self.runtime.now_ns() >= deadline:
-                fail(
-                    "timed out waiting for journal request_released(reset_complete=true)"
-                )
-            self.runtime.wait_for_journal(
-                min(deadline, self.runtime.now_ns() + JOURNAL_POLL_NS)
-            )
-
     def _consume_journal(self, phase: str, case_id: str) -> list[dict[str, Any]]:
         assert self.journal is not None
         if phase in {
@@ -2382,80 +2756,6 @@ class Phase1Collector:
             gateway_pid_deadlines_ns={
                 self.normal_identity.gateway_pid: normal_epoch_end_ns
             },
-        )
-
-    def _sample_point(
-        self,
-        segment: str,
-        request_index: int | None,
-        release: dict[str, Any] | None,
-        settle_start: int,
-    ) -> None:
-        assert self.resource is not None
-        prior_sample: int | None = None
-        expected_identity = (
-            self.normal_identity if segment == "normal" else self.restart_identity
-        )
-        if expected_identity is None:
-            fail("resource segment identity is unavailable")
-        for sample_index in range(5):
-            deadline = (
-                settle_start + IDLE_SETTLE_NS
-                if sample_index == 0
-                else int(prior_sample) + SAMPLE_INTERVAL_NS
-            )
-            self.runtime.wait_until(deadline)
-            capture = self.runtime.capture_resource()
-            self._validate_capture_identity(capture, expected_identity)
-            if capture.sample_monotonic_ns < deadline:
-                fail("resource sample was captured before its scheduled boundary")
-            record = {
-                "schema_version": RESOURCE_SCHEMA,
-                "record_type": "resource_sample",
-                "segment": segment,
-                "phase": "baseline" if release is None else "post_release",
-                "request_index": request_index,
-                "request_id": None if release is None else release["request_id"],
-                "release_outcome": None if release is None else release["outcome"],
-                "release_observed_monotonic_ns": None
-                if release is None
-                else release["observed_monotonic_ns"],
-                "reset_complete": None
-                if release is None
-                else release["reset_complete"],
-                "idle_settle_started_monotonic_ns": settle_start,
-                "sample_index": sample_index,
-                "sample_monotonic_ns": capture.sample_monotonic_ns,
-                "systemd": capture.systemd,
-                "host": capture.host,
-                "gateway": capture.gateway,
-                "worker": capture.worker,
-                "gpu": capture.gpu,
-            }
-            reject_forbidden_passed(record, "resource sample")
-            self.resource.write_value(record)
-            prior_sample = capture.sample_monotonic_ns
-
-    def _capture_metric(self, segment: str, boundary: str) -> None:
-        capture = self.runtime.capture_metric(segment, boundary)
-        strict_json_bytes(capture.raw, f"amd-smi metric {segment} {boundary}")
-        self.guard.reject(capture.raw, "AMD SMI metric output")
-        relative = f"amd-smi-metric-{segment}-{boundary}.json"
-        atomic = AtomicFile(self.output_dir / relative)
-        atomic.write(capture.raw)
-        atomic.commit()
-        assert self.resource is not None
-        self.resource.write_value(
-            {
-                "schema_version": RESOURCE_SCHEMA,
-                "record_type": "gpu_metric",
-                "segment": segment,
-                "boundary": boundary,
-                "captured_monotonic_ns": capture.captured_monotonic_ns,
-                "gpu_index": GPU_INDEX,
-                "raw_output_file": relative,
-                "raw_output_sha256": sha256_bytes(capture.raw),
-            }
         )
 
     def _append_probe(self, phase: str, probe_name: str, probe: LifecycleProbe) -> None:
@@ -2547,30 +2847,6 @@ class Phase1Collector:
             )
         if restart.n_restarts != normal.n_restarts + 1:
             fail("systemd restart count did not increase exactly once")
-
-    @staticmethod
-    def _validate_capture_identity(
-        capture: ResourceCapture, expected: ProcessIdentity
-    ) -> None:
-        systemd_value = capture.systemd
-        if (
-            systemd_value.get("control_group_before") != expected.control_group
-            or systemd_value.get("control_group_after") != expected.control_group
-            or systemd_value.get("main_pid_before") != expected.gateway_pid
-            or systemd_value.get("main_pid_after") != expected.gateway_pid
-        ):
-            fail("resource sample systemd identity changed")
-        gateway = capture.gateway
-        worker = capture.worker
-        if (
-            gateway.get("pid") != expected.gateway_pid
-            or gateway.get("starttime_ticks_before") != expected.gateway_starttime_ticks
-            or gateway.get("starttime_ticks_after") != expected.gateway_starttime_ticks
-            or worker.get("pid") != expected.worker_pid
-            or worker.get("starttime_ticks_before") != expected.worker_starttime_ticks
-            or worker.get("starttime_ticks_after") != expected.worker_starttime_ticks
-        ):
-            fail("resource sample process identity changed")
 
     def _finalize(self) -> None:
         assert (

@@ -53,6 +53,8 @@ class FakeRuntime:
         wrong_journal_pid=False,
         late_normal_boundary_event=False,
         final_git_callback=None,
+        resource_identity_drift=False,
+        negative_admission=False,
     ):
         self.now = 1_000_000_000_000
         self.started = False
@@ -73,6 +75,9 @@ class FakeRuntime:
         self.late_normal_boundary_event = late_normal_boundary_event
         self.final_git_callback = final_git_callback
         self.git_identity_count = 0
+        self.resource_identity_drift = resource_identity_drift
+        self.negative_admission = negative_admission
+        self.plans = []
 
     def now_ns(self):
         return self.now
@@ -110,6 +115,7 @@ class FakeRuntime:
         if self.active != 1:
             raise AssertionError("collector overlapped requests")
         self.http_count += 1
+        self.plans.append(plan)
         try:
             connect = self._tick()
             request_fields = {
@@ -208,6 +214,8 @@ class FakeRuntime:
             )
             if plan.expect_release:
                 self._queue_success_lifecycle(plan, completion_id)
+            elif self.negative_admission:
+                self._queue_negative_admission()
             return COLLECTOR.HttpObservation(
                 status=plan.expected_status,
                 completion_id=completion_id,
@@ -308,6 +316,8 @@ class FakeRuntime:
             "fd_count": 32,
             "children": [identity.worker_pid],
         }
+        if self.resource_identity_drift:
+            gateway["starttime_ticks_after"] += 1
         worker = {
             "pid": identity.worker_pid,
             "ppid": identity.gateway_pid,
@@ -486,6 +496,70 @@ class FakeRuntime:
             }
             self.pending_journal.append(compact(record))
 
+    def _queue_negative_admission(self):
+        event = {
+            "schema_version": COLLECTOR.LIFECYCLE_SCHEMA,
+            "event": "request_admitted",
+            "observed_monotonic_ns": self._tick(),
+            "request_id": f"req-negative-{self.http_count:04d}",
+            "completion_id": f"chatcmpl-negative-{self.http_count:04d}",
+            "stream": True,
+            "prompt_tokens": 8,
+            "max_completion_tokens": 2,
+        }
+        self.cursor_index += 1
+        gateway_pid = 2200 if self.restarted else 1200
+        self.pending_journal.append(
+            compact(
+                {
+                    "__CURSOR": f"cursor-{self.cursor_index:06d}",
+                    "__MONOTONIC_TIMESTAMP": str(
+                        event["observed_monotonic_ns"] // 1000
+                    ),
+                    "_BOOT_ID": BOOT_ID,
+                    "_PID": str(gateway_pid),
+                    "_SYSTEMD_UNIT": "ullm-openai.service",
+                    "PRIORITY": "6",
+                    "MESSAGE": "INFO:     " + compact(event).decode("utf-8"),
+                }
+            )
+        )
+
+
+class BufferedLifecycleClaims:
+    """Synthetic stand-in for a campaign-owned continuous journal capture."""
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+
+    def consume(self, phase, case_id, expected_identity):
+        del phase, case_id
+        result = []
+        for raw in self.runtime.poll_journal():
+            record = json.loads(raw)
+            if int(record["_PID"]) != expected_identity.gateway_pid:
+                raise COLLECTOR.CollectorError("buffered claim PID differs")
+            event = COLLECTOR.decode_lifecycle_message(record["MESSAGE"])
+            if event is not None:
+                result.append(event)
+        return result
+
+    def wait(self, deadline_ns):
+        self.runtime.wait_for_journal(deadline_ns)
+
+    def require_quiet(self, phase, case_id, expected_identity, deadline_ns):
+        while True:
+            if self.consume(phase, case_id, expected_identity):
+                raise COLLECTOR.CollectorError("buffered negative claim is not quiet")
+            if self.runtime.now_ns() >= deadline_ns:
+                return
+            self.wait(
+                min(
+                    deadline_ns,
+                    self.runtime.now_ns() + COLLECTOR.JOURNAL_POLL_NS,
+                )
+            )
+
 
 class CollectorTestCase(unittest.TestCase):
     def setUp(self):
@@ -604,6 +678,37 @@ class CollectorTestCase(unittest.TestCase):
             runtime,
         )
 
+    def _resource_component(self, runtime, name="component"):
+        output = self.root / name
+        output.mkdir()
+        runtime.start()
+        session = COLLECTOR.SessionWriter(output / "session.jsonl", self.guard)
+        resource = COLLECTOR.AtomicJsonlWriter(output / "resources.jsonl", self.guard)
+        journal = COLLECTOR.JournalState(
+            boot_id=runtime.boot_id(),
+            raw_writer=COLLECTOR.AtomicJsonlWriter(
+                output / "journal.jsonl", self.guard
+            ),
+            session=session,
+        )
+        claims = COLLECTOR.Phase1ResourceLifecycleClaims(runtime, journal)
+        component = COLLECTOR.ResourceSegmentCollector(
+            COLLECTOR.ResourceSegmentConfig.from_collector_config(self.config),
+            output,
+            self.guard,
+            runtime,
+            session,
+            resource,
+            claims,
+        )
+        return output, session, resource, journal, component
+
+    @staticmethod
+    def _close_resource_component(session, resource, journal):
+        session.writer.abort_close()
+        resource.abort_close()
+        journal.raw_writer.abort_close()
+
     def test_readiness_url_is_the_deployed_readyz_endpoint(self):
         self.assertEqual(COLLECTOR.HTTP_READY_URL, "http://172.20.0.1:8000/readyz")
         document = self._valid_config_document()
@@ -635,6 +740,238 @@ class CollectorTestCase(unittest.TestCase):
         for path in self.output.rglob("*"):
             if path.is_file():
                 self.assertNotIn(SECRET, path.read_bytes())
+
+    def test_resource_component_collects_normal_segment_only(self):
+        runtime = FakeRuntime()
+        output, session, resource, journal, component = self._resource_component(
+            runtime, "normal-component"
+        )
+        self.config.resource_body_template["messages"][0]["content"] = (
+            "mutated-after-component-construction"
+        )
+        try:
+            result = component.collect_normal()
+            self.assertEqual(result.segment, "normal")
+            self.assertEqual(result.identity.gateway_pid, 1200)
+            self.assertEqual(result.warmup_requests, 10)
+            self.assertEqual(result.measured_requests, 100)
+            self.assertEqual(result.negative_requests, 3)
+            self.assertEqual(result.resource_samples, 505)
+            self.assertEqual(result.gpu_metrics, 2)
+            self.assertEqual(runtime.http_count, 113)
+            self.assertEqual(runtime.max_active, 1)
+            self.assertFalse(runtime.restarted)
+            self.assertFalse(runtime.closed)
+            self.assertEqual(resource.line_count, 507)
+            self.assertEqual(session.counts["lifecycle_probe"], 1)
+            self.assertEqual(session.counts["http_request"], 113)
+            self.assertEqual(session.counts["gateway_event"], 440)
+            self.assertEqual(journal.raw_writer.line_count, 440)
+            self.assertEqual(runtime.plans[34].case_id, "normal-measured-025")
+            self.assertEqual(
+                json.loads(runtime.plans[0].body)["messages"],
+                [{"role": "user", "content": "fixture"}],
+            )
+            self.assertEqual(
+                runtime.plans[35].case_id,
+                "negative-after-025-context_overflow_1",
+            )
+            self.assertEqual(runtime.plans[36].case_id, "normal-measured-026")
+            self.assertEqual(
+                {
+                    path.name
+                    for path in output.iterdir()
+                    if path.name.startswith("amd-smi-metric-")
+                },
+                {
+                    "amd-smi-metric-normal-before.json",
+                    "amd-smi-metric-normal-after.json",
+                },
+            )
+            self.assertFalse(hasattr(component.config, "phase_artifacts"))
+            with self.assertRaisesRegex(COLLECTOR.CollectorError, "duplicated"):
+                component.collect_normal()
+            self.assertEqual(runtime.http_count, 113)
+        finally:
+            self._close_resource_component(session, resource, journal)
+
+    def test_resource_component_collects_restart_segment_only(self):
+        runtime = FakeRuntime()
+        runtime.restarted = True
+        output, session, resource, journal, component = self._resource_component(
+            runtime, "restart-component"
+        )
+        normal_identity = COLLECTOR.ProcessIdentity(
+            "/system.slice/ullm-openai.service", 1200, 10000, 1201, 10001, 2
+        )
+        restart_identity = COLLECTOR.ProcessIdentity(
+            "/system.slice/ullm-openai.service", 2200, 20000, 2201, 20001, 3
+        )
+        try:
+            result = component.collect_restart(
+                normal_identity, expected_identity=restart_identity
+            )
+            self.assertEqual(result.segment, "restart")
+            self.assertEqual(result.identity, restart_identity)
+            self.assertEqual(result.warmup_requests, 10)
+            self.assertEqual(result.measured_requests, 20)
+            self.assertEqual(result.negative_requests, 0)
+            self.assertEqual(result.resource_samples, 105)
+            self.assertEqual(runtime.http_count, 30)
+            self.assertEqual(runtime.max_active, 1)
+            self.assertFalse(runtime.closed)
+            self.assertEqual(resource.line_count, 107)
+            self.assertEqual(session.counts["http_request"], 30)
+            self.assertEqual(session.counts["gateway_event"], 120)
+            self.assertEqual(journal.raw_writer.line_count, 120)
+            session.writer.file.sync()
+            records = [
+                json.loads(line)
+                for line in session.writer.file.incomplete_path.read_text().splitlines()
+            ]
+            self.assertEqual(
+                {record["phase"] for record in records}, {"resource_restart"}
+            )
+            self.assertEqual(
+                {
+                    path.name
+                    for path in output.iterdir()
+                    if path.name.startswith("amd-smi-metric-")
+                },
+                {
+                    "amd-smi-metric-restart-before.json",
+                    "amd-smi-metric-restart-after.json",
+                },
+            )
+        finally:
+            self._close_resource_component(session, resource, journal)
+
+    def test_resource_component_accepts_campaign_owned_buffered_claims(self):
+        runtime = FakeRuntime()
+        runtime.restarted = True
+        output, session, resource, journal, original = self._resource_component(
+            runtime, "buffered-claims-component"
+        )
+        component = COLLECTOR.ResourceSegmentCollector(
+            original.config,
+            output,
+            self.guard,
+            runtime,
+            session,
+            resource,
+            BufferedLifecycleClaims(runtime),
+        )
+        normal_identity = COLLECTOR.ProcessIdentity(
+            "/system.slice/ullm-openai.service", 1200, 10000, 1201, 10001, 2
+        )
+        try:
+            result = component.collect_restart(normal_identity)
+            self.assertEqual(result.identity.gateway_pid, 2200)
+            self.assertEqual(runtime.http_count, 30)
+            self.assertEqual(resource.line_count, 107)
+            self.assertEqual(journal.raw_writer.line_count, 0)
+            self.assertEqual(session.counts["gateway_event"], 0)
+        finally:
+            self._close_resource_component(session, resource, journal)
+
+    def test_resource_component_rejects_start_and_sample_identity_drift(self):
+        runtime = FakeRuntime()
+        _, session, resource, journal, component = self._resource_component(
+            runtime, "start-drift-component"
+        )
+        wrong_identity = COLLECTOR.ProcessIdentity(
+            "/system.slice/ullm-openai.service", 999, 10000, 1201, 10001, 2
+        )
+        try:
+            with self.assertRaisesRegex(COLLECTOR.CollectorError, "campaign epoch"):
+                component.collect_normal(expected_identity=wrong_identity)
+            self.assertEqual(runtime.http_count, 0)
+        finally:
+            self._close_resource_component(session, resource, journal)
+
+        runtime = FakeRuntime(resource_identity_drift=True)
+        _, session, resource, journal, component = self._resource_component(
+            runtime, "sample-drift-component"
+        )
+        try:
+            with self.assertRaisesRegex(
+                COLLECTOR.CollectorError, "process identity changed"
+            ):
+                component.collect_normal()
+            self.assertEqual(runtime.http_count, 10)
+        finally:
+            self._close_resource_component(session, resource, journal)
+
+    def test_resource_component_negative_claim_stops_before_next_request(self):
+        runtime = FakeRuntime(negative_admission=True)
+        _, session, resource, journal, component = self._resource_component(
+            runtime, "negative-claim-component"
+        )
+        try:
+            with self.assertRaisesRegex(
+                COLLECTOR.CollectorError, "negative request produced"
+            ):
+                component.collect_normal()
+            self.assertEqual(runtime.http_count, 36)
+            self.assertEqual(
+                runtime.plans[-1].case_id,
+                "negative-after-025-context_overflow_1",
+            )
+        finally:
+            self._close_resource_component(session, resource, journal)
+
+    def test_resource_component_rejects_schedule_body_and_template_mutations(self):
+        runtime = FakeRuntime()
+        output, session, resource, journal, component = self._resource_component(
+            runtime, "invalid-config-component"
+        )
+        base = component.config
+        mutations = [
+            dataclasses.replace(
+                base, negative_cases=tuple(reversed(base.negative_cases))
+            ),
+            dataclasses.replace(
+                base,
+                negative_cases=tuple(
+                    dataclasses.replace(item, body=b"{}")
+                    if item.name == "malformed_json"
+                    else item
+                    for item in base.negative_cases
+                ),
+            ),
+            dataclasses.replace(
+                base,
+                negative_cases=tuple(
+                    dataclasses.replace(item, body=compact({"wrong": True}))
+                    if item.name == "context_overflow_1"
+                    else item
+                    for item in base.negative_cases
+                ),
+            ),
+            dataclasses.replace(
+                base,
+                resource_body_template={
+                    "model": "Qwen3-14B-SQ8",
+                    "messages": [{"role": "tool", "content": "fixture"}],
+                },
+            ),
+        ]
+        try:
+            for mutation in mutations:
+                with self.subTest(mutation=mutation):
+                    with self.assertRaises(COLLECTOR.CollectorError):
+                        COLLECTOR.ResourceSegmentCollector(
+                            mutation,
+                            output,
+                            self.guard,
+                            runtime,
+                            session,
+                            resource,
+                            component.lifecycle_claims,
+                        )
+            self.assertEqual(runtime.http_count, 0)
+        finally:
+            self._close_resource_component(session, resource, journal)
 
     def test_missing_release_times_out_before_next_request_and_keeps_incomplete(self):
         runtime = FakeRuntime(omit_release_at=1)
