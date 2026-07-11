@@ -10,7 +10,6 @@ import hashlib
 import os
 import re
 import secrets
-import shutil
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Callable, NoReturn
@@ -224,7 +223,7 @@ class AtomicCampaignDirectory:
         self.work_identity: _Identity | None = None
         self.published = False
         self.closed = False
-        self._components: set[str] = set()
+        self._components: dict[str, _Identity] = {}
         self._prevalidation_seals: tuple[tuple[str, _ImmutableFileSeal], ...] | None = (
             None
         )
@@ -309,6 +308,63 @@ class AtomicCampaignDirectory:
         ):
             fail(f"{label} mode or owner differs")
 
+    def _remove_owned_tree(
+        self,
+        parent_fd: int,
+        name: str,
+        *,
+        expected: _Identity | None,
+        label: str,
+        require_private_mode: bool = True,
+    ) -> None:
+        """Remove one private tree without following or replacing directories."""
+
+        descriptor = -1
+        try:
+            entry = _entry_identity(parent_fd, name)
+            if expected is not None and (
+                (entry.device, entry.inode, entry.uid, entry.gid)
+                != (expected.device, expected.inode, expected.uid, expected.gid)
+            ):
+                fail(f"refusing to remove a replaced {label}")
+            if (
+                not stat.S_ISDIR(entry.mode)
+                or entry.uid != self.uid
+                or entry.gid != self.gid
+                or (require_private_mode and stat.S_IMODE(entry.mode) & 0o077 != 0)
+            ):
+                fail(f"{label} mode or owner differs")
+            descriptor = os.open(name, _directory_flags(), dir_fd=parent_fd)
+            opened = _Identity.from_stat(os.fstat(descriptor))
+            if opened != entry:
+                fail(f"{label} changed while opening")
+            os.fchmod(descriptor, 0o700)
+            for child in tuple(os.listdir(descriptor)):
+                child_identity = _entry_identity(descriptor, child)
+                if child_identity.uid != self.uid or child_identity.gid != self.gid:
+                    fail(f"{label} entry owner differs")
+                if stat.S_ISDIR(child_identity.mode):
+                    self._remove_owned_tree(
+                        descriptor,
+                        child,
+                        expected=child_identity,
+                        label=f"{label} directory",
+                        require_private_mode=False,
+                    )
+                else:
+                    os.unlink(child, dir_fd=descriptor)
+            os.fsync(descriptor)
+            _safe_close(descriptor)
+            descriptor = -1
+            os.rmdir(name, dir_fd=parent_fd)
+        except CampaignBundleError:
+            raise
+        except OSError:
+            fail(f"failed to remove {label}")
+        finally:
+            if descriptor >= 0:
+                _safe_close(descriptor)
+
     def _require_open(self) -> None:
         if self.closed or self.published:
             fail("campaign directory is no longer writable")
@@ -331,7 +387,7 @@ class AtomicCampaignDirectory:
             raise
         except OSError:
             fail("failed to create a campaign component directory")
-        self._components.add(label)
+        self._components[label] = identity
         return self.work_path / label
 
     def write_bytes(
@@ -785,18 +841,18 @@ class AtomicCampaignDirectory:
         for name in tuple(os.listdir(self.work_fd)):
             if name not in self._components:
                 fail("campaign work root contains an unknown entry")
-            path = self.work_path / name
             try:
-                identity = path.lstat()
-            except OSError:
-                fail("campaign component work entry is unavailable")
-            if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode):
-                fail("campaign component work entry is not a real directory")
-            try:
-                shutil.rmtree(path)
-            except OSError:
-                fail("failed to remove campaign component work")
-            self._components.remove(name)
+                self._remove_owned_tree(
+                    self.work_fd,
+                    name,
+                    expected=self._components[name],
+                    label="campaign component work",
+                )
+            except CampaignBundleError as error:
+                raise CampaignBundleError(
+                    "failed to remove campaign component work"
+                ) from error
+            del self._components[name]
         os.fsync(self.work_fd)
 
     def abort(self) -> None:
@@ -833,8 +889,13 @@ class AtomicCampaignDirectory:
                 )
                 continue
             try:
-                shutil.rmtree(path)
-            except OSError:
+                self._remove_owned_tree(
+                    self.parent_fd,
+                    path.name,
+                    expected=identity,
+                    label="private campaign directory",
+                )
+            except CampaignBundleError:
                 pending = CampaignBundleError(
                     "failed to remove a private campaign directory"
                 )

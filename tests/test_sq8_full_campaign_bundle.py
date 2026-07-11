@@ -383,6 +383,63 @@ class FullCampaignBundleTests(unittest.TestCase):
             self.assertFalse(work.exists())
             self.assertFalse(final.exists())
 
+    def test_clear_component_work_removes_a_sealed_tree(self) -> None:
+        with BundleFixture() as fixture:
+            component = fixture.bundle.component_directory("api-contract")
+            nested = component / "gate-bundle"
+            nested.mkdir()
+            evidence = nested / "results.json"
+            evidence.write_bytes(b"{}\n")
+            os.chmod(evidence, 0o400)
+            os.chmod(nested, 0o500)
+            os.chmod(component, 0o500)
+
+            fixture.bundle.clear_component_work()
+
+            self.assertFalse(component.exists())
+            self.assertEqual(os.listdir(fixture.bundle.work_fd), [])
+
+    def test_abort_removes_a_sealed_component_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            final = Path(temporary) / "campaign"
+            bundle = BUNDLE.AtomicCampaignDirectory(
+                final, uid=os.getuid(), gid=os.getgid()
+            )
+            stage = bundle.stage_path
+            work = bundle.work_path
+            component = bundle.component_directory("api-contract")
+            nested = component / "gate-bundle"
+            nested.mkdir()
+            evidence = nested / "results.json"
+            evidence.write_bytes(b"{}\n")
+            os.chmod(evidence, 0o400)
+            os.chmod(nested, 0o500)
+            os.chmod(component, 0o500)
+
+            bundle.abort()
+
+            self.assertFalse(stage.exists())
+            self.assertFalse(work.exists())
+            self.assertFalse(final.exists())
+
+    def test_clear_component_work_refuses_a_replaced_directory(self) -> None:
+        with BundleFixture() as fixture:
+            component = fixture.bundle.component_directory("api-contract")
+            original = fixture.bundle.work_path / "original-api-contract"
+            component.rename(original)
+            component.mkdir(mode=0o700)
+            marker = component / "marker"
+            marker.write_bytes(b"keep\n")
+
+            with self.assertRaisesRegex(
+                BUNDLE.CampaignBundleError,
+                "failed to remove campaign component work",
+            ):
+                fixture.bundle.clear_component_work()
+
+            self.assertEqual(marker.read_bytes(), b"keep\n")
+            self.assertTrue(original.is_dir())
+
     def test_validation_file_must_be_regular_private_and_nonempty(self) -> None:
         defects = ("empty", "mode", "symlink")
         for defect in defects:
