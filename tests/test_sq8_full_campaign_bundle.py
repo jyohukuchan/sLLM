@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -160,21 +161,14 @@ class FullCampaignBundleTests(unittest.TestCase):
             fixture.populate()
             fixture.bundle.validate_before_independent_validator()
             validation = fixture.add_validation()
-            real_rename = os.rename
+            real_rename = BUNDLE._rename_noreplace
 
             def mutate_after_publication_rename(
+                parent_fd: int,
                 source: str,
                 destination: str,
-                *,
-                src_dir_fd: int,
-                dst_dir_fd: int,
             ) -> None:
-                real_rename(
-                    source,
-                    destination,
-                    src_dir_fd=src_dir_fd,
-                    dst_dir_fd=dst_dir_fd,
-                )
+                real_rename(parent_fd, source, destination)
                 if (
                     source == fixture.bundle.stage_name
                     and destination == fixture.final.name
@@ -185,8 +179,8 @@ class FullCampaignBundleTests(unittest.TestCase):
                         os.fsync(handle.fileno())
 
             with mock.patch.object(
-                BUNDLE.os,
-                "rename",
+                BUNDLE,
+                "_rename_noreplace",
                 side_effect=mutate_after_publication_rename,
             ):
                 with self.assertRaisesRegex(
@@ -195,6 +189,58 @@ class FullCampaignBundleTests(unittest.TestCase):
                     fixture.bundle.publish(validation)
             self.assertFalse(fixture.final.exists())
             self.assertTrue(fixture.bundle.stage_path.is_dir())
+
+    def test_destination_raced_during_campaign_is_never_replaced(self) -> None:
+        with BundleFixture() as fixture:
+            fixture.populate()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
+            fixture.final.mkdir()
+            marker = fixture.final / "marker"
+            marker.write_bytes(b"keep")
+
+            with self.assertRaisesRegex(
+                BUNDLE.CampaignBundleError,
+                "destination appeared before exclusive publication",
+            ):
+                fixture.bundle.publish(validation)
+
+            self.assertEqual(marker.read_bytes(), b"keep")
+            self.assertTrue(fixture.bundle.stage_path.is_dir())
+
+    def test_rollback_never_replaces_a_raced_private_stage_name(self) -> None:
+        with BundleFixture() as fixture:
+            fixture.populate()
+            fixture.bundle.validate_before_independent_validator()
+            validation = fixture.add_validation()
+            real_fsync = os.fsync
+            raced_stage: Path | None = None
+
+            def race_before_rollback(descriptor: int) -> None:
+                nonlocal raced_stage
+                if descriptor == fixture.bundle.parent_fd and fixture.final.exists():
+                    raced_stage = fixture.bundle.stage_path
+                    raced_stage.mkdir()
+                    (raced_stage / "marker").write_bytes(b"keep")
+                    raise OSError("synthetic post-rename fsync failure")
+                real_fsync(descriptor)
+
+            with mock.patch.object(
+                BUNDLE.os,
+                "fsync",
+                side_effect=race_before_rollback,
+            ):
+                with self.assertRaisesRegex(
+                    BUNDLE.CampaignBundleError,
+                    "destination appeared before exclusive publication",
+                ):
+                    fixture.bundle.publish(validation)
+
+            assert raced_stage is not None
+            self.assertEqual((raced_stage / "marker").read_bytes(), b"keep")
+            self.assertTrue(fixture.final.is_dir())
+            shutil.rmtree(raced_stage)
+            shutil.rmtree(fixture.final)
 
     def test_layout_rejects_missing_extra_wrong_mode_and_symlink(self) -> None:
         defects = ("missing", "extra", "mode", "symlink")

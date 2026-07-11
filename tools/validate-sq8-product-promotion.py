@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import stat
 import sys
@@ -54,7 +53,9 @@ class ValidationError(RuntimeError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("product_root", nargs="?", type=Path, default=DEFAULT_PRODUCT_ROOT)
+    parser.add_argument(
+        "product_root", nargs="?", type=Path, default=DEFAULT_PRODUCT_ROOT
+    )
     parser.add_argument(
         "--metadata-only",
         action="store_true",
@@ -106,9 +107,13 @@ def require_regular_file(path: Path, root: Path) -> None:
     try:
         info = path.lstat()
     except OSError as error:
-        raise ValidationError(f"cannot inspect required file {path}: {error}") from error
+        raise ValidationError(
+            f"cannot inspect required file {path}: {error}"
+        ) from error
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise ValidationError(f"required path is not a regular non-symlink file: {path}")
+        raise ValidationError(
+            f"required path is not a regular non-symlink file: {path}"
+        )
     try:
         path.resolve().relative_to(root.resolve())
     except ValueError as error:
@@ -149,7 +154,15 @@ def validate_promotion(root: Path) -> dict[str, Any]:
     promotion = read_json(path)
     exact_keys(
         promotion,
-        {"schema_version", "created_at", "plan_commit", "model", "artifact", "package", "copy"},
+        {
+            "schema_version",
+            "created_at",
+            "plan_commit",
+            "model",
+            "artifact",
+            "package",
+            "copy",
+        },
         "promotion",
     )
     if promotion["schema_version"] != SCHEMA_VERSION:
@@ -167,7 +180,11 @@ def validate_promotion(root: Path) -> dict[str, Any]:
     artifact = promotion["artifact"]
     package = promotion["package"]
     copy = promotion["copy"]
-    if not isinstance(artifact, dict) or not isinstance(package, dict) or not isinstance(copy, dict):
+    if (
+        not isinstance(artifact, dict)
+        or not isinstance(package, dict)
+        or not isinstance(copy, dict)
+    ):
         raise ValidationError("promotion artifact/package/copy entries must be objects")
     expected_artifact = {
         "source": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-full-v0.2",
@@ -195,6 +212,16 @@ def validate_promotion(root: Path) -> dict[str, Any]:
 
 
 def validate_read_only_tree(root: Path, expected_files: int) -> None:
+    try:
+        root_info = root.lstat()
+    except OSError as error:
+        raise ValidationError(
+            f"read-only product root is unavailable: {root}"
+        ) from error
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise ValidationError(f"read-only product root is not a real directory: {root}")
+    if root_info.st_mode & 0o222:
+        raise ValidationError(f"read-only product root has write bits: {root}")
     file_count = 0
     for path in root.rglob("*"):
         info = path.lstat()
@@ -222,19 +249,32 @@ def validate_artifact(root: Path, *, full_payloads: bool) -> dict[str, Any]:
     manifest = read_json(manifest_path)
     if manifest.get("schema_version") != EXPECTED_ARTIFACT["schema_version"]:
         raise ValidationError("artifact schema mismatch")
-    if manifest.get("integrity", {}).get("content_sha256") != EXPECTED_ARTIFACT["content_sha256"]:
+    if (
+        manifest.get("integrity", {}).get("content_sha256")
+        != EXPECTED_ARTIFACT["content_sha256"]
+    ):
         raise ValidationError("artifact content identity mismatch")
-    if manifest.get("coverage", {}).get("selected_pair_count") != EXPECTED_ARTIFACT["selected_pair_count"]:
+    if (
+        manifest.get("coverage", {}).get("selected_pair_count")
+        != EXPECTED_ARTIFACT["selected_pair_count"]
+    ):
         raise ValidationError("artifact selected pair count mismatch")
-    if manifest.get("storage", {}).get("total_payload_bytes") != EXPECTED_ARTIFACT["payload_bytes"]:
+    if (
+        manifest.get("storage", {}).get("total_payload_bytes")
+        != EXPECTED_ARTIFACT["payload_bytes"]
+    ):
         raise ValidationError("artifact payload byte count mismatch")
     if full_payloads:
         try:
             result = canonical.verify_canonical_artifact(root)
         except Exception as error:
-            raise ValidationError(f"canonical artifact verification failed: {error}") from error
+            raise ValidationError(
+                f"canonical artifact verification failed: {error}"
+            ) from error
         if result.get("verified") is not True:
-            raise ValidationError("canonical artifact verifier did not report verified=true")
+            raise ValidationError(
+                "canonical artifact verifier did not report verified=true"
+            )
     validate_read_only_tree(root, EXPECTED_ARTIFACT["file_count"])
     return {
         "manifest_sha256": EXPECTED_ARTIFACT["manifest_sha256"],
@@ -257,7 +297,10 @@ def validate_package(root: Path, *, full_payloads: bool) -> dict[str, Any]:
     if manifest.get("tensors") != []:
         raise ValidationError("thin package tensors list must be empty")
     entries = manifest.get("passthrough_tensors")
-    if not isinstance(entries, list) or len(entries) != EXPECTED_PACKAGE["payload_count"]:
+    if (
+        not isinstance(entries, list)
+        or len(entries) != EXPECTED_PACKAGE["payload_count"]
+    ):
         raise ValidationError("thin package passthrough count mismatch")
     seen_names: set[str] = set()
     seen_files: set[PurePosixPath] = set()
@@ -269,18 +312,26 @@ def validate_package(root: Path, *, full_payloads: bool) -> dict[str, Any]:
         if not isinstance(name, str) or not name or name in seen_names:
             raise ValidationError(f"invalid or duplicate package tensor name: {name}")
         seen_names.add(name)
-        relative = safe_relative_path(entry.get("payload_file"), f"package entry {name} payload_file")
+        relative = safe_relative_path(
+            entry.get("payload_file"), f"package entry {name} payload_file"
+        )
         if relative in seen_files:
             raise ValidationError(f"duplicate package payload file: {relative}")
         seen_files.add(relative)
         path = root.joinpath(*relative.parts)
         require_regular_file(path, root)
         expected_bytes = entry.get("payload_bytes")
-        if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes < 0:
+        if (
+            not isinstance(expected_bytes, int)
+            or isinstance(expected_bytes, bool)
+            or expected_bytes < 0
+        ):
             raise ValidationError(f"invalid package payload byte count: {name}")
         if path.stat().st_size != expected_bytes:
             raise ValidationError(f"package payload byte length mismatch: {name}")
-        expected_sha256 = require_sha256(entry.get("payload_sha256"), f"{name}.payload_sha256")
+        expected_sha256 = require_sha256(
+            entry.get("payload_sha256"), f"{name}.payload_sha256"
+        )
         if full_payloads and sha256_file(path) != expected_sha256:
             raise ValidationError(f"package payload SHA-256 mismatch: {name}")
         payload_bytes += expected_bytes

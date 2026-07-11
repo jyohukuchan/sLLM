@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import dataclasses
+import ctypes
+import errno
 import hashlib
 import os
 import re
@@ -43,6 +45,7 @@ PREVALIDATION_ROOT_FILES = frozenset(
 )
 BROWSER_FILES = frozenset({"openwebui-stop-before.png", "post-header-failure.png"})
 VALIDATION_FILE = "release-validation.json"
+RENAME_NOREPLACE = 1
 
 
 class CampaignBundleError(RuntimeError):
@@ -123,6 +126,36 @@ def _safe_close(descriptor: int) -> None:
         os.close(descriptor)
     except OSError:
         fail("failed to close a campaign bundle descriptor")
+
+
+def _rename_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    """Publish one directory atomically without replacing a raced destination."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    operation = getattr(libc, "renameat2", None)
+    if operation is None:
+        fail("renameat2 is required for exclusive campaign publication")
+    operation.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    operation.restype = ctypes.c_int
+    result = operation(
+        parent_fd,
+        os.fsencode(source),
+        parent_fd,
+        os.fsencode(destination),
+        RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        fail("campaign destination appeared before exclusive publication")
+    fail("failed to exclusively publish the campaign directory")
 
 
 def _write_all(descriptor: int, raw: bytes) -> None:
@@ -634,11 +667,10 @@ class AtomicCampaignDirectory:
             current = _entry_identity(self.parent_fd, self.final_path.name)
             if current.directory_anchor() != self.stage_identity.directory_anchor():
                 fail("refusing to roll back a replaced campaign destination")
-            os.rename(
+            _rename_noreplace(
+                self.parent_fd,
                 self.final_path.name,
                 self.stage_name,
-                src_dir_fd=self.parent_fd,
-                dst_dir_fd=self.parent_fd,
             )
             os.fsync(self.parent_fd)
         except CampaignBundleError:
@@ -684,11 +716,10 @@ class AtomicCampaignDirectory:
             _safe_close(self.work_fd)
             self.work_fd = -1
             os.rmdir(self.work_name, dir_fd=self.parent_fd)
-            os.rename(
+            _rename_noreplace(
+                self.parent_fd,
                 self.stage_name,
                 self.final_path.name,
-                src_dir_fd=self.parent_fd,
-                dst_dir_fd=self.parent_fd,
             )
             renamed = True
             published_identity = _entry_identity(self.parent_fd, self.final_path.name)
