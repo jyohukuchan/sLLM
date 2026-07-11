@@ -505,6 +505,74 @@ class CampaignSecretOwner:
         except OSError:
             fail("campaign secret masters are unavailable")
 
+    def use_api_secret(self, consumer: Callable[[bytes], Any]) -> Any:
+        """Pass a bounded API-key snapshot directly into one trusted owner factory."""
+
+        if not callable(consumer):
+            fail("campaign API secret consumer is not callable")
+        self.revalidate()
+        expected = self._file_identities[self._API_NAME]
+        descriptor = -1
+        raw = b""
+        primary_error: BaseException | None = None
+        try:
+            descriptor = os.open(
+                self._API_NAME,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=self._directory_fd,
+            )
+            before = _StableFileIdentity.from_stat(os.fstat(descriptor))
+            entry = _StableFileIdentity.from_stat(
+                os.stat(
+                    self._API_NAME,
+                    dir_fd=self._directory_fd,
+                    follow_symlinks=False,
+                )
+            )
+            if before != expected or entry != expected:
+                fail("campaign API secret master changed before use")
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := os.read(descriptor, SECRET_COPY_CHUNK_BYTES):
+                total += len(chunk)
+                if total > SECRET_MAX_BYTES:
+                    fail("campaign API secret master exceeds its byte bound")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            if total != expected.size:
+                fail("campaign API secret master size changed during use")
+            return consumer(raw)
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            raw = b""
+            if descriptor >= 0:
+                verification_failed = False
+                try:
+                    after = _StableFileIdentity.from_stat(os.fstat(descriptor))
+                    entry_after = _StableFileIdentity.from_stat(
+                        os.stat(
+                            self._API_NAME,
+                            dir_fd=self._directory_fd,
+                            follow_symlinks=False,
+                        )
+                    )
+                    if after != expected or entry_after != expected:
+                        verification_failed = True
+                except OSError:
+                    verification_failed = True
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    verification_failed = True
+                if verification_failed:
+                    if primary_error is None:
+                        fail("campaign API secret master changed during use")
+                    primary_error.add_note(
+                        "campaign API secret master post-use verification also failed"
+                    )
+
     def close(self) -> None:
         if self.closed:
             return

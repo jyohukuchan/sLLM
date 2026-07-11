@@ -803,6 +803,43 @@ class ProductionSafetyPrimitiveTests(unittest.TestCase):
         owner.close()
         self.assertFalse(directory.exists())
 
+    def test_secret_owner_passes_api_bytes_only_inside_the_consumer(self):
+        owner = ORCHESTRATOR.CampaignSecretOwner.create(
+            self.API_SECRET,
+            self.OPENWEBUI_TOKEN,
+            parent=self.root,
+        )
+        marker = object()
+        seen = []
+
+        def consume(raw):
+            seen.append(raw)
+            return marker
+
+        try:
+            self.assertIs(owner.use_api_secret(consume), marker)
+            self.assertEqual(seen, [self.API_SECRET])
+            owner.revalidate()
+        finally:
+            owner.close()
+
+    def test_secret_owner_detects_master_mutation_by_the_consumer(self):
+        owner = ORCHESTRATOR.CampaignSecretOwner.create(
+            self.API_SECRET,
+            self.OPENWEBUI_TOKEN,
+            parent=self.root,
+        )
+
+        def mutate(_raw):
+            owner.api_key_path.write_bytes(b"changed-api-secret-0123456789")
+
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "changed during use"
+        ):
+            owner.use_api_secret(mutate)
+        with self.assertRaises(ORCHESTRATOR.FullCampaignError):
+            owner.close()
+
     def test_secret_owner_removes_expected_masters_before_reporting_extra_entry(self):
         owner = ORCHESTRATOR.CampaignSecretOwner.create(
             self.API_SECRET,
