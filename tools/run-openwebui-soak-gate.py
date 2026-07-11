@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run exactly 20 serial chats through the real OpenWebUI browser surface."""
+"""Run the exact 20-chat soak, optionally after one fixed OpenWebUI smoke."""
 
 from __future__ import annotations
 
@@ -106,9 +106,16 @@ SUPPORT, SUPPORT_SOURCE_RAW = _load_support()
 
 GATE_SCHEMA = "ullm.openwebui.browser_soak_gate.v1"
 BROWSER_SCHEMA = "ullm.openwebui.browser_soak.v1"
+COMBINED_GATE_SCHEMA = "ullm.openwebui.browser_smoke_soak_gate.v1"
+COMBINED_BROWSER_SCHEMA = "ullm.openwebui.browser_smoke_soak.v1"
 LIFECYCLE_SCHEMA = SUPPORT.LIFECYCLE_SCHEMA
 RUN_CASE = "openwebui_20_chat_soak"
+COMBINED_RUN_CASE = "openwebui_smoke_and_20_chat_soak"
+COMBINED_SUMMARY_RECORD_TYPE = "openwebui_smoke_soak_summary"
+COMBINED_MODE = "smoke_then_soak20"
 CASE_PREFIX = "openwebui_soak_chat_"
+SMOKE_CASE = "openwebui_smoke"
+SMOKE_MARKER = "OPENWEBUI_SMOKE_OK"
 CHAT_COUNT = 20
 MODEL_ID = "ullm-qwen3-14b-sq8"
 MODEL_LABEL = "uLLM Qwen3 14B SQ8"
@@ -117,6 +124,7 @@ BROWSER_SCRIPT_CONTAINER_PATH = "/usr/src/app/ullm-browser-soak.cjs"
 BROWSER_SUMMARY_NAME = "openwebui-soak-summary.json"
 BROWSER_CONTAINER_OUTPUT_DIR_NAME = "browser-output"
 MAX_BROWSER_LINES = CHAT_COUNT + 1
+MAX_COMBINED_BROWSER_LINES = CHAT_COUNT + 2
 MAX_BROWSER_STDERR_BYTES = 4 * 1024 * 1024
 MAX_BROWSER_RAW_BYTES = 32 * 1024 * 1024
 MAX_BROWSER_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -249,19 +257,50 @@ def validate_journal_record(
 SUPPORT.validate_journal_record = validate_journal_record
 
 
-def browser_case(case_index: int) -> str:
+def case_indices(*, include_smoke: bool = False) -> tuple[int, ...]:
+    if not isinstance(include_smoke, bool):
+        fail("browser soak mode flag is not boolean")
+    prefix = (0,) if include_smoke else ()
+    return prefix + tuple(range(1, CHAT_COUNT + 1))
+
+
+def browser_case(case_index: int, *, include_smoke: bool = False) -> str:
+    if include_smoke and case_index == 0:
+        return SMOKE_CASE
     if not 1 <= case_index <= CHAT_COUNT:
         fail("browser soak case index is outside the frozen schedule")
     return f"{CASE_PREFIX}{case_index:02d}"
 
 
-def case_marker(case_index: int) -> str:
-    browser_case(case_index)
+def case_marker(case_index: int, *, include_smoke: bool = False) -> str:
+    browser_case(case_index, include_smoke=include_smoke)
+    if include_smoke and case_index == 0:
+        return SMOKE_MARKER
     return f"OPENWEBUI_SOAK_OK_{case_index:02d}"
 
 
-def case_prompt(case_index: int) -> str:
-    return f"Reply with exactly {case_marker(case_index)} and nothing else."
+def case_prompt(case_index: int, *, include_smoke: bool = False) -> str:
+    marker = case_marker(case_index, include_smoke=include_smoke)
+    return f"Reply with exactly {marker} and nothing else."
+
+
+def case_record_type(case_index: int, *, include_smoke: bool = False) -> str:
+    browser_case(case_index, include_smoke=include_smoke)
+    if include_smoke and case_index == 0:
+        return "openwebui_smoke_chat"
+    return "openwebui_soak_chat"
+
+
+def schedule_evidence(*, include_smoke: bool = False) -> list[dict[str, Any]]:
+    return [
+        {
+            "position": position,
+            "case_index": case_index,
+            "case_kind": "smoke" if case_index == 0 else "soak",
+            "browser_case": browser_case(case_index, include_smoke=include_smoke),
+        }
+        for position, case_index in enumerate(case_indices(include_smoke=include_smoke))
+    ]
 
 
 def navigation_url(base_url: str) -> str:
@@ -290,7 +329,10 @@ class SoakTrace:
 
 
 class SoakLifecycleMachine:
-    def __init__(self) -> None:
+    def __init__(self, *, expected_count: int = CHAT_COUNT) -> None:
+        if expected_count not in {CHAT_COUNT, CHAT_COUNT + 1}:
+            fail("gateway soak expected request count is unsupported")
+        self.expected_count = expected_count
         self.traces: list[SoakTrace] = []
         self.active: SoakTrace | None = None
         self.max_active = 0
@@ -307,7 +349,7 @@ class SoakLifecycleMachine:
         if name == "request_admitted":
             if self.active is not None or pair in self.seen_pairs:
                 fail("gateway admitted an overlapping or duplicate soak request")
-            if len(self.traces) >= CHAT_COUNT:
+            if len(self.traces) >= self.expected_count:
                 fail("gateway admitted an extra soak request")
             trace = SoakTrace(
                 *pair, event["prompt_tokens"], event["max_completion_tokens"]
@@ -379,15 +421,26 @@ class LifecycleObserver(SUPPORT.LifecycleObserver):  # type: ignore[name-defined
         expected_pid: int,
         expected_uid: int,
         writer: LineWriterProtocol,
+        *,
+        expected_count: int = CHAT_COUNT,
     ) -> None:
         super().__init__(path, expected_pid, expected_uid, writer)
-        self.machine = SoakLifecycleMachine()
+        self.machine = SoakLifecycleMachine(expected_count=expected_count)
 
 
 class BrowserProcess:
-    def __init__(self, process: subprocess.Popen[bytes], writer: LineWriterProtocol):
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        writer: LineWriterProtocol,
+        *,
+        maximum_lines: int = MAX_BROWSER_LINES,
+    ):
+        if maximum_lines not in {MAX_BROWSER_LINES, MAX_COMBINED_BROWSER_LINES}:
+            fail("browser stdout line limit is unsupported")
         self.process = process
         self.writer = writer
+        self.maximum_lines = maximum_lines
         self.lines: list[tuple[bytes, dict[str, Any]]] = []
         self.stderr_digest = hashlib.sha256()
         self.stderr_bytes = 0
@@ -417,7 +470,7 @@ class BrowserProcess:
                 payload = raw[:-1]
                 value = strict_json_object(payload, "browser stdout")
                 with self.condition:
-                    if len(self.lines) >= MAX_BROWSER_LINES:
+                    if len(self.lines) >= self.maximum_lines:
                         fail("browser stdout line count exceeds the soak schedule")
                     self.writer.write_line(payload)
                     self.lines.append((payload, value))
@@ -563,6 +616,7 @@ def build_browser_command(
     openwebui_url: str,
     uid: int,
     gid: int,
+    include_smoke: bool = False,
 ) -> list[str]:
     image, _content_digest = normalized_browser_image(image)
     mounts = (
@@ -590,11 +644,11 @@ def build_browser_command(
             "OPENWEBUI_TOKEN_FILE=/run/secrets/openwebui-token",
             "--env",
             "OPENWEBUI_SOAK_SUMMARY=/output/openwebui-soak-summary.json",
-            image,
-            "node",
-            BROWSER_SCRIPT_CONTAINER_PATH,
         )
     )
+    if include_smoke:
+        command.extend(("--env", f"OPENWEBUI_SOAK_MODE={COMBINED_MODE}"))
+    command.extend((image, "node", BROWSER_SCRIPT_CONTAINER_PATH))
     return command
 
 
@@ -628,10 +682,11 @@ def validate_browser_action_sequence(
     *,
     case_index: int,
     base_url: str,
+    include_smoke: bool = False,
 ) -> tuple[int, int]:
     if not isinstance(actions, list) or len(actions) != len(FINAL_ACTIONS):
         fail("browser soak action count differs")
-    case_id = browser_case(case_index)
+    case_id = browser_case(case_index, include_smoke=include_smoke)
     fields = {
         "browser_case",
         "action_index",
@@ -647,7 +702,9 @@ def validate_browser_action_sequence(
     expected_inputs = (
         sha256_bytes(navigation_url(base_url).encode("utf-8")),
         sha256_bytes(MODEL_ID.encode("utf-8")),
-        sha256_bytes(case_prompt(case_index).encode("utf-8")),
+        sha256_bytes(
+            case_prompt(case_index, include_smoke=include_smoke).encode("utf-8")
+        ),
         None,
         None,
     )
@@ -820,6 +877,7 @@ def validate_browser_case(
     *,
     case_index: int,
     base_url: str,
+    include_smoke: bool = False,
 ) -> dict[str, Any]:
     exact_keys(
         value,
@@ -840,19 +898,30 @@ def validate_browser_case(
         "browser soak case",
     )
     if (
-        value["schema_version"] != BROWSER_SCHEMA
-        or value["record_type"] != "openwebui_soak_chat"
-        or value["browser_case"] != browser_case(case_index)
+        value["schema_version"]
+        != (COMBINED_BROWSER_SCHEMA if include_smoke else BROWSER_SCHEMA)
+        or value["record_type"]
+        != case_record_type(case_index, include_smoke=include_smoke)
+        or value["browser_case"]
+        != browser_case(case_index, include_smoke=include_smoke)
         or value["page_errors"] != []
     ):
         fail("browser soak case identity or page-error state differs")
     if (
-        integer(value["case_index"], "browser soak case index", minimum=1) != case_index
+        integer(
+            value["case_index"],
+            "browser soak case index",
+            minimum=0 if include_smoke else 1,
+        )
+        != case_index
         or integer(value["page_error_count"], "browser soak page-error count") != 0
     ):
         fail("browser soak case index or page-error count differs")
     first_action, last_action = validate_browser_action_sequence(
-        value["browser_actions"], case_index=case_index, base_url=base_url
+        value["browser_actions"],
+        case_index=case_index,
+        base_url=base_url,
+        include_smoke=include_smoke,
     )
     observed = decimal_timestamp(
         value["observed_monotonic_ns"], "browser soak case timestamp"
@@ -868,7 +937,9 @@ def validate_browser_case(
         {"expected_marker_utf8_bytes", "expected_marker_sha256", "observed"},
         "browser soak marker evidence",
     )
-    expected_marker = case_marker(case_index).encode("utf-8")
+    expected_marker = case_marker(case_index, include_smoke=include_smoke).encode(
+        "utf-8"
+    )
     if (
         integer(
             marker["expected_marker_utf8_bytes"],
@@ -896,7 +967,11 @@ def validate_browser_case(
         "browser soak page state",
     )
     if (
-        integer(page_state["page_index"], "browser soak page index", minimum=1)
+        integer(
+            page_state["page_index"],
+            "browser soak page index",
+            minimum=0 if include_smoke else 1,
+        )
         != case_index
         or page_state["temporary_chat"] is not True
         or page_state["created"] is not True
@@ -993,7 +1068,10 @@ def validate_browser_case(
     guard.reject(raw, "browser soak case stdout")
     return {
         "case_index": case_index,
-        "browser_case_sha256": sha256_bytes(browser_case(case_index).encode("utf-8")),
+        "browser_case": browser_case(case_index, include_smoke=include_smoke),
+        "browser_case_sha256": sha256_bytes(
+            browser_case(case_index, include_smoke=include_smoke).encode("utf-8")
+        ),
         "record_sha256": sha256_bytes(raw),
         "first_action_ns": first_action,
         "last_action_ns": last_action,
@@ -1012,41 +1090,45 @@ def validate_browser_summary(
     summary_path: Path,
     guard: SecretGuardProtocol,
     cases: list[dict[str, Any]],
+    *,
+    include_smoke: bool = False,
 ) -> dict[str, Any]:
-    exact_keys(
-        value,
-        {
-            "schema_version",
-            "record_type",
-            "browser_case",
-            "observed_monotonic_ns",
-            "chat_count",
-            "action_count",
-            "socket_event_count",
-            "browser_process_count",
-            "browser_context_count",
-            "browser_context_closed_count",
-            "page_count_created",
-            "page_count_closed",
-            "maximum_open_pages",
-            "page_error_count",
-            "cancellation_event_count",
-            "provider_error_count",
-            "case_record_sha256",
-        },
-        "browser soak summary",
-    )
+    expected_fields = {
+        "schema_version",
+        "record_type",
+        "browser_case",
+        "observed_monotonic_ns",
+        "chat_count",
+        "action_count",
+        "socket_event_count",
+        "browser_process_count",
+        "browser_context_count",
+        "browser_context_closed_count",
+        "page_count_created",
+        "page_count_closed",
+        "maximum_open_pages",
+        "page_error_count",
+        "cancellation_event_count",
+        "provider_error_count",
+        "case_record_sha256",
+    }
+    if include_smoke:
+        expected_fields.update({"mode", "schedule"})
+    exact_keys(value, expected_fields, "browser soak summary")
+    expected_count = CHAT_COUNT + int(include_smoke)
+    if len(cases) != expected_count:
+        fail("browser soak summary case count differs")
     expected_case_hashes = [item["record_sha256"] for item in cases]
     expected_socket_events = sum(item["socket_event_count"] for item in cases)
     integer_fields = {
-        "chat_count": CHAT_COUNT,
-        "action_count": CHAT_COUNT * len(FINAL_ACTIONS),
+        "chat_count": expected_count,
+        "action_count": expected_count * len(FINAL_ACTIONS),
         "socket_event_count": expected_socket_events,
         "browser_process_count": 1,
         "browser_context_count": 1,
         "browser_context_closed_count": 1,
-        "page_count_created": CHAT_COUNT,
-        "page_count_closed": CHAT_COUNT,
+        "page_count_created": expected_count,
+        "page_count_closed": expected_count,
         "maximum_open_pages": 1,
         "page_error_count": 0,
         "cancellation_event_count": 0,
@@ -1055,10 +1137,17 @@ def validate_browser_summary(
     for field, expected in integer_fields.items():
         if integer(value[field], f"browser soak summary {field}") != expected:
             fail("browser soak summary counts or bounds differ")
+    if include_smoke and (
+        value["mode"] != COMBINED_MODE
+        or value["schedule"] != schedule_evidence(include_smoke=True)
+    ):
+        fail("browser soak summary mode or schedule differs")
     if (
-        value["schema_version"] != BROWSER_SCHEMA
-        or value["record_type"] != "openwebui_soak_summary"
-        or value["browser_case"] != RUN_CASE
+        value["schema_version"]
+        != (COMBINED_BROWSER_SCHEMA if include_smoke else BROWSER_SCHEMA)
+        or value["record_type"]
+        != (COMBINED_SUMMARY_RECORD_TYPE if include_smoke else "openwebui_soak_summary")
+        or value["browser_case"] != (COMBINED_RUN_CASE if include_smoke else RUN_CASE)
         or value["case_record_sha256"] != expected_case_hashes
     ):
         fail("browser soak summary counts, bounds, or case hashes differ")
@@ -1073,13 +1162,17 @@ def validate_browser_summary(
     if summary_raw != raw + b"\n":
         fail("browser soak stdout and summary file differ")
     guard.reject(raw, "browser soak summary stdout")
-    return {
-        "chat_count": CHAT_COUNT,
-        "action_count": CHAT_COUNT * len(FINAL_ACTIONS),
+    result = {
+        "chat_count": expected_count,
+        "action_count": expected_count * len(FINAL_ACTIONS),
         "socket_event_count": expected_socket_events,
         "browser_summary_bytes": len(summary_raw),
         "browser_summary_sha256": sha256_bytes(summary_raw),
     }
+    if include_smoke:
+        result["mode"] = COMBINED_MODE
+        result["schedule"] = schedule_evidence(include_smoke=True)
+    return result
 
 
 def validate_browser_stdout(
@@ -1088,20 +1181,23 @@ def validate_browser_stdout(
     guard: SecretGuardProtocol,
     *,
     base_url: str,
+    include_smoke: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if len(lines) != MAX_BROWSER_LINES:
+    indices = case_indices(include_smoke=include_smoke)
+    if len(lines) != len(indices) + 1:
         fail("browser stdout record count differs from the frozen soak schedule")
     cases: list[dict[str, Any]] = []
     seen_chat_ids: set[str] = set()
     seen_message_ids: set[str] = set()
     prior_completed = -1
-    for case_index, (raw, value) in enumerate(lines[:CHAT_COUNT], start=1):
+    for case_index, (raw, value) in zip(indices, lines[:-1], strict=True):
         evidence = validate_browser_case(
             value,
             raw,
             guard,
             case_index=case_index,
             base_url=base_url,
+            include_smoke=include_smoke,
         )
         chat_id = evidence["chat_id_sha256"]
         message_id = evidence["message_id_sha256"]
@@ -1115,7 +1211,12 @@ def validate_browser_stdout(
         cases.append(evidence)
     summary_raw, summary_value = lines[-1]
     summary = validate_browser_summary(
-        summary_value, summary_raw, summary_path, guard, cases
+        summary_value,
+        summary_raw,
+        summary_path,
+        guard,
+        cases,
+        include_smoke=include_smoke,
     )
     return cases, summary
 
@@ -1123,18 +1224,23 @@ def validate_browser_stdout(
 def validate_gateway_traces(
     machine: SoakLifecycleMachine,
     browser_cases: list[dict[str, Any]],
+    *,
+    include_smoke: bool = False,
 ) -> list[dict[str, Any]]:
+    indices = case_indices(include_smoke=include_smoke)
+    expected_count = len(indices)
     if (
-        len(machine.traces) != CHAT_COUNT
-        or len(browser_cases) != CHAT_COUNT
+        machine.expected_count != expected_count
+        or len(machine.traces) != expected_count
+        or len(browser_cases) != expected_count
         or machine.active is not None
         or machine.max_active != 1
     ):
         fail("gateway soak request count, activity, or concurrency differs")
     correlations: list[dict[str, Any]] = []
     prior_release = -1
-    for case_index, (trace, browser) in enumerate(
-        zip(machine.traces, browser_cases, strict=True), start=1
+    for case_index, trace, browser in zip(
+        indices, machine.traces, browser_cases, strict=True
     ):
         admitted = trace.event("request_admitted")
         started = trace.event("request_started")
@@ -1156,22 +1262,21 @@ def validate_gateway_traces(
         ):
             fail("gateway soak release or browser ordering differs")
         prior_release = released_ns
-        correlations.append(
-            {
-                "case_index": case_index,
-                "browser_case_sha256": browser["browser_case_sha256"],
-                "chat_id_sha256": browser["chat_id_sha256"],
-                "message_id_sha256": browser["message_id_sha256"],
-                "request_id_sha256": sha256_bytes(trace.request_id.encode("utf-8")),
-                "completion_id_sha256": sha256_bytes(
-                    trace.completion_id.encode("utf-8")
-                ),
-                "admitted_monotonic_ns": str(admitted_ns),
-                "released_monotonic_ns": str(released_ns),
-                "outcome": "stop",
-                "reset_complete": True,
-            }
-        )
+        correlation = {
+            "case_index": case_index,
+            "browser_case_sha256": browser["browser_case_sha256"],
+            "chat_id_sha256": browser["chat_id_sha256"],
+            "message_id_sha256": browser["message_id_sha256"],
+            "request_id_sha256": sha256_bytes(trace.request_id.encode("utf-8")),
+            "completion_id_sha256": sha256_bytes(trace.completion_id.encode("utf-8")),
+            "admitted_monotonic_ns": str(admitted_ns),
+            "released_monotonic_ns": str(released_ns),
+            "outcome": "stop",
+            "reset_complete": True,
+        }
+        if include_smoke:
+            correlation["browser_case"] = browser["browser_case"]
+        correlations.append(correlation)
     return correlations
 
 
@@ -1195,6 +1300,11 @@ def stop_and_validate_journal(
 
 
 def execute(args: argparse.Namespace) -> None:
+    include_smoke = getattr(args, "include_smoke", False)
+    if not isinstance(include_smoke, bool):
+        fail("browser soak CLI mode flag is not boolean")
+    indices = case_indices(include_smoke=include_smoke)
+    expected_count = len(indices)
     output = AtomicRunDirectory(args.output_dir)
     observer: LifecycleObserver | None = None
     journal: JournalFollowerProtocol | None = None
@@ -1246,8 +1356,14 @@ def execute(args: argparse.Namespace) -> None:
             url.encode("utf-8"),
             MODEL_ID.encode("utf-8"),
             MODEL_LABEL.encode("utf-8"),
-            *(case_marker(index).encode("utf-8") for index in range(1, CHAT_COUNT + 1)),
-            *(case_prompt(index).encode("utf-8") for index in range(1, CHAT_COUNT + 1)),
+            *(
+                case_marker(index, include_smoke=include_smoke).encode("utf-8")
+                for index in indices
+            ),
+            *(
+                case_prompt(index, include_smoke=include_smoke).encode("utf-8")
+                for index in indices
+            ),
         ]
         if "@" in browser_image:
             sensitive.append(browser_image.encode("utf-8"))
@@ -1275,6 +1391,7 @@ def execute(args: argparse.Namespace) -> None:
             initial_identity.main_pid,
             initial_identity.uid,
             observer_writer,
+            expected_count=expected_count,
         )
         observer.open()
         journal_process = spawn_journal_follower(args.journalctl, args.service, cursor)
@@ -1297,9 +1414,16 @@ def execute(args: argparse.Namespace) -> None:
             openwebui_url=url,
             uid=os.geteuid(),
             gid=os.getegid(),
+            include_smoke=include_smoke,
         )
         browser_process = spawn_browser(command)
-        browser = BrowserProcess(browser_process, browser_writer)
+        browser = BrowserProcess(
+            browser_process,
+            browser_writer,
+            maximum_lines=(
+                MAX_COMBINED_BROWSER_LINES if include_smoke else MAX_BROWSER_LINES
+            ),
+        )
         browser.start()
         code = browser.wait_exit(deadline_ns)
         if code != 0:
@@ -1309,17 +1433,20 @@ def execute(args: argparse.Namespace) -> None:
             validate_container_output_directory(browser_container_output),
             base_guard,
             base_url=url,
+            include_smoke=include_smoke,
         )
 
         observer.wait_for(
             lambda machine: (
-                len(machine.traces) == CHAT_COUNT
+                len(machine.traces) == expected_count
                 and machine.active is None
                 and machine.traces[-1].released
             ),
             deadline_ns,
         )
-        correlations = validate_gateway_traces(observer.machine, browser_cases)
+        correlations = validate_gateway_traces(
+            observer.machine, browser_cases, include_smoke=include_smoke
+        )
         journal.wait_correlated(observer, deadline_ns)
         time.sleep(0.2)
         journal.wait_correlated(observer, deadline_ns)
@@ -1330,7 +1457,9 @@ def execute(args: argparse.Namespace) -> None:
         machine = observer.machine
         observer_records = list(observer.records)
         observer = None
-        correlations = validate_gateway_traces(machine, browser_cases)
+        correlations = validate_gateway_traces(
+            machine, browser_cases, include_smoke=include_smoke
+        )
         final_identity = query_service_identity(args.systemctl, args.service)
         final_boot_id = read_boot_id()
         if final_identity != initial_identity or final_boot_id != boot_id:
@@ -1368,8 +1497,8 @@ def execute(args: argparse.Namespace) -> None:
         except OSError:
             fail("failed to remove private browser soak runtime staging")
 
-        summary = {
-            "schema_version": GATE_SCHEMA,
+        summary: dict[str, Any] = {
+            "schema_version": (COMBINED_GATE_SCHEMA if include_smoke else GATE_SCHEMA),
             "passed": True,
             "service": {
                 "unit_sha256": sha256_bytes(args.service.encode("utf-8")),
@@ -1437,6 +1566,9 @@ def execute(args: argparse.Namespace) -> None:
                 },
             },
         }
+        if include_smoke:
+            summary["mode"] = COMBINED_MODE
+            summary["schedule"] = schedule_evidence(include_smoke=True)
         summary_guard.reject(compact_json(summary), "browser soak gate summary")
         write_atomic_json(output.stage / "summary.json", summary, summary_guard)
         for path in (
@@ -1512,6 +1644,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--docker", default="docker")
     parser.add_argument("--systemctl", default="systemctl")
     parser.add_argument("--journalctl", default="journalctl")
+    parser.add_argument(
+        "--include-smoke",
+        action="store_true",
+        help="run one fixed OpenWebUI smoke before the exact 20-chat soak",
+    )
     parser.add_argument(
         "--timeout-seconds",
         type=int,

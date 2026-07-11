@@ -5,8 +5,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const SUMMARY_SCHEMA = "ullm.openwebui.browser_soak.v1";
+const COMBINED_SUMMARY_SCHEMA = "ullm.openwebui.browser_smoke_soak.v1";
 const RUN_CASE = "openwebui_20_chat_soak";
+const COMBINED_RUN_CASE = "openwebui_smoke_and_20_chat_soak";
+const COMBINED_MODE = "smoke_then_soak20";
 const CASE_PREFIX = "openwebui_soak_chat_";
+const SMOKE_CASE = "openwebui_smoke";
+const SMOKE_MARKER = "OPENWEBUI_SMOKE_OK";
 const SOAK_CHAT_COUNT = 20;
 const MODEL_ID = "ullm-qwen3-14b-sq8";
 const MODEL_LABEL = "uLLM Qwen3 14B SQ8";
@@ -45,6 +50,43 @@ const browserCase = (caseIndex) => `${CASE_PREFIX}${caseSuffix(caseIndex)}`;
 const caseMarker = (caseIndex) => `OPENWEBUI_SOAK_OK_${caseSuffix(caseIndex)}`;
 const casePrompt = (caseIndex) =>
   `Reply with exactly ${caseMarker(caseIndex)} and nothing else.`;
+
+function caseSchedule(mode) {
+  const soak = [];
+  for (let caseIndex = 1; caseIndex <= SOAK_CHAT_COUNT; caseIndex += 1) {
+    soak.push({
+      caseIndex,
+      caseKind: "soak",
+      browserCase: browserCase(caseIndex),
+      marker: caseMarker(caseIndex),
+      prompt: casePrompt(caseIndex),
+      recordType: "openwebui_soak_chat",
+    });
+  }
+  if (mode === "soak20") return soak;
+  if (mode !== COMBINED_MODE) {
+    throw new Error("browser soak mode is unsupported");
+  }
+  return [
+    {
+      caseIndex: 0,
+      caseKind: "smoke",
+      browserCase: SMOKE_CASE,
+      marker: SMOKE_MARKER,
+      prompt: `Reply with exactly ${SMOKE_MARKER} and nothing else.`,
+      recordType: "openwebui_smoke_chat",
+    },
+    ...soak,
+  ];
+}
+
+const scheduleEvidence = (schedule) =>
+  schedule.map((item, position) => ({
+    position,
+    case_index: item.caseIndex,
+    case_kind: item.caseKind,
+    browser_case: item.browserCase,
+  }));
 
 function lstatOrNull(file) {
   try {
@@ -103,13 +145,17 @@ function loadConfig() {
     process.env.OPENWEBUI_TOKEN_FILE || "/run/secrets/openwebui-token";
   const summaryFile =
     process.env.OPENWEBUI_SOAK_SUMMARY || "/output/openwebui-soak-summary.json";
+  const mode = process.env.OPENWEBUI_SOAK_MODE || "soak20";
+  if (mode !== "soak20" && mode !== COMBINED_MODE) {
+    throw new Error("OPENWEBUI_SOAK_MODE is unsupported");
+  }
   const tokenStat = fs.lstatSync(tokenFile, { bigint: true });
   if (!tokenStat.isFile() || tokenStat.size < 1n || tokenStat.size > 65_536n) {
     throw new Error("OpenWebUI test token file has an invalid type or size");
   }
   const token = strictSingleLineToken(fs.readFileSync(tokenFile));
   requireAbsent(summaryFile, "browser soak summary output");
-  return { baseUrl, token, summaryFile };
+  return { baseUrl, mode, token, summaryFile };
 }
 
 function socketEvent(payload, observed = monotonicNs) {
@@ -321,10 +367,8 @@ function writeStdoutLine(serialized) {
   });
 }
 
-async function runCase(context, config, caseIndex, tracker) {
-  const caseId = browserCase(caseIndex);
-  const marker = caseMarker(caseIndex);
-  const prompt = casePrompt(caseIndex);
+async function runCase(context, config, spec, tracker) {
+  const { browserCase: caseId, caseIndex, marker, prompt, recordType } = spec;
   const actions = [];
   const events = [];
   const pageErrors = [];
@@ -510,8 +554,9 @@ async function runCase(context, config, caseIndex, tracker) {
     validateActionSequence(actions);
 
     evidence = {
-      schema_version: SUMMARY_SCHEMA,
-      record_type: "openwebui_soak_chat",
+      schema_version:
+        config.mode === COMBINED_MODE ? COMBINED_SUMMARY_SCHEMA : SUMMARY_SCHEMA,
+      record_type: recordType,
       browser_case: caseId,
       case_index: caseIndex,
       observed_monotonic_ns: nsString(),
@@ -600,6 +645,7 @@ async function runCase(context, config, caseIndex, tracker) {
 }
 
 async function run(browser, config) {
+  const schedule = caseSchedule(config.mode);
   const tracker = {
     browserProcesses: 1,
     contextsCreated: 0,
@@ -620,8 +666,8 @@ async function run(browser, config) {
     await context.addInitScript((value) => {
       window.localStorage.setItem("token", value);
     }, config.token);
-    for (let caseIndex = 1; caseIndex <= SOAK_CHAT_COUNT; caseIndex += 1) {
-      const record = await runCase(context, config, caseIndex, tracker);
+    for (const spec of schedule) {
+      const record = await runCase(context, config, spec, tracker);
       actionCount += record.value.browser_actions.length;
       socketEventCount += record.value.socket_events.length;
       caseRecordSha256.push(sha256(record.serialized));
@@ -636,19 +682,23 @@ async function run(browser, config) {
     tracker.browserProcesses !== 1 ||
     tracker.contextsCreated !== 1 ||
     tracker.contextsClosed !== 1 ||
-    tracker.pagesCreated !== SOAK_CHAT_COUNT ||
-    tracker.pagesClosed !== SOAK_CHAT_COUNT ||
+    tracker.pagesCreated !== schedule.length ||
+    tracker.pagesClosed !== schedule.length ||
     tracker.openPages !== 0 ||
     tracker.maximumOpenPages !== 1
   ) {
     throw new Error("bounded browser process, context, or page count differs");
   }
   const summary = {
-    schema_version: SUMMARY_SCHEMA,
-    record_type: "openwebui_soak_summary",
-    browser_case: RUN_CASE,
+    schema_version:
+      config.mode === COMBINED_MODE ? COMBINED_SUMMARY_SCHEMA : SUMMARY_SCHEMA,
+    record_type:
+      config.mode === COMBINED_MODE
+        ? "openwebui_smoke_soak_summary"
+        : "openwebui_soak_summary",
+    browser_case: config.mode === COMBINED_MODE ? COMBINED_RUN_CASE : RUN_CASE,
     observed_monotonic_ns: nsString(),
-    chat_count: SOAK_CHAT_COUNT,
+    chat_count: schedule.length,
     action_count: actionCount,
     socket_event_count: socketEventCount,
     browser_process_count: tracker.browserProcesses,
@@ -662,17 +712,17 @@ async function run(browser, config) {
     provider_error_count: 0,
     case_record_sha256: caseRecordSha256,
   };
+  if (config.mode === COMBINED_MODE) {
+    summary.mode = COMBINED_MODE;
+    summary.schedule = scheduleEvidence(schedule);
+  }
   const serialized = assertNoSensitiveSummary(summary, [
     config.baseUrl,
     config.token,
     MODEL_ID,
     MODEL_LABEL,
-    ...Array.from({ length: SOAK_CHAT_COUNT }, (_unused, index) =>
-      caseMarker(index + 1),
-    ),
-    ...Array.from({ length: SOAK_CHAT_COUNT }, (_unused, index) =>
-      casePrompt(index + 1),
-    ),
+    ...schedule.map((item) => item.marker),
+    ...schedule.map((item) => item.prompt),
   ]);
   fs.mkdirSync(path.dirname(config.summaryFile), {
     recursive: true,
@@ -701,7 +751,10 @@ function safeFailure(error) {
   const name = String(error?.name ?? "Error");
   const message = String(error?.message ?? error);
   return {
-    schema_version: SUMMARY_SCHEMA,
+    schema_version:
+      process.env.OPENWEBUI_SOAK_MODE === COMBINED_MODE
+        ? COMBINED_SUMMARY_SCHEMA
+        : SUMMARY_SCHEMA,
     record_type: "openwebui_soak_failure",
     observed_monotonic_ns: nsString(),
     error_name_utf8_bytes: Buffer.byteLength(name, "utf8"),
@@ -713,15 +766,22 @@ function safeFailure(error) {
 
 module.exports = {
   CASE_PREFIX,
+  COMBINED_MODE,
+  COMBINED_RUN_CASE,
+  COMBINED_SUMMARY_SCHEMA,
   EXPECTED_ACTION_SEQUENCE,
   MODEL_ID,
   RUN_CASE,
+  SMOKE_CASE,
+  SMOKE_MARKER,
   SOAK_CHAT_COUNT,
   SUMMARY_SCHEMA,
   assertNoSensitiveSummary,
   browserCase,
   caseMarker,
   casePrompt,
+  caseSchedule,
+  scheduleEvidence,
   socketEvent,
   strictSingleLineToken,
   validateTargetEvents,

@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -102,19 +103,26 @@ def lifecycle_trace(request: str, completion: str, start: int):
     ]
 
 
-def action(case_index: int, action_index: int, name: str, base_url: str):
+def action(
+    case_index: int,
+    action_index: int,
+    name: str,
+    base_url: str,
+    *,
+    include_smoke: bool = False,
+):
     base = case_index * 1000
     inputs = (
         digest(TOOL.navigation_url(base_url)),
         digest(TOOL.MODEL_ID),
-        digest(TOOL.case_prompt(case_index)),
+        digest(TOOL.case_prompt(case_index, include_smoke=include_smoke)),
         None,
         None,
     )
     selectors = (None, "body", "#chat-input", ".chat-assistant", "#chat-input")
     carries_text = name in {"wait_visible", "wait_ready"}
     return {
-        "browser_case": TOOL.browser_case(case_index),
+        "browser_case": TOOL.browser_case(case_index, include_smoke=include_smoke),
         "action_index": action_index,
         "action": name,
         "selector": selectors[action_index],
@@ -152,19 +160,29 @@ def socket_event(
     }
 
 
-def browser_case_fixture(case_index: int, base_url: str):
+def browser_case_fixture(
+    case_index: int, base_url: str, *, include_smoke: bool = False
+):
     base = case_index * 1000
     chat_id = f"temporary-chat-{case_index}"
     message_id = f"temporary-message-{case_index}"
-    marker = TOOL.case_marker(case_index).encode()
+    marker = TOOL.case_marker(case_index, include_smoke=include_smoke).encode()
     return {
-        "schema_version": TOOL.BROWSER_SCHEMA,
-        "record_type": "openwebui_soak_chat",
-        "browser_case": TOOL.browser_case(case_index),
+        "schema_version": (
+            TOOL.COMBINED_BROWSER_SCHEMA if include_smoke else TOOL.BROWSER_SCHEMA
+        ),
+        "record_type": TOOL.case_record_type(case_index, include_smoke=include_smoke),
+        "browser_case": TOOL.browser_case(case_index, include_smoke=include_smoke),
         "case_index": case_index,
         "observed_monotonic_ns": str(base + 60),
         "browser_actions": [
-            action(case_index, index, name, base_url)
+            action(
+                case_index,
+                index,
+                name,
+                base_url,
+                include_smoke=include_smoke,
+            )
             for index, name in enumerate(TOOL.FINAL_ACTIONS)
         ],
         "socket_correlation": {
@@ -205,30 +223,40 @@ def browser_case_fixture(case_index: int, base_url: str):
     }
 
 
-def browser_values(base_url: str):
+def browser_values(base_url: str, *, include_smoke: bool = False):
     cases = [
-        browser_case_fixture(index, base_url) for index in range(1, TOOL.CHAT_COUNT + 1)
+        browser_case_fixture(index, base_url, include_smoke=include_smoke)
+        for index in TOOL.case_indices(include_smoke=include_smoke)
     ]
     raws = [json.dumps(value, separators=(",", ":")).encode() for value in cases]
     summary = {
-        "schema_version": TOOL.BROWSER_SCHEMA,
-        "record_type": "openwebui_soak_summary",
-        "browser_case": TOOL.RUN_CASE,
-        "observed_monotonic_ns": str(TOOL.CHAT_COUNT * 1000 + 100),
-        "chat_count": TOOL.CHAT_COUNT,
-        "action_count": TOOL.CHAT_COUNT * len(TOOL.FINAL_ACTIONS),
+        "schema_version": (
+            TOOL.COMBINED_BROWSER_SCHEMA if include_smoke else TOOL.BROWSER_SCHEMA
+        ),
+        "record_type": (
+            TOOL.COMBINED_SUMMARY_RECORD_TYPE
+            if include_smoke
+            else "openwebui_soak_summary"
+        ),
+        "browser_case": (TOOL.COMBINED_RUN_CASE if include_smoke else TOOL.RUN_CASE),
+        "observed_monotonic_ns": str(len(cases) * 1000 + 100),
+        "chat_count": len(cases),
+        "action_count": len(cases) * len(TOOL.FINAL_ACTIONS),
         "socket_event_count": sum(len(value["socket_events"]) for value in cases),
         "browser_process_count": 1,
         "browser_context_count": 1,
         "browser_context_closed_count": 1,
-        "page_count_created": TOOL.CHAT_COUNT,
-        "page_count_closed": TOOL.CHAT_COUNT,
+        "page_count_created": len(cases),
+        "page_count_closed": len(cases),
         "maximum_open_pages": 1,
         "page_error_count": 0,
         "cancellation_event_count": 0,
         "provider_error_count": 0,
         "case_record_sha256": [digest(raw) for raw in raws],
     }
+    if include_smoke:
+        summary["mode"] = TOOL.COMBINED_MODE
+        summary["schedule"] = TOOL.schedule_evidence(include_smoke=True)
     return cases, summary
 
 
@@ -256,6 +284,78 @@ class BrowserEvidenceTests(unittest.TestCase):
         self.assertEqual(len(evidence), 20)
         self.assertEqual(result["action_count"], 100)
         self.assertEqual(result["socket_event_count"], 80)
+
+    def test_explicit_smoke_then_twenty_case_schedule_validates(self):
+        cases, summary = browser_values(self.base_url, include_smoke=True)
+        lines = framed_lines(cases, summary)
+        with tempfile.TemporaryDirectory() as temporary:
+            summary_path = Path(temporary) / TOOL.BROWSER_SUMMARY_NAME
+            summary_path.write_bytes(lines[-1][0] + b"\n")
+            evidence, result = TOOL.validate_browser_stdout(
+                lines,
+                summary_path,
+                TOOL.SecretGuard([]),
+                base_url=self.base_url,
+                include_smoke=True,
+            )
+        self.assertEqual(len(evidence), 21)
+        self.assertEqual(evidence[0]["case_index"], 0)
+        self.assertEqual(evidence[0]["browser_case"], TOOL.SMOKE_CASE)
+        self.assertEqual(evidence[1]["browser_case"], TOOL.browser_case(1))
+        self.assertEqual(result["chat_count"], 21)
+        self.assertEqual(result["action_count"], 105)
+        self.assertEqual(result["mode"], TOOL.COMBINED_MODE)
+        self.assertEqual(result["schedule"], TOOL.schedule_evidence(include_smoke=True))
+
+    def test_combined_schedule_order_and_summary_identity_are_fail_closed(self):
+        cases, summary = browser_values(self.base_url, include_smoke=True)
+        changed_smoke = copy.deepcopy(cases[0])
+        changed_smoke["visible_marker"]["expected_marker_sha256"] = "0" * 64
+        changed_smoke_raw = json.dumps(changed_smoke, separators=(",", ":")).encode()
+        with self.assertRaisesRegex(TOOL.SoakGateError, "marker evidence"):
+            TOOL.validate_browser_case(
+                changed_smoke,
+                changed_smoke_raw,
+                TOOL.SecretGuard([]),
+                case_index=0,
+                base_url=self.base_url,
+                include_smoke=True,
+            )
+
+        reordered = [cases[1], cases[0], *cases[2:]]
+        lines = framed_lines(reordered, summary)
+        with tempfile.TemporaryDirectory() as temporary:
+            summary_path = Path(temporary) / TOOL.BROWSER_SUMMARY_NAME
+            summary_path.write_bytes(lines[-1][0] + b"\n")
+            with self.assertRaisesRegex(TOOL.SoakGateError, "case identity"):
+                TOOL.validate_browser_stdout(
+                    lines,
+                    summary_path,
+                    TOOL.SecretGuard([]),
+                    base_url=self.base_url,
+                    include_smoke=True,
+                )
+
+        for field, replacement in (
+            ("mode", "soak20"),
+            ("schedule", list(reversed(summary["schedule"]))),
+        ):
+            changed = copy.deepcopy(summary)
+            changed[field] = replacement
+            lines = framed_lines(cases, changed)
+            with tempfile.TemporaryDirectory() as temporary:
+                summary_path = Path(temporary) / TOOL.BROWSER_SUMMARY_NAME
+                summary_path.write_bytes(lines[-1][0] + b"\n")
+                with self.assertRaisesRegex(
+                    TOOL.SoakGateError, "summary mode or schedule"
+                ):
+                    TOOL.validate_browser_stdout(
+                        lines,
+                        summary_path,
+                        TOOL.SecretGuard([]),
+                        base_url=self.base_url,
+                        include_smoke=True,
+                    )
 
     def test_action_marker_and_case_hash_tampering_are_rejected(self):
         cases, summary = browser_values(self.base_url)
@@ -439,9 +539,20 @@ class BrowserEvidenceTests(unittest.TestCase):
 class GatewayTraceTests(unittest.TestCase):
     base_url = "http://127.0.0.1:3000"
 
-    def machine(self, count=TOOL.CHAT_COUNT):
-        machine = TOOL.SoakLifecycleMachine()
-        for case_index in range(1, count + 1):
+    def machine(
+        self,
+        count=TOOL.CHAT_COUNT,
+        *,
+        expected_count=TOOL.CHAT_COUNT,
+        include_smoke=False,
+    ):
+        machine = TOOL.SoakLifecycleMachine(expected_count=expected_count)
+        indices = (
+            TOOL.case_indices(include_smoke=True)
+            if include_smoke
+            else tuple(range(1, count + 1))
+        )
+        for case_index in indices[:count]:
             for event in lifecycle_trace(
                 f"request-{case_index}",
                 f"completion-{case_index}",
@@ -470,6 +581,32 @@ class GatewayTraceTests(unittest.TestCase):
         self.assertEqual(len(correlations), 20)
         self.assertTrue(all(item["outcome"] == "stop" for item in correlations))
         self.assertTrue(all(item["reset_complete"] for item in correlations))
+
+    def test_smoke_then_twenty_gateway_traces_correlate_in_one_epoch(self):
+        cases, _summary = browser_values(self.base_url, include_smoke=True)
+        evidence = [
+            TOOL.validate_browser_case(
+                value,
+                json.dumps(value, separators=(",", ":")).encode(),
+                TOOL.SecretGuard([]),
+                case_index=index,
+                base_url=self.base_url,
+                include_smoke=True,
+            )
+            for index, value in zip(
+                TOOL.case_indices(include_smoke=True), cases, strict=True
+            )
+        ]
+        correlations = TOOL.validate_gateway_traces(
+            self.machine(21, expected_count=21, include_smoke=True),
+            evidence,
+            include_smoke=True,
+        )
+        self.assertEqual(len(correlations), 21)
+        self.assertEqual(correlations[0]["case_index"], 0)
+        self.assertEqual(correlations[0]["browser_case"], TOOL.SMOKE_CASE)
+        self.assertEqual(correlations[1]["case_index"], 1)
+        self.assertEqual(correlations[1]["browser_case"], TOOL.browser_case(1))
 
     def test_gateway_first_token_must_precede_browser_content(self):
         evidence = self.browser_evidence()
@@ -625,6 +762,30 @@ class RawIdentitySecretAndAtomicTests(unittest.TestCase):
         self.assertIn("--network=host", command)
         self.assertNotIn("cleartext-token", "\n".join(command))
         self.assertEqual(command[-2:], ["node", TOOL.BROWSER_SCRIPT_CONTAINER_PATH])
+        self.assertNotIn("OPENWEBUI_SOAK_MODE", command)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / "browser.cjs"
+            token = root / "token"
+            output = root / "output"
+            script.write_text("", encoding="ascii")
+            token.write_text("cleartext-token", encoding="ascii")
+            output.mkdir()
+            combined = TOOL.build_browser_command(
+                docker="docker",
+                image="browser@sha256:" + "a" * 64,
+                name="combined-container",
+                script=script,
+                token_file=token,
+                browser_output=output,
+                openwebui_url="http://127.0.0.1:3000",
+                uid=os.geteuid(),
+                gid=os.getegid(),
+                include_smoke=True,
+            )
+        mode_index = combined.index("OPENWEBUI_SOAK_MODE=" + TOOL.COMBINED_MODE)
+        self.assertEqual(combined[mode_index - 1], "--env")
+        self.assertNotIn("cleartext-token", "\n".join(combined))
         self.assertEqual(
             TOOL.normalized_browser_image("sha256:" + "b" * 64),
             ("sha256:" + "b" * 64, "sha256:" + "b" * 64),
@@ -737,6 +898,55 @@ class RawIdentitySecretAndAtomicTests(unittest.TestCase):
         self.assertTrue(os.access(TOOL_PATH, os.X_OK))
         self.assertTrue(
             os.access(ROOT / "deploy" / "openwebui" / "browser-soak.cjs", os.X_OK)
+        )
+
+    def test_include_smoke_is_explicit_and_default_remains_exact_twenty(self):
+        required = [
+            "--output-dir",
+            "/tmp/output",
+            "--token-file",
+            "/tmp/token",
+            "--browser-image",
+            "sha256:" + "a" * 64,
+            "--openwebui-url",
+            "http://127.0.0.1:3000",
+            "--service",
+            "ullm-openai.service",
+        ]
+        default = TOOL.parse_args(required)
+        combined = TOOL.parse_args([*required, "--include-smoke"])
+        self.assertFalse(default.include_smoke)
+        self.assertTrue(combined.include_smoke)
+        self.assertEqual(TOOL.case_indices(include_smoke=False), tuple(range(1, 21)))
+        self.assertEqual(TOOL.case_indices(include_smoke=True), tuple(range(0, 21)))
+
+    def test_node_and_gate_combined_schedules_are_identical(self):
+        script = ROOT / "deploy" / "openwebui" / "browser-soak.cjs"
+        program = r"""
+const m = require(process.argv[1]);
+const defaults = m.caseSchedule("soak20");
+const combined = m.caseSchedule(m.COMBINED_MODE);
+process.stdout.write(JSON.stringify({
+  defaults: m.scheduleEvidence(defaults),
+  combined: m.scheduleEvidence(combined),
+  smokeMarker: combined[0].marker,
+  smokePrompt: combined[0].prompt,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", program, str(script)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        value = json.loads(completed.stdout)
+        self.assertEqual(value["defaults"], TOOL.schedule_evidence(include_smoke=False))
+        self.assertEqual(value["combined"], TOOL.schedule_evidence(include_smoke=True))
+        self.assertEqual(value["smokeMarker"], TOOL.SMOKE_MARKER)
+        self.assertEqual(
+            digest(value["smokePrompt"]),
+            digest(TOOL.case_prompt(0, include_smoke=True)),
         )
 
 
