@@ -670,7 +670,7 @@ def _latency_sample(
     spec: _LatencySpec,
 ) -> dict[str, Any]:
     _validate_latency_http_common(result, spec)
-    completion_id, events, _first_token, release = _validate_trace_common(
+    completion_id, events, first_token, release = _validate_trace_common(
         request_id, trace, spec
     )
     _sse, items = _sse_items(result, "latency HTTP result")
@@ -694,6 +694,14 @@ def _latency_sample(
         if type(_attribute(item, "content_utf8_bytes", "latency SSE item")) is int
         and cast(int, _attribute(item, "content_utf8_bytes", "latency SSE item")) > 0
     ]
+    if not content_items:
+        fail("latency response lacks non-empty content")
+    first_content = _exact_int(
+        _attribute(content_items[0], "observed_monotonic_ns", "latency content"),
+        "latency first content timestamp",
+    )
+    if _event_time(first_token, "latency first token") > first_content:
+        fail("latency content precedes its lifecycle first-token event")
     common = {
         "sequence": spec.sequence,
         "case_id": spec.case_id,
@@ -706,8 +714,6 @@ def _latency_sample(
     if spec.workload == "ttft":
         if _attribute(result, "outcome", "TTFT HTTP result") != "client_closed":
             fail("TTFT HTTP outcome differs")
-        if not content_items:
-            fail("TTFT response lacks non-empty content")
         chunk_count = cast(int, _attribute(_sse, "chunk_count", "TTFT SSE"))
         if (
             any(
@@ -727,10 +733,6 @@ def _latency_sample(
             )
         ):
             fail("TTFT close/content/usage boundary differs")
-        first_content = _exact_int(
-            _attribute(content_items[0], "observed_monotonic_ns", "TTFT content"),
-            "TTFT first content timestamp",
-        )
         if not sent < first_content <= response_end:
             fail("TTFT timing order differs")
         cancel = events[-2]

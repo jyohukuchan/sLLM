@@ -18,6 +18,7 @@ from typing import Any, Callable, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
+MODULE_PATH = TOOLS / "sq8_full_campaign_independent_metrics.py"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
@@ -33,7 +34,7 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 METRICS = load_module(
     "test_sq8_full_campaign_independent_metrics_tool",
-    TOOLS / "sq8_full_campaign_independent_metrics.py",
+    MODULE_PATH,
 )
 PRODUCER = load_module(
     "test_sq8_full_campaign_independent_metrics_producer_oracle",
@@ -554,6 +555,32 @@ def latency_session(
     return Session(tuple(results), traces, {}, {}), producer_input
 
 
+def move_first_content_before_lifecycle(session: Session, result_index: int) -> None:
+    result = session.http_results[result_index]
+    sse = cast(SseMetadata, result.sse)
+    first = sse.items[0]
+    observed = first.observed_monotonic_ns - 1
+    replacement = dataclasses.replace(
+        result,
+        sse=dataclasses.replace(
+            sse,
+            first_chunk_monotonic_ns=observed,
+            last_chunk_monotonic_ns=(
+                observed if len(sse.items) == 1 else sse.last_chunk_monotonic_ns
+            ),
+            items=(
+                dataclasses.replace(first, observed_monotonic_ns=observed),
+                *sse.items[1:],
+            ),
+        ),
+    )
+    session.http_results = (
+        *session.http_results[:result_index],
+        replacement,
+        *session.http_results[result_index + 1 :],
+    )
+
+
 def canonical(value: dict[str, Any]) -> bytes:
     return (
         json.dumps(
@@ -841,6 +868,11 @@ class ResourceFixture:
 
 
 class IndependentLatencyTests(unittest.TestCase):
+    def test_production_module_does_not_import_producer_or_validator(self) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("sq8_full_campaign_views", source)
+        self.assertNotIn("validate-sq8-openwebui-release", source)
+
     def test_request_body_identities_match_tracked_fixtures(self) -> None:
         self.assertEqual(
             METRICS.LATENCY_REQUEST_BODY_IDENTITIES,
@@ -894,6 +926,14 @@ class IndependentLatencyTests(unittest.TestCase):
                     )
                     + session.http_results[1:],
                 ),
+            ),
+            (
+                "TTFT SSE before lifecycle first token",
+                lambda session: move_first_content_before_lifecycle(session, 0),
+            ),
+            (
+                "decode SSE before lifecycle first token",
+                lambda session: move_first_content_before_lifecycle(session, 60),
             ),
             (
                 "lifecycle",
