@@ -704,6 +704,14 @@ class FullCampaignViewTests(unittest.TestCase):
         with self.assertRaises(VIEWS.FullCampaignViewError):
             VIEWS.project_cancellation(direct, stop_view())
 
+        direct = direct_cancel_view()
+        direct["http_record_count"] = 33
+        VIEWS.project_cancellation(direct, stop_view())
+        for invalid_count in (31, 2049):
+            direct["http_record_count"] = invalid_count
+            with self.assertRaises(VIEWS.FullCampaignViewError):
+                VIEWS.project_cancellation(direct, stop_view())
+
     def test_cancellation_http_deadline_and_stop_recovery_are_exact(self):
         direct = direct_cancel_view()
         direct["cases"][0]["http_outcome"] = "eof"
@@ -743,8 +751,9 @@ class FullCampaignViewTests(unittest.TestCase):
             b"escaped-secret-\\-value",
             b"escaped-secret-\t-value",
         ):
-            with self.subTest(secret=escaped_secret), self.assertRaises(
-                VIEWS.FullCampaignViewError
+            with (
+                self.subTest(secret=escaped_secret),
+                self.assertRaises(VIEWS.FullCampaignViewError),
             ):
                 VIEWS.canonical_json_bytes(
                     {"value": escaped_secret.decode("utf-8")},

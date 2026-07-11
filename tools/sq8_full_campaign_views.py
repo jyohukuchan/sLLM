@@ -349,9 +349,7 @@ def _scan_json_semantics(
             pending.extend((child, depth + 1) for child in item)
         elif type(item) is str:
             try:
-                _scan(
-                    item.encode("utf-8", errors="strict"), forbidden_values, label
-                )
+                _scan(item.encode("utf-8", errors="strict"), forbidden_values, label)
             except UnicodeError:
                 fail(f"{label} contains a non-UTF-8 string")
         elif type(item) in {bytes, bytearray}:
@@ -622,7 +620,9 @@ def _direct_cancel_pairs(value: Mapping[str, Any]) -> list[dict[str, Any]]:
         source["schema_version"] != DIRECT_CANCEL_INPUT_SCHEMA
         or source["phase_order"] != list(DIRECT_CANCEL_PHASES)
         or _integer(source["request_count"], "direct request count") != 8
-        or _integer(source["http_record_count"], "direct HTTP record count") != 32
+        or not 32
+        <= _integer(source["http_record_count"], "direct HTTP record count")
+        <= 2048
         or _integer(source["lifecycle_record_count"], "direct lifecycle count") != 55
         or _integer(source["maximum_active_requests"], "direct active count") != 1
     ):
