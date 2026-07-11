@@ -251,7 +251,12 @@ class IdentityFixture:
 
     def _build_tokenizer_and_worker(self) -> None:
         for name in IDENTITY.TOKENIZER_FILES:
-            self._write(self.tokenizer / name, f"tokenizer identity {name}\n".encode())
+            raw = (
+                canonical({"chat_template": "fake-qwen3-chat-template-v1"})
+                if name == "tokenizer_config.json"
+                else f"tokenizer identity {name}\n".encode()
+            )
+            self._write(self.tokenizer / name, raw)
         self._write(self.worker, b"fake executable worker identity\n")
         os.chmod(self.worker, 0o755)
 
@@ -302,6 +307,15 @@ class FakeProbe:
 
     def systemd_version(self) -> bytes:
         return b"systemd 255 (synthetic)\n+PAM +AUDIT\n"
+
+    def python_version(self) -> bytes:
+        return b"Python 3.12.3\n"
+
+    def rustc_version(self) -> bytes:
+        return b"rustc 1.96.0 (synthetic 2026-05-25)\n"
+
+    def cargo_version(self) -> bytes:
+        return b"cargo 1.96.0 (synthetic 2026-05-25)\n"
 
     def service_show(self, unit: str) -> bytes:
         assert unit == IDENTITY.SERVICE_UNIT
@@ -439,6 +453,25 @@ class FullCampaignIdentityTests(unittest.TestCase):
         )
         self.assertTrue(
             artifacts.model_identity["product"]["artifact"]["payloads_hashed"]
+        )
+        self.assertEqual(
+            artifacts.environment["host"]["tools"]["python_version_line"],
+            "Python 3.12.3",
+        )
+        self.assertTrue(
+            artifacts.environment["host"]["tools"]["rustc_version_line"].startswith(
+                "rustc 1.96.0 "
+            )
+        )
+        self.assertTrue(
+            artifacts.environment["host"]["tools"]["cargo_version_line"].startswith(
+                "cargo 1.96.0 "
+            )
+        )
+        template = b"fake-qwen3-chat-template-v1"
+        self.assertEqual(
+            artifacts.model_identity["tokenizer"]["chat_template"],
+            {"utf8_bytes": len(template), "sha256": sha256(template)},
         )
         self.assertEqual(
             artifacts.environment_bytes,

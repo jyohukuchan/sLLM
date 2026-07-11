@@ -555,6 +555,9 @@ class LiveIdentity:
     cgroup_fs_type: str
     systemd_major: int
     systemd_version_line: str
+    python_version_line: str
+    rustc_version_line: str
+    cargo_version_line: str
     docker_version: str
     docker_api_version: str
     docker_os: str
@@ -628,6 +631,12 @@ class IdentityProbe(Protocol):
     def cgroup_fs_type(self) -> bytes: ...
 
     def systemd_version(self) -> bytes: ...
+
+    def python_version(self) -> bytes: ...
+
+    def rustc_version(self) -> bytes: ...
+
+    def cargo_version(self) -> bytes: ...
 
     def service_show(self, unit: str) -> bytes: ...
 
@@ -879,6 +888,15 @@ class SystemIdentityProbe:
     def systemd_version(self) -> bytes:
         return _run_bounded_command(("systemctl", "--version"), maximum=64 << 10)
 
+    def python_version(self) -> bytes:
+        return _run_bounded_command(("/usr/bin/python3", "--version"), maximum=4096)
+
+    def rustc_version(self) -> bytes:
+        return _run_bounded_command(("/usr/bin/rustc", "--version"), maximum=4096)
+
+    def cargo_version(self) -> bytes:
+        return _run_bounded_command(("/usr/bin/cargo", "--version"), maximum=4096)
+
     def service_show(self, unit: str) -> bytes:
         return _run_bounded_command(
             (
@@ -980,6 +998,22 @@ def _probe_raw(raw: bytes, forbidden_values: tuple[bytes, ...], label: str) -> b
     for offset in range(0, len(raw), COPY_CHUNK_BYTES):
         scanner.consume(raw[offset : offset + COPY_CHUNK_BYTES])
     return raw
+
+
+def _probe_version_line(
+    raw: bytes,
+    forbidden_values: tuple[bytes, ...],
+    label: str,
+    prefix: str,
+) -> str:
+    value = _probe_raw(raw, forbidden_values, label)
+    try:
+        lines = value.decode("utf-8", errors="strict").splitlines()
+    except UnicodeError:
+        fail(f"{label} is not strict UTF-8")
+    if len(lines) != 1 or not lines[0].startswith(prefix):
+        fail(f"{label} line differs")
+    return _safe_text(lines[0], label, maximum=4096)
 
 
 def _key_value_lines(raw: bytes, label: str) -> dict[str, str]:
@@ -1156,6 +1190,16 @@ def _capture_live_identity(
     if match is None or int(match.group(1), 10) != hardware.systemd_major:
         fail("systemd major version differs")
 
+    python_version_line = _probe_version_line(
+        probe.python_version(), forbidden, "Python version identity", "Python "
+    )
+    rustc_version_line = _probe_version_line(
+        probe.rustc_version(), forbidden, "rustc version identity", "rustc "
+    )
+    cargo_version_line = _probe_version_line(
+        probe.cargo_version(), forbidden, "Cargo version identity", "cargo "
+    )
+
     docker_value = _json_any(
         _probe_raw(probe.docker_version(), forbidden, "Docker version identity"),
         "Docker version identity",
@@ -1295,6 +1339,9 @@ def _capture_live_identity(
         cgroup_fs_type,
         hardware.systemd_major,
         systemd_line,
+        python_version_line,
+        rustc_version_line,
+        cargo_version_line,
         docker_version,
         docker_api,
         docker_os,
@@ -1769,6 +1816,9 @@ def _environment_document(
             "tools": {
                 "systemd_major": live.systemd_major,
                 "systemd_version_line": live.systemd_version_line,
+                "python_version_line": live.python_version_line,
+                "rustc_version_line": live.rustc_version_line,
+                "cargo_version_line": live.cargo_version_line,
                 "docker_version": live.docker_version,
                 "docker_api_version": live.docker_api_version,
                 "docker_os": live.docker_os,
@@ -1832,6 +1882,7 @@ def _model_document(
     artifact_manifest: _PinnedFile,
     package_manifest: _PinnedFile,
     tokenizer_entries: list[dict[str, Any]],
+    chat_template_identity: dict[str, Any],
     worker_binary: _PinnedFile,
     source_entries_by_role: dict[str, dict[str, Any]],
     source_sets: dict[str, str],
@@ -1891,6 +1942,7 @@ def _model_document(
             "root": os.fspath(Path(os.path.abspath(inputs.tokenizer_root))),
             "revision": MODEL_REVISION,
             "aggregate_sha256": _sha256(_canonical(tokenizer_entries)),
+            "chat_template": chat_template_identity,
             "files": tokenizer_entries,
         },
         "worker": {
@@ -2007,16 +2059,35 @@ def build_identity_artifacts(
         )
 
         tokenizer_entries: list[dict[str, Any]] = []
+        tokenizer_config: _PinnedFile | None = None
         for name in TOKENIZER_FILES:
             pinned = pins.open(
                 Path(os.path.abspath(inputs.tokenizer_root)) / name,
                 maximum=MAX_TOKENIZER_FILE_BYTES,
                 forbidden_values=inputs.forbidden_values,
-                retain=False,
+                retain=name == "tokenizer_config.json",
             )
+            if name == "tokenizer_config.json":
+                tokenizer_config = pinned
             tokenizer_entries.append(
                 {"path": name, "bytes": pinned.bytes, "sha256": pinned.sha256}
             )
+        assert tokenizer_config is not None and tokenizer_config.raw is not None
+        tokenizer_config_value = _json_object(
+            tokenizer_config.raw,
+            "tokenizer configuration",
+            maximum=MAX_TOKENIZER_FILE_BYTES,
+        )
+        chat_template = _safe_text(
+            tokenizer_config_value.get("chat_template"),
+            "tokenizer chat template",
+            maximum=1 << 20,
+        )
+        chat_template_raw = chat_template.encode("utf-8", errors="strict")
+        chat_template_identity = {
+            "utf8_bytes": len(chat_template_raw),
+            "sha256": _sha256(chat_template_raw),
+        }
         worker_binary = pins.open(
             inputs.worker_binary,
             maximum=MAX_WORKER_BINARY_BYTES,
@@ -2053,6 +2124,7 @@ def build_identity_artifacts(
             artifact_manifest,
             package_manifest,
             tokenizer_entries,
+            chat_template_identity,
             worker_binary,
             source_entries_by_role,
             source_sets,
@@ -2280,6 +2352,9 @@ def validate_environment_document(value: Any) -> dict[str, Any]:
         {
             "systemd_major",
             "systemd_version_line",
+            "python_version_line",
+            "rustc_version_line",
+            "cargo_version_line",
             "docker_version",
             "docker_api_version",
             "docker_os",
@@ -2534,7 +2609,7 @@ def validate_model_identity_document(value: Any) -> dict[str, Any]:
 
     tokenizer = _exact(
         document["tokenizer"],
-        {"root", "revision", "aggregate_sha256", "files"},
+        {"root", "revision", "aggregate_sha256", "chat_template", "files"},
         "model tokenizer",
     )
     tokenizer_root = _safe_text(tokenizer["root"], "model tokenizer root")
@@ -2555,6 +2630,17 @@ def validate_model_identity_document(value: Any) -> dict[str, Any]:
     aggregate = _sha(tokenizer["aggregate_sha256"], "model tokenizer aggregate SHA-256")
     if aggregate != _sha256(_canonical(tokenizer_entries)):
         fail("model tokenizer aggregate differs")
+    chat_template = _exact(
+        tokenizer["chat_template"],
+        {"utf8_bytes", "sha256"},
+        "model tokenizer chat template",
+    )
+    _integer(
+        chat_template["utf8_bytes"],
+        "model tokenizer chat template UTF-8 bytes",
+        minimum=1,
+    )
+    _sha(chat_template["sha256"], "model tokenizer chat template SHA-256")
 
     worker = _exact(
         document["worker"],
