@@ -838,8 +838,8 @@ def validate_journal_record(
     cursor = nonempty_string(record["__CURSOR"], "journal cursor")
     if cursor in cursors:
         fail("journal cursor is duplicated")
-    if record["_BOOT_ID"] != boot_id or record["_SYSTEMD_UNIT"] != service:
-        fail("journal boot or service identity differs")
+    if record["_BOOT_ID"] != boot_id:
+        fail("journal boot identity differs")
     monotonic = str(record["__MONOTONIC_TIMESTAMP"])
     pid = str(record["_PID"])
     priority = record["PRIORITY"]
@@ -855,7 +855,18 @@ def validate_journal_record(
     message = record["MESSAGE"]
     if not isinstance(message, str):
         fail("journal MESSAGE is not text")
-    lifecycle_raw = lifecycle_payload_from_journal_message(message)
+    service_record = record["_SYSTEMD_UNIT"] == service
+    manager_record = (
+        pid == "1"
+        and record["_SYSTEMD_UNIT"] == "init.scope"
+        and record.get("UNIT") == service
+        and record.get("SYSLOG_IDENTIFIER") == "systemd"
+    )
+    if not service_record and not manager_record:
+        fail("journal service identity differs")
+    lifecycle_raw = (
+        lifecycle_payload_from_journal_message(message) if service_record else None
+    )
     lifecycle = None
     if lifecycle_raw is not None:
         if lifecycle_raw in lifecycle_payloads:

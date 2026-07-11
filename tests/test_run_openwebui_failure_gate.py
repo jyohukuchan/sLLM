@@ -819,6 +819,41 @@ class IdentityCommandAndAtomicTests(unittest.TestCase):
                     expected_screenshot_sha256=SCREENSHOT_SHA,
                 )
 
+    def test_systemd_manager_unit_records_are_accepted_but_not_lifecycle(self):
+        manager = {
+            "__CURSOR": "manager-cursor",
+            "__MONOTONIC_TIMESTAMP": "1014113384889",
+            "_BOOT_ID": "a" * 32,
+            "_PID": "1",
+            "_SYSTEMD_UNIT": "init.scope",
+            "UNIT": "ullm-openai.service",
+            "SYSLOG_IDENTIFIER": "systemd",
+            "PRIORITY": "5",
+            "MESSAGE": (
+                "ullm-openai.service: Main process exited, "
+                "code=exited, status=1/FAILURE"
+            ),
+        }
+        cursor, lifecycle_record = TOOL.validate_journal_record(
+            TOOL.compact_json(manager),
+            service="ullm-openai.service",
+            boot_id="a" * 32,
+            cursors=set(),
+            lifecycle_payloads=set(),
+        )
+        self.assertEqual(cursor, "manager-cursor")
+        self.assertIsNone(lifecycle_record)
+
+        manager["UNIT"] = "foreign.service"
+        with self.assertRaisesRegex(TOOL.FailureGateError, "service identity"):
+            TOOL.validate_journal_record(
+                TOOL.compact_json(manager),
+                service="ullm-openai.service",
+                boot_id="a" * 32,
+                cursors=set(),
+                lifecycle_payloads=set(),
+            )
+
     def test_recovery_rejects_reused_worker_pid_or_starttime(self):
         account = pwd.getpwuid(os.geteuid())
         initial_service = TOOL.ServiceIdentity(
