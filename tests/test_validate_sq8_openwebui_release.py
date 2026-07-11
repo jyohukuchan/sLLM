@@ -93,6 +93,264 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
+def identity_canonical(value) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+
+
+def build_identity_documents():
+    source_entries = []
+    for role, path in VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS.items():
+        if role in VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES:
+            expected = VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES[role]
+            entry = {
+                "role": role,
+                "path": expected["path"],
+                "bytes": expected["bytes"],
+                "sha256": expected["sha256"],
+            }
+        else:
+            raw = f"synthetic source {role}\n".encode("ascii")
+            entry = {
+                "role": role,
+                "path": path,
+                "bytes": len(raw),
+                "sha256": sha256_bytes(raw),
+            }
+        source_entries.append(entry)
+    source_entries.sort(key=lambda item: item["path"].encode("utf-8"))
+    by_role = {entry["role"]: entry for entry in source_entries}
+    source_sets = {
+        group: sha256_bytes(
+            identity_canonical([by_role[role] for role in sorted(roles)])
+        )
+        for group, roles in VALIDATOR.EXPECTED_SOURCE_GROUPS.items()
+    }
+    worker_binary = "/opt/ullm/bin/ullm-sq8-worker"
+    product_root = "/opt/ullm/product/qwen3-14b-sq8"
+    tokenizer_root = "/opt/ullm/tokenizer/qwen3-14b-fp8"
+    unit_file = {
+        "path": "/etc/systemd/system/ullm-openai.service",
+        "bytes": by_role["systemd_service"]["bytes"],
+        "sha256": by_role["systemd_service"]["sha256"],
+    }
+    environment_file = {
+        "path": "/etc/ullm/openai-gateway.env",
+        "bytes": by_role["systemd_environment_contract"]["bytes"],
+        "sha256": by_role["systemd_environment_contract"]["sha256"],
+    }
+    environment = {
+        "schema_version": VALIDATOR.ENVIRONMENT_SCHEMA,
+        "record_type": "environment",
+        "captured_utc": "2026-07-11T12:00:00Z",
+        "git": {
+            "commit": GIT_COMMIT,
+            "dirty": False,
+            "status_sha256": sha256_bytes(b""),
+        },
+        "sources": source_entries,
+        "source_sets": source_sets,
+        "deployment": {
+            "service_unit_file": unit_file,
+            "environment_file": environment_file,
+            "configuration": {
+                "worker_binary": worker_binary,
+                "product_root": product_root,
+                "tokenizer_root": tokenizer_root,
+                "api_key_file": "/etc/ullm/openai-api-key",
+                "gpu_lock_file": "/run/ullm/r9700.lock",
+                "bind_host": VALIDATOR.DOCKER_NETWORK_GATEWAY,
+                "bind_port": 8000,
+                "hip_visible_devices": "1",
+                "hip_guards": list(VALIDATOR.HIP_GUARDS),
+            },
+        },
+        "host": {
+            "os": {
+                "id": "ubuntu",
+                "version_id": "24.04",
+                "pretty_name": "Ubuntu 24.04.4 LTS",
+            },
+            "kernel": {
+                "sysname": "Linux",
+                "release": "6.17.0-35-generic",
+                "version": "#35-Ubuntu SMP",
+                "machine": "x86_64",
+            },
+            "boot_id": BOOT_ID,
+            "cgroup_fs_type": "cgroup2fs",
+            "tools": {
+                "systemd_major": 255,
+                "systemd_version_line": "systemd 255 (255.4-1ubuntu8.12)",
+                "python_version_line": "Python 3.12.3",
+                "rustc_version_line": "rustc 1.96.0 (synthetic)",
+                "cargo_version_line": "cargo 1.96.0 (synthetic)",
+                "docker_version": "28.5.1",
+                "docker_api_version": "1.51",
+                "docker_os": "linux",
+                "docker_arch": "amd64",
+                "docker_kernel_version": "6.17.0-35-generic",
+                "amd_smi_tool": "26.2.2+e1a6bc5663",
+                "amd_smi_library": "26.2.2",
+                "rocm_version": "7.2.1",
+                "amd_smi_version_line": "AMD SMI 26.2.2 ROCm 7.2.1",
+            },
+            "gpu": {
+                "index": 2,
+                "bdf": "0000:47:00.0",
+                "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+                "kfd_gpu_id": 51545,
+                "node_id": 2,
+                "partition_id": 0,
+                "architecture": VALIDATOR.DEVICE_ARCHITECTURE,
+            },
+        },
+        "service": {
+            "unit": VALIDATOR.SERVICE_UNIT,
+            "user": "homelab1",
+            "group": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "fragment_path": unit_file["path"],
+            "control_group": f"/system.slice/{VALIDATOR.SERVICE_UNIT}",
+            "gateway": {
+                "pid": 1200,
+                "ppid": 1,
+                "uid": 1000,
+                "gid": 1000,
+                "starttime_ticks": 10000,
+                "executable": "/usr/bin/python3.12",
+                "executable_bytes": 64,
+                "executable_sha256": "6" * 64,
+                "children": [1201],
+            },
+            "worker": {
+                "pid": 1201,
+                "ppid": 1200,
+                "uid": 1000,
+                "gid": 1000,
+                "starttime_ticks": 10001,
+                "executable": worker_binary,
+                "executable_bytes": 123456,
+                "executable_sha256": WORKER_SHA256,
+                "children": [],
+            },
+            "n_restarts": 2,
+            "active_state": "active",
+            "sub_state": "running",
+        },
+        "openwebui": {
+            "version": VALIDATOR.OPENWEBUI_VERSION,
+            "source_revision": VALIDATOR.OPENWEBUI_SOURCE_REVISION,
+            "base_image_digest": VALIDATOR.OPENWEBUI_BASE_IMAGE_DIGEST,
+            "base_image_id": VALIDATOR.OPENWEBUI_BASE_IMAGE_ID,
+            "derived_image_id": VALIDATOR.OPENWEBUI_DERIVED_IMAGE_ID,
+            "Dockerfile_sha256": by_role["openwebui_dockerfile"]["sha256"],
+            "patch_sha256": by_role["openwebui_patch"]["sha256"],
+            "patched_middleware_sha256": (
+                VALIDATOR.OPENWEBUI_PATCHED_MIDDLEWARE_SHA256
+            ),
+            "network_name": VALIDATOR.DOCKER_NETWORK_NAME,
+            "network_id": VALIDATOR.DOCKER_NETWORK_ID,
+            "network_subnet": VALIDATOR.DOCKER_NETWORK_SUBNET,
+            "network_gateway": VALIDATOR.DOCKER_NETWORK_GATEWAY,
+        },
+    }
+
+    tokenizer_files = [
+        {"path": path, "bytes": byte_count, "sha256": digest}
+        for path, byte_count, digest in VALIDATOR.EXPECTED_TOKENIZER_FILES
+    ]
+    artifact = deepcopy(VALIDATOR.EXPECTED_ARTIFACT_IDENTITY)
+    package = deepcopy(VALIDATOR.EXPECTED_PACKAGE_IDENTITY)
+    promotion = {
+        "file": "promotion.json",
+        "bytes": 1347,
+        "sha256": "7" * 64,
+        "created_at": "2026-07-10T12:16:25+09:00",
+        "plan_commit": VALIDATOR.PROMOTION_PLAN_COMMIT,
+    }
+    receipt = {
+        "schema_version": VALIDATOR.PROMOTION_SCHEMA,
+        "product_root": product_root,
+        "created_at": promotion["created_at"],
+        "model_revision": VALIDATOR.MODEL_REVISION,
+        "artifact": {
+            "manifest_sha256": artifact["manifest_sha256"],
+            "content_sha256": artifact["content_sha256"],
+            "selected_pair_count": artifact["selected_pair_count"],
+            "payloads_hashed": True,
+        },
+        "package": {
+            "manifest_sha256": package["manifest_sha256"],
+            "payload_count": package["payload_count"],
+            "payload_bytes": package["payload_bytes"],
+            "payloads_hashed": True,
+        },
+        "read_only": True,
+        "full_payloads": True,
+        "verified": True,
+    }
+    model_identity = {
+        "schema_version": VALIDATOR.MODEL_IDENTITY_SCHEMA,
+        "record_type": "model_identity",
+        "model": {
+            "upstream_id": VALIDATOR.UPSTREAM_MODEL_ID,
+            "served_id": VALIDATOR.SERVED_MODEL_ID,
+            "revision": VALIDATOR.MODEL_REVISION,
+        },
+        "promotion_validation": {
+            "schema_version": VALIDATOR.PROMOTION_SCHEMA,
+            "result_sha256": sha256_bytes(identity_canonical(receipt)),
+            "validator_source_sha256": by_role["product_promotion_validator"]["sha256"],
+            "full_payloads": True,
+            "read_only": True,
+            "verified": True,
+        },
+        "product": {
+            "root": product_root,
+            "promotion": promotion,
+            "artifact": artifact,
+            "package": package,
+        },
+        "tokenizer": {
+            "root": tokenizer_root,
+            "revision": VALIDATOR.MODEL_REVISION,
+            "aggregate_sha256": sha256_bytes(identity_canonical(tokenizer_files)),
+            "chat_template": deepcopy(VALIDATOR.EXPECTED_CHAT_TEMPLATE_IDENTITY),
+            "files": tokenizer_files,
+        },
+        "oracle": {
+            **deepcopy(VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES),
+            "vllm_identity": deepcopy(VALIDATOR.EXPECTED_VLLM_IDENTITY),
+        },
+        "worker": {
+            "binary": worker_binary,
+            "binary_bytes": environment["service"]["worker"]["executable_bytes"],
+            "binary_sha256": WORKER_SHA256,
+            "source_sha256": source_sets["worker"],
+            "protocol_schema": VALIDATOR.WORKER_PROTOCOL_SCHEMA,
+            "device_architecture": VALIDATOR.DEVICE_ARCHITECTURE,
+            "execution_profile": VALIDATOR.EXECUTION_PROFILE,
+            "context_length": VALIDATOR.CONTEXT_LENGTH,
+            "max_completion_tokens": VALIDATOR.MAX_COMPLETION_TOKENS,
+            "vocab_size": VALIDATOR.VOCAB_SIZE,
+            "model_revision": VALIDATOR.MODEL_REVISION,
+            "artifact_content_sha256": artifact["content_sha256"],
+            "package_manifest_sha256": package["manifest_sha256"],
+        },
+    }
+    return environment, model_identity
+
+
 class EvidenceBuilder:
     def __init__(self, root: Path):
         self.root = root
@@ -1788,6 +2046,345 @@ class ApiContractHttpValidationTest(unittest.TestCase):
         records = deepcopy(self.records)
         replace_api_contract_response(records, "models-valid", b"")
         self.assert_invalid("body chunk is empty", records)
+
+
+class CampaignIdentityValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "identity-bundle"
+        self.root.mkdir()
+        self.environment, self.model_identity = build_identity_documents()
+        self.write_documents()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write_documents(self):
+        (self.root / "environment.json").write_bytes(
+            identity_canonical(self.environment)
+        )
+        (self.root / "model-identity.json").write_bytes(
+            identity_canonical(self.model_identity)
+        )
+
+    def validate(self, *, commit=GIT_COMMIT, worker_sha=WORKER_SHA256):
+        return VALIDATOR.validate_campaign_identity(
+            self.root,
+            expected_commit=commit,
+            expected_worker_binary_sha256=worker_sha,
+        )
+
+    def assert_invalid(self, text: str):
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, text):
+            self.validate()
+
+    def test_valid_identity_reconstructs_fixed_contract(self):
+        result = self.validate()
+        self.assertIsInstance(result, VALIDATOR.IdentityData)
+        self.assertEqual(result.expected_commit, GIT_COMMIT)
+        self.assertEqual(result.expected_worker_binary_sha256, WORKER_SHA256)
+        self.assertEqual(
+            result.model_worker["artifact_content_sha256"],
+            VALIDATOR.EXPECTED_ARTIFACT_IDENTITY["content_sha256"],
+        )
+        self.assertEqual(
+            result.environment_sha256,
+            sha256_file(self.root / "environment.json"),
+        )
+
+    def test_source_contract_map_and_groups_match_producer(self):
+        generator_path = REPO_ROOT / "tools" / "sq8_full_campaign_identity.py"
+        spec = importlib.util.spec_from_file_location(
+            "identity_source_contract_parity", generator_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self.assertEqual(
+            VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS,
+            module.SOURCE_ROLE_PATHS,
+        )
+        self.assertEqual(
+            VALIDATOR.EXPECTED_SOURCE_GROUPS,
+            module.SOURCE_GROUPS,
+        )
+
+    def test_identity_json_must_be_canonical_and_forbid_passed(self):
+        path = self.root / "environment.json"
+        path.write_text(json.dumps(self.environment, indent=2), encoding="utf-8")
+        self.assert_invalid("canonical identity JSON")
+        self.write_documents()
+        self.environment["passed"] = True
+        self.write_documents()
+        self.assert_invalid("forbidden key.*passed")
+
+    def test_source_order_aggregate_and_deployment_copy_are_bound(self):
+        mutations = (
+            (
+                "bytewise-sorted",
+                lambda value: value["sources"].reverse(),
+            ),
+            (
+                "source aggregate worker",
+                lambda value: value["source_sets"].__setitem__("worker", "0" * 64),
+            ),
+            (
+                "effective deployment",
+                lambda value: value["deployment"]["service_unit_file"].__setitem__(
+                    "bytes",
+                    value["deployment"]["service_unit_file"]["bytes"] + 1,
+                ),
+            ),
+        )
+        pristine = deepcopy(self.environment)
+        for text, mutation in mutations:
+            with self.subTest(text=text):
+                self.environment = deepcopy(pristine)
+                mutation(self.environment)
+                self.write_documents()
+                self.assert_invalid(text)
+
+    def test_frozen_gpu_systemd_and_openwebui_values_are_exact(self):
+        mutations = (
+            (
+                "tool or host kernel identity",
+                lambda value: value["host"]["tools"].__setitem__("systemd_major", 254),
+            ),
+            (
+                "frozen GPU identity",
+                lambda value: value["host"]["gpu"].__setitem__("index", 1),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__("version", "0.9.4-ullm.2"),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__(
+                    "source_revision", "e" * 40
+                ),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__(
+                    "base_image_digest", "sha256:" + "a" * 64
+                ),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__(
+                    "base_image_id", "sha256:" + "b" * 64
+                ),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__(
+                    "derived_image_id", "sha256:" + "c" * 64
+                ),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__(
+                    "patched_middleware_sha256", "d" * 64
+                ),
+            ),
+            (
+                "OpenWebUI source or network identity",
+                lambda value: value["openwebui"].__setitem__("network_id", "e" * 64),
+            ),
+        )
+        pristine = deepcopy(self.environment)
+        for text, mutation in mutations:
+            with self.subTest(text=text):
+                self.environment = deepcopy(pristine)
+                mutation(self.environment)
+                self.write_documents()
+                self.assert_invalid(text)
+
+    def test_trusted_commit_and_worker_anchors_are_required(self):
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "trusted CLI anchor"):
+            self.validate(commit="c" * 40)
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "worker or runtime"):
+            self.validate(worker_sha="c" * 64)
+
+    def test_promotion_receipt_and_fixed_product_are_recomputed(self):
+        mutations = (
+            (
+                "promotion receipt SHA-256",
+                lambda value: value["promotion_validation"].__setitem__(
+                    "result_sha256", "0" * 64
+                ),
+            ),
+            (
+                "promotion validation state",
+                lambda value: value["promotion_validation"].__setitem__(
+                    "full_payloads", False
+                ),
+            ),
+            (
+                "fixed artifact identity",
+                lambda value: value["product"]["artifact"].__setitem__(
+                    "payload_bytes",
+                    value["product"]["artifact"]["payload_bytes"] + 1,
+                ),
+            ),
+            (
+                "fixed package identity",
+                lambda value: value["product"]["package"].__setitem__(
+                    "payload_count",
+                    value["product"]["package"]["payload_count"] - 1,
+                ),
+            ),
+        )
+        pristine = deepcopy(self.model_identity)
+        for text, mutation in mutations:
+            with self.subTest(text=text):
+                self.model_identity = deepcopy(pristine)
+                mutation(self.model_identity)
+                self.write_documents()
+                self.assert_invalid(text)
+
+    def test_tokenizer_chat_template_and_oracle_are_fixed(self):
+        mutations = (
+            (
+                "tokenizer file tokenizer.json",
+                lambda value: value["tokenizer"]["files"][4].__setitem__(
+                    "sha256", "0" * 64
+                ),
+            ),
+            (
+                "tokenizer chat template",
+                lambda value: value["tokenizer"]["chat_template"].__setitem__(
+                    "utf8_bytes", 4167
+                ),
+            ),
+            (
+                "oracle runtime_oracle_validation",
+                lambda value: value["oracle"]["runtime_oracle_validation"].__setitem__(
+                    "sha256", "0" * 64
+                ),
+            ),
+            (
+                "vLLM oracle identity",
+                lambda value: value["oracle"]["vllm_identity"].__setitem__(
+                    "max_num_seqs", 2
+                ),
+            ),
+        )
+        pristine = deepcopy(self.model_identity)
+        for text, mutation in mutations:
+            with self.subTest(text=text):
+                self.model_identity = deepcopy(pristine)
+                mutation(self.model_identity)
+                self.write_documents()
+                self.assert_invalid(text)
+
+    def test_environment_and_model_cross_document_bindings_are_required(self):
+        pristine_environment = deepcopy(self.environment)
+        pristine_model = deepcopy(self.model_identity)
+        mutations = (
+            (
+                "worker or runtime binding",
+                lambda: self.model_identity["worker"].__setitem__(
+                    "source_sha256", "0" * 64
+                ),
+            ),
+            (
+                "worker or runtime binding",
+                lambda: self.model_identity["tokenizer"].__setitem__(
+                    "root", "/different/tokenizer"
+                ),
+            ),
+            (
+                "promotion validator source",
+                lambda: self.model_identity["promotion_validation"].__setitem__(
+                    "validator_source_sha256", "0" * 64
+                ),
+            ),
+            (
+                "worker or runtime binding",
+                lambda: self.environment["service"]["worker"].__setitem__(
+                    "executable_sha256", "0" * 64
+                ),
+            ),
+        )
+        for text, mutation in mutations:
+            with self.subTest(text=text):
+                self.environment = deepcopy(pristine_environment)
+                self.model_identity = deepcopy(pristine_model)
+                mutation()
+                self.write_documents()
+                self.assert_invalid(text)
+
+    def test_identity_data_binds_header_initial_probe_and_run_end(self):
+        identity = self.validate()
+        header = {
+            "started_utc": "2026-07-11T12:00:01Z",
+            "boot_id": BOOT_ID,
+            "identities": {
+                "environment_file": "environment.json",
+                "environment_sha256": identity.environment_sha256,
+                "model_identity_file": "model-identity.json",
+                "model_identity_sha256": identity.model_identity_sha256,
+                "openwebui": {
+                    key: identity.openwebui[key]
+                    for key in (
+                        "version",
+                        "source_revision",
+                        "base_image_digest",
+                        "base_image_id",
+                        "derived_image_id",
+                        "Dockerfile_sha256",
+                        "patch_sha256",
+                        "patched_middleware_sha256",
+                    )
+                },
+                "docker_network_id": identity.openwebui["network_id"],
+                "gateway_source_sha256": identity.source_sets["gateway"],
+                "worker_source_sha256": identity.source_sets["worker"],
+                "worker_binary_sha256": WORKER_SHA256,
+            },
+        }
+        identity.validate_session_header(header)
+        broken_header = deepcopy(header)
+        broken_header["identities"]["gateway_source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "header identities differ"
+        ):
+            identity.validate_session_header(broken_header)
+
+        service = identity.service
+        probe = {
+            "service_active": True,
+            "ready_http_status": 200,
+            "control_group": service["control_group"],
+            "gateway_pid": service["gateway"]["pid"],
+            "gateway_starttime_ticks": service["gateway"]["starttime_ticks"],
+            "worker_pid": service["worker"]["pid"],
+            "worker_starttime_ticks": service["worker"]["starttime_ticks"],
+            "n_restarts": service["n_restarts"],
+        }
+        identity.validate_initial_probe(probe)
+        broken_probe = deepcopy(probe)
+        broken_probe["worker_pid"] += 1
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "initial lifecycle"):
+            identity.validate_initial_probe(broken_probe)
+
+        run_end = {
+            "final_git_commit": GIT_COMMIT,
+            "final_git_status_raw": "",
+            "final_git_status_sha256": sha256_bytes(b""),
+        }
+        identity.validate_run_end(run_end)
+        broken_end = deepcopy(run_end)
+        broken_end["final_git_status_raw"] = " M tracked.py\n"
+        broken_end["final_git_status_sha256"] = sha256_bytes(
+            broken_end["final_git_status_raw"].encode()
+        )
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "Git status differs"):
+            identity.validate_run_end(broken_end)
 
 
 class ValidatorTest(unittest.TestCase):

@@ -19,6 +19,7 @@ import stat
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
@@ -30,6 +31,12 @@ RESOURCE_SCHEMA = "ullm.sq8.release_measurement.raw.v1"
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 MATRIX_SCHEMA = "ullm.sq8.openwebui_release.matrix.v1"
 PHASE1_REPORT_SCHEMA = "ullm.sq8.openwebui_release.validation.phase1.v1"
+ENVIRONMENT_SCHEMA = "ullm.sq8.full_campaign.environment.v1"
+MODEL_IDENTITY_SCHEMA = "ullm.sq8.full_campaign.model_identity.v1"
+PROMOTION_SCHEMA = "ullm.sq8_product_promotion.v1"
+ARTIFACT_SCHEMA = "sq-fp8-artifact-v0.2"
+PACKAGE_SCHEMA = "ullm-prototype-manifest-v0.1"
+WORKER_PROTOCOL_SCHEMA = "ullm.worker.v1"
 API_CONTRACT_MODEL_ID = "ullm-qwen3-14b-sq8"
 API_CONTRACT_MAX_RESPONSE_BYTES = 1024 * 1024
 API_CONTRACT_INVALID_KEY_MESSAGE = "The supplied API key is invalid."
@@ -58,12 +65,271 @@ API_CONTRACT_MISSING_MODEL_BODY = (
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
+BOOT_ID_RE = re.compile(r"[0-9a-f]{32}")
+NETWORK_ID_RE = re.compile(r"[0-9a-f]{64}")
+BDF_RE = re.compile(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]")
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MAX_JSON_BYTES = 16 * 1024 * 1024
+MAX_IDENTITY_JSON_BYTES = 2 * 1024 * 1024
 U64_MAX = (1 << 64) - 1
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 RESOURCE_FIXTURE_INPUT_PATH = "collector/resource-chat-fixture.json"
 CONTEXT_OVERFLOW_CONTENT = {
     "context_overflow_1": "one" + (" overflow" * 5000),
     "context_overflow_2": "two" + (" overflow" * 5000),
+}
+
+UPSTREAM_MODEL_ID = "Qwen/Qwen3-14B-FP8"
+SERVED_MODEL_ID = "ullm-qwen3-14b-sq8"
+MODEL_REVISION = "9a283b4a5efbc09ce247e0ae5b02b744739e525a"
+SERVICE_UNIT = "ullm-openai.service"
+DOCKER_NETWORK_NAME = "open-webui-network"
+DOCKER_NETWORK_SUBNET = "172.20.0.0/16"
+DOCKER_NETWORK_GATEWAY = "172.20.0.1"
+DOCKER_NETWORK_ID = "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8"
+DEVICE_ARCHITECTURE = "gfx1201"
+EXECUTION_PROFILE = "rdna4_w8a8_block_ck"
+CONTEXT_LENGTH = 4096
+MAX_COMPLETION_TOKENS = 512
+VOCAB_SIZE = 151_936
+PROMOTION_PLAN_COMMIT = "dfc63de"
+SYSTEMD_MAJOR = 255
+OPENWEBUI_VERSION = "0.9.4-ullm.1"
+OPENWEBUI_SOURCE_REVISION = "f51d2b026f1b0e7283b15f093412be8b67d24770"
+OPENWEBUI_BASE_IMAGE_DIGEST = (
+    "sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff"
+)
+OPENWEBUI_BASE_IMAGE_ID = (
+    "sha256:18247c4608796dd5e416ec1e82f20457837a219ed9c272a8d64b405a262b3399"
+)
+OPENWEBUI_DERIVED_IMAGE_ID = (
+    "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
+)
+OPENWEBUI_PATCHED_MIDDLEWARE_SHA256 = (
+    "b8aa5524fac6971aa8326cbef024b6fe9bcea03b3a00d4e7b0fa559514e0c66a"
+)
+
+EXPECTED_GPU_IDENTITY = {
+    "index": 2,
+    "bdf": "0000:47:00.0",
+    "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+    "kfd_gpu_id": 51_545,
+    "node_id": 2,
+    "partition_id": 0,
+    "architecture": DEVICE_ARCHITECTURE,
+}
+
+HIP_GUARDS = (
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL",
+    "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+)
+
+# This table is intentionally independent from the identity producer. A parity
+# test makes source-contract changes explicit without importing producer code here.
+EXPECTED_SOURCE_ROLE_PATHS = {
+    "identity_generator": "tools/sq8_full_campaign_identity.py",
+    "product_promotion_validator": "tools/validate-sq8-product-promotion.py",
+    "release_validator": "tools/validate-sq8-openwebui-release.py",
+    "release_collector": "tools/collect-sq8-openwebui-release.py",
+    "campaign_journal": "tools/sq8_openwebui_campaign.py",
+    "http_client": "tools/sq8-openwebui-http-client.py",
+    "browser_smoke": "deploy/openwebui/browser-smoke.cjs",
+    "browser_stop": "deploy/openwebui/browser-stop-smoke.cjs",
+    "browser_failure": "deploy/openwebui/browser-failure-smoke.cjs",
+    "browser_soak": "deploy/openwebui/browser-soak.cjs",
+    "openwebui_dockerfile": "deploy/openwebui/Dockerfile",
+    "openwebui_compose": "deploy/openwebui/compose.yaml",
+    "openwebui_configure": "deploy/openwebui/configure.py",
+    "openwebui_patch": "deploy/openwebui/provider-stream-error.patch",
+    "openwebui_image_validator": "deploy/openwebui/verify-derived-image.sh",
+    "systemd_service": "deploy/systemd/ullm-openai.service",
+    "systemd_environment_contract": "deploy/systemd/ullm-openai.env.example",
+    "gateway_pyproject": "services/openai-gateway/pyproject.toml",
+    "gateway_lock": "services/openai-gateway/uv.lock",
+    "gateway_init": "services/openai-gateway/src/ullm_openai_gateway/__init__.py",
+    "gateway_main": "services/openai-gateway/src/ullm_openai_gateway/__main__.py",
+    "gateway_app": "services/openai-gateway/src/ullm_openai_gateway/app.py",
+    "gateway_errors": "services/openai-gateway/src/ullm_openai_gateway/errors.py",
+    "gateway_schemas": "services/openai-gateway/src/ullm_openai_gateway/schemas.py",
+    "gateway_settings": "services/openai-gateway/src/ullm_openai_gateway/settings.py",
+    "gateway_tokenizer": "services/openai-gateway/src/ullm_openai_gateway/tokenizer.py",
+    "gateway_worker": "services/openai-gateway/src/ullm_openai_gateway/worker.py",
+    "worker_cargo_manifest": "crates/ullm-engine/Cargo.toml",
+    "worker_entrypoint": "crates/ullm-engine/src/bin/ullm-sq8-worker.rs",
+    "worker_backend": "crates/ullm-engine/src/sq8_worker_backend.rs",
+    "worker_protocol": "crates/ullm-engine/src/sq8_worker_protocol.rs",
+    "worker_runtime": "crates/ullm-engine/src/sq8_worker_runtime.rs",
+    "engine_library": "crates/ullm-engine/src/lib.rs",
+    "workspace_lock": "Cargo.lock",
+    "serving_fixture_manifest": "tests/fixtures/sq8-serving-v0.1/manifest.json",
+    "chat_template_fixture_manifest": (
+        "tests/fixtures/sq8-serving-v0.1/chat-template/manifest.json"
+    ),
+    "runtime_oracle_validation": (
+        "benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-validation.json"
+    ),
+}
+
+EXPECTED_SOURCE_GROUPS = {
+    "gateway": (
+        "gateway_pyproject",
+        "gateway_lock",
+        "gateway_init",
+        "gateway_main",
+        "gateway_app",
+        "gateway_errors",
+        "gateway_schemas",
+        "gateway_settings",
+        "gateway_tokenizer",
+        "gateway_worker",
+    ),
+    "worker": (
+        "worker_cargo_manifest",
+        "worker_entrypoint",
+        "worker_backend",
+        "worker_protocol",
+        "worker_runtime",
+        "engine_library",
+        "workspace_lock",
+    ),
+    "collector": ("release_collector", "campaign_journal"),
+    "browser": (
+        "browser_smoke",
+        "browser_stop",
+        "browser_failure",
+        "browser_soak",
+    ),
+    "http_client": ("http_client",),
+    "deployment": (
+        "openwebui_dockerfile",
+        "openwebui_compose",
+        "openwebui_configure",
+        "openwebui_patch",
+        "openwebui_image_validator",
+        "systemd_service",
+        "systemd_environment_contract",
+    ),
+    "oracle": (
+        "serving_fixture_manifest",
+        "chat_template_fixture_manifest",
+        "runtime_oracle_validation",
+    ),
+}
+
+EXPECTED_ARTIFACT_IDENTITY = {
+    "schema_version": ARTIFACT_SCHEMA,
+    "manifest_file": "artifact/sq_manifest.json",
+    "manifest_bytes": 379_114,
+    "manifest_sha256": "23977f4e9bed4bac4cc64c177c35d7f83355861426bf32027a69cf7a241552e2",
+    "content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "selected_pair_count": 280,
+    "payload_bytes": 13_213_670_400,
+    "file_count": 561,
+    "payloads_hashed": True,
+}
+EXPECTED_PACKAGE_IDENTITY = {
+    "schema_version": PACKAGE_SCHEMA,
+    "manifest_file": "package/manifest.json",
+    "manifest_bytes": 91_910,
+    "manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "payload_count": 163,
+    "payload_bytes": 3_112_499_200,
+    "file_count": 164,
+    "payloads_hashed": True,
+}
+
+EXPECTED_TOKENIZER_FILES = (
+    (
+        "config.json",
+        896,
+        "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793",
+    ),
+    (
+        "generation_config.json",
+        240,
+        "231c22c0b89ffbbb785d0e68b2f3f922244f263487af79f6542fc82dbee37dbf",
+    ),
+    (
+        "merges.txt",
+        1_671_853,
+        "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    ),
+    (
+        "model.safetensors.index.json",
+        62_044,
+        "6a9c8e17744118347080916d8f673b881941cf42989ee77266b14dc2062a7151",
+    ),
+    (
+        "tokenizer.json",
+        11_422_654,
+        "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    ),
+    (
+        "tokenizer_config.json",
+        9_732,
+        "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+    ),
+    (
+        "vocab.json",
+        2_776_833,
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+)
+EXPECTED_CHAT_TEMPLATE_IDENTITY = {
+    "utf8_bytes": 4_168,
+    "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+}
+EXPECTED_ORACLE_FILE_IDENTITIES: dict[str, dict[str, Any]] = {
+    "serving_fixture_manifest": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["serving_fixture_manifest"],
+        "bytes": 31_749,
+        "sha256": "3b6362fd472debbbfb30fb5616325703dd52e90e82319280490a0d84fcd6bf83",
+    },
+    "chat_template_fixture_manifest": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["chat_template_fixture_manifest"],
+        "bytes": 4_948,
+        "sha256": "6324b74e2604b86d46bf2dfdc259c1ca68d8cc9a47e90bfb765919f4aa9d54e0",
+    },
+    "runtime_oracle_validation": {
+        "path": EXPECTED_SOURCE_ROLE_PATHS["runtime_oracle_validation"],
+        "bytes": 17_334,
+        "sha256": "2612a4b434b6f5a15ab0c94d4465ee232a999a854a56a374b88904bdc54524aa",
+    },
+}
+EXPECTED_VLLM_IDENTITY = {
+    "async_scheduling": False,
+    "backend": "vLLM",
+    "device": {
+        "compute_capability": [12, 0],
+        "gfx": DEVICE_ARCHITECTURE,
+        "name": "AMD Radeon Graphics",
+        "total_memory_bytes": 34_208_743_424,
+        "visible_device_index": 0,
+    },
+    "dtype": "bfloat16",
+    "enable_prefix_caching": False,
+    "enforce_eager": True,
+    "max_num_seqs": 1,
+    "package_version": "0.23.1rc1.dev618+g8cf7c4d8a.rocm723",
+    "pipeline_parallel_size": 1,
+    "python_version": "3.12.3",
+    "rocr_visible_devices": "1",
+    "runner": "LLM.generate",
+    "source_revision_from_package_version": "8cf7c4d8a",
+    "tensor_parallel_size": 1,
+    "torch_git_version": "d0c8b1f364ecacff4dd8bc06a645d0fb9324cd37",
+    "torch_hip_version": "7.2.53211",
+    "torch_version": "2.11.0+gitd0c8b1f",
+    "transformers_version": "5.12.1",
 }
 
 FIXTURE_IDS = (
@@ -688,6 +954,839 @@ def safe_relative_file(root: Path, relative: str, label: str) -> Path:
         if stat.S_ISLNK(metadata.st_mode):
             fail(f"{label} contains a symlink")
     return regular_file(current, label)
+
+
+def _identity_canonical_bytes(value: Any) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            + b"\n"
+        )
+    except (TypeError, ValueError, UnicodeError, RecursionError) as error:
+        fail(f"identity document cannot be canonically serialized: {error}")
+        raise AssertionError("unreachable")
+
+
+def _read_canonical_identity(
+    root: Path, relative: str, label: str
+) -> tuple[dict[str, Any], bytes]:
+    path = safe_relative_file(root, relative, label)
+    try:
+        size = path.stat().st_size
+        if not 1 <= size <= MAX_IDENTITY_JSON_BYTES:
+            fail(f"{label} has an invalid size: {size}")
+        raw = path.read_bytes()
+    except OSError as error:
+        fail(f"failed to read {label}: {error}")
+    value = cast(
+        dict[str, Any],
+        decode_json_bytes(raw, label, allow_outer_whitespace=True),
+    )
+    reject_key_recursive(value, "passed", label)
+    if raw != _identity_canonical_bytes(value):
+        fail(f"{label} is not canonical identity JSON")
+    return value, raw
+
+
+def _identity_timestamp(
+    value: Any, label: str, *, require_utc_z: bool = False
+) -> datetime:
+    text = string(value, label)
+    if require_utc_z and not text.endswith("Z"):
+        fail(f"{label} must use UTC Z notation")
+    try:
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
+    except ValueError:
+        fail(f"{label} is not ISO-8601")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        fail(f"{label} lacks a UTC offset")
+    if require_utc_z and parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        fail(f"{label} is not UTC")
+    return parsed
+
+
+def _identity_file(
+    value: Any,
+    label: str,
+    *,
+    expected_path: str | None = None,
+) -> dict[str, Any]:
+    item = exact_fields(value, {"path", "bytes", "sha256"}, label)
+    path = string(item["path"], f"{label}.path")
+    if expected_path is not None and path != expected_path:
+        fail(f"{label}.path differs")
+    integer(item["bytes"], f"{label}.bytes", minimum=1)
+    sha256_value(item["sha256"], f"{label}.sha256")
+    return item
+
+
+def _identity_process(value: Any, label: str) -> dict[str, Any]:
+    process = exact_fields(
+        value,
+        {
+            "pid",
+            "ppid",
+            "uid",
+            "gid",
+            "starttime_ticks",
+            "executable",
+            "executable_bytes",
+            "executable_sha256",
+            "children",
+        },
+        label,
+    )
+    integer(process["pid"], f"{label}.pid", minimum=1)
+    integer(process["ppid"], f"{label}.ppid")
+    integer(process["uid"], f"{label}.uid")
+    integer(process["gid"], f"{label}.gid")
+    integer(process["starttime_ticks"], f"{label}.starttime_ticks", minimum=1)
+    executable = string(process["executable"], f"{label}.executable")
+    if not Path(executable).is_absolute():
+        fail(f"{label}.executable is not absolute")
+    integer(process["executable_bytes"], f"{label}.executable_bytes", minimum=1)
+    sha256_value(process["executable_sha256"], f"{label}.executable_sha256")
+    children = process["children"]
+    if type(children) is not list:
+        fail(f"{label}.children is not an array")
+    parsed = [
+        integer(child, f"{label}.children[{index}]", minimum=1)
+        for index, child in enumerate(children)
+    ]
+    if parsed != sorted(set(parsed)):
+        fail(f"{label}.children is not ascending and unique")
+    return process
+
+
+def _identity_source_aggregate(
+    entries_by_role: dict[str, dict[str, Any]], roles: Iterable[str]
+) -> str:
+    entries = [entries_by_role[role] for role in sorted(roles)]
+    return hashlib.sha256(_identity_canonical_bytes(entries)).hexdigest()
+
+
+def _validate_environment_identity(
+    document: dict[str, Any], expected_commit: str
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, str],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    exact_fields(
+        document,
+        {
+            "schema_version",
+            "record_type",
+            "captured_utc",
+            "git",
+            "sources",
+            "source_sets",
+            "deployment",
+            "host",
+            "service",
+            "openwebui",
+        },
+        "environment.json",
+    )
+    if (
+        document["schema_version"] != ENVIRONMENT_SCHEMA
+        or document["record_type"] != "environment"
+    ):
+        fail("environment.json schema or record type differs")
+    _identity_timestamp(
+        document["captured_utc"], "environment.json.captured_utc", require_utc_z=True
+    )
+    git = exact_fields(
+        document["git"], {"commit", "dirty", "status_sha256"}, "environment.json.git"
+    )
+    if git_commit(git["commit"], "environment.json.git.commit") != expected_commit:
+        fail("environment.json Git commit differs from the trusted CLI anchor")
+    dirty = boolean(git["dirty"], "environment.json.git.dirty")
+    status_sha = sha256_value(
+        git["status_sha256"], "environment.json.git.status_sha256"
+    )
+    if dirty == (status_sha == EMPTY_SHA256):
+        fail("environment.json Git dirty flag and status SHA-256 disagree")
+
+    sources = document["sources"]
+    if type(sources) is not list or len(sources) != len(EXPECTED_SOURCE_ROLE_PATHS):
+        fail("environment.json source list count differs")
+    by_role: dict[str, dict[str, Any]] = {}
+    paths: list[str] = []
+    for index, raw in enumerate(sources):
+        entry = exact_fields(
+            raw,
+            {"role", "path", "bytes", "sha256"},
+            f"environment.json.sources[{index}]",
+        )
+        role = string(entry["role"], f"environment.json.sources[{index}].role")
+        path = string(entry["path"], f"environment.json.sources[{index}].path")
+        if (
+            role not in EXPECTED_SOURCE_ROLE_PATHS
+            or role in by_role
+            or path != EXPECTED_SOURCE_ROLE_PATHS[role]
+        ):
+            fail("environment.json source role or path differs")
+        integer(entry["bytes"], f"environment.json.sources[{index}].bytes", minimum=1)
+        sha256_value(entry["sha256"], f"environment.json.sources[{index}].sha256")
+        by_role[role] = entry
+        paths.append(path)
+    if set(by_role) != set(EXPECTED_SOURCE_ROLE_PATHS) or paths != sorted(
+        paths, key=lambda item: item.encode("utf-8")
+    ):
+        fail("environment.json sources are not the exact bytewise-sorted set")
+    for role, expected in EXPECTED_ORACLE_FILE_IDENTITIES.items():
+        source = by_role[role]
+        if any(source[key] != expected[key] for key in ("path", "bytes", "sha256")):
+            fail(f"environment.json oracle source {role} differs")
+
+    source_sets_raw = exact_fields(
+        document["source_sets"],
+        set(EXPECTED_SOURCE_GROUPS),
+        "environment.json.source_sets",
+    )
+    source_sets: dict[str, str] = {}
+    for group, roles in EXPECTED_SOURCE_GROUPS.items():
+        digest = sha256_value(
+            source_sets_raw[group], f"environment.json.source_sets.{group}"
+        )
+        if digest != _identity_source_aggregate(by_role, roles):
+            fail(f"environment.json source aggregate {group} differs")
+        source_sets[group] = digest
+
+    deployment = exact_fields(
+        document["deployment"],
+        {"service_unit_file", "environment_file", "configuration"},
+        "environment.json.deployment",
+    )
+    unit_file = _identity_file(
+        deployment["service_unit_file"], "environment.json service unit"
+    )
+    environment_file = _identity_file(
+        deployment["environment_file"], "environment.json service environment"
+    )
+    for file_value, role in (
+        (unit_file, "systemd_service"),
+        (environment_file, "systemd_environment_contract"),
+    ):
+        if (
+            not Path(file_value["path"]).is_absolute()
+            or file_value["bytes"] != by_role[role]["bytes"]
+            or file_value["sha256"] != by_role[role]["sha256"]
+        ):
+            fail("environment.json effective deployment differs from tracked source")
+    configuration = exact_fields(
+        deployment["configuration"],
+        {
+            "worker_binary",
+            "product_root",
+            "tokenizer_root",
+            "api_key_file",
+            "gpu_lock_file",
+            "bind_host",
+            "bind_port",
+            "hip_visible_devices",
+            "hip_guards",
+        },
+        "environment.json deployment configuration",
+    )
+    for key in (
+        "worker_binary",
+        "product_root",
+        "tokenizer_root",
+        "api_key_file",
+        "gpu_lock_file",
+    ):
+        path = string(configuration[key], f"environment.json configuration {key}")
+        if not Path(path).is_absolute():
+            fail(f"environment.json configuration {key} is not absolute")
+    if (
+        configuration["bind_host"] != DOCKER_NETWORK_GATEWAY
+        or configuration["bind_port"] != 8000
+        or configuration["hip_visible_devices"] != "1"
+        or not json_equal(configuration["hip_guards"], list(HIP_GUARDS))
+    ):
+        fail("environment.json runtime network or HIP configuration differs")
+
+    host = exact_fields(
+        document["host"],
+        {"os", "kernel", "boot_id", "cgroup_fs_type", "tools", "gpu"},
+        "environment.json.host",
+    )
+    os_value = exact_fields(
+        host["os"], {"id", "version_id", "pretty_name"}, "environment.json host OS"
+    )
+    for key, value in os_value.items():
+        string(value, f"environment.json host OS {key}")
+    kernel = exact_fields(
+        host["kernel"],
+        {"sysname", "release", "version", "machine"},
+        "environment.json host kernel",
+    )
+    for key, value in kernel.items():
+        string(value, f"environment.json host kernel {key}")
+    boot_id = string(host["boot_id"], "environment.json host boot_id")
+    if BOOT_ID_RE.fullmatch(boot_id) is None:
+        fail("environment.json boot ID differs")
+    if host["cgroup_fs_type"] != "cgroup2fs":
+        fail("environment.json cgroup filesystem differs")
+    tools_value = exact_fields(
+        host["tools"],
+        {
+            "systemd_major",
+            "systemd_version_line",
+            "python_version_line",
+            "rustc_version_line",
+            "cargo_version_line",
+            "docker_version",
+            "docker_api_version",
+            "docker_os",
+            "docker_arch",
+            "docker_kernel_version",
+            "amd_smi_tool",
+            "amd_smi_library",
+            "rocm_version",
+            "amd_smi_version_line",
+        },
+        "environment.json host tools",
+    )
+    systemd_major = integer(
+        tools_value["systemd_major"], "environment.json systemd major", minimum=1
+    )
+    for key, value in tools_value.items():
+        if key != "systemd_major":
+            string(value, f"environment.json host tools {key}")
+    if (
+        systemd_major != SYSTEMD_MAJOR
+        or not tools_value["systemd_version_line"].startswith(
+            f"systemd {SYSTEMD_MAJOR}"
+        )
+        or not tools_value["python_version_line"].startswith("Python ")
+        or not tools_value["rustc_version_line"].startswith("rustc ")
+        or not tools_value["cargo_version_line"].startswith("cargo ")
+        or tools_value["docker_os"] != "linux"
+        or tools_value["docker_kernel_version"] != kernel["release"]
+    ):
+        fail("environment.json tool or host kernel identity differs")
+    gpu = exact_fields(
+        host["gpu"],
+        {
+            "index",
+            "bdf",
+            "uuid",
+            "kfd_gpu_id",
+            "node_id",
+            "partition_id",
+            "architecture",
+        },
+        "environment.json host GPU",
+    )
+    integer(gpu["index"], "environment.json GPU index")
+    bdf = string(gpu["bdf"], "environment.json GPU BDF")
+    uuid = string(gpu["uuid"], "environment.json GPU UUID")
+    if BDF_RE.fullmatch(bdf) is None or UUID_RE.fullmatch(uuid) is None:
+        fail("environment.json GPU BDF or UUID differs")
+    integer(gpu["kfd_gpu_id"], "environment.json KFD GPU ID", minimum=1)
+    integer(gpu["node_id"], "environment.json GPU node ID")
+    integer(gpu["partition_id"], "environment.json GPU partition ID")
+    if not json_equal(gpu, EXPECTED_GPU_IDENTITY):
+        fail("environment.json frozen GPU identity differs")
+
+    service = exact_fields(
+        document["service"],
+        {
+            "unit",
+            "user",
+            "group",
+            "uid",
+            "gid",
+            "fragment_path",
+            "control_group",
+            "gateway",
+            "worker",
+            "n_restarts",
+            "active_state",
+            "sub_state",
+        },
+        "environment.json.service",
+    )
+    if (
+        service["unit"] != SERVICE_UNIT
+        or service["active_state"] != "active"
+        or service["sub_state"] != "running"
+        or service["fragment_path"] != unit_file["path"]
+        or service["control_group"] != f"/system.slice/{SERVICE_UNIT}"
+    ):
+        fail("environment.json service state or deployment path differs")
+    string(service["user"], "environment.json service user")
+    string(service["group"], "environment.json service group")
+    uid = integer(service["uid"], "environment.json service UID")
+    gid = integer(service["gid"], "environment.json service GID")
+    integer(service["n_restarts"], "environment.json service restart count")
+    gateway = _identity_process(service["gateway"], "environment.json gateway")
+    worker = _identity_process(service["worker"], "environment.json worker")
+    if (
+        gateway["ppid"] != 1
+        or gateway["uid"] != uid
+        or gateway["gid"] != gid
+        or gateway["children"] != [worker["pid"]]
+        or worker["ppid"] != gateway["pid"]
+        or worker["uid"] != uid
+        or worker["gid"] != gid
+        or worker["children"] != []
+        or Path(worker["executable"]).name != "ullm-sq8-worker"
+        or worker["executable"] != configuration["worker_binary"]
+    ):
+        fail("environment.json gateway/worker process relationship differs")
+
+    openwebui = exact_fields(
+        document["openwebui"],
+        {
+            "version",
+            "source_revision",
+            "base_image_digest",
+            "base_image_id",
+            "derived_image_id",
+            "Dockerfile_sha256",
+            "patch_sha256",
+            "patched_middleware_sha256",
+            "network_name",
+            "network_id",
+            "network_subnet",
+            "network_gateway",
+        },
+        "environment.json.openwebui",
+    )
+    string(openwebui["version"], "environment.json OpenWebUI version")
+    string(openwebui["source_revision"], "environment.json OpenWebUI revision")
+    for key in ("base_image_digest", "base_image_id", "derived_image_id"):
+        image_id = string(openwebui[key], f"environment.json OpenWebUI {key}")
+        if IMAGE_ID_RE.fullmatch(image_id) is None:
+            fail(f"environment.json OpenWebUI {key} differs")
+    for key in ("Dockerfile_sha256", "patch_sha256", "patched_middleware_sha256"):
+        sha256_value(openwebui[key], f"environment.json OpenWebUI {key}")
+    network_id = string(
+        openwebui["network_id"], "environment.json OpenWebUI network ID"
+    )
+    if (
+        openwebui["version"] != OPENWEBUI_VERSION
+        or openwebui["source_revision"] != OPENWEBUI_SOURCE_REVISION
+        or openwebui["base_image_digest"] != OPENWEBUI_BASE_IMAGE_DIGEST
+        or openwebui["base_image_id"] != OPENWEBUI_BASE_IMAGE_ID
+        or openwebui["derived_image_id"] != OPENWEBUI_DERIVED_IMAGE_ID
+        or openwebui["patched_middleware_sha256"] != OPENWEBUI_PATCHED_MIDDLEWARE_SHA256
+        or openwebui["Dockerfile_sha256"] != by_role["openwebui_dockerfile"]["sha256"]
+        or openwebui["patch_sha256"] != by_role["openwebui_patch"]["sha256"]
+        or openwebui["network_name"] != DOCKER_NETWORK_NAME
+        or network_id != DOCKER_NETWORK_ID
+        or openwebui["network_subnet"] != DOCKER_NETWORK_SUBNET
+        or openwebui["network_gateway"] != DOCKER_NETWORK_GATEWAY
+    ):
+        fail("environment.json OpenWebUI source or network identity differs")
+    return by_role, source_sets, configuration, service, openwebui
+
+
+def _validate_model_identity(
+    document: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    exact_fields(
+        document,
+        {
+            "schema_version",
+            "record_type",
+            "model",
+            "promotion_validation",
+            "product",
+            "tokenizer",
+            "oracle",
+            "worker",
+        },
+        "model-identity.json",
+    )
+    if (
+        document["schema_version"] != MODEL_IDENTITY_SCHEMA
+        or document["record_type"] != "model_identity"
+        or not json_equal(
+            document["model"],
+            {
+                "upstream_id": UPSTREAM_MODEL_ID,
+                "served_id": SERVED_MODEL_ID,
+                "revision": MODEL_REVISION,
+            },
+        )
+    ):
+        fail("model-identity.json schema, record type, or model differs")
+    receipt = exact_fields(
+        document["promotion_validation"],
+        {
+            "schema_version",
+            "result_sha256",
+            "validator_source_sha256",
+            "full_payloads",
+            "read_only",
+            "verified",
+        },
+        "model-identity.json promotion validation",
+    )
+    if (
+        receipt["schema_version"] != PROMOTION_SCHEMA
+        or receipt["full_payloads"] is not True
+        or receipt["read_only"] is not True
+        or receipt["verified"] is not True
+    ):
+        fail("model-identity.json promotion validation state differs")
+    sha256_value(receipt["result_sha256"], "model-identity.json promotion result SHA")
+    sha256_value(
+        receipt["validator_source_sha256"],
+        "model-identity.json promotion validator source SHA",
+    )
+
+    product = exact_fields(
+        document["product"],
+        {"root", "promotion", "artifact", "package"},
+        "model-identity.json product",
+    )
+    product_root = string(product["root"], "model-identity.json product root")
+    if not Path(product_root).is_absolute():
+        fail("model-identity.json product root is not absolute")
+    promotion = exact_fields(
+        product["promotion"],
+        {"file", "bytes", "sha256", "created_at", "plan_commit"},
+        "model-identity.json promotion",
+    )
+    if (
+        promotion["file"] != "promotion.json"
+        or promotion["plan_commit"] != PROMOTION_PLAN_COMMIT
+    ):
+        fail("model-identity.json promotion file or plan commit differs")
+    integer(promotion["bytes"], "model-identity.json promotion bytes", minimum=1)
+    sha256_value(promotion["sha256"], "model-identity.json promotion SHA")
+    _identity_timestamp(promotion["created_at"], "model-identity.json promotion time")
+    artifact = exact_fields(
+        product["artifact"],
+        set(EXPECTED_ARTIFACT_IDENTITY),
+        "model-identity.json artifact",
+    )
+    package = exact_fields(
+        product["package"],
+        set(EXPECTED_PACKAGE_IDENTITY),
+        "model-identity.json package",
+    )
+    if not json_equal(artifact, EXPECTED_ARTIFACT_IDENTITY):
+        fail("model-identity.json fixed artifact identity differs")
+    if not json_equal(package, EXPECTED_PACKAGE_IDENTITY):
+        fail("model-identity.json fixed package identity differs")
+
+    expected_receipt = {
+        "schema_version": PROMOTION_SCHEMA,
+        "product_root": product_root,
+        "created_at": promotion["created_at"],
+        "model_revision": MODEL_REVISION,
+        "artifact": {
+            "manifest_sha256": artifact["manifest_sha256"],
+            "content_sha256": artifact["content_sha256"],
+            "selected_pair_count": artifact["selected_pair_count"],
+            "payloads_hashed": artifact["payloads_hashed"],
+        },
+        "package": {
+            "manifest_sha256": package["manifest_sha256"],
+            "payload_count": package["payload_count"],
+            "payload_bytes": package["payload_bytes"],
+            "payloads_hashed": package["payloads_hashed"],
+        },
+        "read_only": receipt["read_only"],
+        "full_payloads": receipt["full_payloads"],
+        "verified": receipt["verified"],
+    }
+    expected_receipt_sha = hashlib.sha256(
+        _identity_canonical_bytes(expected_receipt)
+    ).hexdigest()
+    if receipt["result_sha256"] != expected_receipt_sha:
+        fail("model-identity.json promotion receipt SHA-256 differs")
+
+    tokenizer = exact_fields(
+        document["tokenizer"],
+        {"root", "revision", "aggregate_sha256", "chat_template", "files"},
+        "model-identity.json tokenizer",
+    )
+    tokenizer_root = string(tokenizer["root"], "model-identity.json tokenizer root")
+    if (
+        not Path(tokenizer_root).is_absolute()
+        or tokenizer["revision"] != MODEL_REVISION
+    ):
+        fail("model-identity.json tokenizer root or revision differs")
+    files = tokenizer["files"]
+    if type(files) is not list or len(files) != len(EXPECTED_TOKENIZER_FILES):
+        fail("model-identity.json tokenizer file set differs")
+    parsed_files: list[dict[str, Any]] = []
+    for index, (raw, (path, byte_count, digest)) in enumerate(
+        zip(files, EXPECTED_TOKENIZER_FILES, strict=True)
+    ):
+        item = _identity_file(
+            raw,
+            f"model-identity.json tokenizer file {index}",
+            expected_path=path,
+        )
+        if item["bytes"] != byte_count or item["sha256"] != digest:
+            fail(f"model-identity.json tokenizer file {path} differs")
+        parsed_files.append(item)
+    aggregate = sha256_value(
+        tokenizer["aggregate_sha256"], "model-identity.json tokenizer aggregate"
+    )
+    expected_aggregate = hashlib.sha256(
+        _identity_canonical_bytes(parsed_files)
+    ).hexdigest()
+    if aggregate != expected_aggregate:
+        fail("model-identity.json tokenizer aggregate differs")
+    chat_template = exact_fields(
+        tokenizer["chat_template"],
+        set(EXPECTED_CHAT_TEMPLATE_IDENTITY),
+        "model-identity.json tokenizer chat template",
+    )
+    if not json_equal(chat_template, EXPECTED_CHAT_TEMPLATE_IDENTITY):
+        fail("model-identity.json tokenizer chat template differs")
+
+    oracle = exact_fields(
+        document["oracle"],
+        {
+            "serving_fixture_manifest",
+            "chat_template_fixture_manifest",
+            "runtime_oracle_validation",
+            "vllm_identity",
+        },
+        "model-identity.json oracle",
+    )
+    for role, expected in EXPECTED_ORACLE_FILE_IDENTITIES.items():
+        item = _identity_file(
+            oracle[role],
+            f"model-identity.json oracle {role}",
+            expected_path=expected["path"],
+        )
+        if not json_equal(item, expected):
+            fail(f"model-identity.json oracle {role} differs")
+    if not json_equal(oracle["vllm_identity"], EXPECTED_VLLM_IDENTITY):
+        fail("model-identity.json vLLM oracle identity differs")
+
+    worker = exact_fields(
+        document["worker"],
+        {
+            "binary",
+            "binary_bytes",
+            "binary_sha256",
+            "source_sha256",
+            "protocol_schema",
+            "device_architecture",
+            "execution_profile",
+            "context_length",
+            "max_completion_tokens",
+            "vocab_size",
+            "model_revision",
+            "artifact_content_sha256",
+            "package_manifest_sha256",
+        },
+        "model-identity.json worker",
+    )
+    binary = string(worker["binary"], "model-identity.json worker binary")
+    if not Path(binary).is_absolute() or Path(binary).name != "ullm-sq8-worker":
+        fail("model-identity.json worker binary path differs")
+    integer(
+        worker["binary_bytes"], "model-identity.json worker binary bytes", minimum=1
+    )
+    sha256_value(worker["binary_sha256"], "model-identity.json worker binary SHA")
+    sha256_value(worker["source_sha256"], "model-identity.json worker source SHA")
+    expected_worker = {
+        "protocol_schema": WORKER_PROTOCOL_SCHEMA,
+        "device_architecture": DEVICE_ARCHITECTURE,
+        "execution_profile": EXECUTION_PROFILE,
+        "context_length": CONTEXT_LENGTH,
+        "max_completion_tokens": MAX_COMPLETION_TOKENS,
+        "vocab_size": VOCAB_SIZE,
+        "model_revision": MODEL_REVISION,
+        "artifact_content_sha256": artifact["content_sha256"],
+        "package_manifest_sha256": package["manifest_sha256"],
+    }
+    if any(
+        not json_equal(worker[key], value) for key, value in expected_worker.items()
+    ):
+        fail("model-identity.json worker contract differs")
+    return product, tokenizer, oracle, worker
+
+
+@dataclass(frozen=True)
+class IdentityData:
+    environment: dict[str, Any]
+    model_identity: dict[str, Any]
+    environment_sha256: str
+    model_identity_sha256: str
+    expected_commit: str
+    expected_worker_binary_sha256: str
+    source_by_role: dict[str, dict[str, Any]]
+    source_sets: dict[str, str]
+    configuration: dict[str, Any]
+    service: dict[str, Any]
+    openwebui: dict[str, Any]
+    model_worker: dict[str, Any]
+
+    def validate_session_header(self, record: dict[str, Any]) -> None:
+        if record.get("boot_id") != self.environment["host"]["boot_id"]:
+            fail("raw-session header boot ID differs from environment.json")
+        started = _identity_timestamp(
+            record.get("started_utc"),
+            "raw-session header.started_utc",
+            require_utc_z=True,
+        )
+        captured = _identity_timestamp(
+            self.environment["captured_utc"],
+            "environment.json.captured_utc",
+            require_utc_z=True,
+        )
+        if started < captured:
+            fail("raw-session header predates environment capture")
+        identities = exact_fields(
+            record.get("identities"),
+            {
+                "environment_file",
+                "environment_sha256",
+                "model_identity_file",
+                "model_identity_sha256",
+                "openwebui",
+                "docker_network_id",
+                "gateway_source_sha256",
+                "worker_source_sha256",
+                "worker_binary_sha256",
+            },
+            "raw-session header.identities",
+        )
+        expected_openwebui = {
+            key: self.openwebui[key]
+            for key in (
+                "version",
+                "source_revision",
+                "base_image_digest",
+                "base_image_id",
+                "derived_image_id",
+                "Dockerfile_sha256",
+                "patch_sha256",
+                "patched_middleware_sha256",
+            )
+        }
+        expected = {
+            "environment_file": "environment.json",
+            "environment_sha256": self.environment_sha256,
+            "model_identity_file": "model-identity.json",
+            "model_identity_sha256": self.model_identity_sha256,
+            "openwebui": expected_openwebui,
+            "docker_network_id": self.openwebui["network_id"],
+            "gateway_source_sha256": self.source_sets["gateway"],
+            "worker_source_sha256": self.source_sets["worker"],
+            "worker_binary_sha256": self.expected_worker_binary_sha256,
+        }
+        if not json_equal(identities, expected):
+            fail("raw-session header identities differ from campaign identity")
+
+    def validate_initial_probe(self, record: dict[str, Any]) -> None:
+        gateway = self.service["gateway"]
+        worker = self.service["worker"]
+        expected = {
+            "service_active": True,
+            "ready_http_status": 200,
+            "control_group": self.service["control_group"],
+            "gateway_pid": gateway["pid"],
+            "gateway_starttime_ticks": gateway["starttime_ticks"],
+            "worker_pid": worker["pid"],
+            "worker_starttime_ticks": worker["starttime_ticks"],
+            "n_restarts": self.service["n_restarts"],
+        }
+        if any(
+            not json_equal(record.get(key), value) for key, value in expected.items()
+        ):
+            fail("initial lifecycle probe differs from environment.json")
+
+    def validate_run_end(self, record: dict[str, Any]) -> None:
+        if record.get("final_git_commit") != self.expected_commit:
+            fail("run_end Git commit differs from campaign identity")
+        status = string(
+            record.get("final_git_status_raw"),
+            "run_end.final_git_status_raw",
+            nonempty=False,
+        )
+        digest = hashlib.sha256(status.encode("utf-8", errors="strict")).hexdigest()
+        if (
+            record.get("final_git_status_sha256") != digest
+            or digest != self.environment["git"]["status_sha256"]
+            or bool(status) != self.environment["git"]["dirty"]
+        ):
+            fail("run_end Git status differs from environment.json")
+
+
+def validate_campaign_identity(
+    bundle: Path,
+    *,
+    expected_commit: str,
+    expected_worker_binary_sha256: str,
+) -> IdentityData:
+    trusted_commit = git_commit(expected_commit, "expected campaign Git commit")
+    trusted_worker_sha = sha256_value(
+        expected_worker_binary_sha256, "expected campaign worker binary SHA-256"
+    )
+    root = safe_bundle_root(bundle)
+    environment, environment_raw = _read_canonical_identity(
+        root, "environment.json", "environment.json"
+    )
+    model_identity, model_raw = _read_canonical_identity(
+        root, "model-identity.json", "model-identity.json"
+    )
+    source_by_role, source_sets, configuration, service, openwebui = (
+        _validate_environment_identity(environment, trusted_commit)
+    )
+    product, tokenizer, oracle, model_worker = _validate_model_identity(model_identity)
+
+    service_worker = service["worker"]
+    if (
+        configuration["product_root"] != product["root"]
+        or configuration["tokenizer_root"] != tokenizer["root"]
+        or configuration["worker_binary"] != model_worker["binary"]
+        or service_worker["executable"] != model_worker["binary"]
+        or service_worker["executable_bytes"] != model_worker["binary_bytes"]
+        or service_worker["executable_sha256"] != model_worker["binary_sha256"]
+        or model_worker["binary_sha256"] != trusted_worker_sha
+        or model_worker["source_sha256"] != source_sets["worker"]
+    ):
+        fail("environment/model worker or runtime binding differs")
+    if (
+        model_identity["promotion_validation"]["validator_source_sha256"]
+        != source_by_role["product_promotion_validator"]["sha256"]
+    ):
+        fail("promotion validator source differs from environment.json")
+    for role in EXPECTED_ORACLE_FILE_IDENTITIES:
+        source = source_by_role[role]
+        model_oracle = oracle[role]
+        if any(source[key] != model_oracle[key] for key in ("path", "bytes", "sha256")):
+            fail(f"environment/model oracle source {role} differs")
+    return IdentityData(
+        environment=environment,
+        model_identity=model_identity,
+        environment_sha256=hashlib.sha256(environment_raw).hexdigest(),
+        model_identity_sha256=hashlib.sha256(model_raw).hexdigest(),
+        expected_commit=trusted_commit,
+        expected_worker_binary_sha256=trusted_worker_sha,
+        source_by_role=source_by_role,
+        source_sets=source_sets,
+        configuration=configuration,
+        service=service,
+        openwebui=openwebui,
+        model_worker=model_worker,
+    )
 
 
 def median(values: Iterable[int | Fraction]) -> Fraction:
