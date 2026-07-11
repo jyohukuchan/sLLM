@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib.util
 import inspect
 import os
@@ -88,6 +89,7 @@ print(json.dumps(receipt, sort_keys=True))
 """
 
 CANONICAL_SOURCE = 'VALUE = "head-canonical"\n'
+HTTP_CLIENT_SOURCE = b"#!/usr/bin/env python3\nprint('anchored client')\n"
 
 
 class ProductionFixture:
@@ -105,8 +107,10 @@ class ProductionFixture:
             self.repo / "tools" / "validate-sq8-product-promotion.py"
         )
         self.canonical_source = self.repo / "tools" / "sq8_canonical_artifact.py"
+        self.http_client_source = self.repo / "tools" / "sq8-openwebui-http-client.py"
         self.validator_source.write_text(VALIDATOR_SOURCE, encoding="ascii")
         self.canonical_source.write_text(CANONICAL_SOURCE, encoding="ascii")
+        self.http_client_source.write_bytes(HTTP_CLIENT_SOURCE)
         self.set_mode("normal")
         self._git("init", "-q")
         self._git("config", "user.email", "production-test@example.invalid")
@@ -465,6 +469,152 @@ class HeadToolSnapshotTests(unittest.TestCase):
                     fixture.settings, anchor
                 )
             self.assertEqual(list(fixture.runtime.iterdir()), [])
+
+
+class PinnedHttpClientSourceTests(unittest.TestCase):
+    @staticmethod
+    def expected_sha256(raw: bytes = HTTP_CLIENT_SOURCE) -> str:
+        return hashlib.sha256(raw).hexdigest()
+
+    def test_reads_only_fixed_path_from_anchored_head_with_bounded_runner(self) -> None:
+        with ProductionFixture() as fixture:
+            fixture.http_client_source.write_bytes(b"dirty worktree must be ignored\n")
+            anchor = fixture.anchor()
+            runner = RecordingRunner()
+            raw = PRODUCTION.read_pinned_http_client_source(
+                fixture.settings,
+                anchor,
+                expected_sha256=self.expected_sha256(),
+                runner=runner,
+            )
+            self.assertEqual(raw, HTTP_CLIENT_SOURCE)
+            captures = [argv for argv in runner.argvs if "cat-file" in argv]
+            self.assertEqual(
+                captures,
+                [
+                    (
+                        "/usr/bin/git",
+                        "-C",
+                        os.fspath(fixture.repo),
+                        "cat-file",
+                        "blob",
+                        f"{fixture.commit}:tools/sq8-openwebui-http-client.py",
+                    )
+                ],
+            )
+
+    def test_rejects_missing_oversize_and_digest_drift(self) -> None:
+        with ProductionFixture() as fixture:
+            fixture._git("rm", "tools/sq8-openwebui-http-client.py")
+            fixture._git("commit", "-qm", "remove HTTP client")
+            fixture.commit = fixture._git("rev-parse", "HEAD").stdout.decode().strip()
+            anchor = fixture.anchor()
+            with self.assertRaisesRegex(
+                PRODUCTION.ProductionPreflightError,
+                "HEAD blob capture.*(wrote to stderr|failed)",
+            ):
+                PRODUCTION.read_pinned_http_client_source(
+                    fixture.settings,
+                    anchor,
+                    expected_sha256=self.expected_sha256(),
+                )
+
+        with ProductionFixture() as fixture:
+            anchor = fixture.anchor()
+            with (
+                mock.patch.object(PRODUCTION, "HEAD_HTTP_CLIENT_MAX_BYTES", 16),
+                self.assertRaisesRegex(
+                    PRODUCTION.ProductionPreflightError,
+                    "stdout exceeded its byte limit",
+                ),
+            ):
+                PRODUCTION.read_pinned_http_client_source(
+                    fixture.settings,
+                    anchor,
+                    expected_sha256=self.expected_sha256(),
+                )
+
+        with ProductionFixture() as fixture:
+            anchor = fixture.anchor()
+            with self.assertRaisesRegex(
+                PRODUCTION.ProductionPreflightError, "SHA-256 differs"
+            ):
+                PRODUCTION.read_pinned_http_client_source(
+                    fixture.settings,
+                    anchor,
+                    expected_sha256="0" * 64,
+                )
+
+    def test_rejects_git_drift_after_blob_capture(self) -> None:
+        with ProductionFixture() as fixture:
+            anchor = fixture.anchor()
+
+            def drift() -> None:
+                marker = fixture.repo / "drift-after-client-capture"
+                marker.write_text("drift\n", encoding="ascii")
+
+            class DriftRunner(RecordingRunner):
+                def run(
+                    self,
+                    argv: Sequence[str],
+                    *,
+                    cwd: Path,
+                    timeout_seconds: float,
+                    stdout_limit: int,
+                    stderr_limit: int,
+                ) -> Any:
+                    result = super().run(
+                        argv,
+                        cwd=cwd,
+                        timeout_seconds=timeout_seconds,
+                        stdout_limit=stdout_limit,
+                        stderr_limit=stderr_limit,
+                    )
+                    if "cat-file" in argv:
+                        drift()
+                    return result
+
+            with self.assertRaisesRegex(
+                PRODUCTION.ProductionPreflightError, "Git anchor drifted"
+            ):
+                PRODUCTION.read_pinned_http_client_source(
+                    fixture.settings,
+                    anchor,
+                    expected_sha256=self.expected_sha256(),
+                    runner=DriftRunner(),
+                )
+
+    def test_preserves_keyboard_interrupt_from_blob_capture(self) -> None:
+        with ProductionFixture() as fixture:
+            anchor = fixture.anchor()
+
+            class InterruptRunner(RecordingRunner):
+                def run(
+                    self,
+                    argv: Sequence[str],
+                    *,
+                    cwd: Path,
+                    timeout_seconds: float,
+                    stdout_limit: int,
+                    stderr_limit: int,
+                ) -> Any:
+                    if "cat-file" in argv:
+                        raise KeyboardInterrupt
+                    return super().run(
+                        argv,
+                        cwd=cwd,
+                        timeout_seconds=timeout_seconds,
+                        stdout_limit=stdout_limit,
+                        stderr_limit=stderr_limit,
+                    )
+
+            with self.assertRaises(KeyboardInterrupt):
+                PRODUCTION.read_pinned_http_client_source(
+                    fixture.settings,
+                    anchor,
+                    expected_sha256=self.expected_sha256(),
+                    runner=InterruptRunner(),
+                )
 
 
 class PromotionValidationTests(unittest.TestCase):

@@ -32,12 +32,14 @@ HEAD_PROMOTION_TOOL_PATHS = (
     "tools/validate-sq8-product-promotion.py",
     "tools/sq8_canonical_artifact.py",
 )
+HEAD_HTTP_CLIENT_PATH = "tools/sq8-openwebui-http-client.py"
 
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 GIT_TIMEOUT_SECONDS = 10.0
 GIT_HEAD_MAX_BYTES = 128
 GIT_STATUS_MAX_BYTES = 4 << 20
 HEAD_TOOL_MAX_BYTES = 32 << 20
+HEAD_HTTP_CLIENT_MAX_BYTES = 1 << 20
 PROMOTION_TIMEOUT_SECONDS = 6 * 60 * 60.0
 PROMOTION_STDOUT_MAX_BYTES = 2 << 20
 PROMOTION_STDERR_MAX_BYTES = 64 << 10
@@ -525,6 +527,8 @@ def _read_head_blob(
     anchor: GitAnchor,
     relative_path: str,
     runner: CommandRunner,
+    *,
+    stdout_limit: int = HEAD_TOOL_MAX_BYTES,
 ) -> bytes:
     result = runner.run(
         (
@@ -537,12 +541,44 @@ def _read_head_blob(
         ),
         cwd=settings.repo_root,
         timeout_seconds=GIT_TIMEOUT_SECONDS,
-        stdout_limit=HEAD_TOOL_MAX_BYTES,
+        stdout_limit=stdout_limit,
         stderr_limit=GIT_HEAD_MAX_BYTES,
     )
     raw = _require_clean_command(result, f"HEAD blob capture for {relative_path}")
     if not raw:
         fail(f"HEAD blob for {relative_path} is empty")
+    return raw
+
+
+def read_pinned_http_client_source(
+    settings: ProductionPreflightSettings,
+    anchor: GitAnchor,
+    *,
+    expected_sha256: str,
+    runner: CommandRunner = SYSTEM_COMMAND_RUNNER,
+) -> bytes:
+    """Read the fixed HTTP client blob from anchored HEAD with an exact digest."""
+
+    if (
+        not isinstance(settings, ProductionPreflightSettings)
+        or not isinstance(anchor, GitAnchor)
+        or anchor.settings != settings
+        or type(expected_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+    ):
+        fail("pinned HTTP client source binding differs")
+
+    anchor.revalidate(runner=runner)
+    raw = _read_head_blob(
+        settings,
+        anchor,
+        HEAD_HTTP_CLIENT_PATH,
+        runner,
+        stdout_limit=HEAD_HTTP_CLIENT_MAX_BYTES,
+    )
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        fail("anchored HEAD HTTP client source SHA-256 differs")
+    anchor.revalidate(runner=runner)
     return raw
 
 
@@ -1031,11 +1067,13 @@ __all__ = [
     "BoundedCommandRunner",
     "CommandRunner",
     "GitAnchor",
+    "HEAD_HTTP_CLIENT_PATH",
     "HEAD_PROMOTION_TOOL_PATHS",
     "HeadPromotionToolSnapshotOwner",
     "ProductionPreflightError",
     "ProductionPreflightSettings",
     "canonical_campaign_lock_path",
     "production_preflight_settings",
+    "read_pinned_http_client_source",
     "run_pinned_full_promotion_validation",
 ]
