@@ -726,6 +726,7 @@ class CampaignLockOwner:
         )
         descriptor = -1
         parent_descriptor = -1
+        locked = False
         try:
             parent_descriptor = os.open(absolute.parent, _private_directory_flags())
             if _StableFileIdentity.from_stat(
@@ -759,6 +760,7 @@ class CampaignLockOwner:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 fail("another full SQ8 campaign already holds the lock")
+            locked = True
             locked_identity = _StableFileIdentity.from_stat(os.fstat(descriptor))
             locked_entry = _StableFileIdentity.from_stat(
                 os.stat(
@@ -771,18 +773,28 @@ class CampaignLockOwner:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 fail("campaign lock file changed during acquisition")
             return cls(absolute, descriptor, parent_descriptor, identity)
-        except FullCampaignError:
+        except BaseException as error:
+            cleanup_failed = False
+            if locked and descriptor >= 0:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    cleanup_failed = True
             if descriptor >= 0:
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    cleanup_failed = True
             if parent_descriptor >= 0:
-                os.close(parent_descriptor)
+                try:
+                    os.close(parent_descriptor)
+                except OSError:
+                    cleanup_failed = True
+            if cleanup_failed:
+                error.add_note("campaign lock acquisition cleanup also failed")
+            if isinstance(error, OSError):
+                fail("failed to acquire the full SQ8 campaign lock")
             raise
-        except OSError:
-            if descriptor >= 0:
-                os.close(descriptor)
-            if parent_descriptor >= 0:
-                os.close(parent_descriptor)
-            fail("failed to acquire the full SQ8 campaign lock")
 
     def __enter__(self) -> CampaignLockOwner:
         return self

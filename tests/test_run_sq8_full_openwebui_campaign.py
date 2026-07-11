@@ -1039,6 +1039,54 @@ class ProductionSafetyPrimitiveTests(unittest.TestCase):
         with ORCHESTRATOR.CampaignLockOwner.acquire(path):
             pass
 
+    def test_campaign_lock_interrupt_after_flock_releases_lock(self):
+        path = self.root / "full-campaign.lock"
+        real_flock = ORCHESTRATOR.fcntl.flock
+
+        def lock_then_interrupt(descriptor, operation):
+            result = real_flock(descriptor, operation)
+            if operation & ORCHESTRATOR.fcntl.LOCK_EX:
+                raise KeyboardInterrupt
+            return result
+
+        with (
+            mock.patch.object(
+                ORCHESTRATOR.fcntl,
+                "flock",
+                side_effect=lock_then_interrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            ORCHESTRATOR.CampaignLockOwner.acquire(path)
+
+        with ORCHESTRATOR.CampaignLockOwner.acquire(path):
+            pass
+
+    def test_campaign_lock_interrupt_during_post_lock_identity_releases_lock(self):
+        path = self.root / "full-campaign.lock"
+        real_fstat = ORCHESTRATOR.os.fstat
+        calls = 0
+
+        def interrupt_post_lock(descriptor):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise KeyboardInterrupt
+            return real_fstat(descriptor)
+
+        with (
+            mock.patch.object(
+                ORCHESTRATOR.os,
+                "fstat",
+                side_effect=interrupt_post_lock,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            ORCHESTRATOR.CampaignLockOwner.acquire(path)
+
+        with ORCHESTRATOR.CampaignLockOwner.acquire(path):
+            pass
+
 
 class FullCampaignOrchestratorTests(unittest.TestCase):
     def setUp(self):
