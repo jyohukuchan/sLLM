@@ -3296,6 +3296,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
         execute(args)
+    except FailureGateError as error:
+        print(f"OpenWebUI failure gate failed: {error}", file=sys.stderr)
+        return 1
     except Exception:
         print("OpenWebUI failure gate failed", file=sys.stderr)
         return 1

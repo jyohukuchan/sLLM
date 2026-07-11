@@ -914,6 +914,22 @@ class IdentityCommandAndAtomicTests(unittest.TestCase):
             self.assertEqual(TOOL.main([]), 1)
         self.assertEqual(stderr.getvalue(), "OpenWebUI failure gate failed\n")
 
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                TOOL,
+                "execute",
+                side_effect=TOOL.FailureGateError("journal service identity differs"),
+            ),
+            mock.patch.object(TOOL, "parse_args", return_value=object()),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(TOOL.main([]), 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "OpenWebUI failure gate failed: journal service identity differs\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
