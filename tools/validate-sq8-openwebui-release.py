@@ -35,6 +35,11 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 MAX_JSON_BYTES = 16 * 1024 * 1024
 U64_MAX = (1 << 64) - 1
+RESOURCE_FIXTURE_INPUT_PATH = "collector/resource-chat-fixture.json"
+CONTEXT_OVERFLOW_CONTENT = {
+    "context_overflow_1": "one" + (" overflow" * 5000),
+    "context_overflow_2": "two" + (" overflow" * 5000),
+}
 
 FIXTURE_IDS = (
     "exact-p0032",
@@ -894,6 +899,36 @@ class GatewayEvidence:
     message: str
     message_sha256: str
     event: dict[str, Any]
+    phase: str
+
+
+@dataclass(frozen=True)
+class InputSeal:
+    size: int
+    sha256: str
+
+
+@dataclass
+class HttpBodyState:
+    digest: Any
+    byte_count: int
+    next_index: int
+    raw: bytearray
+    last_observed_ns: int
+
+
+@dataclass
+class HttpValidationState:
+    fixture_seal: InputSeal
+    requests: dict[str, dict[str, Any]]
+    response_started: set[str]
+    response_ended: set[str]
+    bodies: dict[str, HttpBodyState]
+    ordered_keys: list[str]
+    active_key: str | None = None
+    last_response_end_ns: int = -1
+    fixture_model: str | None = None
+    fixture_messages: list[Any] | None = None
 
 
 @dataclass
@@ -907,6 +942,9 @@ class SessionData:
     journal_events: dict[str, GatewayEvidence]
     final_journal_cursor: str
     record_counts: Counter[str]
+    http_requests: dict[str, dict[str, Any]]
+    ordered_http_keys: list[str]
+    probes: dict[str, dict[str, Any]]
 
 
 def validate_hash_bound_bytes(
@@ -1028,7 +1066,7 @@ def _validate_header(
     root: Path,
     matrix: MatrixData,
     expected_worker_sha256: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, InputSeal]:
     label = "raw-session header"
     if record["phase"] != "preflight" or record["case_id"] is not None:
         fail(f"{label} phase/case_id differs")
@@ -1083,17 +1121,19 @@ def _validate_header(
         },
         f"{label}.identities.openwebui",
     )
-    for key in (
-        "version",
-        "source_revision",
-        "base_image_digest",
-        "base_image_id",
-        "derived_image_id",
-    ):
+    for key in ("version", "source_revision"):
         string(openwebui[key], f"{label}.identities.openwebui.{key}")
+    for key in ("base_image_digest", "base_image_id", "derived_image_id"):
+        value = string(openwebui[key], f"{label}.identities.openwebui.{key}")
+        if not value.startswith("sha256:") or SHA256_RE.fullmatch(value[7:]) is None:
+            fail(f"{label}.identities.openwebui.{key} is not a content image identity")
     for key in ("Dockerfile_sha256", "patch_sha256", "patched_middleware_sha256"):
         sha256_value(openwebui[key], f"{label}.identities.openwebui.{key}")
-    string(identities["docker_network_id"], f"{label}.identities.docker_network_id")
+    network_id = string(
+        identities["docker_network_id"], f"{label}.identities.docker_network_id"
+    )
+    if SHA256_RE.fullmatch(network_id) is None:
+        fail(f"{label}.identities.docker_network_id is not a 64-hex ID")
     sha256_value(
         identities["gateway_source_sha256"], f"{label}.identities.gateway_source_sha256"
     )
@@ -1110,6 +1150,7 @@ def _validate_header(
     if type(input_files) is not list:
         fail(f"{label}.input_files must be an array")
     input_paths: list[str] = []
+    input_seals: dict[str, InputSeal] = {}
     for index, item in enumerate(input_files):
         item_label = f"{label}.input_files[{index}]"
         exact_fields(item, {"path", "bytes", "sha256"}, item_label)
@@ -1122,49 +1163,308 @@ def _validate_header(
             or "\\" in relative
         ):
             fail(f"{item_label}.path is unsafe")
-        integer(item["bytes"], f"{item_label}.bytes")
-        sha256_value(item["sha256"], f"{item_label}.sha256")
+        size = integer(item["bytes"], f"{item_label}.bytes")
+        digest = sha256_value(item["sha256"], f"{item_label}.sha256")
         input_paths.append(relative)
+        input_seals[relative] = InputSeal(size, digest)
     if input_paths != sorted(set(input_paths), key=lambda item: item.encode("utf-8")):
         fail(f"{label}.input_files paths are not bytewise ascending and unique")
+    required_inputs = {
+        "collector/config.json",
+        RESOURCE_FIXTURE_INPUT_PATH,
+        "tools/collect-sq8-openwebui-release.py",
+        "tools/sq8-openwebui-http-client.py",
+    }
+    if not required_inputs.issubset(input_seals):
+        fail(f"{label}.input_files lacks fixed collector/client/fixture inputs")
     validate_schedule(record["schedule"], f"{label}.schedule")
     validate_thresholds(record["thresholds"], f"{label}.thresholds")
     if not json_equal(record["schedule"], matrix.schedule) or not json_equal(
         record["thresholds"], matrix.thresholds
     ):
         fail(f"{label} schedule/thresholds differ from release matrix")
-    return run_id, boot_id
+    return run_id, boot_id, input_seals[RESOURCE_FIXTURE_INPUT_PATH]
+
+
+def _canonical_fixture(model: str, messages: list[Any], label: str) -> bytes:
+    for index, message in enumerate(messages):
+        if type(message) is not dict or set(message) != {"role", "content"}:
+            fail(f"{label}.messages[{index}] fields differ")
+        if message["role"] not in {"system", "user", "assistant"}:
+            fail(f"{label}.messages[{index}].role differs")
+        string(message["content"], f"{label}.messages[{index}].content")
+    try:
+        return json.dumps(
+            {"model": model, "messages": messages},
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        fail(f"{label} cannot be canonically encoded: {error}")
+
+
+def _validate_positive_resource_body(
+    raw: bytes,
+    record: dict[str, Any],
+    state: HttpValidationState,
+    label: str,
+) -> str:
+    value = decode_json_bytes(raw, f"{label}.body")
+    exact_fields(
+        value,
+        {
+            "model",
+            "messages",
+            "stream",
+            "stream_options",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+        },
+        f"{label}.body",
+    )
+    model = string(value["model"], f"{label}.body.model")
+    messages = value["messages"]
+    if type(messages) is not list or not messages:
+        fail(f"{label}.body.messages must be a non-empty array")
+    fixture_raw = _canonical_fixture(model, messages, f"{label}.body")
+    if (
+        len(fixture_raw) != state.fixture_seal.size
+        or hashlib.sha256(fixture_raw).hexdigest() != state.fixture_seal.sha256
+    ):
+        fail(f"{label} model/messages differ from the header-bound resource fixture")
+    if state.fixture_model is None:
+        state.fixture_model = model
+        state.fixture_messages = messages
+    elif model != state.fixture_model or not json_equal(
+        messages, state.fixture_messages
+    ):
+        fail(f"{label} resource fixture differs between requests")
+    if (
+        value["stream"] is not True
+        or not json_equal(value["stream_options"], {"include_usage": True})
+        or integer(value["max_tokens"], f"{label}.body.max_tokens") != 2
+    ):
+        fail(f"{label} resource streaming/max_tokens settings differ")
+
+    phase = record["phase"]
+    case_id = record["case_id"]
+    if phase == "resource_normal":
+        warmup = re.fullmatch(r"normal-warmup-([0-9]{2})", case_id)
+        measured = re.fullmatch(r"normal-measured-([0-9]{3})", case_id)
+        match = warmup or measured
+        if match is None:
+            fail(f"{label} normal resource case_id differs")
+        index = int(match.group(1))
+        maximum = 10 if warmup is not None else 100
+        if index < 1 or index > maximum or record["request_index"] != index:
+            fail(f"{label} normal resource request index differs")
+        sampled = measured is not None and index in SCHEDULE["sampled_normal_indices"]
+        expected_temperature: int | Decimal = Decimal("0.6") if sampled else 0
+        expected_top_p: int | Decimal = Decimal("0.95") if sampled else 1
+        expected_seed = index if sampled else 0
+        kind = "normal_warmup" if warmup is not None else "normal_measured"
+    elif phase == "resource_restart":
+        warmup = re.fullmatch(r"restart-warmup-([0-9]{2})", case_id)
+        measured = re.fullmatch(r"restart-measured-([0-9]{3})", case_id)
+        match = warmup or measured
+        if match is None:
+            fail(f"{label} restart resource case_id differs")
+        index = int(match.group(1))
+        maximum = 10 if warmup is not None else 20
+        if index < 1 or index > maximum or record["request_index"] != index:
+            fail(f"{label} restart resource request index differs")
+        expected_temperature, expected_top_p, expected_seed = 0, 1, 0
+        kind = "restart_warmup" if warmup is not None else "restart_measured"
+    else:
+        fail(f"{label} positive resource body has a non-resource phase")
+    if (
+        not json_equal(value["temperature"], expected_temperature)
+        or not json_equal(value["top_p"], expected_top_p)
+        or integer(value["seed"], f"{label}.body.seed") != expected_seed
+    ):
+        fail(f"{label} resource sampling settings differ")
+    return kind
+
+
+def _require_malformed_json(raw: bytes, label: str) -> None:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeError as error:
+        fail(f"{label} malformed JSON body is not strict UTF-8: {error}")
+    try:
+        json.loads(
+            text,
+            parse_constant=reject_json_constant,
+        )
+    except (ValidationError, json.JSONDecodeError, ValueError, RecursionError):
+        return
+    fail(f"{label} must contain malformed JSON")
+
+
+def _validate_overflow_body(
+    raw: bytes,
+    state: HttpValidationState,
+    case_name: str,
+    label: str,
+) -> None:
+    value = decode_json_bytes(raw, f"{label}.body")
+    exact_fields(
+        value,
+        {
+            "model",
+            "messages",
+            "stream",
+            "stream_options",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+        },
+        f"{label}.body",
+    )
+    if state.fixture_model is None or state.fixture_messages is None:
+        fail(f"{label} context overflow appears before the resource fixture")
+    if (
+        value["model"] != state.fixture_model
+        or not json_equal(
+            value["messages"],
+            [
+                {
+                    "role": "user",
+                    "content": CONTEXT_OVERFLOW_CONTENT[case_name],
+                }
+            ],
+        )
+        or value["stream"] is not True
+        or not json_equal(value["stream_options"], {"include_usage": True})
+        or not json_equal(value["max_tokens"], 2)
+        or not json_equal(value["temperature"], 0)
+        or not json_equal(value["top_p"], 1)
+        or not json_equal(value["seed"], 0)
+    ):
+        fail(f"{label} context-overflow request shape differs")
+
+
+def _validate_negative_resource_body(
+    raw: bytes, record: dict[str, Any], state: HttpValidationState, label: str
+) -> str:
+    expected = {
+        "negative-after-025-context_overflow_1": (25, "context_overflow"),
+        "negative-after-050-malformed_json": (50, "malformed_json"),
+        "negative-after-075-context_overflow_2": (75, "context_overflow"),
+    }
+    item = expected.get(record["case_id"])
+    if record["phase"] != "resource_normal" or item is None:
+        fail(f"{label} negative resource identity differs")
+    request_index, kind = item
+    if record["request_index"] != request_index:
+        fail(f"{label} negative resource index differs")
+    if kind == "malformed_json":
+        _require_malformed_json(raw, f"{label}.body")
+    else:
+        case_name = (
+            "context_overflow_1" if request_index == 25 else "context_overflow_2"
+        )
+        _validate_overflow_body(raw, state, case_name, label)
+    return kind
+
+
+def _parse_resource_sse(raw: bytes, label: str) -> str:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeError as error:
+        fail(f"{label} SSE is not strict UTF-8: {error}")
+    data_events: list[str] = []
+    data_lines: list[str] = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line == "":
+            if data_lines:
+                data_events.append("\n".join(data_lines))
+                data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data_lines.append(value)
+    if data_lines:
+        data_events.append("\n".join(data_lines))
+    if not data_events or data_events[-1] != "[DONE]":
+        fail(f"{label} lacks terminal [DONE]")
+    completion_ids: set[str] = set()
+    content_count = 0
+    usage_count: int | None = None
+    for index, payload in enumerate(data_events[:-1]):
+        value = decode_json_bytes(payload.encode("utf-8"), f"{label} data {index}")
+        if "id" in value:
+            completion_ids.add(string(value["id"], f"{label} data {index}.id"))
+        choices = value.get("choices")
+        if type(choices) is list and choices:
+            first = choices[0]
+            if type(first) is dict and type(first.get("delta")) is dict:
+                content = first["delta"].get("content")
+                if type(content) is str and content:
+                    content_count += 1
+        usage = value.get("usage")
+        if type(usage) is dict and "completion_tokens" in usage:
+            count = integer(usage["completion_tokens"], f"{label} usage")
+            if usage_count is not None:
+                fail(f"{label} duplicates usage")
+            usage_count = count
+    if len(completion_ids) != 1 or content_count < 1 or usage_count != 2:
+        fail(f"{label} completion identity/content/usage differs")
+    return next(iter(completion_ids))
+
+
+def _parse_error_envelope(raw: bytes, expected_code: str, label: str) -> None:
+    value = decode_json_bytes(raw, label)
+    exact_fields(value, {"error"}, label)
+    error = exact_fields(
+        value["error"], {"message", "type", "param", "code"}, f"{label}.error"
+    )
+    string(error["message"], f"{label}.error.message")
+    if error["type"] != "invalid_request_error" or error["code"] != expected_code:
+        fail(f"{label} semantic error class differs")
+    if expected_code == "context_length_exceeded" and error["param"] != "messages":
+        fail(f"{label} context overflow param differs")
+    if expected_code == "invalid_request_error" and error["param"] is not None:
+        string(error["param"], f"{label}.error.param")
 
 
 def _validate_http_record(
     record: dict[str, Any],
     label: str,
-    requests: dict[str, dict[str, Any]],
-    response_started: set[str],
-    response_ended: set[str],
-    body_states: dict[str, tuple[hashlib._Hash, int, int]],
+    state: HttpValidationState,
 ) -> None:
     record_type = record["record_type"]
     if record_type == "http_request":
         integer(record["request_index"], f"{label}.request_index")
         key = string(record["request_key"], f"{label}.request_key")
-        if key in requests:
+        if key in state.requests:
             fail(f"{label}.request_key is duplicated")
-        string(record["method"], f"{label}.method")
-        string(record["target"], f"{label}.target")
+        if state.active_key is not None:
+            fail(f"{label} overlaps another active raw HTTP request")
+        if record["method"] != "POST" or record["target"] != "/v1/chat/completions":
+            fail(f"{label} method/target differs")
         headers = exact_fields(
             record["headers"],
             {"content_type", "content_length", "authorization_mode"},
             f"{label}.headers",
         )
-        string(headers["content_type"], f"{label}.headers.content_type")
+        if headers["content_type"] != "application/json":
+            fail(f"{label}.headers.content_type differs")
         content_length = integer(
             headers["content_length"], f"{label}.headers.content_length"
         )
         authorization_mode = string(
             headers["authorization_mode"], f"{label}.headers.authorization_mode"
         )
-        if authorization_mode not in {"valid_bearer", "invalid_bearer", "missing"}:
+        if authorization_mode != "valid_bearer":
             fail(f"{label}.headers.authorization_mode differs")
         raw = validate_hash_bound_bytes(
             record["body_base64"], record["body_bytes"], record["body_sha256"], label
@@ -1184,14 +1484,35 @@ def _validate_http_record(
         )
         if not connect <= started <= sent:
             fail(f"{label} request timing order differs")
-        # Retain only correlation metadata; request bodies may be large.
-        requests[key] = {"request_index": record["request_index"]}
-        body_states[key] = (hashlib.sha256(), 0, 0)
+        if connect < state.last_response_end_ns:
+            fail(f"{label} begins before the prior HTTP response ended")
+        if record["phase"] in {"resource_normal", "resource_restart"}:
+            if record["case_id"].startswith("negative-after-"):
+                kind = _validate_negative_resource_body(raw, record, state, label)
+            else:
+                kind = _validate_positive_resource_body(raw, record, state, label)
+        else:
+            kind = "other"
+        state.requests[key] = {
+            "phase": record["phase"],
+            "case_id": record["case_id"],
+            "request_index": record["request_index"],
+            "kind": kind,
+            "connect_ns": connect,
+            "sent_ns": sent,
+        }
+        state.ordered_keys.append(key)
+        state.bodies[key] = HttpBodyState(hashlib.sha256(), 0, 0, bytearray(), sent)
+        state.active_key = key
     elif record_type == "http_response_start":
         key = string(record["request_key"], f"{label}.request_key")
-        if key not in requests or key in response_started:
+        if (
+            key not in state.requests
+            or key in state.response_started
+            or key != state.active_key
+        ):
             fail(f"{label} response start has an unknown or duplicated request_key")
-        integer(record["status"], f"{label}.status", minimum=100, maximum=599)
+        status = integer(record["status"], f"{label}.status", minimum=100, maximum=599)
         headers = record["headers"]
         if type(headers) is not list:
             fail(f"{label}.headers must be an array")
@@ -1200,24 +1521,51 @@ def _validate_http_record(
                 fail(f"{label}.headers[{index}] must be a two-string array")
             string(pair[0], f"{label}.headers[{index}][0]")
             string(pair[1], f"{label}.headers[{index}][1]", nonempty=False)
-        integer(record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns")
-        response_started.add(key)
+        content_types = [
+            value.split(";", 1)[0].strip().lower()
+            for name, value in headers
+            if name.lower() == "content-type"
+        ]
+        expected_media = "text/event-stream" if status == 200 else "application/json"
+        if content_types != [expected_media]:
+            fail(f"{label} response Content-Type differs")
+        observed = integer(
+            record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns"
+        )
+        body_state = state.bodies[key]
+        if observed < body_state.last_observed_ns:
+            fail(f"{label} response start precedes request send")
+        body_state.last_observed_ns = observed
+        state.requests[key]["status"] = status
+        state.response_started.add(key)
     elif record_type == "http_body_chunk":
         key = string(record["request_key"], f"{label}.request_key")
-        if key not in response_started or key in response_ended:
+        if key not in state.response_started or key in state.response_ended:
             fail(f"{label} chunk has no active response")
-        digest, byte_count, next_index = body_states[key]
-        if integer(record["chunk_index"], f"{label}.chunk_index") != next_index:
+        body_state = state.bodies[key]
+        if (
+            integer(record["chunk_index"], f"{label}.chunk_index")
+            != body_state.next_index
+        ):
             fail(f"{label}.chunk_index is not contiguous")
         raw = validate_hash_bound_bytes(
             record["body_base64"], record["body_bytes"], record["body_sha256"], label
         )
-        digest.update(raw)
-        body_states[key] = (digest, byte_count + len(raw), next_index + 1)
-        integer(record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns")
+        if body_state.byte_count + len(raw) > MAX_JSON_BYTES:
+            fail(f"{label} complete response exceeds its size limit")
+        body_state.digest.update(raw)
+        body_state.raw.extend(raw)
+        body_state.byte_count += len(raw)
+        body_state.next_index += 1
+        observed = integer(
+            record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns"
+        )
+        if observed < body_state.last_observed_ns:
+            fail(f"{label} body chunk timestamps regress")
+        body_state.last_observed_ns = observed
     elif record_type == "http_response_end":
         key = string(record["request_key"], f"{label}.request_key")
-        if key not in response_started or key in response_ended:
+        if key not in state.response_started or key in state.response_ended:
             fail(f"{label} response end has no active response")
         outcome = string(record["outcome"], f"{label}.outcome")
         if outcome not in {"eof", "client_closed", "timeout", "error"}:
@@ -1225,17 +1573,48 @@ def _validate_http_record(
         error = nullable_string(record["error"], f"{label}.error")
         if (outcome in {"eof", "client_closed"}) != (error is None):
             fail(f"{label}.error does not match outcome")
-        digest, byte_count, _ = body_states[key]
-        if integer(record["body_bytes"], f"{label}.body_bytes") != byte_count:
+        body_state = state.bodies[key]
+        if (
+            integer(record["body_bytes"], f"{label}.body_bytes")
+            != body_state.byte_count
+        ):
             fail(f"{label}.body_bytes differs from chunks")
         if (
             sha256_value(record["body_sha256"], f"{label}.body_sha256")
-            != digest.hexdigest()
+            != body_state.digest.hexdigest()
         ):
             fail(f"{label}.body_sha256 differs from chunks")
-        integer(record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns")
-        response_ended.add(key)
-        del body_states[key]
+        observed = integer(
+            record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns"
+        )
+        if observed < body_state.last_observed_ns:
+            fail(f"{label} response end timestamp regresses")
+        request = state.requests[key]
+        if request["kind"] in {
+            "normal_warmup",
+            "normal_measured",
+            "restart_warmup",
+            "restart_measured",
+        }:
+            if request.get("status") != 200 or outcome != "eof":
+                fail(f"{label} positive resource HTTP outcome differs")
+            request["completion_id"] = _parse_resource_sse(
+                bytes(body_state.raw), f"{label}.body"
+            )
+        elif request["kind"] in {"context_overflow", "malformed_json"}:
+            if request.get("status") != 400 or outcome != "eof":
+                fail(f"{label} negative resource HTTP outcome differs")
+            expected_code = (
+                "context_length_exceeded"
+                if request["kind"] == "context_overflow"
+                else "invalid_request_error"
+            )
+            _parse_error_envelope(bytes(body_state.raw), expected_code, f"{label}.body")
+        request["response_end_ns"] = observed
+        state.response_ended.add(key)
+        del state.bodies[key]
+        state.active_key = None
+        state.last_response_end_ns = observed
 
 
 def _add_lifecycle_event(
@@ -1445,6 +1824,224 @@ def validate_service_journal(
         fail("service journal is not bounded exactly by the run_end final cursor")
 
 
+def _probe_identity(record: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        record["control_group"],
+        record["gateway_pid"],
+        record["gateway_starttime_ticks"],
+        record["worker_pid"],
+        record["worker_starttime_ticks"],
+        record["n_restarts"],
+    )
+
+
+def _validate_probe_boundary(
+    probes: dict[str, dict[str, Any]],
+) -> tuple[int, int, int, int]:
+    required = {
+        "normal-segment-start",
+        "post-header-restart-ready",
+        "restart-segment-start",
+        "final-service-ready",
+    }
+    if set(probes) != required:
+        fail("raw session lifecycle probe set differs from phase-1")
+    normal = probes["normal-segment-start"]
+    post = probes["post-header-restart-ready"]
+    restart = probes["restart-segment-start"]
+    final = probes["final-service-ready"]
+    for name, record in (
+        ("normal", normal),
+        ("post", post),
+        ("restart", restart),
+        ("final", final),
+    ):
+        if record["service_active"] is not True or record["ready_http_status"] != 200:
+            fail(f"{name} lifecycle probe is not active and ready")
+    if _probe_identity(post) != _probe_identity(restart) or _probe_identity(
+        restart
+    ) != _probe_identity(final):
+        fail("post-restart lifecycle probe identities differ")
+    if normal["control_group"] != restart["control_group"]:
+        fail("lifecycle probe ControlGroup changes across restart")
+    if (
+        (normal["gateway_pid"], normal["gateway_starttime_ticks"])
+        == (restart["gateway_pid"], restart["gateway_starttime_ticks"])
+        or (normal["worker_pid"], normal["worker_starttime_ticks"])
+        == (restart["worker_pid"], restart["worker_starttime_ticks"])
+        or restart["n_restarts"] != normal["n_restarts"] + 1
+    ):
+        fail("lifecycle probe restart identity/count boundary differs")
+    if not (
+        normal["observed_monotonic_ns"]
+        <= post["observed_monotonic_ns"]
+        <= restart["observed_monotonic_ns"]
+        <= final["observed_monotonic_ns"]
+    ):
+        fail("lifecycle probe timestamps regress across the restart boundary")
+    return (
+        normal["gateway_pid"],
+        restart["gateway_pid"],
+        post["observed_monotonic_ns"],
+        restart["observed_monotonic_ns"],
+    )
+
+
+def _validate_gateway_event_pids(
+    events: dict[str, GatewayEvidence],
+    normal_pid: int,
+    restart_pid: int,
+    normal_epoch_end_ns: int,
+    post_header_epoch_end_ns: int,
+) -> None:
+    normal_phases = {
+        "preflight",
+        "api_contract",
+        "openwebui",
+        "cancellation",
+        "resource_normal",
+    }
+    restart_phases = {"resource_restart", "latency", "final"}
+    for evidence in events.values():
+        if evidence.phase in normal_phases:
+            expected = {normal_pid}
+        elif evidence.phase in restart_phases:
+            expected = {restart_pid}
+        elif evidence.phase == "post_header_failure":
+            expected = {normal_pid, restart_pid}
+        else:
+            fail("gateway event phase lacks a process-identity epoch")
+        if evidence.journal_pid not in expected:
+            fail("gateway event journal PID differs from its lifecycle probe epoch")
+        if evidence.event["event"] == "worker_fatal" and not (
+            evidence.phase == "post_header_failure"
+            and evidence.journal_pid == normal_pid
+        ):
+            fail("worker_fatal is outside the sole planned post-header failure")
+        if (
+            evidence.journal_pid == normal_pid
+            and evidence.event["observed_monotonic_ns"] > normal_epoch_end_ns
+        ):
+            fail("normal gateway event exceeds the post-header restart boundary")
+        if (
+            evidence.phase == "post_header_failure"
+            and evidence.event["observed_monotonic_ns"] > post_header_epoch_end_ns
+        ):
+            fail("post-header gateway event exceeds its lifecycle phase boundary")
+
+
+def _expected_resource_http_cases() -> list[tuple[str, str, int, str]]:
+    expected: list[tuple[str, str, int, str]] = []
+    for index in range(1, 11):
+        expected.append(
+            ("resource_normal", f"normal-warmup-{index:02d}", index, "normal_warmup")
+        )
+    negatives = {
+        25: ("negative-after-025-context_overflow_1", "context_overflow"),
+        50: ("negative-after-050-malformed_json", "malformed_json"),
+        75: ("negative-after-075-context_overflow_2", "context_overflow"),
+    }
+    for index in range(1, 101):
+        expected.append(
+            (
+                "resource_normal",
+                f"normal-measured-{index:03d}",
+                index,
+                "normal_measured",
+            )
+        )
+        if index in negatives:
+            case_id, kind = negatives[index]
+            expected.append(("resource_normal", case_id, index, kind))
+    for index in range(1, 11):
+        expected.append(
+            ("resource_restart", f"restart-warmup-{index:02d}", index, "restart_warmup")
+        )
+    for index in range(1, 21):
+        expected.append(
+            (
+                "resource_restart",
+                f"restart-measured-{index:03d}",
+                index,
+                "restart_measured",
+            )
+        )
+    return expected
+
+
+def _validate_resource_http_schedule(
+    state: HttpValidationState, traces: dict[str, RequestTrace]
+) -> None:
+    resource_keys = [
+        key
+        for key in state.ordered_keys
+        if state.requests[key]["phase"] in {"resource_normal", "resource_restart"}
+    ]
+    expected = _expected_resource_http_cases()
+    if len(resource_keys) != len(expected):
+        fail("resource raw HTTP request count differs from the frozen schedule")
+    prior_release_ns = -1
+    for position, (key, (phase, case_id, request_index, kind)) in enumerate(
+        zip(resource_keys, expected, strict=True)
+    ):
+        request = state.requests[key]
+        if (
+            key != f"p8f-{case_id}"
+            or request["phase"] != phase
+            or request["case_id"] != case_id
+            or request["request_index"] != request_index
+            or request["kind"] != kind
+        ):
+            fail("resource raw HTTP order/identity differs from the frozen schedule")
+        matching = [
+            trace
+            for trace in traces.values()
+            if trace.phase == phase and trace.case_id == case_id
+        ]
+        if kind in {"context_overflow", "malformed_json"}:
+            if matching:
+                fail("negative resource request produced a worker admission lifecycle")
+            if position + 1 >= len(resource_keys):
+                fail("negative resource request lacks a following recovery request")
+            following_phase, following_case_id, _, _ = expected[position + 1]
+            following_traces = [
+                trace
+                for trace in traces.values()
+                if trace.phase == following_phase and trace.case_id == following_case_id
+            ]
+            if len(following_traces) != 1:
+                fail("negative resource request lacks one following lifecycle trace")
+            quiet_end = following_traces[0].events[0]["observed_monotonic_ns"]
+            if any(
+                request["connect_ns"]
+                <= trace.events[0]["observed_monotonic_ns"]
+                < quiet_end
+                for trace in traces.values()
+            ):
+                fail("negative resource request interval contains a worker admission")
+            continue
+        if len(matching) != 1:
+            fail("positive resource HTTP request lacks exactly one lifecycle trace")
+        trace = matching[0]
+        if request.get("completion_id") != trace.completion_id:
+            fail("resource SSE completion ID differs from gateway lifecycle")
+        if trace.events[0]["observed_monotonic_ns"] < request["sent_ns"]:
+            fail("resource admission precedes the final request-body send boundary")
+        release = trace.events[-1]
+        if (
+            trace.terminal != "request_released"
+            or release["outcome"] != "length"
+            or release["completion_tokens"] != 2
+            or release["reset_complete"] is not True
+        ):
+            fail("positive resource HTTP request lacks a length/two/reset release")
+        if request["connect_ns"] < prior_release_ns:
+            fail("next resource HTTP connection begins before the prior release")
+        prior_release_ns = release["observed_monotonic_ns"]
+    if state.fixture_model is None or state.fixture_messages is None:
+        fail("resource HTTP schedule lacks its header-bound fixture")
+
+
 def validate_session(
     root: Path,
     matrix: MatrixData,
@@ -1455,10 +2052,8 @@ def validate_session(
     completion_ids: dict[str, str] = {}
     releases_by_phase: dict[str, list[dict[str, Any]]] = defaultdict(list)
     journal_events: dict[str, GatewayEvidence] = {}
-    requests: dict[str, dict[str, Any]] = {}
-    response_started: set[str] = set()
-    response_ended: set[str] = set()
-    body_states: dict[str, tuple[hashlib._Hash, int, int]] = {}
+    http_state: HttpValidationState | None = None
+    probes: dict[str, dict[str, Any]] = {}
     counts: Counter[str] = Counter()
     run_id: str | None = None
     boot_id: str | None = None
@@ -1496,15 +2091,22 @@ def validate_session(
         if record_type == "header":
             if line_number != 1 or counts[record_type] != 1:
                 fail("raw-session header must be the first and sole header")
-            run_id, boot_id = _validate_header(
+            run_id, boot_id, fixture_seal = _validate_header(
                 record, root, matrix, expected_worker_sha256
+            )
+            http_state = HttpValidationState(
+                fixture_seal=fixture_seal,
+                requests={},
+                response_started=set(),
+                response_ended=set(),
+                bodies={},
+                ordered_keys=[],
             )
         elif run_id is None:
             fail(f"{label} appears before header")
         elif record_type.startswith("http_"):
-            _validate_http_record(
-                record, label, requests, response_started, response_ended, body_states
-            )
+            assert http_state is not None
+            _validate_http_record(record, label, http_state)
         elif record_type == "gateway_event":
             cursor = string(record["journal_cursor"], f"{label}.journal_cursor")
             if cursor in journal_events:
@@ -1534,7 +2136,7 @@ def validate_session(
             if name == "request_released":
                 releases_by_phase[phase].append(event)
             journal_events[cursor] = GatewayEvidence(
-                cursor, usec, journal_pid, message, message_digest, event
+                cursor, usec, journal_pid, message, message_digest, event, phase
             )
         elif record_type == "browser_action":
             string(record["browser_case"], f"{label}.browser_case")
@@ -1597,7 +2199,19 @@ def validate_session(
                 ):
                     fail(f"{label}.screenshot_sha256 differs")
         elif record_type == "lifecycle_probe":
-            string(record["probe"], f"{label}.probe")
+            probe_name = string(record["probe"], f"{label}.probe")
+            expected_probe_phases = {
+                "normal-segment-start": "resource_normal",
+                "post-header-restart-ready": "post_header_failure",
+                "restart-segment-start": "resource_restart",
+                "final-service-ready": "final",
+            }
+            if (
+                record["case_id"] != probe_name
+                or record["phase"] != expected_probe_phases.get(probe_name)
+                or probe_name in probes
+            ):
+                fail(f"{label} lifecycle probe identity is duplicated or differs")
             integer(record["observed_monotonic_ns"], f"{label}.observed_monotonic_ns")
             boolean(record["service_active"], f"{label}.service_active")
             integer(
@@ -1612,6 +2226,7 @@ def validate_session(
             ):
                 integer(record[key], f"{label}.{key}", minimum=1)
             integer(record["n_restarts"], f"{label}.n_restarts")
+            probes[probe_name] = record
         elif record_type == "fault_injection":
             if (
                 record["injection"] != "post_header_worker_kill"
@@ -1676,7 +2291,13 @@ def validate_session(
         type(value) is not int for value in declared_counts.values()
     ) or declared_counts != dict(counts):
         fail("run_end.record_counts differs from independently counted raw records")
-    if set(requests) != response_ended or body_states:
+    if http_state is None:
+        fail("raw-session-results.jsonl lacks initialized HTTP validation state")
+    if (
+        set(http_state.requests) != http_state.response_ended
+        or http_state.bodies
+        or http_state.active_key is not None
+    ):
         fail(
             "one or more raw HTTP requests lack a complete response start/end correlation"
         )
@@ -1706,6 +2327,20 @@ def validate_session(
                 fail(
                     "a cancellation is not followed by a successful recovery lifecycle"
                 )
+    (
+        normal_gateway_pid,
+        restart_gateway_pid,
+        normal_epoch_end_ns,
+        post_header_epoch_end_ns,
+    ) = _validate_probe_boundary(probes)
+    _validate_gateway_event_pids(
+        journal_events,
+        normal_gateway_pid,
+        restart_gateway_pid,
+        normal_epoch_end_ns,
+        post_header_epoch_end_ns,
+    )
+    _validate_resource_http_schedule(http_state, traces)
     validate_service_journal(root, journal_events, boot_id, final_cursor)
     return SessionData(
         run_id=run_id,
@@ -1717,6 +2352,9 @@ def validate_session(
         journal_events=journal_events,
         final_journal_cursor=final_cursor,
         record_counts=counts,
+        http_requests=http_state.requests,
+        ordered_http_keys=http_state.ordered_keys,
+        probes=probes,
     )
 
 
@@ -2353,6 +2991,21 @@ def validate_resources(root: Path, session: SessionData) -> ResourceResult:
             "gateway and worker identities must both change across the planned restart"
         )
 
+    for segment, probe_name in (
+        ("normal", "normal-segment-start"),
+        ("restart", "restart-segment-start"),
+    ):
+        identity = identities[segment]
+        probe = session.probes[probe_name]
+        if (
+            identity[0] != probe["control_group"]
+            or identity[1] != probe["gateway_pid"]
+            or identity[4] != probe["gateway_starttime_ticks"]
+            or identity[5] != probe["worker_pid"]
+            or identity[8] != probe["worker_starttime_ticks"]
+        ):
+            fail(f"{segment} resource identity differs from its lifecycle probe")
+
     for segment in ("normal", "restart"):
         before = metric_times[(segment, "before")]
         after = metric_times[(segment, "after")]
@@ -2369,6 +3022,30 @@ def validate_resources(root: Path, session: SessionData) -> ResourceResult:
             fail(f"{segment} gpu metric-before occurs after baseline settle start")
         if after < points[segment][-1].sample_monotonic_ns[-1]:
             fail(f"{segment} gpu metric-after occurs before the final resource sample")
+        expected_trace_ids = {
+            request_id_value
+            for request_id_value, trace in session.traces.items()
+            if trace.phase == lifecycle_phase
+        }
+        if any(
+            trace.events[0]["observed_monotonic_ns"] <= after
+            and trace.events[-1]["observed_monotonic_ns"] >= before
+            and request_id_value not in expected_trace_ids
+            for request_id_value, trace in session.traces.items()
+        ):
+            fail(f"{segment} resource metric window contains a foreign lifecycle trace")
+        expected_http_keys = {
+            key
+            for key, request in session.http_requests.items()
+            if request["phase"] == lifecycle_phase
+        }
+        if any(
+            request["connect_ns"] <= after
+            and request["response_end_ns"] >= before
+            and key not in expected_http_keys
+            for key, request in session.http_requests.items()
+        ):
+            fail(f"{segment} resource metric window contains a foreign HTTP request")
         _validate_resource_lifecycle(session, segment, baseline, points[segment])
     if metric_times[("restart", "before")] < metric_times[("normal", "after")]:
         fail("restart metric-before occurs before normal metric-after")

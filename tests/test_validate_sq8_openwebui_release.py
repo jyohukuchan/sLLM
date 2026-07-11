@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import importlib.util
 import json
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
@@ -99,6 +101,10 @@ class EvidenceBuilder:
         self.journal_records = []
         self.now = 1_000_000_000
         self.cursor_index = 0
+        self.fixture = {
+            "model": "Qwen3-14B-SQ8",
+            "messages": [{"role": "user", "content": "resource fixture"}],
+        }
 
     def write_json(self, relative: str, value) -> None:
         path = self.root / relative
@@ -146,14 +152,158 @@ class EvidenceBuilder:
             }
         )
 
+    def lifecycle_probe(self, phase: str, probe: str, segment: str) -> None:
+        gateway_pid, worker_pid, gateway_start, worker_start = (
+            (1200, 1201, 10_000, 10_001)
+            if segment == "normal"
+            else (2200, 2201, 20_000, 20_001)
+        )
+        self.session_add(
+            "lifecycle_probe",
+            phase,
+            probe,
+            probe=probe,
+            observed_monotonic_ns=self.now,
+            service_active=True,
+            ready_http_status=200,
+            control_group="/system.slice/ullm-openai.service",
+            gateway_pid=gateway_pid,
+            gateway_starttime_ticks=gateway_start,
+            worker_pid=worker_pid,
+            worker_starttime_ticks=worker_start,
+            n_restarts=2 if segment == "normal" else 3,
+        )
+
+    def http_exchange(
+        self,
+        phase: str,
+        case_id: str,
+        request_index: int,
+        body: bytes,
+        response: bytes,
+        status: int,
+        sent_time: int,
+        response_time: int,
+    ) -> None:
+        request_key = f"p8f-{case_id}"
+        self.session_add(
+            "http_request",
+            phase,
+            case_id,
+            request_index=request_index,
+            request_key=request_key,
+            method="POST",
+            target="/v1/chat/completions",
+            headers={
+                "content_type": "application/json",
+                "content_length": len(body),
+                "authorization_mode": "valid_bearer",
+            },
+            body_base64=base64.b64encode(body).decode("ascii"),
+            body_sha256=sha256_bytes(body),
+            body_bytes=len(body),
+            connect_completed_monotonic_ns=sent_time - 2,
+            write_started_monotonic_ns=sent_time - 1,
+            last_body_byte_sent_monotonic_ns=sent_time,
+        )
+        self.session_add(
+            "http_response_start",
+            phase,
+            case_id,
+            request_key=request_key,
+            status=status,
+            headers=[
+                [
+                    "Content-Type",
+                    "text/event-stream" if status == 200 else "application/json",
+                ]
+            ],
+            observed_monotonic_ns=sent_time + 1,
+        )
+        self.session_add(
+            "http_body_chunk",
+            phase,
+            case_id,
+            request_key=request_key,
+            chunk_index=0,
+            body_base64=base64.b64encode(response).decode("ascii"),
+            body_sha256=sha256_bytes(response),
+            body_bytes=len(response),
+            observed_monotonic_ns=response_time - 1,
+        )
+        self.session_add(
+            "http_response_end",
+            phase,
+            case_id,
+            request_key=request_key,
+            outcome="eof",
+            error=None,
+            body_bytes=len(response),
+            body_sha256=sha256_bytes(response),
+            observed_monotonic_ns=response_time,
+        )
+
+    def positive_body(self, segment: str, role: str, index: int) -> bytes:
+        sampled = (
+            segment == "normal"
+            and role == "measured"
+            and index in SCHEDULE["sampled_normal_indices"]
+        )
+        return json.dumps(
+            {
+                "model": self.fixture["model"],
+                "messages": self.fixture["messages"],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "max_tokens": 2,
+                "temperature": 0.6 if sampled else 0,
+                "top_p": 0.95 if sampled else 1,
+                "seed": index if sampled else 0,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
     def lifecycle_request(self, segment: str, role: str, index: int) -> tuple[str, int]:
         phase = f"resource_{segment}"
         request_id = f"req-{segment}-{role}-{index:03d}"
         completion_id = f"chatcmpl-{segment}-{role}-{index:03d}"
-        case_id = f"{segment}-{role}-{index:03d}"
+        case_id = (
+            f"{segment}-warmup-{index:02d}"
+            if role == "warmup"
+            else f"{segment}-measured-{index:03d}"
+        )
         admitted_time = self.now
         started_time = admitted_time + 100_000
         release_time = admitted_time + 1_000_000
+        response = (
+            b"data: "
+            + compact_json(
+                {
+                    "id": completion_id,
+                    "choices": [{"delta": {"content": "x"}}],
+                }
+            ).encode("utf-8")
+            + b"\n\ndata: "
+            + compact_json(
+                {
+                    "id": completion_id,
+                    "choices": [],
+                    "usage": {"completion_tokens": 2},
+                }
+            ).encode("utf-8")
+            + b"\n\ndata: [DONE]\n\n"
+        )
+        self.http_exchange(
+            phase,
+            case_id,
+            index,
+            self.positive_body(segment, role, index),
+            response,
+            200,
+            admitted_time,
+            release_time + 100_000,
+        )
         self.gateway_event(
             phase,
             case_id,
@@ -217,6 +367,54 @@ class EvidenceBuilder:
         )
         self.now = release_time + 10_000_000_000
         return request_id, release_time
+
+    def negative_request(self, index: int, kind: str) -> None:
+        if kind == "malformed_json":
+            case_id = "negative-after-050-malformed_json"
+            body = b"{"
+            code = "invalid_request_error"
+            param = None
+        else:
+            suffix = "1" if index == 25 else "2"
+            case_id = f"negative-after-{index:03d}-context_overflow_{suffix}"
+            marker = "one" if index == 25 else "two"
+            body = compact_json(
+                {
+                    "model": self.fixture["model"],
+                    "messages": [
+                        {"role": "user", "content": marker + (" overflow" * 5000)}
+                    ],
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                    "max_tokens": 2,
+                    "temperature": 0,
+                    "top_p": 1,
+                    "seed": 0,
+                }
+            ).encode("utf-8")
+            code = "context_length_exceeded"
+            param = "messages"
+        response = compact_json(
+            {
+                "error": {
+                    "message": "rejected",
+                    "type": "invalid_request_error",
+                    "param": param,
+                    "code": code,
+                }
+            }
+        ).encode("utf-8")
+        self.http_exchange(
+            "resource_normal",
+            case_id,
+            index,
+            body,
+            response,
+            400,
+            self.now,
+            self.now + 1_000_000,
+        )
+        self.now += 10_000_000
 
     def process(self, segment: str, kind: str):
         gateway_pid, worker_pid, gateway_start, worker_start = (
@@ -365,10 +563,16 @@ class EvidenceBuilder:
             _, warmup_release = self.lifecycle_request(segment, "warmup", index)
         self.resource_point(segment, "baseline", None, None, warmup_release)
         for index in range(1, measured_count + 1):
-            request_id, release_time = self.lifecycle_request(segment, "request", index)
+            request_id, release_time = self.lifecycle_request(
+                segment, "measured", index
+            )
             self.resource_point(
                 segment, "post_release", index, request_id, release_time
             )
+            if segment == "normal" and index in {25, 50, 75}:
+                self.negative_request(
+                    index, "malformed_json" if index == 50 else "context_overflow"
+                )
         final_sample = self.resource_records[-1]["sample_monotonic_ns"]
         self.metric(segment, "after", final_sample + 1)
         self.now = final_sample + 10_000_000_000
@@ -426,19 +630,59 @@ class EvidenceBuilder:
                     "patch_sha256": "5" * 64,
                     "patched_middleware_sha256": "6" * 64,
                 },
-                "docker_network_id": "network-synthetic",
+                "docker_network_id": "9" * 64,
                 "gateway_source_sha256": "7" * 64,
                 "worker_source_sha256": "8" * 64,
                 "worker_binary_sha256": WORKER_SHA256,
             },
-            input_files=[],
+            input_files=[
+                {
+                    "path": "collector/config.json",
+                    "bytes": 2,
+                    "sha256": sha256_bytes(b"{}"),
+                },
+                {
+                    "path": VALIDATOR.RESOURCE_FIXTURE_INPUT_PATH,
+                    "bytes": len(
+                        json.dumps(
+                            self.fixture,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ),
+                    "sha256": sha256_bytes(
+                        json.dumps(
+                            self.fixture,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ),
+                },
+                {
+                    "path": "tools/collect-sq8-openwebui-release.py",
+                    "bytes": 1,
+                    "sha256": sha256_bytes(b"c"),
+                },
+                {
+                    "path": "tools/sq8-openwebui-http-client.py",
+                    "bytes": 1,
+                    "sha256": sha256_bytes(b"h"),
+                },
+            ],
             schedule=deepcopy(SCHEDULE),
             thresholds=deepcopy(THRESHOLDS),
         )
         self.resource_records.append(self.resource_header())
+        self.lifecycle_probe("resource_normal", "normal-segment-start", "normal")
         self.segment("normal", 100)
+        self.lifecycle_probe(
+            "post_header_failure", "post-header-restart-ready", "restart"
+        )
+        self.lifecycle_probe("resource_restart", "restart-segment-start", "restart")
         self.segment("restart", 20)
-        counts = {"header": 1, "gateway_event": len(self.journal_records), "run_end": 1}
+        self.lifecycle_probe("final", "final-service-ready", "restart")
+        counts = Counter(record["record_type"] for record in self.session_records)
+        counts["run_end"] += 1
         self.session_add(
             "run_end",
             "final",
@@ -448,7 +692,7 @@ class EvidenceBuilder:
             final_git_commit=GIT_COMMIT,
             final_git_status_raw="",
             final_git_status_sha256=sha256_bytes(b""),
-            record_counts=counts,
+            record_counts=dict(counts),
             final_journal_cursor=self.journal_records[-1]["__CURSOR"],
         )
         self.write_jsonl("raw-session-results.jsonl", self.session_records)
@@ -506,6 +750,13 @@ def mutate_jsonl(root: Path, relative: str, mutator) -> None:
     refresh_matrix_and_sums(root)
 
 
+def replace_request_body(record: dict, raw: bytes) -> None:
+    record["body_base64"] = base64.b64encode(raw).decode("ascii")
+    record["body_sha256"] = sha256_bytes(raw)
+    record["body_bytes"] = len(raw)
+    record["headers"]["content_length"] = len(raw)
+
+
 def rewrite_gateway_event_time(
     root: Path, request_id: str, event_name: str, observed_ns: int
 ) -> None:
@@ -547,6 +798,76 @@ def rewrite_gateway_event_time(
             break
     journal_path.write_text(
         "".join(compact_json(record) + "\n" for record in journal), encoding="utf-8"
+    )
+    refresh_matrix_and_sums(root)
+
+
+def insert_gateway_trace_before_case(
+    root: Path,
+    before_case_id: str,
+    phase: str,
+    case_id: str,
+    journal_pid: int,
+    events: list[dict],
+) -> None:
+    session_path = root / "raw-session-results.jsonl"
+    session = [json.loads(line) for line in session_path.read_text().splitlines()]
+    insert_at = next(
+        index
+        for index, record in enumerate(session)
+        if record.get("record_type") == "http_request"
+        and record.get("case_id") == before_case_id
+    )
+    boot_id = session[0]["boot_id"]
+    gateway_records = []
+    journal_records = []
+    for index, event in enumerate(events):
+        cursor = f"test-insert-{case_id}-{index}"
+        message = compact_json(event)
+        gateway_records.append(
+            {
+                "schema_version": VALIDATOR.SESSION_SCHEMA,
+                "record_type": "gateway_event",
+                "sequence": 0,
+                "phase": phase,
+                "case_id": case_id,
+                "journal_cursor": cursor,
+                "journal_monotonic_usec": event["observed_monotonic_ns"] // 1000,
+                "journal_pid": journal_pid,
+                "message": message,
+                "message_sha256": sha256_bytes(message.encode("utf-8")),
+                "event": event,
+            }
+        )
+        journal_records.append(
+            {
+                "__CURSOR": cursor,
+                "__MONOTONIC_TIMESTAMP": str(event["observed_monotonic_ns"] // 1000),
+                "_BOOT_ID": boot_id,
+                "_PID": str(journal_pid),
+                "_SYSTEMD_UNIT": "ullm-openai.service",
+                "PRIORITY": "6",
+                "MESSAGE": message,
+            }
+        )
+    session[insert_at:insert_at] = gateway_records
+    for sequence, record in enumerate(session):
+        record["sequence"] = sequence
+    counts = {}
+    for record in session:
+        counts[record["record_type"]] = counts.get(record["record_type"], 0) + 1
+    session[-1]["record_counts"] = counts
+    session_path.write_text(
+        "".join(compact_json(record) + "\n" for record in session),
+        encoding="utf-8",
+    )
+    journal_path = root / "service-journal.raw.jsonl"
+    journal = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    journal.extend(journal_records)
+    journal.sort(key=lambda record: int(record["__MONOTONIC_TIMESTAMP"]))
+    journal_path.write_text(
+        "".join(compact_json(record) + "\n" for record in journal),
+        encoding="utf-8",
     )
     refresh_matrix_and_sums(root)
 
@@ -647,6 +968,619 @@ class ValidatorTest(unittest.TestCase):
 
         mutate_jsonl(self.root, "soak-resources.raw.jsonl", mutate)
         self.assert_invalid("release order differs")
+
+    def test_gateway_journal_pid_must_match_probe_epoch(self):
+        session_path = self.root / "raw-session-results.jsonl"
+        session = [json.loads(line) for line in session_path.read_text().splitlines()]
+        target = next(
+            record
+            for record in session
+            if record.get("record_type") == "gateway_event"
+            and record["phase"] == "resource_normal"
+        )
+        target["journal_pid"] = 1299
+        cursor = target["journal_cursor"]
+        session_path.write_text(
+            "".join(compact_json(record) + "\n" for record in session),
+            encoding="utf-8",
+        )
+        journal_path = self.root / "service-journal.raw.jsonl"
+        journal = [json.loads(line) for line in journal_path.read_text().splitlines()]
+        next(record for record in journal if record["__CURSOR"] == cursor)["_PID"] = (
+            "1299"
+        )
+        journal_path.write_text(
+            "".join(compact_json(record) + "\n" for record in journal),
+            encoding="utf-8",
+        )
+        refresh_matrix_and_sums(self.root)
+        self.assert_invalid("journal PID differs from its lifecycle probe epoch")
+
+    def test_probe_gateway_identity_must_match_resource_samples(self):
+        session_path = self.root / "raw-session-results.jsonl"
+        session = [json.loads(line) for line in session_path.read_text().splitlines()]
+        normal_probe = next(
+            record
+            for record in session
+            if record.get("record_type") == "lifecycle_probe"
+            and record.get("probe") == "normal-segment-start"
+        )
+        normal_probe["gateway_pid"] = 1299
+        normal_cursors = set()
+        for record in session:
+            if (
+                record.get("record_type") == "gateway_event"
+                and record.get("phase") == "resource_normal"
+            ):
+                record["journal_pid"] = 1299
+                normal_cursors.add(record["journal_cursor"])
+        session_path.write_text(
+            "".join(compact_json(record) + "\n" for record in session),
+            encoding="utf-8",
+        )
+        journal_path = self.root / "service-journal.raw.jsonl"
+        journal = [json.loads(line) for line in journal_path.read_text().splitlines()]
+        for record in journal:
+            if record["__CURSOR"] in normal_cursors:
+                record["_PID"] = "1299"
+        journal_path.write_text(
+            "".join(compact_json(record) + "\n" for record in journal),
+            encoding="utf-8",
+        )
+        refresh_matrix_and_sums(self.root)
+        self.assert_invalid("normal resource identity differs from its lifecycle probe")
+
+    def test_old_gateway_event_cannot_exceed_restart_ready_boundary(self):
+        evidence = VALIDATOR.GatewayEvidence(
+            cursor="cursor",
+            journal_monotonic_usec=1,
+            journal_pid=1200,
+            message="message",
+            message_sha256="a" * 64,
+            event={"event": "request_released", "observed_monotonic_ns": 101},
+            phase="resource_normal",
+        )
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "exceeds the post-header restart boundary"
+        ):
+            VALIDATOR._validate_gateway_event_pids(
+                {"cursor": evidence}, 1200, 2200, 100, 200
+            )
+
+    def test_post_header_phase_cannot_hide_a_late_restart_gateway_event(self):
+        evidence = VALIDATOR.GatewayEvidence(
+            cursor="cursor",
+            journal_monotonic_usec=1,
+            journal_pid=2200,
+            message="message",
+            message_sha256="a" * 64,
+            event={"event": "request_released", "observed_monotonic_ns": 201},
+            phase="post_header_failure",
+        )
+        with self.assertRaisesRegex(
+            VALIDATOR.ValidationError, "exceeds its lifecycle phase boundary"
+        ):
+            VALIDATOR._validate_gateway_event_pids(
+                {"cursor": evidence}, 1200, 2200, 100, 200
+            )
+
+    def test_worker_fatal_is_only_allowed_from_planned_old_gateway_boundary(self):
+        evidence = VALIDATOR.GatewayEvidence(
+            cursor="cursor",
+            journal_monotonic_usec=1,
+            journal_pid=2200,
+            message="message",
+            message_sha256="a" * 64,
+            event={"event": "worker_fatal", "observed_monotonic_ns": 150},
+            phase="post_header_failure",
+        )
+        with self.assertRaisesRegex(VALIDATOR.ValidationError, "sole planned"):
+            VALIDATOR._validate_gateway_event_pids(
+                {"cursor": evidence}, 1200, 2200, 100, 200
+            )
+
+    def test_resource_sampling_body_is_reconstructed(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+                and record.get("case_id") == "normal-measured-005"
+            )
+            body = json.loads(base64.b64decode(target["body_base64"]))
+            body["temperature"] = 0
+            replace_request_body(
+                target,
+                json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                ),
+            )
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("resource sampling settings differ")
+
+    def test_resource_seed_requires_an_integer_json_number(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+                and record.get("case_id") == "normal-measured-005"
+            )
+            body = json.loads(base64.b64decode(target["body_base64"]))
+            body["seed"] = 5.0
+            replace_request_body(
+                target,
+                json.dumps(body, separators=(",", ":")).encode("utf-8"),
+            )
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("body.seed must be an integer")
+
+    def test_resource_max_tokens_requires_an_integer_json_number(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+                and record.get("case_id") == "normal-measured-005"
+            )
+            body = json.loads(base64.b64decode(target["body_base64"]))
+            body["max_tokens"] = 2.0
+            replace_request_body(
+                target,
+                json.dumps(body, separators=(",", ":")).encode("utf-8"),
+            )
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("body.max_tokens must be an integer")
+
+    def test_context_overflow_negative_body_semantics_are_reconstructed(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+                and record.get("case_id") == "negative-after-025-context_overflow_1"
+            )
+            replace_request_body(
+                target,
+                compact_json(
+                    {
+                        "model": "Qwen3-14B-SQ8",
+                        "messages": [{"role": "user", "content": "x"}],
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                        "max_tokens": 2,
+                        "temperature": 0,
+                        "top_p": 1,
+                        "seed": 0,
+                    }
+                ).encode("utf-8"),
+            )
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("context-overflow request shape differs")
+
+    def test_malformed_negative_must_not_be_valid_json(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+                and record.get("case_id") == "negative-after-050-malformed_json"
+            )
+            replace_request_body(target, b"{}")
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("must contain malformed JSON")
+
+    def test_malformed_negative_rejects_syntactically_valid_duplicate_keys(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+                and record.get("case_id") == "negative-after-050-malformed_json"
+            )
+            replace_request_body(target, b'{"duplicate":1,"duplicate":2}')
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("must contain malformed JSON")
+
+    def test_negative_interval_rejects_admission_hidden_under_another_phase(self):
+        session_path = self.root / "raw-session-results.jsonl"
+        session = [json.loads(line) for line in session_path.read_text().splitlines()]
+        negative_index = next(
+            index
+            for index, record in enumerate(session)
+            if record.get("record_type") == "http_response_end"
+            and record.get("case_id") == "negative-after-025-context_overflow_1"
+        )
+        negative_end = session[negative_index]["observed_monotonic_ns"]
+        next_request = next(
+            record
+            for record in session[negative_index + 1 :]
+            if record.get("record_type") == "http_request"
+        )
+        base = next_request["last_body_byte_sent_monotonic_ns"]
+        self.assertGreater(base, negative_end)
+        shifted_journal = {}
+        for record in session:
+            if (
+                record.get("record_type") == "gateway_event"
+                and record.get("case_id") == next_request["case_id"]
+            ):
+                record["event"]["observed_monotonic_ns"] += 1
+                message = compact_json(record["event"])
+                record["message"] = message
+                record["message_sha256"] = sha256_bytes(message.encode("utf-8"))
+                record["journal_monotonic_usec"] = (
+                    record["event"]["observed_monotonic_ns"] // 1000
+                )
+                shifted_journal[record["journal_cursor"]] = (
+                    message,
+                    record["journal_monotonic_usec"],
+                )
+        request_id = "req-hidden-negative-admission"
+        completion_id = "chatcmpl-hidden-negative-admission"
+        events = [
+            {
+                "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+                "event": "request_admitted",
+                "observed_monotonic_ns": base,
+                "request_id": request_id,
+                "completion_id": completion_id,
+                "stream": True,
+                "prompt_tokens": 1,
+                "max_completion_tokens": 1,
+            },
+            {
+                "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+                "event": "request_started",
+                "observed_monotonic_ns": base,
+                "request_id": request_id,
+                "completion_id": completion_id,
+                "stream": True,
+                "prompt_tokens": 1,
+                "admit_to_start_ns": 0,
+            },
+            {
+                "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+                "event": "request_first_token",
+                "observed_monotonic_ns": base,
+                "request_id": request_id,
+                "completion_id": completion_id,
+                "stream": True,
+                "completion_tokens": 1,
+            },
+            {
+                "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+                "event": "request_released",
+                "observed_monotonic_ns": base,
+                "request_id": request_id,
+                "completion_id": completion_id,
+                "stream": True,
+                "outcome": "length",
+                "cancel_reason": None,
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "reset_complete": True,
+                "admit_to_start_ns": 0,
+                "start_to_release_ns": 0,
+                "admit_to_release_ns": 0,
+            },
+        ]
+        gateway_records = []
+        journal_records = []
+        boot_id = session[0]["boot_id"]
+        for index, event in enumerate(events):
+            cursor = f"hidden-negative-cursor-{index}"
+            message = "INFO:     " + compact_json(event)
+            gateway_records.append(
+                {
+                    "schema_version": VALIDATOR.SESSION_SCHEMA,
+                    "record_type": "gateway_event",
+                    "sequence": 0,
+                    "phase": "openwebui",
+                    "case_id": "hidden-negative-admission",
+                    "journal_cursor": cursor,
+                    "journal_monotonic_usec": event["observed_monotonic_ns"] // 1000,
+                    "journal_pid": 1200,
+                    "message": message,
+                    "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+                    "event": event,
+                }
+            )
+            journal_records.append(
+                {
+                    "__CURSOR": cursor,
+                    "__MONOTONIC_TIMESTAMP": str(
+                        event["observed_monotonic_ns"] // 1000
+                    ),
+                    "_BOOT_ID": boot_id,
+                    "_PID": "1200",
+                    "_SYSTEMD_UNIT": "ullm-openai.service",
+                    "PRIORITY": "6",
+                    "MESSAGE": message,
+                }
+            )
+        session[negative_index + 1 : negative_index + 1] = gateway_records
+        for sequence, record in enumerate(session):
+            record["sequence"] = sequence
+        counts = {}
+        for record in session:
+            counts[record["record_type"]] = counts.get(record["record_type"], 0) + 1
+        session[-1]["record_counts"] = counts
+        session_path.write_text(
+            "".join(compact_json(record) + "\n" for record in session),
+            encoding="utf-8",
+        )
+
+        journal_path = self.root / "service-journal.raw.jsonl"
+        journal = [json.loads(line) for line in journal_path.read_text().splitlines()]
+        for record in journal:
+            replacement = shifted_journal.get(record["__CURSOR"])
+            if replacement is not None:
+                record["MESSAGE"] = replacement[0]
+                record["__MONOTONIC_TIMESTAMP"] = str(replacement[1])
+        journal.extend(journal_records)
+        journal.sort(key=lambda record: int(record["__MONOTONIC_TIMESTAMP"]))
+        journal_path.write_text(
+            "".join(compact_json(record) + "\n" for record in journal),
+            encoding="utf-8",
+        )
+        refresh_matrix_and_sums(self.root)
+        self.assert_invalid(
+            "negative resource request interval contains a worker admission"
+        )
+
+    def test_resource_metric_window_rejects_foreign_lifecycle_trace(self):
+        resources = [
+            json.loads(line)
+            for line in (self.root / "soak-resources.raw.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        final_sample = next(
+            record
+            for record in resources
+            if record.get("record_type") == "resource_sample"
+            and record.get("segment") == "normal"
+            and record.get("request_index") == 1
+            and record.get("sample_index") == 4
+        )
+        session = [
+            json.loads(line)
+            for line in (self.root / "raw-session-results.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        next_request = next(
+            record
+            for record in session
+            if record.get("record_type") == "http_request"
+            and record.get("case_id") == "normal-measured-002"
+        )
+        base = final_sample["sample_monotonic_ns"] + 1_000_000
+        self.assertLess(
+            base + 3_000_000, next_request["connect_completed_monotonic_ns"]
+        )
+        request_id = "req-foreign-resource-gap"
+        completion_id = "chatcmpl-foreign-resource-gap"
+        common = {
+            "schema_version": VALIDATOR.LIFECYCLE_SCHEMA,
+            "request_id": request_id,
+            "completion_id": completion_id,
+            "stream": True,
+        }
+        events = [
+            {
+                **common,
+                "event": "request_admitted",
+                "observed_monotonic_ns": base,
+                "prompt_tokens": 1,
+                "max_completion_tokens": 1,
+            },
+            {
+                **common,
+                "event": "request_started",
+                "observed_monotonic_ns": base + 1_000_000,
+                "prompt_tokens": 1,
+                "admit_to_start_ns": 1_000_000,
+            },
+            {
+                **common,
+                "event": "request_first_token",
+                "observed_monotonic_ns": base + 2_000_000,
+                "completion_tokens": 1,
+            },
+            {
+                **common,
+                "event": "request_released",
+                "observed_monotonic_ns": base + 3_000_000,
+                "outcome": "length",
+                "cancel_reason": None,
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "reset_complete": True,
+                "admit_to_start_ns": 1_000_000,
+                "start_to_release_ns": 2_000_000,
+                "admit_to_release_ns": 3_000_000,
+            },
+        ]
+        insert_gateway_trace_before_case(
+            self.root,
+            "normal-measured-002",
+            "openwebui",
+            "foreign-resource-gap",
+            1200,
+            events,
+        )
+        self.assert_invalid("resource metric window contains a foreign lifecycle trace")
+
+    def test_resource_metric_window_rejects_foreign_http_exchange(self):
+        resources = [
+            json.loads(line)
+            for line in (self.root / "soak-resources.raw.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        final_sample = next(
+            record
+            for record in resources
+            if record.get("record_type") == "resource_sample"
+            and record.get("segment") == "normal"
+            and record.get("request_index") == 1
+            and record.get("sample_index") == 4
+        )
+        session_path = self.root / "raw-session-results.jsonl"
+        session = [json.loads(line) for line in session_path.read_text().splitlines()]
+        insert_at = next(
+            index
+            for index, record in enumerate(session)
+            if record.get("record_type") == "http_request"
+            and record.get("case_id") == "normal-measured-002"
+        )
+        next_request = session[insert_at]
+        base = final_sample["sample_monotonic_ns"] + 1_000_000
+        self.assertLess(base + 5, next_request["connect_completed_monotonic_ns"])
+        request_body = b"{}"
+        response_body = b"{}"
+        key = "foreign-resource-gap-http"
+        common = {
+            "schema_version": VALIDATOR.SESSION_SCHEMA,
+            "sequence": 0,
+            "phase": "api_contract",
+            "case_id": "foreign-resource-gap-http",
+        }
+        records = [
+            {
+                **common,
+                "record_type": "http_request",
+                "request_index": 0,
+                "request_key": key,
+                "method": "POST",
+                "target": "/v1/chat/completions",
+                "headers": {
+                    "content_type": "application/json",
+                    "content_length": len(request_body),
+                    "authorization_mode": "valid_bearer",
+                },
+                "body_base64": base64.b64encode(request_body).decode("ascii"),
+                "body_sha256": sha256_bytes(request_body),
+                "body_bytes": len(request_body),
+                "connect_completed_monotonic_ns": base,
+                "write_started_monotonic_ns": base + 1,
+                "last_body_byte_sent_monotonic_ns": base + 2,
+            },
+            {
+                **common,
+                "record_type": "http_response_start",
+                "request_key": key,
+                "status": 400,
+                "headers": [["Content-Type", "application/json"]],
+                "observed_monotonic_ns": base + 3,
+            },
+            {
+                **common,
+                "record_type": "http_body_chunk",
+                "request_key": key,
+                "chunk_index": 0,
+                "body_base64": base64.b64encode(response_body).decode("ascii"),
+                "body_sha256": sha256_bytes(response_body),
+                "body_bytes": len(response_body),
+                "observed_monotonic_ns": base + 4,
+            },
+            {
+                **common,
+                "record_type": "http_response_end",
+                "request_key": key,
+                "outcome": "eof",
+                "error": None,
+                "body_bytes": len(response_body),
+                "body_sha256": sha256_bytes(response_body),
+                "observed_monotonic_ns": base + 5,
+            },
+        ]
+        session[insert_at:insert_at] = records
+        for sequence, record in enumerate(session):
+            record["sequence"] = sequence
+        counts = {}
+        for record in session:
+            counts[record["record_type"]] = counts.get(record["record_type"], 0) + 1
+        session[-1]["record_counts"] = counts
+        session_path.write_text(
+            "".join(compact_json(record) + "\n" for record in session),
+            encoding="utf-8",
+        )
+        refresh_matrix_and_sums(self.root)
+        self.assert_invalid("resource metric window contains a foreign HTTP request")
+
+    def test_http_chunk_timestamp_regression_is_rejected(self):
+        def mutate(records):
+            request = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+            )
+            chunk = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_body_chunk"
+                and record.get("request_key") == request["request_key"]
+            )
+            chunk["observed_monotonic_ns"] = request["last_body_byte_sent_monotonic_ns"]
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("body chunk timestamps regress")
+
+    def test_next_http_connection_must_follow_prior_response_end(self):
+        def mutate(records):
+            requests = [
+                record
+                for record in records
+                if record.get("record_type") == "http_request"
+            ]
+            first, second = requests[:2]
+            prior_end = next(
+                record
+                for record in records
+                if record.get("record_type") == "http_response_end"
+                and record.get("request_key") == first["request_key"]
+            )["observed_monotonic_ns"]
+            second["connect_completed_monotonic_ns"] = prior_end - 1
+            second["write_started_monotonic_ns"] = prior_end - 1
+            second["last_body_byte_sent_monotonic_ns"] = prior_end - 1
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("begins before the prior HTTP response ended")
+
+    def test_restart_probe_count_must_increment_exactly_once(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "lifecycle_probe"
+                and record.get("probe") == "post-header-restart-ready"
+            )
+            target["n_restarts"] += 1
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("post-restart lifecycle probe identities differ")
+
+    def test_lifecycle_probe_name_is_bound_to_its_phase(self):
+        def mutate(records):
+            target = next(
+                record
+                for record in records
+                if record.get("record_type") == "lifecycle_probe"
+                and record.get("probe") == "normal-segment-start"
+            )
+            target["phase"] = "final"
+
+        mutate_jsonl(self.root, "raw-session-results.jsonl", mutate)
+        self.assert_invalid("lifecycle probe identity is duplicated or differs")
 
     def test_next_admission_must_follow_prior_release_not_client_end(self):
         session = [
