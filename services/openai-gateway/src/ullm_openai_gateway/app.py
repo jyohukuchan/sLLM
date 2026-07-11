@@ -262,6 +262,8 @@ async def _serve_claimed_chat_completion(
     normalized: NormalizedChatRequest,
     prompt: TokenizedPrompt,
 ) -> Response:
+    created = int(time.time())
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     worker_request = WorkerGenerationRequest(
         prompt_token_ids=prompt.token_ids,
         max_new_tokens=normalized.max_completion_tokens,
@@ -269,6 +271,7 @@ async def _serve_claimed_chat_completion(
         top_p=normalized.top_p,
         seed=normalized.seed,
         stream=normalized.stream,
+        completion_id=completion_id,
     )
     try:
         handle = await request.app.state.worker.admit(worker_request)
@@ -279,8 +282,6 @@ async def _serve_claimed_chat_completion(
     except WorkerFatal:
         return _fatal_worker_response(request)
 
-    created = int(time.time())
-    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     if normalized.stream:
         worker = cast(WorkerSupervisor, request.app.state.worker)
         try:

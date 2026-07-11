@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -199,6 +201,117 @@ def test_worker_is_reused_and_busy_request_is_not_queued(tmp_path: Path) -> None
         await supervisor.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_release_log_is_structured_and_omits_content(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    completion_id = "chatcmpl-0123456789abcdef0123456789abcdef"
+
+    async def scenario() -> None:
+        supervisor = WorkerSupervisor(config(tmp_path), fatal_exit=lambda _: None)
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        request = generation()
+        request = WorkerGenerationRequest(
+            prompt_token_ids=request.prompt_token_ids,
+            max_new_tokens=request.max_new_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            seed=request.seed,
+            completion_id=completion_id,
+        )
+        result = await supervisor.wait(await supervisor.admit(request))
+        assert result.outcome == "stop"
+        await supervisor.shutdown()
+
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    asyncio.run(scenario())
+    records = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith("{")
+    ]
+    assert [record["event"] for record in records] == [
+        "request_admitted",
+        "request_started",
+        "request_progress",
+        "request_first_token",
+        "request_released",
+    ]
+    assert [record["observed_monotonic_ns"] for record in records] == sorted(
+        record["observed_monotonic_ns"] for record in records
+    )
+    released = [
+        record for record in records if record.get("event") == "request_released"
+    ]
+    assert len(released) == 1
+    record = released[0]
+    assert set(record) == {
+        "schema_version",
+        "event",
+        "observed_monotonic_ns",
+        "request_id",
+        "completion_id",
+        "stream",
+        "outcome",
+        "cancel_reason",
+        "prompt_tokens",
+        "completion_tokens",
+        "reset_complete",
+        "admit_to_start_ns",
+        "start_to_release_ns",
+        "admit_to_release_ns",
+    }
+    assert record["schema_version"] == "ullm.gateway.lifecycle.v1"
+    assert record["observed_monotonic_ns"] > 0
+    assert record["request_id"].startswith("req-")
+    assert record["completion_id"] == completion_id
+    assert record["outcome"] == "stop"
+    assert record["reset_complete"] is True
+    assert record["prompt_tokens"] == 3
+    assert record["completion_tokens"] == 1
+    assert 0 <= record["admit_to_start_ns"] <= record["admit_to_release_ns"]
+    assert 0 <= record["start_to_release_ns"] <= record["admit_to_release_ns"]
+    serialized = json.dumps(records, sort_keys=True)
+    for forbidden in ("prompt_token_ids", "token_ids", "test-secret"):
+        assert forbidden not in serialized
+
+
+def test_cancel_log_precedes_matching_cancelled_release(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        supervisor = WorkerSupervisor(
+            config(tmp_path, mode="wait_cancel"), fatal_exit=lambda _: None
+        )
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        handle = await supervisor.admit(generation(stream=True))
+        await supervisor.wait_started(handle)
+        await supervisor.cancel(handle, "operator")
+        assert (await supervisor.wait(handle)).outcome == "cancelled"
+        await supervisor.shutdown()
+
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    asyncio.run(scenario())
+    records = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith("{")
+    ]
+    cancel = next(
+        record for record in records if record["event"] == "request_cancel_requested"
+    )
+    released = next(
+        record for record in records if record["event"] == "request_released"
+    )
+    assert cancel["request_id"] == released["request_id"]
+    assert cancel["reason"] == "operator"
+    assert released["outcome"] == "cancelled"
+    assert released["cancel_reason"] == "operator"
+    assert released["reset_complete"] is True
+    assert cancel["observed_monotonic_ns"] <= released["observed_monotonic_ns"]
 
 
 def test_slot_remains_busy_from_cancel_until_matching_release(tmp_path: Path) -> None:

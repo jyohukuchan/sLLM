@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import logging
 import os
 import signal
 import stat
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +38,9 @@ FATAL_RESPONSE_ATTEMPT_SECONDS = 0.25
 KILL_WAIT_SECONDS = 2.0
 PREFILL_PROGRESS_TOKENS = 128
 STREAM_TOKEN_QUEUE_SIZE = 32
+LIFECYCLE_LOG_SCHEMA = "ullm.gateway.lifecycle.v1"
+
+_LIFECYCLE_LOGGER = logging.getLogger("uvicorn.error")
 
 HIP_GUARDS = (
     "ULLM_REQUIRE_HIP_ADD_KERNEL",
@@ -109,6 +114,7 @@ class WorkerGenerationRequest:
     top_p: float
     seed: int
     stream: bool = False
+    completion_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +154,9 @@ class _ActiveRequest:
     future: asyncio.Future[WorkerGenerationResult]
     started_future: asyncio.Future[None]
     stream_state: WorkerStreamState | None
+    admitted_monotonic_ns: int
     started: bool = False
+    started_monotonic_ns: int | None = None
     processed_prompt_tokens: int = 0
     token_ids: list[int] = field(default_factory=list)
     terminal_outcome: str | None = None
@@ -259,6 +267,7 @@ class WorkerSupervisor:
                 future=future,
                 started_future=started_future,
                 stream_state=stream_state,
+                admitted_monotonic_ns=time.monotonic_ns(),
                 last_progress=loop.time(),
             )
             self._active = active
@@ -280,6 +289,14 @@ class WorkerSupervisor:
             },
             "eos_token_ids": list(EOS_TOKEN_IDS),
         }
+        _log_lifecycle(
+            "request_admitted",
+            request_id=active.request_id,
+            completion_id=active.request.completion_id,
+            stream=active.request.stream,
+            prompt_tokens=len(active.request.prompt_token_ids),
+            max_completion_tokens=active.request.max_new_tokens,
+        )
         try:
             await self._write_command(command)
         except BaseException as error:
@@ -346,6 +363,14 @@ class WorkerSupervisor:
                     )
                 raise WorkerFatal("worker cancel write failed") from error
             active.cancel_reason = reason
+            _log_lifecycle(
+                "request_cancel_requested",
+                request_id=active.request_id,
+                completion_id=active.request.completion_id,
+                stream=active.request.stream,
+                reason=reason,
+                admit_to_cancel_ns=(time.monotonic_ns() - active.admitted_monotonic_ns),
+            )
             active.cancel_watchdog = self._track(
                 self._cancel_watchdog(active.request_id, active.generation),
                 f"ullm-request-{active.generation}-cancel",
@@ -568,6 +593,18 @@ class WorkerSupervisor:
         if _integer(value.get("prompt_tokens")) != len(active.request.prompt_token_ids):
             raise WorkerProtocolError("worker started prompt count differs")
         active.started = True
+        active.started_monotonic_ns = time.monotonic_ns()
+        _log_lifecycle(
+            "request_started",
+            observed_monotonic_ns=active.started_monotonic_ns,
+            request_id=active.request_id,
+            completion_id=active.request.completion_id,
+            stream=active.request.stream,
+            prompt_tokens=len(active.request.prompt_token_ids),
+            admit_to_start_ns=(
+                active.started_monotonic_ns - active.admitted_monotonic_ns
+            ),
+        )
         if active.started_future.done():
             raise WorkerProtocolError("worker started future completed too early")
         active.started_future.set_result(None)
@@ -598,6 +635,14 @@ class WorkerSupervisor:
         ):
             raise WorkerProtocolError("worker progress event violates ordering")
         active.processed_prompt_tokens = processed
+        _log_lifecycle(
+            "request_progress",
+            request_id=active.request_id,
+            completion_id=active.request.completion_id,
+            phase="prefill",
+            processed_prompt_tokens=processed,
+            prompt_tokens=len(active.request.prompt_token_ids),
+        )
         self._mark_progress(active)
 
     def _handle_token(self, value: dict[str, Any]) -> None:
@@ -617,6 +662,14 @@ class WorkerSupervisor:
         ):
             raise WorkerProtocolError("worker token event violates counters")
         active.token_ids.append(token_id)
+        if index == 0:
+            _log_lifecycle(
+                "request_first_token",
+                request_id=active.request_id,
+                completion_id=active.request.completion_id,
+                stream=active.request.stream,
+                completion_tokens=1,
+            )
         if token_id in EOS_TOKEN_IDS:
             active.terminal_outcome = "stop"
         elif len(active.token_ids) == active.request.max_new_tokens:
@@ -669,7 +722,26 @@ class WorkerSupervisor:
             prompt_tokens=prompt_tokens,
             token_ids=tuple(active.token_ids),
         )
+        released_monotonic_ns = time.monotonic_ns()
+        started_monotonic_ns = active.started_monotonic_ns
+        if started_monotonic_ns is None:
+            raise WorkerProtocolError("worker release lacks a start timestamp")
         await self._finish_active(active, result)
+        _log_lifecycle(
+            "request_released",
+            observed_monotonic_ns=released_monotonic_ns,
+            request_id=active.request_id,
+            completion_id=active.request.completion_id,
+            stream=active.request.stream,
+            outcome=outcome,
+            cancel_reason=active.cancel_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            reset_complete=True,
+            admit_to_start_ns=(started_monotonic_ns - active.admitted_monotonic_ns),
+            start_to_release_ns=released_monotonic_ns - started_monotonic_ns,
+            admit_to_release_ns=(released_monotonic_ns - active.admitted_monotonic_ns),
+        )
 
     async def _finish_active(
         self, active: _ActiveRequest, result: WorkerGenerationResult
@@ -741,7 +813,7 @@ class WorkerSupervisor:
             return active
         return None
 
-    async def _fatal(self, _: str) -> None:
+    async def _fatal(self, reason: str) -> None:
         active: _ActiveRequest | None = None
         async with self._fatal_lock:
             if self._fatal_started:
@@ -754,6 +826,20 @@ class WorkerSupervisor:
             if ready is not None and not ready.done():
                 ready.set_exception(WorkerFatal("worker failed before readiness"))
             active = self._active
+            now_monotonic_ns = time.monotonic_ns()
+            _log_lifecycle(
+                "worker_fatal",
+                request_id=active.request_id if active is not None else None,
+                completion_id=(
+                    active.request.completion_id if active is not None else None
+                ),
+                reason=reason,
+                admit_to_fatal_ns=(
+                    now_monotonic_ns - active.admitted_monotonic_ns
+                    if active is not None
+                    else None
+                ),
+            )
             if active is not None and not active.future.done():
                 active.future.set_exception(WorkerFatal("resident worker failed"))
             if active is not None and not active.started_future.done():
@@ -835,6 +921,25 @@ class WorkerSupervisor:
             self._lock_descriptor = None
 
 
+def _log_lifecycle(event: str, **fields: Any) -> None:
+    value = {
+        "schema_version": LIFECYCLE_LOG_SCHEMA,
+        "event": event,
+        "observed_monotonic_ns": time.monotonic_ns(),
+        **fields,
+    }
+    _LIFECYCLE_LOGGER.info(
+        "%s",
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
 def _acquire_singleton_lock(path: Path) -> int:
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -880,6 +985,18 @@ def _validate_generation_request(request: WorkerGenerationRequest) -> None:
         or not isinstance(request.seed, int)
         or not -(2**63) <= request.seed < 2**63
         or not isinstance(request.stream, bool)
+        or (
+            request.completion_id is not None
+            and (
+                not isinstance(request.completion_id, str)
+                or len(request.completion_id) != 41
+                or not request.completion_id.startswith("chatcmpl-")
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in request.completion_id[9:]
+                )
+            )
+        )
     ):
         raise WorkerProtocolError("generation request violates worker limits")
 

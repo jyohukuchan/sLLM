@@ -404,6 +404,7 @@ def test_nonstream_completion_has_exact_shape_and_usage(
     assert fake_worker.generate_count == 1
     assert fake_worker.requests[0].temperature == 0
     assert fake_worker.requests[0].seed == 7
+    assert fake_worker.requests[0].completion_id == value["id"]
 
 
 @pytest.mark.parametrize(
