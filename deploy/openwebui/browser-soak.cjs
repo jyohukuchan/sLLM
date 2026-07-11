@@ -488,9 +488,9 @@ async function runCase(context, config, spec, tracker) {
       "the correlated Socket.IO content event",
     );
     targetForFinalCheck = target;
-    const visibleText = await assistant.innerText();
-    if (!visibleText.includes(marker)) {
-      throw new Error("OpenWebUI response marker is absent from visible content");
+    const visibleText = (await assistant.innerText()).trim();
+    if (visibleText !== marker) {
+      throw new Error("OpenWebUI visible response differs from its marker");
     }
     const visibleCompleted = monotonicNs();
     addBrowserAction(actions, caseId, {
@@ -522,9 +522,9 @@ async function runCase(context, config, spec, tracker) {
     if (!(await input.isEnabled())) {
       throw new Error("OpenWebUI input is disabled after completion");
     }
-    const finalText = await assistant.innerText();
-    if (!finalText.includes(marker)) {
-      throw new Error("OpenWebUI response marker is absent after completion");
+    const finalText = (await assistant.innerText()).trim();
+    if (finalText !== marker) {
+      throw new Error("OpenWebUI completed response differs from its marker");
     }
     const temporaryChatObserved = await page.evaluate(() => {
       const query = new URLSearchParams(window.location.search);

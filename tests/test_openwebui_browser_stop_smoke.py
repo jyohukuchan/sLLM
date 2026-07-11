@@ -193,6 +193,16 @@ setTimeout(() => fs.writeFileSync(control, expected, { flag: "wx", mode: 0o600 }
         self.assertIn("event.observedMonotonicNs >= initialSubmit.started", source)
         self.assertIn("event.chatId === target.chatId", source)
         self.assertIn("event.messageId !== target.messageId", source)
+        self.assertIn(
+            "const recoveryText = (await recoveryAssistant.innerText()).trim()",
+            source,
+        )
+        self.assertIn("if (recoveryText !== RECOVERY_MARKER)", source)
+        self.assertIn(
+            "const finalRecoveryText = (await recoveryAssistant.innerText()).trim()",
+            source,
+        )
+        self.assertNotIn("recoveryText.includes(RECOVERY_MARKER)", source)
         self.assertIn("fs.lstatSync(tokenFile", source)
         self.assertIn("requireAbsent(gatewayReleaseControlFile", source)
         self.assertNotIn("page.url()", source)

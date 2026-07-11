@@ -705,9 +705,9 @@ async function run(browser, config) {
     RECOVERY_TIMEOUT_MS,
     "the recovery Socket.IO content event",
   );
-  const recoveryText = await recoveryAssistant.innerText();
-  if (!recoveryText.includes(RECOVERY_MARKER)) {
-    throw new Error("OpenWebUI recovery response marker is absent");
+  const recoveryText = (await recoveryAssistant.innerText()).trim();
+  if (recoveryText !== RECOVERY_MARKER) {
+    throw new Error("OpenWebUI recovery response differs from its marker");
   }
   const recoveryVisibleCompleted = monotonicNs();
   addBrowserAction(actions, {
@@ -751,7 +751,7 @@ async function run(browser, config) {
   if (recoveryCancelEvents.length !== 0 || recoveryErrorEvents.length !== 0) {
     throw new Error("recovery chat was cancelled or failed");
   }
-  const finalRecoveryText = await recoveryAssistant.innerText();
+  const finalRecoveryText = (await recoveryAssistant.innerText()).trim();
   if (finalRecoveryText !== recoveryText) {
     throw new Error("recovery assistant content changed after done");
   }
