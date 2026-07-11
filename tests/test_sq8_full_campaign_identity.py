@@ -507,7 +507,7 @@ class FakeProbe:
 
 class FullCampaignIdentityTests(unittest.TestCase):
     def test_source_contract_has_exact_unique_group_coverage(self) -> None:
-        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 68)
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 69)
         self.assertEqual(
             IDENTITY.SOURCE_GROUPS["all"], tuple(IDENTITY.SOURCE_ROLE_PATHS)
         )
