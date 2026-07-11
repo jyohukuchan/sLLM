@@ -2604,6 +2604,29 @@ class ApiContractQuietCheckValidationTest(unittest.TestCase):
             checks,
         )
 
+    def test_quiet_schedule_accepts_one_unchanged_anchor_without_journal_rows(self):
+        checks, _observations, http_results = self.fixture()
+        quiet = tuple(
+            dataclasses.replace(
+                check,
+                new_journal_record_count=0,
+                journal_record_count=0,
+                journal_cursor="api-start-anchor",
+            )
+            for check in checks
+        )
+        self.assertEqual(
+            VALIDATOR.validate_api_contract_quiet_checks(quiet, (), http_results, 1200),
+            quiet,
+        )
+        changed = quiet[:-1] + (
+            dataclasses.replace(quiet[-1], journal_cursor="changed-anchor"),
+        )
+        with self.assertRaises(VALIDATOR.ValidationError):
+            VALIDATOR.validate_api_contract_quiet_checks(
+                changed, (), http_results, 1200
+            )
+
     def test_quiet_schedule_rejects_missing_or_rebound_evidence(self):
         checks, observations, http_results = self.fixture()
         mutations = {
@@ -2671,6 +2694,23 @@ class ApiContractQuietCheckValidationTest(unittest.TestCase):
                 observations[-1].journal_cursor,
                 checks,
                 observations,
+            )
+            zero_checks = tuple(
+                dataclasses.replace(
+                    check,
+                    new_journal_record_count=0,
+                    journal_record_count=0,
+                    journal_cursor="api-start-anchor",
+                )
+                for check in checks
+            )
+            VALIDATOR.validate_service_journal(
+                root,
+                {},
+                BOOT_ID,
+                observations[-1].journal_cursor,
+                zero_checks,
+                (),
             )
 
             interrupted = list(records)

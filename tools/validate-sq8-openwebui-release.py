@@ -4199,8 +4199,6 @@ def validate_api_contract_quiet_checks(
     ]
     if len(checks) != len(labels):
         fail("API contract lifecycle quiet-check count differs from the fixed schedule")
-    if not journal_observations:
-        fail("API contract lifecycle quiet checks lack journal observations")
     seen_cursors: set[str] = set()
     prior_journal_monotonic = -1
     for index, observation in enumerate(journal_observations):
@@ -4225,9 +4223,26 @@ def validate_api_contract_quiet_checks(
 
     prior_checked_ns = -1
     prior_journal_count = 0
+    quiet_anchor_cursor: str | None = None
     for sequence, (check, expected_label) in enumerate(
         zip(checks, labels, strict=True)
     ):
+        if journal_observations:
+            count_invalid = (
+                check.journal_record_count <= 0
+                or check.journal_record_count > len(journal_observations)
+                or check.journal_record_count < prior_journal_count
+                or check.new_journal_record_count
+                != check.journal_record_count - prior_journal_count
+            )
+        else:
+            if quiet_anchor_cursor is None:
+                quiet_anchor_cursor = check.journal_cursor
+            count_invalid = (
+                check.journal_record_count != 0
+                or check.new_journal_record_count != 0
+                or check.journal_cursor != quiet_anchor_cursor
+            )
         if (
             check.phase != "api_contract"
             or check.case_id != expected_label
@@ -4236,20 +4251,19 @@ def validate_api_contract_quiet_checks(
             or check.observer_open is not (sequence <= 10)
             or check.observer_event_count != 0
             or check.checked_monotonic_ns < prior_checked_ns
-            or check.journal_record_count <= 0
-            or check.journal_record_count > len(journal_observations)
-            or check.journal_record_count < prior_journal_count
-            or check.new_journal_record_count
-            != check.journal_record_count - prior_journal_count
+            or count_invalid
         ):
             fail("API contract lifecycle quiet-check identity, order, or count differs")
-        bound_observation = journal_observations[check.journal_record_count - 1]
-        if (
-            check.journal_cursor != bound_observation.journal_cursor
-            or check.checked_monotonic_ns
-            < bound_observation.journal_monotonic_usec * 1000
-        ):
-            fail("API contract lifecycle quiet check differs from its journal boundary")
+        if journal_observations:
+            bound_observation = journal_observations[check.journal_record_count - 1]
+            if (
+                check.journal_cursor != bound_observation.journal_cursor
+                or check.checked_monotonic_ns
+                < bound_observation.journal_monotonic_usec * 1000
+            ):
+                fail(
+                    "API contract lifecycle quiet check differs from its journal boundary"
+                )
         if sequence < len(API_CONTRACT_CASES):
             response_end_ns = api_http[expected_label].response_end_monotonic_ns
         else:
@@ -4406,8 +4420,9 @@ def validate_service_journal(
     next_observation_index = 0
     observation_span_started = False
     quiet_by_cursor: dict[str, list[LifecycleQuietCheckData]] = defaultdict(list)
-    for check in quiet_checks:
-        quiet_by_cursor[check.journal_cursor].append(check)
+    if api_journal_observations:
+        for check in quiet_checks:
+            quiet_by_cursor[check.journal_cursor].append(check)
     remaining_quiet_cursors = set(quiet_by_cursor)
     final_seen = False
     seen_cursors: set[str] = set()
@@ -5387,7 +5402,6 @@ def _validate_lifecycle_quiet_check_data(
     journal_count = integer(
         record["journal_record_count"],
         f"{label}.journal_record_count",
-        minimum=1,
         maximum=MAX_SESSION_RECORDS,
     )
     journal_cursor = bounded_utf8_string(
