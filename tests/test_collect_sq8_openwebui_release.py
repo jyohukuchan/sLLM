@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1303,6 +1304,245 @@ class CollectorTestCase(unittest.TestCase):
             directory = snapshots.directory
             snapshots.close()
         self.assertFalse(directory.exists())
+
+    def test_system_runtime_config_is_deeply_snapshotted_and_immutable(self):
+        identities = json.loads(json.dumps(self.config.identities))
+        expected_image = identities["openwebui"]["derived_image_id"]
+        runtime_config = COLLECTOR.SystemRuntimeConfig.for_full_campaign(
+            identities=identities,
+            amd_smi=COLLECTOR.AMD_SMI_BIN,
+        )
+        identities["openwebui"]["derived_image_id"] = "sha256:" + "f" * 64
+        identities["worker_binary_sha256"] = "e" * 64
+        self.assertEqual(
+            runtime_config.identities["openwebui"]["derived_image_id"],
+            expected_image,
+        )
+        self.assertEqual(
+            runtime_config.identities["worker_binary_sha256"], WORKER_SHA256
+        )
+        nested = runtime_config.identities["openwebui"]
+        with self.assertRaises(TypeError):
+            nested["derived_image_id"] = "sha256:" + "d" * 64
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            runtime_config.amd_smi = "/tmp/changed"
+        self.assertIsNone(runtime_config.restart_command)
+
+    def test_system_runtime_config_rejects_invalid_runtime_identities(self):
+        mutations = (
+            ("missing worker hash", lambda value: value.pop("worker_source_sha256")),
+            (
+                "invalid image",
+                lambda value: value["openwebui"].__setitem__(
+                    "derived_image_id", "sha256:not-a-digest"
+                ),
+            ),
+            (
+                "invalid network",
+                lambda value: value.__setitem__("docker_network_id", "0" * 63),
+            ),
+            (
+                "invalid source hash",
+                lambda value: value.__setitem__("gateway_source_sha256", "A" * 64),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                identities = json.loads(json.dumps(self.config.identities))
+                mutate(identities)
+                with self.assertRaises(COLLECTOR.CollectorError):
+                    COLLECTOR.SystemRuntimeConfig.validated(
+                        identities=identities,
+                        amd_smi=COLLECTOR.AMD_SMI_BIN,
+                    )
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "fixed executable"):
+            COLLECTOR.SystemRuntimeConfig.validated(
+                identities=self.config.identities,
+                amd_smi="/tmp/amd-smi",
+            )
+
+    def test_system_runtime_extracts_only_runtime_fields_from_collector_config(self):
+        class Snapshots:
+            client_path = Path("/tmp/sq8-client.py")
+            credential_path = Path("/tmp/sq8-credential")
+
+            @staticmethod
+            def unlink_credential():
+                raise AssertionError("runtime was not started")
+
+        runtime = COLLECTOR.SystemRuntime(
+            self.config, self.root, self.guard, Snapshots()
+        )
+        self.assertIsInstance(runtime.config, COLLECTOR.SystemRuntimeConfig)
+        self.assertFalse(hasattr(runtime.config, "phase_artifacts"))
+        self.assertFalse(hasattr(runtime.config, "input_files"))
+        self.assertEqual(runtime.config.restart_command, ("unused",))
+        self.assertTrue(runtime.capture_journal)
+        runtime.close()
+
+    def test_http_command_accepts_minimal_identity_only_config(self):
+        class IdentityOnly:
+            def __init__(self, identities):
+                self.identities = identities
+
+        class Snapshots:
+            client_path = Path("/tmp/sq8-client.py")
+            credential_path = Path("/tmp/sq8-credential")
+
+        command = COLLECTOR.build_http_client_command(
+            IdentityOnly(self.config.identities), Snapshots()
+        )
+        self.assertIn(self.config.identities["openwebui"]["derived_image_id"], command)
+
+    def test_system_runtime_external_journal_mode_keeps_http_and_disables_polling(self):
+        class Snapshots:
+            client_path = Path("/tmp/sq8-client.py")
+            credential_path = Path("/tmp/sq8-credential")
+            unlinked = False
+
+            def unlink_credential(self):
+                self.unlinked = True
+
+        class FakeHttp:
+            def __init__(self):
+                self.started = False
+                self.closed = False
+
+            def start(self):
+                self.started = True
+
+            def close(self):
+                self.closed = True
+
+            @staticmethod
+            def request(plan, emit):
+                return (plan, emit)
+
+        snapshots = Snapshots()
+        runtime_config = COLLECTOR.SystemRuntimeConfig.for_full_campaign(
+            identities=self.config.identities,
+            amd_smi=COLLECTOR.AMD_SMI_BIN,
+        )
+        runtime = COLLECTOR.SystemRuntime(
+            runtime_config,
+            self.root,
+            self.guard,
+            snapshots,
+            capture_journal=False,
+        )
+        http = FakeHttp()
+        runtime.http = http
+        with (
+            mock.patch.object(runtime, "_validate_docker_identity"),
+            mock.patch.object(
+                COLLECTOR.JournalSource,
+                "__init__",
+                side_effect=AssertionError("journal source must not be constructed"),
+            ),
+        ):
+            runtime.start()
+        self.assertTrue(http.started)
+        self.assertTrue(snapshots.unlinked)
+        marker = object()
+        observation = runtime.run_http(marker, lambda _event, _fields: None)
+        self.assertIs(observation[0], marker)
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "disabled"):
+            runtime.poll_journal()
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "disabled"):
+            runtime.wait_for_journal(runtime.now_ns())
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "restart command"):
+            runtime.restart_hook()
+        runtime.close()
+        self.assertTrue(http.closed)
+
+    def test_system_runtime_start_failure_closes_http_and_journal(self):
+        class Snapshots:
+            client_path = Path("/tmp/sq8-client.py")
+            credential_path = Path("/tmp/sq8-credential")
+
+            @staticmethod
+            def unlink_credential():
+                raise AssertionError("failed start must not unlink the credential")
+
+        class FakeJournal:
+            def __init__(self, _boot_id):
+                self.started = False
+                self.closed = False
+
+            def start(self):
+                self.started = True
+
+            def close(self):
+                self.closed = True
+
+        class FailingHttp:
+            def __init__(self):
+                self.closed = False
+
+            @staticmethod
+            def start():
+                raise COLLECTOR.CollectorError("synthetic HTTP start failure")
+
+            def close(self):
+                self.closed = True
+
+        runtime = COLLECTOR.SystemRuntime(
+            self.config, self.root, self.guard, Snapshots()
+        )
+        http = FailingHttp()
+        journal = FakeJournal(BOOT_ID)
+        runtime.http = http
+        with (
+            mock.patch.object(runtime, "_validate_docker_identity"),
+            mock.patch.object(COLLECTOR, "JournalSource", return_value=journal),
+        ):
+            with self.assertRaisesRegex(
+                COLLECTOR.CollectorError, "synthetic HTTP start failure"
+            ):
+                runtime.start()
+        self.assertTrue(journal.started)
+        self.assertTrue(journal.closed)
+        self.assertTrue(http.closed)
+        self.assertIsNone(runtime.journal)
+        self.assertEqual(runtime._boot_id, "")
+
+    def test_system_runtime_close_releases_journal_after_http_close_error(self):
+        class Snapshots:
+            client_path = Path("/tmp/sq8-client.py")
+            credential_path = Path("/tmp/sq8-credential")
+
+        class FailingHttp:
+            @staticmethod
+            def close():
+                raise RuntimeError("synthetic HTTP close failure")
+
+        class FakeJournal:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        runtime = COLLECTOR.SystemRuntime(
+            self.config, self.root, self.guard, Snapshots()
+        )
+        journal = FakeJournal()
+        runtime.http = FailingHttp()
+        runtime.journal = journal
+        with self.assertRaisesRegex(RuntimeError, "synthetic HTTP close failure"):
+            runtime.close()
+        self.assertTrue(journal.closed)
+        self.assertIsNone(runtime.journal)
+
+    def test_journal_source_close_releases_reader_and_is_idempotent(self):
+        reader = mock.Mock()
+        source = COLLECTOR.JournalSource(BOOT_ID)
+        source.reader = reader
+        source.cursor = "cursor"
+        source.close()
+        reader.close.assert_called_once_with()
+        self.assertIsNone(source.reader)
+        self.assertIsNone(source.cursor)
+        source.close()
 
     def test_config_rejects_noncanonical_negative_schedule(self):
         config = {

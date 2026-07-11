@@ -33,7 +33,9 @@ import tempfile
 import time
 import urllib.parse
 import uuid
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, BinaryIO, Callable, Iterable, Protocol, Sequence
 
 
@@ -993,6 +995,153 @@ class CollectorConfig:
     phase_artifact_identities: dict[str, tuple[int, int]] | None = None
 
 
+def validate_runtime_identities(value: Any, label: str) -> dict[str, Any]:
+    identities = exact_keys(
+        value,
+        {
+            "openwebui",
+            "docker_network_id",
+            "gateway_source_sha256",
+            "worker_source_sha256",
+            "worker_binary_sha256",
+        },
+        label,
+    )
+    openwebui = exact_keys(
+        identities["openwebui"],
+        {
+            "version",
+            "source_revision",
+            "base_image_digest",
+            "base_image_id",
+            "derived_image_id",
+            "Dockerfile_sha256",
+            "patch_sha256",
+            "patched_middleware_sha256",
+        },
+        f"{label}.openwebui",
+    )
+    for key in ("version", "source_revision"):
+        nonempty_string(openwebui[key], f"{label}.openwebui.{key}")
+    for key in ("base_image_digest", "base_image_id", "derived_image_id"):
+        image_identity = nonempty_string(
+            openwebui[key], f"{label}.openwebui.{key}", maximum=71
+        )
+        if (
+            not image_identity.startswith("sha256:")
+            or SHA256_RE.fullmatch(image_identity[7:]) is None
+        ):
+            fail(f"{label}.openwebui.{key} is not a content image identity")
+    for key in ("Dockerfile_sha256", "patch_sha256", "patched_middleware_sha256"):
+        sha256_value(openwebui[key], f"{label}.openwebui.{key}")
+    network_id = nonempty_string(
+        identities["docker_network_id"],
+        f"{label}.docker_network_id",
+        maximum=64,
+    )
+    if SHA256_RE.fullmatch(network_id) is None:
+        fail(f"{label}.docker_network_id is not a 64-hex network ID")
+    for key in (
+        "gateway_source_sha256",
+        "worker_source_sha256",
+        "worker_binary_sha256",
+    ):
+        sha256_value(identities[key], f"{label}.{key}")
+    return identities
+
+
+def validate_amd_smi(value: Any, label: str) -> str:
+    amd_smi = nonempty_string(value, label)
+    if amd_smi != AMD_SMI_BIN:
+        fail(f"{label} differs from the fixed executable")
+    return amd_smi
+
+
+def freeze_runtime_identities(value: dict[str, Any]) -> Mapping[str, Any]:
+    def freeze(current: Any) -> Any:
+        if type(current) is dict:
+            return MappingProxyType(
+                {key: freeze(item) for key, item in current.items()}
+            )
+        if type(current) is list:
+            return tuple(freeze(item) for item in current)
+        return current
+
+    frozen = freeze(value)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
+@dataclasses.dataclass(frozen=True, slots=True, init=False)
+class SystemRuntimeConfig:
+    identities: Mapping[str, Any]
+    amd_smi: str
+    restart_command: tuple[str, ...] | None
+
+    @classmethod
+    def validated(
+        cls,
+        *,
+        identities: Any,
+        amd_smi: Any,
+        restart_command: Sequence[str] | None = None,
+    ) -> "SystemRuntimeConfig":
+        try:
+            identity_snapshot = copy.deepcopy(identities)
+        except (TypeError, ValueError, RecursionError):
+            fail("system runtime config.identities cannot be snapshotted")
+        validated_identities = validate_runtime_identities(
+            identity_snapshot, "system runtime config.identities"
+        )
+        if restart_command is None:
+            command = None
+        else:
+            if type(restart_command) not in {list, tuple}:
+                fail("system runtime config.restart_command must be a command array")
+            command_value = list(restart_command)
+            command = parse_command_array(
+                command_value, "system runtime config.restart_command"
+            )
+        instance = object.__new__(cls)
+        object.__setattr__(
+            instance, "identities", freeze_runtime_identities(validated_identities)
+        )
+        object.__setattr__(
+            instance,
+            "amd_smi",
+            validate_amd_smi(amd_smi, "system runtime config.amd_smi"),
+        )
+        object.__setattr__(instance, "restart_command", command)
+        return instance
+
+    @classmethod
+    def from_collector_config(cls, config: CollectorConfig) -> "SystemRuntimeConfig":
+        return cls.validated(
+            identities=config.identities,
+            amd_smi=config.amd_smi,
+            restart_command=config.restart_command,
+        )
+
+    @classmethod
+    def for_full_campaign(
+        cls,
+        *,
+        identities: Any,
+        amd_smi: Any,
+        restart_command: Sequence[str] | None = None,
+    ) -> "SystemRuntimeConfig":
+        return cls.validated(
+            identities=identities,
+            amd_smi=amd_smi,
+            restart_command=restart_command,
+        )
+
+
+class HttpClientIdentityConfig(Protocol):
+    @property
+    def identities(self) -> Mapping[str, Any]: ...
+
+
 def canonical_base64(value: Any, label: str) -> bytes:
     text = nonempty_string(value, label, maximum=((MAX_HTTP_BODY_BYTES + 2) // 3) * 4)
     try:
@@ -1077,7 +1226,7 @@ def parse_command_array(value: Any, label: str) -> tuple[str, ...]:
 
 
 def build_http_client_command(
-    config: CollectorConfig,
+    config: HttpClientIdentityConfig,
     snapshots: RuntimeSnapshots,
 ) -> tuple[str, ...]:
     for path in (snapshots.client_path, snapshots.credential_path):
@@ -1150,56 +1299,9 @@ def load_config(
     if RUN_ID_RE.fullmatch(run_id) is None:
         fail("collector config.run_id has invalid syntax")
 
-    identities = exact_keys(
-        document["identities"],
-        {
-            "openwebui",
-            "docker_network_id",
-            "gateway_source_sha256",
-            "worker_source_sha256",
-            "worker_binary_sha256",
-        },
-        "collector config.identities",
+    identities = validate_runtime_identities(
+        document["identities"], "collector config.identities"
     )
-    openwebui = exact_keys(
-        identities["openwebui"],
-        {
-            "version",
-            "source_revision",
-            "base_image_digest",
-            "base_image_id",
-            "derived_image_id",
-            "Dockerfile_sha256",
-            "patch_sha256",
-            "patched_middleware_sha256",
-        },
-        "collector config.identities.openwebui",
-    )
-    for key in ("version", "source_revision"):
-        nonempty_string(openwebui[key], f"collector config.identities.openwebui.{key}")
-    for key in ("base_image_digest", "base_image_id", "derived_image_id"):
-        value = nonempty_string(
-            openwebui[key], f"collector config.identities.openwebui.{key}", maximum=71
-        )
-        if not value.startswith("sha256:") or SHA256_RE.fullmatch(value[7:]) is None:
-            fail(
-                f"collector config.identities.openwebui.{key} is not a content image identity"
-            )
-    for key in ("Dockerfile_sha256", "patch_sha256", "patched_middleware_sha256"):
-        sha256_value(openwebui[key], f"collector config.identities.openwebui.{key}")
-    network_id = nonempty_string(
-        identities["docker_network_id"],
-        "collector config.identities.docker_network_id",
-        maximum=64,
-    )
-    if SHA256_RE.fullmatch(network_id) is None:
-        fail("collector config.identities.docker_network_id is not a 64-hex network ID")
-    for key in (
-        "gateway_source_sha256",
-        "worker_source_sha256",
-        "worker_binary_sha256",
-    ):
-        sha256_value(identities[key], f"collector config.identities.{key}")
 
     input_value = document["input_files"]
     if type(input_value) is not list or not input_value:
@@ -1389,9 +1491,7 @@ def load_config(
         )
     if ready_url != HTTP_READY_URL:
         fail("collector config.ready_url differs from the fixed bridge readiness URL")
-    amd_smi = nonempty_string(document["amd_smi"], "collector config.amd_smi")
-    if amd_smi != AMD_SMI_BIN:
-        fail("collector config.amd_smi differs from the fixed executable")
+    amd_smi = validate_amd_smi(document["amd_smi"], "collector config.amd_smi")
     return CollectorConfig(
         run_id=run_id,
         identities=identities,
@@ -3331,6 +3431,11 @@ class HttpClientProcess:
     def close(self) -> None:
         process = self.process
         if process is None:
+            stderr_file = self.stderr_file
+            self.stderr_file = None
+            self.reader = None
+            if stderr_file is not None:
+                stderr_file.close()
             return
         shutdown_error: CollectorError | None = None
         if process.poll() is not None:
@@ -3377,9 +3482,12 @@ class HttpClientProcess:
                     stream.close()
                 except OSError:
                     pass
-        if self.stderr_file is not None:
-            self.stderr_file.close()
+        stderr_file = self.stderr_file
+        self.stderr_file = None
         self.process = None
+        self.reader = None
+        if stderr_file is not None:
+            stderr_file.close()
         if shutdown_error is not None:
             raise shutdown_error
 
@@ -3743,28 +3851,49 @@ class JournalSource:
         self.reader: Any | None = None
 
     def start(self) -> None:
+        if self.reader is not None or self.cursor is not None:
+            fail("journal source is already initialized")
         try:
             from systemd import journal
 
             reader = journal.Reader()
+        except (ImportError, OSError, ValueError):
+            fail("failed to initialize the direct sd-journal reader")
+        self.reader = reader
+        try:
             reader.add_match(_SYSTEMD_UNIT=SERVICE_UNIT)
             reader.this_boot()
             reader.seek_tail()
             entry = reader.get_previous()
-        except (ImportError, OSError, ValueError):
-            fail("failed to initialize the direct sd-journal reader")
-        if not entry:
-            fail("service journal has no initial cursor")
-        cursor = nonempty_string(entry.get("__CURSOR"), "initial journal cursor")
-        try:
+            if not entry:
+                fail("service journal has no initial cursor")
+            cursor = nonempty_string(entry.get("__CURSOR"), "initial journal cursor")
             reader.seek_cursor(cursor)
             positioned = reader.get_next()
+            if not positioned or positioned.get("__CURSOR") != cursor:
+                fail("direct sd-journal cursor positioning differs")
+            self.cursor = cursor
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException:
+                pass
+            if isinstance(error, CollectorError):
+                raise
+            if isinstance(error, (OSError, ValueError)):
+                fail("failed to initialize or position the direct sd-journal reader")
+            raise
+
+    def close(self) -> None:
+        reader = self.reader
+        self.reader = None
+        self.cursor = None
+        if reader is None:
+            return
+        try:
+            reader.close()
         except (OSError, ValueError):
-            fail("failed to position the direct sd-journal reader")
-        if not positioned or positioned.get("__CURSOR") != cursor:
-            fail("direct sd-journal cursor positioning differs")
-        self.cursor = cursor
-        self.reader = reader
+            fail("failed to close the direct sd-journal reader")
 
     def poll(self) -> list[bytes]:
         if self.cursor is None or self.reader is None:
@@ -4239,20 +4368,31 @@ def parse_key_value_lines(raw: bytes, label: str) -> dict[str, str]:
 class SystemRuntime:
     def __init__(
         self,
-        config: CollectorConfig,
+        config: CollectorConfig | SystemRuntimeConfig,
         repo_root: Path,
         guard: SecretGuard,
         snapshots: RuntimeSnapshots,
+        *,
+        capture_journal: bool = True,
     ):
-        self.config = config
+        if isinstance(config, CollectorConfig):
+            runtime_config = SystemRuntimeConfig.from_collector_config(config)
+        elif isinstance(config, SystemRuntimeConfig):
+            runtime_config = config
+        else:
+            fail("system runtime config type differs")
+        if type(capture_journal) is not bool:
+            fail("capture_journal must be a boolean")
+        self.config = runtime_config
         self.repo_root = repo_root
         self.guard = guard
         self.snapshots = snapshots
+        self.capture_journal = capture_journal
         self.proc_root = Path("/proc")
         self.kfd_root = Path("/sys/class/kfd/kfd/proc")
         self._boot_id = ""
         self.http = HttpClientProcess(
-            build_http_client_command(config, snapshots), guard
+            build_http_client_command(runtime_config, snapshots), guard
         )
         self.journal: JournalSource | None = None
 
@@ -4267,24 +4407,49 @@ class SystemRuntime:
             time.sleep(remaining / 1_000_000_000)
 
     def start(self) -> None:
-        self._validate_docker_identity()
-        raw = read_bounded_file(
-            Path("/proc/sys/kernel/random/boot_id"), "boot ID", maximum=128
-        )
         try:
-            self._boot_id = (
-                raw.decode("ascii", errors="strict").strip().replace("-", "")
+            if self._boot_id:
+                fail("system runtime is already started")
+            self._validate_docker_identity()
+            raw = read_bounded_file(
+                Path("/proc/sys/kernel/random/boot_id"), "boot ID", maximum=128
             )
-        except UnicodeError:
-            fail("boot ID is not ASCII")
-        nonempty_string(self._boot_id, "boot ID", maximum=128)
-        self.journal = JournalSource(self._boot_id)
-        self.journal.start()
-        self.http.start()
-        self.snapshots.unlink_credential()
+            try:
+                self._boot_id = (
+                    raw.decode("ascii", errors="strict").strip().replace("-", "")
+                )
+            except UnicodeError:
+                fail("boot ID is not ASCII")
+            nonempty_string(self._boot_id, "boot ID", maximum=128)
+            if self.capture_journal:
+                self.journal = JournalSource(self._boot_id)
+                self.journal.start()
+            self.http.start()
+            self.snapshots.unlink_credential()
+        except BaseException:
+            try:
+                self.close()
+            except BaseException:
+                pass
+            self._boot_id = ""
+            raise
 
     def close(self) -> None:
-        self.http.close()
+        cleanup_error: BaseException | None = None
+        try:
+            self.http.close()
+        except BaseException as error:
+            cleanup_error = error
+        journal = self.journal
+        self.journal = None
+        if journal is not None:
+            try:
+                journal.close()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def boot_id(self) -> str:
         if not self._boot_id:
@@ -4363,11 +4528,15 @@ class SystemRuntime:
         return self.http.request(plan, emit)
 
     def poll_journal(self) -> list[bytes]:
+        if not self.capture_journal:
+            fail("direct journal polling is disabled for external journal capture")
         if self.journal is None:
             fail("journal source is unavailable")
         return self.journal.poll()
 
     def wait_for_journal(self, deadline_ns: int) -> None:
+        if not self.capture_journal:
+            fail("direct journal waiting is disabled for external journal capture")
         if self.journal is None:
             fail("journal source is unavailable")
         self.journal.wait_until(deadline_ns)
@@ -4462,8 +4631,17 @@ class SystemRuntime:
         )
 
     def restart_hook(self) -> Iterable[dict[str, Any]]:
+        command = self.config.restart_command
+        if command is None:
+            fail("restart hook is unavailable without a configured restart command")
+        assert command is not None
+        return self._restart_hook_records(command)
+
+    def _restart_hook_records(
+        self, command: tuple[str, ...]
+    ) -> Iterable[dict[str, Any]]:
         for line in stream_bounded_jsonl_command(
-            self.config.restart_command,
+            command,
             "planned post-header restart hook",
             cwd=self.repo_root,
             timeout_seconds=RESTART_TIMEOUT_NS / 1_000_000_000,
