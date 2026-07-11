@@ -176,6 +176,7 @@ HIP_GUARDS = (
 EXPECTED_SOURCE_ROLE_PATHS = {
     "identity_generator": "tools/sq8_full_campaign_identity.py",
     "product_promotion_validator": "tools/validate-sq8-product-promotion.py",
+    "product_promotion_canonical": "tools/sq8_canonical_artifact.py",
     "release_validator": "tools/validate-sq8-openwebui-release.py",
     "release_collector": "tools/collect-sq8-openwebui-release.py",
     "campaign_journal": "tools/sq8_openwebui_campaign.py",
@@ -300,6 +301,7 @@ EXPECTED_SOURCE_GROUPS = {
     "campaign": (
         "identity_generator",
         "product_promotion_validator",
+        "product_promotion_canonical",
         "release_validator",
         "release_collector",
         "campaign_journal",
@@ -1901,6 +1903,7 @@ def _validate_model_identity(
             "schema_version",
             "result_sha256",
             "validator_source_sha256",
+            "canonical_source_sha256",
             "full_payloads",
             "read_only",
             "verified",
@@ -1918,6 +1921,10 @@ def _validate_model_identity(
     sha256_value(
         receipt["validator_source_sha256"],
         "model-identity.json promotion validator source SHA",
+    )
+    sha256_value(
+        receipt["canonical_source_sha256"],
+        "model-identity.json promotion canonical source SHA",
     )
 
     product = exact_fields(
@@ -2264,11 +2271,17 @@ def validate_campaign_identity(
         or model_worker["source_sha256"] != source_sets["worker"]
     ):
         fail("environment/model worker or runtime binding differs")
-    if (
-        model_identity["promotion_validation"]["validator_source_sha256"]
-        != source_by_role["product_promotion_validator"]["sha256"]
-    ):
-        fail("promotion validator source differs from environment.json")
+    promotion_sources = {
+        "validator_source_sha256": "product_promotion_validator",
+        "canonical_source_sha256": "product_promotion_canonical",
+    }
+    for field, role in promotion_sources.items():
+        if (
+            model_identity["promotion_validation"][field]
+            != source_by_role[role]["sha256"]
+        ):
+            source_label = role.removeprefix("product_promotion_").replace("_", " ")
+            fail(f"promotion {source_label} source differs from environment.json")
     for role in EXPECTED_ORACLE_FILE_IDENTITIES:
         source = source_by_role[role]
         model_oracle = oracle[role]

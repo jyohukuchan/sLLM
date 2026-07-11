@@ -73,6 +73,7 @@ HIP_GUARDS = (
 SOURCE_ROLE_PATHS = {
     "identity_generator": "tools/sq8_full_campaign_identity.py",
     "product_promotion_validator": "tools/validate-sq8-product-promotion.py",
+    "product_promotion_canonical": "tools/sq8_canonical_artifact.py",
     "release_validator": "tools/validate-sq8-openwebui-release.py",
     "release_collector": "tools/collect-sq8-openwebui-release.py",
     "campaign_journal": "tools/sq8_openwebui_campaign.py",
@@ -192,6 +193,7 @@ SOURCE_GROUPS = {
     "campaign": (
         "identity_generator",
         "product_promotion_validator",
+        "product_promotion_canonical",
         "release_validator",
         "release_collector",
         "campaign_journal",
@@ -2233,6 +2235,9 @@ def _model_document(
             "validator_source_sha256": source_entries_by_role[
                 "product_promotion_validator"
             ]["sha256"],
+            "canonical_source_sha256": source_entries_by_role[
+                "product_promotion_canonical"
+            ]["sha256"],
             "full_payloads": True,
             "read_only": True,
             "verified": True,
@@ -2886,6 +2891,7 @@ def validate_model_identity_document(value: Any) -> dict[str, Any]:
             "schema_version",
             "result_sha256",
             "validator_source_sha256",
+            "canonical_source_sha256",
             "full_payloads",
             "read_only",
             "verified",
@@ -2901,6 +2907,7 @@ def validate_model_identity_document(value: Any) -> dict[str, Any]:
         fail("model promotion validation state differs")
     _sha(receipt["result_sha256"], "promotion result SHA-256")
     _sha(receipt["validator_source_sha256"], "promotion validator source SHA-256")
+    _sha(receipt["canonical_source_sha256"], "promotion canonical source SHA-256")
 
     product = _exact(
         document["product"],

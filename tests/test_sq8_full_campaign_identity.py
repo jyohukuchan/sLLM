@@ -507,7 +507,7 @@ class FakeProbe:
 
 class FullCampaignIdentityTests(unittest.TestCase):
     def test_source_contract_has_exact_unique_group_coverage(self) -> None:
-        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 63)
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 64)
         self.assertEqual(
             IDENTITY.SOURCE_GROUPS["all"], tuple(IDENTITY.SOURCE_ROLE_PATHS)
         )
@@ -562,6 +562,14 @@ class FullCampaignIdentityTests(unittest.TestCase):
         )
         self.assertTrue(
             artifacts.model_identity["promotion_validation"]["full_payloads"]
+        )
+        self.assertEqual(
+            artifacts.model_identity["promotion_validation"]["canonical_source_sha256"],
+            next(
+                item["sha256"]
+                for item in artifacts.environment["sources"]
+                if item["role"] == "product_promotion_canonical"
+            ),
         )
         self.assertTrue(
             artifacts.model_identity["product"]["artifact"]["payloads_hashed"]

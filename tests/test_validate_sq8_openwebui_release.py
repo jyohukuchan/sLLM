@@ -321,6 +321,7 @@ def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
             "schema_version": VALIDATOR.PROMOTION_SCHEMA,
             "result_sha256": sha256_bytes(identity_canonical(receipt)),
             "validator_source_sha256": by_role["product_promotion_validator"]["sha256"],
+            "canonical_source_sha256": by_role["product_promotion_canonical"]["sha256"],
             "full_payloads": True,
             "read_only": True,
             "verified": True,
@@ -2810,7 +2811,7 @@ class CampaignIdentityValidationTest(unittest.TestCase):
         )
 
     def test_source_contract_rejects_unknown_duplicate_and_missing_roles(self) -> None:
-        self.assertEqual(len(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS), 63)
+        self.assertEqual(len(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS), 64)
         VALIDATOR._validate_identity_source_contract()
         duplicate_paths = dict(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS)
         duplicate_paths["campaign_views"] = duplicate_paths["campaign_renderer"]
@@ -3014,6 +3015,12 @@ class CampaignIdentityValidationTest(unittest.TestCase):
                 "promotion validation state",
                 lambda value: value["promotion_validation"].__setitem__(
                     "full_payloads", False
+                ),
+            ),
+            (
+                "promotion canonical source",
+                lambda value: value["promotion_validation"].__setitem__(
+                    "canonical_source_sha256", "0" * 64
                 ),
             ),
             (
@@ -4399,7 +4406,7 @@ class FullReleaseValidationTest(unittest.TestCase):
             environment_sha256="c" * 64,
             model_identity_sha256="d" * 64,
         )
-        source = VALIDATOR.SourceCheckoutData(GIT_COMMIT, 63, "e" * 64)
+        source = VALIDATOR.SourceCheckoutData(GIT_COMMIT, 64, "e" * 64)
         resources = VALIDATOR.ResourceResult({}, 610, 4)
         latency = {"request_count": 72}
         reconstructed_resource = {
@@ -4476,7 +4483,7 @@ class FullReleaseValidationTest(unittest.TestCase):
         report = json.loads(report_raw)
         self.assertEqual(report["release_status"], "complete")
         self.assertTrue(report["full_campaign_validated"])
-        self.assertEqual(report["gate_details"]["source_checkout"]["source_count"], 63)
+        self.assertEqual(report["gate_details"]["source_checkout"]["source_count"], 64)
 
     def test_source_failure_never_creates_validation_file(self) -> None:
         EvidenceBuilder(self.root).build()
