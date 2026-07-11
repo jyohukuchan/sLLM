@@ -13,6 +13,7 @@ import argparse
 import base64
 import binascii
 import collections
+import copy
 import dataclasses
 import errno
 import hashlib
@@ -1688,7 +1689,11 @@ class Runtime(Protocol):
 
 class ResourceLifecycleClaims(Protocol):
     def consume(
-        self, phase: str, case_id: str, expected_identity: ProcessIdentity
+        self,
+        phase: str,
+        case_id: str,
+        expected_identity: ProcessIdentity,
+        completion_id: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def wait(self, deadline_ns: int) -> None: ...
@@ -1804,14 +1809,23 @@ class Phase1ResourceLifecycleClaims:
         self.journal = journal
 
     def consume(
-        self, phase: str, case_id: str, expected_identity: ProcessIdentity
+        self,
+        phase: str,
+        case_id: str,
+        expected_identity: ProcessIdentity,
+        completion_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self.journal.consume(
+        events = self.journal.consume(
             self.runtime.poll_journal(),
             phase,
             case_id,
             expected_gateway_pids=frozenset({expected_identity.gateway_pid}),
         )
+        if completion_id is not None and any(
+            event.get("completion_id") != completion_id for event in events
+        ):
+            fail("journal lifecycle completion ID differs from the active HTTP request")
+        return events
 
     def wait(self, deadline_ns: int) -> None:
         self.runtime.wait_for_journal(deadline_ns)
@@ -1829,6 +1843,97 @@ class Phase1ResourceLifecycleClaims:
             if self.runtime.now_ns() >= deadline_ns:
                 return
             self.wait(min(deadline_ns, self.runtime.now_ns() + JOURNAL_POLL_NS))
+
+
+class CampaignLifecycleClaim(Protocol):
+    phase: str
+    case_id: str
+    fields: dict[str, Any]
+
+
+class CampaignLifecycleCapture(Protocol):
+    def claim_completion_trace(
+        self,
+        completion_id: str,
+        phase: str,
+        case_id: str,
+        deadline_ns: int,
+    ) -> list[CampaignLifecycleClaim]: ...
+
+    def wait_quiet(self, deadline_ns: int) -> str: ...
+
+
+class CampaignResourceLifecycleClaims:
+    """Connect resource requests to the campaign-owned journal capture."""
+
+    def __init__(
+        self,
+        capture: CampaignLifecycleCapture,
+        session: SessionWriter,
+        now_ns: Callable[[], int],
+        wait_until: Callable[[int], None],
+    ):
+        self.capture = capture
+        self.session = session
+        self.now_ns = now_ns
+        self.wait_until = wait_until
+        self._claimed_cases: set[tuple[str, str]] = set()
+
+    def consume(
+        self,
+        phase: str,
+        case_id: str,
+        expected_identity: ProcessIdentity,
+        completion_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if completion_id is None:
+            fail("campaign resource claim lacks the active completion ID")
+        nonempty_string(completion_id, "campaign resource completion ID")
+        key = (phase, case_id)
+        if key in self._claimed_cases:
+            fail("campaign resource case was claimed twice")
+        deadline_ns = self.now_ns() + RELEASE_TIMEOUT_NS
+        claimed = self.capture.claim_completion_trace(
+            completion_id,
+            phase,
+            case_id,
+            deadline_ns,
+        )
+        if not claimed:
+            fail("campaign resource lifecycle trace is empty")
+
+        staged: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for item in claimed:
+            if item.phase != phase or item.case_id != case_id:
+                fail("campaign resource lifecycle claim identity differs")
+            fields = copy.deepcopy(item.fields)
+            event = fields.get("event")
+            if type(event) is not dict:
+                fail("campaign resource lifecycle claim lacks an event")
+            if (
+                fields.get("journal_pid") != expected_identity.gateway_pid
+                or event.get("completion_id") != completion_id
+            ):
+                fail("campaign resource lifecycle claim process or completion differs")
+            staged.append((fields, copy.deepcopy(event)))
+
+        for fields, _event in staged:
+            self.session.append("gateway_event", phase, case_id, **fields)
+        self._claimed_cases.add(key)
+        return [event for _fields, event in staged]
+
+    def wait(self, deadline_ns: int) -> None:
+        self.wait_until(deadline_ns)
+
+    def require_quiet(
+        self,
+        phase: str,
+        case_id: str,
+        expected_identity: ProcessIdentity,
+        deadline_ns: int,
+    ) -> None:
+        del phase, case_id, expected_identity
+        self.capture.wait_quiet(deadline_ns)
 
 
 def decode_lifecycle_message(message: str) -> dict[str, Any] | None:
@@ -2272,7 +2377,7 @@ class ResourceSegmentCollector:
         while True:
             release_result: dict[str, Any] | None = None
             for event in self.lifecycle_claims.consume(
-                plan.phase, plan.case_id, identity
+                plan.phase, plan.case_id, identity, completion_id
             ):
                 if release_result is not None:
                     fail("gateway lifecycle event appears after resource release")

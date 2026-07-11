@@ -532,7 +532,7 @@ class BufferedLifecycleClaims:
     def __init__(self, runtime):
         self.runtime = runtime
 
-    def consume(self, phase, case_id, expected_identity):
+    def consume(self, phase, case_id, expected_identity, completion_id=None):
         del phase, case_id
         result = []
         for raw in self.runtime.poll_journal():
@@ -541,6 +541,11 @@ class BufferedLifecycleClaims:
                 raise COLLECTOR.CollectorError("buffered claim PID differs")
             event = COLLECTOR.decode_lifecycle_message(record["MESSAGE"])
             if event is not None:
+                if (
+                    completion_id is not None
+                    and event.get("completion_id") != completion_id
+                ):
+                    raise COLLECTOR.CollectorError("buffered claim completion differs")
                 result.append(event)
         return result
 
@@ -559,6 +564,146 @@ class BufferedLifecycleClaims:
                     self.runtime.now_ns() + COLLECTOR.JOURNAL_POLL_NS,
                 )
             )
+
+
+@dataclasses.dataclass
+class FakeCampaignClaim:
+    phase: str
+    case_id: str
+    fields: dict
+
+
+class FakeCampaignCapture:
+    def __init__(self, claims):
+        self.claims = claims
+        self.claim_calls = []
+        self.quiet_calls = []
+
+    def claim_completion_trace(self, completion_id, phase, case_id, deadline_ns):
+        self.claim_calls.append((completion_id, phase, case_id, deadline_ns))
+        return self.claims
+
+    def wait_quiet(self, deadline_ns):
+        self.quiet_calls.append(deadline_ns)
+        return "quiet-cursor"
+
+
+class RecordingSession:
+    def __init__(self):
+        self.records = []
+
+    def append(self, record_type, phase, case_id, **fields):
+        self.records.append((record_type, phase, case_id, fields))
+
+
+class CampaignResourceLifecycleClaimsTests(unittest.TestCase):
+    def setUp(self):
+        self.identity = COLLECTOR.ProcessIdentity(
+            "/system.slice/ullm-openai.service", 1200, 10000, 1201, 10001, 2
+        )
+        self.now = 1_000_000_000
+        self.waited = []
+
+    @staticmethod
+    def claim(event_name, *, pid=1200, completion_id="chatcmpl-1"):
+        return FakeCampaignClaim(
+            "resource_normal",
+            "normal-measured-001",
+            {
+                "journal_cursor": f"cursor-{event_name}",
+                "journal_monotonic_usec": 1000,
+                "journal_pid": pid,
+                "message": event_name,
+                "message_sha256": hashlib.sha256(event_name.encode()).hexdigest(),
+                "event": {
+                    "event": event_name,
+                    "completion_id": completion_id,
+                },
+            },
+        )
+
+    def adapter(self, claims):
+        capture = FakeCampaignCapture(claims)
+        session = RecordingSession()
+        adapter = COLLECTOR.CampaignResourceLifecycleClaims(
+            capture,
+            session,
+            lambda: self.now,
+            self.waited.append,
+        )
+        return adapter, capture, session
+
+    def test_claims_one_completion_and_appends_only_validated_events(self):
+        claims = [
+            self.claim("request_admitted"),
+            self.claim("request_released"),
+        ]
+        adapter, capture, session = self.adapter(claims)
+        events = adapter.consume(
+            "resource_normal",
+            "normal-measured-001",
+            self.identity,
+            "chatcmpl-1",
+        )
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["request_admitted", "request_released"],
+        )
+        self.assertEqual(len(session.records), 2)
+        self.assertEqual(
+            capture.claim_calls,
+            [
+                (
+                    "chatcmpl-1",
+                    "resource_normal",
+                    "normal-measured-001",
+                    self.now + COLLECTOR.RELEASE_TIMEOUT_NS,
+                )
+            ],
+        )
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "claimed twice"):
+            adapter.consume(
+                "resource_normal",
+                "normal-measured-001",
+                self.identity,
+                "chatcmpl-1",
+            )
+
+    def test_rejects_entire_trace_before_append_on_pid_or_completion_drift(self):
+        mutations = [
+            [self.claim("request_admitted"), self.claim("request_released", pid=2200)],
+            [
+                self.claim("request_admitted"),
+                self.claim("request_released", completion_id="chatcmpl-other"),
+            ],
+        ]
+        for claims in mutations:
+            with self.subTest(claims=claims):
+                adapter, _capture, session = self.adapter(claims)
+                with self.assertRaisesRegex(
+                    COLLECTOR.CollectorError, "process or completion"
+                ):
+                    adapter.consume(
+                        "resource_normal",
+                        "normal-measured-001",
+                        self.identity,
+                        "chatcmpl-1",
+                    )
+                self.assertEqual(session.records, [])
+
+    def test_requires_completion_and_delegates_wait_and_quiet(self):
+        adapter, capture, _session = self.adapter([self.claim("request_admitted")])
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "completion ID"):
+            adapter.consume("resource_normal", "normal-measured-001", self.identity)
+        adapter.wait(1_100_000_000)
+        adapter.require_quiet(
+            "resource_normal",
+            "negative-after-025-context_overflow_1",
+            self.identity,
+            1_200_000_000,
+        )
+        self.assertEqual(self.waited, [1_100_000_000])
+        self.assertEqual(capture.quiet_calls, [1_200_000_000])
 
 
 class CollectorTestCase(unittest.TestCase):
