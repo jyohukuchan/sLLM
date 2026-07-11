@@ -4,9 +4,11 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,6 +231,172 @@ class FakeJournalSource:
     def release_next_read(self):
         self.hold = False
         self.release_hold.set()
+
+
+def direct_entry(cursor, monotonic_usec=1000):
+    return {
+        "__CURSOR": cursor,
+        "__MONOTONIC_TIMESTAMP": monotonic_usec,
+        "_BOOT_ID": BOOT_ID,
+        "_PID": NORMAL_GATEWAY_PID,
+        "_SYSTEMD_UNIT": CAMPAIGN.SERVICE_UNIT,
+        "PRIORITY": 6,
+        "MESSAGE": "ordinary service line",
+    }
+
+
+class FakeDirectJournalReader:
+    def __init__(self, actions):
+        self.actions = deque(actions)
+        self.seeked = []
+        self.matches = []
+        self.tail_seeked = False
+        self.boot_selected = False
+
+    def add_match(self, **match):
+        self.matches.append(match)
+
+    def this_boot(self):
+        self.boot_selected = True
+
+    def seek_tail(self):
+        self.tail_seeked = True
+
+    def get_previous(self):
+        return direct_entry("anchor-cursor", 999)
+
+    def seek_cursor(self, cursor):
+        self.seeked.append(cursor)
+        self._act("seek", None)
+
+    def get_next(self):
+        return self._act("next", None)
+
+    def wait(self, timeout_usec):
+        return self._act("wait", None)
+
+    def _act(self, expected, default):
+        if not self.actions:
+            return default
+        kind, value = self.actions.popleft()
+        if kind != expected:
+            raise AssertionError(f"expected fake {expected}, got {kind}")
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
+class SystemdJournalSourceTest(unittest.TestCase):
+    NOP = 0
+    APPEND = 1
+    INVALIDATE = 2
+
+    def open_source(self, actions):
+        reader = FakeDirectJournalReader(actions)
+        journal = types.SimpleNamespace(
+            Reader=lambda: reader,
+            NOP=self.NOP,
+            APPEND=self.APPEND,
+            INVALIDATE=self.INVALIDATE,
+        )
+        systemd = types.SimpleNamespace(journal=journal)
+        patcher = mock.patch.dict(sys.modules, {"systemd": systemd})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        source = CAMPAIGN.SystemdJournalSource()
+        self.assertEqual(
+            source.open_after(CAMPAIGN.SERVICE_UNIT, BOOT_ID), "anchor-cursor"
+        )
+        return source, reader
+
+    def test_invalidate_resumes_after_exact_last_returned_cursor(self):
+        first = direct_entry("first-cursor", 1000)
+        second = direct_entry("second-cursor", 1001)
+        source, reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", first),
+                ("next", None),
+                ("wait", self.INVALIDATE),
+                ("seek", None),
+                ("next", first),
+                ("next", second),
+            ]
+        )
+        self.assertIn(b'"__CURSOR":"first-cursor"', source.read_next(1))
+        self.assertIn(b'"__CURSOR":"second-cursor"', source.read_next(1))
+        self.assertEqual(reader.seeked, ["anchor-cursor", "first-cursor"])
+
+    def test_invalidate_fails_when_last_cursor_was_vacuumed(self):
+        source, _reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", None),
+                ("wait", self.INVALIDATE),
+                ("seek", None),
+                ("next", None),
+            ]
+        )
+        with self.assertRaises(CAMPAIGN.JournalSourceGap):
+            source.read_next(1)
+
+    def test_invalidate_fails_when_seek_returns_another_cursor(self):
+        source, _reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", None),
+                ("wait", self.INVALIDATE),
+                ("seek", None),
+                ("next", direct_entry("other-cursor", 999)),
+            ]
+        )
+        with self.assertRaises(CAMPAIGN.JournalSourceGap):
+            source.read_next(1)
+
+    def test_invalidate_seek_os_error_is_a_source_gap(self):
+        source, _reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", None),
+                ("wait", self.INVALIDATE),
+                ("seek", OSError("vacuum race")),
+            ]
+        )
+        with self.assertRaises(CAMPAIGN.JournalSourceGap):
+            source.read_next(1)
+
+    def test_invalidate_recovery_preserves_keyboard_interrupt(self):
+        source, _reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", None),
+                ("wait", self.INVALIDATE),
+                ("seek", KeyboardInterrupt()),
+            ]
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            source.read_next(1)
+
+    def test_append_updates_cursor_and_close_clears_open_state(self):
+        appended = direct_entry("append-cursor", 1000)
+        source, _reader = self.open_source(
+            [
+                ("seek", None),
+                ("next", direct_entry("anchor-cursor", 999)),
+                ("next", None),
+                ("wait", self.APPEND),
+                ("next", appended),
+            ]
+        )
+        self.assertIn(b'"__CURSOR":"append-cursor"', source.read_next(1))
+        source.close()
+        with self.assertRaises(CAMPAIGN.CampaignJournalError):
+            source.read_next(1)
 
 
 class CampaignJournalTest(unittest.TestCase):

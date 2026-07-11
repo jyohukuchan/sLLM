@@ -419,12 +419,13 @@ class SystemdJournalSource:
         self._reader: Any | None = None
         self._journal: Any | None = None
         self._boot_id: str | None = None
+        self._last_cursor: str | None = None
 
     def open_after(self, unit: str, boot_id: str) -> str:
         if self._reader is not None:
             fail("direct sd-journal source is already open")
         try:
-            from systemd import journal  # type: ignore[import-not-found]
+            from systemd import journal  # type: ignore[import-untyped]
 
             reader = journal.Reader()
             reader.add_match(_SYSTEMD_UNIT=unit)
@@ -450,7 +451,42 @@ class SystemdJournalSource:
         self._reader = reader
         self._journal = journal
         self._boot_id = boot_id
+        self._last_cursor = cursor
         return cursor
+
+    def _entry_bytes(self, entry: dict[str, Any], boot_id: str) -> bytes:
+        raw = _source_entry_bytes(entry, boot_id)
+        record = _strict_object(raw, "direct sd-journal entry")
+        self._last_cursor = _bounded_text(
+            record["__CURSOR"], "direct sd-journal entry cursor"
+        )
+        return raw
+
+    def _recover_after_invalidate(self, reader: Any, boot_id: str) -> bytes | None:
+        cursor = self._last_cursor
+        if cursor is None:
+            raise JournalSourceGap("direct sd-journal continuity cursor is absent")
+        try:
+            reader.seek_cursor(cursor)
+            positioned = reader.get_next()
+            if (
+                not positioned
+                or type(positioned.get("__CURSOR")) is not str
+                or positioned["__CURSOR"] != cursor
+            ):
+                raise JournalSourceGap(
+                    "direct sd-journal continuity cursor is unavailable"
+                )
+            entry = reader.get_next()
+        except JournalSourceGap:
+            raise
+        except (OSError, ValueError) as error:
+            raise JournalSourceGap(
+                "direct sd-journal continuity could not be verified"
+            ) from error
+        if entry:
+            return self._entry_bytes(entry, boot_id)
+        return None
 
     def read_next(self, timeout_usec: int) -> bytes | None:
         reader = self._reader
@@ -463,12 +499,12 @@ class SystemdJournalSource:
         try:
             entry = reader.get_next()
             if entry:
-                return _source_entry_bytes(entry, boot_id)
+                return self._entry_bytes(entry, boot_id)
             result = reader.wait(timeout_usec)
         except (OSError, ValueError):
             fail("direct sd-journal read failed")
         if result == journal.INVALIDATE:
-            raise JournalSourceGap("direct sd-journal was invalidated")
+            return self._recover_after_invalidate(reader, boot_id)
         if result not in {journal.NOP, journal.APPEND}:
             fail("direct sd-journal wait result is invalid")
         if result == journal.APPEND:
@@ -477,13 +513,14 @@ class SystemdJournalSource:
             except (OSError, ValueError):
                 fail("direct sd-journal read after append failed")
             if entry:
-                return _source_entry_bytes(entry, boot_id)
+                return self._entry_bytes(entry, boot_id)
         return None
 
     def close(self) -> None:
         self._reader = None
         self._journal = None
         self._boot_id = None
+        self._last_cursor = None
 
 
 class _CaptureState(enum.Enum):
