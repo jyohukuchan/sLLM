@@ -377,6 +377,21 @@ class HeadToolSnapshotTests(unittest.TestCase):
                 owner.close()
             self.assertFalse(root.exists())
 
+    def test_snapshot_allows_an_unrelated_private_sibling(self) -> None:
+        with ProductionFixture() as fixture:
+            anchor = fixture.anchor()
+            owner = PRODUCTION.HeadPromotionToolSnapshotOwner.create(
+                fixture.settings, anchor
+            )
+            sibling = fixture.runtime / "other-owned-runtime-state"
+            sibling.mkdir(mode=0o700)
+            try:
+                owner.revalidate()
+                owner.close()
+            finally:
+                sibling.rmdir()
+            self.assertFalse(owner.root.exists())
+
     def test_snapshot_rejects_private_copy_and_worktree_source_changes(self) -> None:
         with ProductionFixture() as fixture:
             anchor = fixture.anchor()

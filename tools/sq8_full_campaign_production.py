@@ -811,8 +811,8 @@ class HeadPromotionToolSnapshotOwner:
         except OSError:
             fail("private HEAD tool snapshot directory is unavailable")
         if (
-            parent_current != self._parent_identity
-            or parent_entry != self._parent_identity
+            not _same_object(parent_current, self._parent_identity)
+            or not _same_object(parent_entry, self._parent_identity)
             or root_entries != {"tools"}
             or tool_entries != {Path(value).name for value in HEAD_PROMOTION_TOOL_PATHS}
             or root_current != self._root_identity
