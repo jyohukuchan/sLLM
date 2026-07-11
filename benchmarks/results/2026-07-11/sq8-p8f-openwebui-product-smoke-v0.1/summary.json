@@ -1,0 +1,222 @@
+{
+  "schema_version": "ullm.openwebui.product-smoke.v1",
+  "scope": "P8-F core product usability; excludes the full release soak and latency matrix",
+  "measured_at": "2026-07-11T06:35:49Z",
+  "source": {
+    "git_commit": "806fb8a1578e63d1cd199b7402747575b2a92ccc",
+    "git_status_paths": [
+      ".rocprofv3/"
+    ],
+    "unrelated_untracked_paths_excluded": true,
+    "worker_sha256": "145a5351db3957130200276314853e394d0fd206a69e2eab260c01141411b950",
+    "gateway_uv_lock_sha256": "67b2dc58bd640883c7e990872157e9a1e24e7eaa7583d53bc2efcb3fcb7e88c9",
+    "systemd_unit_sha256": "f0239713b16b3bf31cfd12a98f506e77e55af9b31abf58352f4e437e1cdee552",
+    "openwebui_compose_sha256": "3a82ced2baba92ef81a0d2553dd9f1318ad34d62111127b6846200862a961e05",
+    "openwebui_configure_sha256": "92688d99471d37816f63c73161c8164b6a83842b9c4f1972304b2dadbb36ae73",
+    "browser_smoke_sha256": "8b15f0ee3716909774e1390b37ef0e250de289decc48c1a9c8e0ffae551180dc"
+  },
+  "deployment": {
+    "gateway": {
+      "unit": "ullm-openai.service",
+      "enabled": true,
+      "active_state": "active",
+      "sub_state": "running",
+      "gateway_pid": 340006,
+      "gateway_starttime_ticks": 99844386,
+      "worker_pid": 340617,
+      "worker_starttime_ticks": 99844633,
+      "automatic_restart_count": 1,
+      "memory_current_bytes": 406859776,
+      "tasks_current": 200,
+      "bind": "172.20.0.1:8000",
+      "active_requests": 1,
+      "waiting_requests": 0
+    },
+    "openwebui": {
+      "version": "0.9.4",
+      "image_id": "sha256:18247c4608796dd5e416ec1e82f20457837a219ed9c272a8d64b405a262b3399",
+      "image_digest": "sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff",
+      "source_revision": "f51d2b026f1b0e7283b15f093412be8b67d24770",
+      "container_id": "97fe798622cb42f9b82423e606137e4a6b245a0d93b60653db2aedce2077fc2a",
+      "health": "healthy",
+      "container_ip": "172.20.0.2",
+      "host_url": "http://192.168.0.66:3000",
+      "volume": "open-webui",
+      "session_secret_source": "/etc/ullm/openwebui-secret-key",
+      "session_secret_read_only": true
+    },
+    "network": {
+      "id": "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8",
+      "name": "open-webui-network",
+      "driver": "bridge",
+      "subnet": "172.20.0.0/16",
+      "gateway": "172.20.0.1",
+      "bridge_interface": "br-79bb7cfca31c"
+    },
+    "firewall": {
+      "table": "inet ullm_openai",
+      "hook_priority": -5,
+      "non_bridge_drop_packets_observed": 1,
+      "host_bridge_address_http_status": "000",
+      "lan_address_http_status": "000",
+      "authorized_bridge_only": true
+    }
+  },
+  "configuration": {
+    "database_integrity": "ok",
+    "provider_index": 1,
+    "provider_count": 2,
+    "prior_provider_preserved": true,
+    "connection_type": "local",
+    "provider_model_ids": [],
+    "provider_api_key_present": true,
+    "provider_api_key_recorded": false,
+    "model_id": "ullm-qwen3-14b-sq8",
+    "context_length_metadata": 4096,
+    "context_length_enforced_by": "uLLM gateway",
+    "model_params": {},
+    "title_generation": false,
+    "follow_up_generation": false,
+    "tags_generation": false,
+    "sqlite_backups": 3
+  },
+  "checks": {
+    "gateway_auth": {
+      "authorized_models_status": 200,
+      "unauthorized_models_status": 401,
+      "unauthorized_code": "invalid_api_key"
+    },
+    "model_discovery": {
+      "provider_models": [
+        "ullm-qwen3-14b-sq8"
+      ],
+      "selector_name": "uLLM Qwen3 14B SQ8",
+      "selector_connection_type": "local",
+      "selector_url_index": 1
+    },
+    "english_stream": {
+      "status": 200,
+      "content": "OpenWebUI path works.",
+      "finish_reason": "stop",
+      "done_events": 1
+    },
+    "japanese_stream": {
+      "status": 200,
+      "content": "\u9752",
+      "finish_reason": "stop",
+      "done_events": 1
+    },
+    "system_prompt": {
+      "content": "SYSTEM_OK",
+      "finish_reason": "stop"
+    },
+    "multi_turn": {
+      "content": "K9X",
+      "history_observed": true,
+      "finish_reason": "stop"
+    },
+    "code_block": {
+      "content": "```py\nprint(7)\n```",
+      "fence_preserved": true,
+      "finish_reason": "stop"
+    },
+    "max_tokens": {
+      "requested": 1,
+      "content": "1",
+      "finish_reason": "length",
+      "done_events": 1
+    },
+    "context_overflow": {
+      "openwebui_status": 400,
+      "visible_error": true,
+      "next_valid_status": 200,
+      "next_valid_content": "RECOVERED.",
+      "next_valid_finish_reason": "stop"
+    },
+    "disconnect_cancel": {
+      "closed_after_first_content": true,
+      "first_content_ms": 977.0,
+      "busy_probes_before_recovery": 1,
+      "recovery_ms_including_valid_generation": 784.2,
+      "next_valid_content": "AFTER_STOP."
+    },
+    "direct_collision": {
+      "leader_status": 200,
+      "leader_elapsed_ms": 5683.5,
+      "leader_done_events": 1,
+      "collision_status": 429,
+      "collision_elapsed_ms": 1.3,
+      "retry_after": "1",
+      "error_code": "request_busy"
+    },
+    "openwebui_collision": {
+      "leader_status": 200,
+      "leader_elapsed_ms": 5693.7,
+      "leader_finish_reason": "length",
+      "leader_done_events": 1,
+      "collision_status": 400,
+      "collision_elapsed_ms": 15.0,
+      "visible_detail": "The model is serving another request.",
+      "next_valid_status": 200,
+      "next_valid_content": "COLLISION_RECOVERED"
+    },
+    "sampling": {
+      "seed": 4242,
+      "first_content": "Frosty",
+      "second_content": "Frosty",
+      "repeatable": true,
+      "default_content": "Valid.",
+      "default_finish_reason": "stop"
+    },
+    "openwebui_container_recreate": {
+      "old_container_id": "6291c77048d72810f561b6537bc6ea452dcbd847b0d2eead6e6b036360801e30",
+      "new_container_id": "97fe798622cb42f9b82423e606137e4a6b245a0d93b60653db2aedce2077fc2a",
+      "pre_recreate_jwt_status_after_recreate": 200,
+      "model_persisted": true,
+      "task_configuration_persisted": true
+    },
+    "worker_fatal_restart": {
+      "old_gateway_pid": 299570,
+      "old_worker_pid": 299667,
+      "new_gateway_pid": 340006,
+      "new_worker_pid": 340617,
+      "ready_during_load_status": 503,
+      "ready_after_restart_status": 200,
+      "ready_after_kill_ms": 44533,
+      "next_openwebui_status": 200,
+      "next_openwebui_content": "FATAL_RECOVERY_OK"
+    },
+    "browser": {
+      "status": "passed",
+      "model_visible": true,
+      "assistant_text": "BROWSER_OK",
+      "page_errors": [],
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "screenshot": "openwebui-browser-smoke.png",
+      "screenshot_sha256": "107b3461c4ac1410bf05c40f86e8d46b5473585b68d5aa0e3d277a875c257b82",
+      "screenshot_bytes": 39259
+    },
+    "gateway_tests": {
+      "pytest_passed": 114,
+      "mypy_strict_source": "passed",
+      "ruff_source": "passed"
+    }
+  },
+  "compatibility_notes": [
+    "OpenWebUI 0.9.4 has no functional context-length setting for OpenAI-compatible providers. The 4096 values are metadata; the gateway is authoritative and returns HTTP 400 on overflow.",
+    "OpenWebUI 0.9.4 maps an upstream JSON error response, including HTTP 429, to HTTP 400 in its legacy synchronous /api/chat/completions wrapper. The busy detail remains visible. The deployed gateway itself preserves HTTP 429 and Retry-After: 1."
+  ],
+  "result": {
+    "core_product_usable": true,
+    "full_p8f_release_gate_complete": false,
+    "pending": [
+      "machine-readable full release validator",
+      "100-request resource soak and robust slope calculation",
+      "full HTTP latency matrix with frozen fixtures",
+      "post-header injected worker-failure UI case"
+    ]
+  }
+}

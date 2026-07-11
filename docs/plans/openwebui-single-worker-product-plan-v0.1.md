@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-E is complete; P8-F deployment and OpenWebUI end-to-end acceptance is next
+Status: in progress; P8-F core deployment and OpenWebUI product path are complete; full release soak and validator remain
 
 Date: 2026-07-10
 
@@ -22,17 +22,16 @@ Concurrency definition: v0.1 has one active GPU request and no waiting request. 
 
 ## 今回の変更点
 
-- 次の目標を、batchなしのB=1 OpenWebUI対応製品に変更する。
-- multi-request batching、continuous batching、prefix cache、request queueを初期製品の必須条件から外す。
-- 固定M=8 prefillを任意長へ直接拡張せず、M=1 token stepでpromptを順番にKVへ入れる低リスク経路を先に作る。
-- M=1経路を独立oracleで正しいと確認した後、既存M=8実行を一request内の固定prefill chunkとして再利用し、4096 contextのhard TTFT gateを満たす。
-- 現監査runtimeを壊さず、逐次tokenを返すlean serving sessionを別APIとして追加する。
-- Rust常駐workerがGPU/model stateを所有し、Python FastAPI gatewayがtokenizer、chat template、OpenAI互換HTTP、SSEを担当する。
-- 自動履歴切捨て、request `stop`文字列、waiting queue、request batchingはv0.1後の拡張とする。
+- batchなしのB=1 worker、OpenAI gateway、SSE、systemd、bridge限定firewall、OpenWebUI接続まで実装した。
+- OpenWebUI v0.9.4の既存volumeとproviderを保持したまま、uLLMをindex 1のlocal providerとして追加した。
+- OpenWebUIにはOpenAI互換providerの機能的なcontext-length設定がないため、4096はmodel metadataへ記録し、実際の上限はgatewayの400判定を唯一の正とした。
+- OpenWebUIのtitle、follow-up、tag背景生成を無効化し、session署名鍵をroot管理ファイルへ固定した。
+- 日本語、英語、system、複数turn、code block、length、overflow、cancel、collision、sampling、browser描画、worker fatal restartを実機確認した。
+- コア製品smokeは合格したが、100要求のresource soak、HTTP latency matrix、post-header failure、最終validatorは未完である。
 
 ## 次の行動
 
-P8-Fを開始する。まずsystemd unit、environment file、secret file、固定Docker bridge bind、firewall、restart policyを実装して、service起動・停止・fatal restartを検証する。その後、実OpenWebUI containerからmodel discovery、日本語・英語・code block・複数turn、Stop、切断後の回復をend-to-endで確認し、release gateを閉じる。
+P8-Fのrelease evidence schemaと`tools/validate-sq8-openwebui-release.py`を先に固定する。次に未完のStop buttonとpost-header failureを閉じ、20 chat/cancel予備soak、100 request resource soak、HTTP latency matrixの順に実行してrelease gateを閉じる。batch処理は追加しない。
 
 ## 1. Objective
 
@@ -1392,6 +1391,26 @@ incremental decode、disconnect/slow-client cancellationが残っていた。
 
 ### P8-F: OpenWebUI Integration, Deployment, and Release Gate
 
+Implementation status (2026-07-11):
+
+- Core product deployment is fixed at commit `806fb8a1578e63d1cd199b7402747575b2a92ccc`.
+- `ullm-openai.service` and its dedicated nftables unit are installed and enabled.
+- The gateway is reachable only from `open-webui-network`; a host-origin probe
+  was dropped by the dedicated firewall table.
+- OpenWebUI v0.9.4 is healthy at `http://192.168.0.66:3000`, uses the preserved
+  `open-webui` volume, and pins image digest
+  `sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff`.
+- Browser smoke selected `uLLM Qwen3 14B SQ8` and rendered `BROWSER_OK` without
+  a page error. API smoke passed Japanese, English, system, multi-turn, code
+  block, stop/length, overflow recovery, disconnect recovery, collision
+  recovery, and seeded repeatability.
+- Killing the worker caused a full systemd restart. Readiness was 503 while
+  loading, returned 200 after 44.533 seconds, and the next OpenWebUI chat passed.
+- Core evidence is at
+  `benchmarks/results/2026-07-11/sq8-p8f-openwebui-product-smoke-v0.1/summary.json`.
+- This is not the final release gate. Stop-button automation, post-header
+  injected failure, full soak, latency matrix, and independent validator remain.
+
 Tasks:
 
 - add `deploy/systemd/ullm-openai.service` and environment example;
@@ -1403,9 +1422,9 @@ Tasks:
 - record startup/load/readiness timings;
 - configure bind address and Bearer key;
 - bind only to the `open-webui-network` host gateway and restrict port 8000 to that bridge with host firewall rules;
-- connect the current OpenWebUI instance through the OpenAI connection UI;
+- connect the current OpenWebUI instance through the same persistent settings used by the OpenAI connection UI;
 - revalidate the fixed `open-webui-network` route and record its network ID, subnet, gateway, bridge interface, and firewall rules;
-- set model context to 4096 in OpenWebUI;
+- record 4096 in OpenWebUI model metadata and keep gateway validation as the functional limit, because v0.9.4 has no OpenAI-provider context setting;
 - disable title/follow-up/tag background generation for initial single-worker operation;
 - record OpenWebUI version/image digest and connection settings without secrets;
 - run the release smoke and soak matrix;
@@ -1425,7 +1444,7 @@ Required OpenWebUI smoke:
 9. max token completion reports `length`;
 10. EOS completion reports `stop`;
 11. context overflow returns a visible 400 and the next valid chat succeeds;
-12. a concurrent second request receives a visible 429 and does not poison the service;
+12. a concurrent second request receives gateway HTTP 429 with `Retry-After: 1`; OpenWebUI v0.9.4 may map it to a visible HTTP 400 busy detail, and neither path poisons the service;
 13. fixed-seed sampling is repeatable and default sampling produces a valid response;
 14. a post-header injected worker failure is shown as failed, never as a completed answer.
 
@@ -1473,33 +1492,23 @@ Acceptance:
 
 ## 8. Configuration Contract
 
-Initial environment keys:
+Deployed environment keys:
 
 ```text
-HIP_VISIBLE_DEVICES=1
-ULLM_MODEL_ID=ullm-qwen3-14b-sq8
-ULLM_ARTIFACT_DIR=/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact
-ULLM_PACKAGE_DIR=/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package
+ULLM_WORKER_BINARY=/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-sq8-worker
+ULLM_PRODUCT_ROOT=/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1
 ULLM_TOKENIZER_DIR=/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8
-ULLM_CONTEXT_LENGTH=4096
-ULLM_DEFAULT_MAX_TOKENS=256
-ULLM_MAX_TOKENS=512
-ULLM_ACTIVE_REQUESTS=1
-ULLM_WAITING_REQUESTS=0
-ULLM_ENABLE_THINKING=false
-ULLM_LISTEN=172.20.0.1:8000
 ULLM_API_KEY_FILE=/etc/ullm/openai-api-key
 ULLM_GPU_LOCK_FILE=/run/ullm/r9700.lock
-ULLM_SSE_QUEUE_EVENTS=32
-ULLM_WORKER_STARTUP_DEADLINE_SECONDS=600
-ULLM_REQUEST_DEADLINE_SECONDS=180
-ULLM_PROGRESS_DEADLINE_SECONDS=30
-ULLM_CANCEL_RELEASE_DEADLINE_SECONDS=5
-ULLM_FATAL_FLUSH_DEADLINE_MILLISECONDS=250
-ULLM_LOG_LEVEL=info
+ULLM_BIND_HOST=172.20.0.1
+ULLM_BIND_PORT=8000
 ```
 
-The existing ten `ULLM_REQUIRE_HIP_*` SQ8 guards remain mandatory in the worker service environment.
+The worker sets `HIP_VISIBLE_DEVICES=1` and all ten mandatory
+`ULLM_REQUIRE_HIP_*` SQ8 guards internally before process launch. Model ID,
+context 4096, default completion 256, hard completion limit 512, one active
+request, zero waiting requests, queue size, and deadlines are fixed v0.1 code
+constants rather than operator environment knobs.
 
 Configuration validation occurs before model load. Secrets are not accepted as command-line arguments and are not written to evidence.
 
