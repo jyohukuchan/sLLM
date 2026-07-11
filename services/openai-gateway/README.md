@@ -18,6 +18,15 @@ server-sent event (SSE) streaming without a request batch or waiting queue.
 - bounded stream buffering, send timeouts, and worker cancellation on disconnect
 - an isolated tokenizer/executor for incremental stream decoding
 
+Every request lifecycle transition is written as
+`ullm.gateway.lifecycle.v1` JSON to the systemd journal without prompt,
+response, token ID, or credential data. If a datagram listener is already bound
+at `/run/ullm/lifecycle-observer.sock`, the gateway also sends the exact same
+JSON bytes to that local Unix socket on a best-effort, nonblocking basis. The
+listener is normally absent and its absence or failure never changes inference.
+The mirror exists only for low-latency release-test synchronization; journal
+cursor records remain the authoritative evidence.
+
 ## Install
 
 ```bash
