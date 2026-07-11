@@ -409,6 +409,38 @@ browser-visible non-empty content and before `worker_fatal`. The later lifecycle
 probe MUST show a different gateway and worker identity, incremented systemd
 restart count, and readiness 200.
 
+### 8.1 Release matrix
+
+`release-matrix.json` has schema
+`ullm.sq8.openwebui_release.matrix.v1` and contains exactly
+`schema_version`, `run_id`, `files`, `schedule`, and `thresholds`. `run_id`,
+`schedule`, and `thresholds` MUST be JSON-type-sensitive matches for the same
+values in the raw-session header. In particular, `thresholds` contains
+`ttft_seconds_maximum`, whose exact fixture keys are the ordered section 6.1
+IDs and whose values contain exactly numeric `p50` and `p95`, plus the five
+remaining threshold fields defined above. A `passed` key is forbidden at every
+nesting level.
+
+`files` contains exactly one entry for every matrix input named below, sorted by
+the UTF-8 bytes of `path`, with no duplicate path. Each entry contains exactly
+`role`, `path`, `bytes`, and `sha256`; size and digest bind the regular file's
+actual bytes. Roles are fixed as follows:
+
+- `environment.json`: `environment`;
+- `model-identity.json`: `model_identity`;
+- `raw-session-results.jsonl`: `session_raw`;
+- `soak-resources.raw.jsonl`: `resource_raw`;
+- `service-journal.raw.jsonl`: `service_journal_raw`;
+- each of the four `amd-smi-metric-*.json` files: `gpu_metric_raw`;
+- each of `sampling-results.json`, `cancel-results.json`,
+  `prefill-latency-results.json`, `api-contract-results.json`,
+  `openwebui-smoke.json`, and `soak-results.json`: `derived_view`; and
+- each required browser PNG: `browser_screenshot`.
+
+The matrix never lists itself, `release-validation.json`, `summary.md`, or
+`SHA256SUMS`. Those exclusions avoid self-reference and prevent a narrative or
+producer verdict from becoming a trusted measurement input.
+
 ## 9. Evidence Bundle
 
 The mandatory bundle layout is:
