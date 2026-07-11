@@ -26,6 +26,20 @@ sys.modules[SPEC.name] = BACKEND
 SPEC.loader.exec_module(BACKEND)
 
 
+def runtime_identities() -> dict[str, Any]:
+    return {
+        "openwebui": {},
+        "docker_network_id": "a" * 64,
+        "gateway_source_sha256": "b" * 64,
+        "worker_source_sha256": "c" * 64,
+        "worker_binary_sha256": "d" * 64,
+        "environment_file": "environment.json",
+        "environment_sha256": "e" * 64,
+        "model_identity_file": "model-identity.json",
+        "model_identity_sha256": "f" * 64,
+    }
+
+
 def load_tool(name: str) -> Any:
     path = TOOLS / f"{name}.py"
     spec = importlib.util.spec_from_file_location(f"test_{name}", path)
@@ -199,7 +213,9 @@ def bridge_fixture(
             pass
 
     client = b"print('trusted client')\n"
-    resource = SimpleNamespace(session_header_fields={"identities": {}})
+    resource = SimpleNamespace(
+        session_header_fields={"identities": runtime_identities()}
+    )
     inputs = BACKEND.SystemBridgeInputs(
         SimpleNamespace(),
         resource,
@@ -682,7 +698,7 @@ class BackendTests(unittest.TestCase):
         )
         identity = SimpleNamespace(identity_artifacts=artifacts)
         resource = SimpleNamespace(
-            session_header_fields={"identities": {"worker_binary_sha256": "b" * 64}},
+            session_header_fields={"identities": runtime_identities()},
             resource_header={"record_type": "header"},
             segment_config=object(),
         )
@@ -759,7 +775,9 @@ class BackendTests(unittest.TestCase):
         client = b"print('trusted client')\n"
         snapshots = Closable("snapshots")
         runtime = Closable("runtime")
-        resource = SimpleNamespace(session_header_fields={"identities": {}})
+        resource = SimpleNamespace(
+            session_header_fields={"identities": runtime_identities()}
+        )
         factories = BACKEND.SystemBridgeFactories(
             secret_guard=Guard,
             runtime_snapshots=lambda source, secret: snapshots,

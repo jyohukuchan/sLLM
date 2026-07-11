@@ -582,7 +582,19 @@ class SystemCampaignBridge:
             self.guard = guard
             snapshots = factories.runtime_snapshots(raw, secret)
             self.snapshots = snapshots
-            identities = inputs.resource.session_header_fields["identities"]
+            header_identities = inputs.resource.session_header_fields["identities"]
+            runtime_identity_keys = (
+                "openwebui",
+                "docker_network_id",
+                "gateway_source_sha256",
+                "worker_source_sha256",
+                "worker_binary_sha256",
+            )
+            if type(header_identities) is not dict or any(
+                key not in header_identities for key in runtime_identity_keys
+            ):
+                fail("system runtime identities are incomplete")
+            identities = {key: header_identities[key] for key in runtime_identity_keys}
             config = factories.runtime_config(identities, inputs.amd_smi)
             runtime = factories.system_runtime(
                 config, inputs.repo_root, guard, snapshots, False
