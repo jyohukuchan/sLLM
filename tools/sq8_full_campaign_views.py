@@ -323,6 +323,41 @@ def _scan(raw: bytes, forbidden_values: tuple[bytes, ...], label: str) -> None:
             fail(f"{label} contains forbidden secret cleartext")
 
 
+def _scan_json_semantics(
+    value: Any, forbidden_values: tuple[bytes, ...], label: str
+) -> None:
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    visited = 0
+    while pending:
+        item, depth = pending.pop()
+        visited += 1
+        if depth > 128 or visited > 100_000:
+            fail(f"{label} exceeds the semantic secret-scan bound")
+        if type(item) is dict:
+            for key, child in item.items():
+                if type(key) is str:
+                    try:
+                        _scan(
+                            key.encode("utf-8", errors="strict"),
+                            forbidden_values,
+                            label,
+                        )
+                    except UnicodeError:
+                        fail(f"{label} contains a non-UTF-8 object key")
+                pending.append((child, depth + 1))
+        elif type(item) in {list, tuple}:
+            pending.extend((child, depth + 1) for child in item)
+        elif type(item) is str:
+            try:
+                _scan(
+                    item.encode("utf-8", errors="strict"), forbidden_values, label
+                )
+            except UnicodeError:
+                fail(f"{label} contains a non-UTF-8 string")
+        elif type(item) in {bytes, bytearray}:
+            _scan(bytes(item), forbidden_values, label)
+
+
 def canonical_json_bytes(
     value: Mapping[str, Any], *, forbidden_values: tuple[bytes, ...] = ()
 ) -> bytes:
@@ -332,6 +367,7 @@ def canonical_json_bytes(
     if type(value) is not dict:
         fail("canonical view root is not an object")
     _reject_passed(value, "canonical view")
+    _scan_json_semantics(value, forbidden, "canonical view")
     try:
         raw = (
             json.dumps(

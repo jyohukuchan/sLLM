@@ -491,6 +491,32 @@ class SecretGuard:
         if self._value in raw:
             fail(f"{label} contains the API credential")
 
+    def reject_json_value(self, value: Any, label: str) -> None:
+        pending: list[tuple[Any, int]] = [(value, 0)]
+        visited = 0
+        while pending:
+            item, depth = pending.pop()
+            visited += 1
+            if depth > 128 or visited > 100_000:
+                fail(f"{label} exceeds the semantic secret-scan bound")
+            if type(item) is dict:
+                for key, child in item.items():
+                    if type(key) is str:
+                        try:
+                            self.reject(key.encode("utf-8", errors="strict"), label)
+                        except UnicodeError:
+                            fail(f"{label} contains a non-UTF-8 object key")
+                    pending.append((child, depth + 1))
+            elif type(item) in {list, tuple}:
+                pending.extend((child, depth + 1) for child in item)
+            elif type(item) is str:
+                try:
+                    self.reject(item.encode("utf-8", errors="strict"), label)
+                except UnicodeError:
+                    fail(f"{label} contains a non-UTF-8 string")
+            elif type(item) in {bytes, bytearray}:
+                self.reject(bytes(item), label)
+
     def scanner(self, label: str) -> "StreamingSecretScanner":
         return StreamingSecretScanner(self._value, label)
 
@@ -1566,7 +1592,19 @@ class AtomicJsonlWriter:
         self.line_count = 0
 
     def write_value(self, value: dict[str, Any]) -> None:
-        raw = compact_json(value)
+        self.guard.reject_json_value(value, self.file.final_path.name)
+        cleartext_raw = compact_json(value)
+        self.guard.reject(cleartext_raw, self.file.final_path.name)
+        try:
+            raw = json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            fail("internal evidence record is not canonical JSON")
         self.guard.reject(raw, self.file.final_path.name)
         self.file.write(raw + b"\n")
         self.line_count += 1
@@ -1575,7 +1613,8 @@ class AtomicJsonlWriter:
         if not raw or raw.endswith(b"\r") or b"\n" in raw or len(raw) > MAX_JSON_BYTES:
             fail(f"{label} is not one bounded LF-free JSON line")
         self.guard.reject(raw, label)
-        strict_json_object(raw, label)
+        value = strict_json_object(raw, label)
+        self.guard.reject_json_value(value, label)
         self.file.write(raw + b"\n")
         self.line_count += 1
 

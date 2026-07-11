@@ -19,6 +19,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR_PATH = ROOT / "tools" / "collect-sq8-openwebui-release.py"
 VALIDATOR_PATH = ROOT / "tools" / "validate-sq8-openwebui-release.py"
+FULL_CAMPAIGN_VIEWS_PATH = ROOT / "tools" / "sq8_full_campaign_views.py"
 
 
 def load_module(name, path):
@@ -32,6 +33,9 @@ def load_module(name, path):
 
 COLLECTOR = load_module("collect_sq8_openwebui_release", COLLECTOR_PATH)
 VALIDATOR = load_module("validate_sq8_openwebui_release_for_collector", VALIDATOR_PATH)
+FULL_CAMPAIGN_VIEWS = load_module(
+    "sq8_full_campaign_views_for_collector", FULL_CAMPAIGN_VIEWS_PATH
+)
 
 COMMIT = "a" * 40
 WORKER_SHA256 = "b" * 64
@@ -865,6 +869,48 @@ class CollectorTestCase(unittest.TestCase):
         ):
             COLLECTOR.load_config(path)
 
+    def test_atomic_jsonl_writer_emits_canonical_ascii_and_scans_cleartext(self):
+        path = self.root / "canonical.jsonl"
+        writer = COLLECTOR.AtomicJsonlWriter(path, self.guard)
+        writer.write_value({"z": "日本語", "a": 1})
+        writer.commit()
+        self.assertEqual(path.read_bytes(), b'{"a":1,"z":"\\u65e5\\u672c\\u8a9e"}\n')
+
+        unicode_secret = "秘密の認証情報-0123456789".encode()
+        secret_path = self.root / "unicode-secret.jsonl"
+        secret_writer = COLLECTOR.AtomicJsonlWriter(
+            secret_path, COLLECTOR.SecretGuard(unicode_secret)
+        )
+        with self.assertRaisesRegex(COLLECTOR.CollectorError, "API credential"):
+            secret_writer.write_value({"credential": unicode_secret.decode()})
+        secret_writer.abort_close()
+
+        for index, escaped_secret in enumerate(
+            (
+                b'01234567"89abcdef',
+                b"01234567\\89abcdef",
+                b"01234567\t89abcdef",
+            )
+        ):
+            with self.subTest(secret=escaped_secret):
+                guard = COLLECTOR.SecretGuard(escaped_secret)
+                value = {"credential": escaped_secret.decode()}
+                value_writer = COLLECTOR.AtomicJsonlWriter(
+                    self.root / f"semantic-secret-{index}.jsonl", guard
+                )
+                with self.assertRaisesRegex(COLLECTOR.CollectorError, "API credential"):
+                    value_writer.write_value(value)
+                value_writer.abort_close()
+
+                raw_writer = COLLECTOR.AtomicJsonlWriter(
+                    self.root / f"raw-semantic-secret-{index}.jsonl", guard
+                )
+                escaped_raw = json.dumps(value, ensure_ascii=True).encode("ascii")
+                self.assertNotIn(escaped_secret, escaped_raw)
+                with self.assertRaisesRegex(COLLECTOR.CollectorError, "API credential"):
+                    raw_writer.write_raw_line(escaped_raw, "escaped raw secret")
+                raw_writer.abort_close()
+
     def test_synthetic_phase1_bundle_passes_independent_validator(self):
         runtime = FakeRuntime()
         result = self._collector(runtime).run()
@@ -881,6 +927,11 @@ class CollectorTestCase(unittest.TestCase):
         self.assertEqual(report["release_status"], "incomplete")
         self.assertEqual(report["raw_counts"]["resource_samples"], 610)
         self.assertEqual(report["raw_counts"]["gpu_metrics"], 4)
+        resources = FULL_CAMPAIGN_VIEWS.analyze_soak_resources(
+            self.output / "soak-resources.raw.jsonl"
+        )
+        self.assertEqual(resources["resource_sample_count"], 610)
+        self.assertEqual(resources["gpu_metric_count"], 4)
         self.assertFalse((self.output / "release-validation.json").exists())
         self.assertEqual(list(self.output.rglob("*.incomplete")), [])
         for path in self.output.rglob("*"):

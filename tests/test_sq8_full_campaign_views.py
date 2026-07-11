@@ -738,6 +738,18 @@ class FullCampaignViewTests(unittest.TestCase):
         api["cases"][1]["error"]["code"] = "top-secret-value"
         with self.assertRaises(VIEWS.FullCampaignViewError):
             self.build(api_contract=api, forbidden_values=(b"top-secret-value",))
+        for escaped_secret in (
+            b'escaped-secret-"-value',
+            b"escaped-secret-\\-value",
+            b"escaped-secret-\t-value",
+        ):
+            with self.subTest(secret=escaped_secret), self.assertRaises(
+                VIEWS.FullCampaignViewError
+            ):
+                VIEWS.canonical_json_bytes(
+                    {"value": escaped_secret.decode("utf-8")},
+                    forbidden_values=(escaped_secret,),
+                )
 
     def test_resource_json_rejects_duplicate_keys_and_nonfinite_values(self):
         duplicate = self.root / "duplicate.raw.jsonl"
