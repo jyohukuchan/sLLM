@@ -1426,8 +1426,12 @@ Tasks:
 - revalidate the fixed `open-webui-network` route and record its network ID, subnet, gateway, bridge interface, and firewall rules;
 - record 4096 in OpenWebUI model metadata and keep gateway validation as the functional limit, because v0.9.4 has no OpenAI-provider context setting;
 - disable title/follow-up/tag background generation for initial single-worker operation;
-- record OpenWebUI version/image digest and connection settings without secrets;
+- record OpenWebUI version/source revision, base digest and image ID, derived
+  image ID, Dockerfile/patch/patched-middleware hashes, and connection settings
+  without secrets;
 - run the release smoke and soak matrix;
+- follow the frozen P8-F evidence and workload contract in
+  `docs/specs/sq8-openwebui-release-v0.1.md`;
 - add `tools/validate-sq8-openwebui-release.py` to derive pass/fail from the machine-readable release matrix;
 - write operator README with start, stop, health, logs, upgrade, and recovery commands.
 
@@ -1451,11 +1455,15 @@ Required OpenWebUI smoke:
 Soak:
 
 - 20 sequential OpenWebUI chats;
-- at least 5 cancellations at different phases;
-- 100 sequential HTTP chats after warmup, including at least 20 sampled responses;
-- at least 2 context-overflow rejections;
-- at least 1 malformed API request between valid requests;
-- FD, thread, child-process, RSS, VRAM, allocator, and KV observations before and after;
+- exactly one required cancellation case at each frozen phase:
+  `after_started_before_progress`, `prefill_after_128`, `prefill_after_2048`,
+  `decode_after_first_content`, and `openwebui_stop_after_visible_content`;
+- 100 sequential HTTP chats after warmup, with non-greedy sampled response
+  indices fixed to `5, 10, ..., 100`;
+- exactly 2 context-overflow rejections at the frozen schedule positions;
+- exactly 1 malformed API request at the frozen schedule position;
+- FD, thread, child-process, cgroup `MemoryCurrent`, process-RSS diagnostic,
+  VRAM, allocator, and KV observations before and after;
 - kill the worker once and prove automatic full-service restart followed by a successful chat;
 - after restart and re-warmup, run 20 additional sequential HTTP chats;
 - service restart followed by a successful chat.
@@ -1464,7 +1472,9 @@ Measurement rules:
 
 - the HTTP latency client runs from the fixed OpenWebUI Docker network and uses the exact post-template-length fixtures from P8-A;
 - HTTP TTFT starts after the client writes the last request-body byte and ends when it receives the first non-empty SSE content delta, so auth, schema validation, tokenization, admission, IPC, prefill, sampling, detokenization, and local network transport are included;
-- each HTTP length has 2 warmups and 10 measured repeats, with terminal release/reset between samples and the frozen linear percentile calculation;
+- HTTP fixture order is exactly 32, 128, 512, 2048, and 3584 prompt tokens;
+  each length has 2 warmups followed by 10 measured repeats, with terminal
+  release/reset between samples and the frozen linear percentile calculation;
 - resource soak has a normal-operation segment and a later fatal-restart segment; their baselines are never mixed;
 - after 10 warmup chats, the normal segment baseline is the median of five one-second samples taken after a five-second idle settle;
 - primary host memory is the systemd service cgroup `MemoryCurrent`; gateway and worker RSS are recorded as diagnostics;
@@ -1479,13 +1489,18 @@ Acceptance:
 - no worker reload occurs between normal requests;
 - allocator and KV state exactly match the post-warmup baseline after every terminal release;
 - FD, thread, and child-process counts return to the post-warmup baseline;
-- in each separately baselined soak segment, final RSS and VRAM are each no more than 64 MiB above that segment's post-warmup baseline, and their frozen robust-slope calculation is at most 256 KiB per request;
+- in each separately baselined soak segment, final cgroup `MemoryCurrent` and
+  primary VRAM are each no more than 64 MiB above that segment's post-warmup
+  baseline, and their frozen Theil-Sen slope is at most 256 KiB per request;
+  gateway and worker RSS remain diagnostics rather than acceptance series;
 - readiness is correct during load, Ready, fatal failure, and shutdown;
 - the P8-B2 latency matrix is repeated through HTTP with 10 measured runs, and first non-empty SSE content passes the same p50/p95 limits;
 - logs contain request IDs and timings but not prompt/response content by default;
 - a machine-readable release matrix and independent validator derive the final result;
 - the validator recomputes oracle differences, token/logit gates, percentiles, request counts, resource deltas, Theil-Sen slopes, and all evidence hashes from raw samples rather than trusting any producer `passed` field;
-- the validator binds git commit/dirty state, model/artifact/package/tokenizer identities, vLLM oracle identity, gateway/worker source hashes, OpenWebUI image digest, and every input evidence SHA-256;
+- the validator binds git commit/dirty state, model/artifact/package/tokenizer
+  identities, vLLM oracle identity, gateway/worker source hashes, the complete
+  base and derived OpenWebUI image identity, and every input evidence SHA-256;
 - correctness, resource safety, auth, cancellation recovery, and hard latency gates cannot be waived;
 - evidence bundle and checksums are committed;
 - batch processing remains absent from the critical path.
@@ -1527,7 +1542,7 @@ Configuration validation occurs before model load. Secrets are not accepted as c
 | HTTP | models, chat stream/non-stream, auth, status/error schemas, usage |
 | admission | active 1, waiting 0, concurrent second 429, health endpoints remain responsive |
 | context | exact 4096 reservation, 4097 reject, no silent truncation |
-| resource | KV blocks, FD/thread/child counts, VRAM/RSS baseline/peak/post, 100 raw and HTTP requests, 20 UI chats |
+| resource | KV blocks, FD/thread/child counts, cgroup `MemoryCurrent` and primary VRAM gates, RSS diagnostics, 100 normal and 20 restart HTTP requests, 20 UI chats |
 | operations | startup, readiness, SIGTERM, fatal worker restart, service restart |
 
 Tests that mutate GPU/session state run serially. Python/HTTP schema tests may run in parallel when they do not spawn a model worker.
@@ -1540,7 +1555,13 @@ Use:
 benchmarks/results/YYYY-MM-DD/sq8-openwebui-v0.1/
   environment.json
   model-identity.json
-  raw-session-results.json
+  raw-session-results.jsonl
+  soak-resources.raw.jsonl
+  service-journal.raw.jsonl
+  amd-smi-metric-normal-before.json
+  amd-smi-metric-normal-after.json
+  amd-smi-metric-restart-before.json
+  amd-smi-metric-restart-after.json
   sampling-results.json
   cancel-results.json
   prefill-latency-results.json
@@ -1548,10 +1569,18 @@ benchmarks/results/YYYY-MM-DD/sq8-openwebui-v0.1/
   openwebui-smoke.json
   soak-results.json
   release-matrix.json
-  service.log
+  release-validation.json
+  browser/
+    openwebui-stop-before.png
+    post-header-failure.png
   summary.md
   SHA256SUMS
 ```
+
+The exact raw record types, schedule, journal correlation, mandatory file rules,
+and independent derivations are frozen by
+`docs/specs/sq8-openwebui-release-v0.1.md`; this layout is not a set of optional
+alternatives.
 
 Record:
 
@@ -1559,7 +1588,8 @@ Record:
 - worker/gateway source hashes;
 - model/artifact/package/tokenizer hashes;
 - Rust/Python/package versions;
-- OpenWebUI version or image digest;
+- OpenWebUI version/source revision, base digest and image ID, derived image ID,
+  and Dockerfile/patch/patched-middleware hashes;
 - GPU identity and visibility variables;
 - exact limits and sampling defaults;
 - commands and environment without secrets;
@@ -1567,7 +1597,8 @@ Record:
 - TTFT, per-token latency, request latency;
 - finish reason and cancel phase;
 - allocator/cache state before and after;
-- VRAM/RSS baseline, peak, and post-run;
+- cgroup `MemoryCurrent` and primary VRAM baseline, peak, and post-run, plus
+  gateway/worker RSS diagnostics;
 - validator output and evidence checksums.
 
 ## 11. Risk and Stop Policy

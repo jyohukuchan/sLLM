@@ -1,0 +1,24 @@
+--- a/open_webui/utils/middleware.py
++++ b/open_webui/utils/middleware.py
+@@ -3829,0 +3830 @@
++            provider_stream_error = None
+@@ -3868,0 +3870 @@
++                    nonlocal provider_stream_error
+@@ -4048,0 +4051 @@
++                                            provider_stream_error = error
+@@ -4452,0 +4456,15 @@
++
++                if provider_stream_error:
++                    partial_output = full_output()
++                    await Chats.upsert_message_to_chat_by_id_and_message_id(
++                        metadata['chat_id'],
++                        metadata['message_id'],
++                        {
++                            'done': True,
++                            'content': serialize_output(partial_output),
++                            'output': partial_output,
++                            'error': {'content': provider_stream_error},
++                        },
++                    )
++                    await event_emitter({'type': 'chat:tasks:cancel'})
++                    return

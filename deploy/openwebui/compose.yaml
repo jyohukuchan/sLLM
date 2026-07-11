@@ -1,6 +1,10 @@
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff
+    image: ullm/open-webui:0.9.4-ullm.1
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: open-webui
     init: true
     restart: unless-stopped

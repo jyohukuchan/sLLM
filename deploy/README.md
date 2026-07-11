@@ -13,10 +13,15 @@ interface.
 - model: `ullm-qwen3-14b-sq8`
 - OpenWebUI: `http://192.168.0.66:3000`
 
-The OpenWebUI image is pinned by digest in `openwebui/compose.yaml`. Existing
-connections and the external `open-webui` volume are preserved. Its session
-signing key is mounted read-only from `/etc/ullm/openwebui-secret-key`, so a
-container replacement does not invalidate every login session.
+`openwebui/Dockerfile` pins the OpenWebUI 0.9.4 base image to digest
+`sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff`
+and builds the local image `ullm/open-webui:0.9.4-ullm.1`. The build rejects a
+base middleware file whose SHA256 is not the expected value, applies the local
+provider-stream-error patch with zero fuzz, checks the fixed post-patch SHA256,
+and compiles the result. Existing connections and the external `open-webui`
+volume are preserved. Its session signing key is mounted read-only from
+`/etc/ullm/openwebui-secret-key`, so a container replacement does not invalidate
+every login session.
 
 ## Install the gateway
 
@@ -79,15 +84,17 @@ field.
 
 ```bash
 cd /home/homelab1/coding-local/ultimateLLM/uLLM-project
+docker compose -f deploy/openwebui/compose.yaml build open-webui
+deploy/openwebui/verify-derived-image.sh
 docker stop open-webui 2>/dev/null || true
 docker run --rm \
   -v open-webui:/data \
   -v /etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro \
   -v "$PWD/deploy/openwebui/configure.py:/configure.py:ro" \
   --entrypoint python \
-  ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff \
+  ullm/open-webui:0.9.4-ullm.1 \
   /configure.py
-docker compose -f deploy/openwebui/compose.yaml up -d
+docker compose -f deploy/openwebui/compose.yaml up -d --no-build
 ```
 
 OpenWebUI is ready when both commands succeed:
@@ -115,6 +122,9 @@ docker compose -f deploy/openwebui/compose.yaml down
 removes only the dedicated `inet ullm_openai` table and also stops the gateway
 through the systemd dependency.
 
-For an upgrade, first update and verify the worker, gateway lockfile, and pinned
-OpenWebUI digest. Re-run `configure.py`, restart both services, and retain the
-new backup under the OpenWebUI volume until the smoke matrix passes.
+For an upgrade, first update and verify the worker, gateway lockfile, pinned
+OpenWebUI digest, middleware input/output hashes, and zero-fuzz patch. Rebuild
+and run `verify-derived-image.sh` before replacing the container. Re-run
+`configure.py`, restart both services, and retain the new backup under the
+OpenWebUI volume until the smoke matrix passes. Do not use `docker compose pull`
+for the local derived image.
