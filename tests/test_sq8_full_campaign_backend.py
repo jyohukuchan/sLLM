@@ -5,8 +5,11 @@ import dataclasses
 import hashlib
 import os
 import signal
+import stat
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -159,6 +162,12 @@ class Bindings:
     def confirm_failure(self, result: Any, work_dir: Path) -> Path:
         self.events.append("confirm:failure")
         return Path("/run/user/1000/restart-epoch.json")
+
+    def confirm_latency(self) -> None:
+        self.events.append("confirm:latency")
+
+    def close(self) -> None:
+        pass
 
 
 class Collector:
@@ -394,7 +403,7 @@ class BackendTests(unittest.TestCase):
                 for item in (f"bind:{gate}", f"ingest:{gate}")
             ][:10]
             + ["confirm:failure"]
-            + ["bind:latency", "ingest:latency"],
+            + ["bind:latency", "ingest:latency", "confirm:latency"],
         )
         self.assertEqual(self.secret_owner.revalidations, 1 + len(BACKEND.GATE_ORDER))
 
@@ -463,23 +472,98 @@ class BackendTests(unittest.TestCase):
             contexts.append(context)
             return context.gate
 
-        factory = BACKEND.ProductionGateBindingsFactory(
-            "normal",
-            {gate: build for gate in BACKEND.GATE_ORDER},
-            lambda result, work: (
-                "restart",
-                Path("/run/user/1000/restart-epoch.json"),
-                "a" * 64,
-            ),
-        )
-        with self.assertRaises(BACKEND.ProductionBackendError):
-            factory.build("latency", Path("/tmp/latency"))
-        epoch = factory.confirm_failure("failure", Path("/tmp/failure"))
-        self.assertEqual(epoch, Path("/run/user/1000/restart-epoch.json"))
-        self.assertEqual(factory.build("latency", Path("/tmp/latency")), "latency")
-        self.assertEqual(contexts[-1].restart_identity, "restart")
-        with self.assertRaises(BACKEND.ProductionBackendError):
-            factory.confirm_failure("failure", Path("/tmp/failure"))
+        identity = {
+            "unit": "ullm-openai.service",
+            "user": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "control_group": "/ullm",
+            "boot_id": "d" * 32,
+            "gateway_pid": 1,
+            "gateway_starttime_ticks": 2,
+            "worker_pid": 3,
+            "worker_starttime_ticks": 4,
+            "n_restarts": 1,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = BACKEND.write_restart_epoch(
+                Path(temporary),
+                identity,
+                SimpleNamespace(reject=lambda raw, label: None),
+            )
+            factory = BACKEND.ProductionGateBindingsFactory(
+                "normal",
+                {gate: build for gate in BACKEND.GATE_ORDER},
+                lambda result, work: ("restart", owner),
+            )
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                factory.build("latency", Path("/tmp/latency"))
+            epoch = factory.confirm_failure("failure", Path("/tmp/failure"))
+            self.assertEqual(epoch, Path(temporary) / "resource-restart-epoch.json")
+            self.assertEqual(factory.build("latency", Path("/tmp/latency")), "latency")
+            self.assertEqual(contexts[-1].restart_identity, "restart")
+            factory.confirm_latency()
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                factory.confirm_failure("failure", Path("/tmp/failure"))
+
+    def test_confirm_failure_owns_before_revalidate_and_retries_failed_close(
+        self,
+    ) -> None:
+        identity = {
+            "unit": "ullm-openai.service",
+            "user": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "control_group": "/ullm",
+            "boot_id": "d" * 32,
+            "gateway_pid": 1,
+            "gateway_starttime_ticks": 2,
+            "worker_pid": 3,
+            "worker_starttime_ticks": 4,
+            "n_restarts": 1,
+        }
+        builders = {gate: (lambda context: context) for gate in BACKEND.GATE_ORDER}
+        guard = SimpleNamespace(reject=lambda raw, label: None)
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = BACKEND.write_restart_epoch(Path(temporary), identity, guard)
+            owner.path.write_bytes(b"tampered\n")
+            factory = BACKEND.ProductionGateBindingsFactory(
+                "normal", builders, lambda result, work: ("restart", owner)
+            )
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                factory.confirm_failure("failure", Path("/tmp/failure"))
+            self.assertTrue(owner.closed)
+            self.assertIsNone(factory.restart_epoch_owner)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = BACKEND.write_restart_epoch(Path(temporary), identity, guard)
+            owner.path.write_bytes(b"tampered\n")
+            factory = BACKEND.ProductionGateBindingsFactory(
+                "normal", builders, lambda result, work: ("restart", owner)
+            )
+            original_close = os.close
+            failed = False
+
+            def fail_owner_file_close(descriptor: int) -> None:
+                nonlocal failed
+                if descriptor == owner.file_fd and not failed:
+                    failed = True
+                    raise OSError("owner close failed")
+                original_close(descriptor)
+
+            with (
+                mock.patch.object(
+                    BACKEND.os, "close", side_effect=fail_owner_file_close
+                ),
+                self.assertRaises(BACKEND.ProductionBackendError) as raised,
+            ):
+                factory.confirm_failure("failure", Path("/tmp/failure"))
+            self.assertIn("owner cleanup", " ".join(raised.exception.__notes__))
+            self.assertIs(factory.restart_epoch_owner, owner)
+            self.assertFalse(owner.closed)
+            factory.close()
+            self.assertTrue(owner.closed)
+            self.assertIsNone(factory.restart_epoch_owner)
 
     def test_ingestor_factory_maps_all_six_existing_adapters(self) -> None:
         def passthrough(bundle: Path, bindings: Any) -> tuple[Path, Any]:
@@ -824,6 +908,277 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(snapshots.closes, 2)
         self.assertIsNone(bridge.snapshots)
         self.assertTrue(bridge.closed)
+
+    def production_binding_inputs(self, root: Path) -> Any:
+        required = {
+            "gate_api_contract",
+            "gate_direct_cancel",
+            "release_collector",
+            "http_client",
+            "gateway_app",
+            "gateway_errors",
+            "gateway_schemas",
+            "gate_openwebui_soak",
+            "campaign_journal",
+            "browser_soak",
+            "gate_openwebui_stop",
+            "browser_stop",
+            "gate_openwebui_failure",
+            "gate_openwebui_failure_hook",
+            "browser_failure",
+            "gate_http_latency",
+        }
+        roles = sorted(required | {f"dummy_{index:02d}" for index in range(54)})
+        paths = {role: f"tools/{role}.source" for role in roles}
+        sources = [
+            {"role": role, "path": paths[role], "bytes": 1, "sha256": "a" * 64}
+            for role in roles
+        ]
+        binding_types = {}
+        for gate, fields in BACKEND.EXPECTED_BINDING_FIELDS.items():
+            binding_types[gate] = dataclasses.make_dataclass(
+                f"{gate.title()}Binding",
+                [(field, Any) for field in fields],
+                frozen=True,
+            )
+        normal = SimpleNamespace(
+            control_group="/ullm",
+            gateway_pid=1,
+            gateway_starttime_ticks=2,
+            worker_pid=3,
+            worker_starttime_ticks=4,
+            n_restarts=5,
+        )
+        restart = SimpleNamespace(
+            control_group="/ullm",
+            gateway_pid=11,
+            gateway_starttime_ticks=12,
+            worker_pid=13,
+            worker_starttime_ticks=14,
+            n_restarts=6,
+        )
+        guard = SimpleNamespace(reject=lambda raw, label: None)
+        return BACKEND.ProductionBindingInputs(
+            {"sources": sources},
+            paths,
+            root,
+            binding_types,
+            normal,
+            lambda: restart,
+            guard,
+            (b"forbidden-secret",),
+            BACKEND.PRODUCTION_IMAGE_ID,
+            BACKEND.PRODUCTION_NETWORK_ID,
+            "172.20.0.0/16",
+            "172.20.0.1",
+            "browser@sha256:" + "b" * 64,
+            "sha256:" + "b" * 64,
+            "probe@sha256:" + "c" * 64,
+            "sha256:" + "c" * 64,
+            "http://192.168.0.66:3000/",
+            "ullm-openai.service",
+            "homelab1",
+            "d" * 32,
+            1000,
+            1000,
+        )
+
+    def test_production_binding_builders_fill_all_six_exact_dataclasses(self) -> None:
+        inputs = self.production_binding_inputs(ROOT)
+        builders = BACKEND.production_binding_builders(inputs)
+        for gate in BACKEND.GATE_ORDER:
+            context = BACKEND.GateBindingContext(
+                gate,
+                Path(f"/tmp/{gate}"),
+                inputs.normal_identity,
+                inputs.restart_identity() if gate == "latency" else None,
+                Path("/tmp/restart.json") if gate == "latency" else None,
+                "e" * 64 if gate == "latency" else None,
+            )
+            binding = builders[gate](context)
+            self.assertEqual(
+                tuple(field.name for field in dataclasses.fields(binding)),
+                BACKEND.EXPECTED_BINDING_FIELDS[gate],
+            )
+        failure = builders["failure"](
+            BACKEND.GateBindingContext(
+                "failure",
+                Path("/tmp/failure"),
+                inputs.normal_identity,
+                None,
+                None,
+                None,
+            )
+        )
+        self.assertEqual(failure.normal_gateway_pid, 1)
+        self.assertEqual(failure.restart_gateway_pid, 11)
+
+    def test_production_binding_sources_reject_missing_duplicate_and_sha_tamper(
+        self,
+    ) -> None:
+        for mutation in ("missing", "duplicate", "sha"):
+            inputs = self.production_binding_inputs(ROOT)
+            sources = inputs.environment["sources"]
+            if mutation == "missing":
+                sources.pop()
+            elif mutation == "duplicate":
+                sources[-1]["role"] = sources[0]["role"]
+            else:
+                sources[0]["sha256"] = "X" * 64
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                BACKEND.production_binding_builders(inputs)
+
+    def test_restart_epoch_private_canonical_one_shot_and_negative_cases(self) -> None:
+        identity = {
+            "unit": "ullm-openai.service",
+            "user": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "control_group": "/ullm",
+            "boot_id": "d" * 32,
+            "gateway_pid": 11,
+            "gateway_starttime_ticks": 12,
+            "worker_pid": 13,
+            "worker_starttime_ticks": 14,
+            "n_restarts": 6,
+        }
+        guard = SimpleNamespace(reject=lambda raw, label: None)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = BACKEND.write_restart_epoch(root, identity, guard)
+            raw = evidence.path.read_bytes()
+            self.assertEqual(evidence.sha256, hashlib.sha256(raw).hexdigest())
+            self.assertEqual(stat.S_IMODE(evidence.path.stat().st_mode), 0o600)
+            with self.assertRaises(FileExistsError):
+                BACKEND.write_restart_epoch(root, identity, guard)
+            evidence.revalidate()
+            evidence.close()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "resource-restart-epoch.json").symlink_to("target")
+            with self.assertRaises(FileExistsError):
+                BACKEND.write_restart_epoch(root, identity, guard)
+        huge = dict(identity)
+        huge["control_group"] = "/" + "x" * (17 << 10)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                BACKEND.write_restart_epoch(Path(temporary), huge, guard)
+
+    def test_restart_epoch_interrupt_removes_partial_file(self) -> None:
+        identity = {
+            "unit": "ullm-openai.service",
+            "user": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "control_group": "/ullm",
+            "boot_id": "d" * 32,
+            "gateway_pid": 11,
+            "gateway_starttime_ticks": 12,
+            "worker_pid": 13,
+            "worker_starttime_ticks": 14,
+            "n_restarts": 6,
+        }
+        original_write = os.write
+        writes = 0
+
+        def interrupted(descriptor: int, raw: bytes) -> int:
+            nonlocal writes
+            writes += 1
+            if writes == 1:
+                return original_write(descriptor, raw[:1])
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                mock.patch.object(BACKEND.os, "write", side_effect=interrupted),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                BACKEND.write_restart_epoch(
+                    root,
+                    identity,
+                    SimpleNamespace(reject=lambda raw, label: None),
+                )
+            self.assertFalse((root / "resource-restart-epoch.json").exists())
+
+    def test_restart_epoch_owner_rejects_tamper_replace_and_retries_close(self) -> None:
+        identity = {
+            "unit": "ullm-openai.service",
+            "user": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "control_group": "/ullm",
+            "boot_id": "d" * 32,
+            "gateway_pid": 11,
+            "gateway_starttime_ticks": 12,
+            "worker_pid": 13,
+            "worker_starttime_ticks": 14,
+            "n_restarts": 6,
+        }
+        guard = SimpleNamespace(reject=lambda raw, label: None)
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = BACKEND.write_restart_epoch(Path(temporary), identity, guard)
+            owner.path.write_bytes(b"tampered\n")
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                owner.revalidate()
+            owner.close()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = BACKEND.write_restart_epoch(Path(temporary), identity, guard)
+            moved = owner.path.with_name("moved-epoch.json")
+            owner.path.rename(moved)
+            owner.path.write_bytes(b"replacement\n")
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                owner.revalidate()
+            owner.close()
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = BACKEND.write_restart_epoch(Path(temporary), identity, guard)
+            original_close = os.close
+            failed = False
+
+            def close_once(descriptor: int) -> None:
+                nonlocal failed
+                if descriptor == owner.file_fd and not failed:
+                    failed = True
+                    raise OSError("close failed")
+                original_close(descriptor)
+
+            with (
+                mock.patch.object(BACKEND.os, "close", side_effect=close_once),
+                self.assertRaisesRegex(OSError, "close failed"),
+            ):
+                owner.close()
+            self.assertFalse(owner.closed)
+            self.assertGreaterEqual(owner.file_fd, 0)
+            self.assertEqual(owner.directory_fd, -1)
+            owner.close()
+            self.assertTrue(owner.closed)
+
+    def test_restart_epoch_rejects_stage_mode_bool_and_unbounded_strings(self) -> None:
+        identity = {
+            "unit": "ullm-openai.service",
+            "user": "homelab1",
+            "uid": 1000,
+            "gid": 1000,
+            "control_group": "/ullm",
+            "boot_id": "d" * 32,
+            "gateway_pid": 11,
+            "gateway_starttime_ticks": 12,
+            "worker_pid": 13,
+            "worker_starttime_ticks": 14,
+            "n_restarts": 6,
+        }
+        guard = SimpleNamespace(reject=lambda raw, label: None)
+        for field, value in (("uid", True), ("n_restarts", True), ("user", "x" * 65)):
+            mutated = dict(identity)
+            mutated[field] = value
+            with tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaises(BACKEND.ProductionBackendError):
+                    BACKEND.write_restart_epoch(Path(temporary), mutated, guard)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            with self.assertRaises(BACKEND.ProductionBackendError):
+                BACKEND.write_restart_epoch(root, identity, guard)
 
 
 if __name__ == "__main__":

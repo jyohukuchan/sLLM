@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -720,6 +722,300 @@ class GateBindingContext:
     restart_epoch_sha256: str | None
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProductionBindingInputs:
+    environment: Mapping[str, Any]
+    expected_source_role_paths: Mapping[str, str]
+    repo_root: Path
+    binding_types: Mapping[GateName, Callable[..., Any]]
+    normal_identity: Any
+    restart_identity: Callable[[], Any]
+    secret_guard: Any
+    forbidden_values: tuple[bytes, ...]
+    http_image_id: str
+    docker_network_id: str
+    docker_network_subnet: str
+    docker_network_gateway: str
+    browser_image_reference: str
+    browser_image_content_id: str
+    probe_image_reference: str
+    probe_image_content_digest: str
+    openwebui_url: str
+    service_unit: str
+    service_user: str
+    boot_id: str
+    uid: int
+    gid: int
+
+
+def _source_bindings(inputs: ProductionBindingInputs) -> dict[str, tuple[Path, str]]:
+    sources = inputs.environment.get("sources")
+    expected = inputs.expected_source_role_paths
+    if (
+        type(sources) is not list
+        or len(sources) != 70
+        or len(expected) != 70
+        or not inputs.repo_root.is_absolute()
+    ):
+        fail("production binding source set differs")
+    result: dict[str, tuple[Path, str]] = {}
+    seen_paths: set[str] = set()
+    for item in sources:
+        if type(item) is not dict or set(item) != {"role", "path", "bytes", "sha256"}:
+            fail("production binding source record differs")
+        role = item["role"]
+        relative = item["path"]
+        digest = item["sha256"]
+        if (
+            type(role) is not str
+            or role in result
+            or expected.get(role) != relative
+            or type(relative) is not str
+            or relative in seen_paths
+            or type(item["bytes"]) is not int
+            or item["bytes"] < 1
+            or type(digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            fail("production binding source identity differs")
+        path = inputs.repo_root / relative
+        if not path.is_absolute() or ".." in Path(relative).parts:
+            fail("production binding source path differs")
+        result[role] = (path, digest)
+        seen_paths.add(relative)
+    if set(result) != set(expected):
+        fail("production binding source role coverage differs")
+    return result
+
+
+def _identity_values(identity: Any) -> dict[str, Any]:
+    names = (
+        "control_group",
+        "gateway_pid",
+        "gateway_starttime_ticks",
+        "worker_pid",
+        "worker_starttime_ticks",
+        "n_restarts",
+    )
+    values = {name: getattr(identity, name, None) for name in names}
+    if type(values["control_group"]) is not str or any(
+        type(values[name]) is not int for name in names[1:]
+    ):
+        fail("production binding process identity differs")
+    return values
+
+
+def _source_fields(
+    sources: Mapping[str, tuple[Path, str]], mapping: Mapping[str, str]
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for prefix, role in mapping.items():
+        try:
+            path, digest = sources[role]
+        except KeyError:
+            fail("production binding required source is missing")
+        fields[f"{prefix}_source"] = path
+        fields[f"{prefix}_source_sha256"] = digest
+    return fields
+
+
+def _instantiate_binding(
+    inputs: ProductionBindingInputs, gate: GateName, values: dict[str, Any]
+) -> Any:
+    if set(values) != set(EXPECTED_BINDING_FIELDS[gate]):
+        fail("production ingestor binding field set differs")
+    try:
+        result = inputs.binding_types[gate](**values)
+    except (KeyError, TypeError, ValueError):
+        fail("production ingestor binding construction failed")
+    if (
+        tuple(field.name for field in dataclasses.fields(result))
+        != EXPECTED_BINDING_FIELDS[gate]
+    ):
+        fail("production ingestor binding type differs")
+    return result
+
+
+def production_binding_builders(
+    inputs: ProductionBindingInputs,
+) -> Mapping[GateName, Callable[[GateBindingContext], Any]]:
+    """Build all six exact independent-ingestor dataclasses from prepared pins."""
+
+    if (
+        inputs.http_image_id != PRODUCTION_IMAGE_ID
+        or inputs.docker_network_id != PRODUCTION_NETWORK_ID
+        or inputs.docker_network_subnet != "172.20.0.0/16"
+        or inputs.docker_network_gateway != "172.20.0.1"
+        or IMAGE_RE.fullmatch(inputs.browser_image_reference) is None
+        or IMAGE_RE.fullmatch(inputs.probe_image_reference) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", inputs.browser_image_content_id) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", inputs.probe_image_content_digest)
+        is None
+        or inputs.openwebui_url != "http://192.168.0.66:3000/"
+        or inputs.service_unit != "ullm-openai.service"
+        or inputs.service_user != "homelab1"
+        or re.fullmatch(r"[0-9a-f]{32}", inputs.boot_id) is None
+        or inputs.uid != 1000
+        or inputs.gid != 1000
+        or not callable(getattr(inputs.secret_guard, "reject", None))
+    ):
+        fail("production binding deployment snapshot differs")
+    sources = _source_bindings(inputs)
+    normal = _identity_values(inputs.normal_identity)
+    common = {
+        "service_unit": inputs.service_unit,
+        "service_user": inputs.service_user,
+        "boot_id": inputs.boot_id,
+        "control_group": normal["control_group"],
+        "gateway_pid": normal["gateway_pid"],
+        "gateway_starttime_ticks": normal["gateway_starttime_ticks"],
+        "worker_pid": normal["worker_pid"],
+        "worker_starttime_ticks": normal["worker_starttime_ticks"],
+        "restart_count": normal["n_restarts"],
+        "uid": inputs.uid,
+        "gid": inputs.gid,
+        "forbidden_values": inputs.forbidden_values,
+    }
+
+    def build(context: GateBindingContext) -> Any:
+        gate = context.gate
+        if gate == "api_contract":
+            values = {
+                **_source_fields(
+                    sources,
+                    {
+                        "gate": "gate_api_contract",
+                        "direct": "gate_direct_cancel",
+                        "collector": "release_collector",
+                        "http_client": "http_client",
+                        "gateway_app": "gateway_app",
+                        "gateway_errors": "gateway_errors",
+                        "gateway_schemas": "gateway_schemas",
+                    },
+                ),
+                "http_image_id": inputs.http_image_id,
+                "docker_network_id": inputs.docker_network_id,
+                **common,
+            }
+        elif gate == "combined":
+            values = {
+                **_source_fields(
+                    sources,
+                    {
+                        "gate": "gate_openwebui_soak",
+                        "support": "campaign_journal",
+                    },
+                ),
+                "browser_script": sources["browser_soak"][0],
+                "browser_script_sha256": sources["browser_soak"][1],
+                "browser_image_reference": inputs.browser_image_reference,
+                "browser_image_content_id": inputs.browser_image_content_id,
+                "openwebui_base_url": inputs.openwebui_url,
+                "service_unit": inputs.service_unit,
+                "boot_id": inputs.boot_id,
+                "gateway_pid": normal["gateway_pid"],
+                "uid": inputs.uid,
+                "gid": inputs.gid,
+                "restart_count": normal["n_restarts"],
+                "forbidden_values": inputs.forbidden_values,
+            }
+        elif gate == "direct_cancel":
+            values = {
+                **_source_fields(
+                    sources,
+                    {
+                        "gate": "gate_direct_cancel",
+                        "collector": "release_collector",
+                        "http_client": "http_client",
+                    },
+                ),
+                "http_image_id": inputs.http_image_id,
+                "docker_network_id": inputs.docker_network_id,
+                **common,
+            }
+        elif gate == "stop":
+            values = {
+                **_source_fields(
+                    sources,
+                    {"gate": "gate_openwebui_stop"},
+                ),
+                "browser_script": sources["browser_stop"][0],
+                "browser_script_sha256": sources["browser_stop"][1],
+                "browser_image_reference": inputs.browser_image_reference,
+                "browser_image_content_id": inputs.browser_image_content_id,
+                "openwebui_url": inputs.openwebui_url,
+                **common,
+            }
+        elif gate == "failure":
+            restart = _identity_values(inputs.restart_identity())
+            values = {
+                **_source_fields(
+                    sources,
+                    {
+                        "gate": "gate_openwebui_failure",
+                        "hook": "gate_openwebui_failure_hook",
+                        "browser": "browser_failure",
+                    },
+                ),
+                "browser_image_reference": inputs.browser_image_reference,
+                "browser_image_content_digest": inputs.browser_image_content_id,
+                "probe_image_reference": inputs.probe_image_reference,
+                "probe_image_content_digest": inputs.probe_image_content_digest,
+                "docker_network_id": inputs.docker_network_id,
+                "docker_network_subnet": inputs.docker_network_subnet,
+                "docker_network_gateway": inputs.docker_network_gateway,
+                "service_unit": inputs.service_unit,
+                "service_user": inputs.service_user,
+                "boot_id": inputs.boot_id,
+                "control_group": normal["control_group"],
+                "normal_gateway_pid": normal["gateway_pid"],
+                "normal_gateway_starttime_ticks": normal["gateway_starttime_ticks"],
+                "normal_worker_pid": normal["worker_pid"],
+                "normal_worker_starttime_ticks": normal["worker_starttime_ticks"],
+                "normal_restart_count": normal["n_restarts"],
+                "restart_gateway_pid": restart["gateway_pid"],
+                "restart_gateway_starttime_ticks": restart["gateway_starttime_ticks"],
+                "restart_worker_pid": restart["worker_pid"],
+                "restart_worker_starttime_ticks": restart["worker_starttime_ticks"],
+                "restart_restart_count": restart["n_restarts"],
+                "uid": inputs.uid,
+                "gid": inputs.gid,
+                "forbidden_values": inputs.forbidden_values,
+            }
+        else:
+            restart = _identity_values(context.restart_identity)
+            values = {
+                **_source_fields(
+                    sources,
+                    {
+                        "gate": "gate_http_latency",
+                        "direct": "gate_direct_cancel",
+                        "collector": "release_collector",
+                        "http_client": "http_client",
+                    },
+                ),
+                "restart_epoch_file": context.restart_epoch_file,
+                "restart_epoch_sha256": context.restart_epoch_sha256,
+                "http_image_id": inputs.http_image_id,
+                "docker_network_id": inputs.docker_network_id,
+                "service_unit": inputs.service_unit,
+                "service_user": inputs.service_user,
+                "boot_id": inputs.boot_id,
+                "control_group": restart["control_group"],
+                "gateway_pid": restart["gateway_pid"],
+                "gateway_starttime_ticks": restart["gateway_starttime_ticks"],
+                "worker_pid": restart["worker_pid"],
+                "worker_starttime_ticks": restart["worker_starttime_ticks"],
+                "restart_count": restart["n_restarts"],
+                "uid": inputs.uid,
+                "gid": inputs.gid,
+                "forbidden_values": inputs.forbidden_values,
+            }
+        return _instantiate_binding(inputs, gate, values)
+
+    return {gate: build for gate in GATE_ORDER}
+
+
 class ProductionGateBindingsFactory:
     """Build exact ingestor bindings and pin the one post-failure epoch."""
 
@@ -727,7 +1023,7 @@ class ProductionGateBindingsFactory:
         self,
         normal_identity: Any,
         builders: Mapping[GateName, Callable[[GateBindingContext], Any]],
-        restart_extractor: Callable[[Any, Path], tuple[Any, Path, str]],
+        restart_extractor: Callable[[Any, Path], tuple[Any, "RestartEpochOwner"]],
     ) -> None:
         if set(builders) != set(GATE_ORDER):
             fail("production gate binding builder set differs")
@@ -737,6 +1033,7 @@ class ProductionGateBindingsFactory:
         self.restart_identity: Any | None = None
         self.restart_epoch_file: Path | None = None
         self.restart_epoch_sha256: str | None = None
+        self.restart_epoch_owner: RestartEpochOwner | None = None
 
     def confirm_restart(
         self, identity: Any, epoch_file: Path, epoch_sha256: str
@@ -752,13 +1049,32 @@ class ProductionGateBindingsFactory:
         self.restart_epoch_sha256 = epoch_sha256
 
     def confirm_failure(self, result: Any, work_dir: Path) -> Path:
-        identity, epoch_file, epoch_sha256 = self.restart_extractor(result, work_dir)
-        self.confirm_restart(identity, epoch_file, epoch_sha256)
-        return epoch_file
+        identity, owner = self.restart_extractor(result, work_dir)
+        if not isinstance(owner, RestartEpochOwner):
+            fail("production restart epoch owner type differs")
+        self.restart_epoch_owner = owner
+        try:
+            owner.revalidate()
+            self.confirm_restart(identity, owner.path, owner.sha256)
+        except BaseException as error:
+            cleanup_failed = False
+            try:
+                owner.close()
+            except BaseException:
+                cleanup_failed = True
+                error.add_note("restart epoch owner cleanup also failed")
+            if not cleanup_failed:
+                self.restart_epoch_owner = None
+            raise
+        return owner.path
 
     def build(self, gate: GateName, work_dir: Path) -> Any:
         if gate == "latency" and self.restart_identity is None:
             fail("latency binding lacks the confirmed restart epoch")
+        if gate == "latency":
+            if self.restart_epoch_owner is None:
+                fail("latency binding lacks the restart epoch owner")
+            self.restart_epoch_owner.revalidate()
         return self.builders[gate](
             GateBindingContext(
                 gate,
@@ -769,6 +1085,309 @@ class ProductionGateBindingsFactory:
                 self.restart_epoch_sha256,
             )
         )
+
+    def confirm_latency(self) -> None:
+        if self.restart_epoch_owner is None:
+            fail("latency completion lacks the restart epoch owner")
+        self.restart_epoch_owner.revalidate()
+        self.restart_epoch_owner.close()
+        self.restart_epoch_owner = None
+
+    def close(self) -> None:
+        if self.restart_epoch_owner is None:
+            return
+        self.restart_epoch_owner.close()
+        self.restart_epoch_owner = None
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+@dataclasses.dataclass(slots=True)
+class RestartEpochOwner:
+    path: Path
+    sha256: str
+    identity: Mapping[str, Any]
+    directory_fd: int
+    file_fd: int
+    directory_identity: tuple[int, ...]
+    file_identity: tuple[int, ...]
+    closed: bool = False
+
+    def revalidate(self) -> None:
+        if self.closed or self.directory_fd < 0 or self.file_fd < 0:
+            fail("restart epoch owner is closed")
+        try:
+            directory = os.fstat(self.directory_fd)
+            directory_entry = os.stat(self.path.parent, follow_symlinks=False)
+            file_value = os.fstat(self.file_fd)
+            file_entry = os.stat(
+                self.path.name, dir_fd=self.directory_fd, follow_symlinks=False
+            )
+        except OSError:
+            fail("restart epoch owner entry is unavailable")
+        if (
+            _stat_identity(directory) != self.directory_identity
+            or _stat_identity(directory_entry) != self.directory_identity
+            or _stat_identity(file_value) != self.file_identity
+            or _stat_identity(file_entry) != self.file_identity
+        ):
+            fail("restart epoch owner identity changed")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        errors: list[BaseException] = []
+        for attribute in ("file_fd", "directory_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor < 0:
+                continue
+            try:
+                os.close(descriptor)
+                setattr(self, attribute, -1)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
+        self.closed = True
+
+
+def write_restart_epoch(
+    stage_path: Path,
+    service_identity: Mapping[str, Any],
+    secret_guard: Any,
+) -> RestartEpochOwner:
+    """Atomically create the one private latency epoch pin after failure."""
+
+    fields = (
+        "unit",
+        "user",
+        "uid",
+        "gid",
+        "control_group",
+        "boot_id",
+        "gateway_pid",
+        "gateway_starttime_ticks",
+        "worker_pid",
+        "worker_starttime_ticks",
+        "n_restarts",
+    )
+    integer_fields = (
+        "uid",
+        "gid",
+        "gateway_pid",
+        "gateway_starttime_ticks",
+        "worker_pid",
+        "worker_starttime_ticks",
+        "n_restarts",
+    )
+    if (
+        set(service_identity) != set(fields)
+        or not stage_path.is_absolute()
+        or Path(os.path.abspath(stage_path)) != stage_path
+        or ".." in stage_path.parts
+        or os.geteuid() != 1000
+        or os.getegid() != 1000
+        or service_identity.get("unit") != "ullm-openai.service"
+        or service_identity.get("user") != "homelab1"
+        or service_identity.get("uid") != 1000
+        or service_identity.get("gid") != 1000
+        or type(service_identity.get("boot_id")) is not str
+        or re.fullmatch(r"[0-9a-f]{32}", service_identity["boot_id"]) is None
+        or type(service_identity.get("control_group")) is not str
+        or not service_identity["control_group"].startswith("/")
+        or len(service_identity["control_group"]) > 4096
+        or any(
+            type(service_identity.get(name)) is not int
+            or service_identity.get(name, -1) < 0
+            for name in integer_fields
+        )
+        or service_identity.get("gateway_pid", 0) < 1
+        or service_identity.get("worker_pid", 0) < 1
+        or service_identity.get("gateway_starttime_ticks", 0) < 1
+        or service_identity.get("worker_starttime_ticks", 0) < 1
+        or service_identity.get("uid", 0) > (1 << 32) - 1
+        or service_identity.get("gid", 0) > (1 << 32) - 1
+        or service_identity.get("gateway_pid", 0) > (1 << 31) - 1
+        or service_identity.get("worker_pid", 0) > (1 << 31) - 1
+        or service_identity.get("gateway_starttime_ticks", 0) > (1 << 63) - 1
+        or service_identity.get("worker_starttime_ticks", 0) > (1 << 63) - 1
+        or service_identity.get("n_restarts", 0) > (1 << 31) - 1
+    ):
+        fail("restart epoch service identity differs")
+    try:
+        for name, limit in (
+            ("unit", 255),
+            ("user", 64),
+            ("boot_id", 32),
+            ("control_group", 4096),
+        ):
+            encoded = service_identity[name].encode("ascii", errors="strict")
+            if not encoded or len(encoded) > limit or b"\x00" in encoded:
+                fail("restart epoch service string differs")
+    except UnicodeError:
+        fail("restart epoch service string is not ASCII")
+    value = {
+        "schema_version": "ullm.sq8.resource_restart_epoch.v1",
+        "phase": "resource_restart",
+        "service_identity": dict(service_identity),
+    }
+    try:
+        raw = (
+            json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            + b"\n"
+        )
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        fail("restart epoch cannot be encoded")
+    if len(raw) > 16 << 10:
+        fail("restart epoch exceeds its byte bound")
+    secret_guard.reject(raw, "restart epoch")
+    name = "resource-restart-epoch.json"
+    path = stage_path / name
+    directory_fd = -1
+    descriptor = -1
+    created = False
+    file_anchor: tuple[int, int] | None = None
+    try:
+        directory_fd = os.open(
+            stage_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        before = os.fstat(directory_fd)
+        before_entry = os.stat(stage_path, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or stat.S_ISLNK(before_entry.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o700
+            or before.st_uid != os.geteuid()
+            or before.st_gid != os.getegid()
+            or (before.st_dev, before.st_ino)
+            != (before_entry.st_dev, before_entry.st_ino)
+        ):
+            fail("restart epoch stage is not a directory")
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        created = True
+        opened = os.fstat(descriptor)
+        file_anchor = (opened.st_dev, opened.st_ino)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset : offset + 4096])
+            if written <= 0:
+                fail("restart epoch write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o600)
+        file_identity = os.fstat(descriptor)
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        after = os.fstat(directory_fd)
+        after_entry = os.stat(stage_path, follow_symlinks=False)
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or (after.st_dev, after.st_ino) != (after_entry.st_dev, after_entry.st_ino)
+            or (file_identity.st_dev, file_identity.st_ino)
+            != (entry.st_dev, entry.st_ino)
+            or not stat.S_ISREG(file_identity.st_mode)
+            or stat.S_IMODE(file_identity.st_mode) != 0o600
+            or file_identity.st_nlink != 1
+            or file_identity.st_size != len(raw)
+        ):
+            fail("restart epoch identity changed")
+        os.fsync(directory_fd)
+        return RestartEpochOwner(
+            path,
+            hashlib.sha256(raw).hexdigest(),
+            dict(service_identity),
+            directory_fd,
+            descriptor,
+            _stat_identity(after),
+            _stat_identity(file_identity),
+        )
+    except BaseException as error:
+        if created and directory_fd >= 0:
+            try:
+                entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if file_anchor == (entry.st_dev, entry.st_ino):
+                    os.unlink(name, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+            except FileNotFoundError:
+                pass
+            except BaseException:
+                error.add_note("restart epoch partial-file cleanup also failed")
+        for descriptor_value, note in (
+            (descriptor, "restart epoch file descriptor cleanup also failed"),
+            (directory_fd, "restart epoch directory descriptor cleanup also failed"),
+        ):
+            if descriptor_value < 0:
+                continue
+            try:
+                os.close(descriptor_value)
+            except BaseException:
+                error.add_note(note)
+        raise
+
+
+def production_binding_factory(
+    inputs: ProductionBindingInputs,
+) -> ProductionGateBindingsFactory:
+    """Create bindings plus the canonical one-shot restart epoch writer."""
+
+    builders = production_binding_builders(inputs)
+
+    def extract(result: Any, work_dir: Path) -> tuple[Any, RestartEpochOwner]:
+        restart = inputs.restart_identity()
+        identity = _identity_values(restart)
+        record = getattr(result, "restart_probe_record", None)
+        fields = record.get("fields") if type(record) is dict else None
+        if type(fields) is not dict or any(
+            fields.get(name) != identity[name]
+            for name in (
+                "control_group",
+                "gateway_pid",
+                "gateway_starttime_ticks",
+                "worker_pid",
+                "worker_starttime_ticks",
+                "n_restarts",
+            )
+        ):
+            fail("failure result restart identity differs")
+        service = {
+            "unit": inputs.service_unit,
+            "user": inputs.service_user,
+            "uid": inputs.uid,
+            "gid": inputs.gid,
+            "control_group": identity["control_group"],
+            "boot_id": inputs.boot_id,
+            "gateway_pid": identity["gateway_pid"],
+            "gateway_starttime_ticks": identity["gateway_starttime_ticks"],
+            "worker_pid": identity["worker_pid"],
+            "worker_starttime_ticks": identity["worker_starttime_ticks"],
+            "n_restarts": identity["n_restarts"],
+        }
+        evidence = write_restart_epoch(work_dir, service, inputs.secret_guard)
+        return restart, evidence
+
+    return ProductionGateBindingsFactory(inputs.normal_identity, builders, extract)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1002,9 +1621,9 @@ class ResourceAdapter:
                 owner.close()
             except BaseException as error:
                 errors.append(error)
-        self.closed = True
         if errors:
             raise errors[0]
+        self.closed = True
 
 
 class ProductionCampaignBackend:
@@ -1092,6 +1711,11 @@ class ProductionCampaignBackend:
                 self.deployment = dataclasses.replace(
                     self.deployment, expected_epoch_file=epoch_file
                 )
+            elif gate == "latency":
+                confirm_latency = getattr(self.bindings, "confirm_latency", None)
+                if not callable(confirm_latency):
+                    fail("production latency binding cannot close the restart epoch")
+                confirm_latency()
         except BaseException:
             self.poisoned = True
             raise
@@ -1110,14 +1734,18 @@ class ProductionCampaignBackend:
         if self.closed:
             return
         errors: list[BaseException] = []
-        for owner in (self.bridge, *reversed(self.owners)):
+        cleanup_owners: list[Any] = []
+        if callable(getattr(self.bindings, "close", None)):
+            cleanup_owners.append(self.bindings)
+        cleanup_owners.extend((self.bridge, *reversed(self.owners)))
+        for owner in cleanup_owners:
             try:
                 owner.close()
             except BaseException as error:
                 errors.append(error)
-        self.closed = True
         if errors:
             raise errors[0]
+        self.closed = True
 
 
 __all__ = [
