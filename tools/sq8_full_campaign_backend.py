@@ -35,6 +35,10 @@ READ_CHUNK_BYTES = 16 << 10
 PRODUCTION_IMAGE_ID = (
     "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
 )
+PRODUCTION_BROWSER_IMAGE_ID = (
+    "sha256:dbd552f6c831816050a1381a54cdb8d37df56df7f6559c82aba451d2ea93e0aa"
+)
+PRODUCTION_PROBE_IMAGE_ID = PRODUCTION_IMAGE_ID
 PRODUCTION_NETWORK_ID = (
     "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8"
 )
@@ -116,8 +120,8 @@ class GateDeployment:
         if (
             self.http_image_id != PRODUCTION_IMAGE_ID
             or self.docker_network_id != PRODUCTION_NETWORK_ID
-            or IMAGE_RE.fullmatch(self.browser_image) is None
-            or IMAGE_RE.fullmatch(self.probe_image) is None
+            or self.browser_image != PRODUCTION_BROWSER_IMAGE_ID
+            or self.probe_image != PRODUCTION_PROBE_IMAGE_ID
             or self.openwebui_url != "http://192.168.0.66:3000/"
             or self.gateway_ready_url != "http://172.20.0.1:8000/readyz"
             or self.network_name != "open-webui-network"
@@ -616,6 +620,9 @@ class SystemCampaignBridge:
         return int(runtime.now_ns())
 
     def scan_evidence(self, raw: bytes, label: str) -> None:
+        if self.closed or self.guard is None:
+            self._scan(raw, label)
+            return
         guard, _runtime = self._require_open()
         guard.reject(raw, label)
         self._scan(raw, label)
@@ -846,11 +853,10 @@ def production_binding_builders(
         or inputs.docker_network_id != PRODUCTION_NETWORK_ID
         or inputs.docker_network_subnet != "172.20.0.0/16"
         or inputs.docker_network_gateway != "172.20.0.1"
-        or IMAGE_RE.fullmatch(inputs.browser_image_reference) is None
-        or IMAGE_RE.fullmatch(inputs.probe_image_reference) is None
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", inputs.browser_image_content_id) is None
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", inputs.probe_image_content_digest)
-        is None
+        or inputs.browser_image_reference != PRODUCTION_BROWSER_IMAGE_ID
+        or inputs.browser_image_content_id != PRODUCTION_BROWSER_IMAGE_ID
+        or inputs.probe_image_reference != PRODUCTION_PROBE_IMAGE_ID
+        or inputs.probe_image_content_digest != PRODUCTION_PROBE_IMAGE_ID
         or inputs.openwebui_url != "http://192.168.0.66:3000/"
         or inputs.service_unit != "ullm-openai.service"
         or inputs.service_user != "homelab1"
@@ -1412,6 +1418,159 @@ def production_gate_ingestors(modules: IngestorModules) -> GateIngestors:
     )
 
 
+def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
+    """Build every fixed production adapter and publish one prepared campaign."""
+
+    import sq8_api_contract_gate_ingest as api_ingest
+    import sq8_full_campaign_renderer as renderer_module
+    import sq8_http_latency_gate_ingest as latency_ingest
+    import sq8_openwebui_campaign as campaign_module
+    import sq8_openwebui_failure_gate_ingest as failure_ingest
+    import sq8_openwebui_gate_ingest as openwebui_ingest
+    import sq8_openwebui_stop_gate_ingest as stop_ingest
+
+    runtime = prepared.runtime
+    collector = runtime.collector
+    production = runtime.production_module
+    identity_module = runtime.identity_module
+    environment = prepared.identity.identity_artifacts.environment
+    source_items = environment.get("sources")
+    if type(source_items) is not list:
+        fail("prepared production sources differ")
+    http_sources = [
+        item
+        for item in source_items
+        if type(item) is dict and item.get("role") == "http_client"
+    ]
+    if len(http_sources) != 1:
+        fail("prepared HTTP client source seal differs")
+    client_sha = http_sources[0].get("sha256")
+    if type(client_sha) is not str or re.fullmatch(r"[0-9a-f]{64}", client_sha) is None:
+        fail("prepared HTTP client SHA-256 differs")
+    client_raw = production.read_pinned_http_client_source(
+        production.production_preflight_settings(),
+        prepared.git_anchor,
+        expected_sha256=client_sha,
+    )
+    direct = orchestrator._load_hyphenated_module(
+        "_sq8_full_campaign_direct_identity",
+        TOOLS_DIR / "run-sq8-direct-cancel-gate.py",
+    )
+    normal = direct.capture_service_identity()
+    cached_epoch = prepared.config.normal_epoch
+    cached_live = prepared.identity.live_identity
+    if (
+        normal.gateway_pid != cached_epoch.gateway_pid
+        or normal.worker_pid != cached_epoch.worker_pid
+        or normal.boot_id != prepared.config.boot_id
+        or normal.n_restarts != prepared.identity.service_n_restarts
+        or normal.unit != cached_live.service_unit
+        or normal.user != cached_live.service_user
+        or normal.uid != cached_live.service_uid
+        or normal.gid != cached_live.service_gid
+        or normal.control_group != cached_live.control_group
+        or normal.gateway_pid != cached_live.gateway.pid
+        or normal.gateway_starttime_ticks != cached_live.gateway.starttime_ticks
+        or normal.worker_pid != cached_live.worker.pid
+        or normal.worker_starttime_ticks != cached_live.worker.starttime_ticks
+        or normal.n_restarts != cached_live.n_restarts
+        or normal.boot_id != cached_live.boot_id
+        or cached_live.derived_image_id != PRODUCTION_IMAGE_ID
+        or cached_live.docker_network_id != PRODUCTION_NETWORK_ID
+        or cached_live.docker_network_subnet != "172.20.0.0/16"
+        or cached_live.docker_network_gateway != "172.20.0.1"
+    ):
+        fail("live normal service identity differs from the prepared campaign")
+
+    bridge = SystemCampaignBridge(
+        SystemBridgeInputs(
+            prepared.identity,
+            prepared.resource,
+            prepared.git_anchor,
+            prepared.secret_owner,
+            client_raw,
+            client_sha,
+            production.production_preflight_settings().repo_root,
+            collector.AMD_SMI_BIN,
+        ),
+        system_bridge_factories(collector, campaign_module, orchestrator),
+        scan_evidence=prepared.secret_guard.reject,
+    )
+    binding_inputs = ProductionBindingInputs(
+        environment,
+        identity_module.SOURCE_ROLE_PATHS,
+        production.production_preflight_settings().repo_root,
+        {
+            "api_contract": api_ingest.ApiContractInputBindings,
+            "combined": openwebui_ingest.GateInputBindings,
+            "direct_cancel": openwebui_ingest.DirectCancelInputBindings,
+            "stop": stop_ingest.StopGateInputBindings,
+            "failure": failure_ingest.FailureGateInputBindings,
+            "latency": latency_ingest.LatencyGateInputBindings,
+        },
+        normal,
+        direct.capture_service_identity,
+        prepared.secret_guard,
+        prepared.secret_guard.secrets,
+        PRODUCTION_IMAGE_ID,
+        PRODUCTION_NETWORK_ID,
+        "172.20.0.0/16",
+        "172.20.0.1",
+        PRODUCTION_BROWSER_IMAGE_ID,
+        PRODUCTION_BROWSER_IMAGE_ID,
+        PRODUCTION_PROBE_IMAGE_ID,
+        PRODUCTION_PROBE_IMAGE_ID,
+        "http://192.168.0.66:3000/",
+        "ullm-openai.service",
+        "homelab1",
+        prepared.config.boot_id,
+        prepared.config.uid,
+        prepared.config.gid,
+    )
+    bindings = production_binding_factory(binding_inputs)
+    backend = ProductionCampaignBackend(
+        bridge=bridge,
+        runner=BoundedGateRunner(),
+        secrets=SecretMasterPaths.from_owner(prepared.secret_owner),
+        deployment=GateDeployment(
+            PRODUCTION_IMAGE_ID,
+            PRODUCTION_NETWORK_ID,
+            PRODUCTION_BROWSER_IMAGE_ID,
+            PRODUCTION_PROBE_IMAGE_ID,
+            "http://192.168.0.66:3000/",
+            "http://172.20.0.1:8000/readyz",
+            "open-webui-network",
+            "ullm-openai.service",
+            Path("/run/user/1000/ullm-sq8-restart-epoch.pending"),
+        ),
+        bindings=bindings,
+        ingestors=production_gate_ingestors(
+            IngestorModules(
+                api_ingest,
+                openwebui_ingest,
+                stop_ingest,
+                failure_ingest,
+                latency_ingest,
+            )
+        ),
+    )
+    validator = runtime.validator.FullCampaignIndependentValidator(
+        expected_commit=prepared.request.expected_commit,
+        expected_worker_binary_sha256=(prepared.request.expected_worker_binary_sha256),
+        repo_root=production.production_preflight_settings().repo_root,
+        forbidden_values=prepared.secret_guard.secrets,
+    )
+    published = orchestrator.run_full_campaign(
+        prepared.config,
+        backend,
+        renderer_module.FullCampaignRenderer(),
+        validator,
+    )
+    if not isinstance(published, os.PathLike):
+        fail("production campaign publication path type differs")
+    return Path(published)
+
+
 class GateBindingsFactory(Protocol):
     def build(self, gate: GateName, work_dir: Path) -> Any: ...
 
@@ -1697,17 +1856,25 @@ class ProductionCampaignBackend:
         if self.closed or self.poisoned or gate != expected:
             fail("production gate order differs")
         self.attempted.append(gate)
+        gate_bundle = work_dir / "gate-bundle"
+        if (
+            not work_dir.is_absolute()
+            or gate_bundle.exists()
+            or gate_bundle.is_symlink()
+        ):
+            self.poisoned = True
+            fail("production gate bundle destination differs")
         try:
             self.secrets.revalidate()
-            self.runner.run_gate(gate, work_dir, self.secrets, self.deployment)
+            self.runner.run_gate(gate, gate_bundle, self.secrets, self.deployment)
             result = self.ingestors.for_gate(gate)(
-                work_dir, self.bindings.build(gate, work_dir)
+                gate_bundle, self.bindings.build(gate, gate_bundle)
             )
             if gate == "failure":
                 confirm = getattr(self.bindings, "confirm_failure", None)
                 if not callable(confirm):
                     fail("production failure binding cannot confirm the restart epoch")
-                epoch_file = confirm(result, work_dir)
+                epoch_file = confirm(result, gate_bundle)
                 self.deployment = dataclasses.replace(
                     self.deployment, expected_epoch_file=epoch_file
                 )

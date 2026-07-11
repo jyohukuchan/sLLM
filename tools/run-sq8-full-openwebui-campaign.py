@@ -18,7 +18,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Iterable, Mapping, NoReturn, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, NoReturn, Protocol, Sequence, cast
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -1978,6 +1978,10 @@ class ProductionPreparationRuntime(Protocol):
     def revalidate_prepared(self, prepared: "PreparedProductionCampaign") -> None: ...
 
 
+class ProductionExecutor(Protocol):
+    def execute(self, prepared: "PreparedProductionCampaign") -> Path: ...
+
+
 def _validate_final_destination(path: Path) -> None:
     if not isinstance(path, Path) or not path.is_absolute():
         fail("campaign final destination must be an absolute Path")
@@ -2201,8 +2205,11 @@ class SystemProductionPreparationRuntime:
         )
 
     def validate_promotion(self, anchor: Any, tools: Any) -> dict[str, Any]:
-        return self.production_module.run_pinned_full_promotion_validation(
-            self.settings, anchor, tools
+        return cast(
+            dict[str, Any],
+            self.production_module.run_pinned_full_promotion_validation(
+                self.settings, anchor, tools
+            ),
         )
 
     def snapshot_api_key(self, path: Path) -> bytes:
@@ -2330,6 +2337,15 @@ class SystemProductionPreparationRuntime:
             fail("production resource contract changed")
 
 
+class SystemProductionExecutor:
+    """Construct and run the fixed production backend from one prepared campaign."""
+
+    def execute(self, prepared: PreparedProductionCampaign) -> Path:
+        import sq8_full_campaign_backend as backend
+
+        return backend.execute_prepared_campaign(prepared, sys.modules[__name__])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -2348,14 +2364,9 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     runtime: ProductionPreparationRuntime | None = None,
+    executor: ProductionExecutor | None = None,
 ) -> int:
     arguments = build_parser().parse_args(argv)
-    if arguments.execute:
-        print(
-            "full campaign production backend is not wired; refusing to execute",
-            file=sys.stderr,
-        )
-        return 2
     request = ProductionPreparationRequest(
         arguments.expected_commit,
         arguments.expected_worker_binary_sha256,
@@ -2365,11 +2376,32 @@ def main(
         arguments.openwebui_token_file,
     )
     try:
+        if arguments.execute and runtime is not None and executor is None:
+            fail("injected preparation runtime requires an injected executor")
         selected = SystemProductionPreparationRuntime() if runtime is None else runtime
+        selected_executor = SystemProductionExecutor() if executor is None else executor
         with PreparedProductionCampaign.create(request, selected) as prepared:
             prepared.revalidate()
-            report = prepared.report()
-        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+            if arguments.execute:
+                published = selected_executor.execute(prepared)
+                if published != request.final_path:
+                    fail("production executor publication path differs")
+                report = {
+                    "schema_version": "ullm.sq8.production_execution.v1",
+                    "status": "published",
+                    "run_id": request.run_id,
+                    "git_commit": request.expected_commit,
+                    "published_path": os.fspath(published),
+                }
+            else:
+                report = prepared.report()
+        encoded = json.dumps(report, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 4096:
+            fail("production result report exceeds its byte bound")
+        prepared.secret_guard.reject(
+            encoded.encode("utf-8"), "production result report"
+        )
+        print(encoded)
         return 0
     except KeyboardInterrupt:
         print("production preflight interrupted", file=sys.stderr)
@@ -2392,9 +2424,11 @@ __all__ = [
     "CampaignSecretOwner",
     "CampaignSecretScanner",
     "PreparedProductionCampaign",
+    "ProductionExecutor",
     "ProductionPreparationRequest",
     "ProductionPreparationRuntime",
     "SystemProductionPreparationRuntime",
+    "SystemProductionExecutor",
     "FinalPhaseResult",
     "FileEvidence",
     "FullCampaignError",

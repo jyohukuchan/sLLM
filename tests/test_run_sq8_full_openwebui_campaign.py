@@ -1467,11 +1467,13 @@ class ProductionPreparationCliTests(unittest.TestCase):
             os.fspath(self.root / "token"),
         ]
 
-    def run_main(self, runtime, mode="--preflight-only"):
+    def run_main(self, runtime, mode="--preflight-only", executor=None):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            status = ORCHESTRATOR.main(self.arguments(mode), runtime=runtime)
+            status = ORCHESTRATOR.main(
+                self.arguments(mode), runtime=runtime, executor=executor
+            )
         return status, stdout.getvalue(), stderr.getvalue()
 
     def test_preflight_success_has_fixed_order_redacted_report_and_no_campaign(self):
@@ -1525,8 +1527,51 @@ class ProductionPreparationCliTests(unittest.TestCase):
         runtime = FakePreparationRuntime()
         status, stdout, stderr = self.run_main(runtime, "--execute")
         self.assertEqual((status, stdout), (2, ""))
-        self.assertIn("not wired", stderr)
+        self.assertIn("failed", stderr)
         self.assertEqual(runtime.calls, [])
+
+    def test_execute_prepares_revalidates_executes_then_cleans_before_success(self):
+        runtime = FakePreparationRuntime()
+
+        class Executor:
+            def execute(self, prepared):
+                runtime.calls.append("execute")
+                self.prepared = prepared
+                return prepared.request.final_path
+
+        executor = Executor()
+        status, stdout, stderr = self.run_main(runtime, "--execute", executor)
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["status"], "published")
+        self.assertLess(
+            runtime.calls.index("execute"), runtime.calls.index("close:secret")
+        )
+        self.assertTrue(executor.prepared.closed)
+
+    def test_execute_failure_and_cleanup_failure_print_no_success(self):
+        class FailingExecutor:
+            def execute(self, prepared):
+                raise RuntimeError("execute failed")
+
+        for runtime, executor in (
+            (FakePreparationRuntime(), FailingExecutor()),
+            (
+                FakePreparationRuntime(cleanup_error="secret"),
+                types.SimpleNamespace(
+                    execute=lambda prepared: prepared.request.final_path
+                ),
+            ),
+        ):
+            status, stdout, stderr = self.run_main(runtime, "--execute", executor)
+            self.assertEqual((status, stdout), (2, ""))
+            self.assertIn("failed", stderr)
+
+    def test_preflight_never_calls_injected_executor(self):
+        runtime = FakePreparationRuntime()
+        executor = mock.Mock()
+        status, _stdout, _stderr = self.run_main(runtime, executor=executor)
+        self.assertEqual(status, 0)
+        executor.execute.assert_not_called()
 
     def test_existing_final_destination_fails_before_lock(self):
         (self.root / "campaign").mkdir()
