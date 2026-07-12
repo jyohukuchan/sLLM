@@ -5131,6 +5131,151 @@ extern "C" __global__ void ullm_paged_kv_write_f32_kernel(
 )";
     }
 
+    static const char *paged_chunk_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_paged_kv_write_chunk_f32_kernel(
+    const float *k,
+    const float *v,
+    const unsigned int *block_table,
+    unsigned long long cache_start,
+    unsigned long long m,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    unsigned long long table_entries,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float *k_cache,
+    float *v_cache) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long k_row = kv_heads * head_dim;
+    const unsigned long long v_row = kv_heads * value_dim;
+    const unsigned long long k_elements = m * k_row;
+    const unsigned long long v_elements = m * v_row;
+    if (index >= k_elements + v_elements || k_row == 0ull || v_row == 0ull) {
+        return;
+    }
+    const bool is_k = index < k_elements;
+    const unsigned long long row = is_k ? index / k_row : (index - k_elements) / v_row;
+    const unsigned long long row_offset = is_k ? index - row * k_row : index - k_elements - row * v_row;
+    const unsigned long long logical = cache_start + row;
+    const unsigned long long block_index = logical / block_size;
+    if (block_index >= table_entries) {
+        return;
+    }
+    const unsigned long long block_offset = logical - block_index * block_size;
+    const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+    if (block_id >= cache_blocks) {
+        return;
+    }
+    const unsigned long long physical = block_id * block_size + block_offset;
+    if (is_k) {
+        k_cache[(physical * kv_heads * head_dim) + row_offset] = k[row * k_row + row_offset];
+    } else {
+        v_cache[(physical * kv_heads * value_dim) + row_offset] = v[row * v_row + row_offset];
+    }
+}
+
+extern "C" __global__ void ullm_paged_causal_gqa_chunk_f32_kernel(
+    const float *q,
+    const float *gate,
+    const float *k_cache,
+    const float *v_cache,
+    const unsigned int *block_table,
+    unsigned long long cached_prefix_len,
+    unsigned long long m,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    unsigned long long table_entries,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    const unsigned long long q_head_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long query_heads = m * q_heads;
+    if (q_head_index >= query_heads || q_heads == 0ull || kv_heads == 0ull ||
+        head_dim == 0ull || value_dim == 0ull || blockDim.x != 256u ||
+        head_dim > 256ull || value_dim > 256ull) {
+        return;
+    }
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long row = q_head_index / q_heads;
+    const unsigned long long q_head = q_head_index - row * q_heads;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_base = (row * q_heads + q_head) * head_dim;
+    const unsigned long long cache_len = cached_prefix_len + row + 1ull;
+    __shared__ float partial[256];
+    __shared__ float shared_prev_scale;
+    __shared__ float shared_weight;
+    __shared__ float shared_max_score;
+    float weighted = 0.0f;
+    float denominator = 0.0f;
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source = 0ull; source < cache_len; ++source) {
+        const unsigned long long block_index = source / block_size;
+        if (block_index >= table_entries) {
+            if (tid < value_dim) {
+                output[q_head_index * value_dim + tid] = 0.0f;
+            }
+            return;
+        }
+        const unsigned long long block_offset = source - block_index * block_size;
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+        if (block_id >= cache_blocks) {
+            if (tid < value_dim) {
+                output[q_head_index * value_dim + tid] = 0.0f;
+            }
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + block_offset;
+        const unsigned long long k_base = (physical * kv_heads + kv_head) * head_dim;
+        float dot = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            dot += q[q_base + dim] * k_cache[k_base + dim];
+        }
+        partial[tid] = dot;
+        __syncthreads();
+        for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) {
+                partial[tid] += partial[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0u) {
+            const float score = partial[0] * softmax_scale;
+            const float new_max_score = fmaxf(max_score, score);
+            shared_prev_scale =
+                max_score <= -3.4028234663852886e38f ? 0.0f : expf(max_score - new_max_score);
+            shared_weight = expf(score - new_max_score);
+            shared_max_score = new_max_score;
+        }
+        __syncthreads();
+        const unsigned long long v_index =
+            (physical * kv_heads + kv_head) * value_dim + tid;
+        if (tid < value_dim) {
+            weighted = weighted * shared_prev_scale + shared_weight * v_cache[v_index];
+        }
+        denominator = denominator * shared_prev_scale + shared_weight;
+        max_score = shared_max_score;
+        __syncthreads();
+    }
+    if (tid < value_dim) {
+        const unsigned long long output_index = q_head_index * value_dim + tid;
+        float result = weighted / denominator;
+        if (gate != nullptr) {
+            const float gate_value = gate[output_index];
+            result *= 1.0f / (1.0f + expf(-gate_value));
+        }
+        output[output_index] = result;
+    }
+}
+)";
+    }
+
     static const char *depthwise_conv1d_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_depthwise_conv1d_f32_kernel(

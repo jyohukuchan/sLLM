@@ -998,6 +998,15 @@ public:
             error);
     }
 
+    bool compile_paged_chunk_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(
+            arch,
+            paged_chunk_kernel_source(),
+            "ullm_paged_chunk_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_depthwise_conv1d_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -7802,6 +7811,97 @@ void paged_kv_write_f32_host(
         const size_t v_src = kv_head * value_dim;
         const size_t v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
         std::copy(v + v_src, v + v_src + value_dim, v_cache + v_dst);
+    }
+}
+
+void paged_kv_write_chunk_f32_host(
+    const float *k,
+    const float *v,
+    const std::uint32_t *block_table,
+    size_t cache_start,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float *k_cache,
+    float *v_cache) {
+    (void)cache_blocks;
+    for (size_t row = 0; row < m; ++row) {
+        const size_t logical_position = cache_start + row;
+        const size_t block_index = logical_position / block_size;
+        const size_t block_offset = logical_position - block_index * block_size;
+        const size_t physical_timestep =
+            static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+        for (size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
+            const size_t k_src = (row * kv_heads + kv_head) * head_dim;
+            const size_t k_dst = (physical_timestep * kv_heads + kv_head) * head_dim;
+            std::copy(k + k_src, k + k_src + head_dim, k_cache + k_dst);
+            const size_t v_src = (row * kv_heads + kv_head) * value_dim;
+            const size_t v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
+            std::copy(v + v_src, v + v_src + value_dim, v_cache + v_dst);
+        }
+    }
+}
+
+void paged_causal_gqa_chunk_f32_host(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    const std::uint32_t *block_table,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float *output) {
+    const size_t q_per_kv = q_heads / kv_heads;
+    for (size_t row = 0; row < m; ++row) {
+        const size_t cache_len = cached_prefix_len + row + 1;
+        for (size_t q_head = 0; q_head < q_heads; ++q_head) {
+            const size_t kv_head = q_head / q_per_kv;
+            const size_t q_base = (row * q_heads + q_head) * head_dim;
+            float max_score = -std::numeric_limits<float>::infinity();
+            for (size_t source = 0; source < cache_len; ++source) {
+                const size_t block_index = source / block_size;
+                const size_t block_offset = source - block_index * block_size;
+                const size_t physical =
+                    static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+                const size_t k_base = (physical * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += q[q_base + dim] * k_cache[k_base + dim];
+                }
+                max_score = std::max(max_score, score * softmax_scale);
+            }
+            float denominator = 0.0f;
+            const size_t output_base = (row * q_heads + q_head) * value_dim;
+            std::vector<float> weighted(value_dim, 0.0f);
+            for (size_t source = 0; source < cache_len; ++source) {
+                const size_t block_index = source / block_size;
+                const size_t block_offset = source - block_index * block_size;
+                const size_t physical =
+                    static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+                const size_t k_base = (physical * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += q[q_base + dim] * k_cache[k_base + dim];
+                }
+                const float weight = std::exp(score * softmax_scale - max_score);
+                denominator += weight;
+                const size_t v_base = (physical * kv_heads + kv_head) * value_dim;
+                for (size_t value = 0; value < value_dim; ++value) {
+                    weighted[value] += weight * v_cache[v_base + value];
+                }
+            }
+            for (size_t value = 0; value < value_dim; ++value) {
+                output[output_base + value] = weighted[value] / denominator;
+            }
+        }
     }
 }
 

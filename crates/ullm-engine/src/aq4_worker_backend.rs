@@ -42,9 +42,12 @@ pub const QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV: &[&str] = &[
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_ROPE_KERNEL",
@@ -396,6 +399,9 @@ mod tests {
             RuntimeFeature::HipAq4MatvecBatch,
             RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
             RuntimeFeature::HipLinearAttentionRecurrentSequence,
+            RuntimeFeature::HipPagedKvWriteChunk,
+            RuntimeFeature::HipPagedCausalGqaChunk,
+            RuntimeFeature::HipQkNormRopeBatch,
         ] {
             assert!(unique.contains(runtime_feature_environment(feature)));
         }

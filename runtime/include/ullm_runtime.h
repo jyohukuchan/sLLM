@@ -904,6 +904,70 @@ ullm_status ullm_runtime_paged_kv_write_f32(
     ullm_runtime_buffer *v_cache_buffer,
     ullm_runtime_stream *stream);
 
+/*
+ * Writes a contiguous M-token K/V chunk into the logical paged cache. K and V
+ * use [M,kv_heads,dim] row-major layout. cache_start is the logical position
+ * of row zero; block_table maps logical blocks to physical cache blocks.
+ */
+ullm_status ullm_runtime_paged_kv_write_chunk_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_start,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Computes causal GQA attention for an M-token query chunk against a paged
+ * cache. Query row i attends to logical source positions
+ * [0,cached_prefix_len+i+1). Q is [M,q_heads,head_dim], output is
+ * [M,q_heads,value_dim], and no M-by-context workspace is required.
+ */
+ullm_status ullm_runtime_paged_causal_gqa_chunk_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/* As above, then multiplies each output element by sigmoid(gate). gate follows
+ * the existing M=1 contract [M,q_heads,head_dim]; the gated ABI requires
+ * head_dim == value_dim so the gate and output element indexing agree. */
+ullm_status ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_linear_attn_qkv_prepare_f32(
     const ullm_runtime_buffer *qkv_buffer,
     const ullm_runtime_buffer *conv_weight_buffer,

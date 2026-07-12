@@ -912,3 +912,46 @@
         assert!(output.iter().all(|value| value.is_finite()));
         assert!(output.iter().any(|value| *value != 0.0_f32));
     }
+
+    #[test]
+    fn first_hip_paged_chunk_invalid_table_fails_closed_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let m = 2_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 2_usize;
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let head_dim = 2_usize;
+        let value_dim = 2_usize;
+        let q_values = vec![0.1_f32; m * q_heads * head_dim];
+        let k_values = vec![0.2_f32; m * kv_heads * head_dim];
+        let v_values = vec![0.3_f32; m * kv_heads * value_dim];
+        let cache_k = vec![0.4_f32; cache_blocks * block_size * kv_heads * head_dim];
+        let cache_v = vec![0.5_f32; cache_blocks * block_size * kv_heads * value_dim];
+        let mut q = context.alloc_buffer(q_values.len() * 4).unwrap();
+        let mut k = context.alloc_buffer(k_values.len() * 4).unwrap();
+        let mut v = context.alloc_buffer(v_values.len() * 4).unwrap();
+        let mut table = context.alloc_buffer(4).unwrap();
+        let mut k_cache = context.alloc_buffer(cache_k.len() * 4).unwrap();
+        let mut v_cache = context.alloc_buffer(cache_v.len() * 4).unwrap();
+        let mut output = context.alloc_buffer(m * q_heads * value_dim * 4).unwrap();
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream)).unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream)).unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream)).unwrap();
+        table.copy_from_host(0, &u32s_to_le_bytes(&[u32::MAX]), Some(&mut stream)).unwrap();
+        k_cache.copy_from_host(0, &f32s_to_le_bytes(&cache_k), Some(&mut stream)).unwrap();
+        v_cache.copy_from_host(0, &f32s_to_le_bytes(&cache_v), Some(&mut stream)).unwrap();
+        output.copy_from_host(0, &f32s_to_le_bytes(&vec![42.0_f32; m * q_heads * value_dim]), Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        assert!(paged_kv_write_chunk_f32(&k, &v, &table, 0, m, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut k_cache, &mut v_cache, Some(&mut stream)).is_err());
+        assert!(paged_causal_gqa_chunk_f32(&q, &k_cache, &v_cache, &table, 0, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, 1.0, &mut output, Some(&mut stream)).is_err());
+        stream.synchronize().unwrap();
+        let mut output_bytes = vec![0_u8; m * q_heads * value_dim * 4];
+        output.copy_to_host(0, &mut output_bytes, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![42.0_f32; m * q_heads * value_dim]);
+    }

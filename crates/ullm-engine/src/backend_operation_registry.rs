@@ -27,6 +27,9 @@ enum ProbeFaultStage {
     Aq4MatvecBatch = 9,
     QkvPrepareBatch = 10,
     RecurrentSequence = 11,
+    QkNormRopeBatch = 12,
+    PagedKvWriteChunk = 13,
+    PagedCausalGqaChunk = 14,
 }
 
 #[cfg(test)]
@@ -53,8 +56,8 @@ fn probe_cache_key(capabilities: &DeviceCapabilities) -> ProbeCacheKey {
 }
 
 #[cfg(test)]
-static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 12] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 12];
+static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 15] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 15];
 
 #[cfg(test)]
 std::thread_local! {
@@ -230,6 +233,10 @@ pub enum RuntimeFeature {
     HipAq4MatvecBatch = 5,
     HipLinearAttentionQkvPrepareBatch = 6,
     HipLinearAttentionRecurrentSequence = 7,
+    HipPagedKvWriteChunk = 8,
+    HipPagedCausalGqaChunk = 9,
+    /// Generic Q/K normalization and RoPE batch scratch capability.
+    HipQkNormRopeBatch = 10,
 }
 
 /// Canonical production guard for a probed runtime feature.
@@ -251,6 +258,9 @@ pub const fn runtime_feature_environment(feature: RuntimeFeature) -> &'static st
         RuntimeFeature::HipLinearAttentionRecurrentSequence => {
             "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL"
         }
+        RuntimeFeature::HipPagedKvWriteChunk => "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+        RuntimeFeature::HipPagedCausalGqaChunk => "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+        RuntimeFeature::HipQkNormRopeBatch => "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
     }
 }
 
@@ -283,6 +293,9 @@ impl DeviceCapabilities {
                 RuntimeFeature::HipAq4MatvecBatch,
                 RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
                 RuntimeFeature::HipLinearAttentionRecurrentSequence,
+                RuntimeFeature::HipPagedKvWriteChunk,
+                RuntimeFeature::HipPagedCausalGqaChunk,
+                RuntimeFeature::HipQkNormRopeBatch,
             ] {
                 if std::env::var_os(runtime_feature_environment(feature)).as_deref()
                     == Some(std::ffi::OsStr::new("1"))
@@ -423,52 +436,59 @@ impl DeviceCapabilities {
             probe_fault_checkpoint(11, "recurrent-sequence")?;
             proven = proven.with(RuntimeFeature::HipLinearAttentionRecurrentSequence);
         }
-        if policy.contains(RuntimeFeature::HipPagedDecodeAttention) {
-            let q = zeros(context, stream, 32 * 128)?;
-            let gate = zeros(context, stream, 32 * 128)?;
+        let paged_cache_probe_needed = policy.contains(RuntimeFeature::HipPagedDecodeAttention)
+            || policy.contains(RuntimeFeature::HipPagedKvWrite)
+            || policy.contains(RuntimeFeature::HipFusedQkNormRopePagedKvWrite)
+            || policy.contains(RuntimeFeature::HipPagedKvWriteChunk)
+            || policy.contains(RuntimeFeature::HipPagedCausalGqaChunk);
+        if paged_cache_probe_needed {
             let mut k_cache = zeros(context, stream, 16 * 256 * 4 * 256)?;
             let mut v_cache = zeros(context, stream, 16 * 256 * 4 * 256)?;
             let mut table = context.alloc_buffer(16 * 4)?;
             let table_bytes = (0_u32..16).flat_map(u32::to_le_bytes).collect::<Vec<_>>();
             table.copy_from_host(0, &table_bytes, Some(stream))?;
-            let mut plain_output = zeros(context, stream, 32 * 128)?;
-            let mut gated_output = zeros(context, stream, 32 * 128)?;
-            ullm_runtime_sys::paged_decode_attn_f32(
-                &q,
-                &k_cache,
-                &v_cache,
-                &table,
-                1,
-                256,
-                16,
-                16,
-                4,
-                256,
-                256,
-                1.0 / 256.0_f32.sqrt(),
-                &mut plain_output,
-                Some(stream),
-            )?;
-            probe_fault_checkpoint(4, "paged-plain")?;
-            ullm_runtime_sys::paged_decode_attn_sigmoid_gate_f32(
-                &q,
-                &gate,
-                &k_cache,
-                &v_cache,
-                &table,
-                1,
-                256,
-                16,
-                16,
-                4,
-                256,
-                256,
-                1.0 / 256.0_f32.sqrt(),
-                &mut gated_output,
-                Some(stream),
-            )?;
-            probe_fault_checkpoint(5, "paged-gated")?;
-            proven = proven.with(RuntimeFeature::HipPagedDecodeAttention);
+            if policy.contains(RuntimeFeature::HipPagedDecodeAttention) {
+                let q = zeros(context, stream, 32 * 128)?;
+                let gate = zeros(context, stream, 32 * 128)?;
+                let mut plain_output = zeros(context, stream, 32 * 128)?;
+                let mut gated_output = zeros(context, stream, 32 * 128)?;
+                ullm_runtime_sys::paged_decode_attn_f32(
+                    &q,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    1,
+                    256,
+                    16,
+                    16,
+                    4,
+                    256,
+                    256,
+                    1.0 / 256.0_f32.sqrt(),
+                    &mut plain_output,
+                    Some(stream),
+                )?;
+                probe_fault_checkpoint(4, "paged-plain")?;
+                ullm_runtime_sys::paged_decode_attn_sigmoid_gate_f32(
+                    &q,
+                    &gate,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    1,
+                    256,
+                    16,
+                    16,
+                    4,
+                    256,
+                    256,
+                    1.0 / 256.0_f32.sqrt(),
+                    &mut gated_output,
+                    Some(stream),
+                )?;
+                probe_fault_checkpoint(5, "paged-gated")?;
+                proven = proven.with(RuntimeFeature::HipPagedDecodeAttention);
+            }
             if policy.contains(RuntimeFeature::HipPagedKvWrite) {
                 let k = zeros(context, stream, 4 * 256)?;
                 let v = zeros(context, stream, 4 * 256)?;
@@ -524,6 +544,102 @@ impl DeviceCapabilities {
                 probe_fault_checkpoint(7, "fused-writer")?;
                 proven = proven.with(RuntimeFeature::HipFusedQkNormRopePagedKvWrite);
             }
+            if policy.contains(RuntimeFeature::HipPagedKvWriteChunk) {
+                const CHUNK: usize = 128;
+                let k = zeros(context, stream, CHUNK * 4 * 256)?;
+                let v = zeros(context, stream, CHUNK * 4 * 256)?;
+                ullm_runtime_sys::paged_kv_write_chunk_f32(
+                    &k,
+                    &v,
+                    &table,
+                    0,
+                    CHUNK,
+                    256,
+                    16,
+                    4,
+                    256,
+                    256,
+                    &mut k_cache,
+                    &mut v_cache,
+                    Some(stream),
+                )?;
+                probe_fault_checkpoint(13, "paged-kv-write-chunk")?;
+                proven = proven.with(RuntimeFeature::HipPagedKvWriteChunk);
+            }
+            if policy.contains(RuntimeFeature::HipPagedCausalGqaChunk) {
+                const CHUNK: usize = 128;
+                let q = zeros(context, stream, CHUNK * 16 * 256)?;
+                let gate = zeros(context, stream, CHUNK * 16 * 256)?;
+                let mut plain_output = zeros(context, stream, CHUNK * 16 * 256)?;
+                let mut gated_output = zeros(context, stream, CHUNK * 16 * 256)?;
+                ullm_runtime_sys::paged_causal_gqa_chunk_f32(
+                    &q,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    0,
+                    CHUNK,
+                    256,
+                    16,
+                    16,
+                    4,
+                    256,
+                    256,
+                    1.0 / 256.0_f32.sqrt(),
+                    &mut plain_output,
+                    Some(stream),
+                )?;
+                ullm_runtime_sys::paged_causal_gqa_chunk_sigmoid_gate_f32(
+                    &q,
+                    &gate,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    0,
+                    CHUNK,
+                    256,
+                    16,
+                    16,
+                    4,
+                    256,
+                    256,
+                    1.0 / 256.0_f32.sqrt(),
+                    &mut gated_output,
+                    Some(stream),
+                )?;
+                probe_fault_checkpoint(14, "paged-causal-gqa-chunk")?;
+                proven = proven.with(RuntimeFeature::HipPagedCausalGqaChunk);
+            }
+        }
+        if policy.contains(RuntimeFeature::HipQkNormRopeBatch) {
+            const SEQUENCE_LEN: usize = 128;
+            let q_projected = zeros(context, stream, SEQUENCE_LEN * 2 * 16 * 256)?;
+            let k_projected = zeros(context, stream, SEQUENCE_LEN * 4 * 256)?;
+            let q_weight = zeros(context, stream, 256)?;
+            let k_weight = zeros(context, stream, 256)?;
+            let mut q_gate = zeros(context, stream, SEQUENCE_LEN * 16 * 256)?;
+            let mut q_rope = zeros(context, stream, SEQUENCE_LEN * 16 * 256)?;
+            let mut k_rope = zeros(context, stream, SEQUENCE_LEN * 4 * 256)?;
+            ullm_runtime_sys::qwen35_qk_norm_rope_batch_f32(
+                &q_projected,
+                &k_projected,
+                &q_weight,
+                &k_weight,
+                16,
+                4,
+                SEQUENCE_LEN,
+                256,
+                64,
+                0,
+                10_000_000.0,
+                1e-5,
+                &mut q_gate,
+                &mut q_rope,
+                &mut k_rope,
+                Some(stream),
+            )?;
+            probe_fault_checkpoint(12, "qk-norm-rope-batch")?;
+            proven = proven.with(RuntimeFeature::HipQkNormRopeBatch);
         }
         if policy.contains(RuntimeFeature::HipAq4MatvecBatch) {
             let binding = aq4_probe_binding(128);
@@ -828,6 +944,7 @@ pub enum PromotionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutableOperation {
     HipPagedKvWriteF32,
+    HipPagedKvWriteChunkF32,
     HipFusedQkNormRopePagedKvWriteF32,
     HipLinearAttentionQkvPrepareF32,
     HipLinearAttentionQkvPrepareBatchF32,
@@ -836,6 +953,8 @@ pub enum ExecutableOperation {
     HipAq4MatvecBatchF32,
     HipPagedDecodeAttentionF32,
     HipPagedDecodeAttentionSigmoidGateF32,
+    HipPagedCausalGqaChunkF32,
+    HipPagedCausalGqaChunkSigmoidGateF32,
 }
 
 /// Exact load-time request emitted from validated package geometry and served capabilities.
@@ -1795,6 +1914,61 @@ impl StartedOperationPlan<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn execute_paged_kv_write_chunk_f32(
+        self,
+        k: &ullm_runtime_sys::RuntimeBuffer,
+        v: &ullm_runtime_sys::RuntimeBuffer,
+        block_table: &ullm_runtime_sys::RuntimeBuffer,
+        cache_start: usize,
+        k_cache: &mut ullm_runtime_sys::RuntimeBuffer,
+        v_cache: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let plan = self.plan();
+        let OperationGeometry::PagedKvWrite {
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+        } = plan.geometry
+        else {
+            return Err("resolved paged KV chunk writer has incompatible geometry".into());
+        };
+        let chunk_width = usize::try_from(plan.chunk_width)
+            .map_err(|_| "resolved paged KV chunk width exceeds usize".to_string())?;
+        let cache_limit = block_size
+            .checked_mul(cache_blocks)
+            .ok_or_else(|| "resolved paged KV chunk cache capacity overflows".to_string())?;
+        if plan.kind != OperationKind::PagedKvWrite
+            || plan.executable != ExecutableOperation::HipPagedKvWriteChunkF32
+            || plan.batch_width != 1
+            || !(2..=128).contains(&plan.chunk_width)
+            || cache_start
+                .checked_add(chunk_width)
+                .is_none_or(|end| end > cache_limit)
+        {
+            return Err("resolved paged KV chunk writer has incompatible binding/position".into());
+        }
+        ullm_runtime_sys::paged_kv_write_chunk_f32(
+            k,
+            v,
+            block_table,
+            cache_start,
+            chunk_width,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache,
+            v_cache,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_fused_qk_norm_rope_paged_kv_write_f32(
         self,
         q_projected: &ullm_runtime_sys::RuntimeBuffer,
@@ -1937,6 +2111,93 @@ impl StartedOperationPlan<'_> {
         .map_err(|error| error.to_string())
     }
 
+    pub fn execute_paged_causal_gqa_chunk_f32(
+        self,
+        q: &ullm_runtime_sys::RuntimeBuffer,
+        k_cache: &ullm_runtime_sys::RuntimeBuffer,
+        v_cache: &ullm_runtime_sys::RuntimeBuffer,
+        block_table: &ullm_runtime_sys::RuntimeBuffer,
+        cached_prefix_len: usize,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let (q_heads, kv_heads, head_dim, value_dim, block_size, cache_blocks, chunk_width) =
+            self.paged_chunk_geometry(false, ExecutableOperation::HipPagedCausalGqaChunkF32)?;
+        let cache_limit = block_size
+            .checked_mul(cache_blocks)
+            .ok_or_else(|| "resolved paged GQA chunk cache capacity overflows".to_string())?;
+        if cached_prefix_len
+            .checked_add(chunk_width)
+            .is_none_or(|end| end > cache_limit)
+        {
+            return Err("resolved paged GQA chunk has an incompatible cache prefix".into());
+        }
+        ullm_runtime_sys::paged_causal_gqa_chunk_f32(
+            q,
+            k_cache,
+            v_cache,
+            block_table,
+            cached_prefix_len,
+            chunk_width,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            1.0_f32 / (head_dim as f32).sqrt(),
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn execute_paged_causal_gqa_chunk_sigmoid_gate_f32(
+        self,
+        q: &ullm_runtime_sys::RuntimeBuffer,
+        gate: &ullm_runtime_sys::RuntimeBuffer,
+        k_cache: &ullm_runtime_sys::RuntimeBuffer,
+        v_cache: &ullm_runtime_sys::RuntimeBuffer,
+        block_table: &ullm_runtime_sys::RuntimeBuffer,
+        cached_prefix_len: usize,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let (q_heads, kv_heads, head_dim, value_dim, block_size, cache_blocks, chunk_width) = self
+            .paged_chunk_geometry(
+                true,
+                ExecutableOperation::HipPagedCausalGqaChunkSigmoidGateF32,
+            )?;
+        let cache_limit = block_size
+            .checked_mul(cache_blocks)
+            .ok_or_else(|| "resolved paged GQA chunk cache capacity overflows".to_string())?;
+        if cached_prefix_len
+            .checked_add(chunk_width)
+            .is_none_or(|end| end > cache_limit)
+        {
+            return Err("resolved paged GQA chunk has an incompatible cache prefix".into());
+        }
+        ullm_runtime_sys::paged_causal_gqa_chunk_sigmoid_gate_f32(
+            q,
+            gate,
+            k_cache,
+            v_cache,
+            block_table,
+            cached_prefix_len,
+            chunk_width,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            1.0_f32 / (head_dim as f32).sqrt(),
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     fn paged_geometry(
         &self,
         expected_gate: bool,
@@ -1973,6 +2234,48 @@ impl StartedOperationPlan<'_> {
             value_dim,
             block_size,
             cache_blocks,
+        ))
+    }
+
+    fn paged_chunk_geometry(
+        &self,
+        expected_gate: bool,
+        expected_executable: ExecutableOperation,
+    ) -> Result<(usize, usize, usize, usize, usize, usize, usize), String> {
+        let plan = self.plan();
+        let OperationGeometry::PagedCausalGqaRead {
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+            sigmoid_gate,
+        } = plan.geometry
+        else {
+            return Err("resolved paged GQA chunk operation has incompatible geometry".into());
+        };
+        if plan.kind != OperationKind::PagedCausalGqaRead
+            || plan.executable != expected_executable
+            || sigmoid_gate != expected_gate
+            || plan.batch_width != 1
+            || !(2..=128).contains(&plan.chunk_width)
+        {
+            return Err(format!(
+                "resolved backend operation {} has an incompatible paged GQA chunk binding",
+                plan.implementation_id
+            ));
+        }
+        let chunk_width = usize::try_from(plan.chunk_width)
+            .map_err(|_| "resolved paged GQA chunk width exceeds usize".to_string())?;
+        Ok((
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+            chunk_width,
         ))
     }
 }
@@ -2025,6 +2328,11 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
             ExecutableOperation::HipPagedKvWriteF32,
         ) => true,
         (
+            OperationKind::PagedKvWrite,
+            OperationGeometry::PagedKvWrite { .. },
+            ExecutableOperation::HipPagedKvWriteChunkF32,
+        ) => true,
+        (
             OperationKind::FusedQkNormRopePagedKvWrite,
             OperationGeometry::FusedQkNormRopePagedKvWrite { .. },
             ExecutableOperation::HipFusedQkNormRopePagedKvWriteF32,
@@ -2068,6 +2376,21 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
                 sigmoid_gate: true, ..
             },
             ExecutableOperation::HipPagedDecodeAttentionSigmoidGateF32,
+        ) => true,
+        (
+            OperationKind::PagedCausalGqaRead,
+            OperationGeometry::PagedCausalGqaRead {
+                sigmoid_gate: false,
+                ..
+            },
+            ExecutableOperation::HipPagedCausalGqaChunkF32,
+        ) => true,
+        (
+            OperationKind::PagedCausalGqaRead,
+            OperationGeometry::PagedCausalGqaRead {
+                sigmoid_gate: true, ..
+            },
+            ExecutableOperation::HipPagedCausalGqaChunkSigmoidGateF32,
         ) => true,
         _ => false,
     };
@@ -2685,6 +3008,297 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
     ])
 }
 
+fn paged_chunk_backend_binding(
+    device: &DeviceCapabilities,
+    feature: RuntimeFeature,
+    host_id: &'static str,
+    hip_id: &'static str,
+) -> Result<
+    (
+        OperationBackend,
+        Option<&'static str>,
+        RuntimeFeatureSet,
+        &'static str,
+    ),
+    String,
+> {
+    match device.backend {
+        OperationBackend::Host => Ok((
+            OperationBackend::Host,
+            None,
+            RuntimeFeatureSet::EMPTY,
+            host_id,
+        )),
+        OperationBackend::Hip => {
+            if device.architecture.as_deref() != Some("gfx1201") {
+                return Err(format!(
+                    "paged chunk production requires gfx1201, got {}",
+                    device.architecture.as_deref().unwrap_or("unavailable")
+                ));
+            }
+            Ok((
+                OperationBackend::Hip,
+                Some("gfx1201"),
+                RuntimeFeatureSet::from_feature(feature),
+                hip_id,
+            ))
+        }
+    }
+}
+
+fn paged_cache_bytes(
+    block_size: usize,
+    cache_blocks: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> Result<u64, String> {
+    let elements = block_size
+        .checked_mul(cache_blocks)
+        .and_then(|value| value.checked_mul(kv_heads))
+        .and_then(|value| value.checked_mul(head_dim.checked_add(value_dim)?))
+        .ok_or_else(|| "paged chunk cache element count overflows".to_string())?;
+    let bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "paged chunk cache byte count overflows".to_string())?;
+    u64::try_from(bytes).map_err(|_| "paged chunk cache bytes exceed u64".to_string())
+}
+
+/// Builds a production registry for one exact paged K/V cache geometry and widths `2..=128`.
+pub fn paged_kv_write_chunk_production_registry(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<BackendOperationRegistry, String> {
+    let OperationGeometry::PagedKvWrite {
+        kv_heads,
+        head_dim,
+        value_dim,
+        block_size,
+        cache_blocks,
+    } = geometry
+    else {
+        return Err("paged K/V chunk registry requires paged K/V writer geometry".into());
+    };
+    if [kv_heads, head_dim, value_dim, block_size, cache_blocks]
+        .into_iter()
+        .any(|value| value == 0)
+    {
+        return Err("paged K/V chunk registry geometry contains zero dimensions".into());
+    }
+    let persistent_bytes =
+        paged_cache_bytes(block_size, cache_blocks, kv_heads, head_dim, value_dim)?;
+    let temporary_bytes_per_chunk_token =
+        u64::try_from(
+            kv_heads
+                .checked_mul(head_dim.checked_add(value_dim).ok_or_else(|| {
+                    "paged K/V chunk temporary element count overflows".to_string()
+                })?)
+                .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| "paged K/V chunk temporary bytes overflow".to_string())?,
+        )
+        .map_err(|_| "paged K/V chunk temporary bytes exceed u64".to_string())?;
+    let maximum_total_bytes = persistent_bytes
+        .checked_add(
+            temporary_bytes_per_chunk_token
+                .checked_mul(128)
+                .ok_or_else(|| "paged K/V chunk workspace overflows".to_string())?,
+        )
+        .ok_or_else(|| "paged K/V chunk workspace overflows".to_string())?;
+    let (backend, architecture, required_features, id) = paged_chunk_backend_binding(
+        device,
+        RuntimeFeature::HipPagedKvWriteChunk,
+        "host.paged-kv-write-chunk-f32.m2-m128",
+        "hip.paged-kv-write-chunk-f32.m2-m128",
+    )?;
+    let paged_kv = StateResourceSet::from_resource(StateResource::PagedKvCache);
+    BackendOperationRegistry::new(vec![ImplementationDescriptor {
+        id,
+        semantic_version: "1.0.0",
+        kind: OperationKind::PagedKvWrite,
+        phases: PhaseSet::ALL_CURRENT,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout: OperationStateLayout::PagedKvBlocks,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
+        state_format: NumericalFormat::F32,
+        geometry,
+        minimum_batch_width: 1,
+        maximum_batch_width: 1,
+        minimum_chunk_width: 2,
+        maximum_chunk_width: 128,
+        backend,
+        architecture,
+        device_name: None,
+        minimum_abi_version: 1,
+        required_features,
+        workspace: WorkspaceFormula {
+            fixed_persistent_bytes: persistent_bytes,
+            fixed_temporary_bytes: 0,
+            temporary_bytes_per_batch_item: 0,
+            temporary_bytes_per_chunk_token,
+            maximum_total_bytes,
+        },
+        state_effect: StateEffect {
+            reads: paged_kv,
+            writes: paged_kv,
+            prepares: StateResourceSet::EMPTY,
+            commits: StateResourceSet::EMPTY,
+            update_mode: StateUpdateMode::InPlace,
+            externally_visible_before_commit: true,
+        },
+        promotion: PromotionStatus::Production,
+        priority: 100,
+        fallback_id: None,
+        deterministic: true,
+        executable: ExecutableOperation::HipPagedKvWriteChunkF32,
+        runtime_build: env!("CARGO_PKG_VERSION"),
+    }])
+}
+
+/// Builds a production registry for one exact paged GQA cache geometry and widths `2..=128`.
+pub fn paged_causal_gqa_chunk_production_registry(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<BackendOperationRegistry, String> {
+    let OperationGeometry::PagedCausalGqaRead {
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        block_size,
+        cache_blocks,
+        sigmoid_gate,
+    } = geometry
+    else {
+        return Err("paged causal GQA chunk registry requires paged GQA geometry".into());
+    };
+    if [
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        block_size,
+        cache_blocks,
+    ]
+    .into_iter()
+    .any(|value| value == 0)
+    {
+        return Err("paged causal GQA chunk registry geometry contains zero dimensions".into());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err("paged causal GQA chunk q_heads must be a multiple of kv_heads".into());
+    }
+    if sigmoid_gate && head_dim != value_dim {
+        return Err("paged causal GQA chunk gated geometry requires head_dim == value_dim".into());
+    }
+    let persistent_bytes =
+        paged_cache_bytes(block_size, cache_blocks, kv_heads, head_dim, value_dim)?;
+    let output_elements = q_heads
+        .checked_mul(head_dim.max(value_dim))
+        .ok_or_else(|| "paged GQA chunk output elements overflow".to_string())?;
+    let output_bytes_per_token = u64::try_from(
+        output_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "paged GQA chunk output bytes overflow".to_string())?,
+    )
+    .map_err(|_| "paged GQA chunk output bytes exceed u64".to_string())?;
+    let temporary_bytes_per_chunk_token = output_bytes_per_token
+        .checked_mul(if sigmoid_gate { 3 } else { 2 })
+        .ok_or_else(|| "paged GQA chunk workspace overflows".to_string())?;
+    let maximum_total_bytes = persistent_bytes
+        .checked_add(
+            temporary_bytes_per_chunk_token
+                .checked_mul(128)
+                .ok_or_else(|| "paged GQA chunk workspace overflows".to_string())?,
+        )
+        .ok_or_else(|| "paged GQA chunk workspace overflows".to_string())?;
+    let (backend, architecture, required_features, id) = paged_chunk_backend_binding(
+        device,
+        RuntimeFeature::HipPagedCausalGqaChunk,
+        if sigmoid_gate {
+            "host.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128"
+        } else {
+            "host.paged-causal-gqa-chunk-f32.m2-m128"
+        },
+        if sigmoid_gate {
+            "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128"
+        } else {
+            "hip.paged-causal-gqa-chunk-f32.m2-m128"
+        },
+    )?;
+    let executable = if sigmoid_gate {
+        ExecutableOperation::HipPagedCausalGqaChunkSigmoidGateF32
+    } else {
+        ExecutableOperation::HipPagedCausalGqaChunkF32
+    };
+    let paged_kv = StateResourceSet::from_resource(StateResource::PagedKvCache);
+    BackendOperationRegistry::new(vec![ImplementationDescriptor {
+        id,
+        semantic_version: "1.0.0",
+        kind: OperationKind::PagedCausalGqaRead,
+        phases: PhaseSet::ALL_CURRENT,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout: OperationStateLayout::PagedKvBlocks,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
+        state_format: NumericalFormat::F32,
+        geometry,
+        minimum_batch_width: 1,
+        maximum_batch_width: 1,
+        minimum_chunk_width: 2,
+        maximum_chunk_width: 128,
+        backend,
+        architecture,
+        device_name: None,
+        minimum_abi_version: 1,
+        required_features,
+        workspace: WorkspaceFormula {
+            fixed_persistent_bytes: persistent_bytes,
+            fixed_temporary_bytes: 0,
+            temporary_bytes_per_batch_item: 0,
+            temporary_bytes_per_chunk_token,
+            maximum_total_bytes,
+        },
+        state_effect: StateEffect {
+            reads: paged_kv,
+            writes: StateResourceSet::EMPTY,
+            prepares: StateResourceSet::EMPTY,
+            commits: StateResourceSet::EMPTY,
+            update_mode: StateUpdateMode::ReadOnly,
+            externally_visible_before_commit: false,
+        },
+        promotion: PromotionStatus::Production,
+        priority: 100,
+        fallback_id: None,
+        deterministic: true,
+        executable,
+        runtime_build: env!("CARGO_PKG_VERSION"),
+    }])
+}
+
+/// Builds the appropriate paged chunk registry while retaining the semantic operation kind.
+pub fn qwen35_paged_chunk_production_registry(
+    kind: OperationKind,
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<BackendOperationRegistry, String> {
+    match kind {
+        OperationKind::PagedKvWrite => paged_kv_write_chunk_production_registry(geometry, device),
+        OperationKind::PagedCausalGqaRead => {
+            paged_causal_gqa_chunk_production_registry(geometry, device)
+        }
+        other => Err(format!(
+            "operation kind {other:?} is not a paged chunk operation"
+        )),
+    }
+}
+
 /// Build the exact M1 request from geometry validated against package weights.
 pub fn qwen35_m1_operation_request(
     kind: OperationKind,
@@ -2764,6 +3378,108 @@ pub fn qwen35_sequence_operation_request(
         workspace_budget_bytes,
         minimum_promotion: PromotionStatus::Production,
     })
+}
+
+/// Builds a one-request paged K/V writer request for a contiguous chunk in `2..=128`.
+pub fn paged_kv_write_chunk_operation_request(
+    phase: ExecutionPhase,
+    geometry: OperationGeometry,
+    chunk_width: u64,
+    device: DeviceCapabilities,
+    workspace_budget_bytes: u64,
+) -> Result<OperationRequest, String> {
+    if !matches!(geometry, OperationGeometry::PagedKvWrite { .. }) {
+        return Err("paged K/V chunk request requires paged K/V writer geometry".into());
+    }
+    if !(2..=128).contains(&chunk_width) {
+        return Err(format!(
+            "paged K/V chunk width must be in 2..=128, got {chunk_width}"
+        ));
+    }
+    Ok(OperationRequest {
+        kind: OperationKind::PagedKvWrite,
+        phase,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout: OperationStateLayout::PagedKvBlocks,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
+        state_format: NumericalFormat::F32,
+        geometry,
+        batch_width: 1,
+        chunk_width,
+        device,
+        workspace_budget_bytes,
+        minimum_promotion: PromotionStatus::Production,
+    })
+}
+
+/// Builds a one-request paged causal GQA reader request for a contiguous chunk in `2..=128`.
+pub fn paged_causal_gqa_chunk_operation_request(
+    phase: ExecutionPhase,
+    geometry: OperationGeometry,
+    chunk_width: u64,
+    device: DeviceCapabilities,
+    workspace_budget_bytes: u64,
+) -> Result<OperationRequest, String> {
+    if !matches!(geometry, OperationGeometry::PagedCausalGqaRead { .. }) {
+        return Err("paged causal GQA chunk request requires paged GQA geometry".into());
+    }
+    if !(2..=128).contains(&chunk_width) {
+        return Err(format!(
+            "paged causal GQA chunk width must be in 2..=128, got {chunk_width}"
+        ));
+    }
+    Ok(OperationRequest {
+        kind: OperationKind::PagedCausalGqaRead,
+        phase,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout: OperationStateLayout::PagedKvBlocks,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
+        state_format: NumericalFormat::F32,
+        geometry,
+        batch_width: 1,
+        chunk_width,
+        device,
+        workspace_budget_bytes,
+        minimum_promotion: PromotionStatus::Production,
+    })
+}
+
+/// Generic paged chunk request helper that preserves the semantic operation kind.
+pub fn qwen35_paged_chunk_operation_request(
+    kind: OperationKind,
+    phase: ExecutionPhase,
+    geometry: OperationGeometry,
+    chunk_width: u64,
+    device: DeviceCapabilities,
+    workspace_budget_bytes: u64,
+) -> Result<OperationRequest, String> {
+    match kind {
+        OperationKind::PagedKvWrite => paged_kv_write_chunk_operation_request(
+            phase,
+            geometry,
+            chunk_width,
+            device,
+            workspace_budget_bytes,
+        ),
+        OperationKind::PagedCausalGqaRead => paged_causal_gqa_chunk_operation_request(
+            phase,
+            geometry,
+            chunk_width,
+            device,
+            workspace_budget_bytes,
+        ),
+        other => Err(format!(
+            "operation kind {other:?} is not a paged chunk operation"
+        )),
+    }
 }
 
 /// Builds a shape-exact AQ4 projection request for a batch width in `2..=128`.
@@ -3066,7 +3782,10 @@ mod tests {
                 .with(RuntimeFeature::HipPagedKvWrite)
                 .with(RuntimeFeature::HipAq4MatvecBatch)
                 .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch)
-                .with(RuntimeFeature::HipLinearAttentionRecurrentSequence),
+                .with(RuntimeFeature::HipLinearAttentionRecurrentSequence)
+                .with(RuntimeFeature::HipPagedKvWriteChunk)
+                .with(RuntimeFeature::HipPagedCausalGqaChunk)
+                .with(RuntimeFeature::HipQkNormRopeBatch),
             workspace_capacity_bytes: u64::MAX,
         }
     }
@@ -3157,6 +3876,400 @@ mod tests {
             row_scale_count: 0,
             tensor_scale_bits: 10.0_f32.to_bits(),
         }
+    }
+
+    fn paged_kv_geometry() -> OperationGeometry {
+        OperationGeometry::PagedKvWrite {
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+            block_size: 4,
+            cache_blocks: 1,
+        }
+    }
+
+    fn paged_gqa_geometry(sigmoid_gate: bool) -> OperationGeometry {
+        OperationGeometry::PagedCausalGqaRead {
+            q_heads: 1,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+            block_size: 4,
+            cache_blocks: 1,
+            sigmoid_gate,
+        }
+    }
+
+    #[test]
+    fn paged_chunk_registries_are_width_bounded_geometry_exact_and_feature_gated() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let writer = paged_kv_write_chunk_production_registry(paged_kv_geometry(), &host).unwrap();
+        let reader =
+            paged_causal_gqa_chunk_production_registry(paged_gqa_geometry(false), &host).unwrap();
+        for width in [2, 128] {
+            let writer_request = paged_kv_write_chunk_operation_request(
+                ExecutionPhase::Decode,
+                paged_kv_geometry(),
+                width,
+                host.clone(),
+                u64::MAX,
+            )
+            .unwrap();
+            assert!(writer.admit(writer_request).is_ok());
+            let reader_request = paged_causal_gqa_chunk_operation_request(
+                ExecutionPhase::Decode,
+                paged_gqa_geometry(false),
+                width,
+                host.clone(),
+                u64::MAX,
+            )
+            .unwrap();
+            assert!(reader.admit(reader_request).is_ok());
+        }
+        for width in [1, 129] {
+            assert!(
+                paged_kv_write_chunk_operation_request(
+                    ExecutionPhase::Decode,
+                    paged_kv_geometry(),
+                    width,
+                    host.clone(),
+                    u64::MAX,
+                )
+                .is_err()
+            );
+            assert!(
+                paged_causal_gqa_chunk_operation_request(
+                    ExecutionPhase::Decode,
+                    paged_gqa_geometry(false),
+                    width,
+                    host.clone(),
+                    u64::MAX,
+                )
+                .is_err()
+            );
+        }
+        let mut wrong_geometry = paged_kv_geometry();
+        if let OperationGeometry::PagedKvWrite { head_dim, .. } = &mut wrong_geometry {
+            *head_dim = 4;
+        }
+        let wrong_request = paged_kv_write_chunk_operation_request(
+            ExecutionPhase::Decode,
+            wrong_geometry,
+            2,
+            host.clone(),
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(writer.admit(wrong_request).is_err());
+
+        let mut hip_without_feature = test_hip_capabilities();
+        hip_without_feature.runtime_features = RuntimeFeatureSet::EMPTY;
+        let hip_writer =
+            paged_kv_write_chunk_production_registry(paged_kv_geometry(), &hip_without_feature)
+                .unwrap();
+        assert!(
+            hip_writer
+                .admit(
+                    paged_kv_write_chunk_operation_request(
+                        ExecutionPhase::Decode,
+                        paged_kv_geometry(),
+                        2,
+                        hip_without_feature,
+                        u64::MAX,
+                    )
+                    .unwrap()
+                )
+                .is_err()
+        );
+
+        let mut wrong_architecture = test_hip_capabilities();
+        wrong_architecture.architecture = Some("gfx1100".into());
+        assert!(
+            paged_causal_gqa_chunk_production_registry(
+                paged_gqa_geometry(false),
+                &wrong_architecture
+            )
+            .is_err()
+        );
+        assert_eq!(
+            reader
+                .implementations()
+                .first()
+                .unwrap()
+                .state_effect
+                .update_mode,
+            StateUpdateMode::ReadOnly
+        );
+        assert_eq!(
+            writer
+                .implementations()
+                .first()
+                .unwrap()
+                .state_effect
+                .update_mode,
+            StateUpdateMode::InPlace
+        );
+    }
+
+    #[test]
+    fn paged_chunk_reader_plain_and_sigmoid_selection_is_unambiguous() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        for sigmoid_gate in [false, true] {
+            let registry =
+                paged_causal_gqa_chunk_production_registry(paged_gqa_geometry(sigmoid_gate), &host)
+                    .unwrap();
+            let trace = registry
+                .resolve(
+                    &paged_causal_gqa_chunk_operation_request(
+                        ExecutionPhase::Decode,
+                        paged_gqa_geometry(sigmoid_gate),
+                        17,
+                        host.clone(),
+                        u64::MAX,
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .trace();
+            assert_eq!(trace.chunk_width, 17);
+            assert_eq!(trace.state_effect.update_mode, StateUpdateMode::ReadOnly);
+            assert_eq!(
+                trace.executable,
+                if sigmoid_gate {
+                    ExecutableOperation::HipPagedCausalGqaChunkSigmoidGateF32
+                } else {
+                    ExecutableOperation::HipPagedCausalGqaChunkF32
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn paged_chunk_duplicate_descriptor_is_ambiguous() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let registry =
+            paged_kv_write_chunk_production_registry(paged_kv_geometry(), &host).unwrap();
+        let mut entries = registry.implementations().to_vec();
+        let mut duplicate = entries[0].clone();
+        duplicate.id = "host.paged-kv-write-chunk-f32.ambiguous";
+        entries.push(duplicate);
+        let registry = BackendOperationRegistry::new(entries).unwrap();
+        let request = paged_kv_write_chunk_operation_request(
+            ExecutionPhase::Decode,
+            paged_kv_geometry(),
+            2,
+            host,
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(
+            registry
+                .resolve(&request)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+    }
+
+    #[test]
+    fn planned_paged_chunk_wrappers_match_direct_cpu_abis() {
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut table = context.alloc_buffer(4).unwrap();
+        table
+            .copy_from_host(0, &0_u32.to_le_bytes(), Some(&mut stream))
+            .unwrap();
+        let mut k = context.alloc_buffer(2 * 2 * 4).unwrap();
+        let mut v = context.alloc_buffer(2 * 2 * 4).unwrap();
+        let payload = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        k.copy_from_host(0, &payload(&[1.0, 2.0, 3.0, 4.0]), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &payload(&[5.0, 6.0, 7.0, 8.0]), Some(&mut stream))
+            .unwrap();
+        let mut direct_k_cache = context.alloc_buffer(4 * 2 * 4).unwrap();
+        let mut direct_v_cache = context.alloc_buffer(4 * 2 * 4).unwrap();
+        let mut planned_k_cache = context.alloc_buffer(4 * 2 * 4).unwrap();
+        let mut planned_v_cache = context.alloc_buffer(4 * 2 * 4).unwrap();
+        ullm_runtime_sys::paged_kv_write_chunk_f32(
+            &k,
+            &v,
+            &table,
+            0,
+            2,
+            4,
+            1,
+            1,
+            2,
+            2,
+            &mut direct_k_cache,
+            &mut direct_v_cache,
+            Some(&mut stream),
+        )
+        .unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let writer_registry =
+            paged_kv_write_chunk_production_registry(paged_kv_geometry(), &host).unwrap();
+        writer_registry
+            .admit(
+                paged_kv_write_chunk_operation_request(
+                    ExecutionPhase::Decode,
+                    paged_kv_geometry(),
+                    2,
+                    host.clone(),
+                    u64::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .start()
+            .execute_paged_kv_write_chunk_f32(
+                &k,
+                &v,
+                &table,
+                0,
+                &mut planned_k_cache,
+                &mut planned_v_cache,
+                &mut stream,
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+        let mut direct_bytes = vec![0_u8; 16];
+        let mut planned_bytes = vec![0_u8; 16];
+        direct_k_cache
+            .copy_to_host(0, &mut direct_bytes, Some(&mut stream))
+            .unwrap();
+        planned_k_cache
+            .copy_to_host(0, &mut planned_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(direct_bytes, planned_bytes);
+
+        let mut q = context.alloc_buffer(2 * 2 * 4).unwrap();
+        q.copy_from_host(0, &payload(&[1.0, 0.0, 0.0, 1.0]), Some(&mut stream))
+            .unwrap();
+        let mut gate = context.alloc_buffer(2 * 2 * 4).unwrap();
+        gate.copy_from_host(0, &payload(&[0.0; 4]), Some(&mut stream))
+            .unwrap();
+        let mut direct_output = context.alloc_buffer(2 * 2 * 4).unwrap();
+        let mut planned_output = context.alloc_buffer(2 * 2 * 4).unwrap();
+        ullm_runtime_sys::paged_causal_gqa_chunk_f32(
+            &q,
+            &direct_k_cache,
+            &direct_v_cache,
+            &table,
+            0,
+            2,
+            4,
+            1,
+            1,
+            1,
+            2,
+            2,
+            1.0 / 2.0_f32.sqrt(),
+            &mut direct_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        let reader_registry =
+            paged_causal_gqa_chunk_production_registry(paged_gqa_geometry(false), &host).unwrap();
+        reader_registry
+            .admit(
+                paged_causal_gqa_chunk_operation_request(
+                    ExecutionPhase::Decode,
+                    paged_gqa_geometry(false),
+                    2,
+                    host.clone(),
+                    u64::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .start()
+            .execute_paged_causal_gqa_chunk_f32(
+                &q,
+                &planned_k_cache,
+                &planned_v_cache,
+                &table,
+                0,
+                &mut planned_output,
+                &mut stream,
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+        direct_output
+            .copy_to_host(0, &mut direct_bytes, Some(&mut stream))
+            .unwrap();
+        planned_output
+            .copy_to_host(0, &mut planned_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(direct_bytes, planned_bytes);
+
+        let mut direct_gated_output = context.alloc_buffer(2 * 2 * 4).unwrap();
+        let mut planned_gated_output = context.alloc_buffer(2 * 2 * 4).unwrap();
+        ullm_runtime_sys::paged_causal_gqa_chunk_sigmoid_gate_f32(
+            &q,
+            &gate,
+            &direct_k_cache,
+            &direct_v_cache,
+            &table,
+            0,
+            2,
+            4,
+            1,
+            1,
+            1,
+            2,
+            2,
+            1.0 / 2.0_f32.sqrt(),
+            &mut direct_gated_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        let gated_device = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let gated_registry =
+            paged_causal_gqa_chunk_production_registry(paged_gqa_geometry(true), &gated_device)
+                .unwrap();
+        gated_registry
+            .admit(
+                paged_causal_gqa_chunk_operation_request(
+                    ExecutionPhase::Decode,
+                    paged_gqa_geometry(true),
+                    2,
+                    gated_device,
+                    u64::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .start()
+            .execute_paged_causal_gqa_chunk_sigmoid_gate_f32(
+                &q,
+                &gate,
+                &planned_k_cache,
+                &planned_v_cache,
+                &table,
+                0,
+                &mut planned_gated_output,
+                &mut stream,
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+        direct_gated_output
+            .copy_to_host(0, &mut direct_bytes, Some(&mut stream))
+            .unwrap();
+        planned_gated_output
+            .copy_to_host(0, &mut planned_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(direct_bytes, planned_bytes);
     }
 
     #[test]
@@ -3625,6 +4738,17 @@ mod tests {
             (ProbeFaultStage::Aq4MatvecBatch, 9, "aq4-matvec-batch"),
             (ProbeFaultStage::QkvPrepareBatch, 10, "qkv-prepare-batch"),
             (ProbeFaultStage::RecurrentSequence, 11, "recurrent-sequence"),
+            (ProbeFaultStage::QkNormRopeBatch, 12, "qk-norm-rope-batch"),
+            (
+                ProbeFaultStage::PagedKvWriteChunk,
+                13,
+                "paged-kv-write-chunk",
+            ),
+            (
+                ProbeFaultStage::PagedCausalGqaChunk,
+                14,
+                "paged-causal-gqa-chunk",
+            ),
             (ProbeFaultStage::Synchronize, 8, "synchronize"),
         ] {
             force_probe_failure(stage);
@@ -3697,6 +4821,9 @@ mod tests {
             "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
             "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
             "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+            "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+            "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+            "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
         ] {
             assert_eq!(std::env::var(environment).as_deref(), Ok("1"));
         }

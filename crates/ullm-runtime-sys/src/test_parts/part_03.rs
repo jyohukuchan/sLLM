@@ -719,3 +719,310 @@
             );
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expected_paged_causal_gqa_chunk(
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        block_table: &[u32],
+        cached_prefix_len: usize,
+        m: usize,
+        block_size: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0_f32; m * q_heads * value_dim];
+        let q_per_kv = q_heads / kv_heads;
+        for row in 0..m {
+            let cache_len = cached_prefix_len + row + 1;
+            for q_head in 0..q_heads {
+                let kv_head = q_head / q_per_kv;
+                let q_base = (row * q_heads + q_head) * head_dim;
+                let mut max_score = f32::NEG_INFINITY;
+                for source in 0..cache_len {
+                    let physical = block_table[source / block_size] as usize * block_size
+                        + source % block_size;
+                    let k_base = (physical * kv_heads + kv_head) * head_dim;
+                    let score = (0..head_dim)
+                        .map(|dim| q[q_base + dim] * k_cache[k_base + dim])
+                        .sum::<f32>()
+                        * softmax_scale;
+                    max_score = max_score.max(score);
+                }
+                let mut denominator = 0.0_f32;
+                let output_base = (row * q_heads + q_head) * value_dim;
+                for source in 0..cache_len {
+                    let physical = block_table[source / block_size] as usize * block_size
+                        + source % block_size;
+                    let k_base = (physical * kv_heads + kv_head) * head_dim;
+                    let score = (0..head_dim)
+                        .map(|dim| q[q_base + dim] * k_cache[k_base + dim])
+                        .sum::<f32>()
+                        * softmax_scale;
+                    let weight = (score - max_score).exp();
+                    denominator += weight;
+                    let v_base = (physical * kv_heads + kv_head) * value_dim;
+                    for value in 0..value_dim {
+                        output[output_base + value] += weight * v_cache[v_base + value];
+                    }
+                }
+                for value in 0..value_dim {
+                    output[output_base + value] /= denominator;
+                }
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn cpu_paged_chunk_writer_reader_supports_widths_prefixes_and_gate() {
+        for &(m, cached_prefix_len) in &[(2_usize, 0_usize), (3, 1), (127, 5), (128, 4)] {
+            let block_size = 3_usize;
+            let q_heads = 4_usize;
+            let kv_heads = 2_usize;
+            let head_dim = 4_usize;
+            let value_dim = 4_usize;
+            let total_context = cached_prefix_len + m;
+            let table_len = (total_context - 1) / block_size + 1;
+            let cache_blocks = table_len + 3;
+            let block_table_values = (0..table_len)
+                .map(|index| ((index + 2) % cache_blocks) as u32)
+                .collect::<Vec<_>>();
+            let physical_tokens = cache_blocks * block_size;
+            let q_values = (0..m * q_heads * head_dim)
+                .map(|index| (index as f32 - 19.0) / 23.0)
+                .collect::<Vec<_>>();
+            let k_values = (0..m * kv_heads * head_dim)
+                .map(|index| (index as f32 - 7.0) / 17.0)
+                .collect::<Vec<_>>();
+            let v_values = (0..m * kv_heads * value_dim)
+                .map(|index| (index as f32 + 3.0) / 13.0)
+                .collect::<Vec<_>>();
+            let mut expected_k_cache = vec![99.0_f32; physical_tokens * kv_heads * head_dim];
+            let mut expected_v_cache = vec![77.0_f32; physical_tokens * kv_heads * value_dim];
+            for logical in 0..cached_prefix_len {
+                let physical = block_table_values[logical / block_size] as usize * block_size
+                    + logical % block_size;
+                for kv_head in 0..kv_heads {
+                    let k_dst = (physical * kv_heads + kv_head) * head_dim;
+                    let v_dst = (physical * kv_heads + kv_head) * value_dim;
+                    for dim in 0..head_dim {
+                        expected_k_cache[k_dst + dim] = (logical * 11 + kv_head * 3 + dim) as f32;
+                    }
+                    for value in 0..value_dim {
+                        expected_v_cache[v_dst + value] =
+                            (logical * 7 + kv_head * 5 + value) as f32 / 9.0;
+                    }
+                }
+            }
+            let initial_k_cache = expected_k_cache.clone();
+            let initial_v_cache = expected_v_cache.clone();
+            for row in 0..m {
+                let logical = cached_prefix_len + row;
+                let physical = block_table_values[logical / block_size] as usize * block_size
+                    + logical % block_size;
+                for kv_head in 0..kv_heads {
+                    let k_src = (row * kv_heads + kv_head) * head_dim;
+                    let k_dst = (physical * kv_heads + kv_head) * head_dim;
+                    expected_k_cache[k_dst..k_dst + head_dim]
+                        .copy_from_slice(&k_values[k_src..k_src + head_dim]);
+                    let v_src = (row * kv_heads + kv_head) * value_dim;
+                    let v_dst = (physical * kv_heads + kv_head) * value_dim;
+                    expected_v_cache[v_dst..v_dst + value_dim]
+                        .copy_from_slice(&v_values[v_src..v_src + value_dim]);
+                }
+            }
+            let mut context = RuntimeContext::create(0).unwrap();
+            let mut stream = context.create_stream().unwrap();
+            let mut q = context.alloc_buffer(q_values.len() * 4).unwrap();
+            let mut k = context.alloc_buffer(k_values.len() * 4).unwrap();
+            let mut v = context.alloc_buffer(v_values.len() * 4).unwrap();
+            let mut table = context.alloc_buffer(table_len * 4).unwrap();
+            let mut k_cache = context.alloc_buffer(expected_k_cache.len() * 4).unwrap();
+            let mut v_cache = context.alloc_buffer(expected_v_cache.len() * 4).unwrap();
+            let mut output = context.alloc_buffer(m * q_heads * value_dim * 4).unwrap();
+            let mut gated_output = context.alloc_buffer(m * q_heads * value_dim * 4).unwrap();
+            q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream)).unwrap();
+            k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream)).unwrap();
+            v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream)).unwrap();
+            table.copy_from_host(0, &u32s_to_le_bytes(&block_table_values), Some(&mut stream)).unwrap();
+            k_cache.copy_from_host(0, &f32s_to_le_bytes(&initial_k_cache), Some(&mut stream)).unwrap();
+            v_cache.copy_from_host(0, &f32s_to_le_bytes(&initial_v_cache), Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            paged_kv_write_chunk_f32(&k, &v, &table, cached_prefix_len, m, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut k_cache, &mut v_cache, Some(&mut stream)).unwrap();
+            let scale = 1.0_f32 / (head_dim as f32).sqrt();
+            let expected = expected_paged_causal_gqa_chunk(&q_values, &expected_k_cache, &expected_v_cache, &block_table_values, cached_prefix_len, m, block_size, q_heads, kv_heads, head_dim, value_dim, scale);
+            paged_causal_gqa_chunk_f32(&q, &k_cache, &v_cache, &table, cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut output, Some(&mut stream)).unwrap();
+            let gate_values = (0..m * q_heads * head_dim).map(|index| (index as f32 - 3.0) / 11.0).collect::<Vec<_>>();
+            let expected_gated = expected.iter().zip(&gate_values).map(|(value, gate)| value / (1.0 + (-gate).exp())).collect::<Vec<_>>();
+            let mut gate = context.alloc_buffer(gate_values.len() * 4).unwrap();
+            gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream)).unwrap();
+            paged_causal_gqa_chunk_sigmoid_gate_f32(&q, &gate, &k_cache, &v_cache, &table, cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut gated_output, Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            let mut k_bytes = vec![0_u8; expected_k_cache.len() * 4];
+            let mut v_bytes = vec![0_u8; expected_v_cache.len() * 4];
+            let mut output_bytes = vec![0_u8; expected.len() * 4];
+            let mut gated_bytes = vec![0_u8; expected_gated.len() * 4];
+            k_cache.copy_to_host(0, &mut k_bytes, Some(&mut stream)).unwrap();
+            v_cache.copy_to_host(0, &mut v_bytes, Some(&mut stream)).unwrap();
+            output.copy_to_host(0, &mut output_bytes, Some(&mut stream)).unwrap();
+            gated_output.copy_to_host(0, &mut gated_bytes, Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            assert_eq!(le_bytes_to_f32s(&k_bytes), expected_k_cache);
+            assert_eq!(le_bytes_to_f32s(&v_bytes), expected_v_cache);
+            assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+            assert_f32s_close(&le_bytes_to_f32s(&gated_bytes), &expected_gated, 1e-5);
+        }
+    }
+
+    #[test]
+    fn cpu_paged_chunk_m1_matches_paged_decode_and_rejects_invalid_widths() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let head_dim = 2_usize;
+        let value_dim = 2_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 3_usize;
+        let q_values = vec![0.2_f32, -0.1, 0.5, 0.3];
+        let k_values = vec![0.4_f32, -0.2];
+        let v_values = vec![1.0_f32, -2.0];
+        let table_values = vec![2_u32, 0_u32];
+        let k_cache_values = vec![0.1_f32; cache_blocks * block_size * kv_heads * head_dim];
+        let v_cache_values = vec![0.2_f32; cache_blocks * block_size * kv_heads * value_dim];
+        let mut q = context.alloc_buffer(q_values.len() * 4).unwrap();
+        let mut k = context.alloc_buffer(k_values.len() * 4).unwrap();
+        let mut v = context.alloc_buffer(v_values.len() * 4).unwrap();
+        let mut table = context.alloc_buffer(table_values.len() * 4).unwrap();
+        let mut k_cache = context.alloc_buffer(k_cache_values.len() * 4).unwrap();
+        let mut v_cache = context.alloc_buffer(v_cache_values.len() * 4).unwrap();
+        let mut generic = context.alloc_buffer(q_heads * value_dim * 4).unwrap();
+        let mut decode = context.alloc_buffer(q_heads * value_dim * 4).unwrap();
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream)).unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream)).unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream)).unwrap();
+        table.copy_from_host(0, &u32s_to_le_bytes(&table_values), Some(&mut stream)).unwrap();
+        k_cache.copy_from_host(0, &f32s_to_le_bytes(&k_cache_values), Some(&mut stream)).unwrap();
+        v_cache.copy_from_host(0, &f32s_to_le_bytes(&v_cache_values), Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        paged_kv_write_chunk_f32(&k, &v, &table, 0, 1, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut k_cache, &mut v_cache, Some(&mut stream)).unwrap();
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        paged_causal_gqa_chunk_f32(&q, &k_cache, &v_cache, &table, 0, 1, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut generic, Some(&mut stream)).unwrap();
+        paged_decode_attn_f32(&q, &k_cache, &v_cache, &table, 1, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut decode, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        let mut generic_bytes = vec![0_u8; q_heads * value_dim * 4];
+        let mut decode_bytes = vec![0_u8; q_heads * value_dim * 4];
+        generic.copy_to_host(0, &mut generic_bytes, Some(&mut stream)).unwrap();
+        decode.copy_to_host(0, &mut decode_bytes, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&generic_bytes), &le_bytes_to_f32s(&decode_bytes), 1e-6);
+        assert!(paged_kv_write_chunk_f32(&k, &v, &table, 0, 0, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut k_cache, &mut v_cache, None).is_err());
+        assert!(paged_kv_write_chunk_f32(&k, &v, &table, 0, 129, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut k_cache, &mut v_cache, None).is_err());
+        assert!(paged_causal_gqa_chunk_f32(&q, &k_cache, &v_cache, &table, 0, 1, block_size, cache_blocks, q_heads, kv_heads, 257, value_dim, scale, &mut generic, None).is_err());
+        assert!(paged_causal_gqa_chunk_sigmoid_gate_f32(&q, &k, &k_cache, &v_cache, &table, 0, 1, block_size, cache_blocks, q_heads, kv_heads, head_dim, 1, scale, &mut generic, None).is_err());
+    }
+
+    #[test]
+    fn cpu_paged_chunk_matches_m1_writer_and_reader_differential() {
+        for &(m, prefix) in &[(2_usize, 0_usize), (3, 1)] {
+            let block_size = 2_usize;
+            let cache_blocks = 4_usize;
+            let q_heads = 2_usize;
+            let kv_heads = 1_usize;
+            let head_dim = 2_usize;
+            let value_dim = 2_usize;
+            let table_values = vec![2_u32, 0_u32, 3_u32];
+            let q_values = (0..m * q_heads * head_dim)
+                .map(|i| (i as f32 - 4.0) / 7.0)
+                .collect::<Vec<_>>();
+            let k_values = (0..m * kv_heads * head_dim)
+                .map(|i| (i as f32 + 1.0) / 5.0)
+                .collect::<Vec<_>>();
+            let v_values = (0..m * kv_heads * value_dim)
+                .map(|i| (i as f32 - 2.0) / 3.0)
+                .collect::<Vec<_>>();
+            let cache_len = cache_blocks * block_size * kv_heads * head_dim;
+            let value_cache_len = cache_blocks * block_size * kv_heads * value_dim;
+            let mut context = RuntimeContext::create(0).unwrap();
+            let mut stream = context.create_stream().unwrap();
+            let mut q = context.alloc_buffer(q_values.len() * 4).unwrap();
+            let mut k = context.alloc_buffer(k_values.len() * 4).unwrap();
+            let mut v = context.alloc_buffer(v_values.len() * 4).unwrap();
+            let mut table = context.alloc_buffer(table_values.len() * 4).unwrap();
+            let initial_k = vec![0.125_f32; cache_len];
+            let initial_v = vec![0.375_f32; value_cache_len];
+            let mut chunk_k_cache = context.alloc_buffer(cache_len * 4).unwrap();
+            let mut chunk_v_cache = context.alloc_buffer(value_cache_len * 4).unwrap();
+            let mut m1_k_cache = context.alloc_buffer(cache_len * 4).unwrap();
+            let mut m1_v_cache = context.alloc_buffer(value_cache_len * 4).unwrap();
+            q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream)).unwrap();
+            k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream)).unwrap();
+            v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream)).unwrap();
+            table.copy_from_host(0, &u32s_to_le_bytes(&table_values), Some(&mut stream)).unwrap();
+            chunk_k_cache.copy_from_host(0, &f32s_to_le_bytes(&initial_k), Some(&mut stream)).unwrap();
+            chunk_v_cache.copy_from_host(0, &f32s_to_le_bytes(&initial_v), Some(&mut stream)).unwrap();
+            m1_k_cache.copy_from_host(0, &f32s_to_le_bytes(&initial_k), Some(&mut stream)).unwrap();
+            m1_v_cache.copy_from_host(0, &f32s_to_le_bytes(&initial_v), Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            paged_kv_write_chunk_f32(&k, &v, &table, prefix, m, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut chunk_k_cache, &mut chunk_v_cache, Some(&mut stream)).unwrap();
+            for row in 0..m {
+                let k_row = &k_values[row * kv_heads * head_dim..(row + 1) * kv_heads * head_dim];
+                let v_row = &v_values[row * kv_heads * value_dim..(row + 1) * kv_heads * value_dim];
+                let mut k_one = context.alloc_buffer(k_row.len() * 4).unwrap();
+                let mut v_one = context.alloc_buffer(v_row.len() * 4).unwrap();
+                k_one.copy_from_host(0, &f32s_to_le_bytes(k_row), Some(&mut stream)).unwrap();
+                v_one.copy_from_host(0, &f32s_to_le_bytes(v_row), Some(&mut stream)).unwrap();
+                paged_kv_write_f32(&k_one, &v_one, &table, prefix + row, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut m1_k_cache, &mut m1_v_cache, Some(&mut stream)).unwrap();
+            }
+            let mut chunk_k_bytes = vec![0_u8; cache_len * 4];
+            let mut chunk_v_bytes = vec![0_u8; value_cache_len * 4];
+            let mut m1_k_bytes = vec![0_u8; cache_len * 4];
+            let mut m1_v_bytes = vec![0_u8; value_cache_len * 4];
+            chunk_k_cache.copy_to_host(0, &mut chunk_k_bytes, Some(&mut stream)).unwrap();
+            chunk_v_cache.copy_to_host(0, &mut chunk_v_bytes, Some(&mut stream)).unwrap();
+            m1_k_cache.copy_to_host(0, &mut m1_k_bytes, Some(&mut stream)).unwrap();
+            m1_v_cache.copy_to_host(0, &mut m1_v_bytes, Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            assert_eq!(chunk_k_bytes, m1_k_bytes);
+            assert_eq!(chunk_v_bytes, m1_v_bytes);
+            let mut chunk_output = context.alloc_buffer(m * q_heads * value_dim * 4).unwrap();
+            let mut m1_output = vec![0.0_f32; m * q_heads * value_dim];
+            let scale = 1.0_f32 / (head_dim as f32).sqrt();
+            paged_causal_gqa_chunk_f32(&q, &chunk_k_cache, &chunk_v_cache, &table, prefix, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut chunk_output, Some(&mut stream)).unwrap();
+            for row in 0..m {
+                let q_row = &q_values[row * q_heads * head_dim..(row + 1) * q_heads * head_dim];
+                let mut q_one = context.alloc_buffer(q_row.len() * 4).unwrap();
+                let mut out_one = context.alloc_buffer(q_heads * value_dim * 4).unwrap();
+                q_one.copy_from_host(0, &f32s_to_le_bytes(q_row), Some(&mut stream)).unwrap();
+                paged_decode_attn_f32(&q_one, &m1_k_cache, &m1_v_cache, &table, prefix + row + 1, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut out_one, Some(&mut stream)).unwrap();
+                let mut out_bytes = vec![0_u8; q_heads * value_dim * 4];
+                out_one.copy_to_host(0, &mut out_bytes, Some(&mut stream)).unwrap();
+                stream.synchronize().unwrap();
+                m1_output[row * q_heads * value_dim..(row + 1) * q_heads * value_dim]
+                    .copy_from_slice(&le_bytes_to_f32s(&out_bytes));
+            }
+            let mut chunk_bytes = vec![0_u8; m * q_heads * value_dim * 4];
+            chunk_output.copy_to_host(0, &mut chunk_bytes, Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            assert_f32s_close(&le_bytes_to_f32s(&chunk_bytes), &m1_output, 1e-6);
+            assert!(paged_causal_gqa_chunk_f32(&q, &chunk_k_cache, &chunk_v_cache, &table, usize::MAX, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut chunk_output, None).is_err());
+            let mut bad_table = context.alloc_buffer(table_values.len() * 4).unwrap();
+            bad_table.copy_from_host(0, &u32s_to_le_bytes(&[u32::MAX, 0, 3]), None).unwrap();
+            let mut untouched = context.alloc_buffer(cache_len * 4).unwrap();
+            untouched.copy_from_host(0, &f32s_to_le_bytes(&initial_k), None).unwrap();
+            let mut v_untouched = context.alloc_buffer(value_cache_len * 4).unwrap();
+            v_untouched.copy_from_host(0, &f32s_to_le_bytes(&initial_v), None).unwrap();
+            assert!(paged_kv_write_chunk_f32(&k, &v, &bad_table, prefix, m, block_size, cache_blocks, kv_heads, head_dim, value_dim, &mut untouched, &mut v_untouched, None).is_err());
+            let mut output_sentinel = context.alloc_buffer(m * q_heads * value_dim * 4).unwrap();
+            output_sentinel.copy_from_host(0, &f32s_to_le_bytes(&vec![42.0_f32; m * q_heads * value_dim]), None).unwrap();
+            assert!(paged_causal_gqa_chunk_f32(&q, &chunk_k_cache, &chunk_v_cache, &bad_table, prefix, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, scale, &mut output_sentinel, None).is_err());
+            let mut output_bytes = vec![0_u8; m * q_heads * value_dim * 4];
+            output_sentinel.copy_to_host(0, &mut output_bytes, None).unwrap();
+            assert_eq!(le_bytes_to_f32s(&output_bytes), vec![42.0_f32; m * q_heads * value_dim]);
+        }
+    }

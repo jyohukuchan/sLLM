@@ -830,6 +830,56 @@ unsafe extern "C" {
         v_cache: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_kv_write_chunk_f32(
+        k: *const RawRuntimeBuffer,
+        v: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_start: usize,
+        m: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        k_cache: *mut RawRuntimeBuffer,
+        v_cache: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_paged_causal_gqa_chunk_f32(
+        q: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cached_prefix_len: usize,
+        m: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_f32(
+        q: *const RawRuntimeBuffer,
+        gate: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cached_prefix_len: usize,
+        m: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_qkv_prepare_f32(
         qkv_buffer: *const RawRuntimeBuffer,
         conv_weight_buffer: *const RawRuntimeBuffer,
@@ -5457,6 +5507,267 @@ pub fn paged_kv_write_f32(
             value_dim,
             k_cache.raw.as_ptr(),
             v_cache.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paged_kv_write_chunk_f32(
+    k: &RuntimeBuffer,
+    v: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_start: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    k_cache: &mut RuntimeBuffer,
+    v_cache: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if m == 0 || m > 128 {
+        return Err("f32 paged KV write chunk m must be in 1..=128".to_string());
+    }
+    if block_size == 0 || cache_blocks == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err("f32 paged KV write chunk dimensions must be greater than zero".to_string());
+    }
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "f32 paged KV write chunk physical cache size overflows".to_string())?;
+    let end = cache_start
+        .checked_add(m)
+        .ok_or_else(|| "f32 paged KV write chunk logical range overflows".to_string())?;
+    if end > physical_tokens {
+        return Err("f32 paged KV write chunk logical range exceeds physical cache capacity".to_string());
+    }
+    let table_entries = (end - 1) / block_size + 1;
+    let k_row = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 paged KV write chunk k row elements overflow".to_string())?;
+    let v_row = kv_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 paged KV write chunk v row elements overflow".to_string())?;
+    let k_bytes = m
+        .checked_mul(k_row)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "f32 paged KV write chunk k byte size overflows".to_string())?;
+    let v_bytes = m
+        .checked_mul(v_row)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "f32 paged KV write chunk v byte size overflows".to_string())?;
+    let cache_heads = physical_tokens
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "f32 paged KV write chunk cache elements overflow".to_string())?;
+    let k_cache_bytes = cache_heads
+        .checked_mul(head_dim)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "f32 paged KV write chunk k cache byte size overflows".to_string())?;
+    let v_cache_bytes = cache_heads
+        .checked_mul(value_dim)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "f32 paged KV write chunk v cache byte size overflows".to_string())?;
+    let table_bytes = table_entries
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 paged KV write chunk table byte size overflows".to_string())?;
+    check_copy_range(0, k_bytes, k.size()?)?;
+    check_copy_range(0, v_bytes, v.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_kv_write_chunk_f32(
+            k.raw.as_ptr(),
+            v.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_start,
+            m,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paged_causal_gqa_chunk_sizes(
+    cached_prefix_len: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> Result<(usize, usize, usize, usize, usize, usize), String> {
+    if m == 0 || m > 128 {
+        return Err("f32 paged causal GQA chunk m must be in 1..=128".to_string());
+    }
+    if block_size == 0 || cache_blocks == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err("f32 paged causal GQA chunk dimensions must be greater than zero".to_string());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err("f32 paged causal GQA chunk q_heads must be a multiple of kv_heads".to_string());
+    }
+    if head_dim > 256 || value_dim > 256 {
+        return Err("f32 paged causal GQA chunk head_dim/value_dim must be at most 256".to_string());
+    }
+    let total_context = cached_prefix_len
+        .checked_add(m)
+        .ok_or_else(|| "f32 paged causal GQA chunk total context overflows".to_string())?;
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "f32 paged causal GQA chunk physical cache size overflows".to_string())?;
+    if total_context > physical_tokens {
+        return Err("f32 paged causal GQA chunk context exceeds physical cache capacity".to_string());
+    }
+    let table_entries = (total_context - 1) / block_size + 1;
+    let q_elements = m
+        .checked_mul(q_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "f32 paged causal GQA chunk q element count overflows".to_string())?;
+    let output_elements = m
+        .checked_mul(q_heads)
+        .and_then(|value| value.checked_mul(value_dim))
+        .ok_or_else(|| "f32 paged causal GQA chunk output element count overflows".to_string())?;
+    let cache_heads = physical_tokens
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "f32 paged causal GQA chunk cache element count overflows".to_string())?;
+    let k_elements = cache_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 paged causal GQA chunk k cache element count overflows".to_string())?;
+    let v_elements = cache_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 paged causal GQA chunk v cache element count overflows".to_string())?;
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged causal GQA chunk q byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged causal GQA chunk output byte size overflows".to_string())?;
+    let k_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged causal GQA chunk k cache byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged causal GQA chunk v cache byte size overflows".to_string())?;
+    let table_bytes = table_entries
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 paged causal GQA chunk table byte size overflows".to_string())?;
+    Ok((q_bytes, output_bytes, q_bytes, k_bytes, v_bytes, table_bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paged_causal_gqa_chunk_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cached_prefix_len: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("f32 paged causal GQA chunk softmax scale must be finite and greater than zero".to_string());
+    }
+    let (q_bytes, output_bytes, _, k_bytes, v_bytes, table_bytes) = paged_causal_gqa_chunk_sizes(
+        cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim,
+    )?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_bytes, v_cache.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_causal_gqa_chunk_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cached_prefix_len,
+            m,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paged_causal_gqa_chunk_sigmoid_gate_f32(
+    q: &RuntimeBuffer,
+    gate: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cached_prefix_len: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if head_dim != value_dim {
+        return Err("f32 paged causal GQA chunk gated ABI requires head_dim == value_dim".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("f32 paged causal GQA chunk softmax scale must be finite and greater than zero".to_string());
+    }
+    let (q_bytes, output_bytes, gate_bytes, k_bytes, v_bytes, table_bytes) = paged_causal_gqa_chunk_sizes(
+        cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim,
+    )?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, gate_bytes, gate.size()?)?;
+    check_copy_range(0, k_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_bytes, v_cache.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_f32(
+            q.raw.as_ptr(),
+            gate.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cached_prefix_len,
+            m,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
             stream,
         )
     })

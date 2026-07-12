@@ -4130,6 +4130,301 @@ ullm_status paged_kv_write_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+class HipPagedChunkKernelCache {
+public:
+    void *writer_for_device(int device_id, std::string *error) {
+        ensure_device(device_id, error);
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        return found == modules_.end() ? nullptr : found->second->writer;
+    }
+
+    void *reader_for_device(int device_id, std::string *error) {
+        ensure_device(device_id, error);
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        return found == modules_.end() ? nullptr : found->second->reader;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *writer = nullptr;
+        void *reader = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    void ensure_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (modules_.find(device_id) != modules_.end()) {
+            return;
+        }
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return;
+        }
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_paged_chunk_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *writer = nullptr;
+            void *reader = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &writer, module, "ullm_paged_kv_write_chunk_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(
+                    &reader, module, "ullm_paged_causal_gqa_chunk_f32_kernel", device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for paged chunk kernels");
+                continue;
+            }
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->writer = writer;
+            loaded->reader = reader;
+            loaded->arch = arch;
+            modules_.emplace(device_id, std::move(loaded));
+            return;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build paged chunk HIP kernels" : compile_errors);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipPagedChunkKernelCache &hip_paged_chunk_kernel_cache() {
+    static HipPagedChunkKernelCache cache;
+    return cache;
+}
+
+bool paged_kv_write_chunk_f32_hip_kernel(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_start,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t block_table_entries,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = k_buffer->hip_device_id;
+    void *function = hip_paged_chunk_kernel_cache().writer_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+    const size_t k_row = kv_heads * head_dim;
+    const size_t v_row = kv_heads * value_dim;
+    const size_t elements = m * (k_row + v_row);
+    constexpr unsigned int launch_block_size = 256;
+    const size_t grid_size = (elements + launch_block_size - 1) / launch_block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "paged KV write chunk element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_cache_start = static_cast<unsigned long long>(cache_start);
+    unsigned long long kernel_m = static_cast<unsigned long long>(m);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_table_entries = static_cast<unsigned long long>(block_table_entries);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *table_ptr = block_table_buffer->ptr;
+    void *k_cache_ptr = k_cache_buffer->ptr;
+    void *v_cache_ptr = v_cache_buffer->ptr;
+    void *kernel_params[] = {
+        &k_ptr,
+        &v_ptr,
+        &table_ptr,
+        &kernel_cache_start,
+        &kernel_m,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_table_entries,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &k_cache_ptr,
+        &v_cache_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 paged KV write chunk";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool paged_causal_gqa_chunk_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t block_table_entries,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_paged_chunk_kernel_cache().reader_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+    constexpr unsigned int launch_block_size = 256;
+    const size_t grid_size = m * q_heads;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "paged causal GQA chunk element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_cached_prefix_len = static_cast<unsigned long long>(cached_prefix_len);
+    unsigned long long kernel_m = static_cast<unsigned long long>(m);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_table_entries = static_cast<unsigned long long>(block_table_entries);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *gate_ptr = gate_buffer == nullptr ? nullptr : gate_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *table_ptr = block_table_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &gate_ptr,
+        &k_ptr,
+        &v_ptr,
+        &table_ptr,
+        &kernel_cached_prefix_len,
+        &kernel_m,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_table_entries,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 paged causal GQA chunk";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status validate_paged_chunk_block_table_hip(
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t table_entries,
+    size_t cache_blocks,
+    ullm_runtime_stream *stream,
+    const char *operation) {
+    if (block_table_buffer == nullptr || table_entries == 0 || cache_blocks == 0) {
+        set_error("f32 paged chunk HIP block table validation received invalid geometry");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (table_entries > std::numeric_limits<size_t>::max() / sizeof(std::uint32_t)) {
+        set_error("f32 paged chunk HIP block table validation byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    std::vector<std::uint32_t> host_table;
+    try {
+        host_table.resize(table_entries);
+    } catch (const std::bad_alloc &) {
+        set_error("f32 paged chunk HIP block table validation ran out of host memory");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = block_table_buffer->hip_device_id;
+    const size_t table_bytes = table_entries * sizeof(std::uint32_t);
+    if (!hip_runtime().copy_async(
+            host_table.data(),
+            block_table_buffer->ptr,
+            table_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("f32 paged chunk HIP block table D2H validation copy failed");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("f32 paged chunk HIP block table validation synchronization failed");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    for (size_t index = 0; index < host_table.size(); ++index) {
+        if (static_cast<size_t>(host_table[index]) >= cache_blocks) {
+            std::string message = operation == nullptr ? "f32 paged chunk" : operation;
+            message += " block table contains an out-of-range block id";
+            set_error(message.c_str());
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    return ULLM_STATUS_OK;
+}
+
 void depthwise_conv1d_f32_host(
     const float *input,
     const float *weight,

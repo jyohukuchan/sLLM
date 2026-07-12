@@ -2252,3 +2252,397 @@ ullm_status ullm_runtime_paged_kv_write_f32(
         v_cache_buffer,
         stream);
 }
+
+ullm_status ullm_runtime_paged_kv_write_chunk_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_start,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream) {
+    if (k_buffer == nullptr || v_buffer == nullptr || block_table_buffer == nullptr ||
+        k_cache_buffer == nullptr || v_cache_buffer == nullptr) {
+        set_error("f32 paged KV write chunk received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (m == 0 || m > 128 || block_size == 0 || cache_blocks == 0 || kv_heads == 0 ||
+        head_dim == 0 || value_dim == 0) {
+        set_error("f32 paged KV write chunk width must be in 1..128 and dimensions nonzero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(k_buffer, v_buffer) ||
+        !buffers_share_backend(k_buffer, block_table_buffer) ||
+        !buffers_share_backend(k_buffer, k_cache_buffer) ||
+        !buffers_share_backend(k_buffer, v_cache_buffer)) {
+        set_error("f32 paged KV write chunk buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(k_cache_buffer, stream) ||
+        !stream_matches_buffer(v_cache_buffer, stream)) {
+        set_error("f32 paged KV write chunk stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cache_blocks > max_size / block_size) {
+        set_error("f32 paged KV write chunk physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (cache_start > max_size - m || cache_start + m > physical_tokens) {
+        set_error("f32 paged KV write chunk logical range exceeds physical cache capacity");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t end = cache_start + m;
+    const size_t table_entries = (end - 1) / block_size + 1;
+    if (kv_heads > max_size / head_dim || kv_heads > max_size / value_dim) {
+        set_error("f32 paged KV write chunk token element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_row = kv_heads * head_dim;
+    const size_t v_row = kv_heads * value_dim;
+    if (m > max_size / k_row || m > max_size / v_row ||
+        physical_tokens > max_size / kv_heads) {
+        set_error("f32 paged KV write chunk element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = m * k_row;
+    const size_t v_elements = m * v_row;
+    const size_t cache_heads = physical_tokens * kv_heads;
+    if (head_dim > max_size / cache_heads || value_dim > max_size / cache_heads) {
+        set_error("f32 paged KV write chunk cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_cache_elements = cache_heads * head_dim;
+    const size_t v_cache_elements = cache_heads * value_dim;
+    if (k_elements > max_size / sizeof(float) || v_elements > max_size / sizeof(float) ||
+        k_cache_elements > max_size / sizeof(float) ||
+        v_cache_elements > max_size / sizeof(float) ||
+        table_entries > max_size / sizeof(std::uint32_t)) {
+        set_error("f32 paged KV write chunk byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t k_cache_bytes = k_cache_elements * sizeof(float);
+    const size_t v_cache_bytes = v_cache_elements * sizeof(float);
+    const size_t table_bytes = table_entries * sizeof(std::uint32_t);
+    if (k_buffer->bytes < k_bytes || v_buffer->bytes < v_bytes ||
+        block_table_buffer->bytes < table_bytes || k_cache_buffer->bytes < k_cache_bytes ||
+        v_cache_buffer->bytes < v_cache_bytes) {
+        set_error("f32 paged KV write chunk buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_buffer->backend == BackendKind::Cpu) {
+        const auto *table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        for (size_t index = 0; index < table_entries; ++index) {
+            if (static_cast<size_t>(table[index]) >= cache_blocks) {
+                set_error("f32 paged KV write chunk block table contains an out-of-range block id");
+                return ULLM_STATUS_INVALID_ARGUMENT;
+            }
+        }
+        paged_kv_write_chunk_f32_host(
+            static_cast<const float *>(k_buffer->ptr),
+            static_cast<const float *>(v_buffer->ptr),
+            table,
+            cache_start,
+            m,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            static_cast<float *>(k_cache_buffer->ptr),
+            static_cast<float *>(v_cache_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    const ullm_status table_status = validate_paged_chunk_block_table_hip(
+        block_table_buffer,
+        table_entries,
+        cache_blocks,
+        stream,
+        "f32 paged KV write chunk");
+    if (table_status != ULLM_STATUS_OK) {
+        return table_status;
+    }
+    std::string hip_error;
+    if (paged_kv_write_chunk_f32_hip_kernel(
+            k_buffer,
+            v_buffer,
+            block_table_buffer,
+            cache_start,
+            m,
+            block_size,
+            cache_blocks,
+            table_entries,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache_buffer,
+            v_cache_buffer,
+            stream,
+            &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "f32 paged KV write chunk HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
+static ullm_status paged_causal_gqa_chunk_f32_impl(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || output_buffer == nullptr || q_buffer == output_buffer ||
+        (gate_buffer != nullptr &&
+         (gate_buffer == output_buffer || gate_buffer == q_buffer))) {
+        set_error("f32 paged causal GQA chunk received a null or aliased pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (m == 0 || m > 128 || block_size == 0 || cache_blocks == 0 || q_heads == 0 ||
+        kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error("f32 paged causal GQA chunk width must be in 1..128 and dimensions nonzero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (head_dim > 256 || value_dim > 256) {
+        set_error("f32 paged causal GQA chunk head_dim/value_dim must be at most 256");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_buffer != nullptr && head_dim != value_dim) {
+        set_error("f32 paged causal GQA chunk gated ABI requires head_dim == value_dim");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 paged causal GQA chunk q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("f32 paged causal GQA chunk softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((gate_buffer != nullptr && !buffers_share_backend(q_buffer, gate_buffer)) ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 paged causal GQA chunk buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 paged causal GQA chunk stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cached_prefix_len > max_size - m || cache_blocks > max_size / block_size) {
+        set_error("f32 paged causal GQA chunk context or physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t total_context = cached_prefix_len + m;
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (total_context > physical_tokens) {
+        set_error("f32 paged causal GQA chunk context exceeds physical cache capacity");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t table_entries = (total_context - 1) / block_size + 1;
+    if (m > max_size / q_heads || q_heads > max_size / head_dim ||
+        q_heads > max_size / value_dim || kv_heads > max_size / physical_tokens) {
+        set_error("f32 paged causal GQA chunk element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_heads_per_chunk = m * q_heads;
+    if (q_heads_per_chunk > max_size / head_dim ||
+        q_heads_per_chunk > max_size / value_dim) {
+        set_error("f32 paged causal GQA chunk element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_heads_per_chunk * head_dim;
+    const size_t output_elements = q_heads_per_chunk * value_dim;
+    const size_t cache_heads = physical_tokens * kv_heads;
+    if (head_dim > max_size / cache_heads || value_dim > max_size / cache_heads) {
+        set_error("f32 paged causal GQA chunk cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = cache_heads * head_dim;
+    const size_t v_elements = cache_heads * value_dim;
+    if (q_elements > max_size / sizeof(float) || output_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) || v_elements > max_size / sizeof(float) ||
+        table_entries > max_size / sizeof(std::uint32_t)) {
+        set_error("f32 paged causal GQA chunk byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    const size_t gate_bytes = output_bytes;
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t table_bytes = table_entries * sizeof(std::uint32_t);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < k_bytes ||
+        v_cache_buffer->bytes < v_bytes || block_table_buffer->bytes < table_bytes ||
+        output_buffer->bytes < output_bytes ||
+        (gate_buffer != nullptr && gate_buffer->bytes < gate_bytes)) {
+        set_error("f32 paged causal GQA chunk buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        for (size_t index = 0; index < table_entries; ++index) {
+            if (static_cast<size_t>(table[index]) >= cache_blocks) {
+                set_error("f32 paged causal GQA chunk block table contains an out-of-range block id");
+                return ULLM_STATUS_INVALID_ARGUMENT;
+            }
+        }
+        paged_causal_gqa_chunk_f32_host(
+            static_cast<const float *>(q_buffer->ptr),
+            static_cast<const float *>(k_cache_buffer->ptr),
+            static_cast<const float *>(v_cache_buffer->ptr),
+            table,
+            cached_prefix_len,
+            m,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            static_cast<float *>(output_buffer->ptr));
+        if (gate_buffer != nullptr) {
+            const auto *gate = static_cast<const float *>(gate_buffer->ptr);
+            auto *output = static_cast<float *>(output_buffer->ptr);
+            for (size_t index = 0; index < output_elements; ++index) {
+                output[index] *= 1.0f / (1.0f + std::exp(-gate[index]));
+            }
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    const ullm_status table_status = validate_paged_chunk_block_table_hip(
+        block_table_buffer,
+        table_entries,
+        cache_blocks,
+        stream,
+        "f32 paged causal GQA chunk");
+    if (table_status != ULLM_STATUS_OK) {
+        return table_status;
+    }
+    std::string hip_error;
+    if (paged_causal_gqa_chunk_f32_hip_kernel(
+            q_buffer,
+            gate_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            block_table_buffer,
+            cached_prefix_len,
+            m,
+            block_size,
+            cache_blocks,
+            table_entries,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "f32 paged causal GQA chunk HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
+ullm_status ullm_runtime_paged_causal_gqa_chunk_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return paged_causal_gqa_chunk_f32_impl(
+        q_buffer,
+        nullptr,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (gate_buffer == nullptr) {
+        set_error("f32 paged causal GQA chunk sigmoid gate received a null gate buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    return paged_causal_gqa_chunk_f32_impl(
+        q_buffer,
+        gate_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        output_buffer,
+        stream);
+}
