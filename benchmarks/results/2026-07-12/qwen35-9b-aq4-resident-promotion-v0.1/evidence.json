@@ -1,14 +1,14 @@
 {
   "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
-  "source_commit": "9a1d292227d1dc41b71e6af70cd082d05116ce7a",
-  "created_at_unix_ns": 1783840956231212337,
+  "source_commit": "2c087579358853794b7eb4af1d2c9203466c2843",
+  "created_at_unix_ns": 1783841646781237725,
   "production_receipt_written": false,
   "ephemeral_bundle": {
     "receipt": {
-      "source_commit": "9a1d292227d1dc41b71e6af70cd082d05116ce7a"
+      "source_commit": "2c087579358853794b7eb4af1d2c9203466c2843"
     },
-    "profile_sha256": "de6311820de861e7bc644814fb659c913e8cd0ee938239d462a44de9d8c085b2",
-    "manifest_sha256": "137ef7630be5a0e270089355af5f057b8822ad73b4df343919932cb4e16d2b5f",
+    "profile_sha256": "a24eade3e052e1ea2128f4977546cf56fa307081b411fcd88be9cf41fe68224b",
+    "manifest_sha256": "274f07341850f328599a1b0d82d0662e41fcc97e2bf98749f7175feef0c78a78",
     "manifest": {
       "schema_version": "ullm.served_model.v1",
       "public": {
@@ -55,7 +55,7 @@
       "worker": {
         "protocol": "ullm.worker.v1",
         "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
-        "binary_sha256": "f09c5877d4e8903f56da8d5dd550dfe02a46194b471a25fa0a609cf3b885baad",
+        "binary_sha256": "a7218f269cf88c1fd85e2893ee2e6632ea179defeecd898ecd5a3efd2fc80650",
         "arguments": [
           "--served-model-manifest",
           "{manifest}"
@@ -96,19 +96,19 @@
         }
       },
       "promotion": {
-        "source_commit": "9a1d292227d1dc41b71e6af70cd082d05116ce7a",
-        "receipt": "/tmp/ullm-aq4-promotion-evidence-u1x82bdx/smoke-promotion.json",
-        "receipt_sha256": "fd8d3ba285e108f1645131366f4d1696061db1b0a566eb34afc9119a5f8b5b82"
+        "source_commit": "2c087579358853794b7eb4af1d2c9203466c2843",
+        "receipt": "/tmp/ullm-aq4-promotion-evidence-80l88620/smoke-promotion.json",
+        "receipt_sha256": "8c97f832bbfa234c0fd982c50142835f5b557aa375a45ed4cf2c1c1829902e5a"
       }
     }
   },
   "worker_binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
-  "worker_binary_sha256": "f09c5877d4e8903f56da8d5dd550dfe02a46194b471a25fa0a609cf3b885baad",
+  "worker_binary_sha256": "a7218f269cf88c1fd85e2893ee2e6632ea179defeecd898ecd5a3efd2fc80650",
   "legacy_engine": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-engine",
   "legacy_engine_sha256": "e132578354b2c64399dd3de6ca1a228490f2018a465c724c5bf2c7ab7180264d",
   "resident": {
     "mode": "resident",
-    "pid": 2396367,
+    "pid": 2448512,
     "ready": {
       "type": "ready",
       "schema_version": "ullm.worker.v1",
@@ -142,13 +142,13 @@
         "timings": {
           "cache_n": 0,
           "prompt_n": 1,
-          "prompt_ms": 96.582537,
-          "prompt_per_token_ms": 96.582537,
-          "prompt_per_second": 10.353838603349175,
+          "prompt_ms": 99.93938800000001,
+          "prompt_per_token_ms": 99.93938800000001,
+          "prompt_per_second": 10.006064876042666,
           "predicted_n": 4,
-          "predicted_ms": 71.217619,
-          "predicted_per_token_ms": 17.80440475,
-          "predicted_per_second": 56.16587659298186
+          "predicted_ms": 71.063073,
+          "predicted_per_token_ms": 17.76576825,
+          "predicted_per_second": 56.28802458345701
         }
       },
       {
@@ -178,13 +178,13 @@
         "timings": {
           "cache_n": 0,
           "prompt_n": 8,
-          "prompt_ms": 163.306074,
-          "prompt_per_token_ms": 20.41325925,
-          "prompt_per_second": 48.98776759522123,
+          "prompt_ms": 163.13465399999998,
+          "prompt_per_token_ms": 20.391831749999998,
+          "prompt_per_second": 49.03924337253323,
           "predicted_n": 4,
-          "predicted_ms": 71.392921,
-          "predicted_per_token_ms": 17.84823025,
-          "predicted_per_second": 56.02796389294675
+          "predicted_ms": 71.246887,
+          "predicted_per_token_ms": 17.81172175,
+          "predicted_per_second": 56.14280382523941
         }
       }
     ],
@@ -305,11 +305,11 @@
       }
     ],
     "clean_shutdown": true,
-    "stderr_tail": "{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"start\",\"prompt_tokens\":1,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":1,\"completion_tokens\":4,\"elapsed_ms\":170,\"outcome\":\"length\"}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"start\",\"prompt_tokens\":8,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":8,\"completion_tokens\":4,\"elapsed_ms\":236,\"outcome\":\"length\"}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"process_stopped\",\"phase\":\"process\"}\n"
+    "stderr_tail": "{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"start\",\"prompt_tokens\":1,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":1,\"completion_tokens\":4,\"elapsed_ms\":172,\"outcome\":\"length\"}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"start\",\"prompt_tokens\":8,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":8,\"completion_tokens\":4,\"elapsed_ms\":236,\"outcome\":\"length\"}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"process_stopped\",\"phase\":\"process\"}\n"
   },
   "legacy": {
     "mode": "legacy",
-    "pid": 2396718,
+    "pid": 2448893,
     "ready": {
       "type": "ready",
       "schema_version": "ullm.worker.v1",
@@ -343,13 +343,13 @@
         "timings": {
           "cache_n": 0,
           "prompt_n": 1,
-          "prompt_ms": 95.895391,
-          "prompt_per_token_ms": 95.895391,
-          "prompt_per_second": 10.428029851820511,
+          "prompt_ms": 96.196009,
+          "prompt_per_token_ms": 96.196009,
+          "prompt_per_second": 10.395441665360565,
           "predicted_n": 4,
-          "predicted_ms": 70.982687,
-          "predicted_per_token_ms": 17.74567175,
-          "predicted_per_second": 56.351769270160204
+          "predicted_ms": 70.950282,
+          "predicted_per_token_ms": 17.7375705,
+          "predicted_per_second": 56.377506716604735
         }
       },
       {
@@ -379,13 +379,13 @@
         "timings": {
           "cache_n": 0,
           "prompt_n": 8,
-          "prompt_ms": 234.727068,
-          "prompt_per_token_ms": 29.3408835,
-          "prompt_per_second": 34.082136620050996,
+          "prompt_ms": 245.788588,
+          "prompt_per_token_ms": 30.7235735,
+          "prompt_per_second": 32.54829715690462,
           "predicted_n": 4,
-          "predicted_ms": 71.27432400000001,
-          "predicted_per_token_ms": 17.818581000000002,
-          "predicted_per_second": 56.12119169309834
+          "predicted_ms": 71.167926,
+          "predicted_per_token_ms": 17.7919815,
+          "predicted_per_second": 56.20509441289606
         }
       }
     ],
