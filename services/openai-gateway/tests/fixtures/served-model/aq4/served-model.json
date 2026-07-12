@@ -1,0 +1,63 @@
+{
+  "schema_version": "ullm.served_model.v1",
+  "public": {
+    "id": "ullm-qwen3.5-9b-aq4",
+    "name": "uLLM Qwen3.5 9B AQ4",
+    "description": "AQ4 served-model loader fixture.",
+    "upstream_id": "Qwen/Qwen3.5-9B",
+    "revision": "aq4-cli-compat-v0.1",
+    "context_length": 4096
+  },
+  "generation": {
+    "max_completion_tokens": 512,
+    "vocab_size": 248320,
+    "eos_token_ids": [248044, 248046],
+    "sampling": {
+      "top_k": 1,
+      "temperature": false,
+      "top_p": false
+    }
+  },
+  "format": {
+    "format_id": "AQ4_0",
+    "implementation_id": "qwen35_aq4_rdna4_v1"
+  },
+  "tokenizer": {
+    "root": "tokenizer",
+    "transformers_version": "5.12.1",
+    "class": "Qwen2Tokenizer",
+    "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "files": {
+      "tokenizer.json": "fbf7a252a02bd1c2aa304add04605701307ffa5386a98f61802ff07a4d5b6b20",
+      "tokenizer_config.json": "061eda209bdec61e59e77034995ca5c1793e467eb972442665cf87584ac2b9a0"
+    },
+    "template_options": {
+      "add_generation_prompt": true,
+      "enable_thinking": false
+    }
+  },
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary": "worker",
+    "binary_sha256": "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb",
+    "arguments": ["--served-model-manifest", "{manifest}"],
+    "required_environment": ["ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL"],
+    "identity": {
+      "device": "gfx1201",
+      "execution_profile": "rdna4_aq4_resident"
+    }
+  },
+  "product": {
+    "root": "product",
+    "artifact": null,
+    "package": {
+      "manifest_path": "package/manifest.json",
+      "manifest_sha256": "6cd84661eb27933b61d960d4f3af3c5ff60c571997d47ab96b0065d8191e0ed6"
+    }
+  },
+  "promotion": {
+    "source_commit": "fa69c10",
+    "receipt": "promotion.json",
+    "receipt_sha256": "7d58a4aafa1cccdcfd5390b3063da3403d6fc36af8017c73c80aca012c8ee468"
+  }
+}
