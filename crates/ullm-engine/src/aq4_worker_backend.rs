@@ -215,10 +215,13 @@ impl Sq8InferenceBackend for Qwen35Aq4WorkerBackend {
             .map_err(|error| format!("failed to decode AQ4 engine report: {error}"))?;
         validate_report(&report, &request)?;
 
-        publications.observe_prompt_unit(
-            request.prompt_token_ids.len(),
-            request.prompt_token_ids.len(),
-        )?;
+        let mut processed_prompt_tokens = 0;
+        while processed_prompt_tokens < request.prompt_token_ids.len() {
+            let remaining = request.prompt_token_ids.len() - processed_prompt_tokens;
+            let execution_width = if remaining >= 128 { 128 } else { 1 };
+            processed_prompt_tokens += execution_width;
+            publications.observe_prompt_unit(processed_prompt_tokens, execution_width)?;
+        }
         publications.observe_prefill_transition()?;
         for &token_id in &report.generated_token_ids {
             publications.publish_token(token_id)?;
