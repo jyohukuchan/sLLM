@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import sqlite3
 import stat
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +16,32 @@ SPEC = importlib.util.spec_from_file_location("openwebui_configure", CONFIGURE_P
 assert SPEC is not None and SPEC.loader is not None
 CONFIGURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONFIGURE)
+
+
+def _write_manifest(path: Path) -> bytes:
+    raw = json.dumps(
+        {
+            "schema_version": "ullm.served_model.v1",
+            "public": {
+                "id": "ullm-qwen3.5-9b-aq4",
+                "name": "uLLM Qwen3.5 9B AQ4",
+                "description": "Qwen3.5 9B served locally by uLLM AQ4_0.",
+                "upstream_id": "Qwen/Qwen3.5-9B",
+                "revision": "test-revision",
+                "context_length": 32_768,
+            },
+            "generation": {"max_completion_tokens": 512},
+            "format": {},
+            "tokenizer": {},
+            "worker": {},
+            "product": {},
+            "promotion": {},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    path.write_bytes(raw)
+    return raw
 
 
 def _create_database(path: Path) -> tuple[dict, dict, dict]:
@@ -120,9 +149,7 @@ def test_configure_enables_usage_and_preserves_existing_state(tmp_path: Path) ->
     existing_config, existing_meta, existing_params = _create_database(database)
     key_file.write_text("new-api-key\n", encoding="ascii")
 
-    provider_index, backup_path = CONFIGURE.configure(
-        database, key_file, backup_dir
-    )
+    provider_index, backup_path = CONFIGURE.configure(database, key_file, backup_dir)
 
     assert provider_index == 1
     with sqlite3.connect(database) as connection:
@@ -141,9 +168,10 @@ def test_configure_enables_usage_and_preserves_existing_state(tmp_path: Path) ->
         CONFIGURE.BASE_URL,
     ]
     assert config["openai"]["api_keys"] == ["existing-key", "new-api-key"]
-    assert config["openai"]["api_configs"]["0"] == existing_config["openai"][
-        "api_configs"
-    ]["0"]
+    assert (
+        config["openai"]["api_configs"]["0"]
+        == existing_config["openai"]["api_configs"]["0"]
+    )
     assert config["openai"]["retained"] == "openai-value"
     assert config["task"]["follow_up"]["retained"] == "follow-up"
 
@@ -160,6 +188,11 @@ def test_configure_enables_usage_and_preserves_existing_state(tmp_path: Path) ->
     assert meta["capabilities"]["usage"] is True
     assert meta["capabilities"]["retained_capability"] is True
     assert meta["retained_meta"] == existing_meta["retained_meta"]
+    assert meta["ullm"] == {
+        "managed": True,
+        "base_url": CONFIGURE.BASE_URL,
+        "served_model_manifest_sha256": None,
+    }
     assert params["temperature"] == existing_params["temperature"]
     assert params["retained_params"] == existing_params["retained_params"]
     assert "num_ctx" not in params
@@ -227,6 +260,11 @@ def test_configure_adds_custom_model_without_replacing_sq8(tmp_path: Path) -> No
     assert meta["n_ctx_train"] == 32_768
     assert meta["context_length"] == 32_768
     assert meta["capabilities"]["usage"] is True
+    assert meta["ullm"] == {
+        "managed": True,
+        "base_url": base_url,
+        "served_model_manifest_sha256": None,
+    }
     assert "num_ctx" not in params
     assert "max_tokens" not in params
 
@@ -267,3 +305,126 @@ def test_parse_args_reads_model_environment_and_allows_cli_override() -> None:
     assert cli_args.context_length == 8_192
     assert cli_args.description == "Custom description."
     assert cli_args.base_url == "http://127.0.0.1:28000/v1"
+
+
+def test_manifest_mode_reconciles_managed_models_for_same_base_url(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "webui.db"
+    key_file = tmp_path / "api-key"
+    backup_dir = tmp_path / "backups"
+    manifest = tmp_path / "served-model.json"
+    _create_database(database)
+    key_file.write_text("new-api-key\n", encoding="ascii")
+    manifest_raw = _write_manifest(manifest)
+
+    with sqlite3.connect(database) as connection:
+        for model_id, meta in (
+            (
+                "old-managed-model",
+                {
+                    "ullm": {
+                        "managed": True,
+                        "base_url": CONFIGURE.BASE_URL,
+                        "served_model_manifest_sha256": "0" * 64,
+                    }
+                },
+            ),
+            ("unmanaged-model", {"description": "user model"}),
+        ):
+            connection.execute(
+                """
+                INSERT INTO model (
+                    id, user_id, base_model_id, name, meta, params,
+                    created_at, updated_at, is_active
+                ) VALUES (?, 'owner', NULL, ?, ?, '{}', 1, 1, 1)
+                """,
+                (model_id, model_id, json.dumps(meta)),
+            )
+        connection.commit()
+
+    CONFIGURE.configure(
+        database,
+        key_file,
+        backup_dir,
+        served_model_manifest=manifest,
+    )
+
+    with sqlite3.connect(database) as connection:
+        rows = dict(connection.execute("SELECT id, is_active FROM model"))
+        name, meta_raw = connection.execute(
+            "SELECT name, meta FROM model WHERE id = ?",
+            ("ullm-qwen3.5-9b-aq4",),
+        ).fetchone()
+    meta = json.loads(meta_raw)
+
+    assert rows["old-managed-model"] == 0
+    assert rows["unmanaged-model"] == 1
+    assert rows["ullm-qwen3.5-9b-aq4"] == 1
+    assert name == "uLLM Qwen3.5 9B AQ4"
+    assert meta["description"] == "Qwen3.5 9B served locally by uLLM AQ4_0."
+    assert meta["context_length"] == 32_768
+    assert meta["n_ctx_train"] == 32_768
+    assert meta["ullm"] == {
+        "managed": True,
+        "base_url": CONFIGURE.BASE_URL,
+        "served_model_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+    }
+
+
+def test_manifest_mode_from_environment_rejects_legacy_model_settings(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "served-model.json"
+    _write_manifest(manifest)
+
+    args = CONFIGURE.parse_args([], {"ULLM_SERVED_MODEL_MANIFEST": str(manifest)})
+    assert args.served_model_manifest == manifest
+    assert args.model_id is None
+
+    for argv, environ in (
+        (
+            ["--served-model-manifest", str(manifest), "--model-id", "legacy"],
+            {},
+        ),
+        (
+            [],
+            {
+                "ULLM_SERVED_MODEL_MANIFEST": str(manifest),
+                "ULLM_MODEL_NAME": "legacy",
+            },
+        ),
+    ):
+        with pytest.raises(CONFIGURE.ConfigurationError, match="cannot be mixed"):
+            CONFIGURE.parse_args(argv, environ)
+
+
+def test_manifest_mode_rejects_invalid_or_non_regular_manifest(tmp_path: Path) -> None:
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(
+        '{"schema_version":"ullm.served_model.v1","public":{"id":"x"}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(CONFIGURE.ConfigurationError):
+        CONFIGURE.read_served_model_manifest(invalid)
+    with pytest.raises(CONFIGURE.ConfigurationError, match="regular file"):
+        CONFIGURE.read_served_model_manifest(tmp_path)
+    link = tmp_path / "manifest-link.json"
+    link.symlink_to(invalid)
+    with pytest.raises(CONFIGURE.ConfigurationError, match="absent or unreadable"):
+        CONFIGURE.read_served_model_manifest(link)
+
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text(
+        '{"schema_version":"ullm.served_model.v1",'
+        '"schema_version":"ullm.served_model.v1","public":{}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(CONFIGURE.ConfigurationError, match="not valid JSON"):
+        CONFIGURE.read_served_model_manifest(duplicate)
+
+    writable = tmp_path / "world-writable.json"
+    _write_manifest(writable)
+    writable.chmod(0o666)
+    with pytest.raises(CONFIGURE.ConfigurationError, match="world-writable"):
+        CONFIGURE.read_served_model_manifest(writable)
