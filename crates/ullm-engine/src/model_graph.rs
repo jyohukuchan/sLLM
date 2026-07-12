@@ -481,6 +481,8 @@ impl NormalizationAxis {
 /// Typed activation semantic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationKind {
+    /// Logistic sigmoid `1 / (1 + exp(-x))`.
+    Sigmoid,
     /// Sigmoid linear unit.
     Silu,
     /// Gaussian error linear unit.
@@ -553,6 +555,18 @@ pub enum GraphNodeKind {
     ///
     /// `GraphNode::weights` is paired with `GraphNode::outputs` by index.
     FusedLinearGroup { output_count: usize },
+    /// Splits repeated groups along the final axis into segment-major outputs.
+    ///
+    /// The input final axis contains `groups` contiguous groups. Within each
+    /// group, segments appear in `segment_widths` order. Output `i` gathers
+    /// segment `i` from every group, preserving group order, and therefore has
+    /// final width `groups * segment_widths[i]`. This node has no weights or
+    /// state. `PackedRagged` is unambiguous because the operation is local to
+    /// each packed token's final feature axis and does not use sequence bounds.
+    GroupedLastSplit {
+        groups: usize,
+        segment_widths: Vec<usize>,
+    },
     /// Rotary position operation.
     ///
     /// `GraphNode::inputs` is `[values, positions]`. `values` has rank at
@@ -620,6 +634,13 @@ pub enum GraphNodeKind {
     RecurrentAttention { state_width: usize },
     /// Pointwise activation.
     Activation { kind: ActivationKind },
+    /// Multiplies values by an activated gate element by element.
+    ///
+    /// Inputs are ordered `[value, gate]`, and
+    /// `output = value * activation(gate)`. This semantic currently requires
+    /// [`ActivationKind::Sigmoid`]. All three tensors have identical shape,
+    /// numerical format, and layout. The node has no weights or state.
+    GatedMultiply { activation: ActivationKind },
     /// Gated MLP.
     ///
     /// `GraphNode::weights` is ordered gate, up, down.
@@ -666,6 +687,10 @@ impl GraphNodeKind {
             Self::FusedLinearGroup { output_count } => {
                 ensure_nonzero(*output_count, "fused linear output_count")
             }
+            Self::GroupedLastSplit {
+                groups,
+                segment_widths,
+            } => validate_grouped_last_split_geometry(*groups, segment_widths).map(|_| ()),
             Self::RotaryPosition {
                 heads,
                 head_dim,
@@ -717,6 +742,13 @@ impl GraphNodeKind {
                 ensure_nonzero(*state_width, "recurrent attention state_width")
             }
             Self::Activation { kind } => kind.validate(),
+            Self::GatedMultiply { activation } => {
+                activation.validate()?;
+                if activation != &ActivationKind::Sigmoid {
+                    return Err("gated multiply requires Sigmoid activation".into());
+                }
+                Ok(())
+            }
             Self::GatedMlp {
                 intermediate_size,
                 activation,
@@ -756,8 +788,10 @@ impl GraphNodeKind {
             }
             Self::Linear { has_bias } => exact(1, 1, if *has_bias { 2 } else { 1 }, 0),
             Self::FusedLinearGroup { output_count } => exact(1, *output_count, *output_count, 0),
+            Self::GroupedLastSplit { segment_widths, .. } => exact(1, segment_widths.len(), 0, 0),
             Self::RotaryPosition { .. } => exact(2, 1, 0, 0),
             Self::Activation { .. } => exact(1, 1, 0, 0),
+            Self::GatedMultiply { .. } => exact(2, 1, 0, 0),
             Self::CausalGqaAttentionCore { .. } => {
                 if inputs == 3 && outputs == 1 && weights == 0 && states <= 1 {
                     Ok(())
@@ -970,6 +1004,78 @@ impl GraphNode {
                 }
                 Ok(())
             }
+            GraphNodeKind::GroupedLastSplit {
+                groups,
+                segment_widths,
+            } => {
+                let input = value(&self.inputs[0], "grouped last split input")?;
+                if !matches!(
+                    input.format,
+                    NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+                ) {
+                    return Err(format!(
+                        "node {} grouped last split input must use F32, BF16, or FP16",
+                        self.id.as_str()
+                    ));
+                }
+                if !matches!(
+                    input.layout,
+                    TensorLayout::RowMajor
+                        | TensorLayout::TokensHidden
+                        | TensorLayout::PackedRagged
+                ) {
+                    return Err(format!(
+                        "node {} grouped last split input must use RowMajor, TokensHidden, or PackedRagged layout",
+                        self.id.as_str()
+                    ));
+                }
+                let segment_total = validate_grouped_last_split_geometry(*groups, segment_widths)?;
+                let expected_input_width = checked_dimension_product(
+                    *groups,
+                    segment_total,
+                    "grouped last split input width",
+                )?;
+                let input_width =
+                    feature_width(input, "grouped last split input", self.id.as_str())?;
+                if input_width != expected_input_width {
+                    return Err(format!(
+                        "node {} grouped last split input final width {input_width} does not match groups * segment sum {expected_input_width}",
+                        self.id.as_str()
+                    ));
+                }
+                for (index, (output_id, segment_width)) in
+                    self.outputs.iter().zip(segment_widths).enumerate()
+                {
+                    let output = value(output_id, "grouped last split output")?;
+                    if output.shape.len() != input.shape.len()
+                        || output.shape[..output.shape.len() - 1]
+                            != input.shape[..input.shape.len() - 1]
+                    {
+                        return Err(format!(
+                            "node {} grouped last split output {index} must preserve input rank and leading dimensions",
+                            self.id.as_str()
+                        ));
+                    }
+                    let expected_output_width = checked_dimension_product(
+                        *groups,
+                        *segment_width,
+                        "grouped last split output width",
+                    )?;
+                    if output.shape.last().copied() != Some(expected_output_width) {
+                        return Err(format!(
+                            "node {} grouped last split output {index} final width must be {expected_output_width}",
+                            self.id.as_str()
+                        ));
+                    }
+                    if output.format != input.format || output.layout != input.layout {
+                        return Err(format!(
+                            "node {} grouped last split output {index} format and layout must match input",
+                            self.id.as_str()
+                        ));
+                    }
+                }
+                Ok(())
+            }
             GraphNodeKind::RotaryPosition {
                 heads,
                 head_dim,
@@ -1175,6 +1281,54 @@ impl GraphNode {
                 "activation input and output",
                 self.id.as_str(),
             ),
+            GraphNodeKind::GatedMultiply { .. } => {
+                let value_input = value(&self.inputs[0], "gated multiply value")?;
+                let gate = value(&self.inputs[1], "gated multiply gate")?;
+                let output = value(&self.outputs[0], "gated multiply output")?;
+                if !matches!(
+                    value_input.format,
+                    NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+                ) {
+                    return Err(format!(
+                        "node {} gated multiply tensors must use F32, BF16, or FP16",
+                        self.id.as_str()
+                    ));
+                }
+                if !matches!(
+                    value_input.layout,
+                    TensorLayout::RowMajor
+                        | TensorLayout::TokensHidden
+                        | TensorLayout::PackedRagged
+                ) {
+                    return Err(format!(
+                        "node {} gated multiply tensors must use RowMajor, TokensHidden, or PackedRagged layout",
+                        self.id.as_str()
+                    ));
+                }
+                require_same_shape(
+                    value_input,
+                    gate,
+                    "gated multiply value and gate",
+                    self.id.as_str(),
+                )?;
+                require_same_shape(
+                    value_input,
+                    output,
+                    "gated multiply value and output",
+                    self.id.as_str(),
+                )?;
+                if gate.format != value_input.format
+                    || output.format != value_input.format
+                    || gate.layout != value_input.layout
+                    || output.layout != value_input.layout
+                {
+                    return Err(format!(
+                        "node {} gated multiply tensors must have identical format and layout",
+                        self.id.as_str()
+                    ));
+                }
+                Ok(())
+            }
             GraphNodeKind::GatedMlp {
                 intermediate_size, ..
             } => {
@@ -1618,6 +1772,28 @@ fn normalization_axis_width(
     }
 }
 
+fn validate_grouped_last_split_geometry(
+    groups: usize,
+    segment_widths: &[usize],
+) -> Result<usize, String> {
+    ensure_nonzero(groups, "grouped last split groups")?;
+    if segment_widths.len() < 2 {
+        return Err("grouped last split requires at least two segments and outputs".into());
+    }
+    if segment_widths.len() > MAX_NODE_VALUES {
+        return Err("grouped last split segment count exceeds node value limit".into());
+    }
+    let mut total = 0_usize;
+    for (index, width) in segment_widths.iter().copied().enumerate() {
+        ensure_nonzero(width, &format!("grouped last split segment width {index}"))?;
+        total = total
+            .checked_add(width)
+            .ok_or_else(|| "grouped last split segment width sum overflows usize".to_string())?;
+    }
+    checked_dimension_product(groups, total, "grouped last split groups * segment sum")?;
+    Ok(total)
+}
+
 fn validate_attention_geometry(
     q_heads: usize,
     kv_heads: usize,
@@ -1800,6 +1976,86 @@ mod tests {
                 weights: weight_ids,
                 states,
                 kind,
+            }],
+        }
+    }
+
+    fn grouped_last_split_graph(
+        input_shape: &[usize],
+        output_shapes: &[&[usize]],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        groups: usize,
+        segment_widths: Vec<usize>,
+    ) -> ModelGraph {
+        let mut values = vec![GraphValue {
+            id: value_id("input"),
+            tensor: rotary_spec(input_shape, format.clone(), layout.clone()),
+        }];
+        let outputs = output_shapes
+            .iter()
+            .enumerate()
+            .map(|(index, shape)| {
+                let id = value_id(&format!("output-{index}"));
+                values.push(GraphValue {
+                    id: id.clone(),
+                    tensor: rotary_spec(shape, format.clone(), layout.clone()),
+                });
+                id
+            })
+            .collect::<Vec<_>>();
+        ModelGraph {
+            graph_id: "grouped-last-split".into(),
+            inputs: vec![value_id("input")],
+            outputs: outputs.clone(),
+            values,
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("split"),
+                inputs: vec![value_id("input")],
+                outputs,
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::GroupedLastSplit {
+                    groups,
+                    segment_widths,
+                },
+            }],
+        }
+    }
+
+    fn gated_multiply_graph(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        activation: ActivationKind,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "gated-multiply".into(),
+            inputs: vec![value_id("value"), value_id("gate")],
+            outputs: vec![value_id("output")],
+            values: vec![
+                GraphValue {
+                    id: value_id("value"),
+                    tensor: rotary_spec(shape, format.clone(), layout.clone()),
+                },
+                GraphValue {
+                    id: value_id("gate"),
+                    tensor: rotary_spec(shape, format.clone(), layout.clone()),
+                },
+                GraphValue {
+                    id: value_id("output"),
+                    tensor: rotary_spec(shape, format, layout),
+                },
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("gate-multiply"),
+                inputs: vec![value_id("value"), value_id("gate")],
+                outputs: vec![value_id("output")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::GatedMultiply { activation },
             }],
         }
     }
@@ -2690,6 +2946,282 @@ mod tests {
             .unwrap_err()
             .contains("normalization scale")
         );
+    }
+
+    #[test]
+    fn grouped_last_split_accepts_asymmetric_segments_rank3_and_real_formats() {
+        grouped_last_split_graph(
+            &[2, 18],
+            &[&[2, 6], &[2, 3], &[2, 9]],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            3,
+            vec![2, 1, 3],
+        )
+        .validate()
+        .unwrap();
+        grouped_last_split_graph(
+            &[2, 4, 18],
+            &[&[2, 4, 6], &[2, 4, 3], &[2, 4, 9]],
+            NumericalFormat::Bf16,
+            TensorLayout::PackedRagged,
+            3,
+            vec![2, 1, 3],
+        )
+        .validate()
+        .unwrap();
+        grouped_last_split_graph(
+            &[1, 18],
+            &[&[1, 6], &[1, 3], &[1, 9]],
+            NumericalFormat::Fp16,
+            TensorLayout::RowMajor,
+            3,
+            vec![2, 1, 3],
+        )
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn grouped_last_split_rejects_geometry_arity_weights_and_state() {
+        for (groups, widths, expected) in [
+            (0, vec![1, 1], "greater than zero"),
+            (1, vec![1, 0], "greater than zero"),
+            (1, vec![1], "at least two"),
+            (1, vec![usize::MAX, 1], "sum overflows"),
+            (usize::MAX, vec![1, 1], "overflows"),
+        ] {
+            let graph = grouped_last_split_graph(
+                &[1, 2],
+                &[&[1, 1], &[1, 1]],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                groups,
+                widths,
+            );
+            assert!(graph.validate().unwrap_err().contains(expected));
+        }
+
+        let mut zero_outputs = grouped_last_split_graph(
+            &[1, 4],
+            &[&[1, 2], &[1, 2]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            2,
+            vec![1, 1],
+        );
+        zero_outputs.nodes[0].outputs.clear();
+        assert!(
+            zero_outputs
+                .validate()
+                .unwrap_err()
+                .contains("exceeds reference limits")
+        );
+
+        let one_output = grouped_last_split_graph(
+            &[1, 2],
+            &[&[1, 2]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            vec![2],
+        );
+        assert!(one_output.validate().unwrap_err().contains("at least two"));
+
+        let mut input_arity = grouped_last_split_graph(
+            &[1, 4],
+            &[&[1, 2], &[1, 2]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            2,
+            vec![1, 1],
+        );
+        input_arity.nodes[0].inputs.push(value_id("split-output-0"));
+        assert!(input_arity.validate().unwrap_err().contains("inputs=2"));
+
+        let mut output_arity = grouped_last_split_graph(
+            &[1, 4],
+            &[&[1, 2], &[1, 2]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            2,
+            vec![1, 1],
+        );
+        output_arity.nodes[0].outputs.push(value_id("input"));
+        assert!(output_arity.validate().unwrap_err().contains("outputs=3"));
+
+        let mut weights = grouped_last_split_graph(
+            &[1, 4],
+            &[&[1, 2], &[1, 2]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            2,
+            vec![1, 1],
+        );
+        weights.nodes[0].weights.push(weight_id("unexpected"));
+        assert!(weights.validate().unwrap_err().contains("weights=1"));
+
+        let mut state = grouped_last_split_graph(
+            &[1, 4],
+            &[&[1, 2], &[1, 2]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            2,
+            vec![1, 1],
+        );
+        state.nodes[0].states.push(state_id("unexpected"));
+        assert!(state.validate().unwrap_err().contains("states=1"));
+    }
+
+    #[test]
+    fn grouped_last_split_rejects_input_output_and_metadata_mismatches() {
+        let graph = |input_shape: &[usize], outputs: &[&[usize]]| {
+            grouped_last_split_graph(
+                input_shape,
+                outputs,
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                3,
+                vec![2, 1, 3],
+            )
+        };
+        assert!(
+            graph(&[2, 17], &[&[2, 6], &[2, 3], &[2, 9]])
+                .validate()
+                .unwrap_err()
+                .contains("input final width")
+        );
+        assert!(
+            graph(&[2, 18], &[&[3, 6], &[2, 3], &[2, 9]])
+                .validate()
+                .unwrap_err()
+                .contains("leading dimensions")
+        );
+        assert!(
+            graph(&[2, 18], &[&[2, 5], &[2, 3], &[2, 9]])
+                .validate()
+                .unwrap_err()
+                .contains("final width")
+        );
+
+        let mut format_mismatch = graph(&[2, 18], &[&[2, 6], &[2, 3], &[2, 9]]);
+        format_mismatch.values[1].tensor.format = NumericalFormat::Bf16;
+        assert!(
+            format_mismatch
+                .validate()
+                .unwrap_err()
+                .contains("format and layout")
+        );
+        let mut layout_mismatch = graph(&[2, 18], &[&[2, 6], &[2, 3], &[2, 9]]);
+        layout_mismatch.values[1].tensor.layout = TensorLayout::TokensHidden;
+        assert!(
+            layout_mismatch
+                .validate()
+                .unwrap_err()
+                .contains("format and layout")
+        );
+        let mut invalid_format = graph(&[2, 18], &[&[2, 6], &[2, 3], &[2, 9]]);
+        for value in &mut invalid_format.values {
+            value.tensor.format = NumericalFormat::U32;
+        }
+        assert!(
+            invalid_format
+                .validate()
+                .unwrap_err()
+                .contains("F32, BF16, or FP16")
+        );
+        let mut invalid_layout = graph(&[2, 18], &[&[2, 6], &[2, 3], &[2, 9]]);
+        for value in &mut invalid_layout.values {
+            value.tensor.layout = TensorLayout::Custom("ambiguous".into());
+        }
+        assert!(
+            invalid_layout
+                .validate()
+                .unwrap_err()
+                .contains("PackedRagged")
+        );
+    }
+
+    #[test]
+    fn gated_multiply_accepts_sigmoid_and_rejects_mismatches_and_arity() {
+        for (shape, format, layout) in [
+            (&[2, 4][..], NumericalFormat::F32, TensorLayout::RowMajor),
+            (
+                &[2, 3, 4][..],
+                NumericalFormat::Bf16,
+                TensorLayout::PackedRagged,
+            ),
+            (
+                &[1, 4][..],
+                NumericalFormat::Fp16,
+                TensorLayout::TokensHidden,
+            ),
+        ] {
+            gated_multiply_graph(shape, format, layout, ActivationKind::Sigmoid)
+                .validate()
+                .unwrap();
+        }
+
+        let mut shape = gated_multiply_graph(
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Sigmoid,
+        );
+        shape.values[1].tensor.shape = vec![2, 3];
+        assert!(shape.validate().unwrap_err().contains("identical shapes"));
+
+        let mut metadata = gated_multiply_graph(
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Sigmoid,
+        );
+        metadata.values[2].tensor.layout = TensorLayout::TokensHidden;
+        assert!(
+            metadata
+                .validate()
+                .unwrap_err()
+                .contains("format and layout")
+        );
+
+        let unsupported_activation = gated_multiply_graph(
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Silu,
+        );
+        assert!(
+            unsupported_activation
+                .validate()
+                .unwrap_err()
+                .contains("requires Sigmoid")
+        );
+
+        let mut arity = gated_multiply_graph(
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Sigmoid,
+        );
+        arity.nodes[0].inputs.pop();
+        assert!(arity.validate().unwrap_err().contains("expected inputs=2"));
+        let mut weight = gated_multiply_graph(
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Sigmoid,
+        );
+        weight.nodes[0].weights.push(weight_id("unexpected"));
+        assert!(weight.validate().unwrap_err().contains("weights=1"));
+        let mut state = gated_multiply_graph(
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Sigmoid,
+        );
+        state.nodes[0].states.push(state_id("unexpected"));
+        assert!(state.validate().unwrap_err().contains("states=1"));
     }
 
     #[test]

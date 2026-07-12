@@ -272,11 +272,13 @@ pub enum CpuReferenceNodeKind {
     Norm,
     Linear,
     FusedLinearGroup,
+    GroupedLastSplit,
     RotaryPosition,
     CausalGqaAttentionCore,
     DenseAttention,
     RecurrentAttention,
     Activation,
+    GatedMultiply,
     GatedMlp,
     Residual,
     FinalNorm,
@@ -291,11 +293,13 @@ impl From<&GraphNodeKind> for CpuReferenceNodeKind {
             GraphNodeKind::Norm { .. } => Self::Norm,
             GraphNodeKind::Linear { .. } => Self::Linear,
             GraphNodeKind::FusedLinearGroup { .. } => Self::FusedLinearGroup,
+            GraphNodeKind::GroupedLastSplit { .. } => Self::GroupedLastSplit,
             GraphNodeKind::RotaryPosition { .. } => Self::RotaryPosition,
             GraphNodeKind::CausalGqaAttentionCore { .. } => Self::CausalGqaAttentionCore,
             GraphNodeKind::DenseAttention { .. } => Self::DenseAttention,
             GraphNodeKind::RecurrentAttention { .. } => Self::RecurrentAttention,
             GraphNodeKind::Activation { .. } => Self::Activation,
+            GraphNodeKind::GatedMultiply { .. } => Self::GatedMultiply,
             GraphNodeKind::GatedMlp { .. } => Self::GatedMlp,
             GraphNodeKind::Residual => Self::Residual,
             GraphNodeKind::FinalNorm { .. } => Self::FinalNorm,
@@ -312,11 +316,13 @@ impl CpuReferenceNodeKind {
             Self::Norm => "Norm",
             Self::Linear => "Linear",
             Self::FusedLinearGroup => "FusedLinearGroup",
+            Self::GroupedLastSplit => "GroupedLastSplit",
             Self::RotaryPosition => "RotaryPosition",
             Self::CausalGqaAttentionCore => "CausalGqaAttentionCore",
             Self::DenseAttention => "DenseAttention",
             Self::RecurrentAttention => "RecurrentAttention",
             Self::Activation => "Activation",
+            Self::GatedMultiply => "GatedMultiply",
             Self::GatedMlp => "GatedMlp",
             Self::Residual => "Residual",
             Self::FinalNorm => "FinalNorm",
@@ -911,11 +917,72 @@ impl CpuReferenceExecutor {
                 }
                 Ok(outputs)
             }
+            GraphNodeKind::GroupedLastSplit {
+                groups,
+                segment_widths,
+            } => {
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let segment_total = node_internal(
+                    node,
+                    cpu_grouped_last_split_geometry(*groups, segment_widths),
+                )?;
+                let mut outputs = Vec::new();
+                outputs.try_reserve(segment_widths.len()).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "metadata_allocation",
+                        "grouped last split output metadata allocation failed",
+                    )
+                })?;
+                let mut segment_offset = 0_usize;
+                for (index, segment_width) in segment_widths.iter().copied().enumerate() {
+                    let output_spec =
+                        node_internal(node, node_output_spec(node, value_specs, index))?;
+                    let output = grouped_last_split_output_f32(
+                        input,
+                        *groups,
+                        segment_total,
+                        segment_offset,
+                        segment_width,
+                        output_spec,
+                        allocated_elements,
+                        runtime,
+                    )
+                    .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                    outputs.push((node.outputs[index].clone(), output));
+                    segment_offset =
+                        segment_offset.checked_add(segment_width).ok_or_else(|| {
+                            CpuReferenceFault::node(
+                                CpuReferenceFailureClass::Internal,
+                                node,
+                                "runtime_invariant",
+                                "grouped last split segment offset overflows usize",
+                            )
+                        })?;
+                }
+                Ok(outputs)
+            }
             GraphNodeKind::Activation { kind } => {
                 let input = node_internal(node, node_input(node, values, 0))?;
                 let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
                 let output = activation_f32(input, kind, output_spec, allocated_elements, runtime)
                     .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![(node.outputs[0].clone(), output)])
+            }
+            GraphNodeKind::GatedMultiply { activation } => {
+                let value_input = node_internal(node, node_input(node, values, 0))?;
+                let gate = node_internal(node, node_input(node, values, 1))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = gated_multiply_f32(
+                    value_input,
+                    gate,
+                    activation,
+                    output_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::GatedMlp {
@@ -1352,6 +1419,104 @@ fn preflight_graph(
                     )?;
                 }
             }
+            GraphNodeKind::GroupedLastSplit {
+                groups,
+                segment_widths,
+            } => {
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "grouped last split input"),
+                )?;
+                let segment_total = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    cpu_grouped_last_split_geometry(*groups, segment_widths),
+                )?;
+                let mut copied_elements = 0_usize;
+                for (index, segment_width) in segment_widths.iter().copied().enumerate() {
+                    let output = preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_output_spec(node, value_specs, index),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(output, "grouped last split output"),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "layout_mismatch",
+                        require_matching_value_layout(
+                            node,
+                            "grouped last split input",
+                            input,
+                            "grouped last split output",
+                            output,
+                        ),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        validate_cpu_grouped_last_split_output(
+                            input,
+                            output,
+                            *groups,
+                            segment_total,
+                            segment_width,
+                            index,
+                        ),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "element_budget",
+                        reserve_output_elements(&mut plan, node, output),
+                    )?;
+                    copied_elements = copied_elements
+                        .checked_add(preflight_result(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "element_budget",
+                            spec_elements(output, "grouped last split output"),
+                        )?)
+                        .ok_or_else(|| {
+                            CpuReferenceFault::node(
+                                CpuReferenceFailureClass::Resource,
+                                node,
+                                "work_budget",
+                                "grouped last split copied element count overflows usize",
+                            )
+                        })?;
+                }
+                let work = u64::try_from(copied_elements).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        "grouped last split copied element count exceeds u64",
+                    )
+                })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
+                )?;
+            }
             GraphNodeKind::Activation { kind } => {
                 let input = preflight_result(
                     CpuReferenceFailureClass::Internal,
@@ -1415,6 +1580,96 @@ fn preflight_graph(
                         "activation output elements exceed u64",
                     )
                 })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
+                )?;
+            }
+            GraphNodeKind::GatedMultiply { activation } => {
+                let value_input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let gate = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 1),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                for (label, spec) in [
+                    ("gated multiply value", value_input),
+                    ("gated multiply gate", gate),
+                    ("gated multiply output", output),
+                ] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, label),
+                    )?;
+                }
+                for (right_label, right) in [
+                    ("gated multiply gate", gate),
+                    ("gated multiply output", output),
+                ] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "layout_mismatch",
+                        require_matching_value_layout(
+                            node,
+                            "gated multiply value",
+                            value_input,
+                            right_label,
+                            right,
+                        ),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "activation",
+                    validate_cpu_gated_multiply_activation(activation),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    validate_cpu_gated_multiply_contract(value_input, gate, output),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                let elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(output, "gated multiply output"),
+                )?;
+                let work = u64::try_from(elements)
+                    .ok()
+                    .and_then(|elements| elements.checked_mul(24))
+                    .ok_or_else(|| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "work_budget",
+                            "gated multiply work-unit count overflows u64",
+                        )
+                    })?;
                 preflight_result(
                     CpuReferenceFailureClass::Resource,
                     node,
@@ -2178,12 +2433,102 @@ fn validate_cpu_weight_layout(spec: &TensorSpec, label: &str) -> Result<(), Stri
 
 fn validate_cpu_activation(kind: &ActivationKind) -> Result<(), String> {
     match kind {
+        ActivationKind::Sigmoid => {
+            Err("Sigmoid is supported only by GatedMultiply in the CPU reference".into())
+        }
         ActivationKind::Silu | ActivationKind::Relu => Ok(()),
         ActivationKind::Gelu => {
             Err("GELU is unsupported until its exact or tanh contract is explicit".into())
         }
         ActivationKind::Custom(name) => Err(format!("unsupported custom activation {name}")),
     }
+}
+
+fn validate_cpu_gated_multiply_activation(kind: &ActivationKind) -> Result<(), String> {
+    if kind == &ActivationKind::Sigmoid {
+        Ok(())
+    } else {
+        Err("gated multiply CPU reference requires Sigmoid activation".into())
+    }
+}
+
+fn cpu_grouped_last_split_geometry(
+    groups: usize,
+    segment_widths: &[usize],
+) -> Result<usize, String> {
+    if groups == 0 {
+        return Err("grouped last split groups must be nonzero".into());
+    }
+    if segment_widths.len() < 2 {
+        return Err("grouped last split requires at least two segments".into());
+    }
+    if segment_widths.len() > MAX_GRAPH_ENDPOINTS {
+        return Err("grouped last split segment count exceeds graph endpoint limit".into());
+    }
+    let mut segment_total = 0_usize;
+    for (index, segment_width) in segment_widths.iter().copied().enumerate() {
+        if segment_width == 0 {
+            return Err(format!(
+                "grouped last split segment width {index} must be nonzero"
+            ));
+        }
+        segment_total = segment_total
+            .checked_add(segment_width)
+            .ok_or_else(|| "grouped last split segment width sum overflows usize".to_string())?;
+    }
+    groups
+        .checked_mul(segment_total)
+        .ok_or_else(|| "grouped last split input width overflows usize".to_string())?;
+    Ok(segment_total)
+}
+
+fn validate_cpu_grouped_last_split_output(
+    input: &TensorSpec,
+    output: &TensorSpec,
+    groups: usize,
+    segment_total: usize,
+    segment_width: usize,
+    output_index: usize,
+) -> Result<(), String> {
+    let rank = input.shape.len();
+    if rank == 0 || output.shape.len() != rank {
+        return Err(format!(
+            "grouped last split output {output_index} must preserve nonzero input rank"
+        ));
+    }
+    if output.shape[..rank - 1] != input.shape[..rank - 1] {
+        return Err(format!(
+            "grouped last split output {output_index} must preserve leading dimensions"
+        ));
+    }
+    let input_width = groups
+        .checked_mul(segment_total)
+        .ok_or_else(|| "grouped last split input width overflows usize".to_string())?;
+    if input.shape.last().copied() != Some(input_width) {
+        return Err(format!(
+            "grouped last split input final width must be {input_width}"
+        ));
+    }
+    let output_width = groups
+        .checked_mul(segment_width)
+        .ok_or_else(|| "grouped last split output width overflows usize".to_string())?;
+    if output.shape.last().copied() != Some(output_width) {
+        return Err(format!(
+            "grouped last split output {output_index} final width must be {output_width}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cpu_gated_multiply_contract(
+    value_input: &TensorSpec,
+    gate: &TensorSpec,
+    output: &TensorSpec,
+) -> Result<(), String> {
+    if value_input.shape != gate.shape || value_input.shape != output.shape {
+        return Err("gated multiply value, gate, and output shapes must match".into());
+    }
+    Ok(())
 }
 
 fn validate_cpu_rms_normalization(
@@ -3383,6 +3728,160 @@ fn rms_norm_f32(
     HostTensor::f32(input_shape.to_vec(), output_spec.layout.clone(), output)
 }
 
+fn grouped_last_split_output_f32(
+    input: &HostTensor,
+    groups: usize,
+    segment_total: usize,
+    segment_offset: usize,
+    segment_width: usize,
+    output_spec: &TensorSpec,
+    allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<HostTensor, String> {
+    let (input_shape, input_layout, input_data) = input.f32_parts()?;
+    if !matches!(
+        input_layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden
+    ) {
+        return Err("grouped last split input layout is unsupported".into());
+    }
+    if groups == 0 || segment_total == 0 || segment_width == 0 {
+        return Err("grouped last split geometry must be nonzero".into());
+    }
+    if segment_offset
+        .checked_add(segment_width)
+        .filter(|end| *end <= segment_total)
+        .is_none()
+    {
+        return Err("grouped last split segment lies outside each input group".into());
+    }
+    let input_width = groups
+        .checked_mul(segment_total)
+        .ok_or_else(|| "grouped last split input width overflows usize".to_string())?;
+    if input_shape.last().copied() != Some(input_width) {
+        return Err(format!(
+            "grouped last split input final width must be {input_width}"
+        ));
+    }
+    let output_width = groups
+        .checked_mul(segment_width)
+        .ok_or_else(|| "grouped last split output width overflows usize".to_string())?;
+    let expected_output_shape = replaced_last_axis(input_shape, output_width)?;
+    require_f32_output_spec(
+        output_spec,
+        &expected_output_shape,
+        input_layout,
+        "grouped last split",
+    )?;
+    let rows = input_data
+        .len()
+        .checked_div(input_width)
+        .ok_or_else(|| "grouped last split row count overflows usize".to_string())?;
+    if rows.checked_mul(input_width) != Some(input_data.len()) {
+        return Err("grouped last split payload is not divisible by input width".into());
+    }
+    let output_elements = rows
+        .checked_mul(output_width)
+        .ok_or_else(|| "grouped last split output element count overflows usize".to_string())?;
+    let mut output = allocate_f32(
+        output_elements,
+        allocated_elements,
+        runtime,
+        "grouped last split output",
+    )?;
+    for row in 0..rows {
+        let input_row = row
+            .checked_mul(input_width)
+            .ok_or_else(|| "grouped last split input row offset overflows usize".to_string())?;
+        let output_row = row
+            .checked_mul(output_width)
+            .ok_or_else(|| "grouped last split output row offset overflows usize".to_string())?;
+        for group in 0..groups {
+            let source_start = input_row
+                .checked_add(group.checked_mul(segment_total).ok_or_else(|| {
+                    "grouped last split input group offset overflows usize".to_string()
+                })?)
+                .and_then(|offset| offset.checked_add(segment_offset))
+                .ok_or_else(|| {
+                    "grouped last split input segment offset overflows usize".to_string()
+                })?;
+            let destination_start = output_row
+                .checked_add(group.checked_mul(segment_width).ok_or_else(|| {
+                    "grouped last split output group offset overflows usize".to_string()
+                })?)
+                .ok_or_else(|| {
+                    "grouped last split output segment offset overflows usize".to_string()
+                })?;
+            let source = f32_slice(
+                input_data,
+                source_start,
+                segment_width,
+                "grouped last split input segment",
+            )?;
+            let destination = f32_slice_mut(
+                &mut output,
+                destination_start,
+                segment_width,
+                "grouped last split output segment",
+            )?;
+            destination.copy_from_slice(source);
+        }
+    }
+    HostTensor::f32(expected_output_shape, output_spec.layout.clone(), output)
+}
+
+fn gated_multiply_f32(
+    value_input: &HostTensor,
+    gate: &HostTensor,
+    activation: &ActivationKind,
+    output_spec: &TensorSpec,
+    allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<HostTensor, String> {
+    if activation != &ActivationKind::Sigmoid {
+        runtime.unsupported_failure_reason = Some("activation");
+        return Err("gated multiply requires Sigmoid activation".into());
+    }
+    let (value_shape, value_layout, value_data) = value_input.f32_parts()?;
+    let (gate_shape, gate_layout, gate_data) = gate.f32_parts()?;
+    if value_shape != gate_shape || value_layout != gate_layout {
+        return Err("gated multiply value and gate must have identical shape and layout".into());
+    }
+    if !matches!(
+        value_layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden
+    ) {
+        return Err("gated multiply input layout is unsupported".into());
+    }
+    require_f32_output_spec(output_spec, value_shape, value_layout, "gated multiply")?;
+    if value_data.len() != gate_data.len() {
+        return Err("gated multiply input payload lengths must match".into());
+    }
+    let mut output = allocate_f32(
+        value_data.len(),
+        allocated_elements,
+        runtime,
+        "gated multiply output",
+    )?;
+    for index in 0..output.len() {
+        if !value_data[index].is_finite() || !gate_data[index].is_finite() {
+            runtime.numerical_failed = true;
+            return Err("gated multiply input is non-finite".into());
+        }
+        let activated = stable_sigmoid(gate_data[index]).map_err(|error| {
+            runtime.numerical_failed = true;
+            error
+        })?;
+        let result = value_data[index] * activated;
+        if !result.is_finite() {
+            runtime.numerical_failed = true;
+            return Err("gated multiply output is non-finite".into());
+        }
+        output[index] = result;
+    }
+    HostTensor::f32(value_shape.to_vec(), output_spec.layout.clone(), output)
+}
+
 fn activation_f32(
     input: &HostTensor,
     kind: &ActivationKind,
@@ -3505,6 +4004,7 @@ fn residual_f32(
 
 fn activate(value: f32, kind: &ActivationKind) -> Result<f32, String> {
     match kind {
+        ActivationKind::Sigmoid => stable_sigmoid(value),
         ActivationKind::Silu => Ok(value / (1.0 + (-value).exp())),
         ActivationKind::Gelu => {
             Err("GELU is unsupported until its exact or tanh contract is explicit".into())
@@ -3512,6 +4012,22 @@ fn activate(value: f32, kind: &ActivationKind) -> Result<f32, String> {
         ActivationKind::Relu => Ok(value.max(0.0)),
         ActivationKind::Custom(name) => Err(format!("unsupported custom activation {name}")),
     }
+}
+
+fn stable_sigmoid(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err("sigmoid input is non-finite".into());
+    }
+    let result = if value >= 0.0 {
+        1.0_f32 / (1.0_f32 + (-value).exp())
+    } else {
+        let exponent = value.exp();
+        exponent / (1.0_f32 + exponent)
+    };
+    if !result.is_finite() {
+        return Err("sigmoid result is non-finite".into());
+    }
+    Ok(result)
 }
 
 fn require_f32_output_spec(
@@ -3820,11 +4336,13 @@ fn node_kind_name(kind: &GraphNodeKind) -> &'static str {
         GraphNodeKind::Norm { .. } => "Norm",
         GraphNodeKind::Linear { .. } => "Linear",
         GraphNodeKind::FusedLinearGroup { .. } => "FusedLinearGroup",
+        GraphNodeKind::GroupedLastSplit { .. } => "GroupedLastSplit",
         GraphNodeKind::RotaryPosition { .. } => "RotaryPosition",
         GraphNodeKind::CausalGqaAttentionCore { .. } => "CausalGqaAttentionCore",
         GraphNodeKind::DenseAttention { .. } => "DenseAttention",
         GraphNodeKind::RecurrentAttention { .. } => "RecurrentAttention",
         GraphNodeKind::Activation { .. } => "Activation",
+        GraphNodeKind::GatedMultiply { .. } => "GatedMultiply",
         GraphNodeKind::GatedMlp { .. } => "GatedMlp",
         GraphNodeKind::Residual => "Residual",
         GraphNodeKind::FinalNorm { .. } => "FinalNorm",
@@ -5585,6 +6103,98 @@ mod tests {
     }
 
     #[test]
+    fn sigmoid_standalone_and_gated_mlp_stay_unsupported_to_avoid_undercharged_work() {
+        // These paths do not yet charge sigmoid exponentiation. Empty payload
+        // maps fix capability rejection in preflight, before payload admission
+        // or any output/temporary allocation can execute.
+        let activation = ModelGraph {
+            graph_id: "unsupported-standalone-sigmoid".into(),
+            inputs: vec![value_id("input")],
+            outputs: vec![value_id("out")],
+            values: vec![
+                value(
+                    "input",
+                    &[1, 2],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                ),
+                value("out", &[1, 2], NumericalFormat::F32, TensorLayout::RowMajor),
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("standalone-sigmoid"),
+                inputs: vec![value_id("input")],
+                outputs: vec![value_id("out")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::Activation {
+                    kind: ActivationKind::Sigmoid,
+                },
+            }],
+        };
+        let activation_error = executor()
+            .execute_traced(&activation, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(
+            activation_error.class,
+            CpuReferenceFailureClass::Unsupported
+        );
+        assert_eq!(activation_error.reason_code, "activation");
+        assert_eq!(activation_error.trace.completed_node_count, 0);
+        assert_eq!(
+            activation_error.failed_node,
+            Some(CpuReferenceNodeRef {
+                id: node_id("standalone-sigmoid"),
+                kind: CpuReferenceNodeKind::Activation,
+            })
+        );
+
+        let gated_mlp = ModelGraph {
+            graph_id: "unsupported-gated-mlp-sigmoid".into(),
+            inputs: vec![value_id("input")],
+            outputs: vec![value_id("out")],
+            values: vec![
+                value(
+                    "input",
+                    &[1, 2],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                ),
+                value("out", &[1, 2], NumericalFormat::F32, TensorLayout::RowMajor),
+            ],
+            weights: vec![
+                weight("gate", &[2, 2]),
+                weight("up", &[2, 2]),
+                weight("down", &[2, 2]),
+            ],
+            nodes: vec![GraphNode {
+                id: node_id("gated-mlp-sigmoid"),
+                inputs: vec![value_id("input")],
+                outputs: vec![value_id("out")],
+                weights: vec![weight_id("gate"), weight_id("up"), weight_id("down")],
+                states: vec![],
+                kind: GraphNodeKind::GatedMlp {
+                    intermediate_size: 2,
+                    activation: ActivationKind::Sigmoid,
+                },
+            }],
+        };
+        let gated_mlp_error = executor()
+            .execute_traced(&gated_mlp, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(gated_mlp_error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(gated_mlp_error.reason_code, "activation");
+        assert_eq!(gated_mlp_error.trace.completed_node_count, 0);
+        assert_eq!(
+            gated_mlp_error.failed_node,
+            Some(CpuReferenceNodeRef {
+                id: node_id("gated-mlp-sigmoid"),
+                kind: CpuReferenceNodeKind::GatedMlp,
+            })
+        );
+    }
+
+    #[test]
     fn resource_preflight_rejects_aggregate_elements_and_billion_scale_work() {
         assert!(
             checked_total_element_budget(7, 2, 8)
@@ -5742,6 +6352,318 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("exceeds CPU reference limit"));
+    }
+
+    #[test]
+    fn grouped_last_split_literal_preserves_group_order_and_segment_offsets() {
+        let graph = grouped_last_split_graph(
+            &[1, 18],
+            &[&[1, 6], &[1, 3], &[1, 9]],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            3,
+            vec![2, 1, 3],
+        );
+        let inputs = map([(
+            value_id("split-input"),
+            f32(
+                &[1, 18],
+                TensorLayout::TokensHidden,
+                &[
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+                    15.0, 16.0, 17.0,
+                ],
+            ),
+        )]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &traced.outputs[&value_id("split-output-0")],
+            &[0.0, 1.0, 6.0, 7.0, 12.0, 13.0],
+            0.0,
+        );
+        assert_f32(
+            &traced.outputs[&value_id("split-output-1")],
+            &[2.0, 8.0, 14.0],
+            0.0,
+        );
+        assert_f32(
+            &traced.outputs[&value_id("split-output-2")],
+            &[3.0, 4.0, 5.0, 9.0, 10.0, 11.0, 15.0, 16.0, 17.0],
+            0.0,
+        );
+        assert_eq!(
+            traced.trace.completed_nodes,
+            vec![CpuReferenceNodeRef {
+                id: node_id("split"),
+                kind: CpuReferenceNodeKind::GroupedLastSplit,
+            }]
+        );
+        let legacy = executor().execute(&graph, inputs, BTreeMap::new()).unwrap();
+        assert_eq!(legacy.outputs, traced.outputs);
+    }
+
+    #[test]
+    fn grouped_last_split_rank3_keeps_rows_independent() {
+        let graph = grouped_last_split_graph(
+            &[1, 2, 6],
+            &[&[1, 2, 2], &[1, 2, 4]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            2,
+            vec![1, 2],
+        );
+        let run = executor()
+            .execute(
+                &graph,
+                map([(
+                    value_id("split-input"),
+                    f32(
+                        &[1, 2, 6],
+                        TensorLayout::RowMajor,
+                        &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                    ),
+                )]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &run.outputs[&value_id("split-output-0")],
+            &[0.0, 3.0, 6.0, 9.0],
+            0.0,
+        );
+        assert_f32(
+            &run.outputs[&value_id("split-output-1")],
+            &[1.0, 2.0, 4.0, 5.0, 7.0, 8.0, 10.0, 11.0],
+            0.0,
+        );
+    }
+
+    #[test]
+    fn grouped_last_split_rejects_non_cpu_capabilities_before_payload() {
+        for graph in [
+            grouped_last_split_graph(
+                &[1, 4],
+                &[&[1, 2], &[1, 2]],
+                NumericalFormat::Bf16,
+                TensorLayout::RowMajor,
+                2,
+                vec![1, 1],
+            ),
+            grouped_last_split_graph(
+                &[1, 4],
+                &[&[1, 2], &[1, 2]],
+                NumericalFormat::F32,
+                TensorLayout::PackedRagged,
+                2,
+                vec![1, 1],
+            ),
+        ] {
+            graph.validate().unwrap();
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, "value_layout");
+            assert_eq!(error.trace.completed_node_count, 0);
+            assert_eq!(
+                error.failed_node.as_ref().unwrap().kind,
+                CpuReferenceNodeKind::GroupedLastSplit
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_last_split_preflight_accounts_outputs_and_rejects_resource_limit() {
+        let graph = grouped_last_split_graph(
+            &[2, 18],
+            &[&[2, 6], &[2, 3], &[2, 9]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            3,
+            vec![2, 1, 3],
+        );
+        let value_specs = graph
+            .values
+            .iter()
+            .map(|value| (value.id.clone(), &value.tensor))
+            .collect();
+        let plan = preflight_graph(&graph, &value_specs, &BTreeMap::new()).unwrap();
+        assert_eq!(plan.execution_elements, 36);
+        assert_eq!(plan.work_units, 36);
+
+        let too_large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
+        let resource = grouped_last_split_graph(
+            &[1, too_large + 1],
+            &[&[1, too_large], &[1, 1]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            vec![too_large, 1],
+        );
+        resource.validate().unwrap();
+        let error = executor()
+            .execute_traced(&resource, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "element_budget");
+        assert_eq!(error.trace.completed_node_count, 0);
+    }
+
+    #[test]
+    fn gated_multiply_sigmoid_matches_literals_extremes_and_legacy() {
+        let graph = gated_multiply_graph(&[1, 5], NumericalFormat::F32, TensorLayout::TokensHidden);
+        let inputs = map([
+            (
+                value_id("multiply-value"),
+                f32(
+                    &[1, 5],
+                    TensorLayout::TokensHidden,
+                    &[2.0, -2.0, 4.0, -4.0, 1.0],
+                ),
+            ),
+            (
+                value_id("multiply-gate"),
+                f32(
+                    &[1, 5],
+                    TensorLayout::TokensHidden,
+                    &[0.0, 1.0, -1.0, 2.0, -2.0],
+                ),
+            ),
+        ]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &traced.outputs[&value_id("multiply-output")],
+            &[1.0, -1.462_117_2, 1.075_765_7, -3.523_188_4, 0.119_202_92],
+            2e-6,
+        );
+        assert_eq!(
+            traced.trace.completed_nodes[0].kind,
+            CpuReferenceNodeKind::GatedMultiply
+        );
+        let legacy = executor().execute(&graph, inputs, BTreeMap::new()).unwrap();
+        assert_eq!(legacy.outputs, traced.outputs);
+
+        let extremes = gated_multiply_graph(&[1, 2], NumericalFormat::F32, TensorLayout::RowMajor);
+        let extreme_run = executor()
+            .execute(
+                &extremes,
+                map([
+                    (
+                        value_id("multiply-value"),
+                        f32(&[1, 2], TensorLayout::RowMajor, &[3.0, 3.0]),
+                    ),
+                    (
+                        value_id("multiply-gate"),
+                        f32(&[1, 2], TensorLayout::RowMajor, &[100.0, -100.0]),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &extreme_run.outputs[&value_id("multiply-output")],
+            &[3.0, 0.0],
+            1e-6,
+        );
+        let (_, _, extreme_values) = extreme_run.outputs[&value_id("multiply-output")]
+            .f32_parts()
+            .unwrap();
+        assert!(extreme_values[1].is_finite());
+        assert!(extreme_values[1] > 0.0);
+    }
+
+    #[test]
+    fn gated_multiply_rejects_non_cpu_capabilities_and_nonfinite_input() {
+        for graph in [
+            gated_multiply_graph(&[1, 2], NumericalFormat::Fp16, TensorLayout::RowMajor),
+            gated_multiply_graph(&[1, 2], NumericalFormat::F32, TensorLayout::PackedRagged),
+        ] {
+            graph.validate().unwrap();
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, "value_layout");
+            assert_eq!(error.trace.completed_node_count, 0);
+            assert_eq!(
+                error.failed_node.as_ref().unwrap().kind,
+                CpuReferenceNodeKind::GatedMultiply
+            );
+        }
+
+        let graph = gated_multiply_graph(&[1, 2], NumericalFormat::F32, TensorLayout::RowMajor);
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([
+                    (
+                        value_id("multiply-value"),
+                        f32(&[1, 2], TensorLayout::RowMajor, &[1.0, f32::NAN]),
+                    ),
+                    (
+                        value_id("multiply-gate"),
+                        f32(&[1, 2], TensorLayout::RowMajor, &[0.0, 0.0]),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(error.reason_code, "nonfinite_input");
+        assert_eq!(error.trace.completed_node_count, 0);
+        assert!(error.failed_node.is_none());
+    }
+
+    #[test]
+    fn gated_multiply_preflight_rejects_element_and_work_budgets() {
+        let too_large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
+        let resource = gated_multiply_graph(
+            &[1, too_large],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+        );
+        resource.validate().unwrap();
+        let error = executor()
+            .execute_traced(&resource, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "element_budget");
+
+        let width = MAX_CPU_REFERENCE_TENSOR_ELEMENTS;
+        let mut work =
+            gated_multiply_graph(&[1, width], NumericalFormat::F32, TensorLayout::RowMajor);
+        work.values.push(value(
+            "multiply-output-2",
+            &[1, width],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+        ));
+        work.outputs = vec![value_id("multiply-output-2")];
+        work.nodes.push(GraphNode {
+            id: node_id("gated-multiply-2"),
+            inputs: vec![value_id("multiply-output"), value_id("multiply-gate")],
+            outputs: vec![value_id("multiply-output-2")],
+            weights: vec![],
+            states: vec![],
+            kind: GraphNodeKind::GatedMultiply {
+                activation: ActivationKind::Sigmoid,
+            },
+        });
+        work.validate().unwrap();
+        let error = executor()
+            .execute_traced(&work, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "work_budget");
+        assert_eq!(
+            error.failed_node.as_ref().unwrap().id,
+            node_id("gated-multiply-2")
+        );
+        assert_eq!(error.trace.completed_node_count, 0);
     }
 
     #[test]
@@ -6549,6 +7471,77 @@ mod tests {
                         groups,
                         group_width,
                     },
+                },
+            }],
+        }
+    }
+
+    fn grouped_last_split_graph(
+        input_shape: &[usize],
+        output_shapes: &[&[usize]],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        groups: usize,
+        segment_widths: Vec<usize>,
+    ) -> ModelGraph {
+        let mut values = vec![value(
+            "split-input",
+            input_shape,
+            format.clone(),
+            layout.clone(),
+        )];
+        let outputs = output_shapes
+            .iter()
+            .enumerate()
+            .map(|(index, shape)| {
+                let name = format!("split-output-{index}");
+                values.push(value(&name, shape, format.clone(), layout.clone()));
+                value_id(&name)
+            })
+            .collect::<Vec<_>>();
+        ModelGraph {
+            graph_id: "grouped-last-split-reference".into(),
+            inputs: vec![value_id("split-input")],
+            outputs: outputs.clone(),
+            values,
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("split"),
+                inputs: vec![value_id("split-input")],
+                outputs,
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::GroupedLastSplit {
+                    groups,
+                    segment_widths,
+                },
+            }],
+        }
+    }
+
+    fn gated_multiply_graph(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "gated-multiply-reference".into(),
+            inputs: vec![value_id("multiply-value"), value_id("multiply-gate")],
+            outputs: vec![value_id("multiply-output")],
+            values: vec![
+                value("multiply-value", shape, format.clone(), layout.clone()),
+                value("multiply-gate", shape, format.clone(), layout.clone()),
+                value("multiply-output", shape, format, layout),
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("gated-multiply"),
+                inputs: vec![value_id("multiply-value"), value_id("multiply-gate")],
+                outputs: vec![value_id("multiply-output")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::GatedMultiply {
+                    activation: ActivationKind::Sigmoid,
                 },
             }],
         }
