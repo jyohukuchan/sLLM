@@ -273,6 +273,7 @@ pub enum CpuReferenceNodeKind {
     Linear,
     FusedLinearGroup,
     GroupedLastSplit,
+    LastAxisSplit,
     RotaryPosition,
     CausalGqaAttentionCore,
     DenseAttention,
@@ -294,6 +295,7 @@ impl From<&GraphNodeKind> for CpuReferenceNodeKind {
             GraphNodeKind::Linear { .. } => Self::Linear,
             GraphNodeKind::FusedLinearGroup { .. } => Self::FusedLinearGroup,
             GraphNodeKind::GroupedLastSplit { .. } => Self::GroupedLastSplit,
+            GraphNodeKind::LastAxisSplit { .. } => Self::LastAxisSplit,
             GraphNodeKind::RotaryPosition { .. } => Self::RotaryPosition,
             GraphNodeKind::CausalGqaAttentionCore { .. } => Self::CausalGqaAttentionCore,
             GraphNodeKind::DenseAttention { .. } => Self::DenseAttention,
@@ -317,6 +319,7 @@ impl CpuReferenceNodeKind {
             Self::Linear => "Linear",
             Self::FusedLinearGroup => "FusedLinearGroup",
             Self::GroupedLastSplit => "GroupedLastSplit",
+            Self::LastAxisSplit => "LastAxisSplit",
             Self::RotaryPosition => "RotaryPosition",
             Self::CausalGqaAttentionCore => "CausalGqaAttentionCore",
             Self::DenseAttention => "DenseAttention",
@@ -963,6 +966,45 @@ impl CpuReferenceExecutor {
                 }
                 Ok(outputs)
             }
+            GraphNodeKind::LastAxisSplit { segment_widths } => {
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let segment_total =
+                    node_internal(node, cpu_grouped_last_split_geometry(1, segment_widths))?;
+                let mut outputs = Vec::new();
+                outputs.try_reserve(segment_widths.len()).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "metadata_allocation",
+                        "last axis split output metadata allocation failed",
+                    )
+                })?;
+                let mut offset = 0_usize;
+                for (index, width) in segment_widths.iter().copied().enumerate() {
+                    let spec = node_internal(node, node_output_spec(node, value_specs, index))?;
+                    let output = grouped_last_split_output_f32(
+                        input,
+                        1,
+                        segment_total,
+                        offset,
+                        width,
+                        spec,
+                        allocated_elements,
+                        runtime,
+                    )
+                    .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                    outputs.push((node.outputs[index].clone(), output));
+                    offset = offset.checked_add(width).ok_or_else(|| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Internal,
+                            node,
+                            "runtime_invariant",
+                            "last axis split offset overflows usize",
+                        )
+                    })?;
+                }
+                Ok(outputs)
+            }
             GraphNodeKind::Activation { kind } => {
                 let input = node_internal(node, node_input(node, values, 0))?;
                 let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
@@ -1060,7 +1102,19 @@ impl CpuReferenceExecutor {
                     )
                 })?;
                 let input = node_internal(node, node_input(node, values, 0))?;
-                let scale = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let scale = if matches!(
+                    affine,
+                    NormalizationAffine::Scale
+                        | NormalizationAffine::UnitOffsetScale
+                        | NormalizationAffine::ScaleAndBias
+                ) {
+                    Some(node_internal(
+                        node,
+                        node_weight(node, weights, weight_specs, 0),
+                    )?)
+                } else {
+                    None
+                };
                 let bias = if *affine == NormalizationAffine::ScaleAndBias {
                     Some(node_internal(
                         node,
@@ -1074,6 +1128,7 @@ impl CpuReferenceExecutor {
                     input,
                     scale,
                     bias,
+                    *kind,
                     *affine,
                     *axis,
                     epsilon.get(),
@@ -1517,6 +1572,99 @@ fn preflight_graph(
                     add_work_units(&mut plan, node, work),
                 )?;
             }
+            GraphNodeKind::LastAxisSplit { segment_widths } => {
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                // PackedRagged is graph-valid because splitting is local to each
+                // final axis. This executor has no execution-batch packed offsets,
+                // so its CPU capability remains F32 RowMajor/TokensHidden only.
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "last axis split input"),
+                )?;
+                let total = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    cpu_grouped_last_split_geometry(1, segment_widths),
+                )?;
+                let mut copied = 0_usize;
+                for (index, width) in segment_widths.iter().copied().enumerate() {
+                    let output = preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_output_spec(node, value_specs, index),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(output, "last axis split output"),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "layout_mismatch",
+                        require_matching_value_layout(
+                            node,
+                            "last axis split input",
+                            input,
+                            "last axis split output",
+                            output,
+                        ),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        validate_cpu_grouped_last_split_output(
+                            input, output, 1, total, width, index,
+                        ),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "element_budget",
+                        reserve_output_elements(&mut plan, node, output),
+                    )?;
+                    copied = copied
+                        .checked_add(preflight_result(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "element_budget",
+                            spec_elements(output, "last axis split output"),
+                        )?)
+                        .ok_or_else(|| {
+                            CpuReferenceFault::node(
+                                CpuReferenceFailureClass::Resource,
+                                node,
+                                "work_budget",
+                                "last axis split copied element count overflows usize",
+                            )
+                        })?;
+                }
+                let work = u64::try_from(copied).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        "last axis split work exceeds u64",
+                    )
+                })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
+                )?;
+            }
             GraphNodeKind::Activation { kind } => {
                 let input = preflight_result(
                     CpuReferenceFailureClass::Internal,
@@ -1906,12 +2054,21 @@ fn preflight_graph(
                     "node_contract",
                     node_output_spec(node, value_specs, 0),
                 )?;
-                let scale = preflight_result(
-                    CpuReferenceFailureClass::Internal,
-                    node,
-                    "node_contract",
-                    node_weight_spec(node, weight_specs, 0),
-                )?;
+                let scale = if matches!(
+                    affine,
+                    NormalizationAffine::Scale
+                        | NormalizationAffine::UnitOffsetScale
+                        | NormalizationAffine::ScaleAndBias
+                ) {
+                    Some(preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_weight_spec(node, weight_specs, 0),
+                    )?)
+                } else {
+                    None
+                };
                 let bias = if *affine == NormalizationAffine::ScaleAndBias {
                     Some(preflight_result(
                         CpuReferenceFailureClass::Internal,
@@ -1945,12 +2102,14 @@ fn preflight_graph(
                         output,
                     ),
                 )?;
-                preflight_result(
-                    CpuReferenceFailureClass::Unsupported,
-                    node,
-                    "weight_layout",
-                    validate_cpu_weight_layout(scale, "RMS normalization scale"),
-                )?;
+                if let Some(scale) = scale {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "weight_layout",
+                        validate_cpu_weight_layout(scale, "normalization scale"),
+                    )?;
+                }
                 if let Some(bias) = bias {
                     preflight_result(
                         CpuReferenceFailureClass::Unsupported,
@@ -1963,13 +2122,15 @@ fn preflight_graph(
                     CpuReferenceFailureClass::Internal,
                     node,
                     "node_contract",
-                    validate_cpu_rms_norm_contract(input, output, scale, bias, *affine, *axis),
+                    validate_cpu_rms_norm_contract(
+                        input, output, scale, bias, *kind, *affine, *axis,
+                    ),
                 )?;
                 preflight_result(
                     CpuReferenceFailureClass::Resource,
                     node,
                     "work_budget",
-                    plan_rms_norm(&mut plan, node, input, output, *affine, *axis),
+                    plan_rms_norm(&mut plan, node, input, output, *kind, *affine, *axis),
                 )?;
             }
             GraphNodeKind::RotaryPosition {
@@ -2537,7 +2698,7 @@ fn validate_cpu_rms_normalization(
 ) -> Result<(), String> {
     match (kind, axis) {
         (
-            NormalizationKind::Rms,
+            NormalizationKind::Rms | NormalizationKind::L2,
             NormalizationAxis::Last | NormalizationAxis::GroupedLast { .. },
         ) => Ok(()),
         (
@@ -2550,8 +2711,9 @@ fn validate_cpu_rms_normalization(
 fn validate_cpu_rms_norm_contract(
     input: &TensorSpec,
     output: &TensorSpec,
-    scale: &TensorSpec,
+    scale: Option<&TensorSpec>,
     bias: Option<&TensorSpec>,
+    kind: NormalizationKind,
     affine: NormalizationAffine,
     axis: NormalizationAxis,
 ) -> Result<(), String> {
@@ -2559,18 +2721,29 @@ fn validate_cpu_rms_norm_contract(
         return Err("RMS normalization input and output shapes must match".into());
     }
     let (_, group_width) = rms_norm_group_geometry(&input.shape, axis)?;
-    validate_cpu_rms_norm_weight_shape(scale, group_width, "scale")?;
-    match (affine, bias) {
-        (NormalizationAffine::ScaleAndBias, Some(bias)) => {
-            validate_cpu_rms_norm_weight_shape(bias, group_width, "bias")
-        }
-        (NormalizationAffine::ScaleAndBias, None) => {
-            Err("RMS normalization ScaleAndBias requires a bias weight".into())
-        }
-        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, None) => Ok(()),
-        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, Some(_)) => {
-            Err("RMS normalization affine contract has an unexpected bias weight".into())
-        }
+    if let Some(scale) = scale {
+        validate_cpu_rms_norm_weight_shape(scale, group_width, "scale")?;
+    }
+    match (kind, affine, scale, bias) {
+        (
+            NormalizationKind::L2,
+            NormalizationAffine::None | NormalizationAffine::FixedScale(_),
+            None,
+            None,
+        ) => Ok(()),
+        (
+            NormalizationKind::Rms | NormalizationKind::Layer,
+            NormalizationAffine::ScaleAndBias,
+            Some(_),
+            Some(bias),
+        ) => validate_cpu_rms_norm_weight_shape(bias, group_width, "bias"),
+        (
+            NormalizationKind::Rms | NormalizationKind::Layer,
+            NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale,
+            Some(_),
+            None,
+        ) => Ok(()),
+        _ => Err("normalization kind, affine, and weights are inconsistent".into()),
     }
 }
 
@@ -2724,6 +2897,7 @@ fn plan_rms_norm(
     node: &GraphNode,
     input: &TensorSpec,
     output: &TensorSpec,
+    kind: NormalizationKind,
     affine: NormalizationAffine,
     axis: NormalizationAxis,
 ) -> Result<(), String> {
@@ -2759,9 +2933,20 @@ fn plan_rms_norm(
     // normalization unit (one row for Last, or one contiguous group for GroupedLast).
     // UnitOffsetScale additionally charges the unit-offset add; ScaleAndBias charges
     // the bias add.
-    let work_per_element = match affine {
-        NormalizationAffine::Scale => 4_u64,
-        NormalizationAffine::UnitOffsetScale | NormalizationAffine::ScaleAndBias => 5_u64,
+    let work_per_element = match (kind, affine) {
+        (NormalizationKind::L2, NormalizationAffine::None) => 3_u64,
+        (NormalizationKind::L2, NormalizationAffine::FixedScale(_)) => 4_u64,
+        (NormalizationKind::Rms | NormalizationKind::Layer, NormalizationAffine::Scale) => 4_u64,
+        (
+            NormalizationKind::Rms | NormalizationKind::Layer,
+            NormalizationAffine::UnitOffsetScale | NormalizationAffine::ScaleAndBias,
+        ) => 5_u64,
+        _ => {
+            return Err(node_error(
+                node,
+                "invalid normalization kind and affine combination",
+            ));
+        }
     };
     let element_work = u64::try_from(output_elements)
         .map_err(|_| node_error(node, "RMS normalization element count exceeds u64"))?
@@ -2772,9 +2957,10 @@ fn plan_rms_norm(
                 "RMS normalization element work-unit count overflows u64",
             )
         })?;
+    let work_per_unit = if kind == NormalizationKind::L2 { 3 } else { 4 };
     let unit_work = u64::try_from(units)
         .map_err(|_| node_error(node, "RMS normalization unit count exceeds u64"))?
-        .checked_mul(4)
+        .checked_mul(work_per_unit)
         .ok_or_else(|| node_error(node, "RMS normalization unit work-unit count overflows u64"))?;
     let work = element_work
         .checked_add(unit_work)
@@ -3599,8 +3785,9 @@ fn f32_slice_mut<'a>(
 
 fn rms_norm_f32(
     input: &HostTensor,
-    scale: &HostTensor,
+    scale: Option<&HostTensor>,
     bias: Option<&HostTensor>,
+    kind: NormalizationKind,
     affine: NormalizationAffine,
     axis: NormalizationAxis,
     epsilon: f32,
@@ -3633,17 +3820,24 @@ fn rms_norm_f32(
         return Err("RMS normalization input element count is not divisible by group_width".into());
     }
 
-    let (scale_shape, scale_layout, scale_data) = scale.f32_parts()?;
-    if scale_layout != &TensorLayout::RowMajor {
-        return Err("RMS normalization scale requires RowMajor layout".into());
-    }
-    if scale_shape.len() != 1 || scale_shape[0] != group_width {
-        return Err(format!(
-            "RMS normalization scale must have shape [{group_width}]"
-        ));
-    }
-    let bias_data = match (affine, bias) {
-        (NormalizationAffine::ScaleAndBias, Some(bias)) => {
+    let scale_data = if let Some(scale) = scale {
+        let (scale_shape, scale_layout, scale_data) = scale.f32_parts()?;
+        if scale_layout != &TensorLayout::RowMajor || scale_shape != [group_width] {
+            return Err(format!(
+                "normalization scale must have RowMajor shape [{group_width}]"
+            ));
+        }
+        Some(scale_data)
+    } else {
+        None
+    };
+    let bias_data = match (kind, affine, bias) {
+        (
+            NormalizationKind::L2,
+            NormalizationAffine::None | NormalizationAffine::FixedScale(_),
+            None,
+        ) => None,
+        (_, NormalizationAffine::ScaleAndBias, Some(bias)) => {
             let (bias_shape, bias_layout, bias_data) = bias.f32_parts()?;
             if bias_layout != &TensorLayout::RowMajor {
                 return Err("RMS normalization bias requires RowMajor layout".into());
@@ -3655,13 +3849,14 @@ fn rms_norm_f32(
             }
             Some(bias_data)
         }
-        (NormalizationAffine::ScaleAndBias, None) => {
+        (_, NormalizationAffine::ScaleAndBias, None) => {
             return Err("RMS normalization ScaleAndBias requires a bias weight".into());
         }
-        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, None) => None,
-        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, Some(_)) => {
+        (_, NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, None) => None,
+        (_, NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, Some(_)) => {
             return Err("RMS normalization affine contract has an unexpected bias weight".into());
         }
+        _ => return Err("normalization kind and affine combination is invalid".into()),
     };
 
     let mut output = allocate_f32(
@@ -3690,7 +3885,11 @@ fn rms_norm_f32(
                 return Err("RMS normalization sum of squares is non-finite".into());
             }
         }
-        let mean_plus_epsilon = sum_of_squares / group_width_as_f32 + epsilon;
+        let mean_plus_epsilon = if kind == NormalizationKind::L2 {
+            sum_of_squares + epsilon
+        } else {
+            sum_of_squares / group_width_as_f32 + epsilon
+        };
         if !mean_plus_epsilon.is_finite() || mean_plus_epsilon <= 0.0 {
             runtime.numerical_failed = true;
             return Err("RMS normalization mean plus epsilon is invalid".into());
@@ -3712,10 +3911,14 @@ fn rms_norm_f32(
                 return Err("RMS normalization normalized value is non-finite".into());
             }
             let affine_value = match affine {
-                NormalizationAffine::Scale => normalized * scale_data[index],
-                NormalizationAffine::UnitOffsetScale => normalized * (1.0_f32 + scale_data[index]),
+                NormalizationAffine::None => normalized,
+                NormalizationAffine::FixedScale(scale) => normalized * scale.get(),
+                NormalizationAffine::Scale => normalized * scale_data.unwrap_or(&[])[index],
+                NormalizationAffine::UnitOffsetScale => {
+                    normalized * (1.0_f32 + scale_data.unwrap_or(&[])[index])
+                }
                 NormalizationAffine::ScaleAndBias => {
-                    normalized * scale_data[index] + bias_data[index]
+                    normalized * scale_data.unwrap_or(&[])[index] + bias_data[index]
                 }
             };
             if !affine_value.is_finite() {
@@ -4337,6 +4540,7 @@ fn node_kind_name(kind: &GraphNodeKind) -> &'static str {
         GraphNodeKind::Linear { .. } => "Linear",
         GraphNodeKind::FusedLinearGroup { .. } => "FusedLinearGroup",
         GraphNodeKind::GroupedLastSplit { .. } => "GroupedLastSplit",
+        GraphNodeKind::LastAxisSplit { .. } => "LastAxisSplit",
         GraphNodeKind::RotaryPosition { .. } => "RotaryPosition",
         GraphNodeKind::CausalGqaAttentionCore { .. } => "CausalGqaAttentionCore",
         GraphNodeKind::DenseAttention { .. } => "DenseAttention",
@@ -6405,6 +6609,145 @@ mod tests {
     }
 
     #[test]
+    fn last_axis_split_literal_rank3_and_legacy_are_exact() {
+        let mut graph = grouped_last_split_graph(
+            &[1, 2, 6],
+            &[&[1, 2, 2], &[1, 2, 1], &[1, 2, 3]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            vec![2, 1, 3],
+        );
+        graph.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+            segment_widths: vec![2, 1, 3],
+        };
+        let inputs = map([(
+            value_id("split-input"),
+            f32(
+                &[1, 2, 6],
+                TensorLayout::RowMajor,
+                &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+            ),
+        )]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &traced.outputs[&value_id("split-output-0")],
+            &[0.0, 1.0, 6.0, 7.0],
+            0.0,
+        );
+        assert_f32(
+            &traced.outputs[&value_id("split-output-1")],
+            &[2.0, 8.0],
+            0.0,
+        );
+        assert_f32(
+            &traced.outputs[&value_id("split-output-2")],
+            &[3.0, 4.0, 5.0, 9.0, 10.0, 11.0],
+            0.0,
+        );
+        assert_eq!(
+            traced.trace.completed_nodes[0].kind,
+            CpuReferenceNodeKind::LastAxisSplit
+        );
+        assert_eq!(
+            executor()
+                .execute(&graph, inputs, BTreeMap::new())
+                .unwrap()
+                .outputs,
+            traced.outputs
+        );
+    }
+
+    #[test]
+    fn last_axis_split_preflight_rejects_dtype_layout_and_resource() {
+        for (format, layout) in [
+            (NumericalFormat::Bf16, TensorLayout::RowMajor),
+            (NumericalFormat::F32, TensorLayout::PackedRagged),
+        ] {
+            // PackedRagged remains graph-valid for this final-axis-local
+            // semantic; only this CPU executor capability rejects it.
+            let mut graph = grouped_last_split_graph(
+                &[1, 2],
+                &[&[1, 1], &[1, 1]],
+                format,
+                layout,
+                1,
+                vec![1, 1],
+            );
+            graph.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+                segment_widths: vec![1, 1],
+            };
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, "value_layout");
+        }
+        let large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
+        let mut graph = grouped_last_split_graph(
+            &[1, large + 1],
+            &[&[1, large], &[1, 1]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            vec![large, 1],
+        );
+        graph.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+            segment_widths: vec![large, 1],
+        };
+        let error = executor()
+            .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "element_budget");
+
+        let mut accounted = grouped_last_split_graph(
+            &[1, 6],
+            &[&[1, 2], &[1, 1], &[1, 3]],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            vec![2, 1, 3],
+        );
+        accounted.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+            segment_widths: vec![2, 1, 3],
+        };
+        let specs = accounted
+            .values
+            .iter()
+            .map(|value| (value.id.clone(), &value.tensor))
+            .collect();
+        let plan = preflight_graph(&accounted, &specs, &BTreeMap::new()).unwrap();
+        assert_eq!(plan.execution_elements, 6);
+        assert_eq!(plan.work_units, 6);
+
+        // Copy work equals output elements, so the stricter aggregate element
+        // budget necessarily fires before the larger global work budget.
+        const WIDTH: usize = MAX_CPU_REFERENCE_TENSOR_ELEMENTS;
+        let output_shapes = [&[1, WIDTH][..]; 9];
+        let mut aggregate = grouped_last_split_graph(
+            &[1, WIDTH * 9],
+            &output_shapes,
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            vec![WIDTH; 9],
+        );
+        aggregate.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+            segment_widths: vec![WIDTH; 9],
+        };
+        aggregate.validate().unwrap();
+        let error = executor()
+            .execute_traced(&aggregate, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "element_budget");
+        assert_eq!(error.trace.completed_node_count, 0);
+    }
+
+    #[test]
     fn grouped_last_split_rank3_keeps_rows_independent() {
         let graph = grouped_last_split_graph(
             &[1, 2, 6],
@@ -6770,6 +7113,128 @@ mod tests {
             3e-5,
         );
         assert_ne!(last_run.outputs, traced.outputs);
+    }
+
+    #[test]
+    fn l2_normalization_literals_grouped_fixed_scale_rank3_and_legacy() {
+        let graph = l2_norm_graph(
+            &[1, 2],
+            NormalizationAxis::Last,
+            NormalizationAffine::None,
+            TensorLayout::RowMajor,
+        );
+        let inputs = map([(
+            value_id("l2-input"),
+            f32(&[1, 2], TensorLayout::RowMajor, &[-3.0, 4.0]),
+        )]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &traced.outputs[&value_id("l2-output")],
+            &[-0.599_999_9, 0.799_999_83],
+            2e-6,
+        );
+        assert_eq!(
+            executor()
+                .execute(&graph, inputs, BTreeMap::new())
+                .unwrap()
+                .outputs,
+            traced.outputs
+        );
+
+        let grouped = l2_norm_graph(
+            &[1, 2, 4],
+            NormalizationAxis::GroupedLast {
+                groups: 2,
+                group_width: 2,
+            },
+            NormalizationAffine::FixedScale(PositiveF32::new(2.0, "scale").unwrap()),
+            TensorLayout::TokensHidden,
+        );
+        let run = executor()
+            .execute(
+                &grouped,
+                map([(
+                    value_id("l2-input"),
+                    f32(
+                        &[1, 2, 4],
+                        TensorLayout::TokensHidden,
+                        &[3.0, 4.0, 5.0, 12.0, 0.0, 2.0, 8.0, 6.0],
+                    ),
+                )]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &run.outputs[&value_id("l2-output")],
+            &[
+                1.199_999_8,
+                1.599_999_7,
+                0.769_230_7,
+                1.846_153_7,
+                0.0,
+                1.999_997_5,
+                1.599_999_9,
+                1.199_999_9,
+            ],
+            3e-6,
+        );
+    }
+
+    #[test]
+    fn l2_normalization_preflight_work_resource_and_numerical_are_typed() {
+        for (affine, expected_work) in [
+            (NormalizationAffine::None, 18_u64),
+            (
+                NormalizationAffine::FixedScale(PositiveF32::new(2.0, "scale").unwrap()),
+                22_u64,
+            ),
+        ] {
+            let graph = l2_norm_graph(
+                &[2, 2],
+                NormalizationAxis::Last,
+                affine,
+                TensorLayout::RowMajor,
+            );
+            let specs = graph
+                .values
+                .iter()
+                .map(|value| (value.id.clone(), &value.tensor))
+                .collect();
+            let plan = preflight_graph(&graph, &specs, &BTreeMap::new()).unwrap();
+            assert_eq!(plan.execution_elements, 4);
+            assert_eq!(plan.work_units, expected_work);
+        }
+        let large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
+        let resource = l2_norm_graph(
+            &[1, large],
+            NormalizationAxis::Last,
+            NormalizationAffine::None,
+            TensorLayout::RowMajor,
+        );
+        let error = executor()
+            .execute_traced(&resource, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        let numerical = l2_norm_graph(
+            &[1, 2],
+            NormalizationAxis::Last,
+            NormalizationAffine::None,
+            TensorLayout::RowMajor,
+        );
+        let error = executor()
+            .execute_traced(
+                &numerical,
+                map([(
+                    value_id("l2-input"),
+                    f32(&[1, 2], TensorLayout::RowMajor, &[f32::MAX, 1.0]),
+                )]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(error.reason_code, "runtime_numerical");
     }
 
     #[test]
@@ -7471,6 +7936,37 @@ mod tests {
                         groups,
                         group_width,
                     },
+                },
+            }],
+        }
+    }
+
+    fn l2_norm_graph(
+        shape: &[usize],
+        axis: NormalizationAxis,
+        affine: NormalizationAffine,
+        layout: TensorLayout,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "l2-normalization".into(),
+            inputs: vec![value_id("l2-input")],
+            outputs: vec![value_id("l2-output")],
+            values: vec![
+                value("l2-input", shape, NumericalFormat::F32, layout.clone()),
+                value("l2-output", shape, NumericalFormat::F32, layout),
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("l2"),
+                inputs: vec![value_id("l2-input")],
+                outputs: vec![value_id("l2-output")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::Norm {
+                    epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                    kind: NormalizationKind::L2,
+                    affine,
+                    axis,
                 },
             }],
         }

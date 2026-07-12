@@ -397,6 +397,10 @@ impl PositiveF32 {
 /// validation evidence; they do not change this graph semantic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalizationKind {
+    /// Euclidean L2 normalization without mean scaling.
+    ///
+    /// For each vector, computes `x / sqrt(sum(x^2) + epsilon)`.
+    L2,
     /// Root-mean-square normalization without mean subtraction.
     ///
     /// For each vector normalized along the configured axis, this computes
@@ -415,6 +419,10 @@ pub enum NormalizationKind {
 /// Learned affine parameters applied after normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalizationAffine {
+    /// Applies no learned or fixed post-normalization scale.
+    None,
+    /// Multiplies by a fixed finite positive scalar without a weight tensor.
+    FixedScale(PositiveF32),
     /// Multiplies normalized values by the sole learned scale vector.
     ///
     /// `GraphNode::weights` is `[scale]`.
@@ -435,6 +443,7 @@ pub enum NormalizationAffine {
 impl NormalizationAffine {
     fn weight_count(self) -> usize {
         match self {
+            Self::None | Self::FixedScale(_) => 0,
             Self::Scale | Self::UnitOffsetScale => 1,
             Self::ScaleAndBias => 2,
         }
@@ -567,6 +576,13 @@ pub enum GraphNodeKind {
         groups: usize,
         segment_widths: Vec<usize>,
     },
+    /// Splits contiguous segments of the final axis into separate outputs.
+    ///
+    /// Each row's final axis is exactly the concatenation described by
+    /// `segment_widths`; output `i` receives that one contiguous segment.
+    /// Unlike [`GraphNodeKind::GroupedLastSplit`], segments are not repeated
+    /// inside groups and no cross-group gather is performed.
+    LastAxisSplit { segment_widths: Vec<usize> },
     /// Rotary position operation.
     ///
     /// `GraphNode::inputs` is `[values, positions]`. `values` has rank at
@@ -679,9 +695,33 @@ impl GraphNodeKind {
                 ensure_nonzero(*vocab_size, "embedding vocab_size")?;
                 ensure_nonzero(*hidden_size, "embedding hidden_size")
             }
-            Self::Norm { epsilon, axis, .. } | Self::FinalNorm { epsilon, axis, .. } => {
+            Self::Norm {
+                epsilon,
+                kind,
+                affine,
+                axis,
+            }
+            | Self::FinalNorm {
+                epsilon,
+                kind,
+                affine,
+                axis,
+            } => {
                 epsilon.validate("normalization epsilon")?;
-                axis.validate()
+                axis.validate()?;
+                match (kind, affine) {
+                    (NormalizationKind::L2, NormalizationAffine::None) => Ok(()),
+                    (NormalizationKind::L2, NormalizationAffine::FixedScale(scale)) => {
+                        scale.validate("L2 normalization fixed scale")
+                    }
+                    (
+                        NormalizationKind::Rms | NormalizationKind::Layer,
+                        NormalizationAffine::Scale
+                        | NormalizationAffine::UnitOffsetScale
+                        | NormalizationAffine::ScaleAndBias,
+                    ) => Ok(()),
+                    _ => Err("normalization kind and affine combination is invalid".into()),
+                }
             }
             Self::Linear { .. } | Self::Residual => Ok(()),
             Self::FusedLinearGroup { output_count } => {
@@ -691,6 +731,9 @@ impl GraphNodeKind {
                 groups,
                 segment_widths,
             } => validate_grouped_last_split_geometry(*groups, segment_widths).map(|_| ()),
+            Self::LastAxisSplit { segment_widths } => {
+                validate_last_axis_split_geometry(segment_widths).map(|_| ())
+            }
             Self::RotaryPosition {
                 heads,
                 head_dim,
@@ -789,6 +832,7 @@ impl GraphNodeKind {
             Self::Linear { has_bias } => exact(1, 1, if *has_bias { 2 } else { 1 }, 0),
             Self::FusedLinearGroup { output_count } => exact(1, *output_count, *output_count, 0),
             Self::GroupedLastSplit { segment_widths, .. } => exact(1, segment_widths.len(), 0, 0),
+            Self::LastAxisSplit { segment_widths } => exact(1, segment_widths.len(), 0, 0),
             Self::RotaryPosition { .. } => exact(2, 1, 0, 0),
             Self::Activation { .. } => exact(1, 1, 0, 0),
             Self::GatedMultiply { .. } => exact(2, 1, 0, 0),
@@ -929,28 +973,61 @@ impl GraphNode {
                     self.id.as_str(),
                 )
             }
-            GraphNodeKind::Norm { affine, axis, .. }
-            | GraphNodeKind::FinalNorm { affine, axis, .. } => {
+            GraphNodeKind::Norm {
+                kind, affine, axis, ..
+            }
+            | GraphNodeKind::FinalNorm {
+                kind, affine, axis, ..
+            } => {
                 let input = value(&self.inputs[0], "normalization input")?;
                 let output = value(&self.outputs[0], "normalization output")?;
-                let scale = weight(&self.weights[0], "normalization scale")?;
                 require_same_shape(
                     input,
                     output,
                     "normalization input and output",
                     self.id.as_str(),
                 )?;
-                require_vector_shape(
-                    scale,
-                    normalization_axis_width(
-                        input,
-                        *axis,
-                        "normalization input",
+                normalization_axis_width(input, *axis, "normalization input", self.id.as_str())?;
+                if *kind == NormalizationKind::L2 {
+                    if !matches!(
+                        input.format,
+                        NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+                    ) || !matches!(
+                        input.layout,
+                        TensorLayout::RowMajor
+                            | TensorLayout::TokensHidden
+                            | TensorLayout::PackedRagged
+                    ) {
+                        return Err(format!(
+                            "node {} L2 normalization requires real format and canonical final-axis layout",
+                            self.id.as_str()
+                        ));
+                    }
+                    if output.format != input.format || output.layout != input.layout {
+                        return Err(format!(
+                            "node {} L2 normalization output metadata must match input",
+                            self.id.as_str()
+                        ));
+                    }
+                }
+                if matches!(
+                    affine,
+                    NormalizationAffine::Scale
+                        | NormalizationAffine::UnitOffsetScale
+                        | NormalizationAffine::ScaleAndBias
+                ) {
+                    require_vector_shape(
+                        weight(&self.weights[0], "normalization scale")?,
+                        normalization_axis_width(
+                            input,
+                            *axis,
+                            "normalization input",
+                            self.id.as_str(),
+                        )?,
+                        "normalization scale",
                         self.id.as_str(),
-                    )?,
-                    "normalization scale",
-                    self.id.as_str(),
-                )?;
+                    )?;
+                }
                 if *affine == NormalizationAffine::ScaleAndBias {
                     require_vector_shape(
                         weight(&self.weights[1], "normalization bias")?,
@@ -1070,6 +1147,52 @@ impl GraphNode {
                     if output.format != input.format || output.layout != input.layout {
                         return Err(format!(
                             "node {} grouped last split output {index} format and layout must match input",
+                            self.id.as_str()
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            GraphNodeKind::LastAxisSplit { segment_widths } => {
+                let input = value(&self.inputs[0], "last axis split input")?;
+                let total = validate_last_axis_split_geometry(segment_widths)?;
+                if !matches!(
+                    input.format,
+                    NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+                ) || !matches!(
+                    input.layout,
+                    TensorLayout::RowMajor
+                        | TensorLayout::TokensHidden
+                        | TensorLayout::PackedRagged
+                ) {
+                    return Err(format!(
+                        "node {} last axis split requires real format and canonical final-axis layout",
+                        self.id.as_str()
+                    ));
+                }
+                if feature_width(input, "last axis split input", self.id.as_str())? != total {
+                    return Err(format!(
+                        "node {} last axis split input final width must equal segment sum {total}",
+                        self.id.as_str()
+                    ));
+                }
+                for (index, (output_id, width)) in
+                    self.outputs.iter().zip(segment_widths).enumerate()
+                {
+                    let output = value(output_id, "last axis split output")?;
+                    if output.shape.len() != input.shape.len()
+                        || output.shape[..output.shape.len() - 1]
+                            != input.shape[..input.shape.len() - 1]
+                        || output.shape.last().copied() != Some(*width)
+                    {
+                        return Err(format!(
+                            "node {} last axis split output {index} shape is invalid",
+                            self.id.as_str()
+                        ));
+                    }
+                    if output.format != input.format || output.layout != input.layout {
+                        return Err(format!(
+                            "node {} last axis split output {index} metadata must match input",
                             self.id.as_str()
                         ));
                     }
@@ -1792,6 +1915,25 @@ fn validate_grouped_last_split_geometry(
     }
     checked_dimension_product(groups, total, "grouped last split groups * segment sum")?;
     Ok(total)
+}
+
+fn validate_last_axis_split_geometry(segment_widths: &[usize]) -> Result<usize, String> {
+    if segment_widths.len() < 2 {
+        return Err("last axis split requires at least two segments and outputs".into());
+    }
+    if segment_widths.len() > MAX_NODE_VALUES {
+        return Err("last axis split segment count exceeds node value limit".into());
+    }
+    segment_widths
+        .iter()
+        .copied()
+        .enumerate()
+        .try_fold(0_usize, |total, (index, width)| {
+            ensure_nonzero(width, &format!("last axis split segment width {index}"))?;
+            total
+                .checked_add(width)
+                .ok_or_else(|| "last axis split segment width sum overflows usize".to_string())
+        })
 }
 
 fn validate_attention_geometry(
@@ -3140,6 +3282,117 @@ mod tests {
                 .unwrap_err()
                 .contains("PackedRagged")
         );
+    }
+
+    #[test]
+    fn last_axis_split_validates_contiguous_segments_and_geometry() {
+        let make = |input: &[usize], outputs: &[&[usize]], widths: Vec<usize>| {
+            let mut graph = grouped_last_split_graph(
+                input,
+                outputs,
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                1,
+                widths.clone(),
+            );
+            graph.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+                segment_widths: widths,
+            };
+            graph
+        };
+        make(&[2, 6], &[&[2, 2], &[2, 1], &[2, 3]], vec![2, 1, 3])
+            .validate()
+            .unwrap();
+        make(
+            &[2, 4, 6],
+            &[&[2, 4, 2], &[2, 4, 1], &[2, 4, 3]],
+            vec![2, 1, 3],
+        )
+        .validate()
+        .unwrap();
+        for widths in [vec![1], vec![0, 1], vec![usize::MAX, 1]] {
+            assert!(
+                make(&[1, 2], &[&[1, 1], &[1, 1]], widths)
+                    .validate()
+                    .is_err()
+            );
+        }
+        assert!(
+            make(&[2, 6], &[&[2, 3], &[2, 1], &[2, 3]], vec![2, 1, 3])
+                .validate()
+                .unwrap_err()
+                .contains("shape is invalid")
+        );
+        let mut output_count = make(&[1, 3], &[&[1, 1], &[1, 2]], vec![1, 1, 1]);
+        assert!(output_count.validate().unwrap_err().contains("outputs=2"));
+        output_count.nodes[0].kind = GraphNodeKind::LastAxisSplit {
+            segment_widths: vec![1, 2],
+        };
+        output_count.nodes[0].weights.push(weight_id("unexpected"));
+        assert!(output_count.validate().unwrap_err().contains("weights=1"));
+        output_count.nodes[0].weights.clear();
+        output_count.nodes[0].states.push(state_id("unexpected"));
+        assert!(output_count.validate().unwrap_err().contains("states=1"));
+    }
+
+    #[test]
+    fn l2_normalization_accepts_weightless_affines_and_rejects_kind_mismatches() {
+        for affine in [
+            NormalizationAffine::None,
+            NormalizationAffine::FixedScale(PositiveF32::new(2.0, "scale").unwrap()),
+        ] {
+            unary_graph(
+                value("input", &[2, 4]),
+                vec![value("output", &[2, 4])],
+                vec![],
+                vec![],
+                GraphNodeKind::Norm {
+                    epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                    kind: NormalizationKind::L2,
+                    affine,
+                    axis: NormalizationAxis::GroupedLast {
+                        groups: 2,
+                        group_width: 2,
+                    },
+                },
+            )
+            .validate()
+            .unwrap();
+        }
+        for (kind, affine) in [
+            (NormalizationKind::L2, NormalizationAffine::Scale),
+            (NormalizationKind::L2, NormalizationAffine::UnitOffsetScale),
+            (NormalizationKind::L2, NormalizationAffine::ScaleAndBias),
+            (NormalizationKind::Rms, NormalizationAffine::None),
+            (
+                NormalizationKind::Rms,
+                NormalizationAffine::FixedScale(PositiveF32::new(2.0, "scale").unwrap()),
+            ),
+            (NormalizationKind::Layer, NormalizationAffine::None),
+            (
+                NormalizationKind::Layer,
+                NormalizationAffine::FixedScale(PositiveF32::new(2.0, "scale").unwrap()),
+            ),
+        ] {
+            let graph = unary_graph(
+                value("input", &[1, 2]),
+                vec![value("output", &[1, 2])],
+                vec![],
+                vec![],
+                GraphNodeKind::Norm {
+                    epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                    kind,
+                    affine,
+                    axis: NormalizationAxis::Last,
+                },
+            );
+            assert!(
+                graph
+                    .validate()
+                    .unwrap_err()
+                    .contains("combination is invalid")
+            );
+        }
     }
 
     #[test]
