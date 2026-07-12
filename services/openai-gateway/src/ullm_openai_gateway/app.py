@@ -124,10 +124,10 @@ def create_app(
         if not loaded_key:
             raise RuntimeError("configured API key is empty")
         loaded_tokenizer = tokenizer or FrozenQwen3Tokenizer.load(
-            configured.tokenizer_dir
+            configured.tokenizer_dir, configured.tokenizer_profile
         )
         stream_tokenizer = tokenizer or FrozenQwen3Tokenizer.load(
-            configured.tokenizer_dir
+            configured.tokenizer_dir, configured.tokenizer_profile
         )
         loaded_worker = worker or WorkerSupervisor(
             WorkerConfig.from_settings(configured)

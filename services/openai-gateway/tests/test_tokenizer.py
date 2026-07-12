@@ -16,6 +16,7 @@ from ullm_openai_gateway.tokenizer import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures"
 MODEL_DIR = Path("/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8")
+QWEN35_MODEL_DIR = Path("/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B")
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +27,13 @@ def tokenizer() -> FrozenQwen3Tokenizer:
     assert __import__("os").environ["HF_HUB_OFFLINE"] == "1"
     assert __import__("os").environ["TRANSFORMERS_OFFLINE"] == "1"
     return loaded
+
+
+def test_qwen35_frozen_tokenizer_profile_loads() -> None:
+    if not QWEN35_MODEL_DIR.is_dir():
+        pytest.skip("frozen local Qwen3.5 tokenizer is unavailable")
+    loaded = FrozenQwen3Tokenizer.load(QWEN35_MODEL_DIR, "qwen35-9b")
+    assert loaded._tokenizer.__class__.__name__ == "Qwen2Tokenizer"
 
 
 def test_all_frozen_chat_template_fixtures_match_exactly(

@@ -25,6 +25,29 @@ EXPECTED_FILES = {
     "generation_config.json": "231c22c0b89ffbbb785d0e68b2f3f922244f263487af79f6542fc82dbee37dbf",
 }
 
+QWEN35_EXPECTED_CHAT_TEMPLATE_SHA256 = (
+    "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+)
+QWEN35_EXPECTED_FILES = {
+    "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+    "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+    "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+}
+
+TOKENIZER_PROFILES = {
+    "qwen3-14b": (
+        EXPECTED_TOKENIZER_CLASS,
+        EXPECTED_CHAT_TEMPLATE_SHA256,
+        EXPECTED_FILES,
+    ),
+    "qwen35-9b": (
+        EXPECTED_TOKENIZER_CLASS,
+        QWEN35_EXPECTED_CHAT_TEMPLATE_SHA256,
+        QWEN35_EXPECTED_FILES,
+    ),
+}
+
 
 class TokenizerError(RuntimeError):
     """Raised when frozen tokenizer identity or behavior differs."""
@@ -41,8 +64,16 @@ class FrozenQwen3Tokenizer:
         self._tokenizer = tokenizer
 
     @classmethod
-    def load(cls, directory: Path) -> "FrozenQwen3Tokenizer":
-        _validate_files(directory)
+    def load(
+        cls, directory: Path, profile: str = "qwen3-14b"
+    ) -> "FrozenQwen3Tokenizer":
+        try:
+            expected_class, expected_template, expected_files = TOKENIZER_PROFILES[
+                profile
+            ]
+        except KeyError as error:
+            raise TokenizerError("the tokenizer profile is unsupported") from error
+        _validate_files(directory, expected_files)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -63,12 +94,12 @@ class FrozenQwen3Tokenizer:
             )
         except Exception as error:
             raise TokenizerError("failed to load the frozen local tokenizer") from error
-        if tokenizer.__class__.__name__ != EXPECTED_TOKENIZER_CLASS:
+        if tokenizer.__class__.__name__ != expected_class:
             raise TokenizerError("tokenizer class differs from the frozen class")
         template = getattr(tokenizer, "chat_template", None)
         if (
             not isinstance(template, str)
-            or _sha256_bytes(template.encode("utf-8")) != EXPECTED_CHAT_TEMPLATE_SHA256
+            or _sha256_bytes(template.encode("utf-8")) != expected_template
         ):
             raise TokenizerError("chat template differs from the frozen template")
         return cls(tokenizer)
@@ -162,10 +193,10 @@ class StableIncrementalDecoder:
         return self._emitted
 
 
-def _validate_files(directory: Path) -> None:
+def _validate_files(directory: Path, expected_files: Mapping[str, str]) -> None:
     if not directory.is_dir():
         raise TokenizerError("tokenizer directory is absent")
-    for name, expected in EXPECTED_FILES.items():
+    for name, expected in expected_files.items():
         path = directory / name
         if not path.is_file() or path.is_symlink():
             raise TokenizerError("a frozen tokenizer file is absent or is a symlink")

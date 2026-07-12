@@ -127,6 +127,7 @@ runtime, then use values such as the following in
 ULLM_WORKER_BINARY=/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker
 ULLM_PRODUCT_ROOT=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
 ULLM_TOKENIZER_DIR=/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B
+ULLM_TOKENIZER_PROFILE=qwen35-9b
 ULLM_MODEL_ID=ullm-qwen3.5-9b-aq4
 ULLM_MODEL_NAME=uLLM Qwen3.5 9B AQ4
 ULLM_MODEL_CONTEXT_LENGTH=4096

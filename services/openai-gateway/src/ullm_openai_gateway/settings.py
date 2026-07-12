@@ -62,6 +62,7 @@ class GatewaySettings:
     hip_visible_devices: str = "1"
     hip_guards: tuple[str, ...] = DEFAULT_HIP_GUARDS
     worker_extra_args: tuple[str, ...] = ()
+    tokenizer_profile: str = "qwen3-14b"
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -114,6 +115,9 @@ class GatewaySettings:
             hip_visible_devices=_required_text("ULLM_HIP_VISIBLE_DEVICES", "1"),
             hip_guards=_name_list("ULLM_HIP_GUARDS", DEFAULT_HIP_GUARDS),
             worker_extra_args=_shell_arguments("ULLM_WORKER_EXTRA_ARGS"),
+            tokenizer_profile=_choice(
+                "ULLM_TOKENIZER_PROFILE", "qwen3-14b", {"qwen3-14b", "qwen35-9b"}
+            ),
         )
 
     def validate_paths(self) -> None:
@@ -209,6 +213,13 @@ def _shell_arguments(name: str) -> tuple[str, ...]:
         return tuple(shlex.split(raw))
     except ValueError as error:
         raise SettingsError(f"{name} contains invalid shell quoting") from error
+
+
+def _choice(name: str, default: str, choices: set[str]) -> str:
+    value = _required_text(name, default)
+    if value not in choices:
+        raise SettingsError(f"{name} is not a supported value")
+    return value
 
 
 def read_api_key(path: Path) -> bytes:

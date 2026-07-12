@@ -84,6 +84,7 @@ def test_model_and_worker_contract_can_be_configured_from_environment(
         "ULLM_HIP_VISIBLE_DEVICES": "0",
         "ULLM_HIP_GUARDS": "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
         "ULLM_WORKER_EXTRA_ARGS": "--temperature-floor 0.1",
+        "ULLM_TOKENIZER_PROFILE": "qwen35-9b",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -95,6 +96,7 @@ def test_model_and_worker_contract_can_be_configured_from_environment(
     assert settings.context_length == 32_768
     assert settings.vocab_size == 248_320
     assert settings.eos_token_ids == (248_044, 248_046)
+    assert settings.tokenizer_profile == "qwen35-9b"
     assert config.command[-2:] == ("--temperature-floor", "0.1")
     assert config.environment["HIP_VISIBLE_DEVICES"] == "0"
     assert config.environment["ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL"] == "1"
@@ -114,6 +116,7 @@ def test_model_and_worker_contract_can_be_configured_from_environment(
         ("ULLM_EOS_TOKEN_IDS", "1,1"),
         ("ULLM_HIP_GUARDS", "INVALID-NAME"),
         ("ULLM_WORKER_EXTRA_ARGS", "'unterminated"),
+        ("ULLM_TOKENIZER_PROFILE", "unknown"),
     ],
 )
 def test_invalid_model_contract_environment_is_rejected(
