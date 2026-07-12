@@ -1,6 +1,6 @@
 # Generic production inference optimization plan v0.1
 
-Status: proposed; implementation has not started
+Status: active; P0 contracts completed, P1 implementation not started
 
 ## 前回の要点
 
@@ -19,7 +19,7 @@ Status: proposed; implementation has not started
 
 ## 次の行動
 
-P0で本計画と必要なADR/specを固定し、P1でmodel graph/state schema/execution batchの型とCPU reference executorを実装する。AQ4 kernelの変更から先に始めない。
+P1でtyped model graph/state schema/execution batchの型とCPU reference executorの実装を開始する。AQ4 kernelの変更から先に始めない。
 
 ## 1. 目的
 
@@ -240,6 +240,8 @@ component rowは`scope=component`、full modelは`scope=full_model`、server/Ope
 ## 4. 実装段階
 
 ### P0: 契約固定
+
+Status: completed by ADR 0004, ADR 0005, production-execution-trace-v0.1, and prefill-validation-v0.1.
 
 成果物:
 
