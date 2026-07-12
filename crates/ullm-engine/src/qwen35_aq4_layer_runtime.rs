@@ -3,9 +3,16 @@
 use crate::aq4_package_runtime::{
     PackageAq4ResidentMatvec, PackageResidentSharedBufferRegistry, package_resident_f32_buffer,
 };
+use crate::backend_operation_registry::{
+    DeviceCapabilities, OperationExecutionRecord, OperationExecutionStatus, OperationGeometry,
+    OperationKind, OperationResolutionTrace, QueryScale, ResolvedOperationPlan, ResolvedPhasePlans,
+    RuntimeFeature, RuntimeFeatureSet, qwen35_m1_production_registry,
+};
 use crate::decoder::PagedDecodeShape;
+use crate::execution_batch::ExecutionPhase;
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use crate::loader::{WeightRegistry, effective_rmsnorm_weight_values, read_named_passthrough_f32};
+use crate::package::{TensorSelector, select_tensor_payload_bundle};
 use crate::qwen3_loader::Qwen3PackageSqOverlay;
 use crate::scheduler::RequestId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,6 +30,51 @@ fn format_u64_shape(shape: &[u64]) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join("x")
+}
+
+fn package_aq4_matrix_shape(path: &str, tensor_name: &str) -> Result<(usize, usize), String> {
+    let bundle = select_tensor_payload_bundle(path, &TensorSelector::Name(tensor_name.into()))
+        .map_err(|error| {
+            format!("failed to inspect {tensor_name} before device allocation: {error}")
+        })?;
+    let [rows, cols] = bundle.shape.as_slice() else {
+        return Err(format!("AQ4 tensor {tensor_name} must have rank 2"));
+    };
+    let rows = usize::try_from(*rows)
+        .map_err(|_| format!("AQ4 tensor {tensor_name} rows do not fit usize"))?;
+    let cols = usize::try_from(*cols)
+        .map_err(|_| format!("AQ4 tensor {tensor_name} columns do not fit usize"))?;
+    let elements = u64::try_from(rows)
+        .ok()
+        .and_then(|rows| {
+            u64::try_from(cols)
+                .ok()
+                .and_then(|cols| rows.checked_mul(cols))
+        })
+        .ok_or_else(|| format!("AQ4 tensor {tensor_name} shape overflows"))?;
+    if rows == 0 || cols == 0 || elements != bundle.elements {
+        return Err(format!(
+            "AQ4 tensor {tensor_name} has inconsistent shape metadata"
+        ));
+    }
+    Ok((rows, cols))
+}
+
+fn validate_resolved_device_context(
+    context: &ullm_runtime_sys::RuntimeContext,
+    plan: &ResolvedOperationPlan,
+) -> Result<(), String> {
+    let info = context.device_info()?;
+    let resolved = plan.trace().device;
+    if resolved.device_id != info.device_id
+        || resolved.abi_version != ullm_runtime_sys::abi_version()
+        || resolved.device_name.as_deref() != Some(info.name.as_str())
+    {
+        return Err(
+            "resolved backend operation belongs to a different runtime context/device".into(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,6 +310,7 @@ fn checked_f32_byte_len(elements: usize, label: &str) -> Result<usize, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResidentRequestState {
     Ready,
+    ExecutionFailed,
     Poisoned,
 }
 
@@ -266,7 +319,7 @@ impl ResidentRequestState {
         // Reset is deliberately fail-closed. The caller must mark the state ready only
         // after every queued zero and the final stream synchronization have succeeded.
         match self {
-            Self::Ready => {
+            Self::Ready | Self::ExecutionFailed => {
                 *self = Self::Poisoned;
                 Ok(())
             }
@@ -280,9 +333,16 @@ impl ResidentRequestState {
         *self = Self::Ready;
     }
 
+    fn mark_execution_failed(&mut self) {
+        *self = Self::ExecutionFailed;
+    }
+
     fn ensure_ready(self, label: &str) -> Result<(), String> {
         match self {
             Self::Ready => Ok(()),
+            Self::ExecutionFailed => Err(format!(
+                "{label} resident request state requires a synchronized reset after an in-place operation failure"
+            )),
             Self::Poisoned => Err(format!(
                 "{label} resident request state is not reusable after an incomplete reset"
             )),
@@ -625,6 +685,7 @@ fn prewarm_aq4_matvec_silu_mul_once(
 #[allow(clippy::too_many_arguments)]
 fn prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
     stream: &mut ullm_runtime_sys::RuntimeStream,
+    operation_plan: &ResolvedOperationPlan,
     q_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     k_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     v_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
@@ -635,8 +696,8 @@ fn prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
     kv_heads: usize,
     head_dim: usize,
     value_dim: usize,
-    block_size: usize,
-    cache_blocks: usize,
+    _block_size: usize,
+    _cache_blocks: usize,
     q_gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     q_rope_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     k_cache_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
@@ -681,36 +742,28 @@ fn prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
                 Some(stream),
             )
             .map_err(|err| format!("failed to zero {label} prewarm v projected: {err}"))?;
-        let rotary_dim = if head_dim.is_multiple_of(2) {
-            head_dim
-        } else {
-            head_dim.saturating_sub(1)
-        };
-        ullm_runtime_sys::qwen35_qk_norm_rope_paged_kv_write_f32(
-            q_projected_buffer,
-            k_projected_buffer,
-            v_projected_buffer,
-            q_weight_buffer,
-            k_weight_buffer,
-            block_table_buffer,
-            q_heads,
-            kv_heads,
-            head_dim,
-            value_dim,
-            rotary_dim,
-            0,
-            10000.0_f32,
-            1e-5_f32,
-            0,
-            block_size,
-            cache_blocks,
-            q_gate_output_buffer,
-            q_rope_output_buffer,
-            k_cache_buffer,
-            v_cache_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        operation_plan
+            .attempt()
+            .start()
+            .execute_fused_qk_norm_rope_paged_kv_write_f32(
+                q_projected_buffer,
+                k_projected_buffer,
+                v_projected_buffer,
+                q_weight_buffer,
+                k_weight_buffer,
+                block_table_buffer,
+                64,
+                0,
+                10_000_000.0_f32,
+                1e-5_f32,
+                0,
+                q_gate_output_buffer,
+                q_rope_output_buffer,
+                k_cache_buffer,
+                v_cache_buffer,
+                stream,
+            )
+            .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
@@ -756,6 +809,7 @@ fn release_linear_attn_post_prewarm(device_id: i32) {
 fn prewarm_linear_attn_qkv_prepare_once(
     device_id: i32,
     stream: &mut ullm_runtime_sys::RuntimeStream,
+    operation_plan: &ResolvedOperationPlan,
     qkv_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     conv_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
     conv_history_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
@@ -764,8 +818,6 @@ fn prewarm_linear_attn_qkv_prepare_once(
     key_dim: usize,
     value_dim: usize,
     kernel_size: usize,
-    q_scale: f32,
-    qk_l2_norm: bool,
     conv_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     q_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     k_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
@@ -796,24 +848,20 @@ fn prewarm_linear_attn_qkv_prepare_once(
                 Some(stream),
             )
             .map_err(|err| format!("failed to zero {label} prewarm qkv: {err}"))?;
-        ullm_runtime_sys::linear_attn_qkv_prepare_f32(
-            qkv_buffer,
-            conv_weight_buffer,
-            conv_history_buffer,
-            key_heads,
-            value_heads,
-            key_dim,
-            value_dim,
-            kernel_size,
-            q_scale,
-            qk_l2_norm,
-            conv_output_buffer,
-            q_output_buffer,
-            k_output_buffer,
-            v_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        operation_plan
+            .attempt()
+            .start()
+            .execute_linear_attention_qkv_prepare_f32(
+                qkv_buffer,
+                conv_weight_buffer,
+                conv_history_buffer,
+                conv_output_buffer,
+                q_output_buffer,
+                k_output_buffer,
+                v_output_buffer,
+                stream,
+            )
+            .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
         conv_history_buffer
             .copy_from_host(
                 0,
@@ -901,6 +949,8 @@ pub struct PackageSelfAttnResidentStepWeights {
     block_size: usize,
     cache_blocks: usize,
     pub q_projection_layout: PackageSelfAttnQProjectionLayout,
+    operation_plans: ResolvedPhasePlans,
+    writer_operation_plans: ResolvedPhasePlans,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     q_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     k_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
@@ -918,6 +968,8 @@ pub struct PackageSelfAttnResidentStepLayer {
     weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
     request_state: ResidentRequestState,
     last_component_step_ms: Option<PackageSelfAttnComponentStepMs>,
+    operation_phase: ExecutionPhase,
+    last_operation_executions: [Option<OperationExecutionRecord>; 2],
     written_len: usize,
     block_table_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -1020,6 +1072,118 @@ impl PackageSelfAttnResidentStepLayer {
         k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
         let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
         post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+
+        // Manifest-only geometry and real device capability admission happen before any resident
+        // matrix upload, device buffer allocation, or prewarm call.
+        let (q_rows, hidden) = package_aq4_matrix_shape(path, &q_tensor)?;
+        let (k_rows, k_cols) = package_aq4_matrix_shape(path, &k_tensor)?;
+        let (v_rows, v_cols) = package_aq4_matrix_shape(path, &v_tensor)?;
+        let head_dim = q_norm.values.len();
+        if head_dim == 0 || k_norm.values.len() != head_dim || k_cols != hidden || v_cols != hidden
+        {
+            return Err("self-attn preflight geometry/norm mismatch".into());
+        }
+        if !k_rows.is_multiple_of(head_dim) {
+            return Err("self-attn preflight K rows are not head-aligned".into());
+        }
+        let kv_heads = k_rows / head_dim;
+        if kv_heads == 0 || !v_rows.is_multiple_of(kv_heads) {
+            return Err("self-attn preflight V rows are not KV-head aligned".into());
+        }
+        let value_dim = v_rows / kv_heads;
+        let two_hidden = hidden
+            .checked_mul(2)
+            .ok_or_else(|| "self-attn preflight hidden overflows".to_string())?;
+        let two_head_dim = head_dim
+            .checked_mul(2)
+            .ok_or_else(|| "self-attn preflight head dimension overflows".to_string())?;
+        let (preflight_q_layout, q_heads) =
+            if q_rows == two_hidden && q_rows.is_multiple_of(two_head_dim) {
+                (
+                    PackageSelfAttnQProjectionLayout::Qwen35Gated,
+                    q_rows / two_head_dim,
+                )
+            } else if q_rows.is_multiple_of(head_dim) {
+                (PackageSelfAttnQProjectionLayout::Plain, q_rows / head_dim)
+            } else {
+                return Err("self-attn preflight Q rows do not match a supported layout".into());
+            };
+        if q_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
+            return Err("self-attn preflight GQA head ratio is invalid".into());
+        }
+        let use_paged_decode_sigmoid_gate =
+            matches!(
+                preflight_q_layout,
+                PackageSelfAttnQProjectionLayout::Qwen35Gated
+            ) && !env_flag_enabled("ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN");
+        let device = DeviceCapabilities::probe_m1_runtime_context(context, stream)?;
+        device.require_features(RuntimeFeatureSet::from_feature(
+            RuntimeFeature::HipPagedDecodeAttention,
+        ))?;
+        if matches!(
+            preflight_q_layout,
+            PackageSelfAttnQProjectionLayout::Qwen35Gated
+        ) {
+            device.require_features(RuntimeFeatureSet::from_feature(
+                RuntimeFeature::HipFusedQkNormRopePagedKvWrite,
+            ))?;
+        } else {
+            device.require_features(RuntimeFeatureSet::from_feature(
+                RuntimeFeature::HipPagedKvWrite,
+            ))?;
+        }
+        let operation_plans = ResolvedPhasePlans::resolve_m1(
+            &qwen35_m1_production_registry()?,
+            OperationKind::PagedCausalGqaRead,
+            OperationGeometry::PagedCausalGqaRead {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                block_size,
+                cache_blocks,
+                sigmoid_gate: use_paged_decode_sigmoid_gate,
+            },
+            &device,
+            device.workspace_capacity_bytes,
+        )
+        .map_err(|error| {
+            format!("self-attn resident backend operation preflight failed: {error}")
+        })?;
+        let (writer_kind, writer_geometry) = match preflight_q_layout {
+            PackageSelfAttnQProjectionLayout::Plain => (
+                OperationKind::PagedKvWrite,
+                OperationGeometry::PagedKvWrite {
+                    kv_heads,
+                    head_dim,
+                    value_dim,
+                    block_size,
+                    cache_blocks,
+                },
+            ),
+            PackageSelfAttnQProjectionLayout::Qwen35Gated => (
+                OperationKind::FusedQkNormRopePagedKvWrite,
+                OperationGeometry::FusedQkNormRopePagedKvWrite {
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
+                    rotary_dim: 64,
+                    rope_base_bits: 10_000_000.0_f32.to_bits(),
+                    norm_epsilon_bits: 1e-5_f32.to_bits(),
+                    block_size,
+                    cache_blocks,
+                },
+            ),
+        };
+        let writer_operation_plans = ResolvedPhasePlans::resolve_m1(
+            &qwen35_m1_production_registry()?,
+            writer_kind,
+            writer_geometry,
+            &device,
+            device.workspace_capacity_bytes,
+        )
+        .map_err(|error| format!("self-attn writer operation preflight failed: {error}"))?;
 
         let q_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
@@ -1364,6 +1528,7 @@ impl PackageSelfAttnResidentStepLayer {
         ) {
             prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
                 stream,
+                writer_operation_plans.for_phase(ExecutionPhase::Decode),
                 &mut q_projected_buffer,
                 &mut k_projected_buffer,
                 &mut v_projected_buffer,
@@ -1386,12 +1551,7 @@ impl PackageSelfAttnResidentStepLayer {
 
         let weights = std::sync::Arc::new(PackageSelfAttnResidentStepWeights {
             sync_component_timing: env_flag_enabled("ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING"),
-            use_paged_decode_sigmoid_gate: matches!(
-                q_projection_layout,
-                PackageSelfAttnQProjectionLayout::Qwen35Gated
-            ) && !env_flag_enabled(
-                "ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN",
-            ),
+            use_paged_decode_sigmoid_gate,
             hidden,
             q_heads,
             kv_heads,
@@ -1401,6 +1561,8 @@ impl PackageSelfAttnResidentStepLayer {
             block_size,
             cache_blocks,
             q_projection_layout,
+            operation_plans,
+            writer_operation_plans,
             input_norm_weight_buffer,
             q_norm_weight_buffer,
             k_norm_weight_buffer,
@@ -1418,6 +1580,8 @@ impl PackageSelfAttnResidentStepLayer {
             weights,
             request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
+            operation_phase: ExecutionPhase::Decode,
+            last_operation_executions: [None, None],
             written_len: 0,
             block_table_buffer,
             input_buffer,
@@ -1447,6 +1611,10 @@ impl PackageSelfAttnResidentStepLayer {
         weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
         block_table: &[u32],
     ) -> Result<Self, String> {
+        validate_resolved_device_context(
+            context,
+            weights.operation_plans.for_phase(ExecutionPhase::Decode),
+        )?;
         if block_table.len() != weights.cache_blocks {
             return Err(format!(
                 "self-attn resident shared-weight block table length {} does not match cache blocks {}",
@@ -1576,6 +1744,8 @@ impl PackageSelfAttnResidentStepLayer {
             weights,
             request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
+            operation_phase: ExecutionPhase::Decode,
+            last_operation_executions: [None, None],
             written_len: 0,
             block_table_buffer,
             input_buffer,
@@ -1662,6 +1832,37 @@ impl PackageSelfAttnResidentStepLayer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_from_device_to_device_for_phase(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        phase: ExecutionPhase,
+        label: &str,
+    ) -> Result<(), String> {
+        self.operation_phase = phase;
+        self.step_from_device_to_device(
+            stream,
+            residual_buffer,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            label,
+        )
+    }
+
+    pub fn operation_resolution_traces(&self) -> Vec<OperationResolutionTrace> {
+        let mut traces = Vec::with_capacity(6);
+        traces.extend(self.weights.writer_operation_plans.traces());
+        traces.extend(self.weights.operation_plans.traces());
+        traces
+    }
+
     pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -1680,6 +1881,10 @@ impl PackageSelfAttnResidentStepLayer {
 
     pub fn take_last_component_step_ms(&mut self) -> Option<PackageSelfAttnComponentStepMs> {
         self.last_component_step_ms.take()
+    }
+
+    pub fn take_last_operation_executions(&mut self) -> [Option<OperationExecutionRecord>; 2] {
+        std::mem::take(&mut self.last_operation_executions)
     }
 
     pub fn request_state_is_reusable(&self) -> bool {
@@ -1713,6 +1918,7 @@ impl PackageSelfAttnResidentStepLayer {
         })?;
         self.written_len = 0;
         self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
         self.request_state.mark_ready();
         Ok(())
     }
@@ -1964,9 +2170,6 @@ impl PackageSelfAttnResidentStepLayer {
         let q_heads = self.weights.q_heads;
         let kv_heads = self.weights.kv_heads;
         let head_dim = self.weights.head_dim;
-        let value_dim = self.weights.value_dim;
-        let block_size = self.weights.block_size;
-        let cache_blocks = self.weights.cache_blocks;
         let attention_elements = self.weights.attention_elements;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
@@ -2029,48 +2232,72 @@ impl PackageSelfAttnResidentStepLayer {
                     Some(stream),
                 )
                 .map_err(|err| format!("failed to run {label} self-attn k RoPE: {err}"))?;
-                ullm_runtime_sys::paged_kv_write_f32(
+                let writer_plan = self
+                    .weights
+                    .writer_operation_plans
+                    .for_phase(self.operation_phase);
+                self.last_operation_executions[0] =
+                    Some(writer_plan.execution_record(OperationExecutionStatus::Started));
+                let result = writer_plan.attempt().start().execute_paged_kv_write_f32(
                     &self.k_rope_buffer,
                     &self.v_projected_buffer,
                     &self.block_table_buffer,
                     cache_position,
-                    block_size,
-                    cache_blocks,
-                    kv_heads,
-                    head_dim,
-                    value_dim,
                     &mut self.k_cache_buffer,
                     &mut self.v_cache_buffer,
-                    Some(stream),
-                )
-                .map_err(|err| format!("failed to run {label} self-attn paged KV write: {err}"))?;
+                    stream,
+                );
+                self.last_operation_executions[0] =
+                    Some(writer_plan.execution_record(if result.is_ok() {
+                        OperationExecutionStatus::Succeeded
+                    } else {
+                        OperationExecutionStatus::Failed
+                    }));
+                if result.is_err() {
+                    self.request_state.mark_execution_failed();
+                }
+                result.map_err(|err| {
+                    format!("failed to run {label} self-attn paged KV write: {err}")
+                })?;
             }
             PackageSelfAttnQProjectionLayout::Qwen35Gated => {
-                ullm_runtime_sys::qwen35_qk_norm_rope_paged_kv_write_f32(
-                    &self.q_projected_buffer,
-                    &self.k_projected_buffer,
-                    &self.v_projected_buffer,
-                    self.weights.q_norm_weight_buffer.as_ref(),
-                    self.weights.k_norm_weight_buffer.as_ref(),
-                    &self.block_table_buffer,
-                    q_heads,
-                    kv_heads,
-                    head_dim,
-                    value_dim,
-                    rotary_dim,
-                    rope_position,
-                    rope_base,
-                    1e-5_f32,
-                    cache_position,
-                    block_size,
-                    cache_blocks,
-                    &mut self.q_gate_buffer,
-                    &mut self.q_rope_buffer,
-                    &mut self.k_cache_buffer,
-                    &mut self.v_cache_buffer,
-                    Some(stream),
-                )
-                .map_err(|err| {
+                let writer_plan = self
+                    .weights
+                    .writer_operation_plans
+                    .for_phase(self.operation_phase);
+                self.last_operation_executions[0] =
+                    Some(writer_plan.execution_record(OperationExecutionStatus::Started));
+                let result = writer_plan
+                    .attempt()
+                    .start()
+                    .execute_fused_qk_norm_rope_paged_kv_write_f32(
+                        &self.q_projected_buffer,
+                        &self.k_projected_buffer,
+                        &self.v_projected_buffer,
+                        self.weights.q_norm_weight_buffer.as_ref(),
+                        self.weights.k_norm_weight_buffer.as_ref(),
+                        &self.block_table_buffer,
+                        rotary_dim,
+                        rope_position,
+                        rope_base,
+                        1e-5_f32,
+                        cache_position,
+                        &mut self.q_gate_buffer,
+                        &mut self.q_rope_buffer,
+                        &mut self.k_cache_buffer,
+                        &mut self.v_cache_buffer,
+                        stream,
+                    );
+                self.last_operation_executions[0] =
+                    Some(writer_plan.execution_record(if result.is_ok() {
+                        OperationExecutionStatus::Succeeded
+                    } else {
+                        OperationExecutionStatus::Failed
+                    }));
+                if result.is_err() {
+                    self.request_state.mark_execution_failed();
+                }
+                result.map_err(|err| {
                     format!("failed to run {label} self-attn q/k norm RoPE paged KV write: {err}")
                 })?;
             }
@@ -2084,43 +2311,46 @@ impl PackageSelfAttnResidentStepLayer {
             .ok_or_else(|| format!("{label} self-attn written length overflows"))?;
 
         let component_started = Instant::now();
-        if self.weights.use_paged_decode_sigmoid_gate {
-            ullm_runtime_sys::paged_decode_attn_sigmoid_gate_f32(
-                &self.q_rope_buffer,
-                &self.q_gate_buffer,
-                &self.k_cache_buffer,
-                &self.v_cache_buffer,
-                &self.block_table_buffer,
-                self.written_len,
-                block_size,
-                cache_blocks,
-                q_heads,
-                kv_heads,
-                head_dim,
-                value_dim,
-                1.0_f32 / (head_dim as f32).sqrt(),
-                &mut self.attention_output_buffer,
-                Some(stream),
-            )
+        let read_plan = self.weights.operation_plans.for_phase(self.operation_phase);
+        self.last_operation_executions[1] =
+            Some(read_plan.execution_record(OperationExecutionStatus::Started));
+        let result = if self.weights.use_paged_decode_sigmoid_gate {
+            read_plan
+                .attempt()
+                .start()
+                .execute_paged_decode_attention_sigmoid_gate_f32(
+                    &self.q_rope_buffer,
+                    &self.q_gate_buffer,
+                    &self.k_cache_buffer,
+                    &self.v_cache_buffer,
+                    &self.block_table_buffer,
+                    self.written_len,
+                    &mut self.attention_output_buffer,
+                    stream,
+                )
         } else {
-            ullm_runtime_sys::paged_decode_attn_f32(
-                &self.q_rope_buffer,
-                &self.k_cache_buffer,
-                &self.v_cache_buffer,
-                &self.block_table_buffer,
-                self.written_len,
-                block_size,
-                cache_blocks,
-                q_heads,
-                kv_heads,
-                head_dim,
-                value_dim,
-                1.0_f32 / (head_dim as f32).sqrt(),
-                &mut self.attention_output_buffer,
-                Some(stream),
-            )
+            read_plan
+                .attempt()
+                .start()
+                .execute_paged_decode_attention_f32(
+                    &self.q_rope_buffer,
+                    &self.k_cache_buffer,
+                    &self.v_cache_buffer,
+                    &self.block_table_buffer,
+                    self.written_len,
+                    &mut self.attention_output_buffer,
+                    stream,
+                )
+        };
+        self.last_operation_executions[1] = Some(read_plan.execution_record(if result.is_ok() {
+            OperationExecutionStatus::Succeeded
+        } else {
+            OperationExecutionStatus::Failed
+        }));
+        if result.is_err() {
+            self.request_state.mark_execution_failed();
         }
-        .map_err(|err| format!("failed to run {label} self-attn paged decode: {err}"))?;
+        result.map_err(|err| format!("failed to run {label} self-attn paged decode: {err}"))?;
         component_step_ms.paged_decode_ms =
             finish_component(stream, component_started, "paged decode")?;
 
@@ -2187,6 +2417,7 @@ impl PackageSelfAttnResidentStepLayer {
         let sync_component_timing = self.weights.sync_component_timing;
         let mut component_step_ms = PackageSelfAttnComponentStepMs::default();
         self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
         self.run_device_step_input(
             stream,
             input,
@@ -2228,9 +2459,9 @@ pub struct PackageLinearAttnResidentStepWeights {
     key_dim: usize,
     value_dim: usize,
     pub hidden: usize,
-    q_scale: f32,
-    qk_l2_norm: bool,
     kernel_size: usize,
+    operation_plans: ResolvedPhasePlans,
+    prepare_operation_plans: ResolvedPhasePlans,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     conv_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     a_log_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
@@ -2251,6 +2482,8 @@ pub struct PackageLinearAttnResidentStepLayer {
     weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
     request_state: ResidentRequestState,
     last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
+    operation_phase: ExecutionPhase,
+    last_operation_executions: [Option<OperationExecutionRecord>; 2],
     conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -2329,8 +2562,6 @@ impl PackageLinearAttnResidentStepLayer {
         let k_elements_per_step = q_elements_per_step;
         let v_elements_per_step = hidden;
         let qkv_step_elements = q_elements_per_step + k_elements_per_step + v_elements_per_step;
-        let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
-        let qk_l2_norm = true;
 
         let input_norm_tensor =
             format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
@@ -2419,6 +2650,51 @@ impl PackageLinearAttnResidentStepLayer {
             effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
         let post_norm_weight_values =
             effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+
+        let (qkv_rows, qkv_cols) = package_aq4_matrix_shape(path, &qkv_tensor)?;
+        if qkv_rows != qkv_step_elements || qkv_cols != hidden {
+            return Err(format!(
+                "linear-attn preflight QKV shape mismatch: got [{qkv_rows},{qkv_cols}] expected [{qkv_step_elements},{hidden}]"
+            ));
+        }
+        let device = DeviceCapabilities::probe_m1_runtime_context(context, stream)?;
+        device.require_features(
+            RuntimeFeatureSet::from_feature(RuntimeFeature::HipLinearAttentionRecurrent)
+                .with(RuntimeFeature::HipLinearAttentionQkvPrepare),
+        )?;
+        let operation_plans = ResolvedPhasePlans::resolve_m1(
+            &qwen35_m1_production_registry()?,
+            OperationKind::GatedDeltaRuleScan,
+            OperationGeometry::GatedDeltaRule {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+            },
+            &device,
+            device.workspace_capacity_bytes,
+        )
+        .map_err(|error| {
+            format!("linear-attn resident backend operation preflight failed: {error}")
+        })?;
+        let prepare_operation_plans = ResolvedPhasePlans::resolve_m1(
+            &qwen35_m1_production_registry()?,
+            OperationKind::LinearAttentionQkvPrepare,
+            OperationGeometry::LinearAttentionQkvPrepare {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                kernel_size,
+                query_scale: QueryScale::InverseSqrtKeyDim,
+                qk_l2_norm: true,
+            },
+            &device,
+            device.workspace_capacity_bytes,
+        )
+        .map_err(|error| {
+            format!("linear-attn resident QKV prepare operation preflight failed: {error}")
+        })?;
 
         let qkv_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
@@ -2758,6 +3034,7 @@ impl PackageLinearAttnResidentStepLayer {
             prewarm_linear_attn_qkv_prepare_once(
                 device_info.device_id,
                 stream,
+                prepare_operation_plans.for_phase(ExecutionPhase::Decode),
                 &mut qkv_buffer,
                 &conv_weight_buffer,
                 &mut conv_history_buffer,
@@ -2766,8 +3043,6 @@ impl PackageLinearAttnResidentStepLayer {
                 key_dim,
                 value_dim,
                 kernel_size,
-                q_scale,
-                qk_l2_norm,
                 &mut qkv_conv_output_buffer,
                 &mut recurrent_q_buffer,
                 &mut recurrent_k_buffer,
@@ -2805,9 +3080,9 @@ impl PackageLinearAttnResidentStepLayer {
             key_dim,
             value_dim,
             hidden,
-            q_scale,
-            qk_l2_norm,
             kernel_size,
+            operation_plans,
+            prepare_operation_plans,
             input_norm_weight_buffer,
             conv_weight_buffer,
             a_log_buffer,
@@ -2828,6 +3103,8 @@ impl PackageLinearAttnResidentStepLayer {
             weights,
             request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
+            operation_phase: ExecutionPhase::Decode,
+            last_operation_executions: [None, None],
             conv_history_buffer,
             recurrent_state_buffer,
             input_buffer,
@@ -2854,6 +3131,10 @@ impl PackageLinearAttnResidentStepLayer {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
     ) -> Result<Self, String> {
+        validate_resolved_device_context(
+            context,
+            weights.operation_plans.for_phase(ExecutionPhase::Decode),
+        )?;
         let q_elements_per_step = weights
             .key_heads
             .checked_mul(weights.key_dim)
@@ -2974,6 +3255,8 @@ impl PackageLinearAttnResidentStepLayer {
             weights,
             request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
+            operation_phase: ExecutionPhase::Decode,
+            last_operation_executions: [None, None],
             conv_history_buffer,
             recurrent_state_buffer,
             input_buffer,
@@ -3052,6 +3335,24 @@ impl PackageLinearAttnResidentStepLayer {
         )
     }
 
+    pub fn step_from_device_to_device_for_phase(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        phase: ExecutionPhase,
+        label: &str,
+    ) -> Result<(), String> {
+        self.operation_phase = phase;
+        self.step_from_device_to_device(stream, residual_buffer, label)
+    }
+
+    pub fn operation_resolution_traces(&self) -> Vec<OperationResolutionTrace> {
+        let mut traces = Vec::with_capacity(6);
+        traces.extend(self.weights.prepare_operation_plans.traces());
+        traces.extend(self.weights.operation_plans.traces());
+        traces
+    }
+
     pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -3070,6 +3371,10 @@ impl PackageLinearAttnResidentStepLayer {
 
     pub fn take_last_component_step_ms(&mut self) -> Option<PackageLinearAttnComponentStepMs> {
         self.last_component_step_ms.take()
+    }
+
+    pub fn take_last_operation_executions(&mut self) -> [Option<OperationExecutionRecord>; 2] {
+        std::mem::take(&mut self.last_operation_executions)
     }
 
     pub fn request_state_is_reusable(&self) -> bool {
@@ -3102,6 +3407,7 @@ impl PackageLinearAttnResidentStepLayer {
             format!("failed to synchronize linear-attn resident request state reset: {err}")
         })?;
         self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
         self.request_state.mark_ready();
         Ok(())
     }
@@ -3114,11 +3420,10 @@ impl PackageLinearAttnResidentStepLayer {
     ) -> Result<(), String> {
         self.request_state.ensure_ready(label)?;
         self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
         let weights = self.weights.as_ref();
         let hidden = weights.hidden;
-        let key_heads = weights.key_heads;
         let value_heads = weights.value_heads;
-        let key_dim = weights.key_dim;
         let value_dim = weights.value_dim;
         let sync_component_timing = weights.sync_component_timing;
         let mut component_step_ms = PackageLinearAttnComponentStepMs::default();
@@ -3214,24 +3519,35 @@ impl PackageLinearAttnResidentStepLayer {
         }
 
         let component_started = component_started!();
-        ullm_runtime_sys::linear_attn_qkv_prepare_f32(
-            &self.qkv_buffer,
-            weights.conv_weight_buffer.as_ref(),
-            &mut self.conv_history_buffer,
-            key_heads,
-            value_heads,
-            key_dim,
-            value_dim,
-            weights.kernel_size,
-            weights.q_scale,
-            weights.qk_l2_norm,
-            &mut self.qkv_conv_output_buffer,
-            &mut self.recurrent_q_buffer,
-            &mut self.recurrent_k_buffer,
-            &mut self.recurrent_v_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident qkv prepare: {err}"))?;
+        let prepare_plan = weights
+            .prepare_operation_plans
+            .for_phase(self.operation_phase);
+        self.last_operation_executions[0] =
+            Some(prepare_plan.execution_record(OperationExecutionStatus::Started));
+        let prepare_result = prepare_plan
+            .attempt()
+            .start()
+            .execute_linear_attention_qkv_prepare_f32(
+                &self.qkv_buffer,
+                weights.conv_weight_buffer.as_ref(),
+                &mut self.conv_history_buffer,
+                &mut self.qkv_conv_output_buffer,
+                &mut self.recurrent_q_buffer,
+                &mut self.recurrent_k_buffer,
+                &mut self.recurrent_v_buffer,
+                stream,
+            );
+        self.last_operation_executions[0] =
+            Some(prepare_plan.execution_record(if prepare_result.is_ok() {
+                OperationExecutionStatus::Succeeded
+            } else {
+                OperationExecutionStatus::Failed
+            }));
+        if prepare_result.is_err() {
+            self.request_state.mark_execution_failed();
+        }
+        prepare_result
+            .map_err(|err| format!("failed to run linear-attn resident qkv prepare: {err}"))?;
         finish_component!(component_started, qkv_prepare_ms, "qkv prepare");
         if !use_qkv_z_gate_beta_fusion {
             let component_started = component_started!();
@@ -3248,22 +3564,34 @@ impl PackageLinearAttnResidentStepLayer {
             finish_component!(component_started, gate_beta_projection_ms, "a/b gate-beta");
         }
         let component_started = component_started!();
-        ullm_runtime_sys::linear_attn_recurrent_f32(
-            &self.recurrent_q_buffer,
-            &self.recurrent_k_buffer,
-            &self.recurrent_v_buffer,
-            &self.recurrent_gate_buffer,
-            &self.recurrent_beta_buffer,
-            key_heads,
-            value_heads,
-            1,
-            key_dim,
-            value_dim,
-            &mut self.recurrent_state_buffer,
-            &mut self.recurrent_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident recurrent step: {err}"))?;
+        let operation_plan = weights.operation_plans.for_phase(self.operation_phase);
+        self.last_operation_executions[1] =
+            Some(operation_plan.execution_record(OperationExecutionStatus::Started));
+        let operation_result = operation_plan
+            .attempt()
+            .start()
+            .execute_linear_attention_recurrent_f32(
+                &self.recurrent_q_buffer,
+                &self.recurrent_k_buffer,
+                &self.recurrent_v_buffer,
+                &self.recurrent_gate_buffer,
+                &self.recurrent_beta_buffer,
+                &mut self.recurrent_state_buffer,
+                &mut self.recurrent_output_buffer,
+                stream,
+            );
+        self.last_operation_executions[1] = Some(operation_plan.execution_record(
+            if operation_result.is_ok() {
+                OperationExecutionStatus::Succeeded
+            } else {
+                OperationExecutionStatus::Failed
+            },
+        ));
+        if operation_result.is_err() {
+            self.request_state.mark_execution_failed();
+        }
+        operation_result
+            .map_err(|err| format!("failed to run linear-attn resident recurrent step: {err}"))?;
         finish_component!(component_started, recurrent_ms, "recurrent step");
 
         let component_started = component_started!();
@@ -5621,6 +5949,23 @@ mod linear_attn_step_state_tests {
         let retry_error = state.begin_reset("test").unwrap_err();
         assert!(retry_error.contains("poisoned and cannot be reset again"));
         assert_eq!(state, ResidentRequestState::Poisoned);
+    }
+
+    #[test]
+    fn in_place_execution_failure_blocks_retry_until_successful_reset() {
+        let mut state = ResidentRequestState::Ready;
+        state.mark_execution_failed();
+        assert_eq!(state, ResidentRequestState::ExecutionFailed);
+        assert!(
+            state
+                .ensure_ready("retry")
+                .unwrap_err()
+                .contains("requires a synchronized reset")
+        );
+        state.begin_reset("retry").unwrap();
+        assert_eq!(state, ResidentRequestState::Poisoned);
+        state.mark_ready();
+        state.ensure_ready("next request").unwrap();
     }
 
     #[test]

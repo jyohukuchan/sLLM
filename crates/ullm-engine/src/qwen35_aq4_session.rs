@@ -7,11 +7,17 @@
 //! Preparing a token is deliberately separate from publishing and committing it, so cancellation
 //! and publisher failures cannot make an unobserved token part of the decode history.
 
+use crate::backend_operation_registry::{
+    OperationExecutionAudit, OperationExecutionCount, OperationExecutionRecord,
+    OperationExecutionStatus, OperationResolutionTrace,
+};
+use crate::execution_batch::ExecutionPhase;
 use crate::inference_api::{
     CancellationToken, FinishReason, InferenceRequest, ReleaseOutcome, ReleaseSummary,
 };
 use crate::qwen35_aq4_model_runtime::{Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime};
 use crate::worker_driver::{InferenceSession, PublishedAdvance, SessionAdvance};
+use sha2::{Digest, Sha256};
 
 pub const QWEN35_AQ4_ROTARY_DIM: usize = 64;
 pub const QWEN35_AQ4_ROPE_BASE: f32 = 10_000_000.0;
@@ -53,15 +59,24 @@ pub trait Qwen35Aq4SessionModel {
 
     fn vocab_size(&self) -> usize;
 
+    fn operation_resolution_traces(&self) -> Vec<Vec<OperationResolutionTrace>> {
+        Vec::new()
+    }
+
     fn dispatch_token(
         &mut self,
         token_id: usize,
         rotary_dim: usize,
         rope_base: f32,
         position: usize,
+        phase: ExecutionPhase,
         sync_each_layer_for_timing: bool,
         label: &str,
-    ) -> Result<(), String>;
+    ) -> Result<Vec<[OperationExecutionRecord; 2]>, String>;
+
+    fn take_failed_operation_executions(&mut self) -> Vec<[Option<OperationExecutionRecord>; 2]> {
+        Vec::new()
+    }
 
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String>;
 
@@ -81,26 +96,32 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
         self.geometry().vocab
     }
 
+    fn operation_resolution_traces(&self) -> Vec<Vec<OperationResolutionTrace>> {
+        Qwen35Aq4ModelRuntime::operation_resolution_traces(self)
+    }
+
     fn dispatch_token(
         &mut self,
         token_id: usize,
         rotary_dim: usize,
         rope_base: f32,
         position: usize,
+        phase: ExecutionPhase,
         sync_each_layer_for_timing: bool,
         label: &str,
-    ) -> Result<(), String> {
-        Qwen35Aq4ModelRuntime::dispatch_token(
+    ) -> Result<Vec<[OperationExecutionRecord; 2]>, String> {
+        let step = Qwen35Aq4ModelRuntime::dispatch_token_for_phase(
             self,
             token_id,
             rotary_dim,
             rope_base,
             position,
             position,
+            phase,
             sync_each_layer_for_timing,
             label,
         )?;
-        Ok(())
+        Ok(step.operation_executions)
     }
 
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String> {
@@ -112,6 +133,10 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
             return Err("Qwen3.5 AQ4 top-1 returned a non-finite logit".to_string());
         }
         Ok(top.token_id)
+    }
+
+    fn take_failed_operation_executions(&mut self) -> Vec<[Option<OperationExecutionRecord>; 2]> {
+        self.take_last_partial_operation_executions()
     }
 
     fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
@@ -130,6 +155,311 @@ pub struct Qwen35Aq4PreparedToken {
     pub cache_len: usize,
     pub terminal_reason: Option<FinishReason>,
     nonce: u64,
+}
+
+const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 6] = [
+    (
+        "linear_attention_qkv_prepare",
+        "hip.linear-attention-qkv-prepare-f32.m1",
+    ),
+    (
+        "gated_delta_rule_scan",
+        "hip.linear-attention-recurrent-f32.m1",
+    ),
+    ("paged_kv_write", "hip.paged-kv-write-f32.m1"),
+    (
+        "fused_qk_norm_rope_paged_kv_write",
+        "hip.fused-qk-norm-rope-paged-kv-write-f32.m1",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-f32.m1-gqa",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+    ),
+];
+
+type LayerExecutionContract = [[&'static str; 2]; 3];
+
+struct OperationAuditAccumulator {
+    cold_prefill_steps: u64,
+    cached_prefix_prefill_steps: u64,
+    decode_steps: u64,
+    total_steps: u64,
+    total_records: u64,
+    implementation_counts: [u64; 6],
+    digest: Sha256,
+}
+
+impl OperationAuditAccumulator {
+    fn new() -> Self {
+        Self {
+            cold_prefill_steps: 0,
+            cached_prefix_prefill_steps: 0,
+            decode_steps: 0,
+            total_steps: 0,
+            total_records: 0,
+            implementation_counts: [0; 6],
+            digest: Sha256::new(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        phase: ExecutionPhase,
+        contract: &[LayerExecutionContract],
+        records: &[[OperationExecutionRecord; 2]],
+    ) -> Result<(), String> {
+        if records.len() != contract.len() || records.is_empty() {
+            return Err(format!(
+                "operation execution trace layer coverage mismatch: expected={} actual={}",
+                contract.len(),
+                records.len()
+            ));
+        }
+        let phase_index = execution_phase_index(phase);
+        for (layer_index, layer_records) in records.iter().enumerate() {
+            for (record_index, record) in layer_records.iter().enumerate() {
+                let expected = contract[layer_index][phase_index][record_index];
+                if record.phase != phase
+                    || record.status != OperationExecutionStatus::Succeeded
+                    || record.implementation_id != expected
+                {
+                    return Err(format!(
+                        "operation execution trace mismatch at layer={layer_index} record={record_index}"
+                    ));
+                }
+                let slot = EXECUTION_IMPLEMENTATIONS
+                    .iter()
+                    .position(|(_, implementation_id)| {
+                        *implementation_id == record.implementation_id
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "operation execution trace contains unknown implementation {}",
+                            record.implementation_id
+                        )
+                    })?;
+                self.implementation_counts[slot] = self.implementation_counts[slot]
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        "operation execution implementation count overflows".to_string()
+                    })?;
+                self.digest.update([phase_index as u8]);
+                self.digest.update(self.total_steps.to_le_bytes());
+                self.digest.update((layer_index as u64).to_le_bytes());
+                self.digest.update([record_index as u8]);
+                self.digest.update(record.implementation_id.as_bytes());
+                self.digest.update([0]);
+            }
+        }
+        match phase {
+            ExecutionPhase::ColdPrefill => self.cold_prefill_steps += 1,
+            ExecutionPhase::CachedPrefixPrefill => self.cached_prefix_prefill_steps += 1,
+            ExecutionPhase::Decode => self.decode_steps += 1,
+        }
+        self.total_steps = self
+            .total_steps
+            .checked_add(1)
+            .ok_or_else(|| "operation execution step count overflows".to_string())?;
+        self.total_records = self
+            .total_records
+            .checked_add(
+                u64::try_from(records.len() * 2)
+                    .map_err(|_| "operation execution record count does not fit u64".to_string())?,
+            )
+            .ok_or_else(|| "operation execution record count overflows".to_string())?;
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        layers: usize,
+        expected_cold: u64,
+        expected_cached: u64,
+        expected_decode: u64,
+        outcome: &'static str,
+    ) -> Result<OperationExecutionAudit, String> {
+        let coverage_complete = self.cold_prefill_steps == expected_cold
+            && self.cached_prefix_prefill_steps == expected_cached
+            && self.decode_steps == expected_decode
+            && self.total_steps == expected_cold + expected_cached + expected_decode
+            && self.total_records
+                == self
+                    .total_steps
+                    .checked_mul(u64::try_from(layers * 2).map_err(|_| {
+                        "expected operation record count does not fit u64".to_string()
+                    })?)
+                    .ok_or_else(|| "expected operation record count overflows".to_string())?;
+        if !coverage_complete {
+            return Err("operation execution terminal coverage is incomplete".into());
+        }
+        let deterministic_digest_sha256 = self.digest.clone().finalize().into();
+        Ok(OperationExecutionAudit {
+            schema_version: "ullm.backend_operation.request.v1",
+            outcome,
+            expected_layers_per_step: layers,
+            expected_records_per_layer: 2,
+            cold_prefill_steps: self.cold_prefill_steps,
+            cached_prefix_prefill_steps: self.cached_prefix_prefill_steps,
+            decode_steps: self.decode_steps,
+            total_steps: self.total_steps,
+            total_records: self.total_records,
+            implementation_counts: std::array::from_fn(|index| OperationExecutionCount {
+                kind: EXECUTION_IMPLEMENTATIONS[index].0,
+                implementation_id: EXECUTION_IMPLEMENTATIONS[index].1,
+                count: self.implementation_counts[index],
+            }),
+            deterministic_digest_sha256,
+            coverage_complete,
+            failed_phase: None,
+            failed_layer: None,
+            failed_operation: None,
+        })
+    }
+
+    fn observe_failed_step(
+        &mut self,
+        phase: ExecutionPhase,
+        contract: &[LayerExecutionContract],
+        records: &[[Option<OperationExecutionRecord>; 2]],
+    ) -> Result<(Option<usize>, Option<usize>), String> {
+        if records.len() > contract.len() {
+            return Err("failed operation trace exceeds layer contract".into());
+        }
+        let phase_index = execution_phase_index(phase);
+        let mut failure = (None, None);
+        for (layer_index, layer) in records.iter().enumerate() {
+            for (operation_index, record) in layer.iter().enumerate() {
+                let Some(record) = record else { continue };
+                if record.phase != phase
+                    || record.implementation_id
+                        != contract[layer_index][phase_index][operation_index]
+                {
+                    return Err("failed operation trace does not match resolved contract".into());
+                }
+                match record.status {
+                    OperationExecutionStatus::Succeeded => {
+                        let slot = EXECUTION_IMPLEMENTATIONS
+                            .iter()
+                            .position(|(_, id)| *id == record.implementation_id)
+                            .ok_or_else(|| {
+                                "unknown successful partial implementation".to_string()
+                            })?;
+                        self.implementation_counts[slot] += 1;
+                        self.total_records += 1;
+                        self.digest.update([phase_index as u8]);
+                        self.digest.update(self.total_steps.to_le_bytes());
+                        self.digest.update((layer_index as u64).to_le_bytes());
+                        self.digest.update([operation_index as u8]);
+                        self.digest.update(record.implementation_id.as_bytes());
+                        self.digest.update([0]);
+                    }
+                    OperationExecutionStatus::Failed => {
+                        if failure.0.is_some() {
+                            return Err("failed operation trace contains multiple failures".into());
+                        }
+                        failure = (Some(layer_index), Some(operation_index));
+                    }
+                    OperationExecutionStatus::Started => {
+                        return Err("failed operation trace retained an unclassified start".into());
+                    }
+                }
+            }
+        }
+        Ok(failure)
+    }
+
+    fn partial(
+        &self,
+        layers: usize,
+        outcome: &'static str,
+        failed_phase: Option<ExecutionPhase>,
+        failed_layer: Option<usize>,
+        failed_operation: Option<usize>,
+    ) -> OperationExecutionAudit {
+        OperationExecutionAudit {
+            schema_version: "ullm.backend_operation.request.v1",
+            outcome,
+            expected_layers_per_step: layers,
+            expected_records_per_layer: 2,
+            cold_prefill_steps: self.cold_prefill_steps,
+            cached_prefix_prefill_steps: self.cached_prefix_prefill_steps,
+            decode_steps: self.decode_steps,
+            total_steps: self.total_steps,
+            total_records: self.total_records,
+            implementation_counts: std::array::from_fn(|index| OperationExecutionCount {
+                kind: EXECUTION_IMPLEMENTATIONS[index].0,
+                implementation_id: EXECUTION_IMPLEMENTATIONS[index].1,
+                count: self.implementation_counts[index],
+            }),
+            deterministic_digest_sha256: self.digest.clone().finalize().into(),
+            coverage_complete: false,
+            failed_phase: failed_phase.map(execution_phase_name),
+            failed_layer,
+            failed_operation,
+        }
+    }
+}
+
+fn execution_phase_index(phase: ExecutionPhase) -> usize {
+    match phase {
+        ExecutionPhase::ColdPrefill => 0,
+        ExecutionPhase::CachedPrefixPrefill => 1,
+        ExecutionPhase::Decode => 2,
+    }
+}
+
+fn execution_phase_name(phase: ExecutionPhase) -> &'static str {
+    match phase {
+        ExecutionPhase::ColdPrefill => "cold_prefill",
+        ExecutionPhase::CachedPrefixPrefill => "cached_prefix_prefill",
+        ExecutionPhase::Decode => "decode",
+    }
+}
+
+fn build_execution_contract(
+    traces: Vec<Vec<OperationResolutionTrace>>,
+) -> Result<Option<Vec<LayerExecutionContract>>, String> {
+    if traces.is_empty() {
+        return Ok(None);
+    }
+    if traces.len() != 32 {
+        return Err(format!(
+            "Qwen3.5 AQ4 operation execution audit requires exactly 32 layers, got {}",
+            traces.len()
+        ));
+    }
+    let mut contract = Vec::with_capacity(32);
+    for (layer_index, layer_traces) in traces.into_iter().enumerate() {
+        if layer_traces.is_empty() {
+            return Err(format!(
+                "Qwen3.5 AQ4 operation trace layer {layer_index} is empty"
+            ));
+        }
+        let mut phases = [[""; 2]; 3];
+        for phase in [
+            ExecutionPhase::ColdPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::Decode,
+        ] {
+            let selected = layer_traces
+                .iter()
+                .filter(|trace| trace.phase == phase)
+                .collect::<Vec<_>>();
+            if selected.len() != 2 {
+                return Err(format!(
+                    "Qwen3.5 AQ4 operation trace layer {layer_index} phase {phase:?} must contain exactly two operations"
+                ));
+            }
+            phases[execution_phase_index(phase)] =
+                [selected[0].implementation_id, selected[1].implementation_id];
+        }
+        contract.push(phases);
+    }
+    Ok(Some(contract))
 }
 
 #[derive(Debug)]
@@ -151,6 +481,9 @@ pub struct Qwen35Aq4InferenceSession<M = Qwen35Aq4ModelRuntime> {
     active: Option<ActiveRequest>,
     pending: Option<Qwen35Aq4PreparedToken>,
     next_nonce: u64,
+    execution_contract: Option<Vec<LayerExecutionContract>>,
+    active_operation_audit: Option<OperationAuditAccumulator>,
+    last_terminal_operation_audit: Option<OperationExecutionAudit>,
 }
 
 impl Qwen35Aq4InferenceSession<Qwen35Aq4ModelRuntime> {
@@ -173,6 +506,7 @@ impl Qwen35Aq4InferenceSession<Qwen35Aq4ModelRuntime> {
 impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     pub fn from_model(model: M, config: Qwen35Aq4SessionConfig) -> Result<Self, String> {
         validate_config(&model, &config)?;
+        let execution_contract = build_execution_contract(model.operation_resolution_traces())?;
         Ok(Self {
             model,
             config,
@@ -180,6 +514,9 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             active: None,
             pending: None,
             next_nonce: 0,
+            execution_contract,
+            active_operation_audit: None,
+            last_terminal_operation_audit: None,
         })
     }
 
@@ -189,6 +526,14 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
 
     pub fn model(&self) -> &M {
         &self.model
+    }
+
+    pub fn operation_resolution_traces(&self) -> Vec<Vec<OperationResolutionTrace>> {
+        self.model.operation_resolution_traces()
+    }
+
+    pub fn last_terminal_operation_audit(&self) -> Option<&OperationExecutionAudit> {
+        self.last_terminal_operation_audit.as_ref()
     }
 
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, String> {
@@ -274,11 +619,44 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             generated_tokens: active.generated_tokens,
             reset_complete: true,
         };
+        let audit_layers = self.execution_contract.as_ref().map_or(0, Vec::len);
+        let terminal_audit = if let Some(audit) = self.active_operation_audit.as_ref() {
+            if outcome == ReleaseOutcome::Cancelled {
+                Some(audit.partial(audit_layers, "cancelled", None, None, None))
+            } else {
+                let expected_cold = u64::from(!active.prompt_token_ids.is_empty());
+                let expected_cached = u64::try_from(
+                    active.prompt_token_ids.len().saturating_sub(1),
+                )
+                .map_err(|_| "expected cached-prefix step count does not fit u64".to_string())?;
+                let expected_decode = u64::try_from(active.generated_tokens.saturating_sub(1))
+                    .map_err(|_| "expected decode step count does not fit u64".to_string())?;
+                Some(audit.finish(
+                    audit_layers,
+                    expected_cold,
+                    expected_cached,
+                    expected_decode,
+                    match outcome {
+                        ReleaseOutcome::Stop => "stop",
+                        ReleaseOutcome::Length => "length",
+                        ReleaseOutcome::Cancelled => unreachable!(),
+                    },
+                )?)
+            }
+        } else {
+            None
+        };
         if let Err(error) = self.model.reset_all_request_state_synchronized() {
+            self.last_terminal_operation_audit = self
+                .active_operation_audit
+                .as_ref()
+                .map(|audit| audit.partial(audit_layers, "reset_failed", None, None, None));
             self.status = Qwen35Aq4SessionStatus::Failed;
             return Err(format!("Qwen3.5 AQ4 request reset failed: {error}"));
         }
         self.active = None;
+        self.active_operation_audit = None;
+        self.last_terminal_operation_audit = terminal_audit;
         self.pending = None;
         self.status = Qwen35Aq4SessionStatus::Ready;
         Ok(summary)
@@ -324,6 +702,11 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             decode_input: None,
             terminal_outcome: None,
         });
+        self.active_operation_audit = self
+            .execution_contract
+            .as_ref()
+            .map(|_| OperationAuditAccumulator::new());
+        self.last_terminal_operation_audit = None;
         self.pending = None;
         self.status = Qwen35Aq4SessionStatus::Prefilling;
         Ok(())
@@ -392,15 +775,58 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         } else {
             "Qwen3.5 AQ4 decode"
         };
-        if let Err(error) = self.model.dispatch_token(
+        let phase = if prompt_progress {
+            // Each PromptProgress is committed before the next prepare_advance call. Therefore
+            // prompt token zero is cold and every later prompt token consumes a committed prefix.
+            if position == 0 {
+                ExecutionPhase::ColdPrefill
+            } else {
+                ExecutionPhase::CachedPrefixPrefill
+            }
+        } else {
+            ExecutionPhase::Decode
+        };
+        let operation_records = match self.model.dispatch_token(
             token_id,
             self.config.rotary_dim,
             self.config.rope_base,
             position,
+            phase,
             self.config.sync_each_layer_for_timing,
             label,
         ) {
-            return self.fail(format!("{label} token dispatch failed: {error}"));
+            Ok(records) => records,
+            Err(error) => {
+                let partial_records = self.model.take_failed_operation_executions();
+                let failure = match (
+                    self.active_operation_audit.as_mut(),
+                    self.execution_contract.as_deref(),
+                ) {
+                    (Some(audit), Some(contract)) => audit
+                        .observe_failed_step(phase, contract, &partial_records)
+                        .unwrap_or((None, None)),
+                    _ => (None, None),
+                };
+                self.last_terminal_operation_audit =
+                    self.active_operation_audit.as_ref().map(|audit| {
+                        audit.partial(
+                            self.execution_contract.as_ref().map_or(0, Vec::len),
+                            "execution_failed",
+                            Some(phase),
+                            failure.0,
+                            failure.1,
+                        )
+                    });
+                return self.fail(format!("{label} token dispatch failed: {error}"));
+            }
+        };
+        if let (Some(contract), Some(audit)) = (
+            self.execution_contract.as_deref(),
+            self.active_operation_audit.as_mut(),
+        ) {
+            if let Err(error) = audit.observe(phase, contract, &operation_records) {
+                return self.fail(format!("{label} operation execution audit failed: {error}"));
+            }
         }
         if prompt_progress {
             let active = self.active.as_mut().expect("active request checked above");
@@ -533,6 +959,10 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         }
         Ok(())
     }
+
+    fn terminal_operation_execution_audit(&self) -> Option<&OperationExecutionAudit> {
+        self.last_terminal_operation_audit()
+    }
 }
 
 fn validate_config<M: Qwen35Aq4SessionModel>(
@@ -577,16 +1007,153 @@ mod tests {
     use crate::inference_api::SamplingParams;
     use std::collections::VecDeque;
 
+    fn audited_contract() -> Vec<LayerExecutionContract> {
+        (0..32)
+            .map(|layer| {
+                let pair = if layer % 4 == 3 {
+                    [
+                        "hip.fused-qk-norm-rope-paged-kv-write-f32.m1",
+                        "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+                    ]
+                } else {
+                    [
+                        "hip.linear-attention-qkv-prepare-f32.m1",
+                        "hip.linear-attention-recurrent-f32.m1",
+                    ]
+                };
+                [pair, pair, pair]
+            })
+            .collect()
+    }
+
+    fn audited_records(
+        contract: &[LayerExecutionContract],
+        phase: ExecutionPhase,
+    ) -> Vec<[OperationExecutionRecord; 2]> {
+        contract
+            .iter()
+            .map(|layer| {
+                std::array::from_fn(|record| OperationExecutionRecord {
+                    implementation_id: layer[execution_phase_index(phase)][record],
+                    phase,
+                    status: OperationExecutionStatus::Succeeded,
+                })
+            })
+            .collect()
+    }
+
+    fn audited_failed_records(
+        phase: ExecutionPhase,
+        failed_layer: usize,
+        failed_operation: usize,
+    ) -> Vec<[Option<OperationExecutionRecord>; 2]> {
+        let contract = audited_contract();
+        (0..=failed_layer)
+            .map(|layer| {
+                std::array::from_fn(|operation| {
+                    if layer == failed_layer && operation > failed_operation {
+                        return None;
+                    }
+                    Some(OperationExecutionRecord {
+                        implementation_id: contract[layer][execution_phase_index(phase)][operation],
+                        phase,
+                        status: if layer == failed_layer && operation == failed_operation {
+                            OperationExecutionStatus::Failed
+                        } else {
+                            OperationExecutionStatus::Succeeded
+                        },
+                    })
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fixed_operation_audit_covers_32_layer_cold_cached_and_decode_steps() {
+        let contract = audited_contract();
+        let mut audit = OperationAuditAccumulator::new();
+        for phase in [
+            ExecutionPhase::ColdPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::Decode,
+        ] {
+            audit
+                .observe(phase, &contract, &audited_records(&contract, phase))
+                .unwrap();
+        }
+        let finished = audit.finish(32, 1, 2, 1, "length").unwrap();
+        assert_eq!(finished.total_steps, 4);
+        assert_eq!(finished.total_records, 256);
+        assert_eq!(finished.implementation_counts[0].count, 96);
+        assert_eq!(finished.implementation_counts[1].count, 96);
+        assert_eq!(finished.implementation_counts[2].count, 0);
+        assert_eq!(finished.implementation_counts[3].count, 32);
+        assert_eq!(finished.implementation_counts[4].count, 0);
+        assert_eq!(finished.implementation_counts[5].count, 32);
+        assert_eq!(
+            finished.deterministic_digest_sha256,
+            [
+                0x02, 0xa0, 0xd6, 0xc4, 0x32, 0x4b, 0x09, 0x62, 0xa1, 0xe4, 0x0b, 0xa9, 0xae, 0x13,
+                0xe0, 0x2c, 0x00, 0x3c, 0x85, 0xfa, 0xfc, 0x73, 0x8c, 0xe3, 0xdf, 0x32, 0xd9, 0xc5,
+                0x3c, 0x13, 0xc3, 0xe7,
+            ]
+        );
+        assert!(finished.coverage_complete);
+
+        let mut second_request = OperationAuditAccumulator::new();
+        for phase in [
+            ExecutionPhase::ColdPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::Decode,
+        ] {
+            second_request
+                .observe(phase, &contract, &audited_records(&contract, phase))
+                .unwrap();
+        }
+        assert_eq!(
+            second_request
+                .finish(32, 1, 2, 1, "length")
+                .unwrap()
+                .deterministic_digest_sha256,
+            finished.deterministic_digest_sha256
+        );
+    }
+
+    #[test]
+    fn operation_audit_rejects_empty_missing_and_out_of_order_records() {
+        let contract = audited_contract();
+        let mut audit = OperationAuditAccumulator::new();
+        assert!(
+            audit
+                .observe(ExecutionPhase::ColdPrefill, &contract, &[])
+                .is_err()
+        );
+        let mut records = audited_records(&contract, ExecutionPhase::ColdPrefill);
+        records[0].swap(0, 1);
+        assert!(
+            audit
+                .observe(ExecutionPhase::ColdPrefill, &contract, &records)
+                .is_err()
+        );
+        assert!(build_execution_contract(vec![Vec::new(); 32]).is_err());
+    }
+
     #[derive(Default)]
     struct ScriptedModel {
         context: usize,
         vocab: usize,
         logits: VecDeque<Result<usize, String>>,
         dispatches: Vec<(usize, usize, usize, u32)>,
+        dispatch_phases: Vec<ExecutionPhase>,
         resets: usize,
         fail_reset: bool,
         shutdowns: usize,
         fail_shutdown: bool,
+        audited: bool,
+        fail_dispatch_phase: Option<ExecutionPhase>,
+        failed_operation: Option<(usize, usize)>,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -604,18 +1171,38 @@ mod tests {
             rotary_dim: usize,
             rope_base: f32,
             position: usize,
+            phase: ExecutionPhase,
             _: bool,
             _: &str,
-        ) -> Result<(), String> {
+        ) -> Result<Vec<[OperationExecutionRecord; 2]>, String> {
             self.dispatches
                 .push((token_id, position, rotary_dim, rope_base.to_bits()));
-            Ok(())
+            self.dispatch_phases.push(phase);
+            if self.fail_dispatch_phase == Some(phase) {
+                return Err("scripted operation failure".into());
+            }
+            if self.audited {
+                Ok(audited_records(&audited_contract(), phase))
+            } else {
+                Ok(Vec::new())
+            }
         }
 
         fn top_token_from_last_layer(&mut self, _: &str) -> Result<usize, String> {
             self.logits
                 .pop_front()
                 .unwrap_or_else(|| Err("script exhausted".to_string()))
+        }
+
+        fn take_failed_operation_executions(
+            &mut self,
+        ) -> Vec<[Option<OperationExecutionRecord>; 2]> {
+            match (self.fail_dispatch_phase, self.failed_operation) {
+                (Some(phase), Some((layer, operation))) => {
+                    audited_failed_records(phase, layer, operation)
+                }
+                _ => Vec::new(),
+            }
         }
 
         fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
@@ -652,6 +1239,18 @@ mod tests {
             Qwen35Aq4SessionConfig::greedy(8, vec![2]),
         )
         .unwrap()
+    }
+
+    fn audited_session(tokens: &[usize]) -> Qwen35Aq4InferenceSession<ScriptedModel> {
+        let mut model = model(tokens);
+        model.audited = true;
+        let mut session = Qwen35Aq4InferenceSession::from_model(
+            model,
+            Qwen35Aq4SessionConfig::greedy(8, vec![2]),
+        )
+        .unwrap();
+        session.execution_contract = Some(audited_contract());
+        session
     }
 
     fn request(id: &str, prompt: &[usize], max_new_tokens: usize) -> InferenceRequest {
@@ -708,6 +1307,14 @@ mod tests {
                 (6, 2, 64, QWEN35_AQ4_ROPE_BASE.to_bits()),
             ]
         );
+        assert_eq!(
+            session.model().dispatch_phases,
+            vec![
+                ExecutionPhase::ColdPrefill,
+                ExecutionPhase::CachedPrefixPrefill,
+                ExecutionPhase::CachedPrefixPrefill,
+            ]
+        );
     }
 
     #[test]
@@ -749,6 +1356,10 @@ mod tests {
             ReleaseOutcome::Length
         );
         assert_eq!(session.model().dispatches[1].0, 7);
+        assert_eq!(
+            session.model().dispatch_phases,
+            vec![ExecutionPhase::ColdPrefill, ExecutionPhase::Decode]
+        );
     }
 
     #[test]
@@ -764,6 +1375,38 @@ mod tests {
         }
         assert_eq!(session.model().resets, 2);
         assert_eq!(session.model().dispatches.len(), 2);
+        assert_eq!(
+            session.model().dispatch_phases,
+            vec![ExecutionPhase::ColdPrefill, ExecutionPhase::ColdPrefill]
+        );
+    }
+
+    #[test]
+    fn two_request_reset_restarts_fixed_operation_audit_without_cumulative_growth() {
+        let mut session = audited_session(&[7, 8, 7, 8]);
+        let mut digest = None;
+        for id in ["audit-one", "audit-two"] {
+            session
+                .start_request(request(id, &[4, 5, 6], 2), CancellationToken::new())
+                .unwrap();
+            let first = next_prepared(&mut session);
+            session.publish_prepared(first, |_| Ok(())).unwrap();
+            let second = next_prepared(&mut session);
+            session.publish_prepared(second, |_| Ok(())).unwrap();
+            session.finish_and_reset().unwrap();
+            let audit = session.last_terminal_operation_audit().unwrap();
+            assert_eq!(
+                (audit.cold_prefill_steps, audit.cached_prefix_prefill_steps),
+                (1, 2)
+            );
+            assert_eq!(audit.decode_steps, 1);
+            assert_eq!(audit.total_records, 256);
+            if let Some(previous) = digest {
+                assert_eq!(audit.deterministic_digest_sha256, previous);
+            }
+            digest = Some(audit.deterministic_digest_sha256);
+        }
+        assert_eq!(session.model().resets, 2);
     }
 
     #[test]
@@ -787,6 +1430,90 @@ mod tests {
         );
         assert!(!called);
         assert_eq!(session.abort_and_reset().unwrap().generated_tokens, 0);
+    }
+
+    #[test]
+    fn cancellation_after_prompt_and_before_any_operation_publish_partial_audits() {
+        let mut after_prompt = audited_session(&[7]);
+        let cancel = CancellationToken::new();
+        after_prompt
+            .start_request(request("partial-cancel", &[4, 5], 2), cancel.clone())
+            .unwrap();
+        assert!(matches!(
+            after_prompt.prepare_advance().unwrap(),
+            SessionAdvance::PromptProgress { .. }
+        ));
+        cancel.cancel();
+        assert_eq!(
+            after_prompt.prepare_advance().unwrap(),
+            SessionAdvance::CancellationObserved
+        );
+        after_prompt.abort_and_reset().unwrap();
+        let audit = after_prompt.last_terminal_operation_audit().unwrap();
+        assert_eq!(audit.outcome, "cancelled");
+        assert_eq!(audit.total_steps, 1);
+        assert_eq!(audit.total_records, 64);
+        assert!(!audit.coverage_complete);
+
+        let mut before_operation = audited_session(&[]);
+        let cancel = CancellationToken::new();
+        before_operation
+            .start_request(request("zero-cancel", &[4], 1), cancel.clone())
+            .unwrap();
+        cancel.cancel();
+        assert_eq!(
+            before_operation.prepare_advance().unwrap(),
+            SessionAdvance::CancellationObserved
+        );
+        before_operation.abort_and_reset().unwrap();
+        assert_eq!(
+            before_operation
+                .last_terminal_operation_audit()
+                .unwrap()
+                .total_records,
+            0
+        );
+    }
+
+    #[test]
+    fn execution_and_reset_failures_retain_partial_terminal_audits() {
+        let mut execution = audited_session(&[]);
+        execution.model.fail_dispatch_phase = Some(ExecutionPhase::CachedPrefixPrefill);
+        execution.model.failed_operation = Some((3, 0));
+        execution
+            .start_request(request("op-fail", &[4, 5], 1), CancellationToken::new())
+            .unwrap();
+        assert!(matches!(
+            execution.prepare_advance().unwrap(),
+            SessionAdvance::PromptProgress { .. }
+        ));
+        assert!(
+            execution
+                .prepare_advance()
+                .unwrap_err()
+                .contains("dispatch failed")
+        );
+        let audit = execution.last_terminal_operation_audit().unwrap();
+        assert_eq!(audit.outcome, "execution_failed");
+        assert_eq!(audit.failed_phase, Some("cached_prefix_prefill"));
+        assert_eq!(audit.failed_layer, Some(3));
+        assert_eq!(audit.failed_operation, Some(0));
+        assert_eq!(audit.total_records, 70);
+
+        let mut reset = audited_session(&[2]);
+        reset.model.fail_reset = true;
+        reset
+            .start_request(
+                request("reset-fail-audit", &[4], 1),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let token = next_prepared(&mut reset);
+        reset.publish_prepared(token, |_| Ok(())).unwrap();
+        assert!(reset.finish_and_reset().is_err());
+        let audit = reset.last_terminal_operation_audit().unwrap();
+        assert_eq!(audit.outcome, "reset_failed");
+        assert!(!audit.coverage_complete);
     }
 
     #[test]

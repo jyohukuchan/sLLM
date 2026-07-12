@@ -38,6 +38,8 @@ fn main() {
     }
 
     let ck_enabled = std::env::var_os("CARGO_FEATURE_ROCM_CK_GFX1201").is_some();
+    let rocm_path =
+        PathBuf::from(std::env::var_os("ROCM_PATH").unwrap_or_else(|| "/opt/rocm".into()));
     let mut runtime = cc::Build::new();
     runtime
         .cpp(true)
@@ -47,6 +49,12 @@ fn main() {
         .flag_if_supported("-O2")
         .flag_if_supported("-Wall")
         .flag_if_supported("-Wextra");
+    if rocm_path.join("include/hip/hip_runtime_api.h").is_file() {
+        runtime
+            .include(rocm_path.join("include"))
+            .define("__HIP_PLATFORM_AMD__", "1")
+            .define("ULLM_HAVE_HIP_RUNTIME_API", "1");
+    }
     if ck_enabled {
         runtime.define("ULLM_RUNTIME_ROCM_CK_GFX1201", "1");
     }
@@ -55,9 +63,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=GPU_ARCH");
     if ck_enabled {
-        let rocm_path = PathBuf::from(
-            std::env::var_os("ROCM_PATH").unwrap_or_else(|| "/opt/rocm-7.2.1".into()),
-        );
         let gpu_arch = std::env::var("GPU_ARCH").unwrap_or_else(|_| "gfx1201".to_string());
         if gpu_arch != "gfx1201" {
             panic!("Cargo feature rocm-ck-gfx1201 requires GPU_ARCH=gfx1201");

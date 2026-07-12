@@ -10,6 +10,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::backend_operation_registry::{OperationExecutionRecord, OperationResolutionTrace};
+use crate::execution_batch::ExecutionPhase;
+use crate::execution_batch::WorkspacePlan;
 use crate::loader::{
     PassthroughF32Data, effective_rmsnorm_weight_values, read_named_passthrough_f32,
 };
@@ -24,6 +27,170 @@ use crate::qwen35_aq4_layer_runtime::{
 use crate::qwen35_package_contract::{
     PackageDecoderLayerKind, PackageManifestLayerEntry, package_manifest_layer_entries,
 };
+
+const QWEN35_LINEAR_PERSISTENT_STATE_BYTES: u64 = 2_228_224;
+const QWEN35_SELF_PERSISTENT_STATE_BYTES: u64 = 33_554_432;
+const QWEN35_REQUIRED_DEVICE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+
+fn qwen35_model_workspace_plan(
+    capacity_bytes: u64,
+    resident_bytes: u64,
+    retained_activation_bytes: u64,
+    linear_layers: usize,
+    self_layers: usize,
+) -> Result<WorkspacePlan, String> {
+    // `capacity_bytes` is the device property's totalGlobalMem. This is a conservative static
+    // admission bound with 512 MiB headroom; it is not a reservation against currently free VRAM.
+    let linear = u64::try_from(linear_layers)
+        .map_err(|_| "linear layer count does not fit u64".to_string())?
+        .checked_mul(QWEN35_LINEAR_PERSISTENT_STATE_BYTES)
+        .ok_or_else(|| "linear persistent state bytes overflow".to_string())?;
+    let self_attention = u64::try_from(self_layers)
+        .map_err(|_| "self-attention layer count does not fit u64".to_string())?
+        .checked_mul(QWEN35_SELF_PERSISTENT_STATE_BYTES)
+        .ok_or_else(|| "self-attention persistent state bytes overflow".to_string())?;
+    let plan = WorkspacePlan {
+        capacity_bytes,
+        resident_bytes,
+        persistent_state_bytes: linear
+            .checked_add(self_attention)
+            .ok_or_else(|| "model persistent state bytes overflow".to_string())?,
+        temporary_activation_bytes: retained_activation_bytes,
+        // Registry state/IO estimates describe the same buffers counted above and the peak, so
+        // they are audit metadata rather than an additional allocation here.
+        operator_workspace_bytes: 0,
+        required_headroom_bytes: QWEN35_REQUIRED_DEVICE_HEADROOM_BYTES,
+    };
+    plan.validate()?;
+    Ok(plan)
+}
+
+fn qwen35_retained_activation_bytes(
+    package_dir: &Path,
+    layers: &[Qwen35Aq4LayerSpec],
+    hidden: usize,
+    vocab: usize,
+) -> Result<u64, String> {
+    let bundles = crate::package::list_tensor_payload_bundles(package_dir)?;
+    let rows = |name: &str| -> Result<u64, String> {
+        let bundle = bundles
+            .iter()
+            .find(|bundle| bundle.tensor_name == name)
+            .ok_or_else(|| format!("missing tensor metadata {name}"))?;
+        bundle
+            .shape
+            .first()
+            .copied()
+            .ok_or_else(|| format!("tensor {name} has no row dimension"))
+    };
+    let h = u64::try_from(hidden).map_err(|_| "hidden does not fit u64".to_string())?;
+    let mut elements = 0_u64;
+    for layer in layers {
+        let prefix = format!("model.language_model.layers.{}", layer.layer_index);
+        let intermediate = rows(&format!("{prefix}.mlp.gate_proj.weight"))?;
+        let retained = match layer.kind {
+            Qwen35Aq4LayerKind::LinearAttention => 9_u64
+                .checked_mul(h)
+                .and_then(|value| value.checked_add(2 * 8_192))
+                .and_then(|value| value.checked_add(2 * 2_048))
+                .and_then(|value| value.checked_add(2 * 32))
+                .and_then(|value| value.checked_add(intermediate)),
+            Qwen35Aq4LayerKind::SelfAttention => {
+                let q_rows = rows(&format!("{prefix}.self_attn.q_proj.weight"))?;
+                let k_rows = rows(&format!("{prefix}.self_attn.k_proj.weight"))?;
+                let v_rows = rows(&format!("{prefix}.self_attn.v_proj.weight"))?;
+                let q = q_rows / 2;
+                let attention = q;
+                5_u64
+                    .checked_mul(h)
+                    .and_then(|value| value.checked_add(q_rows))
+                    .and_then(|value| value.checked_add(3 * q))
+                    .and_then(|value| value.checked_add(3 * k_rows))
+                    .and_then(|value| value.checked_add(v_rows))
+                    .and_then(|value| value.checked_add(2 * attention))
+                    .and_then(|value| value.checked_add(intermediate))
+            }
+        }
+        .ok_or_else(|| "retained layer activation elements overflow".to_string())?;
+        elements = elements
+            .checked_add(retained)
+            .ok_or_else(|| "retained model activation elements overflow".to_string())?;
+    }
+    // Embedding output, final-norm weight/output, lm-head input/logits, and a conservative
+    // per-vocabulary upper bound for top-1 partial value/index buffers.
+    let vocab = u64::try_from(vocab).map_err(|_| "vocab does not fit u64".to_string())?;
+    elements = elements
+        .checked_add(3 * h)
+        .and_then(|value| value.checked_add(5 * vocab))
+        .ok_or_else(|| "global activation elements overflow".to_string())?;
+    elements
+        .checked_mul(4)
+        .ok_or_else(|| "retained activation bytes overflow".to_string())
+}
+
+fn tensor_layer_index(name: &str) -> Option<usize> {
+    let (_, suffix) = name.split_once(".layers.")?;
+    suffix.split('.').next()?.parse().ok()
+}
+
+fn qwen35_package_resident_plan_bytes(
+    package_dir: &Path,
+    selected_layers: &[Qwen35Aq4LayerSpec],
+) -> Result<u64, String> {
+    let selected = selected_layers
+        .iter()
+        .map(|layer| layer.layer_index)
+        .collect::<BTreeSet<_>>();
+    let mut bytes = 0_u64;
+    let mut component_codebooks = BTreeSet::new();
+    for bundle in crate::package::list_tensor_payload_bundles(package_dir)? {
+        let layer_index = tensor_layer_index(&bundle.tensor_name);
+        if layer_index.is_some_and(|index| !selected.contains(&index)) {
+            continue;
+        }
+        let component = layer_index
+            .map(|index| format!("layer-{index}"))
+            .unwrap_or_else(|| bundle.tensor_name.clone());
+        bytes = bytes
+            .checked_add(bundle.index_file.bytes)
+            .and_then(|value| value.checked_add(bundle.scale_file.bytes))
+            .ok_or_else(|| "AQ4 resident payload bytes overflow".to_string())?;
+        if component_codebooks.insert((component, bundle.codebook_file.absolute_path.clone())) {
+            bytes = bytes
+                .checked_add(bundle.codebook_file.bytes)
+                .ok_or_else(|| "AQ4 codebook resident bytes overflow".to_string())?;
+        }
+        let scale_format = bundle
+            .scale_format
+            .as_deref()
+            .ok_or_else(|| format!("{} has no AQ4 scale format", bundle.tensor_name))?;
+        let scale_table_bytes = crate::aq4_package_runtime::package_aq4_f32_allocation_bytes(
+            u64::try_from(crate::aq::scale_values(scale_format)?.len())
+                .map_err(|_| "AQ4 scale-table length does not fit u64".to_string())?,
+        )?;
+        bytes = bytes
+            .checked_add(scale_table_bytes)
+            .ok_or_else(|| "AQ4 resident bytes overflow".to_string())?;
+        if !bundle.row_scale_overrides.is_empty() {
+            let rows = *bundle
+                .shape
+                .first()
+                .ok_or_else(|| format!("{} has no row dimension", bundle.tensor_name))?;
+            bytes = bytes
+                .checked_add(crate::aq4_package_runtime::package_aq4_f32_allocation_bytes(rows)?)
+                .ok_or_else(|| "AQ4 resident bytes overflow".to_string())?;
+        }
+    }
+    for bundle in crate::package::list_passthrough_payload_bundles(package_dir)? {
+        if tensor_layer_index(&bundle.tensor_name).is_some_and(|index| !selected.contains(&index)) {
+            continue;
+        }
+        bytes = bytes
+            .checked_add(bundle.payload_bytes)
+            .ok_or_else(|| "passthrough resident bytes overflow".to_string())?;
+    }
+    Ok(bytes)
+}
 
 /// Product context length used by the Qwen3.5 9B served-model contract.
 pub const QWEN35_AQ4_CONTEXT_LENGTH: usize = 4096;
@@ -91,6 +258,7 @@ impl Qwen35Aq4ModelGeometry {
 pub struct Qwen35Aq4ModelLoadConfig {
     pub package_dir: PathBuf,
     pub device_index: u32,
+    pub expected_architecture: Option<String>,
     pub chunk_bytes: usize,
     pub context_length: usize,
     pub kv_block_size: usize,
@@ -106,6 +274,8 @@ pub struct Qwen35Aq4StackStep {
     pub layer_step_ms: Vec<f64>,
     pub linear_attention_components: Vec<Option<PackageLinearAttnComponentStepMs>>,
     pub self_attention_components: Vec<Option<PackageSelfAttnComponentStepMs>>,
+    /// Exactly two registry-routed operations for every successfully completed layer.
+    pub operation_executions: Vec<[OperationExecutionRecord; 2]>,
 }
 
 pub enum Qwen35Aq4ResidentLayer {
@@ -128,6 +298,13 @@ impl Qwen35Aq4ResidentLayer {
         }
     }
 
+    pub fn operation_resolution_traces(&self) -> Vec<OperationResolutionTrace> {
+        match self {
+            Self::LinearAttention(layer) => layer.operation_resolution_traces(),
+            Self::SelfAttention(layer) => layer.operation_resolution_traces(),
+        }
+    }
+
     fn step_from_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -136,17 +313,21 @@ impl Qwen35Aq4ResidentLayer {
         rope_base: f32,
         rope_position: usize,
         cache_position: usize,
+        phase: ExecutionPhase,
         label: &str,
     ) -> Result<(), String> {
         match self {
-            Self::LinearAttention(layer) => layer.step_from_device_to_device(stream, input, label),
-            Self::SelfAttention(layer) => layer.step_from_device_to_device(
+            Self::LinearAttention(layer) => {
+                layer.step_from_device_to_device_for_phase(stream, input, phase, label)
+            }
+            Self::SelfAttention(layer) => layer.step_from_device_to_device_for_phase(
                 stream,
                 input,
                 rotary_dim,
                 rope_base,
                 rope_position,
                 cache_position,
+                phase,
                 label,
             ),
         }
@@ -173,6 +354,13 @@ impl Qwen35Aq4ResidentLayer {
             Self::SelfAttention(layer) => (None, layer.take_last_component_step_ms()),
         }
     }
+
+    fn take_operation_executions(&mut self) -> [Option<OperationExecutionRecord>; 2] {
+        match self {
+            Self::LinearAttention(layer) => layer.take_last_operation_executions(),
+            Self::SelfAttention(layer) => layer.take_last_operation_executions(),
+        }
+    }
 }
 
 /// Owns one device context and every resident allocation required by one Qwen3.5 AQ4 model.
@@ -195,6 +383,7 @@ pub struct Qwen35Aq4ModelRuntime {
     device_name: String,
     backend: String,
     device_total_global_mem: u64,
+    last_partial_operation_executions: Vec<[Option<OperationExecutionRecord>; 2]>,
 }
 
 impl Qwen35Aq4ModelRuntime {
@@ -219,6 +408,24 @@ impl Qwen35Aq4ModelRuntime {
         let info = context
             .device_info()
             .map_err(|err| format!("failed to query Qwen3.5 AQ4 runtime device: {err}"))?;
+        if let Some(expected) = config.expected_architecture.as_deref() {
+            crate::backend_operation_registry::require_device_architecture(&info, expected)
+                .map_err(|error| format!("Qwen3.5 AQ4 {error}"))?;
+        }
+        let linear_layers = geometry
+            .layers
+            .iter()
+            .filter(|layer| layer.kind == Qwen35Aq4LayerKind::LinearAttention)
+            .count();
+        let self_layers = geometry.layers.len() - linear_layers;
+        let _workspace = qwen35_model_workspace_plan(
+            info.total_global_mem,
+            qwen35_package_resident_plan_bytes(&config.package_dir, &geometry.layers)?,
+            qwen35_retained_activation_bytes(&config.package_dir, &geometry.layers, hidden, vocab)?,
+            linear_layers,
+            self_layers,
+        )
+        .map_err(|error| format!("Qwen3.5 AQ4 model workspace admission failed: {error}"))?;
         let mut stream = context
             .create_stream()
             .map_err(|err| format!("failed to create Qwen3.5 AQ4 runtime stream: {err}"))?;
@@ -352,6 +559,7 @@ impl Qwen35Aq4ModelRuntime {
             device_name: info.name,
             backend: info.backend.to_string(),
             device_total_global_mem: info.total_global_mem,
+            last_partial_operation_executions: Vec::with_capacity(32),
         })
     }
 
@@ -383,6 +591,14 @@ impl Qwen35Aq4ModelRuntime {
         self.final_norm_runtime.is_some() && self.lm_head.supports_device_input()
     }
 
+    /// Returns all load-time operation resolutions in decoder-layer order.
+    pub fn operation_resolution_traces(&self) -> Vec<Vec<OperationResolutionTrace>> {
+        self.layers
+            .iter()
+            .map(Qwen35Aq4ResidentLayer::operation_resolution_traces)
+            .collect()
+    }
+
     /// Gathers one token and dispatches it through the complete resident decoder stack.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_token(
@@ -392,6 +608,31 @@ impl Qwen35Aq4ModelRuntime {
         rope_base: f32,
         rope_position: usize,
         cache_position: usize,
+        sync_each_layer_for_timing: bool,
+        label: &str,
+    ) -> Result<Qwen35Aq4StackStep, String> {
+        self.dispatch_token_for_phase(
+            token_id,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            ExecutionPhase::Decode,
+            sync_each_layer_for_timing,
+            label,
+        )
+    }
+
+    /// Dispatches one token using operation plans resolved for the explicit scheduler phase.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_token_for_phase(
+        &mut self,
+        token_id: usize,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        phase: ExecutionPhase,
         sync_each_layer_for_timing: bool,
         label: &str,
     ) -> Result<Qwen35Aq4StackStep, String> {
@@ -414,6 +655,7 @@ impl Qwen35Aq4ModelRuntime {
         })?;
         embedding.gather_token(&mut self.stream, token_id, label)?;
         let input = embedding.output_buffer();
+        self.last_partial_operation_executions.clear();
         dispatch_layer_stack(
             &mut self.layers,
             &mut self.stream,
@@ -422,9 +664,17 @@ impl Qwen35Aq4ModelRuntime {
             rope_base,
             rope_position,
             cache_position,
+            phase,
             sync_each_layer_for_timing,
             label,
+            &mut self.last_partial_operation_executions,
         )
+    }
+
+    pub fn take_last_partial_operation_executions(
+        &mut self,
+    ) -> Vec<[Option<OperationExecutionRecord>; 2]> {
+        std::mem::take(&mut self.last_partial_operation_executions)
     }
 
     pub fn top_logits_from_last_layer(
@@ -500,8 +750,10 @@ fn dispatch_layer_stack(
     rope_base: f32,
     rope_position: usize,
     cache_position: usize,
+    phase: ExecutionPhase,
     sync_each_layer_for_timing: bool,
     label: &str,
+    partial_operation_executions: &mut Vec<[Option<OperationExecutionRecord>; 2]>,
 ) -> Result<Qwen35Aq4StackStep, String> {
     if layers.is_empty() {
         return Err(format!("{label} requires at least one resident layer"));
@@ -509,10 +761,11 @@ fn dispatch_layer_stack(
     let mut layer_step_ms = Vec::with_capacity(layers.len());
     let mut linear_attention_components = Vec::with_capacity(layers.len());
     let mut self_attention_components = Vec::with_capacity(layers.len());
+    let mut operation_executions = Vec::with_capacity(layers.len());
     for position in 0..layers.len() {
         let started = std::time::Instant::now();
         let layer_label = format!("{label} layer {position} position {rope_position}");
-        if position == 0 {
+        let step_result = if position == 0 {
             layers[0].step_from_device(
                 stream,
                 first_input,
@@ -520,8 +773,9 @@ fn dispatch_layer_stack(
                 rope_base,
                 rope_position,
                 cache_position,
+                phase,
                 &layer_label,
-            )?;
+            )
         } else {
             let (previous, current) = layers.split_at_mut(position);
             current[0].step_from_device(
@@ -531,8 +785,13 @@ fn dispatch_layer_stack(
                 rope_base,
                 rope_position,
                 cache_position,
+                phase,
                 &layer_label,
-            )?;
+            )
+        };
+        if let Err(error) = step_result {
+            partial_operation_executions.push(layers[position].take_operation_executions());
+            return Err(error);
         }
         if sync_each_layer_for_timing {
             stream
@@ -543,12 +802,22 @@ fn dispatch_layer_stack(
         let (linear, self_attention) = layers[position].take_components();
         linear_attention_components.push(linear);
         self_attention_components.push(self_attention);
+        let [first, second] = layers[position].take_operation_executions();
+        operation_executions.push([
+            first.ok_or_else(|| format!("{layer_label} did not record its first operation"))?,
+            second.ok_or_else(|| format!("{layer_label} did not record its second operation"))?,
+        ]);
+        partial_operation_executions.push([
+            Some(operation_executions[position][0]),
+            Some(operation_executions[position][1]),
+        ]);
     }
     Ok(Qwen35Aq4StackStep {
         final_layer_position: layers.len() - 1,
         layer_step_ms,
         linear_attention_components,
         self_attention_components,
+        operation_executions,
     })
 }
 
@@ -591,6 +860,8 @@ fn package_path_text(path: &Path) -> Result<&str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn specs() -> Vec<Qwen35Aq4LayerSpec> {
         vec![
@@ -607,6 +878,85 @@ mod tests {
                 kind: Qwen35Aq4LayerKind::LinearAttention,
             },
         ]
+    }
+
+    #[test]
+    fn aggregate_workspace_admission_is_checked_before_model_allocations() {
+        let valid = qwen35_model_workspace_plan(8 << 30, 5 << 30, 128 << 20, 24, 8).unwrap();
+        assert!(valid.persistent_state_bytes > 0);
+        assert_eq!(valid.operator_workspace_bytes, 0);
+        assert!(qwen35_model_workspace_plan(1 << 30, 900 << 20, 128 << 20, 24, 8).is_err());
+        assert!(qwen35_model_workspace_plan(u64::MAX, 0, 0, usize::MAX, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn package_workspace_uses_real_manifest_selection_and_allocation_components() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-qwen35-workspace-fixture-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        for (path, bytes) in [
+            ("tensors/l0q.idx", 10),
+            ("tensors/l0q.scale", 2),
+            ("tensors/l0k.idx", 12),
+            ("tensors/l0k.scale", 3),
+            ("tensors/l1q.idx", 14),
+            ("tensors/l1q.scale", 4),
+            ("tensors/l2q.idx", 16),
+            ("tensors/l2q.scale", 5),
+            ("codebooks/shared.f32", 64),
+            ("tensors/l0.raw", 7),
+            ("tensors/l1.raw", 8),
+            ("tensors/l2.raw", 9),
+            ("tensors/embed.raw", 11),
+            ("tensors/norm.raw", 12),
+            ("tensors/head.raw", 13),
+        ] {
+            fs::write(root.join(path), vec![1_u8; bytes]).unwrap();
+        }
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [
+                {"name":"model.layers.0.q.weight","shape":[2,4],"scale_format":"e4m3","elements":8,"groups":2,"index_file":"tensors/l0q.idx","scale_file":"tensors/l0q.scale","codebook_file":"codebooks/shared.f32"},
+                {"name":"model.layers.0.k.weight","shape":[3,4],"scale_format":"e4m3","elements":12,"groups":3,"index_file":"tensors/l0k.idx","scale_file":"tensors/l0k.scale","codebook_file":"codebooks/shared.f32"},
+                {"name":"model.layers.1.q.weight","shape":[2,4],"scale_format":"e4m3","elements":8,"groups":2,"index_file":"tensors/l1q.idx","scale_file":"tensors/l1q.scale","codebook_file":"codebooks/shared.f32"},
+                {"name":"model.layers.2.q.weight","shape":[2,4],"scale_format":"e4m3","elements":8,"groups":2,"index_file":"tensors/l2q.idx","scale_file":"tensors/l2q.scale","codebook_file":"codebooks/shared.f32"}
+              ],
+              "passthrough_tensors": [
+                {"name":"model.layers.0.input_layernorm.weight","shape":[3],"elements":3,"payload_bytes":7,"payload_file":"tensors/l0.raw"},
+                {"name":"model.layers.1.input_layernorm.weight","shape":[4],"elements":4,"payload_bytes":8,"payload_file":"tensors/l1.raw"},
+                {"name":"model.layers.2.input_layernorm.weight","shape":[4],"elements":4,"payload_bytes":9,"payload_file":"tensors/l2.raw"},
+                {"name":"model.embed_tokens.weight","shape":[1],"elements":1,"payload_bytes":11,"payload_file":"tensors/embed.raw"},
+                {"name":"model.norm.weight","shape":[1],"elements":1,"payload_bytes":12,"payload_file":"tensors/norm.raw"},
+                {"name":"lm_head.weight","shape":[1],"elements":1,"payload_bytes":13,"payload_file":"tensors/head.raw"}
+              ],
+              "row_scale_overrides":{"schema_version":"row-scale-overrides-v0.1","entries":[{"tensor_name":"model.layers.0.q.weight","row_index":1,"scale":1.25}]}
+            }"#,
+        )
+        .unwrap();
+        let layer = |layer_index| Qwen35Aq4LayerSpec {
+            layer_index,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        };
+        assert_eq!(crate::aq::scale_values("e4m3").unwrap().len(), 119);
+        // layer 0: index+scale 27, one shared codebook 64, two tables 952,
+        // row-scale allocation 8, passthrough 7; global embedding/norm/head 36.
+        assert_eq!(
+            qwen35_package_resident_plan_bytes(&root, &[layer(0)]).unwrap(),
+            1_094
+        );
+        // The same physical codebook is one allocation per layer component, not one per package.
+        assert_eq!(
+            qwen35_package_resident_plan_bytes(&root, &[layer(0), layer(1)]).unwrap(),
+            1_660
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

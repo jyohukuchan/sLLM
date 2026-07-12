@@ -38,9 +38,11 @@ pub const QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV: &[&str] = &[
     "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_ROPE_KERNEL",
     "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
@@ -316,6 +318,7 @@ fn validate_report(report: &Aq4GenerateReport, request: &InferenceRequest) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_operation_registry::{RuntimeFeature, runtime_feature_environment};
     use crate::inference_api::SamplingParams;
 
     fn request() -> InferenceRequest {
@@ -369,5 +372,26 @@ mod tests {
         assert!(validate_report(&report(vec![4, 5, 6]), &request).is_ok());
         assert!(validate_report(&report(vec![9, 4]), &request).is_err());
         assert!(validate_report(&report(vec![4]), &request).is_err());
+    }
+
+    #[test]
+    fn production_guards_cover_the_resolved_stateful_m1_operations_exactly_once() {
+        let unique = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.len());
+        assert!(unique.contains("ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL"));
+        assert!(unique.contains("ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL"));
+        assert!(unique.contains("ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL"));
+        for feature in [
+            RuntimeFeature::HipLinearAttentionRecurrent,
+            RuntimeFeature::HipPagedDecodeAttention,
+            RuntimeFeature::HipFusedQkNormRopePagedKvWrite,
+            RuntimeFeature::HipLinearAttentionQkvPrepare,
+            RuntimeFeature::HipPagedKvWrite,
+        ] {
+            assert!(unique.contains(runtime_feature_environment(feature)));
+        }
     }
 }

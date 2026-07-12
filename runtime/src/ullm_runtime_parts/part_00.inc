@@ -22,6 +22,11 @@
 #include <dlfcn.h>
 #endif
 
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+#include <hip/hip_runtime_api.h>
+#include <hip/hip_deprecated.h>
+#endif
+
 namespace {
 
 constexpr unsigned int kAq4MatvecTop1RowsPerBlock = 8u;
@@ -157,6 +162,29 @@ public:
         }
         name.back() = '\0';
         return std::string(name.data());
+    }
+
+    std::string device_arch_name(int device_id) {
+        load_once();
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+        if (hip_get_device_properties_r0600_ != nullptr) {
+            hipDeviceProp_t property{};
+            if (hip_get_device_properties_r0600_(&property, device_id) == 0) {
+                property.gcnArchName[sizeof(property.gcnArchName) - 1] = '\0';
+                return std::string(property.gcnArchName);
+            }
+        }
+        if (hip_get_device_properties_r0000_ != nullptr) {
+            hipDeviceProp_tR0000 property{};
+            if (hip_get_device_properties_r0000_(&property, device_id) == 0) {
+                property.gcnArchName[sizeof(property.gcnArchName) - 1] = '\0';
+                return std::string(property.gcnArchName);
+            }
+        }
+#else
+        (void)device_id;
+#endif
+        return "";
     }
 
     uint64_t device_total_mem(int device_id) {
@@ -371,6 +399,10 @@ private:
     using hip_device_get_name_fn = int (*)(char *, int, int);
     using hip_device_total_mem_fn = int (*)(size_t *, int);
     using hip_device_compute_capability_fn = int (*)(int *, int *, int);
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+    using hip_get_device_properties_r0600_fn = int (*)(hipDeviceProp_t *, int);
+    using hip_get_device_properties_r0000_fn = int (*)(hipDeviceProp_tR0000 *, int);
+#endif
     using hip_set_device_fn = int (*)(int);
     using hip_malloc_fn = int (*)(void **, size_t);
     using hip_free_fn = int (*)(void *);
@@ -423,6 +455,14 @@ private:
                 reinterpret_cast<hip_device_total_mem_fn>(dlsym(handle_, "hipDeviceTotalMem"));
             hip_device_compute_capability_ = reinterpret_cast<hip_device_compute_capability_fn>(
                 dlsym(handle_, "hipDeviceComputeCapability"));
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+            hip_get_device_properties_r0600_ =
+                reinterpret_cast<hip_get_device_properties_r0600_fn>(
+                    dlsym(handle_, "hipGetDevicePropertiesR0600"));
+            hip_get_device_properties_r0000_ =
+                reinterpret_cast<hip_get_device_properties_r0000_fn>(
+                    dlsym(handle_, "hipGetDevicePropertiesR0000"));
+#endif
             hip_set_device_ = reinterpret_cast<hip_set_device_fn>(dlsym(handle_, "hipSetDevice"));
             hip_malloc_ = reinterpret_cast<hip_malloc_fn>(dlsym(handle_, "hipMalloc"));
             hip_free_ = reinterpret_cast<hip_free_fn>(dlsym(handle_, "hipFree"));
@@ -455,6 +495,10 @@ private:
     hip_device_get_name_fn hip_device_get_name_ = nullptr;
     hip_device_total_mem_fn hip_device_total_mem_ = nullptr;
     hip_device_compute_capability_fn hip_device_compute_capability_ = nullptr;
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+    hip_get_device_properties_r0600_fn hip_get_device_properties_r0600_ = nullptr;
+    hip_get_device_properties_r0000_fn hip_get_device_properties_r0000_ = nullptr;
+#endif
     hip_set_device_fn hip_set_device_ = nullptr;
     hip_malloc_fn hip_malloc_ = nullptr;
     hip_free_fn hip_free_ = nullptr;
@@ -1377,6 +1421,8 @@ uint32_t total_device_count() {
     return static_cast<uint32_t>(1 + hip_runtime().device_count());
 }
 
+std::vector<std::string> hip_arch_candidates(int device_id);
+
 void fill_cpu_device(ullm_device_info *info) {
     info->device_id = 0;
     copy_cstr(info->backend, sizeof(info->backend), "cpu");
@@ -1399,7 +1445,10 @@ void fill_hip_device(uint32_t index, ullm_device_info *info) {
     info->total_global_mem = hip_runtime().device_total_mem(hip_index);
     info->compute_major = major;
     info->compute_minor = minor;
-    copy_cstr(info->gcn_arch_name, sizeof(info->gcn_arch_name), "");
+    copy_cstr(
+        info->gcn_arch_name,
+        sizeof(info->gcn_arch_name),
+        hip_runtime().device_arch_name(hip_index));
     info->flags = static_cast<uint32_t>(hip_runtime().runtime_version());
 }
 

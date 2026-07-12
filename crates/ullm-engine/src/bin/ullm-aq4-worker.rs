@@ -196,6 +196,7 @@ fn resident_config_from_startup(
     let model = Qwen35Aq4ModelLoadConfig {
         package_dir: startup.package_dir,
         device_index: RESIDENT_DEVICE_INDEX,
+        expected_architecture: Some(startup.profile.device.clone()),
         chunk_bytes: RESIDENT_CHUNK_BYTES,
         context_length: startup.profile.context_length,
         kv_block_size: QWEN35_AQ4_KV_BLOCK_SIZE,
@@ -228,7 +229,25 @@ fn load_resident_backend(
             config.expected_vocab_size
         ));
     }
+    let operation_traces = session.operation_resolution_traces();
+    if operation_traces.len() != session.model().geometry().layers.len() {
+        return Err("Qwen3.5 AQ4 operation trace coverage does not match decoder layers".into());
+    }
+    for (layer_position, traces) in operation_traces.iter().enumerate() {
+        for trace in traces {
+            eprintln!(
+                "{}",
+                operation_trace_log_line(layer_position, &trace.audit_json())
+            );
+        }
+    }
     Ok(SessionInferenceBackend::new(session))
+}
+
+fn operation_trace_log_line(layer_position: usize, trace_json: &str) -> String {
+    format!(
+        "{{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":{layer_position},\"trace\":{trace_json}}}"
+    )
 }
 
 fn run_loaded_worker<R, W, LB, RB, FL, FR>(
@@ -521,6 +540,10 @@ mod tests {
 
         assert_eq!(config.model.package_dir, PathBuf::from("/product/package"));
         assert_eq!(config.model.device_index, 1);
+        assert_eq!(
+            config.model.expected_architecture.as_deref(),
+            Some("gfx1201")
+        );
         assert_eq!(config.model.chunk_bytes, 1024 * 1024);
         assert_eq!(config.model.context_length, 4096);
         assert_eq!(config.model.kv_block_size, 256);
@@ -570,10 +593,14 @@ mod tests {
             _: usize,
             _: f32,
             _: usize,
+            _: ullm_engine::execution_batch::ExecutionPhase,
             _: bool,
             _: &str,
-        ) -> Result<(), String> {
-            Ok(())
+        ) -> Result<
+            Vec<[ullm_engine::backend_operation_registry::OperationExecutionRecord; 2]>,
+            String,
+        > {
+            Ok(Vec::new())
         }
 
         fn top_token_from_last_layer(&mut self, _: &str) -> Result<usize, String> {
@@ -623,6 +650,7 @@ mod tests {
             model: Qwen35Aq4ModelLoadConfig {
                 package_dir: PathBuf::from("/never-loaded"),
                 device_index: 1,
+                expected_architecture: Some("gfx1201".into()),
                 chunk_bytes: 1024 * 1024,
                 context_length: 16,
                 kv_block_size: 256,
@@ -805,5 +833,16 @@ mod tests {
         let mut expected = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn operation_trace_worker_audit_wrapper_is_exact_json() {
+        let line = operation_trace_log_line(7, "{\"implementation_id\":\"impl-1\"}");
+        assert_eq!(
+            line,
+            "{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":7,\"trace\":{\"implementation_id\":\"impl-1\"}}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["trace"]["implementation_id"], "impl-1");
     }
 }

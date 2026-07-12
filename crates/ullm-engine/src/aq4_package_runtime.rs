@@ -196,6 +196,12 @@ fn checked_f32_byte_len(elements: usize, label: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("{label} byte size overflows"))
 }
 
+pub fn package_aq4_f32_allocation_bytes(elements: u64) -> Result<u64, String> {
+    elements
+        .checked_mul(std::mem::size_of::<f32>() as u64)
+        .ok_or_else(|| "AQ4 f32 allocation bytes overflow".to_string())
+}
+
 fn read_runtime_buffer_f32(
     buffer: &ullm_runtime_sys::RuntimeBuffer,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -392,11 +398,14 @@ impl PackageAq4ResidentMatvec {
                 &format!("AQ4 scale values for {tensor_name}"),
             )?
         } else {
-            let mut buffer = context
-                .alloc_buffer(materialize.scale_values.len() * std::mem::size_of::<f32>())
-                .map_err(|err| {
-                    format!("failed to allocate AQ4 scale values for {tensor_name}: {err}")
-                })?;
+            let scale_bytes = usize::try_from(package_aq4_f32_allocation_bytes(
+                u64::try_from(materialize.scale_values.len())
+                    .map_err(|_| "AQ4 scale count does not fit u64".to_string())?,
+            )?)
+            .map_err(|_| "AQ4 scale allocation bytes do not fit usize".to_string())?;
+            let mut buffer = context.alloc_buffer(scale_bytes).map_err(|err| {
+                format!("failed to allocate AQ4 scale values for {tensor_name}: {err}")
+            })?;
             buffer
                 .copy_from_host(
                     0,
@@ -430,11 +439,14 @@ impl PackageAq4ResidentMatvec {
                     &format!("AQ4 row scales for {tensor_name}"),
                 )?
             } else {
-                let mut buffer = context
-                    .alloc_buffer(rows * std::mem::size_of::<f32>())
-                    .map_err(|err| {
-                        format!("failed to allocate row scale buffer for {tensor_name}: {err}")
-                    })?;
+                let row_scale_bytes = usize::try_from(package_aq4_f32_allocation_bytes(
+                    u64::try_from(rows)
+                        .map_err(|_| "AQ4 row-scale count does not fit u64".to_string())?,
+                )?)
+                .map_err(|_| "AQ4 row-scale allocation bytes do not fit usize".to_string())?;
+                let mut buffer = context.alloc_buffer(row_scale_bytes).map_err(|err| {
+                    format!("failed to allocate row scale buffer for {tensor_name}: {err}")
+                })?;
                 buffer
                     .copy_from_host(0, &encode_f32_to_bytes(&row_scales), Some(stream))
                     .map_err(|err| format!("failed to copy row scales for {tensor_name}: {err}"))?;

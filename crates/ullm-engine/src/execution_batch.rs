@@ -36,7 +36,8 @@ pub const MAX_PACKED_TOKENS: u64 = 65_536;
 pub enum ExecutionPhase {
     /// Process a prompt that has no request-owned cached prefix.
     ColdPrefill,
-    /// Process new prompt tokens after a committed request-owned prefix.
+    /// Process new prompt tokens after any committed request-owned prefix, including token 1 and
+    /// later in a token-wise cold-request prefill; this does not require an externally reused cache.
     CachedPrefixPrefill,
     /// Process one decode input token per request item.
     Decode,

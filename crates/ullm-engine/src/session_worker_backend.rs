@@ -3,6 +3,7 @@
 
 //! Quantization-independent adapter from an inference session to the JSONL worker runtime.
 
+use crate::backend_operation_registry::OperationExecutionAudit;
 use crate::inference_api::{GenerationTimings, InferenceRequest, ReleaseOutcome};
 use crate::worker_driver::{InferenceSession, RequestPublications, drive_worker_request};
 use crate::worker_protocol::{ReleaseOutcomeEvent, WorkerAdmission};
@@ -56,6 +57,7 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
             elapsed_ms: 0,
             outcome: None,
             error_code: None,
+            operation_execution_audit: None,
         });
 
         let result =
@@ -73,6 +75,7 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
                     elapsed_ms: elapsed_millis(started),
                     outcome: Some(release_outcome_name(outcome)),
                     error_code: None,
+                    operation_execution_audit: self.session.terminal_operation_execution_audit(),
                 });
                 Ok(())
             }
@@ -88,6 +91,7 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
                     elapsed_ms: elapsed_millis(started),
                     outcome: None,
                     error_code: Some("runtime_failed"),
+                    operation_execution_audit: self.session.terminal_operation_execution_audit(),
                 });
                 Err(error)
             }
@@ -174,6 +178,8 @@ struct BackendLog<'a> {
     outcome: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_execution_audit: Option<&'a OperationExecutionAudit>,
 }
 
 fn write_backend_log(record: BackendLog<'_>) {
@@ -213,24 +219,68 @@ mod tests {
 
     #[test]
     fn structured_backend_log_contains_counts_but_no_prompt_or_token_content() {
+        let audit = OperationExecutionAudit {
+            schema_version: "ullm.backend_operation.request.v1",
+            outcome: "stop",
+            expected_layers_per_step: 32,
+            expected_records_per_layer: 2,
+            cold_prefill_steps: 1,
+            cached_prefix_prefill_steps: 2,
+            decode_steps: 1,
+            total_steps: 4,
+            total_records: 256,
+            implementation_counts: std::array::from_fn(|index| {
+                crate::backend_operation_registry::OperationExecutionCount {
+                    kind: "kind",
+                    implementation_id: ["a", "b", "c", "d", "e", "f"][index],
+                    count: index as u64,
+                }
+            }),
+            deterministic_digest_sha256: [0xab; 32],
+            coverage_complete: true,
+            failed_phase: None,
+            failed_layer: None,
+            failed_operation: None,
+        };
         let value = serde_json::to_value(BackendLog {
             schema_version: "ullm.worker.log.v1",
-            level: "error",
-            event: "request_failed",
+            level: "info",
+            event: "request_released",
             request_id: "req-log",
             phase: "execute",
             prompt_tokens: 128,
             completion_tokens: 3,
             elapsed_ms: 42,
-            outcome: None,
-            error_code: Some("runtime_failed"),
+            outcome: Some("stop"),
+            error_code: None,
+            operation_execution_audit: Some(&audit),
         })
         .unwrap();
         assert_eq!(value["schema_version"], "ullm.worker.log.v1");
         assert_eq!(value["request_id"], "req-log");
         assert_eq!(value["prompt_tokens"], 128);
         assert_eq!(value["completion_tokens"], 3);
-        assert_eq!(value["error_code"], "runtime_failed");
+        assert_eq!(value["outcome"], "stop");
+        assert_eq!(
+            value["operation_execution_audit"]["schema_version"],
+            "ullm.backend_operation.request.v1"
+        );
+        assert_eq!(value["operation_execution_audit"]["total_records"], 256);
+        assert_eq!(
+            value["operation_execution_audit"]["deterministic_digest_sha256"],
+            "ab".repeat(32)
+        );
+        assert_eq!(
+            value["operation_execution_audit"]["implementation_counts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(
+            value["operation_execution_audit"]["coverage_complete"],
+            true
+        );
         assert!(value.get("prompt_token_ids").is_none());
         assert!(value.get("token_id").is_none());
         assert!(value.get("message").is_none());

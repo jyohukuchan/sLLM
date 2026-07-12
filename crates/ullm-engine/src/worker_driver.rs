@@ -3,6 +3,7 @@
 
 //! Quantization-independent inference session driver.
 
+use crate::backend_operation_registry::OperationExecutionAudit;
 use crate::inference_api::{
     CancellationToken, FinishReason, GenerationTimings, InferenceRequest, ReleaseOutcome,
     ReleaseSummary,
@@ -65,6 +66,11 @@ pub trait InferenceSession {
     /// Sessions without resident resources may keep the default implementation.
     fn shutdown(&mut self) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Optional model-specific audit retained after terminal reset.
+    fn terminal_operation_execution_audit(&self) -> Option<&OperationExecutionAudit> {
+        None
     }
 }
 
