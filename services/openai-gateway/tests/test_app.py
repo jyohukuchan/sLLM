@@ -468,6 +468,7 @@ def test_configured_model_id_is_used_for_validation_and_responses(
     [
         ("sq8", "ullm-qwen3-14b-sq8"),
         ("aq4", "ullm-qwen3.5-9b-aq4"),
+        ("sq8/served-model-fq6.json", "ullm-qwen3-14b-fq6-fixture"),
     ],
 )
 def test_manifest_models_share_the_same_http_application_path(
@@ -477,10 +478,12 @@ def test_manifest_models_share_the_same_http_application_path(
 ) -> None:
     for name in LEGACY_MODEL_ENVIRONMENT:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(
-        "ULLM_SERVED_MODEL_MANIFEST",
-        str(MANIFEST_FIXTURES / fixture / "served-model.json"),
+    manifest = (
+        MANIFEST_FIXTURES / fixture
+        if fixture.endswith(".json")
+        else MANIFEST_FIXTURES / fixture / "served-model.json"
     )
+    monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
     configured = GatewaySettings.from_env()
     fake_worker = FakeWorker()
     app = create_app(

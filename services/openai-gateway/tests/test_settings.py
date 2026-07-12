@@ -146,6 +146,12 @@ def test_invalid_model_contract_environment_is_rejected(
             248_320,
             "6cd84661eb27933b61d960d4f3af3c5ff60c571997d47ab96b0065d8191e0ed6",
         ),
+        (
+            "sq8/served-model-fq6.json",
+            "ullm-qwen3-14b-fq6-fixture",
+            151_936,
+            "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+        ),
     ],
 )
 def test_manifest_mode_builds_gateway_and_worker_contract(
@@ -157,7 +163,11 @@ def test_manifest_mode_builds_gateway_and_worker_contract(
 ) -> None:
     for name in LEGACY_MODEL_ENVIRONMENT:
         monkeypatch.delenv(name, raising=False)
-    manifest = MANIFEST_FIXTURES / fixture / "served-model.json"
+    manifest = (
+        MANIFEST_FIXTURES / fixture
+        if fixture.endswith(".json")
+        else MANIFEST_FIXTURES / fixture / "served-model.json"
+    )
     monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
     monkeypatch.setenv("ULLM_HIP_VISIBLE_DEVICES", "0")
     monkeypatch.setenv("ULLM_REQUIRE_HIP_STALE_KERNEL", "1")

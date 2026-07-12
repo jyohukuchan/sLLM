@@ -1,0 +1,75 @@
+{
+  "schema_version": "ullm.served_model.v1",
+  "public": {
+    "id": "ullm-qwen3-14b-fq6-fixture",
+    "name": "uLLM Qwen3 14B FQ6 Fixture",
+    "description": "Virtual future-quantization fixture for API-layer separation tests.",
+    "upstream_id": "Qwen/Qwen3-14B-FP8",
+    "revision": "fq6-api-separation-fixture-v0.1",
+    "context_length": 4096
+  },
+  "generation": {
+    "max_completion_tokens": 512,
+    "vocab_size": 151936,
+    "eos_token_ids": [
+      151645,
+      151643
+    ],
+    "sampling": {
+      "top_k": 20,
+      "temperature": true,
+      "top_p": true
+    }
+  },
+  "format": {
+    "format_id": "FQ6_0",
+    "implementation_id": "qwen3_future_quant_fixture_v1"
+  },
+  "tokenizer": {
+    "root": "tokenizer",
+    "transformers_version": "5.12.1",
+    "class": "Qwen2Tokenizer",
+    "chat_template_sha256": "96752e04e3d93e082f3492f71af10421e85cf3d2f583eca45248a923277ebabe",
+    "files": {
+      "tokenizer.json": "8cea2357626f5aea9554f9f4dd4a358368c3c24aec64af6ebad85db1a1473290",
+      "tokenizer_config.json": "84d1df1795c69109dc5be0bfb0a41daffd386ec33c99bbf0c452258046acd512"
+    },
+    "template_options": {
+      "add_generation_prompt": true,
+      "enable_thinking": false
+    }
+  },
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary": "worker",
+    "binary_sha256": "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb",
+    "arguments": [
+      "--served-model-manifest",
+      "{manifest}"
+    ],
+    "required_environment": [
+      "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL"
+    ],
+    "identity": {
+      "device": "gfx1201",
+      "execution_profile": "rdna4_w8a8_block_ck"
+    }
+  },
+  "product": {
+    "root": "product",
+    "artifact": {
+      "manifest_path": "artifact/sq_manifest.json",
+      "manifest_sha256": "126e0dd4bbc359705ad5fb1994f69bdfc572a8cb6b2b12da8d497998027dee25",
+      "content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147"
+    },
+    "package": {
+      "manifest_path": "package/manifest.json",
+      "manifest_sha256": "860823f96b87f35c853586fc29d8d6f1b1ab29a77dbe1f9675c1171ad073d74c"
+    }
+  },
+  "promotion": {
+    "source_commit": "fa69c10",
+    "receipt": "promotion.json",
+    "receipt_sha256": "d5d25204c797429a03fd377a3458f0b8c90ec91d3a1db3c98a8269a67e44701c"
+  }
+}

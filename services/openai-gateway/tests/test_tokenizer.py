@@ -40,13 +40,14 @@ def test_qwen35_frozen_tokenizer_profile_loads() -> None:
     assert loaded._tokenizer.__class__.__name__ == "Qwen2Tokenizer"
 
 
-@pytest.mark.parametrize("fixture", ["sq8", "aq4"])
+@pytest.mark.parametrize(
+    "fixture",
+    ["sq8/served-model.json", "aq4/served-model.json", "sq8/served-model-fq6.json"],
+)
 def test_manifest_tokenizer_contract_uses_declared_identity_and_options(
     fixture: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    contract = load_served_model(
-        MANIFEST_FIXTURES / fixture / "served-model.json"
-    ).tokenizer
+    contract = load_served_model(MANIFEST_FIXTURES / fixture).tokenizer
     tokenizer_config = json.loads(
         (contract.root / "tokenizer_config.json").read_text(encoding="utf-8")
     )

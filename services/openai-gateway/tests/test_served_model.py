@@ -24,16 +24,27 @@ FIXTURES = Path(__file__).parent / "fixtures/served-model"
     [
         ("sq8", "ullm-qwen3-14b-sq8", "SQ8_0", 151_936, True),
         ("aq4", "ullm-qwen3.5-9b-aq4", "AQ4_0", 248_320, False),
+        (
+            "sq8/served-model-fq6.json",
+            "ullm-qwen3-14b-fq6-fixture",
+            "FQ6_0",
+            151_936,
+            True,
+        ),
     ],
 )
-def test_sq8_and_aq4_fixtures_use_the_same_loader(
+def test_quantization_format_fixtures_use_the_same_loader(
     name: str,
     model_id: str,
     format_id: str,
     vocab_size: int,
     has_artifact: bool,
 ) -> None:
-    path = FIXTURES / name / "served-model.json"
+    path = (
+        FIXTURES / name
+        if name.endswith(".json")
+        else FIXTURES / name / "served-model.json"
+    )
     loaded = load_served_model(path)
 
     assert loaded.manifest_path == path.resolve()
@@ -64,6 +75,23 @@ def _write(path: Path, value: dict[str, Any]) -> None:
         json.dumps(value, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
+
+
+def test_virtual_format_changes_only_public_and_format_contracts() -> None:
+    existing = _document(FIXTURES / "sq8/served-model.json")
+    virtual = _document(FIXTURES / "sq8/served-model-fq6.json")
+
+    assert existing["public"] != virtual["public"]
+    assert existing["format"] != virtual["format"]
+    for section in (
+        "schema_version",
+        "generation",
+        "tokenizer",
+        "worker",
+        "product",
+        "promotion",
+    ):
+        assert virtual[section] == existing[section]
 
 
 @pytest.mark.parametrize(
