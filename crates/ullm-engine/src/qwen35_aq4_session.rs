@@ -23,9 +23,20 @@ pub const QWEN35_AQ4_ROTARY_DIM: usize = 64;
 pub const QWEN35_AQ4_ROPE_BASE: f32 = 10_000_000.0;
 pub const QWEN35_AQ4_MAX_PREFILL_CHUNK: usize = 128;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen35PrefillExecutionStep {
+    pub layer_index: usize,
+    pub execution_width: usize,
     pub phase: ExecutionPhase,
-    pub records: Vec<[OperationExecutionRecord; 2]>,
+    pub records: [OperationExecutionRecord; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen35FailedPrefillExecutionStep {
+    pub layer_index: usize,
+    pub execution_width: usize,
+    pub phase: ExecutionPhase,
+    pub records: [Option<OperationExecutionRecord>; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +95,10 @@ pub trait Qwen35Aq4SessionModel {
         Vec::new()
     }
 
+    fn take_failed_prefill_executions(&mut self) -> Vec<Qwen35FailedPrefillExecutionStep> {
+        Vec::new()
+    }
+
     fn dispatch_prefill_chunk(
         &mut self,
         token_ids: &[usize],
@@ -94,7 +109,7 @@ pub trait Qwen35Aq4SessionModel {
         sync_each_layer_for_timing: bool,
         label: &str,
     ) -> Result<Vec<Qwen35PrefillExecutionStep>, String> {
-        let mut executions = Vec::with_capacity(token_ids.len());
+        let mut executions = Vec::new();
         for (offset, token_id) in token_ids.iter().copied().enumerate() {
             let position = absolute_start
                 .checked_add(offset)
@@ -104,18 +119,27 @@ pub trait Qwen35Aq4SessionModel {
             } else {
                 ExecutionPhase::CachedPrefixPrefill
             };
-            executions.push(Qwen35PrefillExecutionStep {
-                phase: token_phase,
-                records: self.dispatch_token(
-                    token_id,
-                    rotary_dim,
-                    rope_base,
-                    position,
-                    token_phase,
-                    sync_each_layer_for_timing,
-                    label,
-                )?,
-            });
+            let records = self.dispatch_token(
+                token_id,
+                rotary_dim,
+                rope_base,
+                position,
+                token_phase,
+                sync_each_layer_for_timing,
+                label,
+            )?;
+            executions.reserve(records.len());
+            executions.extend(
+                records
+                    .into_iter()
+                    .enumerate()
+                    .map(|(layer_index, records)| Qwen35PrefillExecutionStep {
+                        layer_index,
+                        execution_width: 1,
+                        phase: token_phase,
+                        records,
+                    }),
+            );
         }
         Ok(executions)
     }
@@ -123,6 +147,8 @@ pub trait Qwen35Aq4SessionModel {
     fn synchronize_after_prefill_chunk(&mut self) -> Result<(), String> {
         Ok(())
     }
+
+    fn mark_prefill_chunk_uncommitted(&mut self) {}
 
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String>;
 
@@ -170,6 +196,62 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
         Ok(step.operation_executions)
     }
 
+    fn dispatch_prefill_chunk(
+        &mut self,
+        token_ids: &[usize],
+        rotary_dim: usize,
+        rope_base: f32,
+        absolute_start: usize,
+        phase: ExecutionPhase,
+        sync_each_layer_for_timing: bool,
+        label: &str,
+    ) -> Result<Vec<Qwen35PrefillExecutionStep>, String> {
+        if token_ids.len() == 1 {
+            let records = Qwen35Aq4ModelRuntime::dispatch_token_for_phase(
+                self,
+                token_ids[0],
+                rotary_dim,
+                rope_base,
+                absolute_start,
+                absolute_start,
+                phase,
+                sync_each_layer_for_timing,
+                label,
+            )?
+            .operation_executions;
+            return Ok(records
+                .into_iter()
+                .enumerate()
+                .map(|(layer_index, records)| Qwen35PrefillExecutionStep {
+                    layer_index,
+                    execution_width: 1,
+                    phase,
+                    records,
+                })
+                .collect());
+        }
+        let step = Qwen35Aq4ModelRuntime::dispatch_prefill_chunk_for_phase(
+            self,
+            token_ids,
+            rotary_dim,
+            rope_base,
+            absolute_start,
+            phase,
+            sync_each_layer_for_timing,
+            label,
+        )?;
+        Ok(step
+            .invocations
+            .into_iter()
+            .map(|invocation| Qwen35PrefillExecutionStep {
+                layer_index: invocation.layer_index,
+                execution_width: invocation.execution_width,
+                phase: invocation.phase,
+                records: invocation.records,
+            })
+            .collect())
+    }
+
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String> {
         let logits = self.top_logits_from_last_layer(1, label)?;
         let top = logits
@@ -185,8 +267,24 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
         self.take_last_partial_operation_executions()
     }
 
+    fn take_failed_prefill_executions(&mut self) -> Vec<Qwen35FailedPrefillExecutionStep> {
+        self.take_last_partial_prefill_invocations()
+            .into_iter()
+            .map(|invocation| Qwen35FailedPrefillExecutionStep {
+                layer_index: invocation.layer_index,
+                execution_width: invocation.execution_width,
+                phase: invocation.phase,
+                records: invocation.records,
+            })
+            .collect()
+    }
+
     fn synchronize_after_prefill_chunk(&mut self) -> Result<(), String> {
         self.synchronize()
+    }
+
+    fn mark_prefill_chunk_uncommitted(&mut self) {
+        Qwen35Aq4ModelRuntime::mark_prefill_chunk_uncommitted(self)
     }
 
     fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
@@ -207,7 +305,7 @@ pub struct Qwen35Aq4PreparedToken {
     nonce: u64,
 }
 
-const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 6] = [
+const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 8] = [
     (
         "linear_attention_qkv_prepare",
         "hip.linear-attention-qkv-prepare-f32.m1",
@@ -229,6 +327,14 @@ const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 6] = [
         "paged_causal_gqa_read",
         "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
     ),
+    (
+        "linear_attention_qkv_prepare",
+        "hip.linear-attention-qkv-prepare-batch-f32.m2-m128",
+    ),
+    (
+        "gated_delta_rule_scan",
+        "hip.linear-attention-recurrent-sequence-f32.m2-m128",
+    ),
 ];
 
 type LayerExecutionContract = [[&'static str; 2]; 3];
@@ -244,7 +350,7 @@ struct OperationAuditAccumulator {
     prefill_tokens_executed: u64,
     prefill_tokens_committed: u64,
     prefill_width_histogram: Vec<u64>,
-    implementation_counts: [u64; 6],
+    implementation_counts: [u64; 8],
     digest: Sha256,
 }
 
@@ -261,7 +367,7 @@ impl OperationAuditAccumulator {
             prefill_tokens_executed: 0,
             prefill_tokens_committed: 0,
             prefill_width_histogram: vec![0; QWEN35_AQ4_MAX_PREFILL_CHUNK + 1],
-            implementation_counts: [0; 6],
+            implementation_counts: [0; 8],
             digest: Sha256::new(),
         }
     }
@@ -344,6 +450,8 @@ impl OperationAuditAccumulator {
         &mut self,
         phase: ExecutionPhase,
         execution_width: usize,
+        contract: &[LayerExecutionContract],
+        invocations: &[Qwen35PrefillExecutionStep],
     ) -> Result<(), String> {
         if !(1..=QWEN35_AQ4_MAX_PREFILL_CHUNK).contains(&execution_width) {
             return Err(format!(
@@ -353,16 +461,128 @@ impl OperationAuditAccumulator {
         if phase == ExecutionPhase::Decode {
             return Err("decode phase cannot be recorded as a prefill chunk".into());
         }
+        if contract.is_empty() || invocations.is_empty() {
+            return Err("prefill execution trace must contain layers and invocations".into());
+        }
+        let mut layer_widths = vec![0_usize; contract.len()];
+        for (invocation_index, invocation) in invocations.iter().enumerate() {
+            if invocation.layer_index >= contract.len() {
+                return Err(format!(
+                    "prefill invocation {invocation_index} layer {} exceeds contract layers {}",
+                    invocation.layer_index,
+                    contract.len()
+                ));
+            }
+            if !(1..=execution_width).contains(&invocation.execution_width) {
+                return Err(format!(
+                    "prefill invocation {invocation_index} width {} is outside 1..={execution_width}",
+                    invocation.execution_width
+                ));
+            }
+            if invocation.phase == ExecutionPhase::Decode {
+                return Err(format!(
+                    "prefill invocation {invocation_index} cannot use decode phase"
+                ));
+            }
+            layer_widths[invocation.layer_index] = layer_widths[invocation.layer_index]
+                .checked_add(invocation.execution_width)
+                .ok_or_else(|| "prefill layer coverage width overflows".to_string())?;
+            let phase_index = execution_phase_index(invocation.phase);
+            for (operation_index, record) in invocation.records.iter().enumerate() {
+                let expected = prefill_expected_implementation(
+                    contract[invocation.layer_index][phase_index][operation_index],
+                    invocation.execution_width,
+                );
+                if record.phase != invocation.phase
+                    || record.status != OperationExecutionStatus::Succeeded
+                    || record.implementation_id != expected
+                {
+                    return Err(format!(
+                        "prefill operation execution trace mismatch at invocation={invocation_index} layer={} operation={operation_index}",
+                        invocation.layer_index
+                    ));
+                }
+                let slot = EXECUTION_IMPLEMENTATIONS
+                    .iter()
+                    .position(|(_, implementation_id)| {
+                        *implementation_id == record.implementation_id
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "prefill operation trace contains unknown implementation {}",
+                            record.implementation_id
+                        )
+                    })?;
+                self.implementation_counts[slot] = self.implementation_counts[slot]
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        "operation execution implementation count overflows".to_string()
+                    })?;
+                self.total_records = self
+                    .total_records
+                    .checked_add(1)
+                    .ok_or_else(|| "operation execution record count overflows".to_string())?;
+                self.token_equivalent_operation_coverage = self
+                    .token_equivalent_operation_coverage
+                    .checked_add(
+                        u64::try_from(invocation.execution_width)
+                            .map_err(|_| "prefill invocation width does not fit u64".to_string())?,
+                    )
+                    .ok_or_else(|| "token-equivalent operation coverage overflows".to_string())?;
+                self.digest.update(b"prefill-invocation-v2\0");
+                self.digest.update((invocation_index as u64).to_le_bytes());
+                self.digest
+                    .update((invocation.layer_index as u64).to_le_bytes());
+                self.digest
+                    .update((invocation.execution_width as u64).to_le_bytes());
+                self.digest.update([phase_index as u8]);
+                self.digest.update([operation_index as u8]);
+                self.digest.update(record.implementation_id.as_bytes());
+                self.digest.update([0]);
+            }
+        }
+        if let Some((layer_index, covered)) = layer_widths
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, covered)| *covered != execution_width)
+        {
+            return Err(format!(
+                "prefill layer coverage mismatch at layer={layer_index}: expected={execution_width} actual={covered}"
+            ));
+        }
+        let width_u64 = u64::try_from(execution_width)
+            .map_err(|_| "prefill execution width does not fit u64".to_string())?;
+        match phase {
+            ExecutionPhase::ColdPrefill => {
+                self.cold_prefill_steps = self
+                    .cold_prefill_steps
+                    .checked_add(1)
+                    .ok_or_else(|| "cold-prefill step count overflows".to_string())?;
+                self.cached_prefix_prefill_steps = self
+                    .cached_prefix_prefill_steps
+                    .checked_add(width_u64 - 1)
+                    .ok_or_else(|| "cached-prefix step count overflows".to_string())?;
+            }
+            ExecutionPhase::CachedPrefixPrefill => {
+                self.cached_prefix_prefill_steps = self
+                    .cached_prefix_prefill_steps
+                    .checked_add(width_u64)
+                    .ok_or_else(|| "cached-prefix step count overflows".to_string())?;
+            }
+            ExecutionPhase::Decode => unreachable!("decode rejected above"),
+        }
+        self.total_steps = self
+            .total_steps
+            .checked_add(width_u64)
+            .ok_or_else(|| "operation execution step count overflows".to_string())?;
         self.prefill_chunks_executed = self
             .prefill_chunks_executed
             .checked_add(1)
             .ok_or_else(|| "prefill chunk count overflows".to_string())?;
         self.prefill_tokens_executed = self
             .prefill_tokens_executed
-            .checked_add(
-                u64::try_from(execution_width)
-                    .map_err(|_| "prefill execution width does not fit u64".to_string())?,
-            )
+            .checked_add(width_u64)
             .ok_or_else(|| "prefill executed-token count overflows".to_string())?;
         self.prefill_width_histogram[execution_width] = self.prefill_width_histogram
             [execution_width]
@@ -471,8 +691,19 @@ impl OperationAuditAccumulator {
                             .ok_or_else(|| {
                                 "unknown successful partial implementation".to_string()
                             })?;
-                        self.implementation_counts[slot] += 1;
-                        self.total_records += 1;
+                        self.implementation_counts[slot] = self.implementation_counts[slot]
+                            .checked_add(1)
+                            .ok_or_else(|| "partial implementation count overflows".to_string())?;
+                        self.total_records =
+                            self.total_records.checked_add(1).ok_or_else(|| {
+                                "partial operation record count overflows".to_string()
+                            })?;
+                        self.token_equivalent_operation_coverage = self
+                            .token_equivalent_operation_coverage
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                "partial token-equivalent coverage overflows".to_string()
+                            })?;
                         self.digest.update([phase_index as u8]);
                         self.digest.update(self.total_steps.to_le_bytes());
                         self.digest.update((layer_index as u64).to_le_bytes());
@@ -488,6 +719,82 @@ impl OperationAuditAccumulator {
                     }
                     OperationExecutionStatus::Started => {
                         return Err("failed operation trace retained an unclassified start".into());
+                    }
+                }
+            }
+        }
+        Ok(failure)
+    }
+
+    fn observe_failed_prefill(
+        &mut self,
+        contract: &[LayerExecutionContract],
+        invocations: &[Qwen35FailedPrefillExecutionStep],
+    ) -> Result<(Option<usize>, Option<usize>), String> {
+        let mut failure = (None, None);
+        for (invocation_index, invocation) in invocations.iter().enumerate() {
+            if invocation.layer_index >= contract.len()
+                || !(1..=QWEN35_AQ4_MAX_PREFILL_CHUNK).contains(&invocation.execution_width)
+                || invocation.phase == ExecutionPhase::Decode
+            {
+                return Err(format!(
+                    "failed prefill invocation {invocation_index} has invalid metadata"
+                ));
+            }
+            let phase_index = execution_phase_index(invocation.phase);
+            for (operation_index, record) in invocation.records.iter().enumerate() {
+                let Some(record) = record else { continue };
+                let expected = prefill_expected_implementation(
+                    contract[invocation.layer_index][phase_index][operation_index],
+                    invocation.execution_width,
+                );
+                if record.phase != invocation.phase || record.implementation_id != expected {
+                    return Err(format!(
+                        "failed prefill invocation {invocation_index} does not match resolved contract"
+                    ));
+                }
+                match record.status {
+                    OperationExecutionStatus::Succeeded => {
+                        let slot = EXECUTION_IMPLEMENTATIONS
+                            .iter()
+                            .position(|(_, id)| *id == record.implementation_id)
+                            .ok_or_else(|| {
+                                "unknown successful partial prefill implementation".to_string()
+                            })?;
+                        self.implementation_counts[slot] = self.implementation_counts[slot]
+                            .checked_add(1)
+                            .ok_or_else(|| "partial implementation count overflows".to_string())?;
+                        self.total_records =
+                            self.total_records.checked_add(1).ok_or_else(|| {
+                                "partial operation record count overflows".to_string()
+                            })?;
+                        self.token_equivalent_operation_coverage = self
+                            .token_equivalent_operation_coverage
+                            .checked_add(u64::try_from(invocation.execution_width).map_err(
+                                |_| "partial prefill width does not fit u64".to_string(),
+                            )?)
+                            .ok_or_else(|| {
+                                "partial token-equivalent coverage overflows".to_string()
+                            })?;
+                        self.digest.update(b"failed-prefill-invocation-v2\0");
+                        self.digest.update((invocation_index as u64).to_le_bytes());
+                        self.digest
+                            .update((invocation.layer_index as u64).to_le_bytes());
+                        self.digest
+                            .update((invocation.execution_width as u64).to_le_bytes());
+                        self.digest
+                            .update([phase_index as u8, operation_index as u8]);
+                        self.digest.update(record.implementation_id.as_bytes());
+                        self.digest.update([0]);
+                    }
+                    OperationExecutionStatus::Failed => {
+                        if failure.0.is_some() {
+                            return Err("failed prefill trace contains multiple failures".into());
+                        }
+                        failure = (Some(invocation.layer_index), Some(operation_index));
+                    }
+                    OperationExecutionStatus::Started => {
+                        return Err("failed prefill trace retained an unclassified start".into());
                     }
                 }
             }
@@ -530,6 +837,24 @@ impl OperationAuditAccumulator {
             failed_layer,
             failed_operation,
         }
+    }
+}
+
+fn prefill_expected_implementation(
+    m1_implementation: &'static str,
+    execution_width: usize,
+) -> &'static str {
+    if execution_width <= 1 {
+        return m1_implementation;
+    }
+    match m1_implementation {
+        "hip.linear-attention-qkv-prepare-f32.m1" => {
+            "hip.linear-attention-qkv-prepare-batch-f32.m2-m128"
+        }
+        "hip.linear-attention-recurrent-f32.m1" => {
+            "hip.linear-attention-recurrent-sequence-f32.m2-m128"
+        }
+        _ => m1_implementation,
     }
 }
 
@@ -707,11 +1032,15 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         ) {
             Ok(steps) => steps,
             Err(error) => {
+                let partial_prefill = self.model.take_failed_prefill_executions();
                 let partial_records = self.model.take_failed_operation_executions();
                 let failure = match (
                     self.active_operation_audit.as_mut(),
                     self.execution_contract.as_deref(),
                 ) {
+                    (Some(audit), Some(contract)) if !partial_prefill.is_empty() => audit
+                        .observe_failed_prefill(contract, &partial_prefill)
+                        .unwrap_or((None, None)),
                     (Some(audit), Some(contract)) => audit
                         .observe_failed_step(phase, contract, &partial_records)
                         .unwrap_or((None, None)),
@@ -733,47 +1062,57 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             }
         };
         if let Err(error) = self.model.synchronize_after_prefill_chunk() {
+            self.model.mark_prefill_chunk_uncommitted();
+            self.last_terminal_operation_audit =
+                self.active_operation_audit.as_ref().map(|audit| {
+                    audit.partial(
+                        self.execution_contract.as_ref().map_or(0, Vec::len),
+                        "synchronization_failed",
+                        Some(phase),
+                        None,
+                        None,
+                    )
+                });
             return self.fail(format!(
                 "Qwen3.5 AQ4 prefill chunk synchronization failed: {error}"
-            ));
-        }
-        if execution_steps.len() != execution_width {
-            return self.fail(format!(
-                "Qwen3.5 AQ4 prefill chunk execution coverage mismatch: width={execution_width} steps={}",
-                execution_steps.len()
             ));
         }
         if let (Some(contract), Some(audit)) = (
             self.execution_contract.as_deref(),
             self.active_operation_audit.as_mut(),
         ) {
-            for step in &execution_steps {
-                if let Err(error) = audit.observe(step.phase, contract, &step.records) {
-                    return self.fail(format!(
-                        "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
-                    ));
-                }
-            }
-            if let Err(error) = audit.observe_prefill_chunk(phase, execution_width) {
+            if let Err(error) =
+                audit.observe_prefill_chunk(phase, execution_width, contract, &execution_steps)
+            {
+                self.model.mark_prefill_chunk_uncommitted();
                 return self.fail(format!(
-                    "Qwen3.5 AQ4 prefill chunk width audit failed: {error}"
+                    "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
                 ));
             }
         }
         if cancel.is_cancelled() {
+            self.model.mark_prefill_chunk_uncommitted();
             let active = self.active.as_mut().expect("active request checked above");
             active.terminal_outcome = Some(ReleaseOutcome::Cancelled);
             self.status = Qwen35Aq4SessionStatus::Terminal;
             return Ok(SessionAdvance::CancellationObserved);
         }
-        let active = self.active.as_mut().expect("active request checked above");
-        active.prompt_tokens_processed = active
+        let next_prompt_tokens_processed = self
+            .active
+            .as_ref()
+            .expect("active request checked above")
             .prompt_tokens_processed
             .checked_add(execution_width)
             .ok_or_else(|| "Qwen3.5 AQ4 prefill progress overflows".to_string())?;
         if let Some(audit) = self.active_operation_audit.as_mut() {
-            audit.commit_prefill_chunk(execution_width)?;
+            if let Err(error) = audit.commit_prefill_chunk(execution_width) {
+                return self.fail(format!(
+                    "Qwen3.5 AQ4 prefill chunk commit audit failed: {error}"
+                ));
+            }
         }
+        let active = self.active.as_mut().expect("active request checked above");
+        active.prompt_tokens_processed = next_prompt_tokens_processed;
         Ok(SessionAdvance::PromptProgress {
             prompt_tokens_processed: active.prompt_tokens_processed,
             cache_len: active.prompt_tokens_processed,
@@ -1233,6 +1572,24 @@ mod tests {
             .collect()
     }
 
+    fn native_hybrid_contract(execution_width: usize) -> Vec<LayerExecutionContract> {
+        let mut contract = audited_contract();
+        if execution_width > 1 {
+            for (layer_index, phases) in contract.iter_mut().enumerate() {
+                if layer_index % 4 == 3 {
+                    continue;
+                }
+                for phase in [0, 1] {
+                    phases[phase] = [
+                        "hip.linear-attention-qkv-prepare-batch-f32.m2-m128",
+                        "hip.linear-attention-recurrent-sequence-f32.m2-m128",
+                    ];
+                }
+            }
+        }
+        contract
+    }
+
     fn audited_records(
         contract: &[LayerExecutionContract],
         phase: ExecutionPhase,
@@ -1275,22 +1632,48 @@ mod tests {
             .collect()
     }
 
+    fn fallback_prefill_invocations(
+        contract: &[LayerExecutionContract],
+        execution_width: usize,
+    ) -> Vec<Qwen35PrefillExecutionStep> {
+        (0..execution_width)
+            .flat_map(|offset| {
+                let phase = if offset == 0 {
+                    ExecutionPhase::ColdPrefill
+                } else {
+                    ExecutionPhase::CachedPrefixPrefill
+                };
+                audited_records(contract, phase)
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(layer_index, records)| Qwen35PrefillExecutionStep {
+                        layer_index,
+                        execution_width: 1,
+                        phase,
+                        records,
+                    })
+            })
+            .collect()
+    }
+
     #[test]
     fn fixed_operation_audit_covers_32_layer_cold_cached_and_decode_steps() {
         let contract = audited_contract();
         let mut audit = OperationAuditAccumulator::new();
-        for phase in [
-            ExecutionPhase::ColdPrefill,
-            ExecutionPhase::CachedPrefixPrefill,
-            ExecutionPhase::CachedPrefixPrefill,
-            ExecutionPhase::Decode,
-        ] {
-            audit
-                .observe(phase, &contract, &audited_records(&contract, phase))
-                .unwrap();
-        }
         audit
-            .observe_prefill_chunk(ExecutionPhase::ColdPrefill, 3)
+            .observe_prefill_chunk(
+                ExecutionPhase::ColdPrefill,
+                3,
+                &contract,
+                &fallback_prefill_invocations(&contract, 3),
+            )
+            .unwrap();
+        audit
+            .observe(
+                ExecutionPhase::Decode,
+                &contract,
+                &audited_records(&contract, ExecutionPhase::Decode),
+            )
             .unwrap();
         audit.commit_prefill_chunk(3).unwrap();
         let finished = audit.finish(32, 1, 2, 1, "length").unwrap();
@@ -1309,22 +1692,26 @@ mod tests {
         assert_eq!(finished.implementation_counts[3].count, 32);
         assert_eq!(finished.implementation_counts[4].count, 0);
         assert_eq!(finished.implementation_counts[5].count, 32);
+        assert_eq!(finished.implementation_counts[6].count, 0);
+        assert_eq!(finished.implementation_counts[7].count, 0);
         assert_ne!(finished.deterministic_digest_sha256, [0; 32]);
         assert!(finished.coverage_complete);
 
         let mut second_request = OperationAuditAccumulator::new();
-        for phase in [
-            ExecutionPhase::ColdPrefill,
-            ExecutionPhase::CachedPrefixPrefill,
-            ExecutionPhase::CachedPrefixPrefill,
-            ExecutionPhase::Decode,
-        ] {
-            second_request
-                .observe(phase, &contract, &audited_records(&contract, phase))
-                .unwrap();
-        }
         second_request
-            .observe_prefill_chunk(ExecutionPhase::ColdPrefill, 3)
+            .observe_prefill_chunk(
+                ExecutionPhase::ColdPrefill,
+                3,
+                &contract,
+                &fallback_prefill_invocations(&contract, 3),
+            )
+            .unwrap();
+        second_request
+            .observe(
+                ExecutionPhase::Decode,
+                &contract,
+                &audited_records(&contract, ExecutionPhase::Decode),
+            )
             .unwrap();
         second_request.commit_prefill_chunk(3).unwrap();
         assert_eq!(
@@ -1355,6 +1742,62 @@ mod tests {
         assert!(build_execution_contract(vec![Vec::new(); 32]).is_err());
     }
 
+    #[test]
+    fn failed_native_prefill_retains_physical_width_and_layer_location() {
+        let contract = audited_contract();
+        let mut audit = OperationAuditAccumulator::new();
+        let failure = audit
+            .observe_failed_prefill(
+                &contract,
+                &[
+                    Qwen35FailedPrefillExecutionStep {
+                        layer_index: 0,
+                        execution_width: 128,
+                        phase: ExecutionPhase::ColdPrefill,
+                        records: [
+                            Some(OperationExecutionRecord {
+                                implementation_id:
+                                    "hip.linear-attention-qkv-prepare-batch-f32.m2-m128",
+                                phase: ExecutionPhase::ColdPrefill,
+                                status: OperationExecutionStatus::Succeeded,
+                            }),
+                            Some(OperationExecutionRecord {
+                                implementation_id:
+                                    "hip.linear-attention-recurrent-sequence-f32.m2-m128",
+                                phase: ExecutionPhase::ColdPrefill,
+                                status: OperationExecutionStatus::Succeeded,
+                            }),
+                        ],
+                    },
+                    Qwen35FailedPrefillExecutionStep {
+                        layer_index: 1,
+                        execution_width: 128,
+                        phase: ExecutionPhase::ColdPrefill,
+                        records: [
+                            Some(OperationExecutionRecord {
+                                implementation_id:
+                                    "hip.linear-attention-qkv-prepare-batch-f32.m2-m128",
+                                phase: ExecutionPhase::ColdPrefill,
+                                status: OperationExecutionStatus::Succeeded,
+                            }),
+                            Some(OperationExecutionRecord {
+                                implementation_id:
+                                    "hip.linear-attention-recurrent-sequence-f32.m2-m128",
+                                phase: ExecutionPhase::ColdPrefill,
+                                status: OperationExecutionStatus::Failed,
+                            }),
+                        ],
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(failure, (Some(1), Some(1)));
+        assert_eq!(audit.total_records, 3);
+        assert_eq!(audit.token_equivalent_operation_coverage, 384);
+        assert_eq!(audit.implementation_counts[6], 2);
+        assert_eq!(audit.implementation_counts[7], 1);
+    }
+
     #[derive(Default)]
     struct ScriptedModel {
         context: usize,
@@ -1370,6 +1813,7 @@ mod tests {
         fail_dispatch_phase: Option<ExecutionPhase>,
         failed_operation: Option<(usize, usize)>,
         cancel_on_prefill_sync: Option<CancellationToken>,
+        native_hybrid_prefill: bool,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -1402,6 +1846,74 @@ mod tests {
             } else {
                 Ok(Vec::new())
             }
+        }
+
+        fn dispatch_prefill_chunk(
+            &mut self,
+            token_ids: &[usize],
+            rotary_dim: usize,
+            rope_base: f32,
+            absolute_start: usize,
+            phase: ExecutionPhase,
+            sync_each_layer_for_timing: bool,
+            label: &str,
+        ) -> Result<Vec<Qwen35PrefillExecutionStep>, String> {
+            if !self.native_hybrid_prefill {
+                let mut invocations = Vec::new();
+                for (offset, token_id) in token_ids.iter().copied().enumerate() {
+                    let position = absolute_start + offset;
+                    let token_phase = if position == 0 {
+                        ExecutionPhase::ColdPrefill
+                    } else {
+                        ExecutionPhase::CachedPrefixPrefill
+                    };
+                    let records = self.dispatch_token(
+                        token_id,
+                        rotary_dim,
+                        rope_base,
+                        position,
+                        token_phase,
+                        sync_each_layer_for_timing,
+                        label,
+                    )?;
+                    invocations.extend(records.into_iter().enumerate().map(
+                        |(layer_index, records)| Qwen35PrefillExecutionStep {
+                            layer_index,
+                            execution_width: 1,
+                            phase: token_phase,
+                            records,
+                        },
+                    ));
+                }
+                return Ok(invocations);
+            }
+            let contract = native_hybrid_contract(token_ids.len());
+            let mut invocations = Vec::with_capacity(24 + 8 * token_ids.len());
+            for layer_index in 0..contract.len() {
+                if layer_index % 4 != 3 {
+                    invocations.push(Qwen35PrefillExecutionStep {
+                        layer_index,
+                        execution_width: token_ids.len(),
+                        phase,
+                        records: audited_records(&contract, phase)[layer_index],
+                    });
+                    continue;
+                }
+                for offset in 0..token_ids.len() {
+                    let token_phase = if absolute_start + offset == 0 {
+                        ExecutionPhase::ColdPrefill
+                    } else {
+                        ExecutionPhase::CachedPrefixPrefill
+                    };
+                    invocations.push(Qwen35PrefillExecutionStep {
+                        layer_index,
+                        execution_width: 1,
+                        phase: token_phase,
+                        records: audited_records(&contract, token_phase)[layer_index],
+                    });
+                }
+            }
+            Ok(invocations)
         }
 
         fn top_token_from_last_layer(&mut self, _: &str) -> Result<usize, String> {
@@ -1587,6 +2099,79 @@ mod tests {
     }
 
     #[test]
+    fn native_hybrid_prefill_audit_counts_physical_and_token_equivalent_coverage() {
+        for execution_width in [1, 2, 128] {
+            let mut scripted = model(&[2]);
+            scripted.context = 256;
+            scripted.audited = true;
+            scripted.native_hybrid_prefill = true;
+            let mut session = Qwen35Aq4InferenceSession::from_model(
+                scripted,
+                Qwen35Aq4SessionConfig::greedy(8, vec![2]),
+            )
+            .unwrap();
+            session.execution_contract = Some(native_hybrid_contract(execution_width));
+            session
+                .start_request(
+                    request("native-hybrid", &vec![4; execution_width], 1),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                session.prepare_advance().unwrap(),
+                SessionAdvance::PromptProgress {
+                    prompt_tokens_processed: execution_width,
+                    cache_len: execution_width,
+                    execution_width,
+                }
+            );
+            let token = next_prepared(&mut session);
+            session.publish_prepared(token, |_| Ok(())).unwrap();
+            session.finish_and_reset().unwrap();
+
+            let audit = session.last_terminal_operation_audit().unwrap();
+            assert_eq!(audit.cold_prefill_steps, 1);
+            assert_eq!(
+                audit.cached_prefix_prefill_steps,
+                u64::try_from(execution_width - 1).unwrap()
+            );
+            assert_eq!(audit.prefill_chunks_executed, 1);
+            assert_eq!(
+                audit.physical_operation_invocations,
+                u64::try_from(48 + 16 * execution_width).unwrap()
+            );
+            assert_eq!(
+                audit.token_equivalent_operation_coverage,
+                u64::try_from(64 * execution_width).unwrap()
+            );
+            let expected_m1_linear = u64::from(execution_width == 1) * 24;
+            let expected_native_linear = u64::from(execution_width > 1) * 24;
+            assert_eq!(audit.implementation_counts[0].count, expected_m1_linear);
+            assert_eq!(audit.implementation_counts[1].count, expected_m1_linear);
+            assert_eq!(
+                audit.implementation_counts[3].count,
+                u64::try_from(8 * execution_width).unwrap()
+            );
+            assert_eq!(
+                audit.implementation_counts[5].count,
+                u64::try_from(8 * execution_width).unwrap()
+            );
+            assert_eq!(audit.implementation_counts[6].count, expected_native_linear);
+            assert_eq!(audit.implementation_counts[7].count, expected_native_linear);
+            assert_eq!(
+                audit
+                    .implementation_counts
+                    .iter()
+                    .map(|entry| entry.count)
+                    .sum::<u64>(),
+                audit.physical_operation_invocations
+            );
+            assert_eq!(audit.prefill_width_histogram[execution_width], 1);
+            assert!(audit.coverage_complete);
+        }
+    }
+
+    #[test]
     fn eos_commits_stop_and_reset_summary() {
         let mut session = session(&[2]);
         session
@@ -1748,6 +2333,8 @@ mod tests {
     fn cancellation_observed_after_chunk_sync_does_not_commit_prompt_progress() {
         let mut session = audited_session(&[7]);
         let cancel = CancellationToken::new();
+        session.model.native_hybrid_prefill = true;
+        session.execution_contract = Some(native_hybrid_contract(2));
         session.model.cancel_on_prefill_sync = Some(cancel.clone());
         session
             .start_request(request("sync-cancel", &[4, 5], 2), cancel)
@@ -1765,7 +2352,7 @@ mod tests {
         assert_eq!(audit.prefill_tokens_executed, 2);
         assert_eq!(audit.prefill_tokens_committed, 0);
         assert_eq!(audit.prefill_width_histogram[2], 1);
-        assert_eq!(audit.physical_operation_invocations, 128);
+        assert_eq!(audit.physical_operation_invocations, 48 + 16 * 2);
         assert_eq!(audit.token_equivalent_operation_coverage, 128);
         assert!(!audit.coverage_complete);
     }

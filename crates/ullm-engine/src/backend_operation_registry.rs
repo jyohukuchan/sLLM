@@ -24,6 +24,8 @@ enum ProbeFaultStage {
     PagedKvWrite = 6,
     FusedWriter = 7,
     Synchronize = 8,
+    Aq4MatvecBatch = 9,
+    QkvPrepareBatch = 10,
 }
 
 #[cfg(test)]
@@ -50,8 +52,8 @@ fn probe_cache_key(capabilities: &DeviceCapabilities) -> ProbeCacheKey {
 }
 
 #[cfg(test)]
-static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 9] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 9];
+static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 11] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 11];
 
 #[cfg(test)]
 std::thread_local! {
@@ -100,8 +102,12 @@ pub enum OperationKind {
     FusedQkNormRopePagedKvWrite,
     /// Convolution-history update and Q/K/V preparation before the recurrent scan.
     LinearAttentionQkvPrepare,
+    /// Sequence-width convolution-history update and Q/K/V preparation for one request.
+    LinearAttentionQkvPrepareBatch,
     /// Recurrent-state update only; convolution/QKV preparation is a separate operation.
     GatedDeltaRuleScan,
+    /// Sequence-width recurrent-state scan for one request.
+    GatedDeltaRuleSequence,
     /// Read-only paged causal GQA over an already-written KV cache.
     PagedCausalGqaRead,
 }
@@ -187,6 +193,8 @@ pub enum RuntimeFeature {
     HipFusedQkNormRopePagedKvWrite = 2,
     HipLinearAttentionQkvPrepare = 3,
     HipPagedKvWrite = 4,
+    HipAq4MatvecBatch = 5,
+    HipLinearAttentionQkvPrepareBatch = 6,
 }
 
 /// Canonical production guard for a probed runtime feature.
@@ -201,6 +209,10 @@ pub const fn runtime_feature_environment(feature: RuntimeFeature) -> &'static st
         }
         RuntimeFeature::HipLinearAttentionQkvPrepare => "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
         RuntimeFeature::HipPagedKvWrite => "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+        RuntimeFeature::HipAq4MatvecBatch => "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+        RuntimeFeature::HipLinearAttentionQkvPrepareBatch => {
+            "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL"
+        }
     }
 }
 
@@ -230,6 +242,8 @@ impl DeviceCapabilities {
                 RuntimeFeature::HipFusedQkNormRopePagedKvWrite,
                 RuntimeFeature::HipLinearAttentionQkvPrepare,
                 RuntimeFeature::HipPagedKvWrite,
+                RuntimeFeature::HipAq4MatvecBatch,
+                RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
             ] {
                 if std::env::var_os(runtime_feature_environment(feature)).as_deref()
                     == Some(std::ffi::OsStr::new("1"))
@@ -444,6 +458,74 @@ impl DeviceCapabilities {
                 probe_fault_checkpoint(7, "fused-writer")?;
                 proven = proven.with(RuntimeFeature::HipFusedQkNormRopePagedKvWrite);
             }
+        }
+        if policy.contains(RuntimeFeature::HipAq4MatvecBatch) {
+            let mut index = context.alloc_buffer(3)?;
+            index.copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(stream))?;
+            let mut scale = context.alloc_buffer(3)?;
+            scale.copy_from_host(0, &[0_u8, 1, 0], Some(stream))?;
+            let mut codebook = context.alloc_buffer(16 * 4)?;
+            let codebook_bytes = (0..16_u32)
+                .flat_map(|value| (value as f32).to_le_bytes())
+                .collect::<Vec<_>>();
+            codebook.copy_from_host(0, &codebook_bytes, Some(stream))?;
+            let mut scale_values = context.alloc_buffer(2 * 4)?;
+            let scale_value_bytes = [0.5_f32, 2.0_f32]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>();
+            scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
+            let input = zeros(context, stream, 2 * 3)?;
+            let mut output = zeros(context, stream, 2 * 2)?;
+            ullm_runtime_sys::aq4_matvec_batch_f32(
+                &index,
+                &scale,
+                &codebook,
+                &scale_values,
+                &input,
+                None,
+                2,
+                2,
+                1.0,
+                0,
+                2,
+                3,
+                2,
+                &mut output,
+                Some(stream),
+            )?;
+            probe_fault_checkpoint(9, "aq4-matvec-batch")?;
+            proven = proven.with(RuntimeFeature::HipAq4MatvecBatch);
+        }
+        if policy.contains(RuntimeFeature::HipLinearAttentionQkvPrepareBatch) {
+            const SEQUENCE_LEN: usize = 2;
+            let qkv = zeros(context, stream, SEQUENCE_LEN * 8_192)?;
+            let conv_weight = zeros(context, stream, 8_192 * 4)?;
+            let mut history = zeros(context, stream, 8_192 * 4)?;
+            let mut conv_output = zeros(context, stream, SEQUENCE_LEN * 8_192)?;
+            let mut q = zeros(context, stream, SEQUENCE_LEN * 16 * 128)?;
+            let mut k = zeros(context, stream, SEQUENCE_LEN * 16 * 128)?;
+            let mut v = zeros(context, stream, SEQUENCE_LEN * 32 * 128)?;
+            ullm_runtime_sys::linear_attn_qkv_prepare_batch_f32(
+                &qkv,
+                &conv_weight,
+                &mut history,
+                16,
+                32,
+                128,
+                128,
+                4,
+                SEQUENCE_LEN,
+                1.0 / 128.0_f32.sqrt(),
+                true,
+                &mut conv_output,
+                &mut q,
+                &mut k,
+                &mut v,
+                Some(stream),
+            )?;
+            probe_fault_checkpoint(10, "qkv-prepare-batch")?;
+            proven = proven.with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch);
         }
         probe_fault_checkpoint(8, "synchronize")?;
         stream.synchronize().map_err(|error| {
@@ -680,7 +762,9 @@ pub enum ExecutableOperation {
     HipPagedKvWriteF32,
     HipFusedQkNormRopePagedKvWriteF32,
     HipLinearAttentionQkvPrepareF32,
+    HipLinearAttentionQkvPrepareBatchF32,
     HipLinearAttentionRecurrentF32,
+    HipLinearAttentionRecurrentSequenceF32,
     HipPagedDecodeAttentionF32,
     HipPagedDecodeAttentionSigmoidGateF32,
 }
@@ -722,7 +806,9 @@ pub struct ImplementationDescriptor {
     pub weight_format: Option<NumericalFormat>,
     pub state_format: NumericalFormat,
     pub geometry: OperationGeometry,
+    pub minimum_batch_width: u64,
     pub maximum_batch_width: u64,
+    pub minimum_chunk_width: u64,
     pub maximum_chunk_width: u64,
     pub backend: OperationBackend,
     pub architecture: Option<&'static str>,
@@ -1080,7 +1166,7 @@ pub struct OperationExecutionAudit {
     pub prefill_tokens_committed: u64,
     /// Index is the execution width. Index zero is reserved and must remain zero.
     pub prefill_width_histogram: Vec<u64>,
-    pub implementation_counts: [OperationExecutionCount; 6],
+    pub implementation_counts: [OperationExecutionCount; 8],
     #[serde(serialize_with = "serialize_sha256_hex")]
     pub deterministic_digest_sha256: [u8; 32],
     pub coverage_complete: bool,
@@ -1355,6 +1441,70 @@ impl StartedOperationPlan<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn execute_linear_attention_qkv_prepare_batch_f32(
+        self,
+        qkv: &ullm_runtime_sys::RuntimeBuffer,
+        convolution_weight: &ullm_runtime_sys::RuntimeBuffer,
+        convolution_history: &mut ullm_runtime_sys::RuntimeBuffer,
+        qkv_convolution_output: &mut ullm_runtime_sys::RuntimeBuffer,
+        q: &mut ullm_runtime_sys::RuntimeBuffer,
+        k: &mut ullm_runtime_sys::RuntimeBuffer,
+        v: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let plan = self.plan();
+        let OperationGeometry::LinearAttentionQkvPrepare {
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            query_scale,
+            qk_l2_norm,
+        } = plan.geometry
+        else {
+            return Err("resolved batch QKV prepare operation has incompatible geometry".into());
+        };
+        if plan.kind != OperationKind::LinearAttentionQkvPrepareBatch
+            || plan.executable != ExecutableOperation::HipLinearAttentionQkvPrepareBatchF32
+            || plan.batch_width != 1
+            || !(2..=128).contains(&plan.chunk_width)
+        {
+            return Err("resolved batch QKV prepare operation has incompatible binding".into());
+        }
+        let sequence_len = usize::try_from(plan.chunk_width)
+            .map_err(|_| "resolved batch QKV prepare width exceeds usize".to_string())?;
+        let q_scale = match query_scale {
+            QueryScale::InverseSqrtKeyDim => 1.0_f32 / (key_dim as f32).sqrt(),
+            QueryScale::ExactF32Bits(bits) => f32::from_bits(bits),
+        };
+        if !q_scale.is_finite() || q_scale <= 0.0 {
+            return Err("resolved batch QKV prepare query scale is invalid".into());
+        }
+        #[cfg(test)]
+        PREPARE_SYS_CALL_COUNT.with(|count| count.set(count.get() + 1));
+        ullm_runtime_sys::linear_attn_qkv_prepare_batch_f32(
+            qkv,
+            convolution_weight,
+            convolution_history,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            sequence_len,
+            q_scale,
+            qk_l2_norm,
+            qkv_convolution_output,
+            q,
+            k,
+            v,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_linear_attention_recurrent_f32(
         self,
         q: &ullm_runtime_sys::RuntimeBuffer,
@@ -1397,6 +1547,60 @@ impl StartedOperationPlan<'_> {
             key_heads,
             value_heads,
             1,
+            key_dim,
+            value_dim,
+            state,
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_linear_attention_recurrent_sequence_f32(
+        self,
+        q: &ullm_runtime_sys::RuntimeBuffer,
+        k: &ullm_runtime_sys::RuntimeBuffer,
+        v: &ullm_runtime_sys::RuntimeBuffer,
+        gate: &ullm_runtime_sys::RuntimeBuffer,
+        beta: &ullm_runtime_sys::RuntimeBuffer,
+        state: &mut ullm_runtime_sys::RuntimeBuffer,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let plan = self.plan();
+        let OperationGeometry::GatedDeltaRule {
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+        } = plan.geometry
+        else {
+            return Err("resolved recurrent sequence operation has incompatible geometry".into());
+        };
+        if plan.kind != OperationKind::GatedDeltaRuleSequence
+            || plan.executable != ExecutableOperation::HipLinearAttentionRecurrentSequenceF32
+            || plan.batch_width != 1
+            || !(2..=128).contains(&plan.chunk_width)
+        {
+            return Err(format!(
+                "resolved backend operation {} is not a linear attention recurrent sequence",
+                plan.implementation_id
+            ));
+        }
+        let sequence_len = usize::try_from(plan.chunk_width)
+            .map_err(|_| "resolved recurrent sequence width exceeds usize".to_string())?;
+        #[cfg(test)]
+        RECURRENT_SYS_CALL_COUNT.with(|count| count.set(count.get() + 1));
+        ullm_runtime_sys::linear_attn_recurrent_f32(
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            key_heads,
+            value_heads,
+            sequence_len,
             key_dim,
             value_dim,
             state,
@@ -1666,9 +1870,13 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
             ));
         }
     }
-    if descriptor.maximum_batch_width == 0 || descriptor.maximum_chunk_width == 0 {
+    if descriptor.minimum_batch_width == 0
+        || descriptor.minimum_chunk_width == 0
+        || descriptor.minimum_batch_width > descriptor.maximum_batch_width
+        || descriptor.minimum_chunk_width > descriptor.maximum_chunk_width
+    {
         return Err(format!(
-            "backend operation descriptor {} has a zero width bound",
+            "backend operation descriptor {} has an invalid width bound",
             descriptor.id
         ));
     }
@@ -1690,9 +1898,19 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
             ExecutableOperation::HipLinearAttentionQkvPrepareF32,
         ) => true,
         (
+            OperationKind::LinearAttentionQkvPrepareBatch,
+            OperationGeometry::LinearAttentionQkvPrepare { .. },
+            ExecutableOperation::HipLinearAttentionQkvPrepareBatchF32,
+        ) => true,
+        (
             OperationKind::GatedDeltaRuleScan,
             OperationGeometry::GatedDeltaRule { .. },
             ExecutableOperation::HipLinearAttentionRecurrentF32,
+        ) => true,
+        (
+            OperationKind::GatedDeltaRuleSequence,
+            OperationGeometry::GatedDeltaRule { .. },
+            ExecutableOperation::HipLinearAttentionRecurrentSequenceF32,
         ) => true,
         (
             OperationKind::PagedCausalGqaRead,
@@ -1741,11 +1959,12 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
             descriptor.state_layout == OperationStateLayout::PagedKvBlocks
                 && effect.writes.contains(StateResource::PagedKvCache)
         }
-        OperationKind::LinearAttentionQkvPrepare => {
+        OperationKind::LinearAttentionQkvPrepare
+        | OperationKind::LinearAttentionQkvPrepareBatch => {
             descriptor.state_layout == OperationStateLayout::ConvolutionHistory
                 && effect.writes.contains(StateResource::ConvolutionHistory)
         }
-        OperationKind::GatedDeltaRuleScan => {
+        OperationKind::GatedDeltaRuleScan | OperationKind::GatedDeltaRuleSequence => {
             descriptor.state_layout == OperationStateLayout::RecurrentMatrix
                 && effect.writes.contains(StateResource::RecurrentState)
         }
@@ -1829,7 +2048,9 @@ fn descriptor_matches(descriptor: &ImplementationDescriptor, request: &Operation
         && descriptor.weight_format == request.weight_format
         && descriptor.state_format == request.state_format
         && descriptor.geometry == request.geometry
+        && request.batch_width >= descriptor.minimum_batch_width
         && request.batch_width <= descriptor.maximum_batch_width
+        && request.chunk_width >= descriptor.minimum_chunk_width
         && request.chunk_width <= descriptor.maximum_chunk_width
         && descriptor.backend == request.device.backend
         && descriptor.minimum_abi_version <= request.device.abi_version
@@ -1863,6 +2084,10 @@ fn validate_fallback_compatibility(
         || primary.geometry != fallback.geometry
         || primary.state_effect != fallback.state_effect
         || primary.executable != fallback.executable
+        || primary.minimum_batch_width != fallback.minimum_batch_width
+        || primary.maximum_batch_width != fallback.maximum_batch_width
+        || primary.minimum_chunk_width != fallback.minimum_chunk_width
+        || primary.maximum_chunk_width != fallback.maximum_chunk_width
     {
         return Err(format!(
             "backend operation fallback {} is incompatible with primary {}",
@@ -1900,7 +2125,9 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
                 query_scale: QueryScale::InverseSqrtKeyDim,
                 qk_l2_norm: true,
             },
+            minimum_batch_width: 1,
             maximum_batch_width: 1,
+            minimum_chunk_width: 1,
             maximum_chunk_width: 1,
             backend: OperationBackend::Hip,
             architecture: Some("gfx1201"),
@@ -1950,7 +2177,9 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
                 key_dim: 128,
                 value_dim: 128,
             },
+            minimum_batch_width: 1,
             maximum_batch_width: 1,
+            minimum_chunk_width: 1,
             maximum_chunk_width: 1,
             backend: OperationBackend::Hip,
             architecture: Some("gfx1201"),
@@ -1982,6 +2211,113 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
             runtime_build: env!("CARGO_PKG_VERSION"),
         },
         ImplementationDescriptor {
+            id: "hip.linear-attention-qkv-prepare-batch-f32.m2-m128",
+            semantic_version: "1.0.0",
+            kind: OperationKind::LinearAttentionQkvPrepareBatch,
+            phases: PhaseSet::ALL_CURRENT,
+            input_layout: TensorLayout::TokensHidden,
+            output_layout: TensorLayout::TokensHidden,
+            weight_layout: None,
+            state_layout: OperationStateLayout::ConvolutionHistory,
+            activation_format: NumericalFormat::F32,
+            value_format: NumericalFormat::F32,
+            weight_format: None,
+            state_format: NumericalFormat::F32,
+            geometry: OperationGeometry::LinearAttentionQkvPrepare {
+                key_heads: 16,
+                value_heads: 32,
+                key_dim: 128,
+                value_dim: 128,
+                kernel_size: 4,
+                query_scale: QueryScale::InverseSqrtKeyDim,
+                qk_l2_norm: true,
+            },
+            minimum_batch_width: 1,
+            maximum_batch_width: 1,
+            minimum_chunk_width: 2,
+            maximum_chunk_width: 128,
+            backend: OperationBackend::Hip,
+            architecture: Some("gfx1201"),
+            device_name: None,
+            minimum_abi_version: 1,
+            required_features: RuntimeFeatureSet::from_feature(
+                RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
+            ),
+            workspace: WorkspaceFormula {
+                fixed_persistent_bytes: 131_072,
+                fixed_temporary_bytes: 0,
+                temporary_bytes_per_batch_item: 0,
+                temporary_bytes_per_chunk_token: 98_304,
+                maximum_total_bytes: 12_713_984,
+            },
+            state_effect: StateEffect {
+                reads: convolution_history,
+                writes: convolution_history,
+                prepares: StateResourceSet::EMPTY,
+                commits: StateResourceSet::EMPTY,
+                update_mode: StateUpdateMode::InPlace,
+                externally_visible_before_commit: true,
+            },
+            promotion: PromotionStatus::Production,
+            priority: 100,
+            fallback_id: None,
+            deterministic: true,
+            executable: ExecutableOperation::HipLinearAttentionQkvPrepareBatchF32,
+            runtime_build: env!("CARGO_PKG_VERSION"),
+        },
+        ImplementationDescriptor {
+            id: "hip.linear-attention-recurrent-sequence-f32.m2-m128",
+            semantic_version: "1.0.0",
+            kind: OperationKind::GatedDeltaRuleSequence,
+            phases: PhaseSet::ALL_CURRENT,
+            input_layout: TensorLayout::TokensHidden,
+            output_layout: TensorLayout::TokensHidden,
+            weight_layout: None,
+            state_layout: OperationStateLayout::RecurrentMatrix,
+            activation_format: NumericalFormat::F32,
+            value_format: NumericalFormat::F32,
+            weight_format: None,
+            state_format: NumericalFormat::F32,
+            geometry: OperationGeometry::GatedDeltaRule {
+                key_heads: 16,
+                value_heads: 32,
+                key_dim: 128,
+                value_dim: 128,
+            },
+            minimum_batch_width: 1,
+            maximum_batch_width: 1,
+            minimum_chunk_width: 2,
+            maximum_chunk_width: 128,
+            backend: OperationBackend::Hip,
+            architecture: Some("gfx1201"),
+            device_name: None,
+            minimum_abi_version: 1,
+            required_features: RuntimeFeatureSet::from_feature(
+                RuntimeFeature::HipLinearAttentionRecurrent,
+            ),
+            workspace: WorkspaceFormula {
+                fixed_persistent_bytes: 2_097_152,
+                fixed_temporary_bytes: 0,
+                temporary_bytes_per_batch_item: 0,
+                temporary_bytes_per_chunk_token: 49_408,
+                maximum_total_bytes: 8_421_376,
+            },
+            state_effect: StateEffect {
+                reads: recurrent_state,
+                writes: recurrent_state,
+                prepares: StateResourceSet::EMPTY,
+                commits: StateResourceSet::EMPTY,
+                update_mode: StateUpdateMode::InPlace,
+                externally_visible_before_commit: true,
+            },
+            promotion: PromotionStatus::Production,
+            priority: 100,
+            fallback_id: None,
+            deterministic: true,
+            executable: ExecutableOperation::HipLinearAttentionRecurrentSequenceF32,
+            runtime_build: env!("CARGO_PKG_VERSION"),
+        },
+        ImplementationDescriptor {
             id: "hip.paged-kv-write-f32.m1",
             semantic_version: "1.0.0",
             kind: OperationKind::PagedKvWrite,
@@ -2001,7 +2337,9 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
                 block_size: 256,
                 cache_blocks: 16,
             },
+            minimum_batch_width: 1,
             maximum_batch_width: 1,
+            minimum_chunk_width: 1,
             maximum_chunk_width: 1,
             backend: OperationBackend::Hip,
             architecture: Some("gfx1201"),
@@ -2054,7 +2392,9 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
                 block_size: 256,
                 cache_blocks: 16,
             },
+            minimum_batch_width: 1,
             maximum_batch_width: 1,
+            minimum_chunk_width: 1,
             maximum_chunk_width: 1,
             backend: OperationBackend::Hip,
             architecture: Some("gfx1201"),
@@ -2107,7 +2447,9 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
                 cache_blocks: 16,
                 sigmoid_gate: false,
             },
+            minimum_batch_width: 1,
             maximum_batch_width: 1,
+            minimum_chunk_width: 1,
             maximum_chunk_width: 1,
             backend: OperationBackend::Hip,
             architecture: Some("gfx1201"),
@@ -2160,7 +2502,9 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
                 cache_blocks: 16,
                 sigmoid_gate: true,
             },
+            minimum_batch_width: 1,
             maximum_batch_width: 1,
+            minimum_chunk_width: 1,
             maximum_chunk_width: 1,
             backend: OperationBackend::Hip,
             architecture: Some("gfx1201"),
@@ -2213,8 +2557,13 @@ pub fn qwen35_m1_operation_request(
             OperationKind::PagedKvWrite | OperationKind::FusedQkNormRopePagedKvWrite => {
                 OperationStateLayout::PagedKvBlocks
             }
-            OperationKind::LinearAttentionQkvPrepare => OperationStateLayout::ConvolutionHistory,
-            OperationKind::GatedDeltaRuleScan => OperationStateLayout::RecurrentMatrix,
+            OperationKind::LinearAttentionQkvPrepare
+            | OperationKind::LinearAttentionQkvPrepareBatch => {
+                OperationStateLayout::ConvolutionHistory
+            }
+            OperationKind::GatedDeltaRuleScan | OperationKind::GatedDeltaRuleSequence => {
+                OperationStateLayout::RecurrentMatrix
+            }
             OperationKind::PagedCausalGqaRead => OperationStateLayout::PagedKvBlocks,
         },
         activation_format: NumericalFormat::F32,
@@ -2229,6 +2578,44 @@ pub fn qwen35_m1_operation_request(
         workspace_budget_bytes,
         minimum_promotion: PromotionStatus::Production,
     }
+}
+
+/// Builds a one-request linear-attention sequence request for `2..=128` prompt tokens.
+pub fn qwen35_sequence_operation_request(
+    kind: OperationKind,
+    phase: ExecutionPhase,
+    geometry: OperationGeometry,
+    sequence_len: u64,
+    device: DeviceCapabilities,
+    workspace_budget_bytes: u64,
+) -> Result<OperationRequest, String> {
+    let state_layout = match kind {
+        OperationKind::LinearAttentionQkvPrepareBatch => OperationStateLayout::ConvolutionHistory,
+        OperationKind::GatedDeltaRuleSequence => OperationStateLayout::RecurrentMatrix,
+        _ => {
+            return Err(format!(
+                "operation kind {kind:?} is not a one-request linear-attention sequence"
+            ));
+        }
+    };
+    Ok(OperationRequest {
+        kind,
+        phase,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
+        state_format: NumericalFormat::F32,
+        geometry,
+        batch_width: 1,
+        chunk_width: sequence_len,
+        device,
+        workspace_budget_bytes,
+        minimum_promotion: PromotionStatus::Production,
+    })
 }
 
 /// One pre-resolved plan for every current execution phase.
@@ -2278,6 +2665,37 @@ impl ResolvedPhasePlans {
         })
     }
 
+    /// Resolves one-request sequence plans at the concrete runtime width for every current phase.
+    ///
+    /// Callers resolve only the width they are about to execute; descriptors enforce `2..=128`,
+    /// and each returned plan retains that exact width in its trace and ABI binding.
+    pub fn resolve_sequence(
+        registry: &BackendOperationRegistry,
+        kind: OperationKind,
+        geometry: OperationGeometry,
+        sequence_len: u64,
+        device: &DeviceCapabilities,
+        workspace_budget_bytes: u64,
+    ) -> Result<Self, String> {
+        let resolve = |phase| {
+            registry
+                .admit(qwen35_sequence_operation_request(
+                    kind,
+                    phase,
+                    geometry,
+                    sequence_len,
+                    device.clone(),
+                    workspace_budget_bytes,
+                )?)
+                .map(PrestartAttempt::into_plan)
+        };
+        Ok(Self {
+            cold_prefill: resolve(ExecutionPhase::ColdPrefill)?,
+            cached_prefix_prefill: resolve(ExecutionPhase::CachedPrefixPrefill)?,
+            decode: resolve(ExecutionPhase::Decode)?,
+        })
+    }
+
     pub const fn for_phase(&self, phase: ExecutionPhase) -> &ResolvedOperationPlan {
         match phase {
             ExecutionPhase::ColdPrefill => &self.cold_prefill,
@@ -2311,7 +2729,9 @@ mod tests {
                 .with(RuntimeFeature::HipPagedDecodeAttention)
                 .with(RuntimeFeature::HipFusedQkNormRopePagedKvWrite)
                 .with(RuntimeFeature::HipLinearAttentionQkvPrepare)
-                .with(RuntimeFeature::HipPagedKvWrite),
+                .with(RuntimeFeature::HipPagedKvWrite)
+                .with(RuntimeFeature::HipAq4MatvecBatch)
+                .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch),
             workspace_capacity_bytes: u64::MAX,
         }
     }
@@ -2355,6 +2775,164 @@ mod tests {
                 ExecutableOperation::HipLinearAttentionRecurrentF32
             );
         }
+    }
+
+    fn sequence_request(
+        kind: OperationKind,
+        phase: ExecutionPhase,
+        sequence_len: u64,
+    ) -> OperationRequest {
+        let geometry = match kind {
+            OperationKind::LinearAttentionQkvPrepareBatch => {
+                OperationGeometry::LinearAttentionQkvPrepare {
+                    key_heads: 16,
+                    value_heads: 32,
+                    key_dim: 128,
+                    value_dim: 128,
+                    kernel_size: 4,
+                    query_scale: QueryScale::InverseSqrtKeyDim,
+                    qk_l2_norm: true,
+                }
+            }
+            OperationKind::GatedDeltaRuleSequence => OperationGeometry::GatedDeltaRule {
+                key_heads: 16,
+                value_heads: 32,
+                key_dim: 128,
+                value_dim: 128,
+            },
+            other => panic!("unexpected sequence operation {other:?}"),
+        };
+        qwen35_sequence_operation_request(
+            kind,
+            phase,
+            geometry,
+            sequence_len,
+            test_hip_capabilities(),
+            u64::MAX,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sequence_registry_width_bounds_and_features_fail_closed_in_every_phase() {
+        let registry = qwen35_m1_production_registry().unwrap();
+        for phase in [
+            ExecutionPhase::ColdPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::Decode,
+        ] {
+            for kind in [
+                OperationKind::LinearAttentionQkvPrepareBatch,
+                OperationKind::GatedDeltaRuleSequence,
+            ] {
+                assert!(registry.resolve(&sequence_request(kind, phase, 1)).is_err());
+                for width in [2, 128] {
+                    let trace = registry
+                        .resolve(&sequence_request(kind, phase, width))
+                        .unwrap()
+                        .trace();
+                    assert_eq!(trace.phase, phase);
+                    assert_eq!(trace.batch_width, 1);
+                    assert_eq!(trace.chunk_width, width);
+                }
+                assert!(
+                    registry
+                        .resolve(&sequence_request(kind, phase, 129))
+                        .is_err()
+                );
+
+                let mut missing = sequence_request(kind, phase, 2);
+                missing.device.runtime_features = RuntimeFeatureSet::EMPTY;
+                assert!(registry.resolve(&missing).is_err());
+            }
+        }
+        assert!(
+            qwen35_sequence_operation_request(
+                OperationKind::GatedDeltaRuleScan,
+                ExecutionPhase::ColdPrefill,
+                OperationGeometry::GatedDeltaRule {
+                    key_heads: 16,
+                    value_heads: 32,
+                    key_dim: 128,
+                    value_dim: 128,
+                },
+                2,
+                test_hip_capabilities(),
+                u64::MAX,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn equal_priority_sequence_descriptor_is_ambiguous() {
+        let registry = qwen35_m1_production_registry().unwrap();
+        let mut entries = registry.implementations().to_vec();
+        let mut duplicate = entries
+            .iter()
+            .find(|descriptor| descriptor.kind == OperationKind::GatedDeltaRuleSequence)
+            .unwrap()
+            .clone();
+        duplicate.id = "hip.linear-attention-recurrent-sequence-f32.ambiguous";
+        entries.push(duplicate);
+        let registry = BackendOperationRegistry::new(entries).unwrap();
+        assert!(
+            registry
+                .resolve(&sequence_request(
+                    OperationKind::GatedDeltaRuleSequence,
+                    ExecutionPhase::ColdPrefill,
+                    2,
+                ))
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+    }
+
+    #[test]
+    fn sequence_phase_plans_retain_the_concrete_execution_width() {
+        let registry = qwen35_m1_production_registry().unwrap();
+        for width in [2, 17, 128] {
+            let plans = ResolvedPhasePlans::resolve_sequence(
+                &registry,
+                OperationKind::GatedDeltaRuleSequence,
+                OperationGeometry::GatedDeltaRule {
+                    key_heads: 16,
+                    value_heads: 32,
+                    key_dim: 128,
+                    value_dim: 128,
+                },
+                width,
+                &test_hip_capabilities(),
+                u64::MAX,
+            )
+            .unwrap();
+            for phase in [
+                ExecutionPhase::ColdPrefill,
+                ExecutionPhase::CachedPrefixPrefill,
+                ExecutionPhase::Decode,
+            ] {
+                let trace = plans.for_phase(phase).trace();
+                assert_eq!(trace.phase, phase);
+                assert_eq!(trace.batch_width, 1);
+                assert_eq!(trace.chunk_width, width);
+            }
+        }
+        assert!(
+            ResolvedPhasePlans::resolve_sequence(
+                &registry,
+                OperationKind::GatedDeltaRuleSequence,
+                OperationGeometry::GatedDeltaRule {
+                    key_heads: 16,
+                    value_heads: 32,
+                    key_dim: 128,
+                    value_dim: 128,
+                },
+                1,
+                &test_hip_capabilities(),
+                u64::MAX,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2542,6 +3120,8 @@ mod tests {
             (ProbeFaultStage::PagedGated, 5, "paged-gated"),
             (ProbeFaultStage::PagedKvWrite, 6, "paged-kv-write"),
             (ProbeFaultStage::FusedWriter, 7, "fused-writer"),
+            (ProbeFaultStage::Aq4MatvecBatch, 9, "aq4-matvec-batch"),
+            (ProbeFaultStage::QkvPrepareBatch, 10, "qkv-prepare-batch"),
             (ProbeFaultStage::Synchronize, 8, "synchronize"),
         ] {
             force_probe_failure(stage);
@@ -2593,6 +3173,8 @@ mod tests {
             "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
             "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
             "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+            "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+            "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
         ] {
             assert_eq!(std::env::var(environment).as_deref(), Ok("1"));
         }
@@ -2605,6 +3187,8 @@ mod tests {
             ProbeFaultStage::PagedGated,
             ProbeFaultStage::PagedKvWrite,
             ProbeFaultStage::FusedWriter,
+            ProbeFaultStage::Aq4MatvecBatch,
+            ProbeFaultStage::QkvPrepareBatch,
             ProbeFaultStage::Synchronize,
         ] {
             M1_PROBE_CACHE
@@ -2828,6 +3412,177 @@ mod tests {
         ] {
             assert_eq!(read(direct, &mut stream), read(planned, &mut stream));
         }
+    }
+
+    #[test]
+    fn planned_sequence_wrappers_are_bit_exact_with_direct_cpu_abi() {
+        fn buffer(
+            context: &mut ullm_runtime_sys::RuntimeContext,
+            stream: &mut ullm_runtime_sys::RuntimeStream,
+            values: &[f32],
+        ) -> ullm_runtime_sys::RuntimeBuffer {
+            let mut buffer = context.alloc_buffer(values.len() * 4).unwrap();
+            let bytes = values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>();
+            buffer.copy_from_host(0, &bytes, Some(stream)).unwrap();
+            buffer
+        }
+        fn read(
+            buffer: &ullm_runtime_sys::RuntimeBuffer,
+            stream: &mut ullm_runtime_sys::RuntimeStream,
+        ) -> Vec<u8> {
+            let mut bytes = vec![0; buffer.size().unwrap()];
+            buffer.copy_to_host(0, &mut bytes, Some(stream)).unwrap();
+            stream.synchronize().unwrap();
+            bytes
+        }
+
+        const SEQUENCE_LEN: usize = 2;
+        const KEY_HEADS: usize = 16;
+        const VALUE_HEADS: usize = 32;
+        const KEY_DIM: usize = 128;
+        const VALUE_DIM: usize = 128;
+        const KERNEL_SIZE: usize = 4;
+        const Q_ELEMENTS: usize = KEY_HEADS * KEY_DIM;
+        const V_ELEMENTS: usize = VALUE_HEADS * VALUE_DIM;
+        const CHANNELS: usize = Q_ELEMENTS * 2 + V_ELEMENTS;
+
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let qkv_values = (0..SEQUENCE_LEN * CHANNELS)
+            .map(|index| (index % 29) as f32 * 0.002 - 0.025)
+            .collect::<Vec<_>>();
+        let weight_values = (0..CHANNELS * KERNEL_SIZE)
+            .map(|index| (index % 7) as f32 * 0.01 - 0.02)
+            .collect::<Vec<_>>();
+        let history_values = (0..CHANNELS * KERNEL_SIZE)
+            .map(|index| (index % 11) as f32 * 0.001)
+            .collect::<Vec<_>>();
+        let qkv = buffer(&mut context, &mut stream, &qkv_values);
+        let weight = buffer(&mut context, &mut stream, &weight_values);
+        let mut direct_history = buffer(&mut context, &mut stream, &history_values);
+        let mut planned_history = buffer(&mut context, &mut stream, &history_values);
+        let zeros = |elements| vec![0.0_f32; elements];
+        let mut direct_conv = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * CHANNELS));
+        let mut direct_q = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * Q_ELEMENTS));
+        let mut direct_k = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * Q_ELEMENTS));
+        let mut direct_v = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * V_ELEMENTS));
+        let mut planned_conv = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * CHANNELS));
+        let mut planned_q = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * Q_ELEMENTS));
+        let mut planned_k = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * Q_ELEMENTS));
+        let mut planned_v = buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * V_ELEMENTS));
+        ullm_runtime_sys::linear_attn_qkv_prepare_batch_f32(
+            &qkv,
+            &weight,
+            &mut direct_history,
+            KEY_HEADS,
+            VALUE_HEADS,
+            KEY_DIM,
+            VALUE_DIM,
+            KERNEL_SIZE,
+            SEQUENCE_LEN,
+            1.0 / (KEY_DIM as f32).sqrt(),
+            true,
+            &mut direct_conv,
+            &mut direct_q,
+            &mut direct_k,
+            &mut direct_v,
+            Some(&mut stream),
+        )
+        .unwrap();
+        qwen35_m1_production_registry()
+            .unwrap()
+            .admit(sequence_request(
+                OperationKind::LinearAttentionQkvPrepareBatch,
+                ExecutionPhase::ColdPrefill,
+                SEQUENCE_LEN as u64,
+            ))
+            .unwrap()
+            .start()
+            .execute_linear_attention_qkv_prepare_batch_f32(
+                &qkv,
+                &weight,
+                &mut planned_history,
+                &mut planned_conv,
+                &mut planned_q,
+                &mut planned_k,
+                &mut planned_v,
+                &mut stream,
+            )
+            .unwrap();
+        for (direct, planned) in [
+            (&direct_history, &planned_history),
+            (&direct_conv, &planned_conv),
+            (&direct_q, &planned_q),
+            (&direct_k, &planned_k),
+            (&direct_v, &planned_v),
+        ] {
+            assert_eq!(read(direct, &mut stream), read(planned, &mut stream));
+        }
+
+        let gate_values = (0..SEQUENCE_LEN * VALUE_HEADS)
+            .map(|index| -0.01 * (1 + index % 5) as f32)
+            .collect::<Vec<_>>();
+        let beta_values = (0..SEQUENCE_LEN * VALUE_HEADS)
+            .map(|index| 0.1 + 0.01 * (index % 7) as f32)
+            .collect::<Vec<_>>();
+        let gate = buffer(&mut context, &mut stream, &gate_values);
+        let beta = buffer(&mut context, &mut stream, &beta_values);
+        let state_values = (0..VALUE_HEADS * KEY_DIM * VALUE_DIM)
+            .map(|index| (index % 13) as f32 * 0.0001)
+            .collect::<Vec<_>>();
+        let mut direct_state = buffer(&mut context, &mut stream, &state_values);
+        let mut planned_state = buffer(&mut context, &mut stream, &state_values);
+        let mut direct_output =
+            buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * V_ELEMENTS));
+        let mut planned_output =
+            buffer(&mut context, &mut stream, &zeros(SEQUENCE_LEN * V_ELEMENTS));
+        ullm_runtime_sys::linear_attn_recurrent_f32(
+            &direct_q,
+            &direct_k,
+            &direct_v,
+            &gate,
+            &beta,
+            KEY_HEADS,
+            VALUE_HEADS,
+            SEQUENCE_LEN,
+            KEY_DIM,
+            VALUE_DIM,
+            &mut direct_state,
+            &mut direct_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        qwen35_m1_production_registry()
+            .unwrap()
+            .admit(sequence_request(
+                OperationKind::GatedDeltaRuleSequence,
+                ExecutionPhase::ColdPrefill,
+                SEQUENCE_LEN as u64,
+            ))
+            .unwrap()
+            .start()
+            .execute_linear_attention_recurrent_sequence_f32(
+                &planned_q,
+                &planned_k,
+                &planned_v,
+                &gate,
+                &beta,
+                &mut planned_state,
+                &mut planned_output,
+                &mut stream,
+            )
+            .unwrap();
+        assert_eq!(
+            read(&direct_state, &mut stream),
+            read(&planned_state, &mut stream)
+        );
+        assert_eq!(
+            read(&direct_output, &mut stream),
+            read(&planned_output, &mut stream)
+        );
     }
 
     #[test]

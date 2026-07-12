@@ -22,6 +22,7 @@ use crate::qwen35_aq4_head_runtime::{
 };
 use crate::qwen35_aq4_layer_runtime::{
     PackageLinearAttnComponentStepMs, PackageLinearAttnResidentStepLayer,
+    PackageLinearAttnSequenceGeometry, PackageLinearAttnSequenceWorkspace,
     PackageSelfAttnComponentStepMs, PackageSelfAttnResidentStepLayer,
 };
 use crate::qwen35_package_contract::{
@@ -31,6 +32,29 @@ use crate::qwen35_package_contract::{
 const QWEN35_LINEAR_PERSISTENT_STATE_BYTES: u64 = 2_228_224;
 const QWEN35_SELF_PERSISTENT_STATE_BYTES: u64 = 33_554_432;
 const QWEN35_REQUIRED_DEVICE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+pub const QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen35Aq4PrefillInvocation {
+    pub layer_index: usize,
+    pub execution_width: usize,
+    pub phase: ExecutionPhase,
+    pub records: [OperationExecutionRecord; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen35Aq4PrefillChunkStep {
+    pub execution_width: usize,
+    pub invocations: Vec<Qwen35Aq4PrefillInvocation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen35Aq4FailedPrefillInvocation {
+    pub layer_index: usize,
+    pub execution_width: usize,
+    pub phase: ExecutionPhase,
+    pub records: [Option<OperationExecutionRecord>; 2],
+}
 
 fn qwen35_model_workspace_plan(
     capacity_bytes: u64,
@@ -85,16 +109,23 @@ fn qwen35_retained_activation_bytes(
     };
     let h = u64::try_from(hidden).map_err(|_| "hidden does not fit u64".to_string())?;
     let mut elements = 0_u64;
+    let mut maximum_linear_intermediate = None::<u64>;
     for layer in layers {
         let prefix = format!("model.language_model.layers.{}", layer.layer_index);
         let intermediate = rows(&format!("{prefix}.mlp.gate_proj.weight"))?;
         let retained = match layer.kind {
-            Qwen35Aq4LayerKind::LinearAttention => 9_u64
-                .checked_mul(h)
-                .and_then(|value| value.checked_add(2 * 8_192))
-                .and_then(|value| value.checked_add(2 * 2_048))
-                .and_then(|value| value.checked_add(2 * 32))
-                .and_then(|value| value.checked_add(intermediate)),
+            Qwen35Aq4LayerKind::LinearAttention => {
+                maximum_linear_intermediate = Some(
+                    maximum_linear_intermediate
+                        .map_or(intermediate, |previous| previous.max(intermediate)),
+                );
+                9_u64
+                    .checked_mul(h)
+                    .and_then(|value| value.checked_add(2 * 8_192))
+                    .and_then(|value| value.checked_add(2 * 2_048))
+                    .and_then(|value| value.checked_add(2 * 32))
+                    .and_then(|value| value.checked_add(intermediate))
+            }
             Qwen35Aq4LayerKind::SelfAttention => {
                 let q_rows = rows(&format!("{prefix}.self_attn.q_proj.weight"))?;
                 let k_rows = rows(&format!("{prefix}.self_attn.k_proj.weight"))?;
@@ -115,6 +146,25 @@ fn qwen35_retained_activation_bytes(
         elements = elements
             .checked_add(retained)
             .ok_or_else(|| "retained model activation elements overflow".to_string())?;
+    }
+    if let Some(intermediate) = maximum_linear_intermediate {
+        // One model-wide arena: linear sequence intermediates plus two `[128,H]` ping-pong
+        // buffers and one M1 splice row. No layer owns a duplicate of this allocation.
+        let per_row = 10_u64
+            .checked_mul(h)
+            .and_then(|value| value.checked_add(2 * 8_192))
+            .and_then(|value| value.checked_add(2 * 2_048))
+            .and_then(|value| value.checked_add(4 * 32))
+            .and_then(|value| value.checked_add(3 * intermediate))
+            .ok_or_else(|| "shared prefill workspace row elements overflow".to_string())?;
+        let shared = per_row
+            .checked_mul(QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH as u64)
+            .and_then(|value| value.checked_add(2 * 128 * h))
+            .and_then(|value| value.checked_add(h))
+            .ok_or_else(|| "shared prefill workspace elements overflow".to_string())?;
+        elements = elements
+            .checked_add(shared)
+            .ok_or_else(|| "retained prefill workspace elements overflow".to_string())?;
     }
     // Embedding output, final-norm weight/output, lm-head input/logits, and a conservative
     // per-vocabulary upper bound for top-1 partial value/index buffers.
@@ -361,6 +411,13 @@ impl Qwen35Aq4ResidentLayer {
             Self::SelfAttention(layer) => layer.take_last_operation_executions(),
         }
     }
+
+    fn mark_execution_failed(&mut self) {
+        match self {
+            Self::LinearAttention(layer) => layer.mark_request_execution_failed(),
+            Self::SelfAttention(layer) => layer.mark_request_execution_failed(),
+        }
+    }
 }
 
 /// Owns one device context and every resident allocation required by one Qwen3.5 AQ4 model.
@@ -375,6 +432,9 @@ pub struct Qwen35Aq4ModelRuntime {
     final_norm: PassthroughF32Data,
     final_norm_runtime: Option<PackageFinalNormRuntime>,
     lm_head: PackageLmHeadRuntime,
+    prefill_sequence_workspace: Option<PackageLinearAttnSequenceWorkspace>,
+    prefill_ping_buffers: [ullm_runtime_sys::RuntimeBuffer; 2],
+    prefill_row_input_buffer: ullm_runtime_sys::RuntimeBuffer,
     // Runtime handles -- stream must precede context for destruction order.
     stream: ullm_runtime_sys::RuntimeStream,
     _context: ullm_runtime_sys::RuntimeContext,
@@ -384,6 +444,7 @@ pub struct Qwen35Aq4ModelRuntime {
     backend: String,
     device_total_global_mem: u64,
     last_partial_operation_executions: Vec<[Option<OperationExecutionRecord>; 2]>,
+    last_partial_prefill_invocations: Vec<Qwen35Aq4FailedPrefillInvocation>,
 }
 
 impl Qwen35Aq4ModelRuntime {
@@ -542,6 +603,55 @@ impl Qwen35Aq4ModelRuntime {
         } else {
             None
         };
+        let sequence_geometry = resident_layers
+            .iter()
+            .filter_map(|layer| match layer {
+                Qwen35Aq4ResidentLayer::LinearAttention(layer) => {
+                    Some(layer.sequence_geometry())
+                }
+                Qwen35Aq4ResidentLayer::SelfAttention(_) => None,
+            })
+            .try_fold(None, |previous: Option<PackageLinearAttnSequenceGeometry>, current| {
+                if let Some(previous) = previous
+                    && previous != current
+                {
+                    return Err(format!(
+                        "Qwen3.5 AQ4 linear sequence geometry changed: previous={previous:?} current={current:?}"
+                    ));
+                }
+                Ok(Some(current))
+            })?;
+        let prefill_sequence_workspace = sequence_geometry
+            .map(|geometry| {
+                PackageLinearAttnSequenceWorkspace::allocate(
+                    &mut context,
+                    QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH,
+                    geometry,
+                )
+            })
+            .transpose()?;
+        let max_prefill_elements = QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH
+            .checked_mul(hidden)
+            .ok_or_else(|| "Qwen3.5 AQ4 prefill ping element count overflows".to_string())?;
+        let prefill_ping_bytes = max_prefill_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Qwen3.5 AQ4 prefill ping byte count overflows".to_string())?;
+        let prefill_ping_0 = context
+            .alloc_buffer(prefill_ping_bytes)
+            .map_err(|error| format!("failed to allocate Qwen3.5 AQ4 prefill ping 0: {error}"))?;
+        let prefill_ping_1 = context
+            .alloc_buffer(prefill_ping_bytes)
+            .map_err(|error| format!("failed to allocate Qwen3.5 AQ4 prefill ping 1: {error}"))?;
+        let prefill_ping_buffers = [prefill_ping_0, prefill_ping_1];
+        let prefill_row_input_buffer = context
+            .alloc_buffer(
+                hidden
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "Qwen3.5 AQ4 prefill row byte count overflows".to_string())?,
+            )
+            .map_err(|error| {
+                format!("failed to allocate Qwen3.5 AQ4 prefill row input: {error}")
+            })?;
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize Qwen3.5 AQ4 model load: {err}"))?;
@@ -552,6 +662,9 @@ impl Qwen35Aq4ModelRuntime {
             final_norm,
             final_norm_runtime,
             lm_head,
+            prefill_sequence_workspace,
+            prefill_ping_buffers,
+            prefill_row_input_buffer,
             stream,
             _context: context,
             package_dir: config.package_dir,
@@ -560,6 +673,7 @@ impl Qwen35Aq4ModelRuntime {
             backend: info.backend.to_string(),
             device_total_global_mem: info.total_global_mem,
             last_partial_operation_executions: Vec::with_capacity(32),
+            last_partial_prefill_invocations: Vec::new(),
         })
     }
 
@@ -656,6 +770,7 @@ impl Qwen35Aq4ModelRuntime {
         embedding.gather_token(&mut self.stream, token_id, label)?;
         let input = embedding.output_buffer();
         self.last_partial_operation_executions.clear();
+        self.last_partial_prefill_invocations.clear();
         dispatch_layer_stack(
             &mut self.layers,
             &mut self.stream,
@@ -671,10 +786,290 @@ impl Qwen35Aq4ModelRuntime {
         )
     }
 
+    /// Executes one single-request prompt chunk. Linear-attention layers consume the complete
+    /// `[M, H]` tensor while self-attention layers preserve causal KV order with an explicit M1
+    /// row splice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_prefill_chunk_for_phase(
+        &mut self,
+        token_ids: &[usize],
+        rotary_dim: usize,
+        rope_base: f32,
+        absolute_start: usize,
+        phase: ExecutionPhase,
+        sync_each_layer_for_timing: bool,
+        label: &str,
+    ) -> Result<Qwen35Aq4PrefillChunkStep, String> {
+        let sequence_len = token_ids.len();
+        if !(2..=QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH).contains(&sequence_len) {
+            return Err(format!(
+                "{label} native prefill width must be in 2..={QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH}, got {sequence_len}"
+            ));
+        }
+        let absolute_end = absolute_start
+            .checked_add(sequence_len)
+            .ok_or_else(|| format!("{label} position range overflows"))?;
+        if absolute_end > self.geometry.context_length {
+            return Err(format!(
+                "{label} position range {absolute_start}..{absolute_end} exceeds context length {}",
+                self.geometry.context_length
+            ));
+        }
+        if let Some(attention) = &self.geometry.self_attention
+            && (rotary_dim == 0 || rotary_dim > attention.head_dim || rotary_dim % 2 != 0)
+        {
+            return Err(format!(
+                "{label} rotary dimension {rotary_dim} must be a positive even value at most {}",
+                attention.head_dim
+            ));
+        }
+        let hidden_bytes = self
+            .geometry
+            .hidden
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("{label} hidden byte count overflows"))?;
+        let sequence_bytes = sequence_len
+            .checked_mul(hidden_bytes)
+            .ok_or_else(|| format!("{label} sequence byte count overflows"))?;
+        let embedding = self.embedding.as_mut().ok_or_else(|| {
+            "Qwen3.5 AQ4 native prefill requires a resident embedding".to_string()
+        })?;
+        for (row, token_id) in token_ids.iter().copied().enumerate() {
+            embedding.gather_token(&mut self.stream, token_id, label)?;
+            self.prefill_ping_buffers[0]
+                .copy_from_buffer(
+                    row.checked_mul(hidden_bytes)
+                        .ok_or_else(|| format!("{label} embedding row offset overflows"))?,
+                    embedding.output_buffer(),
+                    0,
+                    hidden_bytes,
+                    Some(&mut self.stream),
+                )
+                .map_err(|error| {
+                    format!("failed to scatter {label} embedding row {row}: {error}")
+                })?;
+        }
+
+        self.last_partial_operation_executions.clear();
+        self.last_partial_prefill_invocations.clear();
+        let layer_count = self.layers.len();
+        let mut invocations = Vec::with_capacity(layer_count * sequence_len);
+        let mut current_ping = 0usize;
+        for layer_position in 0..layer_count {
+            let next_ping = 1 - current_ping;
+            let layer_label = format!(
+                "{label} layer {layer_position} positions {absolute_start}..{absolute_end}"
+            );
+            let (source, destination) = if current_ping == 0 {
+                let (left, right) = self.prefill_ping_buffers.split_at_mut(1);
+                (&left[0], &mut right[0])
+            } else {
+                let (left, right) = self.prefill_ping_buffers.split_at_mut(1);
+                (&right[0], &mut left[0])
+            };
+            match &mut self.layers[layer_position] {
+                Qwen35Aq4ResidentLayer::LinearAttention(layer) => {
+                    let workspace = self.prefill_sequence_workspace.as_mut().ok_or_else(|| {
+                        format!("{layer_label} has no shared linear sequence workspace")
+                    })?;
+                    let records = match layer.run_device_sequence_for_phase(
+                        &mut self.stream,
+                        source,
+                        sequence_len,
+                        phase,
+                        workspace,
+                        &layer_label,
+                    ) {
+                        Ok(records) => records,
+                        Err(error) => {
+                            let partial = layer.take_last_operation_executions();
+                            self.last_partial_operation_executions.push(partial);
+                            self.last_partial_prefill_invocations.push(
+                                Qwen35Aq4FailedPrefillInvocation {
+                                    layer_index: layer_position,
+                                    execution_width: sequence_len,
+                                    phase,
+                                    records: partial,
+                                },
+                            );
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = destination.copy_from_buffer(
+                        0,
+                        workspace.output_buffer(),
+                        0,
+                        sequence_bytes,
+                        Some(&mut self.stream),
+                    ) {
+                        layer.mark_request_execution_failed();
+                        self.last_partial_prefill_invocations.push(
+                            Qwen35Aq4FailedPrefillInvocation {
+                                layer_index: layer_position,
+                                execution_width: sequence_len,
+                                phase,
+                                records: [Some(records[0]), Some(records[1])],
+                            },
+                        );
+                        return Err(format!(
+                            "failed to copy {layer_label} sequence output: {error}"
+                        ));
+                    }
+                    if layer_position + 1 == layer_count {
+                        if let Err(error) = layer.retain_last_sequence_row(
+                            &mut self.stream,
+                            workspace,
+                            sequence_len,
+                            &layer_label,
+                        ) {
+                            layer.mark_request_execution_failed();
+                            self.last_partial_prefill_invocations.push(
+                                Qwen35Aq4FailedPrefillInvocation {
+                                    layer_index: layer_position,
+                                    execution_width: sequence_len,
+                                    phase,
+                                    records: [Some(records[0]), Some(records[1])],
+                                },
+                            );
+                            return Err(error);
+                        }
+                    }
+                    self.last_partial_operation_executions
+                        .push([Some(records[0]), Some(records[1])]);
+                    self.last_partial_prefill_invocations
+                        .push(Qwen35Aq4FailedPrefillInvocation {
+                            layer_index: layer_position,
+                            execution_width: sequence_len,
+                            phase,
+                            records: [Some(records[0]), Some(records[1])],
+                        });
+                    invocations.push(Qwen35Aq4PrefillInvocation {
+                        layer_index: layer_position,
+                        execution_width: sequence_len,
+                        phase,
+                        records,
+                    });
+                }
+                Qwen35Aq4ResidentLayer::SelfAttention(layer) => {
+                    for row in 0..sequence_len {
+                        let row_offset = row
+                            .checked_mul(hidden_bytes)
+                            .ok_or_else(|| format!("{layer_label} row offset overflows"))?;
+                        self.prefill_row_input_buffer
+                            .copy_from_buffer(
+                                0,
+                                source,
+                                row_offset,
+                                hidden_bytes,
+                                Some(&mut self.stream),
+                            )
+                            .map_err(|error| {
+                                format!("failed to gather {layer_label} row {row}: {error}")
+                            })?;
+                        let position = absolute_start
+                            .checked_add(row)
+                            .ok_or_else(|| format!("{layer_label} row position overflows"))?;
+                        let token_phase = if position == 0 {
+                            ExecutionPhase::ColdPrefill
+                        } else {
+                            ExecutionPhase::CachedPrefixPrefill
+                        };
+                        let row_label = format!("{layer_label} row {row} position {position}");
+                        if let Err(error) = layer.step_from_device_to_device_for_phase(
+                            &mut self.stream,
+                            &self.prefill_row_input_buffer,
+                            rotary_dim,
+                            rope_base,
+                            position,
+                            position,
+                            token_phase,
+                            &row_label,
+                        ) {
+                            let partial = layer.take_last_operation_executions();
+                            self.last_partial_operation_executions.push(partial);
+                            self.last_partial_prefill_invocations.push(
+                                Qwen35Aq4FailedPrefillInvocation {
+                                    layer_index: layer_position,
+                                    execution_width: 1,
+                                    phase: token_phase,
+                                    records: partial,
+                                },
+                            );
+                            return Err(error);
+                        }
+                        let [first, second] = layer.take_last_operation_executions();
+                        let Some(first) = first else {
+                            layer.mark_request_execution_failed();
+                            return Err(format!("{row_label} did not record its first operation"));
+                        };
+                        let Some(second) = second else {
+                            layer.mark_request_execution_failed();
+                            return Err(format!("{row_label} did not record its second operation"));
+                        };
+                        let records = [first, second];
+                        if let Err(error) = destination.copy_from_buffer(
+                            row_offset,
+                            layer.output_buffer(),
+                            0,
+                            hidden_bytes,
+                            Some(&mut self.stream),
+                        ) {
+                            layer.mark_request_execution_failed();
+                            self.last_partial_prefill_invocations.push(
+                                Qwen35Aq4FailedPrefillInvocation {
+                                    layer_index: layer_position,
+                                    execution_width: 1,
+                                    phase: token_phase,
+                                    records: [Some(records[0]), Some(records[1])],
+                                },
+                            );
+                            return Err(format!("failed to scatter {row_label} output: {error}"));
+                        }
+                        self.last_partial_operation_executions
+                            .push([Some(records[0]), Some(records[1])]);
+                        self.last_partial_prefill_invocations.push(
+                            Qwen35Aq4FailedPrefillInvocation {
+                                layer_index: layer_position,
+                                execution_width: 1,
+                                phase: token_phase,
+                                records: [Some(records[0]), Some(records[1])],
+                            },
+                        );
+                        invocations.push(Qwen35Aq4PrefillInvocation {
+                            layer_index: layer_position,
+                            execution_width: 1,
+                            phase: token_phase,
+                            records,
+                        });
+                    }
+                }
+            }
+            if sync_each_layer_for_timing {
+                if let Err(error) = self.stream.synchronize() {
+                    for layer in &mut self.layers[..=layer_position] {
+                        layer.mark_execution_failed();
+                    }
+                    return Err(format!("failed to synchronize {layer_label}: {error}"));
+                }
+            }
+            current_ping = next_ping;
+        }
+        Ok(Qwen35Aq4PrefillChunkStep {
+            execution_width: sequence_len,
+            invocations,
+        })
+    }
+
     pub fn take_last_partial_operation_executions(
         &mut self,
     ) -> Vec<[Option<OperationExecutionRecord>; 2]> {
         std::mem::take(&mut self.last_partial_operation_executions)
+    }
+
+    pub fn take_last_partial_prefill_invocations(
+        &mut self,
+    ) -> Vec<Qwen35Aq4FailedPrefillInvocation> {
+        std::mem::take(&mut self.last_partial_prefill_invocations)
     }
 
     pub fn top_logits_from_last_layer(
@@ -724,6 +1119,12 @@ impl Qwen35Aq4ModelRuntime {
         self.stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize Qwen3.5 AQ4 model runtime: {err}"))
+    }
+
+    pub fn mark_prefill_chunk_uncommitted(&mut self) {
+        for layer in &mut self.layers {
+            layer.mark_execution_failed();
+        }
     }
 
     /// Explicitly synchronizes before the owner and its context are dropped.

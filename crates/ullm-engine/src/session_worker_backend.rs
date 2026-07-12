@@ -242,7 +242,7 @@ mod tests {
             implementation_counts: std::array::from_fn(|index| {
                 crate::backend_operation_registry::OperationExecutionCount {
                     kind: "kind",
-                    implementation_id: ["a", "b", "c", "d", "e", "f"][index],
+                    implementation_id: ["a", "b", "c", "d", "e", "f", "g", "h"][index],
                     count: index as u64,
                 }
             }),
@@ -277,6 +277,18 @@ mod tests {
         );
         assert_eq!(value["operation_execution_audit"]["total_records"], 256);
         assert_eq!(
+            value["operation_execution_audit"]["physical_operation_invocations"],
+            256
+        );
+        assert_eq!(
+            value["operation_execution_audit"]["token_equivalent_operation_coverage"],
+            256
+        );
+        assert_eq!(
+            value["operation_execution_audit"]["prefill_width_histogram"][3],
+            1
+        );
+        assert_eq!(
             value["operation_execution_audit"]["deterministic_digest_sha256"],
             "ab".repeat(32)
         );
@@ -285,7 +297,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            6
+            8
         );
         assert_eq!(
             value["operation_execution_audit"]["coverage_complete"],

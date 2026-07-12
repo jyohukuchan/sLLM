@@ -29,6 +29,7 @@ const AQ4_REPORT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV: &[&str] = &[
     "ULLM_REQUIRE_HIP_AQ4_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
@@ -38,6 +39,7 @@ pub const QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV: &[&str] = &[
     "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
@@ -375,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn production_guards_cover_the_resolved_stateful_m1_operations_exactly_once() {
+    fn production_guards_cover_resolved_m1_and_native_prefill_operations_exactly_once() {
         let unique = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
             .iter()
             .copied()
@@ -390,6 +392,8 @@ mod tests {
             RuntimeFeature::HipFusedQkNormRopePagedKvWrite,
             RuntimeFeature::HipLinearAttentionQkvPrepare,
             RuntimeFeature::HipPagedKvWrite,
+            RuntimeFeature::HipAq4MatvecBatch,
+            RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
         ] {
             assert!(unique.contains(runtime_feature_environment(feature)));
         }

@@ -1891,6 +1891,10 @@ impl PackageSelfAttnResidentStepLayer {
         self.request_state == ResidentRequestState::Ready
     }
 
+    pub fn mark_request_execution_failed(&mut self) {
+        self.request_state.mark_execution_failed();
+    }
+
     /// Clears request-owned KV state while retaining the resident layer weights.
     ///
     /// The state becomes permanently unusable if synchronization or device zeroing fails;
@@ -2462,6 +2466,7 @@ pub struct PackageLinearAttnResidentStepWeights {
     kernel_size: usize,
     operation_plans: ResolvedPhasePlans,
     prepare_operation_plans: ResolvedPhasePlans,
+    sequence_device: DeviceCapabilities,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     conv_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     a_log_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
@@ -2518,7 +2523,127 @@ pub enum PackageLinearAttnResidentStepInput<'a> {
     ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackageLinearAttnSequenceGeometry {
+    pub hidden: usize,
+    pub channels: usize,
+    pub key_elements: usize,
+    pub value_heads: usize,
+    pub intermediate: usize,
+}
+
+/// One model-owned scratch arena reused by every resident linear-attention layer.
+///
+/// Request state remains layer-owned; only transient `[M, ...]` activations live here.
+pub struct PackageLinearAttnSequenceWorkspace {
+    max_width: usize,
+    geometry: PackageLinearAttnSequenceGeometry,
+    input_normed: ullm_runtime_sys::RuntimeBuffer,
+    qkv: ullm_runtime_sys::RuntimeBuffer,
+    z: ullm_runtime_sys::RuntimeBuffer,
+    a: ullm_runtime_sys::RuntimeBuffer,
+    b: ullm_runtime_sys::RuntimeBuffer,
+    conv_output: ullm_runtime_sys::RuntimeBuffer,
+    q: ullm_runtime_sys::RuntimeBuffer,
+    k: ullm_runtime_sys::RuntimeBuffer,
+    v: ullm_runtime_sys::RuntimeBuffer,
+    gate: ullm_runtime_sys::RuntimeBuffer,
+    beta: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_output: ullm_runtime_sys::RuntimeBuffer,
+    attn_projection_input: ullm_runtime_sys::RuntimeBuffer,
+    projected: ullm_runtime_sys::RuntimeBuffer,
+    attention_output: ullm_runtime_sys::RuntimeBuffer,
+    post_normed: ullm_runtime_sys::RuntimeBuffer,
+    mlp_gate: ullm_runtime_sys::RuntimeBuffer,
+    mlp_up: ullm_runtime_sys::RuntimeBuffer,
+    mlp_activation: ullm_runtime_sys::RuntimeBuffer,
+    mlp_down: ullm_runtime_sys::RuntimeBuffer,
+    layer_output: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl PackageLinearAttnSequenceWorkspace {
+    pub fn allocate(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        max_width: usize,
+        geometry: PackageLinearAttnSequenceGeometry,
+    ) -> Result<Self, String> {
+        if !(2..=128).contains(&max_width) {
+            return Err(format!(
+                "linear-attn sequence workspace width must be in 2..=128, got {max_width}"
+            ));
+        }
+        for (name, value) in [
+            ("hidden", geometry.hidden),
+            ("channels", geometry.channels),
+            ("key elements", geometry.key_elements),
+            ("value heads", geometry.value_heads),
+            ("intermediate", geometry.intermediate),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "linear-attn sequence workspace {name} must be positive"
+                ));
+            }
+        }
+        let elements = |width: usize, columns: usize, label: &str| {
+            width
+                .checked_mul(columns)
+                .ok_or_else(|| format!("{label} element count overflows"))
+        };
+        let mut alloc = |columns: usize, label: &str| {
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    elements(max_width, columns, label)?,
+                    label,
+                )?)
+                .map_err(|error| format!("failed to allocate {label}: {error}"))
+        };
+        Ok(Self {
+            max_width,
+            geometry,
+            input_normed: alloc(geometry.hidden, "linear-attn sequence input normed")?,
+            qkv: alloc(geometry.channels, "linear-attn sequence qkv")?,
+            z: alloc(geometry.hidden, "linear-attn sequence z")?,
+            a: alloc(geometry.value_heads, "linear-attn sequence a")?,
+            b: alloc(geometry.value_heads, "linear-attn sequence b")?,
+            conv_output: alloc(geometry.channels, "linear-attn sequence conv output")?,
+            q: alloc(geometry.key_elements, "linear-attn sequence q")?,
+            k: alloc(geometry.key_elements, "linear-attn sequence k")?,
+            v: alloc(geometry.hidden, "linear-attn sequence v")?,
+            gate: alloc(geometry.value_heads, "linear-attn sequence gate")?,
+            beta: alloc(geometry.value_heads, "linear-attn sequence beta")?,
+            recurrent_output: alloc(geometry.hidden, "linear-attn sequence recurrent output")?,
+            attn_projection_input: alloc(
+                geometry.hidden,
+                "linear-attn sequence attention projection input",
+            )?,
+            projected: alloc(geometry.hidden, "linear-attn sequence projected")?,
+            attention_output: alloc(geometry.hidden, "linear-attn sequence attention output")?,
+            post_normed: alloc(geometry.hidden, "linear-attn sequence post normed")?,
+            mlp_gate: alloc(geometry.intermediate, "linear-attn sequence MLP gate")?,
+            mlp_up: alloc(geometry.intermediate, "linear-attn sequence MLP up")?,
+            mlp_activation: alloc(geometry.intermediate, "linear-attn sequence MLP activation")?,
+            mlp_down: alloc(geometry.hidden, "linear-attn sequence MLP down")?,
+            layer_output: alloc(geometry.hidden, "linear-attn sequence layer output")?,
+        })
+    }
+
+    pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.layer_output
+    }
+}
+
 impl PackageLinearAttnResidentStepLayer {
+    pub fn sequence_geometry(&self) -> PackageLinearAttnSequenceGeometry {
+        PackageLinearAttnSequenceGeometry {
+            hidden: self.weights.hidden,
+            channels: self.weights.qkv_matrix.rows,
+            key_elements: self.weights.key_heads * self.weights.key_dim,
+            value_heads: self.weights.value_heads,
+            intermediate: self.weights.mlp_gate_matrix.rows,
+        }
+    }
+
     pub fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -2660,7 +2785,9 @@ impl PackageLinearAttnResidentStepLayer {
         let device = DeviceCapabilities::probe_m1_runtime_context(context, stream)?;
         device.require_features(
             RuntimeFeatureSet::from_feature(RuntimeFeature::HipLinearAttentionRecurrent)
-                .with(RuntimeFeature::HipLinearAttentionQkvPrepare),
+                .with(RuntimeFeature::HipLinearAttentionQkvPrepare)
+                .with(RuntimeFeature::HipAq4MatvecBatch)
+                .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch),
         )?;
         let operation_plans = ResolvedPhasePlans::resolve_m1(
             &qwen35_m1_production_registry()?,
@@ -3083,6 +3210,7 @@ impl PackageLinearAttnResidentStepLayer {
             kernel_size,
             operation_plans,
             prepare_operation_plans,
+            sequence_device: device,
             input_norm_weight_buffer,
             conv_weight_buffer,
             a_log_buffer,
@@ -3369,6 +3497,307 @@ impl PackageLinearAttnResidentStepLayer {
         &self.layer_output_buffer
     }
 
+    pub fn run_device_sequence_for_phase(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageLinearAttnSequenceWorkspace,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], String> {
+        self.request_state.ensure_ready(label)?;
+        if !(2..=workspace.max_width).contains(&sequence_len) || sequence_len > 128 {
+            return Err(format!(
+                "{label} sequence width must be in 2..={}, got {sequence_len}",
+                workspace.max_width.min(128)
+            ));
+        }
+        let geometry = self.sequence_geometry();
+        if geometry != workspace.geometry {
+            return Err(format!(
+                "{label} shared sequence workspace geometry mismatch: layer={geometry:?} workspace={:?}",
+                workspace.geometry
+            ));
+        }
+        let sequence_elements = sequence_len
+            .checked_mul(geometry.hidden)
+            .ok_or_else(|| format!("{label} sequence element count overflows"))?;
+        let required_bytes = checked_f32_byte_len(sequence_elements, label)?;
+        let residual_bytes = residual
+            .size()
+            .map_err(|error| format!("failed to query {label} residual bytes: {error}"))?;
+        if residual_bytes < required_bytes {
+            return Err(format!(
+                "{label} residual buffer is too small: got {residual_bytes} expected at least {required_bytes}"
+            ));
+        }
+        self.operation_phase = phase;
+        self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
+        let result =
+            self.run_device_sequence_inner(stream, residual, sequence_len, workspace, label);
+        if result.is_err() {
+            self.request_state.mark_execution_failed();
+        }
+        result?;
+        let [first, second] = self.take_last_operation_executions();
+        Ok([
+            first.ok_or_else(|| format!("{label} did not record QKV prepare"))?,
+            second.ok_or_else(|| format!("{label} did not record recurrent scan"))?,
+        ])
+    }
+
+    fn run_device_sequence_inner(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        workspace: &mut PackageLinearAttnSequenceWorkspace,
+        label: &str,
+    ) -> Result<(), String> {
+        let weights = self.weights.as_ref();
+        let hidden = weights.hidden;
+        let sequence_elements = sequence_len
+            .checked_mul(hidden)
+            .ok_or_else(|| format!("{label} sequence element count overflows"))?;
+        let intermediate_elements = sequence_len
+            .checked_mul(weights.mlp_gate_matrix.rows)
+            .ok_or_else(|| format!("{label} intermediate element count overflows"))?;
+        ullm_runtime_sys::segmented_rmsnorm_f32(
+            residual,
+            weights.input_norm_weight_buffer.as_ref(),
+            sequence_len,
+            hidden,
+            1e-6,
+            &mut workspace.input_normed,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} input RMSNorm: {error}"))?;
+        weights.qkv_matrix.matvec_batch(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.qkv,
+            stream,
+            &format!("{label} qkv projection"),
+        )?;
+        weights.z_matrix.matvec_batch(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.z,
+            stream,
+            &format!("{label} z projection"),
+        )?;
+        weights.a_matrix.matvec_batch(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.a,
+            stream,
+            &format!("{label} a projection"),
+        )?;
+        weights.b_matrix.matvec_batch(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.b,
+            stream,
+            &format!("{label} b projection"),
+        )?;
+
+        let registry = qwen35_m1_production_registry()?;
+        let sequence_width = u64::try_from(sequence_len)
+            .map_err(|_| format!("{label} sequence width does not fit u64"))?;
+        let prepare_plans = ResolvedPhasePlans::resolve_sequence(
+            &registry,
+            OperationKind::LinearAttentionQkvPrepareBatch,
+            OperationGeometry::LinearAttentionQkvPrepare {
+                key_heads: weights.key_heads,
+                value_heads: weights.value_heads,
+                key_dim: weights.key_dim,
+                value_dim: weights.value_dim,
+                kernel_size: weights.kernel_size,
+                query_scale: QueryScale::InverseSqrtKeyDim,
+                qk_l2_norm: true,
+            },
+            sequence_width,
+            &weights.sequence_device,
+            weights.sequence_device.workspace_capacity_bytes,
+        )
+        .map_err(|error| format!("failed to resolve {label} batch QKV prepare: {error}"))?;
+        let prepare_plan = prepare_plans.for_phase(self.operation_phase);
+        self.last_operation_executions[0] =
+            Some(prepare_plan.execution_record(OperationExecutionStatus::Started));
+        let prepare_result = prepare_plan
+            .attempt()
+            .start()
+            .execute_linear_attention_qkv_prepare_batch_f32(
+                &workspace.qkv,
+                weights.conv_weight_buffer.as_ref(),
+                &mut self.conv_history_buffer,
+                &mut workspace.conv_output,
+                &mut workspace.q,
+                &mut workspace.k,
+                &mut workspace.v,
+                stream,
+            );
+        self.last_operation_executions[0] =
+            Some(prepare_plan.execution_record(if prepare_result.is_ok() {
+                OperationExecutionStatus::Succeeded
+            } else {
+                OperationExecutionStatus::Failed
+            }));
+        prepare_result.map_err(|error| format!("failed to run {label} QKV prepare: {error}"))?;
+        ullm_runtime_sys::linear_attn_gate_beta_f32(
+            &workspace.a,
+            &workspace.b,
+            weights.a_log_buffer.as_ref(),
+            weights.dt_bias_buffer.as_ref(),
+            weights.value_heads,
+            sequence_len,
+            &mut workspace.gate,
+            &mut workspace.beta,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} gate/beta: {error}"))?;
+
+        let recurrent_plans = ResolvedPhasePlans::resolve_sequence(
+            &registry,
+            OperationKind::GatedDeltaRuleSequence,
+            OperationGeometry::GatedDeltaRule {
+                key_heads: weights.key_heads,
+                value_heads: weights.value_heads,
+                key_dim: weights.key_dim,
+                value_dim: weights.value_dim,
+            },
+            sequence_width,
+            &weights.sequence_device,
+            weights.sequence_device.workspace_capacity_bytes,
+        )
+        .map_err(|error| format!("failed to resolve {label} recurrent sequence: {error}"))?;
+        let recurrent_plan = recurrent_plans.for_phase(self.operation_phase);
+        self.last_operation_executions[1] =
+            Some(recurrent_plan.execution_record(OperationExecutionStatus::Started));
+        let recurrent_result = recurrent_plan
+            .attempt()
+            .start()
+            .execute_linear_attention_recurrent_sequence_f32(
+                &workspace.q,
+                &workspace.k,
+                &workspace.v,
+                &workspace.gate,
+                &workspace.beta,
+                &mut self.recurrent_state_buffer,
+                &mut workspace.recurrent_output,
+                stream,
+            );
+        self.last_operation_executions[1] = Some(recurrent_plan.execution_record(
+            if recurrent_result.is_ok() {
+                OperationExecutionStatus::Succeeded
+            } else {
+                OperationExecutionStatus::Failed
+            },
+        ));
+        recurrent_result
+            .map_err(|error| format!("failed to run {label} recurrent scan: {error}"))?;
+        ullm_runtime_sys::segmented_rmsnorm_silu_mul_f32(
+            &workspace.recurrent_output,
+            weights.attn_norm_weight_buffer.as_ref(),
+            &workspace.z,
+            sequence_len
+                .checked_mul(weights.value_heads)
+                .ok_or_else(|| format!("{label} attention segment count overflows"))?,
+            weights.value_dim,
+            1e-6,
+            &mut workspace.attn_projection_input,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} attention postprocess: {error}"))?;
+        weights.out_matrix.matvec_batch(
+            &workspace.attn_projection_input,
+            sequence_len,
+            &mut workspace.projected,
+            stream,
+            &format!("{label} out projection"),
+        )?;
+        ullm_runtime_sys::add_f32(
+            &workspace.projected,
+            residual,
+            sequence_elements,
+            &mut workspace.attention_output,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} attention residual: {error}"))?;
+        ullm_runtime_sys::segmented_rmsnorm_f32(
+            &workspace.attention_output,
+            weights.post_norm_weight_buffer.as_ref(),
+            sequence_len,
+            hidden,
+            1e-5,
+            &mut workspace.post_normed,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} post RMSNorm: {error}"))?;
+        weights.mlp_gate_matrix.matvec_batch(
+            &workspace.post_normed,
+            sequence_len,
+            &mut workspace.mlp_gate,
+            stream,
+            &format!("{label} MLP gate projection"),
+        )?;
+        weights.mlp_up_matrix.matvec_batch(
+            &workspace.post_normed,
+            sequence_len,
+            &mut workspace.mlp_up,
+            stream,
+            &format!("{label} MLP up projection"),
+        )?;
+        ullm_runtime_sys::silu_mul_f32(
+            &workspace.mlp_gate,
+            &workspace.mlp_up,
+            intermediate_elements,
+            &mut workspace.mlp_activation,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} MLP activation: {error}"))?;
+        weights.mlp_down_matrix.matvec_batch(
+            &workspace.mlp_activation,
+            sequence_len,
+            &mut workspace.mlp_down,
+            stream,
+            &format!("{label} MLP down projection"),
+        )?;
+        ullm_runtime_sys::add_f32(
+            &workspace.mlp_down,
+            &workspace.attention_output,
+            sequence_elements,
+            &mut workspace.layer_output,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to run {label} layer residual: {error}"))
+    }
+
+    pub fn retain_last_sequence_row(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        workspace: &PackageLinearAttnSequenceWorkspace,
+        sequence_len: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let hidden_bytes = checked_f32_byte_len(self.hidden, label)?;
+        let source_offset = sequence_len
+            .checked_sub(1)
+            .and_then(|row| row.checked_mul(hidden_bytes))
+            .ok_or_else(|| format!("{label} last-row offset overflows"))?;
+        self.layer_output_buffer
+            .copy_from_buffer(
+                0,
+                workspace.output_buffer(),
+                source_offset,
+                hidden_bytes,
+                Some(stream),
+            )
+            .map_err(|error| format!("failed to retain {label} final sequence row: {error}"))
+    }
+
     pub fn take_last_component_step_ms(&mut self) -> Option<PackageLinearAttnComponentStepMs> {
         self.last_component_step_ms.take()
     }
@@ -3379,6 +3808,10 @@ impl PackageLinearAttnResidentStepLayer {
 
     pub fn request_state_is_reusable(&self) -> bool {
         self.request_state == ResidentRequestState::Ready
+    }
+
+    pub fn mark_request_execution_failed(&mut self) {
+        self.request_state.mark_execution_failed();
     }
 
     /// Clears request-owned convolution and recurrent state while retaining resident weights.
@@ -5966,6 +6399,33 @@ mod linear_attn_step_state_tests {
         assert_eq!(state, ResidentRequestState::Poisoned);
         state.mark_ready();
         state.ensure_ready("next request").unwrap();
+    }
+
+    #[test]
+    fn shared_sequence_workspace_rejects_width_and_element_overflow_before_allocation() {
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let geometry = PackageLinearAttnSequenceGeometry {
+            hidden: 8,
+            channels: 16,
+            key_elements: 4,
+            value_heads: 2,
+            intermediate: 12,
+        };
+        assert!(PackageLinearAttnSequenceWorkspace::allocate(&mut context, 1, geometry).is_err());
+        assert!(PackageLinearAttnSequenceWorkspace::allocate(&mut context, 129, geometry).is_err());
+        assert!(
+            PackageLinearAttnSequenceWorkspace::allocate(
+                &mut context,
+                128,
+                PackageLinearAttnSequenceGeometry {
+                    hidden: usize::MAX,
+                    ..geometry
+                },
+            )
+            .err()
+            .unwrap()
+            .contains("overflows")
+        );
     }
 
     #[test]
