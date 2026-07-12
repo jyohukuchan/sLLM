@@ -22,7 +22,11 @@ use std::time::Duration;
 const AQ4_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const AQ4_REPORT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-const REQUIRED_HIP_KERNEL_ENV: &[&str] = &[
+/// Complete production guard contract for the resident Qwen3.5 AQ4 execution path.
+///
+/// Manifest generation and deployment code can use this public list instead of maintaining a
+/// second, easily-drifted copy. Compatibility mode also applies the same guards to its child.
+pub const QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV: &[&str] = &[
     "ULLM_REQUIRE_HIP_AQ4_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
@@ -162,7 +166,7 @@ impl Qwen35Aq4WorkerBackend {
             .env("ULLM_PREFILL_DEVICE_TOKEN_LOOP", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        for name in REQUIRED_HIP_KERNEL_ENV {
+        for name in QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV {
             command.env(name, "1");
         }
         command
