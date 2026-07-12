@@ -15,6 +15,10 @@ use crate::backend_dispatch::{
     select_sq8_projection_implementation_id as select_backend_sq8_projection_implementation_id,
     sq8_0_projection_descriptor_family,
 };
+use crate::backend_operation_registry::{
+    DeviceCapabilities, OperationGeometry, ResolvedPhasePlans, aq4_matvec_batch_production_registry,
+};
+use crate::execution_batch::ExecutionPhase;
 use crate::format_id::FORMAT_SQ8_0;
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use crate::loader::{LoadOptions, WeightRegistry, materialize_config, matrix_shape_rows_cols};
@@ -231,6 +235,7 @@ pub struct PackageAq4ResidentMatvec {
     pub tensor_scale: f32,
     pub scale_count: usize,
     row_scale_count: usize,
+    aq4_batch_plans: Option<Box<[ResolvedPhasePlans]>>,
     projection_dispatches: SqFp8ProjectionDispatches,
     storage: PackageResidentMatvecStorage,
 }
@@ -261,6 +266,43 @@ struct PackageAq4StorageRef<'a> {
     codebook_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
     scale_values_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
     row_scale_buffer: Option<&'a ullm_runtime_sys::RuntimeBuffer>,
+}
+
+fn resolve_aq4_batch_plans(
+    context: &ullm_runtime_sys::RuntimeContext,
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+    scale_count: usize,
+    row_scale_count: usize,
+    tensor_scale: f32,
+) -> Result<Box<[ResolvedPhasePlans]>, String> {
+    let device = DeviceCapabilities::from_runtime_context(context)?;
+    let geometry = OperationGeometry::Aq4MatvecBatch {
+        rows,
+        cols,
+        group_size,
+        scale_count,
+        row_scale_count,
+        tensor_scale_bits: tensor_scale.to_bits(),
+    };
+    let registry = aq4_matvec_batch_production_registry(geometry, &device)?;
+    let workspace_budget = if device.workspace_capacity_bytes == 0 {
+        u64::MAX
+    } else {
+        device.workspace_capacity_bytes
+    };
+    let mut plans = Vec::with_capacity(127);
+    for batch_count in 2..=128_u64 {
+        plans.push(ResolvedPhasePlans::resolve_aq4_batch(
+            &registry,
+            geometry,
+            batch_count,
+            &device,
+            workspace_budget,
+        )?);
+    }
+    Ok(plans.into_boxed_slice())
 }
 
 #[derive(Default)]
@@ -461,6 +503,15 @@ impl PackageAq4ResidentMatvec {
             tensor_scale: materialize.tensor_scale,
             scale_count: materialize.scale_values.len(),
             row_scale_count: if row_scale_buffer.is_some() { rows } else { 0 },
+            aq4_batch_plans: Some(resolve_aq4_batch_plans(
+                context,
+                rows,
+                cols,
+                materialize.group_size,
+                materialize.scale_values.len(),
+                if row_scale_buffer.is_some() { rows } else { 0 },
+                materialize.tensor_scale,
+            )?),
             projection_dispatches,
             storage: PackageResidentMatvecStorage::Aq4 {
                 index_buffer: loaded.index.buffer.clone(),
@@ -503,6 +554,7 @@ impl PackageAq4ResidentMatvec {
                         tensor_scale: 1.0,
                         scale_count,
                         row_scale_count: 0,
+                        aq4_batch_plans: None,
                         projection_dispatches,
                         storage: PackageResidentMatvecStorage::SqFp8 {
                             payload_buffer: Arc::new(resident.payload_buffer),
@@ -827,27 +879,53 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<(), String> {
+        self.matvec_batch_for_phase(
+            input_buffer,
+            batch_count,
+            output_buffer,
+            stream,
+            ExecutionPhase::Decode,
+            label,
+        )
+    }
+
+    pub fn matvec_batch_for_phase(
+        &self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        batch_count: usize,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        phase: ExecutionPhase,
+        label: &str,
+    ) -> Result<(), String> {
         match &self.storage {
             PackageResidentMatvecStorage::Aq4 { .. } => {
                 let aq4 = self.aq4_storage(label)?;
-                ullm_runtime_sys::aq4_matvec_batch_f32(
-                    aq4.index_buffer,
-                    aq4.scale_buffer,
-                    aq4.codebook_buffer,
-                    aq4.scale_values_buffer,
-                    input_buffer,
-                    aq4.row_scale_buffer,
-                    self.scale_count,
-                    self.group_size,
-                    self.tensor_scale,
-                    self.row_scale_count,
-                    self.rows,
-                    self.cols,
-                    batch_count,
-                    output_buffer,
-                    Some(stream),
-                )
-                .map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
+                if !(2..=128).contains(&batch_count) {
+                    return Err(format!(
+                        "{label} AQ4 matvec batch width must be in 2..=128, got {batch_count}"
+                    ));
+                }
+                let plans = self.aq4_batch_plans.as_ref().ok_or_else(|| {
+                    format!("{label} AQ4 matvec batch has no resolved production plan")
+                })?;
+                let plan = plans
+                    .get(batch_count - 2)
+                    .ok_or_else(|| format!("{label} AQ4 matvec batch width plan is unavailable"))?;
+                plan.for_phase(phase)
+                    .attempt()
+                    .start()
+                    .execute_aq4_matvec_batch_f32(
+                        aq4.index_buffer,
+                        aq4.scale_buffer,
+                        aq4.codebook_buffer,
+                        aq4.scale_values_buffer,
+                        input_buffer,
+                        aq4.row_scale_buffer,
+                        output_buffer,
+                        stream,
+                    )
+                    .map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
             }
             PackageResidentMatvecStorage::SqFp8 {
                 payload_buffer,

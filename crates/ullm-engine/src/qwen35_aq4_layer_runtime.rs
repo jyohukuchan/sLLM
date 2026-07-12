@@ -3574,32 +3574,36 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} input RMSNorm: {error}"))?;
-        weights.qkv_matrix.matvec_batch(
+        weights.qkv_matrix.matvec_batch_for_phase(
             &workspace.input_normed,
             sequence_len,
             &mut workspace.qkv,
             stream,
+            self.operation_phase,
             &format!("{label} qkv projection"),
         )?;
-        weights.z_matrix.matvec_batch(
+        weights.z_matrix.matvec_batch_for_phase(
             &workspace.input_normed,
             sequence_len,
             &mut workspace.z,
             stream,
+            self.operation_phase,
             &format!("{label} z projection"),
         )?;
-        weights.a_matrix.matvec_batch(
+        weights.a_matrix.matvec_batch_for_phase(
             &workspace.input_normed,
             sequence_len,
             &mut workspace.a,
             stream,
+            self.operation_phase,
             &format!("{label} a projection"),
         )?;
-        weights.b_matrix.matvec_batch(
+        weights.b_matrix.matvec_batch_for_phase(
             &workspace.input_normed,
             sequence_len,
             &mut workspace.b,
             stream,
+            self.operation_phase,
             &format!("{label} b projection"),
         )?;
 
@@ -3711,11 +3715,12 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} attention postprocess: {error}"))?;
-        weights.out_matrix.matvec_batch(
+        weights.out_matrix.matvec_batch_for_phase(
             &workspace.attn_projection_input,
             sequence_len,
             &mut workspace.projected,
             stream,
+            self.operation_phase,
             &format!("{label} out projection"),
         )?;
         ullm_runtime_sys::add_f32(
@@ -3736,18 +3741,20 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} post RMSNorm: {error}"))?;
-        weights.mlp_gate_matrix.matvec_batch(
+        weights.mlp_gate_matrix.matvec_batch_for_phase(
             &workspace.post_normed,
             sequence_len,
             &mut workspace.mlp_gate,
             stream,
+            self.operation_phase,
             &format!("{label} MLP gate projection"),
         )?;
-        weights.mlp_up_matrix.matvec_batch(
+        weights.mlp_up_matrix.matvec_batch_for_phase(
             &workspace.post_normed,
             sequence_len,
             &mut workspace.mlp_up,
             stream,
+            self.operation_phase,
             &format!("{label} MLP up projection"),
         )?;
         ullm_runtime_sys::silu_mul_f32(
@@ -3758,11 +3765,12 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} MLP activation: {error}"))?;
-        weights.mlp_down_matrix.matvec_batch(
+        weights.mlp_down_matrix.matvec_batch_for_phase(
             &workspace.mlp_activation,
             sequence_len,
             &mut workspace.mlp_down,
             stream,
+            self.operation_phase,
             &format!("{label} MLP down projection"),
         )?;
         ullm_runtime_sys::add_f32(

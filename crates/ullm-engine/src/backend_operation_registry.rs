@@ -26,6 +26,7 @@ enum ProbeFaultStage {
     Synchronize = 8,
     Aq4MatvecBatch = 9,
     QkvPrepareBatch = 10,
+    RecurrentSequence = 11,
 }
 
 #[cfg(test)]
@@ -52,8 +53,8 @@ fn probe_cache_key(capabilities: &DeviceCapabilities) -> ProbeCacheKey {
 }
 
 #[cfg(test)]
-static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 11] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 11];
+static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 12] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 12];
 
 #[cfg(test)]
 std::thread_local! {
@@ -108,6 +109,8 @@ pub enum OperationKind {
     GatedDeltaRuleScan,
     /// Sequence-width recurrent-state scan for one request.
     GatedDeltaRuleSequence,
+    /// Sequence-width AQ4 projection for one or more rows.
+    Aq4MatvecBatch,
     /// Read-only paged causal GQA over an already-written KV cache.
     PagedCausalGqaRead,
 }
@@ -147,6 +150,14 @@ pub enum OperationGeometry {
         value_heads: usize,
         key_dim: usize,
         value_dim: usize,
+    },
+    Aq4MatvecBatch {
+        rows: usize,
+        cols: usize,
+        group_size: usize,
+        scale_count: usize,
+        row_scale_count: usize,
+        tensor_scale_bits: u32,
     },
     PagedCausalGqaRead {
         q_heads: usize,
@@ -195,6 +206,7 @@ pub enum RuntimeFeature {
     HipPagedKvWrite = 4,
     HipAq4MatvecBatch = 5,
     HipLinearAttentionQkvPrepareBatch = 6,
+    HipLinearAttentionRecurrentSequence = 7,
 }
 
 /// Canonical production guard for a probed runtime feature.
@@ -212,6 +224,9 @@ pub const fn runtime_feature_environment(feature: RuntimeFeature) -> &'static st
         RuntimeFeature::HipAq4MatvecBatch => "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
         RuntimeFeature::HipLinearAttentionQkvPrepareBatch => {
             "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL"
+        }
+        RuntimeFeature::HipLinearAttentionRecurrentSequence => {
+            "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL"
         }
     }
 }
@@ -244,6 +259,7 @@ impl DeviceCapabilities {
                 RuntimeFeature::HipPagedKvWrite,
                 RuntimeFeature::HipAq4MatvecBatch,
                 RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
+                RuntimeFeature::HipLinearAttentionRecurrentSequence,
             ] {
                 if std::env::var_os(runtime_feature_environment(feature)).as_deref()
                     == Some(std::ffi::OsStr::new("1"))
@@ -357,6 +373,33 @@ impl DeviceCapabilities {
             probe_fault_checkpoint(3, "recurrent")?;
             proven = proven.with(RuntimeFeature::HipLinearAttentionRecurrent);
         }
+        if policy.contains(RuntimeFeature::HipLinearAttentionRecurrentSequence) {
+            const SEQUENCE_LEN: usize = 128;
+            let q = zeros(context, stream, SEQUENCE_LEN * 16 * 128)?;
+            let k = zeros(context, stream, SEQUENCE_LEN * 16 * 128)?;
+            let v = zeros(context, stream, SEQUENCE_LEN * 32 * 128)?;
+            let gate = zeros(context, stream, SEQUENCE_LEN * 32)?;
+            let beta = zeros(context, stream, SEQUENCE_LEN * 32)?;
+            let mut state = zeros(context, stream, 32 * 128 * 128)?;
+            let mut output = zeros(context, stream, SEQUENCE_LEN * 32 * 128)?;
+            ullm_runtime_sys::linear_attn_recurrent_f32(
+                &q,
+                &k,
+                &v,
+                &gate,
+                &beta,
+                16,
+                32,
+                SEQUENCE_LEN,
+                128,
+                128,
+                &mut state,
+                &mut output,
+                Some(stream),
+            )?;
+            probe_fault_checkpoint(11, "recurrent-sequence")?;
+            proven = proven.with(RuntimeFeature::HipLinearAttentionRecurrentSequence);
+        }
         if policy.contains(RuntimeFeature::HipPagedDecodeAttention) {
             let q = zeros(context, stream, 32 * 128)?;
             let gate = zeros(context, stream, 32 * 128)?;
@@ -460,6 +503,7 @@ impl DeviceCapabilities {
             }
         }
         if policy.contains(RuntimeFeature::HipAq4MatvecBatch) {
+            const BATCH_COUNT: usize = 128;
             let mut index = context.alloc_buffer(3)?;
             index.copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(stream))?;
             let mut scale = context.alloc_buffer(3)?;
@@ -475,8 +519,8 @@ impl DeviceCapabilities {
                 .flat_map(f32::to_le_bytes)
                 .collect::<Vec<_>>();
             scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
-            let input = zeros(context, stream, 2 * 3)?;
-            let mut output = zeros(context, stream, 2 * 2)?;
+            let input = zeros(context, stream, BATCH_COUNT * 3)?;
+            let mut output = zeros(context, stream, BATCH_COUNT * 2)?;
             ullm_runtime_sys::aq4_matvec_batch_f32(
                 &index,
                 &scale,
@@ -484,7 +528,7 @@ impl DeviceCapabilities {
                 &scale_values,
                 &input,
                 None,
-                2,
+                BATCH_COUNT,
                 2,
                 1.0,
                 0,
@@ -498,7 +542,7 @@ impl DeviceCapabilities {
             proven = proven.with(RuntimeFeature::HipAq4MatvecBatch);
         }
         if policy.contains(RuntimeFeature::HipLinearAttentionQkvPrepareBatch) {
-            const SEQUENCE_LEN: usize = 2;
+            const SEQUENCE_LEN: usize = 128;
             let qkv = zeros(context, stream, SEQUENCE_LEN * 8_192)?;
             let conv_weight = zeros(context, stream, 8_192 * 4)?;
             let mut history = zeros(context, stream, 8_192 * 4)?;
@@ -627,6 +671,7 @@ impl RuntimeFeatureSet {
 /// Typed persistent-state layout at the operation boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationStateLayout {
+    None,
     ConvolutionHistory,
     RecurrentMatrix,
     PagedKvBlocks,
@@ -765,6 +810,7 @@ pub enum ExecutableOperation {
     HipLinearAttentionQkvPrepareBatchF32,
     HipLinearAttentionRecurrentF32,
     HipLinearAttentionRecurrentSequenceF32,
+    HipAq4MatvecBatchF32,
     HipPagedDecodeAttentionF32,
     HipPagedDecodeAttentionSigmoidGateF32,
 }
@@ -1610,6 +1656,74 @@ impl StartedOperationPlan<'_> {
         .map_err(|error| error.to_string())
     }
 
+    pub fn execute_aq4_matvec_batch_f32(
+        self,
+        index: &ullm_runtime_sys::RuntimeBuffer,
+        scale: &ullm_runtime_sys::RuntimeBuffer,
+        codebook: &ullm_runtime_sys::RuntimeBuffer,
+        scale_values: &ullm_runtime_sys::RuntimeBuffer,
+        input: &ullm_runtime_sys::RuntimeBuffer,
+        row_scale: Option<&ullm_runtime_sys::RuntimeBuffer>,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let plan = self.plan();
+        let OperationGeometry::Aq4MatvecBatch {
+            rows,
+            cols,
+            group_size,
+            scale_count,
+            row_scale_count,
+            tensor_scale_bits,
+        } = plan.geometry
+        else {
+            return Err("resolved AQ4 matvec batch operation has incompatible geometry".into());
+        };
+        if plan.kind != OperationKind::Aq4MatvecBatch
+            || plan.executable != ExecutableOperation::HipAq4MatvecBatchF32
+            || plan.chunk_width != 1
+            || !(2..=128).contains(&plan.batch_width)
+        {
+            return Err(format!(
+                "resolved backend operation {} is not an AQ4 matvec batch",
+                plan.implementation_id
+            ));
+        }
+        if rows == 0 || cols == 0 || group_size == 0 || scale_count == 0 {
+            return Err("resolved AQ4 matvec batch geometry contains zero dimensions".into());
+        }
+        let tensor_scale = f32::from_bits(tensor_scale_bits);
+        if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+            return Err("resolved AQ4 matvec batch tensor scale is invalid".into());
+        }
+        if row_scale_count == 0 && row_scale.is_some() {
+            return Err("resolved AQ4 matvec batch has an unexpected row scale buffer".into());
+        }
+        if row_scale_count != 0 && row_scale.is_none() {
+            return Err("resolved AQ4 matvec batch is missing its row scale buffer".into());
+        }
+        let batch_count = usize::try_from(plan.batch_width)
+            .map_err(|_| "resolved AQ4 matvec batch width exceeds usize".to_string())?;
+        ullm_runtime_sys::aq4_matvec_batch_f32(
+            index,
+            scale,
+            codebook,
+            scale_values,
+            input,
+            row_scale,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn execute_paged_kv_write_f32(
         self,
@@ -1913,6 +2027,11 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
             ExecutableOperation::HipLinearAttentionRecurrentSequenceF32,
         ) => true,
         (
+            OperationKind::Aq4MatvecBatch,
+            OperationGeometry::Aq4MatvecBatch { .. },
+            ExecutableOperation::HipAq4MatvecBatchF32,
+        ) => true,
+        (
             OperationKind::PagedCausalGqaRead,
             OperationGeometry::PagedCausalGqaRead {
                 sigmoid_gate: false,
@@ -1938,7 +2057,7 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
     let effect = descriptor.state_effect;
     let effect_valid = match effect.update_mode {
         StateUpdateMode::ReadOnly => {
-            !effect.reads.is_empty()
+            (descriptor.kind == OperationKind::Aq4MatvecBatch || !effect.reads.is_empty())
                 && effect.writes.is_empty()
                 && effect.prepares.is_empty()
                 && effect.commits.is_empty()
@@ -1967,6 +2086,11 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
         OperationKind::GatedDeltaRuleScan | OperationKind::GatedDeltaRuleSequence => {
             descriptor.state_layout == OperationStateLayout::RecurrentMatrix
                 && effect.writes.contains(StateResource::RecurrentState)
+        }
+        OperationKind::Aq4MatvecBatch => {
+            descriptor.state_layout == OperationStateLayout::None
+                && effect.reads.is_empty()
+                && effect.writes.is_empty()
         }
         OperationKind::PagedCausalGqaRead => {
             descriptor.state_layout == OperationStateLayout::PagedKvBlocks
@@ -2293,7 +2417,7 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
             device_name: None,
             minimum_abi_version: 1,
             required_features: RuntimeFeatureSet::from_feature(
-                RuntimeFeature::HipLinearAttentionRecurrent,
+                RuntimeFeature::HipLinearAttentionRecurrentSequence,
             ),
             workspace: WorkspaceFormula {
                 fixed_persistent_bytes: 2_097_152,
@@ -2564,6 +2688,7 @@ pub fn qwen35_m1_operation_request(
             OperationKind::GatedDeltaRuleScan | OperationKind::GatedDeltaRuleSequence => {
                 OperationStateLayout::RecurrentMatrix
             }
+            OperationKind::Aq4MatvecBatch => OperationStateLayout::None,
             OperationKind::PagedCausalGqaRead => OperationStateLayout::PagedKvBlocks,
         },
         activation_format: NumericalFormat::F32,
@@ -2616,6 +2741,166 @@ pub fn qwen35_sequence_operation_request(
         workspace_budget_bytes,
         minimum_promotion: PromotionStatus::Production,
     })
+}
+
+/// Builds a shape-exact AQ4 projection request for a batch width in `2..=128`.
+pub fn aq4_matvec_batch_operation_request(
+    phase: ExecutionPhase,
+    geometry: OperationGeometry,
+    batch_count: u64,
+    device: DeviceCapabilities,
+    workspace_budget_bytes: u64,
+) -> Result<OperationRequest, String> {
+    if !matches!(geometry, OperationGeometry::Aq4MatvecBatch { .. }) {
+        return Err("AQ4 matvec batch request requires AQ4 matvec batch geometry".into());
+    }
+    if !(2..=128).contains(&batch_count) {
+        return Err(format!(
+            "AQ4 matvec batch width must be in 2..=128, got {batch_count}"
+        ));
+    }
+    Ok(OperationRequest {
+        kind: OperationKind::Aq4MatvecBatch,
+        phase,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: Some(TensorLayout::RowMajor),
+        state_layout: OperationStateLayout::None,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: Some(NumericalFormat::Aq4_0),
+        state_format: NumericalFormat::F32,
+        geometry,
+        batch_width: batch_count,
+        chunk_width: 1,
+        device,
+        workspace_budget_bytes,
+        minimum_promotion: PromotionStatus::Production,
+    })
+}
+
+fn aq4_matvec_batch_descriptor(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<ImplementationDescriptor, String> {
+    let OperationGeometry::Aq4MatvecBatch {
+        rows,
+        cols,
+        group_size,
+        scale_count,
+        row_scale_count,
+        tensor_scale_bits,
+    } = geometry
+    else {
+        return Err("AQ4 matvec batch descriptor requires AQ4 matvec batch geometry".into());
+    };
+    if rows == 0 || cols == 0 || group_size == 0 || scale_count == 0 {
+        return Err("AQ4 matvec batch descriptor geometry contains zero dimensions".into());
+    }
+    let tensor_scale = f32::from_bits(tensor_scale_bits);
+    if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+        return Err("AQ4 matvec batch descriptor tensor scale is invalid".into());
+    }
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec batch descriptor matrix elements overflow".to_string())?;
+    let _ = elements
+        .checked_add(group_size - 1)
+        .and_then(|value| value.checked_div(group_size))
+        .ok_or_else(|| "AQ4 matvec batch descriptor group count overflow".to_string())?;
+    if row_scale_count != 0 && row_scale_count != rows {
+        return Err(format!(
+            "AQ4 matvec batch descriptor row scale count {row_scale_count} must be zero or rows {rows}"
+        ));
+    }
+    let bytes_per_item = rows
+        .checked_add(cols)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "AQ4 matvec batch descriptor workspace overflows".to_string())?;
+    let bytes_per_item = u64::try_from(bytes_per_item)
+        .map_err(|_| "AQ4 matvec batch descriptor workspace exceeds u64".to_string())?;
+    let maximum_total_bytes = 1_u64 << 30;
+    let maximum_estimate = bytes_per_item
+        .checked_mul(128)
+        .ok_or_else(|| "AQ4 matvec batch descriptor workspace overflows".to_string())?;
+    if maximum_estimate > maximum_total_bytes {
+        return Err("AQ4 matvec batch descriptor workspace exceeds bounded maximum".into());
+    }
+    let (backend, architecture, required_features, id) = match device.backend {
+        OperationBackend::Host => (
+            OperationBackend::Host,
+            None,
+            RuntimeFeatureSet::EMPTY,
+            "host.aq4-matvec-batch-f32.m2-m128",
+        ),
+        OperationBackend::Hip => {
+            if device.architecture.as_deref() != Some("gfx1201") {
+                return Err(format!(
+                    "AQ4 matvec batch production requires gfx1201, got {}",
+                    device.architecture.as_deref().unwrap_or("unavailable")
+                ));
+            }
+            (
+                OperationBackend::Hip,
+                Some("gfx1201"),
+                RuntimeFeatureSet::from_feature(RuntimeFeature::HipAq4MatvecBatch),
+                "hip.aq4-matvec-batch-f32.m2-m128",
+            )
+        }
+    };
+    Ok(ImplementationDescriptor {
+        id,
+        semantic_version: "1.0.0",
+        kind: OperationKind::Aq4MatvecBatch,
+        phases: PhaseSet::ALL_CURRENT,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: Some(TensorLayout::RowMajor),
+        state_layout: OperationStateLayout::None,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: Some(NumericalFormat::Aq4_0),
+        state_format: NumericalFormat::F32,
+        geometry,
+        minimum_batch_width: 2,
+        maximum_batch_width: 128,
+        minimum_chunk_width: 1,
+        maximum_chunk_width: 1,
+        backend,
+        architecture,
+        device_name: None,
+        minimum_abi_version: 1,
+        required_features,
+        workspace: WorkspaceFormula {
+            fixed_persistent_bytes: 0,
+            fixed_temporary_bytes: 0,
+            temporary_bytes_per_batch_item: bytes_per_item,
+            temporary_bytes_per_chunk_token: 0,
+            maximum_total_bytes,
+        },
+        state_effect: StateEffect {
+            reads: StateResourceSet::EMPTY,
+            writes: StateResourceSet::EMPTY,
+            prepares: StateResourceSet::EMPTY,
+            commits: StateResourceSet::EMPTY,
+            update_mode: StateUpdateMode::ReadOnly,
+            externally_visible_before_commit: false,
+        },
+        promotion: PromotionStatus::Production,
+        priority: 100,
+        fallback_id: None,
+        deterministic: true,
+        executable: ExecutableOperation::HipAq4MatvecBatchF32,
+        runtime_build: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Builds a production AQ4 batch registry for one exact resident matrix shape.
+pub fn aq4_matvec_batch_production_registry(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<BackendOperationRegistry, String> {
+    BackendOperationRegistry::new(vec![aq4_matvec_batch_descriptor(geometry, device)?])
 }
 
 /// One pre-resolved plan for every current execution phase.
@@ -2696,6 +2981,32 @@ impl ResolvedPhasePlans {
         })
     }
 
+    /// Resolves an exact resident AQ4 matrix shape for every current execution phase.
+    pub fn resolve_aq4_batch(
+        registry: &BackendOperationRegistry,
+        geometry: OperationGeometry,
+        batch_count: u64,
+        device: &DeviceCapabilities,
+        workspace_budget_bytes: u64,
+    ) -> Result<Self, String> {
+        let resolve = |phase| {
+            registry
+                .admit(aq4_matvec_batch_operation_request(
+                    phase,
+                    geometry,
+                    batch_count,
+                    device.clone(),
+                    workspace_budget_bytes,
+                )?)
+                .map(PrestartAttempt::into_plan)
+        };
+        Ok(Self {
+            cold_prefill: resolve(ExecutionPhase::ColdPrefill)?,
+            cached_prefix_prefill: resolve(ExecutionPhase::CachedPrefixPrefill)?,
+            decode: resolve(ExecutionPhase::Decode)?,
+        })
+    }
+
     pub const fn for_phase(&self, phase: ExecutionPhase) -> &ResolvedOperationPlan {
         match phase {
             ExecutionPhase::ColdPrefill => &self.cold_prefill,
@@ -2731,7 +3042,8 @@ mod tests {
                 .with(RuntimeFeature::HipLinearAttentionQkvPrepare)
                 .with(RuntimeFeature::HipPagedKvWrite)
                 .with(RuntimeFeature::HipAq4MatvecBatch)
-                .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch),
+                .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch)
+                .with(RuntimeFeature::HipLinearAttentionRecurrentSequence),
             workspace_capacity_bytes: u64::MAX,
         }
     }
@@ -2811,6 +3123,173 @@ mod tests {
             u64::MAX,
         )
         .unwrap()
+    }
+
+    fn aq4_geometry() -> OperationGeometry {
+        OperationGeometry::Aq4MatvecBatch {
+            rows: 2,
+            cols: 3,
+            group_size: 2,
+            scale_count: 2,
+            row_scale_count: 0,
+            tensor_scale_bits: 10.0_f32.to_bits(),
+        }
+    }
+
+    #[test]
+    fn aq4_batch_registry_is_shape_exact_and_width_bounded() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let device = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let registry = aq4_matvec_batch_production_registry(aq4_geometry(), &device).unwrap();
+        assert_eq!(registry.implementations().len(), 1);
+        for width in [2, 128] {
+            let request = aq4_matvec_batch_operation_request(
+                ExecutionPhase::Decode,
+                aq4_geometry(),
+                width,
+                device.clone(),
+                u64::MAX,
+            )
+            .unwrap();
+            assert!(registry.admit(request).is_ok());
+        }
+        for width in [1, 129] {
+            assert!(
+                aq4_matvec_batch_operation_request(
+                    ExecutionPhase::Decode,
+                    aq4_geometry(),
+                    width,
+                    device.clone(),
+                    device.workspace_capacity_bytes,
+                )
+                .is_err()
+            );
+        }
+        let mut wrong_geometry = aq4_geometry();
+        if let OperationGeometry::Aq4MatvecBatch { cols, .. } = &mut wrong_geometry {
+            *cols = 4;
+        }
+        let request = aq4_matvec_batch_operation_request(
+            ExecutionPhase::Decode,
+            wrong_geometry,
+            2,
+            device.clone(),
+            device.workspace_capacity_bytes,
+        )
+        .unwrap();
+        assert!(registry.admit(request).is_err());
+
+        let mut hip = test_hip_capabilities();
+        hip.runtime_features = RuntimeFeatureSet::EMPTY;
+        let hip_registry = aq4_matvec_batch_production_registry(aq4_geometry(), &hip).unwrap();
+        let request = aq4_matvec_batch_operation_request(
+            ExecutionPhase::Decode,
+            aq4_geometry(),
+            2,
+            hip,
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(hip_registry.admit(request).is_err());
+    }
+
+    #[test]
+    fn planned_aq4_batch_wrapper_matches_direct_cpu_abi() {
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(3).unwrap();
+        let mut scale = context.alloc_buffer(3).unwrap();
+        let mut codebook = context.alloc_buffer(16 * 4).unwrap();
+        let mut scale_values = context.alloc_buffer(2 * 4).unwrap();
+        let mut input = context.alloc_buffer(2 * 3 * 4).unwrap();
+        let mut direct_output = context.alloc_buffer(2 * 2 * 4).unwrap();
+        let mut planned_output = context.alloc_buffer(2 * 2 * 4).unwrap();
+        index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_bytes = (0..16_u32)
+            .flat_map(|value| (value as f32).to_le_bytes())
+            .collect::<Vec<_>>();
+        codebook
+            .copy_from_host(0, &codebook_bytes, Some(&mut stream))
+            .unwrap();
+        scale_values
+            .copy_from_host(
+                0,
+                &[0.5_f32.to_le_bytes(), 2.0_f32.to_le_bytes()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>(),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(
+                0,
+                &[0.5_f32, -1.0, 2.0, 1.0, 0.0, -0.5]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+                Some(&mut stream),
+            )
+            .unwrap();
+        let device = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let registry = aq4_matvec_batch_production_registry(aq4_geometry(), &device).unwrap();
+        let request = aq4_matvec_batch_operation_request(
+            ExecutionPhase::Decode,
+            aq4_geometry(),
+            2,
+            device,
+            u64::MAX,
+        )
+        .unwrap();
+        ullm_runtime_sys::aq4_matvec_batch_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            2,
+            2,
+            10.0,
+            0,
+            2,
+            3,
+            2,
+            &mut direct_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        registry
+            .admit(request)
+            .unwrap()
+            .start()
+            .execute_aq4_matvec_batch_f32(
+                &index,
+                &scale,
+                &codebook,
+                &scale_values,
+                &input,
+                None,
+                &mut planned_output,
+                &mut stream,
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+        let mut direct_bytes = vec![0_u8; 16];
+        let mut planned_bytes = vec![0_u8; 16];
+        direct_output
+            .copy_to_host(0, &mut direct_bytes, Some(&mut stream))
+            .unwrap();
+        planned_output
+            .copy_to_host(0, &mut planned_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(direct_bytes, planned_bytes);
     }
 
     #[test]
@@ -3122,6 +3601,7 @@ mod tests {
             (ProbeFaultStage::FusedWriter, 7, "fused-writer"),
             (ProbeFaultStage::Aq4MatvecBatch, 9, "aq4-matvec-batch"),
             (ProbeFaultStage::QkvPrepareBatch, 10, "qkv-prepare-batch"),
+            (ProbeFaultStage::RecurrentSequence, 11, "recurrent-sequence"),
             (ProbeFaultStage::Synchronize, 8, "synchronize"),
         ] {
             force_probe_failure(stage);
@@ -3175,6 +3655,7 @@ mod tests {
             "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
             "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
             "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+            "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
         ] {
             assert_eq!(std::env::var(environment).as_deref(), Ok("1"));
         }
@@ -3189,6 +3670,7 @@ mod tests {
             ProbeFaultStage::FusedWriter,
             ProbeFaultStage::Aq4MatvecBatch,
             ProbeFaultStage::QkvPrepareBatch,
+            ProbeFaultStage::RecurrentSequence,
             ProbeFaultStage::Synchronize,
         ] {
             M1_PROBE_CACHE

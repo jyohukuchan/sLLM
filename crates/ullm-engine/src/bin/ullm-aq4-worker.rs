@@ -831,6 +831,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(actual.contains(&"ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL"));
         assert!(actual.contains(&"ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL"));
+        assert!(actual.contains(&"ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL"));
         actual.sort_unstable();
         let mut expected = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
         expected.sort_unstable();

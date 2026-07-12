@@ -176,6 +176,7 @@ def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
     profile["worker"]["required_environment"] = [
         "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
         "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
     ]
     profile["product"]["artifact"] = None
     profile["promotion"] = {
@@ -243,6 +244,7 @@ def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path)
     assert document["worker"]["required_environment"] == [
         "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
         "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
     ]
 
 
