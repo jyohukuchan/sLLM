@@ -3,9 +3,9 @@
 
 //! CPU-side thread and channel topology for the resident SQ8 worker.
 
+use crate::inference_api::InferenceRequest as Sq8ServingRequest;
 #[cfg(test)]
 use crate::sq8_model_head_runtime::QWEN3_14B_VOCAB_SIZE;
-use crate::sq8_serving_runtime::Sq8ServingRequest;
 use crate::sq8_worker_protocol::{
     Sq8ActiveTerminalFlushAck, Sq8ActiveTerminalPermit, Sq8BoundedJsonlReader,
     Sq8JsonlFramingError, Sq8JsonlRead, Sq8OrderedJsonlWriter, Sq8PromptProgressTracker,

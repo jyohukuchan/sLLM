@@ -3,6 +3,11 @@
 
 //! Resident Qwen3 SQ8 session backend for the JSONL worker.
 
+use crate::inference_api::{
+    CancellationToken as Sq8CancellationToken, FinishReason as Sq8FinishReason,
+    InferenceRequest as Sq8ServingRequest, ReleaseOutcome as Sq8ReleaseOutcome,
+    ReleaseSummary as Sq8ReleaseSummary,
+};
 use crate::sq_canonical::read_sq8_canonical_artifact;
 use crate::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
 use crate::sq8_layer_runtime::{
@@ -13,10 +18,8 @@ use crate::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use crate::sq8_serving_runtime::{
-    Qwen3Sq8ServingSession, Sq8CancellationToken, Sq8FinishReason, Sq8PreparedAdvance,
-    Sq8PreparedToken, Sq8ReleaseOutcome, Sq8ReleaseSummary, Sq8ServingAdvance,
-    Sq8ServingPrefillMode, Sq8ServingRequest, Sq8ServingRuntimeStatus,
-    load_qwen3_14b_sq8_serving_norms,
+    Qwen3Sq8ServingSession, Sq8PreparedAdvance, Sq8PreparedToken, Sq8ServingAdvance,
+    Sq8ServingPrefillMode, Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
 };
 use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerTimings};
 use crate::sq8_worker_runtime::{Sq8InferenceBackend, Sq8RequestEventPublisher};

@@ -8,7 +8,7 @@
 //! available to the product protocol without duplicating the prototype model loop. Moving that
 //! model loop into a reusable resident session remains separate work.
 
-use crate::sq8_serving_runtime::Sq8ServingRequest;
+use crate::inference_api::InferenceRequest as Sq8ServingRequest;
 use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerTimings};
 use crate::sq8_worker_runtime::{Sq8InferenceBackend, Sq8RequestEventPublisher};
 use serde::Deserialize;

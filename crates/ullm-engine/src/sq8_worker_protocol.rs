@@ -3,11 +3,16 @@
 
 //! Strict bounded JSONL contracts for the private SQ8 resident worker protocol.
 
+pub use crate::inference_api::GenerationTimings as Sq8WorkerTimings;
+use crate::inference_api::{
+    CancellationToken as Sq8CancellationToken, InferenceRequest as Sq8ServingRequest,
+    SamplingParams as Sq8SamplingParams,
+};
 use crate::sq8_model_head_runtime::QWEN3_14B_VOCAB_SIZE;
 use crate::sq8_serving_runtime::{
     QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256, QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
     QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS, QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256,
-    QWEN3_14B_SQ8_SERVING_TOP_K, Sq8SamplingParams, Sq8ServingRequest,
+    QWEN3_14B_SQ8_SERVING_TOP_K,
 };
 use memchr::memchr;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -16,8 +21,6 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::{BufRead, Write};
 use std::sync::{Mutex, TryLockError};
-
-use crate::sq8_serving_runtime::Sq8CancellationToken;
 
 pub const SQ8_WORKER_SCHEMA_VERSION: &str = "ullm.worker.v1";
 pub const SQ8_WORKER_MAX_RECORD_BYTES: usize = 4_194_304;
@@ -1446,19 +1449,6 @@ pub enum Sq8ReleaseOutcomeEvent {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct Sq8WorkerTimings {
-    pub cache_n: usize,
-    pub prompt_n: usize,
-    pub prompt_ms: f64,
-    pub prompt_per_token_ms: f64,
-    pub prompt_per_second: f64,
-    pub predicted_n: usize,
-    pub predicted_ms: f64,
-    pub predicted_per_token_ms: f64,
-    pub predicted_per_second: f64,
-}
-
 impl Sq8WorkerTimings {
     pub fn from_elapsed_millis(
         prompt_n: usize,
@@ -1467,32 +1457,17 @@ impl Sq8WorkerTimings {
         predicted_ms: f64,
     ) -> Result<Self, Sq8WorkerProtocolError> {
         let profile = configured_worker_profile();
-        if !(1..=profile.context_length).contains(&prompt_n)
-            || !(1..=profile.max_new_tokens).contains(&predicted_n)
-            || !prompt_ms.is_finite()
-            || prompt_ms <= 0.0
-            || !predicted_ms.is_finite()
-            || predicted_ms < 0.001
-        {
-            return Err(Sq8WorkerProtocolError::invalid_command(
-                "SQ8 worker timings are out of range",
-            ));
-        }
-        let value = Self {
-            cache_n: 0,
+        Self::from_elapsed_millis_with_limits(
             prompt_n,
             prompt_ms,
-            prompt_per_token_ms: prompt_ms / prompt_n as f64,
-            prompt_per_second: 1e3 / prompt_ms * prompt_n as f64,
             predicted_n,
             predicted_ms,
-            predicted_per_token_ms: predicted_ms / predicted_n as f64,
-            predicted_per_second: 1e3 / predicted_ms * predicted_n as f64,
-        };
-        value
-            .validate_for_release(prompt_n, predicted_n)
-            .map_err(Sq8WorkerProtocolError::invalid_command)?;
-        Ok(value)
+            profile.context_length,
+            profile.max_new_tokens,
+        )
+        .ok_or_else(|| {
+            Sq8WorkerProtocolError::invalid_command("SQ8 worker timings are out of range")
+        })
     }
 
     fn validate_for_release(
@@ -1500,47 +1475,11 @@ impl Sq8WorkerTimings {
         prompt_tokens: usize,
         completion_tokens: usize,
     ) -> Result<(), String> {
-        let positive_finite = [
-            self.prompt_ms,
-            self.prompt_per_token_ms,
-            self.prompt_per_second,
-            self.predicted_ms,
-            self.predicted_per_token_ms,
-            self.predicted_per_second,
-        ]
-        .into_iter()
-        .all(|value| value.is_finite() && value > 0.0);
-        if self.cache_n != 0
-            || self.prompt_n != prompt_tokens
-            || self.predicted_n != completion_tokens
-            || self.predicted_ms < 0.001
-            || !positive_finite
-            || !timing_value_matches(
-                self.prompt_per_token_ms,
-                self.prompt_ms / self.prompt_n as f64,
-            )
-            || !timing_value_matches(
-                self.prompt_per_second,
-                1e3 / self.prompt_ms * self.prompt_n as f64,
-            )
-            || !timing_value_matches(
-                self.predicted_per_token_ms,
-                self.predicted_ms / self.predicted_n as f64,
-            )
-            || !timing_value_matches(
-                self.predicted_per_second,
-                1e3 / self.predicted_ms * self.predicted_n as f64,
-            )
-        {
+        if !self.validates_release(prompt_tokens, completion_tokens) {
             return Err("SQ8 released timings violate the llama-server contract".into());
         }
         Ok(())
     }
-}
-
-fn timing_value_matches(actual: f64, expected: f64) -> bool {
-    let tolerance = (expected.abs() * 1e-12).max(1e-12);
-    (actual - expected).abs() <= tolerance
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

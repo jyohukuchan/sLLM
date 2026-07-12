@@ -7,6 +7,12 @@
 //! result schemas remain unchanged while serving gains variable prompt lengths and reusable state.
 
 use crate::decoder::{PagedDecodeShape, PagedDecodeState};
+pub use crate::inference_api::{
+    CancellationToken as Sq8CancellationToken, FinishReason as Sq8FinishReason,
+    InferenceError as Sq8ServingError, InferenceErrorKind as Sq8ServingErrorKind,
+    InferenceRequest as Sq8ServingRequest, ReleaseOutcome as Sq8ReleaseOutcome,
+    ReleaseSummary as Sq8ReleaseSummary, SamplingParams as Sq8SamplingParams,
+};
 use crate::loader::{read_named_passthrough_f32, verify_named_passthrough_payload};
 use crate::scheduler::{
     KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest, SchedulerState,
@@ -33,10 +39,7 @@ use crate::sq8_stack_runtime::{
     Sq8PagedStackExecutionReport, Sq8PagedStackPhase, Sq8ServingChunkExecutionReport,
 };
 use sha2::{Digest, Sha256};
-use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use ullm_runtime_sys::{DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream};
 
 pub const QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS: usize = 4096;
@@ -98,57 +101,6 @@ impl Sq8ServingPrefillMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Sq8SamplingParams {
-    pub temperature: f32,
-    pub top_p: f32,
-    pub top_k: usize,
-    pub seed: i64,
-}
-
-impl Sq8SamplingParams {
-    pub const fn greedy(seed: i64) -> Self {
-        Self {
-            temperature: 0.0,
-            top_p: 1.0,
-            top_k: QWEN3_14B_SQ8_SERVING_TOP_K,
-            seed,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), Sq8ServingError> {
-        if !self.temperature.is_finite() || !(0.0..=2.0).contains(&self.temperature) {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "temperature must be finite and in 0..=2, got {}",
-                self.temperature
-            )));
-        }
-        if !self.top_p.is_finite() || self.top_p <= 0.0 || self.top_p > 1.0 {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "top_p must be finite and in 0<top_p<=1, got {}",
-                self.top_p
-            )));
-        }
-        if self.top_k != QWEN3_14B_SQ8_SERVING_TOP_K {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "top_k must be {}, got {}",
-                QWEN3_14B_SQ8_SERVING_TOP_K, self.top_k
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Sq8ServingRequest {
-    pub request_id: String,
-    pub prompt_token_ids: Vec<usize>,
-    pub max_new_tokens: usize,
-    pub eos_token_ids: Vec<usize>,
-    pub sampling: Sq8SamplingParams,
-    test_only_ignore_eos: bool,
-}
-
 impl Sq8ServingRequest {
     pub fn new(
         request_id: impl Into<String>,
@@ -156,14 +108,13 @@ impl Sq8ServingRequest {
         max_new_tokens: usize,
         sampling: Sq8SamplingParams,
     ) -> Self {
-        Self {
-            request_id: request_id.into(),
+        Self::new_with_eos(
+            request_id,
             prompt_token_ids,
             max_new_tokens,
-            eos_token_ids: QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS.to_vec(),
+            QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS.to_vec(),
             sampling,
-            test_only_ignore_eos: false,
-        }
+        )
     }
 
     pub fn greedy(
@@ -186,13 +137,7 @@ impl Sq8ServingRequest {
         prompt_token_ids: Vec<usize>,
         max_new_tokens: usize,
     ) -> Self {
-        let mut request = Self::greedy(request_id, prompt_token_ids, max_new_tokens);
-        request.test_only_ignore_eos = true;
-        request
-    }
-
-    pub fn test_only_ignores_eos(&self) -> bool {
-        self.test_only_ignore_eos
+        Self::greedy(request_id, prompt_token_ids, max_new_tokens).ignore_eos_for_testing()
     }
 
     pub fn validate(&self) -> Result<(), Sq8ServingError> {
@@ -204,128 +149,15 @@ impl Sq8ServingRequest {
             QWEN3_14B_SQ8_SERVING_TOP_K,
         )
     }
-
-    pub fn validate_for_worker(
-        &self,
-        context_tokens: usize,
-        max_new_tokens: usize,
-        vocab_size: usize,
-        eos_token_ids: &[usize],
-        top_k: usize,
-    ) -> Result<(), Sq8ServingError> {
-        validate_request_id(&self.request_id)?;
-        if context_tokens == 0
-            || self.prompt_token_ids.is_empty()
-            || self.prompt_token_ids.len() > context_tokens
-        {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "prompt token count must be in 1..={}, got {}",
-                context_tokens,
-                self.prompt_token_ids.len()
-            )));
-        }
-        if let Some((index, token_id)) = self
-            .prompt_token_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, token_id)| *token_id >= vocab_size)
-        {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "prompt_token_ids[{index}]={token_id} exceeds vocabulary size {vocab_size}"
-            )));
-        }
-        if !(1..=max_new_tokens).contains(&self.max_new_tokens) {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "max_new_tokens must be in 1..={}, got {}",
-                max_new_tokens, self.max_new_tokens
-            )));
-        }
-        let reserved_tokens = self
-            .prompt_token_ids
-            .len()
-            .checked_add(self.max_new_tokens)
-            .ok_or_else(|| Sq8ServingError::invalid_request("context token count overflows"))?;
-        if reserved_tokens > context_tokens {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "prompt plus completion exceeds context: requested={reserved_tokens} context={context_tokens}"
-            )));
-        }
-        if self.eos_token_ids != eos_token_ids {
-            return Err(Sq8ServingError::invalid_request(format!(
-                "eos_token_ids must be {:?}, got {:?}",
-                eos_token_ids, self.eos_token_ids
-            )));
-        }
-        if !self.sampling.temperature.is_finite()
-            || !(0.0..=2.0).contains(&self.sampling.temperature)
-            || !self.sampling.top_p.is_finite()
-            || self.sampling.top_p <= 0.0
-            || self.sampling.top_p > 1.0
-            || self.sampling.top_k != top_k
-        {
-            return Err(Sq8ServingError::invalid_request(
-                "sampling violates the configured worker limits",
-            ));
-        }
-        Ok(())
-    }
 }
 
-#[derive(Debug, Default)]
-struct Sq8CancellationState {
-    flag: AtomicBool,
-    publication: Mutex<()>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Sq8CancellationToken {
-    inner: Arc<Sq8CancellationState>,
-}
-
-impl Sq8CancellationToken {
-    pub fn new() -> Self {
-        Self::default()
+impl Sq8SamplingParams {
+    pub const fn greedy(seed: i64) -> Self {
+        Self::greedy_with_top_k(seed, QWEN3_14B_SQ8_SERVING_TOP_K)
     }
 
-    pub fn cancel(&self) {
-        match self.cancel_checked() {
-            Ok(()) => {}
-            Err(_) => self.inner.flag.store(true, Ordering::Release),
-        }
-    }
-
-    pub fn cancel_checked(&self) -> Result<(), String> {
-        let _publication = self.publication_guard()?;
-        self.inner.flag.store(true, Ordering::Release);
-        Ok(())
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.inner.flag.load(Ordering::Acquire)
-    }
-
-    fn publication_guard(&self) -> Result<MutexGuard<'_, ()>, String> {
-        self.inner
-            .publication
-            .lock()
-            .map_err(|_| "SQ8 cancellation publication mutex is poisoned".to_string())
-    }
-
-    #[cfg(test)]
-    fn publication_is_locked(&self) -> Result<bool, String> {
-        match self.inner.publication.try_lock() {
-            Ok(_publication) => Ok(false),
-            Err(std::sync::TryLockError::WouldBlock) => Ok(true),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                Err("SQ8 cancellation publication mutex is poisoned".to_string())
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn publication_guard_for_testing(&self) -> Result<MutexGuard<'_, ()>, String> {
-        self.publication_guard()
+    pub fn validate(&self) -> Result<(), Sq8ServingError> {
+        self.validate_with_top_k(QWEN3_14B_SQ8_SERVING_TOP_K)
     }
 }
 
@@ -350,28 +182,6 @@ where
     }
     publish().map_err(|err| format!("serving token publisher failed before commit: {err}"))?;
     commit().map(TokenPublication::Published)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sq8FinishReason {
-    Stop,
-    Length,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sq8ReleaseOutcome {
-    Stop,
-    Length,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sq8ReleaseSummary {
-    pub request_id: String,
-    pub outcome: Sq8ReleaseOutcome,
-    pub prompt_tokens: usize,
-    pub generated_tokens: usize,
-    pub reset_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,58 +265,6 @@ pub enum Sq8ServingRuntimeStatus {
     Resetting,
     Failed,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sq8ServingErrorKind {
-    InvalidRequest,
-    InvalidConfiguration,
-    InvalidState,
-    FatalRuntime,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sq8ServingError {
-    pub kind: Sq8ServingErrorKind,
-    pub message: String,
-}
-
-impl Sq8ServingError {
-    fn invalid_request(message: impl Into<String>) -> Self {
-        Self {
-            kind: Sq8ServingErrorKind::InvalidRequest,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn invalid_configuration(message: impl Into<String>) -> Self {
-        Self {
-            kind: Sq8ServingErrorKind::InvalidConfiguration,
-            message: message.into(),
-        }
-    }
-
-    fn invalid_state(message: impl Into<String>) -> Self {
-        Self {
-            kind: Sq8ServingErrorKind::InvalidState,
-            message: message.into(),
-        }
-    }
-
-    fn fatal_runtime(message: impl Into<String>) -> Self {
-        Self {
-            kind: Sq8ServingErrorKind::FatalRuntime,
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for Sq8ServingError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{:?}: {}", self.kind, self.message)
-    }
-}
-
-impl std::error::Error for Sq8ServingError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sq8ServingLoadReport {
@@ -617,7 +375,7 @@ impl ActiveServingRequest {
     }
 
     fn terminal_reason(&self, token_id: usize) -> Option<Sq8FinishReason> {
-        if !self.request.test_only_ignore_eos && self.request.eos_token_ids.contains(&token_id) {
+        if !self.request.test_only_ignores_eos() && self.request.eos_token_ids.contains(&token_id) {
             Some(Sq8FinishReason::Stop)
         } else if self.generated_tokens + 1 == self.request.max_new_tokens {
             Some(Sq8FinishReason::Length)
@@ -2353,26 +2111,6 @@ fn validate_active_sampling_progress(active: &ActiveServingRequest) -> Result<()
             active.generated_tokens,
             active.sampler.draws()
         ));
-    }
-    Ok(())
-}
-
-fn validate_request_id(value: &str) -> Result<(), Sq8ServingError> {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 128 {
-        return Err(Sq8ServingError::invalid_request(format!(
-            "request_id must contain 1..=128 ASCII bytes, got {}",
-            bytes.len()
-        )));
-    }
-    if !bytes[0].is_ascii_alphanumeric()
-        || bytes[1..].iter().any(|byte| {
-            !byte.is_ascii_alphanumeric() && !matches!(*byte, b'.' | b'_' | b':' | b'-')
-        })
-    {
-        return Err(Sq8ServingError::invalid_request(format!(
-            "request_id has invalid syntax: {value:?}"
-        )));
     }
     Ok(())
 }

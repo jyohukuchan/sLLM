@@ -9,6 +9,7 @@ pub mod decoder;
 pub mod format_id;
 pub mod golden;
 pub mod host_bytes;
+pub mod inference_api;
 pub mod loader;
 pub mod package;
 pub mod qwen3_loader;
