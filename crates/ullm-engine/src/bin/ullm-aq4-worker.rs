@@ -91,7 +91,7 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
     let mut engine = None;
     let mut artifact = None;
     let mut package = None;
-    let mut device_index = 0_u32;
+    let mut device_index = 1_u32;
     let mut layers = "all".to_string();
     let mut index = 0;
     while index < args.len() {

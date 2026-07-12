@@ -60,10 +60,10 @@ impl Qwen35Aq4WorkerBackendConfig {
         let value = Self {
             engine: engine.into(),
             package: package.into(),
-            // The deployed gateway isolates the R9700 with HIP_VISIBLE_DEVICES, so the
-            // child engine sees that GPU as runtime device zero. Direct benchmark users
-            // can still override this through --device-index.
-            device_index: 0,
+            // uLLM keeps the host CPU fallback at runtime device zero. With the deployed
+            // HIP_VISIBLE_DEVICES isolation, the sole visible R9700 is runtime device one.
+            // Direct benchmark users can still override this through --device-index.
+            device_index: 1,
             layers: "all".into(),
             chunk_bytes: 1024 * 1024,
             lm_head_chunk_rows: 8192,

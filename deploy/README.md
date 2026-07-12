@@ -124,10 +124,24 @@ runtime, then use values such as the following in
 `/etc/ullm/openai-gateway.env`:
 
 ```ini
+ULLM_WORKER_BINARY=/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker
+ULLM_PRODUCT_ROOT=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
+ULLM_TOKENIZER_DIR=/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B
 ULLM_MODEL_ID=ullm-qwen3.5-9b-aq4
 ULLM_MODEL_NAME=uLLM Qwen3.5 9B AQ4
 ULLM_MODEL_CONTEXT_LENGTH=4096
 ULLM_MODEL_DESCRIPTION=Qwen3.5 9B served locally by uLLM AQ4_0.
+ULLM_MODEL_REVISION=aq4-cli-compat-v0.1
+ULLM_ARTIFACT_CONTENT_SHA256=a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad
+ULLM_PACKAGE_MANIFEST_SHA256=a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad
+ULLM_DEVICE=gfx1201
+ULLM_EXECUTION_PROFILE=rdna4_aq4_cli_compat
+ULLM_MAX_NEW_TOKENS=512
+ULLM_VOCAB_SIZE=248320
+ULLM_EOS_TOKEN_IDS=248044,248046
+ULLM_TOP_K=1
+ULLM_HIP_VISIBLE_DEVICES=1
+ULLM_HIP_GUARDS=
 ULLM_OPENAI_BASE_URL=http://172.20.0.1:8000/v1
 ```
 
@@ -151,6 +165,7 @@ docker inspect --format '{{.State.Health.Status}}' open-webui
 - The context limit is 4096 tokens and the gateway rejects overflow without truncating chat history.
 - The API is text-only Chat Completions for one loaded model at a time. Tools, structured output guarantees, multimodal input, embeddings, and the Responses API are not supported.
 - Request stop strings and automatic whole-turn history truncation are not implemented. Model EOS, maximum-token completion, and the OpenWebUI Stop action are supported.
+- The initial AQ4 compatibility worker reloads the package for every request and publishes token events after generation completes. It is suitable for integration validation, but resident AQ4 weights and live token streaming remain required for interactive latency.
 - TLS termination and multi-tenant authorization are outside this local bridge-only deployment.
 
 ## Operations
