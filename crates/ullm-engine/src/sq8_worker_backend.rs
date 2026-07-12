@@ -3,10 +3,11 @@
 
 //! Resident Qwen3 SQ8 session backend for the JSONL worker.
 
+#[cfg(test)]
+use crate::inference_api::FinishReason as Sq8FinishReason;
 use crate::inference_api::{
-    CancellationToken as Sq8CancellationToken, FinishReason as Sq8FinishReason,
-    InferenceRequest as Sq8ServingRequest, ReleaseOutcome as Sq8ReleaseOutcome,
-    ReleaseSummary as Sq8ReleaseSummary,
+    CancellationToken as Sq8CancellationToken, InferenceRequest as Sq8ServingRequest,
+    ReleaseOutcome as Sq8ReleaseOutcome, ReleaseSummary as Sq8ReleaseSummary,
 };
 use crate::sq_canonical::read_sq8_canonical_artifact;
 use crate::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
@@ -21,8 +22,20 @@ use crate::sq8_serving_runtime::{
     Qwen3Sq8ServingSession, Sq8PreparedAdvance, Sq8PreparedToken, Sq8ServingAdvance,
     Sq8ServingPrefillMode, Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
 };
-use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerTimings};
+#[cfg(test)]
+use crate::sq8_worker_protocol::Sq8WorkerTimings;
+use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission};
 use crate::sq8_worker_runtime::{Sq8InferenceBackend, Sq8RequestEventPublisher};
+use crate::worker_driver::{
+    InferenceSession as Sq8WorkerSessionDriver, PublishedAdvance as DriverPublished,
+    RequestPublications as Sq8WorkerRequestPublications, SessionAdvance as DriverAdvance,
+    drive_worker_request,
+};
+#[cfg(test)]
+use crate::worker_driver::{
+    LLAMA_SERVER_MIN_TIMING_MS, RequestTimingTracker as Sq8RequestTimingTracker,
+    validate_release_summary,
+};
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -231,161 +244,6 @@ fn release_event_name(outcome: Sq8ReleaseOutcomeEvent) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DriverAdvance<P> {
-    PromptProgress {
-        prompt_tokens_processed: usize,
-        cache_len: usize,
-        execution_width: usize,
-    },
-    Token {
-        prepared: P,
-        token_id: usize,
-        generated_index: usize,
-        cache_len: usize,
-        terminal_reason: Option<Sq8FinishReason>,
-    },
-    CancellationObserved,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DriverPublished {
-    Token {
-        token_id: usize,
-        generated_index: usize,
-        cache_len: usize,
-        terminal_reason: Option<Sq8FinishReason>,
-    },
-    CancellationObserved,
-}
-
-const LLAMA_SERVER_MIN_TIMING_MS: f64 = 0.001;
-
-#[derive(Debug)]
-struct Sq8RequestTimingTracker {
-    prompt_started_at: Instant,
-    first_sample_at: Option<Instant>,
-    last_sample_at: Option<Instant>,
-    sampled_tokens: usize,
-}
-
-impl Sq8RequestTimingTracker {
-    fn new(prompt_started_at: Instant) -> Self {
-        Self {
-            prompt_started_at,
-            first_sample_at: None,
-            last_sample_at: None,
-            sampled_tokens: 0,
-        }
-    }
-
-    fn observe_sample(&mut self, sampled_at: Instant) -> Result<(), String> {
-        if sampled_at
-            .checked_duration_since(self.prompt_started_at)
-            .is_none()
-            || self
-                .last_sample_at
-                .is_some_and(|last_sample_at| sampled_at < last_sample_at)
-        {
-            return Err("SQ8 worker sample timing moved backwards".into());
-        }
-        if self.first_sample_at.is_none() {
-            self.first_sample_at = Some(sampled_at);
-        }
-        self.last_sample_at = Some(sampled_at);
-        self.sampled_tokens = self
-            .sampled_tokens
-            .checked_add(1)
-            .ok_or_else(|| "SQ8 worker sample timing count overflowed".to_string())?;
-        Ok(())
-    }
-
-    fn finish(
-        &self,
-        prompt_tokens: usize,
-        completion_tokens: usize,
-    ) -> Result<Sq8WorkerTimings, String> {
-        if self.sampled_tokens != completion_tokens || completion_tokens == 0 {
-            return Err("SQ8 worker timing count does not match completion tokens".into());
-        }
-        let first_sample_at = self
-            .first_sample_at
-            .ok_or_else(|| "SQ8 worker timing has no first sample".to_string())?;
-        let last_sample_at = self
-            .last_sample_at
-            .ok_or_else(|| "SQ8 worker timing has no final sample".to_string())?;
-        let prompt_elapsed = first_sample_at
-            .checked_duration_since(self.prompt_started_at)
-            .ok_or_else(|| "SQ8 worker prompt timing moved backwards".to_string())?;
-        let predicted_elapsed = last_sample_at
-            .checked_duration_since(first_sample_at)
-            .ok_or_else(|| "SQ8 worker generation timing moved backwards".to_string())?;
-        Sq8WorkerTimings::from_elapsed_millis(
-            prompt_tokens,
-            positive_elapsed_millis(prompt_elapsed),
-            completion_tokens,
-            positive_elapsed_millis(predicted_elapsed),
-        )
-        .map_err(|error| error.to_string())
-    }
-}
-
-fn positive_elapsed_millis(elapsed: std::time::Duration) -> f64 {
-    (elapsed.as_secs_f64() * 1e3).max(LLAMA_SERVER_MIN_TIMING_MS)
-}
-
-trait Sq8WorkerSessionDriver {
-    type Prepared;
-
-    fn start_request(
-        &mut self,
-        request: Sq8ServingRequest,
-        cancel: Sq8CancellationToken,
-    ) -> Result<(), String>;
-
-    fn prepare_advance(&mut self) -> Result<DriverAdvance<Self::Prepared>, String>;
-
-    fn publish_prepared<F>(
-        &mut self,
-        prepared: Self::Prepared,
-        publish: F,
-    ) -> Result<DriverPublished, String>
-    where
-        F: FnOnce(usize) -> Result<(), String>;
-
-    fn finish_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String>;
-
-    fn abort_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String>;
-}
-
-trait Sq8WorkerRequestPublications {
-    fn publish_started(&mut self) -> Result<(), String>;
-
-    fn observe_prompt_unit(
-        &mut self,
-        prompt_tokens_processed: usize,
-        execution_width: usize,
-    ) -> Result<(), String>;
-
-    fn observe_prefill_transition(&mut self) -> Result<(), String>;
-
-    fn publish_token(&mut self, token_id: usize) -> Result<(), String>;
-
-    fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String>;
-
-    fn publish_released_with_timings(
-        &mut self,
-        outcome: Sq8ReleaseOutcomeEvent,
-        timings: Sq8WorkerTimings,
-    ) -> Result<(), String>;
-
-    fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
-    where
-        F: FnOnce() -> Result<T, String>;
-
-    fn completion_tokens(&self) -> usize;
-}
-
 impl Sq8WorkerRequestPublications for Sq8RequestEventPublisher<'_> {
     fn publish_started(&mut self) -> Result<(), String> {
         Sq8RequestEventPublisher::publish_started(self)
@@ -411,16 +269,20 @@ impl Sq8WorkerRequestPublications for Sq8RequestEventPublisher<'_> {
         Sq8RequestEventPublisher::publish_token(self, token_id)
     }
 
-    fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String> {
-        Sq8RequestEventPublisher::publish_released(self, outcome)
-    }
-
-    fn publish_released_with_timings(
+    fn publish_released(
         &mut self,
-        outcome: Sq8ReleaseOutcomeEvent,
-        timings: Sq8WorkerTimings,
+        outcome: Sq8ReleaseOutcome,
+        timings: Option<crate::inference_api::GenerationTimings>,
     ) -> Result<(), String> {
-        Sq8RequestEventPublisher::publish_released_with_timings(self, outcome, timings)
+        let event_outcome = match outcome {
+            Sq8ReleaseOutcome::Stop => Sq8ReleaseOutcomeEvent::Stop,
+            Sq8ReleaseOutcome::Length => Sq8ReleaseOutcomeEvent::Length,
+            Sq8ReleaseOutcome::Cancelled => Sq8ReleaseOutcomeEvent::Cancelled,
+        };
+        match timings {
+            Some(timings) => self.publish_released_with_timings(event_outcome, timings),
+            None => Sq8RequestEventPublisher::publish_released(self, event_outcome),
+        }
     }
 
     fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
@@ -583,163 +445,11 @@ fn drive_sq8_worker_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
     admission: Sq8WorkerAdmission,
     publications: &mut P,
 ) -> Result<Sq8ReleaseOutcomeEvent, String> {
-    let expected_request_id = request.request_id.clone();
-    let expected_prompt_tokens = request.prompt_token_ids.len();
-    driver.start_request(request, admission.cancel)?;
-    publications.publish_started()?;
-    let mut timings = Sq8RequestTimingTracker::new(Instant::now());
-
-    loop {
-        let advance = driver.prepare_advance()?;
-        if matches!(&advance, DriverAdvance::Token { .. }) {
-            timings.observe_sample(Instant::now())?;
-        }
-        match advance {
-            DriverAdvance::PromptProgress {
-                prompt_tokens_processed,
-                cache_len,
-                execution_width,
-            } => {
-                if cache_len != prompt_tokens_processed {
-                    return Err("SQ8 prompt progress cache length is inconsistent".into());
-                }
-                publications.observe_prompt_unit(prompt_tokens_processed, execution_width)?;
-            }
-            DriverAdvance::Token {
-                prepared,
-                token_id,
-                generated_index,
-                cache_len,
-                terminal_reason,
-            } => {
-                if generated_index == 0 {
-                    publications.observe_prefill_transition()?;
-                }
-                if generated_index != publications.completion_tokens() {
-                    return Err("SQ8 prepared token index does not match publication state".into());
-                }
-                let expected_cache_len = expected_prompt_tokens
-                    .checked_add(generated_index)
-                    .ok_or_else(|| "SQ8 prepared token cache length overflows".to_string())?;
-                if cache_len != expected_cache_len {
-                    return Err("SQ8 prepared token cache length is inconsistent".into());
-                }
-                match driver.publish_prepared(prepared, |published_token_id| {
-                    if published_token_id != token_id {
-                        return Err("SQ8 prepared token changed before publication".into());
-                    }
-                    publications.publish_token(published_token_id)
-                })? {
-                    DriverPublished::CancellationObserved => {
-                        return finish_cancelled_request(
-                            driver,
-                            &expected_request_id,
-                            expected_prompt_tokens,
-                            publications,
-                        );
-                    }
-                    DriverPublished::Token {
-                        token_id: committed_token_id,
-                        generated_index: committed_index,
-                        cache_len: committed_cache_len,
-                        terminal_reason: committed_terminal,
-                    } => {
-                        if committed_token_id != token_id
-                            || committed_index != generated_index
-                            || committed_cache_len != cache_len
-                            || committed_terminal != terminal_reason
-                        {
-                            return Err(
-                                "SQ8 committed token does not match its prepared proposal".into()
-                            );
-                        }
-                        if let Some(reason) = committed_terminal {
-                            let timings = timings
-                                .finish(expected_prompt_tokens, publications.completion_tokens())?;
-                            return finish_completed_request(
-                                driver,
-                                &expected_request_id,
-                                expected_prompt_tokens,
-                                reason,
-                                timings,
-                                publications,
-                            );
-                        }
-                    }
-                }
-            }
-            DriverAdvance::CancellationObserved => {
-                return finish_cancelled_request(
-                    driver,
-                    &expected_request_id,
-                    expected_prompt_tokens,
-                    publications,
-                );
-            }
-        }
+    match drive_worker_request(driver, request, admission.cancel, publications)? {
+        Sq8ReleaseOutcome::Stop => Ok(Sq8ReleaseOutcomeEvent::Stop),
+        Sq8ReleaseOutcome::Length => Ok(Sq8ReleaseOutcomeEvent::Length),
+        Sq8ReleaseOutcome::Cancelled => Ok(Sq8ReleaseOutcomeEvent::Cancelled),
     }
-}
-
-fn finish_completed_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublications>(
-    driver: &mut D,
-    request_id: &str,
-    prompt_tokens: usize,
-    reason: Sq8FinishReason,
-    timings: Sq8WorkerTimings,
-    publications: &mut P,
-) -> Result<Sq8ReleaseOutcomeEvent, String> {
-    let summary = publications.run_terminal_cleanup(|| driver.finish_and_reset())?;
-    let (expected_outcome, event_outcome) = match reason {
-        Sq8FinishReason::Stop => (Sq8ReleaseOutcome::Stop, Sq8ReleaseOutcomeEvent::Stop),
-        Sq8FinishReason::Length => (Sq8ReleaseOutcome::Length, Sq8ReleaseOutcomeEvent::Length),
-    };
-    validate_release_summary(
-        &summary,
-        request_id,
-        prompt_tokens,
-        publications.completion_tokens(),
-        expected_outcome,
-    )?;
-    publications.publish_released_with_timings(event_outcome, timings)?;
-    Ok(event_outcome)
-}
-
-fn finish_cancelled_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublications>(
-    driver: &mut D,
-    request_id: &str,
-    prompt_tokens: usize,
-    publications: &mut P,
-) -> Result<Sq8ReleaseOutcomeEvent, String> {
-    let summary = publications.run_terminal_cleanup(|| driver.abort_and_reset())?;
-    validate_release_summary(
-        &summary,
-        request_id,
-        prompt_tokens,
-        publications.completion_tokens(),
-        Sq8ReleaseOutcome::Cancelled,
-    )?;
-    publications.publish_released(Sq8ReleaseOutcomeEvent::Cancelled)?;
-    Ok(Sq8ReleaseOutcomeEvent::Cancelled)
-}
-
-fn validate_release_summary(
-    summary: &Sq8ReleaseSummary,
-    request_id: &str,
-    prompt_tokens: usize,
-    generated_tokens: usize,
-    outcome: Sq8ReleaseOutcome,
-) -> Result<(), String> {
-    if summary.request_id != request_id
-        || summary.outcome != outcome
-        || summary.prompt_tokens != prompt_tokens
-        || summary.generated_tokens != generated_tokens
-        || !summary.reset_complete
-    {
-        return Err(format!(
-            "SQ8 worker release summary does not match the completed request: {summary:?}"
-        ));
-    }
-    Ok(())
 }
 
 fn require_sq8_worker_hip_guards() -> Result<(), String> {
@@ -1057,18 +767,15 @@ mod tests {
             Ok(())
         }
 
-        fn publish_released(&mut self, _outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String> {
-            self.record("released");
-            Ok(())
-        }
-
-        fn publish_released_with_timings(
+        fn publish_released(
             &mut self,
-            _outcome: Sq8ReleaseOutcomeEvent,
-            timings: Sq8WorkerTimings,
+            _outcome: Sq8ReleaseOutcome,
+            timings: Option<Sq8WorkerTimings>,
         ) -> Result<(), String> {
-            if self.timings.replace(timings).is_some() {
-                return Err("tracing publications received duplicate timings".into());
+            if let Some(timings) = timings {
+                if self.timings.replace(timings).is_some() {
+                    return Err("tracing publications received duplicate timings".into());
+                }
             }
             self.record("released");
             Ok(())

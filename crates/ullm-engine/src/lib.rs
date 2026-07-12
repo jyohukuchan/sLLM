@@ -31,3 +31,4 @@ pub mod sq_canonical;
 pub mod sq_optimized_reference;
 pub mod sq_reference;
 pub mod sq_runtime;
+pub mod worker_driver;
