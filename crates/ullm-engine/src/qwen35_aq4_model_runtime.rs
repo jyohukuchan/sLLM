@@ -16,6 +16,7 @@ use crate::execution_batch::WorkspacePlan;
 use crate::loader::{
     PassthroughF32Data, effective_rmsnorm_weight_values, read_named_passthrough_f32,
 };
+use crate::package::TensorSelector;
 use crate::qwen35_aq4_head_runtime::{
     PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
     PackageTokenLogit, QWEN3_FINAL_NORM_TENSOR, package_embedding_shape,
@@ -90,6 +91,56 @@ fn qwen35_model_workspace_plan(
     Ok(plan)
 }
 
+/// Selects one exact passthrough tensor's manifest metadata without reading its payload.
+///
+/// `select_passthrough_payload_bundle(Name(..))` intentionally supports substring selection for
+/// CLI callers, so admission must verify the selected name and independently reject duplicate
+/// exact names.  The returned shape is restricted to a nonzero rank-1 tensor whose element count
+/// agrees with the shape; callers can therefore use it for head geometry before device or payload
+/// allocation.
+fn qwen35_exact_passthrough_metadata(
+    package_dir: &Path,
+    tensor_name: &str,
+) -> Result<crate::package::PassthroughPayloadBundle, String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let selected = crate::package::select_passthrough_payload_bundle(package_dir, &selector)
+        .map_err(|error| format!("failed to select passthrough metadata {tensor_name}: {error}"))?;
+    if selected.tensor_name != tensor_name {
+        return Err(format!(
+            "passthrough metadata selector for {tensor_name} resolved to non-exact tensor {}",
+            selected.tensor_name
+        ));
+    }
+    let bundle = crate::package::select_exact_passthrough_payload_bundle(package_dir, tensor_name)
+        .map_err(|error| {
+            format!("failed to validate exact passthrough metadata {tensor_name}: {error}")
+        })?;
+    if bundle.shape.len() != 1 {
+        return Err(format!(
+            "passthrough metadata tensor {tensor_name} must have rank-1 shape, got {:?}",
+            bundle.shape
+        ));
+    }
+    let shape_elements = bundle.shape[0];
+    if shape_elements == 0 || bundle.elements == 0 {
+        return Err(format!(
+            "passthrough metadata tensor {tensor_name} must have nonzero shape/elements"
+        ));
+    }
+    if bundle.elements != shape_elements {
+        return Err(format!(
+            "passthrough metadata tensor {tensor_name} shape product {} does not match elements {}",
+            shape_elements, bundle.elements
+        ));
+    }
+    if selected.tensor_index != bundle.tensor_index || bundle.tensor_name != tensor_name {
+        return Err(format!(
+            "passthrough metadata tensor {tensor_name} selector result disagrees with exact metadata"
+        ));
+    }
+    Ok(bundle)
+}
+
 fn qwen35_retained_activation_bytes(
     package_dir: &Path,
     layers: &[Qwen35Aq4LayerSpec],
@@ -132,7 +183,17 @@ fn qwen35_retained_activation_bytes(
                 let q_rows = rows(&format!("{prefix}.self_attn.q_proj.weight"))?;
                 let k_rows = rows(&format!("{prefix}.self_attn.k_proj.weight"))?;
                 let v_rows = rows(&format!("{prefix}.self_attn.v_proj.weight"))?;
-                let head_dim = rows(&format!("{prefix}.self_attn.q_norm.weight"))?;
+                let q_norm_name = format!("{prefix}.self_attn.q_norm.weight");
+                let k_norm_name = format!("{prefix}.self_attn.k_norm.weight");
+                let q_norm = qwen35_exact_passthrough_metadata(package_dir, &q_norm_name)?;
+                let k_norm = qwen35_exact_passthrough_metadata(package_dir, &k_norm_name)?;
+                let head_dim = q_norm.shape[0];
+                if k_norm.shape[0] != head_dim {
+                    return Err(format!(
+                        "Qwen3.5 AQ4 self-attention layer {} q_norm/k_norm head dimensions disagree: q_norm={} k_norm={}",
+                        layer.layer_index, head_dim, k_norm.shape[0]
+                    ));
+                }
                 let gated_q_rows = h
                     .checked_mul(2)
                     .ok_or_else(|| "self-attention gated Q row geometry overflows".to_string())?;
@@ -1369,6 +1430,94 @@ mod tests {
         ]
     }
 
+    fn self_attention_admission_fixture(
+        q_norm_entries: &[(Vec<u64>, u64)],
+        k_norm_entries: &[(Vec<u64>, u64)],
+    ) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-qwen35-self-admission-fixture-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("codebooks/shared.f32"), [1_u8]).unwrap();
+
+        let quantized = [
+            (
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+                8_u64,
+                "q.idx",
+                "q.scale",
+            ),
+            (
+                "model.language_model.layers.0.self_attn.k_proj.weight",
+                2_u64,
+                "k.idx",
+                "k.scale",
+            ),
+            (
+                "model.language_model.layers.0.self_attn.v_proj.weight",
+                2_u64,
+                "v.idx",
+                "v.scale",
+            ),
+            (
+                "model.language_model.layers.0.mlp.gate_proj.weight",
+                6_u64,
+                "gate.idx",
+                "gate.scale",
+            ),
+        ];
+        let mut tensors = Vec::new();
+        for (name, rows, index_name, scale_name) in quantized {
+            let index_path = format!("tensors/{index_name}");
+            let scale_path = format!("tensors/{scale_name}");
+            fs::write(root.join(&index_path), [1_u8]).unwrap();
+            fs::write(root.join(&scale_path), [1_u8]).unwrap();
+            tensors.push(serde_json::json!({
+                "name": name,
+                "shape": [rows, 4],
+                "scale_format": "e4m3",
+                "elements": rows * 4,
+                "groups": 1,
+                "index_file": index_path,
+                "scale_file": scale_path,
+                "codebook_file": "codebooks/shared.f32",
+            }));
+        }
+
+        let mut passthrough_tensors = Vec::new();
+        for (kind, entries) in [("q_norm", q_norm_entries), ("k_norm", k_norm_entries)] {
+            for (index, (shape, elements)) in entries.iter().enumerate() {
+                let name = format!("model.language_model.layers.0.self_attn.{}.weight", kind);
+                let payload_path = format!("tensors/{kind}-{index}.raw");
+                // Deliberately declare a different payload size. Admission must inspect only
+                // manifest/file metadata and must not open or decode the payload.
+                fs::write(root.join(&payload_path), [1_u8]).unwrap();
+                passthrough_tensors.push(serde_json::json!({
+                    "name": name,
+                    "shape": shape,
+                    "elements": elements,
+                    "payload_bytes": 8,
+                    "payload_file": payload_path,
+                }));
+            }
+        }
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "tensors": tensors,
+                "passthrough_tensors": passthrough_tensors,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
     #[test]
     fn aggregate_workspace_admission_is_checked_before_model_allocations() {
         let valid = qwen35_model_workspace_plan(8 << 30, 5 << 30, 128 << 20, 24, 8).unwrap();
@@ -1445,6 +1594,80 @@ mod tests {
             qwen35_package_resident_plan_bytes(&root, &[layer(0), layer(1)]).unwrap(),
             1_660
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_attention_admission_uses_exact_passthrough_qk_norm_metadata() {
+        let root = self_attention_admission_fixture(&[(vec![2], 2)], &[(vec![2], 2)]);
+        let layers = vec![Qwen35Aq4LayerSpec {
+            layer_index: 0,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        }];
+        let retained = qwen35_retained_activation_bytes(&root, &layers, 4, 16).unwrap();
+        assert!(retained > 0);
+        let workspace = qwen35_model_workspace_plan(8 << 30, 0, retained, 0, 1).unwrap();
+        assert_eq!(workspace.temporary_activation_bytes, retained);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_attention_admission_rejects_missing_passthrough_qk_norm() {
+        let root = self_attention_admission_fixture(&[], &[(vec![2], 2)]);
+        let layers = vec![Qwen35Aq4LayerSpec {
+            layer_index: 0,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        }];
+        let error = qwen35_retained_activation_bytes(&root, &layers, 4, 16).unwrap_err();
+        assert!(error.contains("q_norm"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_attention_admission_rejects_ambiguous_passthrough_q_norm() {
+        let root = self_attention_admission_fixture(&[(vec![2], 2), (vec![2], 2)], &[(vec![2], 2)]);
+        let layers = vec![Qwen35Aq4LayerSpec {
+            layer_index: 0,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        }];
+        let error = qwen35_retained_activation_bytes(&root, &layers, 4, 16).unwrap_err();
+        assert!(error.contains("duplicated"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_attention_admission_rejects_wrong_passthrough_q_norm_shape() {
+        let root = self_attention_admission_fixture(&[(vec![2, 1], 2)], &[(vec![2], 2)]);
+        let layers = vec![Qwen35Aq4LayerSpec {
+            layer_index: 0,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        }];
+        let error = qwen35_retained_activation_bytes(&root, &layers, 4, 16).unwrap_err();
+        assert!(error.contains("rank-1"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_attention_admission_rejects_wrong_passthrough_q_norm_elements() {
+        let root = self_attention_admission_fixture(&[(vec![2], 1)], &[(vec![2], 2)]);
+        let layers = vec![Qwen35Aq4LayerSpec {
+            layer_index: 0,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        }];
+        let error = qwen35_retained_activation_bytes(&root, &layers, 4, 16).unwrap_err();
+        assert!(error.contains("does not match elements"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_attention_admission_rejects_mismatched_passthrough_qk_norm_shape() {
+        let root = self_attention_admission_fixture(&[(vec![2], 2)], &[(vec![3], 3)]);
+        let layers = vec![Qwen35Aq4LayerSpec {
+            layer_index: 0,
+            kind: Qwen35Aq4LayerKind::SelfAttention,
+        }];
+        let error = qwen35_retained_activation_bytes(&root, &layers, 4, 16).unwrap_err();
+        assert!(error.contains("head dimensions disagree"));
         fs::remove_dir_all(root).unwrap();
     }
 
