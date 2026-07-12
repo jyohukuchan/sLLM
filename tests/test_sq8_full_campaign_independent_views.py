@@ -1133,6 +1133,27 @@ class IndependentFrontViewTests(unittest.TestCase):
                     VIEWS.reconstruct_api_contract(self.fixture.session)
         self.fixture.session.api_journal_observations = observations
 
+    def test_api_quiet_checks_accept_one_anchor_without_journal_observations(self):
+        self.fixture.session.api_journal_observations = []
+        self.fixture.session.lifecycle_quiet_checks = [
+            dataclasses.replace(
+                check,
+                new_journal_record_count=0,
+                journal_record_count=0,
+                journal_cursor="api-start-anchor",
+            )
+            for check in self.fixture.session.lifecycle_quiet_checks
+        ]
+        result = VIEWS.reconstruct_api_contract(self.fixture.session)
+        self.assertEqual(result["quiet_check_count"], 13)
+
+        self.fixture.session.lifecycle_quiet_checks[-1] = dataclasses.replace(
+            self.fixture.session.lifecycle_quiet_checks[-1],
+            journal_cursor="changed-anchor",
+        )
+        with self.assertRaises(VIEWS.IndependentViewError):
+            VIEWS.reconstruct_api_contract(self.fixture.session)
+
     def test_browser_soak_matches_producer_projection(self) -> None:
         cases = VIEWS.reconstruct_browser_soak(self.fixture.session)
         self.assertEqual(

@@ -541,8 +541,6 @@ def _validate_api_quiet_checks(
         _attr(session, "api_journal_observations", "session"),
         "API journal observations",
     )
-    if not observations:
-        fail("API quiet checks lack journal observations")
     expected_gateway_pid = _integer(
         _attr(
             _attr(session, "full_campaign_order", "session"),
@@ -651,13 +649,25 @@ def _validate_api_quiet_checks(
         journal_count = _integer(
             _attr(check, "journal_record_count", "API quiet check"),
             "API quiet journal count",
-            minimum=1,
         )
         cursor = _text(
             _attr(check, "journal_cursor", "API quiet check"),
             "API quiet journal cursor",
             maximum=1024,
         )
+        if normalized_observations:
+            count_invalid = (
+                journal_count <= 0
+                or journal_count > len(normalized_observations)
+                or journal_count < prior_journal_count
+                or new_journal_count != journal_count - prior_journal_count
+            )
+        else:
+            count_invalid = (
+                journal_count != 0
+                or new_journal_count != 0
+                or (prior_cursor is not None and cursor != prior_cursor)
+            )
         if (
             phase != "api_contract"
             or case_id != expected_label
@@ -666,9 +676,7 @@ def _validate_api_quiet_checks(
             or observer_open is not (sequence <= 10)
             or observer_count != 0
             or checked < prior_checked
-            or journal_count > len(normalized_observations)
-            or journal_count < prior_journal_count
-            or new_journal_count != journal_count - prior_journal_count
+            or count_invalid
         ):
             fail("API quiet-check identity, order, observer, or count differs")
         boundary = (
@@ -685,9 +693,12 @@ def _validate_api_quiet_checks(
         )
         if checked < boundary:
             fail("API quiet check precedes its completed HTTP boundary")
-        bound_cursor, bound_monotonic_usec = normalized_observations[journal_count - 1]
-        if cursor != bound_cursor or checked < bound_monotonic_usec * 1000:
-            fail("API quiet check differs from its journal observation boundary")
+        if normalized_observations:
+            bound_cursor, bound_monotonic_usec = normalized_observations[
+                journal_count - 1
+            ]
+            if cursor != bound_cursor or checked < bound_monotonic_usec * 1000:
+                fail("API quiet check differs from its journal observation boundary")
         if prior_cursor is not None and (
             (new_journal_count == 0 and cursor != prior_cursor)
             or (new_journal_count > 0 and cursor == prior_cursor)
