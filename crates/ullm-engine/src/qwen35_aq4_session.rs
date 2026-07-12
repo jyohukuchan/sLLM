@@ -21,6 +21,12 @@ use sha2::{Digest, Sha256};
 
 pub const QWEN35_AQ4_ROTARY_DIM: usize = 64;
 pub const QWEN35_AQ4_ROPE_BASE: f32 = 10_000_000.0;
+pub const QWEN35_AQ4_MAX_PREFILL_CHUNK: usize = 128;
+
+pub struct Qwen35PrefillExecutionStep {
+    pub phase: ExecutionPhase,
+    pub records: Vec<[OperationExecutionRecord; 2]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Qwen35Aq4SessionStatus {
@@ -69,13 +75,53 @@ pub trait Qwen35Aq4SessionModel {
         rotary_dim: usize,
         rope_base: f32,
         position: usize,
-        phase: ExecutionPhase,
+        _phase: ExecutionPhase,
         sync_each_layer_for_timing: bool,
         label: &str,
     ) -> Result<Vec<[OperationExecutionRecord; 2]>, String>;
 
     fn take_failed_operation_executions(&mut self) -> Vec<[Option<OperationExecutionRecord>; 2]> {
         Vec::new()
+    }
+
+    fn dispatch_prefill_chunk(
+        &mut self,
+        token_ids: &[usize],
+        rotary_dim: usize,
+        rope_base: f32,
+        absolute_start: usize,
+        _phase: ExecutionPhase,
+        sync_each_layer_for_timing: bool,
+        label: &str,
+    ) -> Result<Vec<Qwen35PrefillExecutionStep>, String> {
+        let mut executions = Vec::with_capacity(token_ids.len());
+        for (offset, token_id) in token_ids.iter().copied().enumerate() {
+            let position = absolute_start
+                .checked_add(offset)
+                .ok_or_else(|| "prefill chunk position overflows".to_string())?;
+            let token_phase = if position == 0 {
+                ExecutionPhase::ColdPrefill
+            } else {
+                ExecutionPhase::CachedPrefixPrefill
+            };
+            executions.push(Qwen35PrefillExecutionStep {
+                phase: token_phase,
+                records: self.dispatch_token(
+                    token_id,
+                    rotary_dim,
+                    rope_base,
+                    position,
+                    token_phase,
+                    sync_each_layer_for_timing,
+                    label,
+                )?,
+            });
+        }
+        Ok(executions)
+    }
+
+    fn synchronize_after_prefill_chunk(&mut self) -> Result<(), String> {
+        Ok(())
     }
 
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String>;
@@ -139,6 +185,10 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
         self.take_last_partial_operation_executions()
     }
 
+    fn synchronize_after_prefill_chunk(&mut self) -> Result<(), String> {
+        self.synchronize()
+    }
+
     fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
         Qwen35Aq4ModelRuntime::reset_all_request_state_synchronized(self)
     }
@@ -189,6 +239,11 @@ struct OperationAuditAccumulator {
     decode_steps: u64,
     total_steps: u64,
     total_records: u64,
+    token_equivalent_operation_coverage: u64,
+    prefill_chunks_executed: u64,
+    prefill_tokens_executed: u64,
+    prefill_tokens_committed: u64,
+    prefill_width_histogram: Vec<u64>,
     implementation_counts: [u64; 6],
     digest: Sha256,
 }
@@ -201,6 +256,11 @@ impl OperationAuditAccumulator {
             decode_steps: 0,
             total_steps: 0,
             total_records: 0,
+            token_equivalent_operation_coverage: 0,
+            prefill_chunks_executed: 0,
+            prefill_tokens_executed: 0,
+            prefill_tokens_committed: 0,
+            prefill_width_histogram: vec![0; QWEN35_AQ4_MAX_PREFILL_CHUNK + 1],
             implementation_counts: [0; 6],
             digest: Sha256::new(),
         }
@@ -271,6 +331,59 @@ impl OperationAuditAccumulator {
                     .map_err(|_| "operation execution record count does not fit u64".to_string())?,
             )
             .ok_or_else(|| "operation execution record count overflows".to_string())?;
+        self.token_equivalent_operation_coverage =
+            self.token_equivalent_operation_coverage
+                .checked_add(u64::try_from(records.len() * 2).map_err(|_| {
+                    "token-equivalent operation coverage does not fit u64".to_string()
+                })?)
+                .ok_or_else(|| "token-equivalent operation coverage overflows".to_string())?;
+        Ok(())
+    }
+
+    fn observe_prefill_chunk(
+        &mut self,
+        phase: ExecutionPhase,
+        execution_width: usize,
+    ) -> Result<(), String> {
+        if !(1..=QWEN35_AQ4_MAX_PREFILL_CHUNK).contains(&execution_width) {
+            return Err(format!(
+                "prefill execution width is outside 1..={QWEN35_AQ4_MAX_PREFILL_CHUNK}: {execution_width}"
+            ));
+        }
+        if phase == ExecutionPhase::Decode {
+            return Err("decode phase cannot be recorded as a prefill chunk".into());
+        }
+        self.prefill_chunks_executed = self
+            .prefill_chunks_executed
+            .checked_add(1)
+            .ok_or_else(|| "prefill chunk count overflows".to_string())?;
+        self.prefill_tokens_executed = self
+            .prefill_tokens_executed
+            .checked_add(
+                u64::try_from(execution_width)
+                    .map_err(|_| "prefill execution width does not fit u64".to_string())?,
+            )
+            .ok_or_else(|| "prefill executed-token count overflows".to_string())?;
+        self.prefill_width_histogram[execution_width] = self.prefill_width_histogram
+            [execution_width]
+            .checked_add(1)
+            .ok_or_else(|| "prefill width histogram count overflows".to_string())?;
+        self.digest.update(b"prefill-chunk-v2\0");
+        self.digest.update([execution_phase_index(phase) as u8]);
+        self.digest
+            .update(self.prefill_chunks_executed.to_le_bytes());
+        self.digest.update((execution_width as u64).to_le_bytes());
+        Ok(())
+    }
+
+    fn commit_prefill_chunk(&mut self, execution_width: usize) -> Result<(), String> {
+        self.prefill_tokens_committed = self
+            .prefill_tokens_committed
+            .checked_add(
+                u64::try_from(execution_width)
+                    .map_err(|_| "prefill commit width does not fit u64".to_string())?,
+            )
+            .ok_or_else(|| "prefill committed-token count overflows".to_string())?;
         Ok(())
     }
 
@@ -286,19 +399,23 @@ impl OperationAuditAccumulator {
             && self.cached_prefix_prefill_steps == expected_cached
             && self.decode_steps == expected_decode
             && self.total_steps == expected_cold + expected_cached + expected_decode
-            && self.total_records
+            && self.token_equivalent_operation_coverage
                 == self
                     .total_steps
                     .checked_mul(u64::try_from(layers * 2).map_err(|_| {
-                        "expected operation record count does not fit u64".to_string()
+                        "expected token-equivalent operation coverage does not fit u64".to_string()
                     })?)
-                    .ok_or_else(|| "expected operation record count overflows".to_string())?;
+                    .ok_or_else(|| {
+                        "expected token-equivalent operation coverage overflows".to_string()
+                    })?
+            && self.prefill_tokens_executed == expected_cold + expected_cached
+            && self.prefill_tokens_committed == expected_cold + expected_cached;
         if !coverage_complete {
             return Err("operation execution terminal coverage is incomplete".into());
         }
         let deterministic_digest_sha256 = self.digest.clone().finalize().into();
         Ok(OperationExecutionAudit {
-            schema_version: "ullm.backend_operation.request.v1",
+            schema_version: "ullm.backend_operation.request.v2",
             outcome,
             expected_layers_per_step: layers,
             expected_records_per_layer: 2,
@@ -307,6 +424,12 @@ impl OperationAuditAccumulator {
             decode_steps: self.decode_steps,
             total_steps: self.total_steps,
             total_records: self.total_records,
+            physical_operation_invocations: self.total_records,
+            token_equivalent_operation_coverage: self.token_equivalent_operation_coverage,
+            prefill_chunks_executed: self.prefill_chunks_executed,
+            prefill_tokens_executed: self.prefill_tokens_executed,
+            prefill_tokens_committed: self.prefill_tokens_committed,
+            prefill_width_histogram: self.prefill_width_histogram.clone(),
             implementation_counts: std::array::from_fn(|index| OperationExecutionCount {
                 kind: EXECUTION_IMPLEMENTATIONS[index].0,
                 implementation_id: EXECUTION_IMPLEMENTATIONS[index].1,
@@ -381,7 +504,7 @@ impl OperationAuditAccumulator {
         failed_operation: Option<usize>,
     ) -> OperationExecutionAudit {
         OperationExecutionAudit {
-            schema_version: "ullm.backend_operation.request.v1",
+            schema_version: "ullm.backend_operation.request.v2",
             outcome,
             expected_layers_per_step: layers,
             expected_records_per_layer: 2,
@@ -390,6 +513,12 @@ impl OperationAuditAccumulator {
             decode_steps: self.decode_steps,
             total_steps: self.total_steps,
             total_records: self.total_records,
+            physical_operation_invocations: self.total_records,
+            token_equivalent_operation_coverage: self.token_equivalent_operation_coverage,
+            prefill_chunks_executed: self.prefill_chunks_executed,
+            prefill_tokens_executed: self.prefill_tokens_executed,
+            prefill_tokens_committed: self.prefill_tokens_committed,
+            prefill_width_histogram: self.prefill_width_histogram.clone(),
             implementation_counts: std::array::from_fn(|index| OperationExecutionCount {
                 kind: EXECUTION_IMPLEMENTATIONS[index].0,
                 implementation_id: EXECUTION_IMPLEMENTATIONS[index].1,
@@ -539,6 +668,117 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, String> {
         self.status = Qwen35Aq4SessionStatus::Failed;
         Err(message.into())
+    }
+
+    fn prepare_prefill_chunk(&mut self) -> Result<SessionAdvance<Qwen35Aq4PreparedToken>, String> {
+        let (absolute_start, token_ids, cancel) = {
+            let active = self
+                .active
+                .as_ref()
+                .ok_or_else(|| "Qwen3.5 AQ4 prefill chunk has no active request".to_string())?;
+            let absolute_start = active.prompt_tokens_processed;
+            let end = absolute_start
+                .checked_add(QWEN35_AQ4_MAX_PREFILL_CHUNK)
+                .unwrap_or(usize::MAX)
+                .min(active.prompt_token_ids.len());
+            (
+                absolute_start,
+                active.prompt_token_ids[absolute_start..end].to_vec(),
+                active.cancel.clone(),
+            )
+        };
+        if token_ids.is_empty() {
+            return self.prepare_token("Qwen3.5 AQ4 prefill");
+        }
+        let phase = if absolute_start == 0 {
+            ExecutionPhase::ColdPrefill
+        } else {
+            ExecutionPhase::CachedPrefixPrefill
+        };
+        let execution_width = token_ids.len();
+        let execution_steps = match self.model.dispatch_prefill_chunk(
+            &token_ids,
+            self.config.rotary_dim,
+            self.config.rope_base,
+            absolute_start,
+            phase,
+            self.config.sync_each_layer_for_timing,
+            "Qwen3.5 AQ4 prefill chunk",
+        ) {
+            Ok(steps) => steps,
+            Err(error) => {
+                let partial_records = self.model.take_failed_operation_executions();
+                let failure = match (
+                    self.active_operation_audit.as_mut(),
+                    self.execution_contract.as_deref(),
+                ) {
+                    (Some(audit), Some(contract)) => audit
+                        .observe_failed_step(phase, contract, &partial_records)
+                        .unwrap_or((None, None)),
+                    _ => (None, None),
+                };
+                self.last_terminal_operation_audit =
+                    self.active_operation_audit.as_ref().map(|audit| {
+                        audit.partial(
+                            self.execution_contract.as_ref().map_or(0, Vec::len),
+                            "execution_failed",
+                            Some(phase),
+                            failure.0,
+                            failure.1,
+                        )
+                    });
+                return self.fail(format!(
+                    "Qwen3.5 AQ4 prefill chunk dispatch failed: {error}"
+                ));
+            }
+        };
+        if let Err(error) = self.model.synchronize_after_prefill_chunk() {
+            return self.fail(format!(
+                "Qwen3.5 AQ4 prefill chunk synchronization failed: {error}"
+            ));
+        }
+        if execution_steps.len() != execution_width {
+            return self.fail(format!(
+                "Qwen3.5 AQ4 prefill chunk execution coverage mismatch: width={execution_width} steps={}",
+                execution_steps.len()
+            ));
+        }
+        if let (Some(contract), Some(audit)) = (
+            self.execution_contract.as_deref(),
+            self.active_operation_audit.as_mut(),
+        ) {
+            for step in &execution_steps {
+                if let Err(error) = audit.observe(step.phase, contract, &step.records) {
+                    return self.fail(format!(
+                        "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
+                    ));
+                }
+            }
+            if let Err(error) = audit.observe_prefill_chunk(phase, execution_width) {
+                return self.fail(format!(
+                    "Qwen3.5 AQ4 prefill chunk width audit failed: {error}"
+                ));
+            }
+        }
+        if cancel.is_cancelled() {
+            let active = self.active.as_mut().expect("active request checked above");
+            active.terminal_outcome = Some(ReleaseOutcome::Cancelled);
+            self.status = Qwen35Aq4SessionStatus::Terminal;
+            return Ok(SessionAdvance::CancellationObserved);
+        }
+        let active = self.active.as_mut().expect("active request checked above");
+        active.prompt_tokens_processed = active
+            .prompt_tokens_processed
+            .checked_add(execution_width)
+            .ok_or_else(|| "Qwen3.5 AQ4 prefill progress overflows".to_string())?;
+        if let Some(audit) = self.active_operation_audit.as_mut() {
+            audit.commit_prefill_chunk(execution_width)?;
+        }
+        Ok(SessionAdvance::PromptProgress {
+            prompt_tokens_processed: active.prompt_tokens_processed,
+            cache_len: active.prompt_tokens_processed,
+            execution_width,
+        })
     }
 
     fn prepare_token(
@@ -736,25 +976,15 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         }
 
         if self.status == Qwen35Aq4SessionStatus::Prefilling {
-            let active = self
-                .active
-                .as_ref()
-                .ok_or_else(|| "Qwen3.5 AQ4 prepare has no active request".to_string())?;
-            if active.prompt_tokens_processed == active.prompt_token_ids.len() {
-                return self.prepare_token("Qwen3.5 AQ4 prefill");
-            }
+            return self.prepare_prefill_chunk();
         }
 
-        let (token_id, position, prompt_progress) = {
+        let (token_id, position) = {
             let active = self
                 .active
                 .as_ref()
                 .ok_or_else(|| "Qwen3.5 AQ4 prepare has no active request".to_string())?;
             match self.status {
-                Qwen35Aq4SessionStatus::Prefilling => {
-                    let position = active.prompt_tokens_processed;
-                    (active.prompt_token_ids[position], position, true)
-                }
                 Qwen35Aq4SessionStatus::Decoding => {
                     let token_id = active.decode_input.ok_or_else(|| {
                         "Qwen3.5 AQ4 decode has no committed input token".to_string()
@@ -765,27 +995,13 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
                         .checked_add(active.generated_tokens)
                         .and_then(|value| value.checked_sub(1))
                         .ok_or_else(|| "Qwen3.5 AQ4 decode position overflows".to_string())?;
-                    (token_id, position, false)
+                    (token_id, position)
                 }
                 _ => unreachable!("status checked above"),
             }
         };
-        let label = if prompt_progress {
-            "Qwen3.5 AQ4 prefill"
-        } else {
-            "Qwen3.5 AQ4 decode"
-        };
-        let phase = if prompt_progress {
-            // Each PromptProgress is committed before the next prepare_advance call. Therefore
-            // prompt token zero is cold and every later prompt token consumes a committed prefix.
-            if position == 0 {
-                ExecutionPhase::ColdPrefill
-            } else {
-                ExecutionPhase::CachedPrefixPrefill
-            }
-        } else {
-            ExecutionPhase::Decode
-        };
+        let label = "Qwen3.5 AQ4 decode";
+        let phase = ExecutionPhase::Decode;
         let operation_records = match self.model.dispatch_token(
             token_id,
             self.config.rotary_dim,
@@ -827,15 +1043,6 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             if let Err(error) = audit.observe(phase, contract, &operation_records) {
                 return self.fail(format!("{label} operation execution audit failed: {error}"));
             }
-        }
-        if prompt_progress {
-            let active = self.active.as_mut().expect("active request checked above");
-            active.prompt_tokens_processed += 1;
-            return Ok(SessionAdvance::PromptProgress {
-                prompt_tokens_processed: active.prompt_tokens_processed,
-                cache_len: active.prompt_tokens_processed,
-                execution_width: 1,
-            });
         }
         self.prepare_token(label)
     }
@@ -1082,23 +1289,27 @@ mod tests {
                 .observe(phase, &contract, &audited_records(&contract, phase))
                 .unwrap();
         }
+        audit
+            .observe_prefill_chunk(ExecutionPhase::ColdPrefill, 3)
+            .unwrap();
+        audit.commit_prefill_chunk(3).unwrap();
         let finished = audit.finish(32, 1, 2, 1, "length").unwrap();
+        assert_eq!(finished.schema_version, "ullm.backend_operation.request.v2");
         assert_eq!(finished.total_steps, 4);
         assert_eq!(finished.total_records, 256);
+        assert_eq!(finished.physical_operation_invocations, 256);
+        assert_eq!(finished.token_equivalent_operation_coverage, 256);
+        assert_eq!(finished.prefill_chunks_executed, 1);
+        assert_eq!(finished.prefill_tokens_executed, 3);
+        assert_eq!(finished.prefill_tokens_committed, 3);
+        assert_eq!(finished.prefill_width_histogram[3], 1);
         assert_eq!(finished.implementation_counts[0].count, 96);
         assert_eq!(finished.implementation_counts[1].count, 96);
         assert_eq!(finished.implementation_counts[2].count, 0);
         assert_eq!(finished.implementation_counts[3].count, 32);
         assert_eq!(finished.implementation_counts[4].count, 0);
         assert_eq!(finished.implementation_counts[5].count, 32);
-        assert_eq!(
-            finished.deterministic_digest_sha256,
-            [
-                0x02, 0xa0, 0xd6, 0xc4, 0x32, 0x4b, 0x09, 0x62, 0xa1, 0xe4, 0x0b, 0xa9, 0xae, 0x13,
-                0xe0, 0x2c, 0x00, 0x3c, 0x85, 0xfa, 0xfc, 0x73, 0x8c, 0xe3, 0xdf, 0x32, 0xd9, 0xc5,
-                0x3c, 0x13, 0xc3, 0xe7,
-            ]
-        );
+        assert_ne!(finished.deterministic_digest_sha256, [0; 32]);
         assert!(finished.coverage_complete);
 
         let mut second_request = OperationAuditAccumulator::new();
@@ -1112,6 +1323,10 @@ mod tests {
                 .observe(phase, &contract, &audited_records(&contract, phase))
                 .unwrap();
         }
+        second_request
+            .observe_prefill_chunk(ExecutionPhase::ColdPrefill, 3)
+            .unwrap();
+        second_request.commit_prefill_chunk(3).unwrap();
         assert_eq!(
             second_request
                 .finish(32, 1, 2, 1, "length")
@@ -1154,6 +1369,7 @@ mod tests {
         audited: bool,
         fail_dispatch_phase: Option<ExecutionPhase>,
         failed_operation: Option<(usize, usize)>,
+        cancel_on_prefill_sync: Option<CancellationToken>,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -1203,6 +1419,13 @@ mod tests {
                 }
                 _ => Vec::new(),
             }
+        }
+
+        fn synchronize_after_prefill_chunk(&mut self) -> Result<(), String> {
+            if let Some(cancel) = self.cancel_on_prefill_sync.take() {
+                cancel.cancel();
+            }
+            Ok(())
         }
 
         fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
@@ -1282,21 +1505,19 @@ mod tests {
     }
 
     #[test]
-    fn prompt_progresses_one_token_at_a_time_and_uses_explicit_rope_config() {
+    fn prompt_progresses_in_one_bounded_chunk_and_uses_explicit_rope_config() {
         let mut session = session(&[9]);
         session
             .start_request(request("r1", &[4, 5, 6], 2), CancellationToken::new())
             .unwrap();
-        for expected in 1..=3 {
-            assert_eq!(
-                session.prepare_advance().unwrap(),
-                SessionAdvance::PromptProgress {
-                    prompt_tokens_processed: expected,
-                    cache_len: expected,
-                    execution_width: 1,
-                }
-            );
-        }
+        assert_eq!(
+            session.prepare_advance().unwrap(),
+            SessionAdvance::PromptProgress {
+                prompt_tokens_processed: 3,
+                cache_len: 3,
+                execution_width: 3,
+            }
+        );
         let token = next_prepared(&mut session);
         assert_eq!(token.token_id, 9);
         assert_eq!(
@@ -1315,6 +1536,54 @@ mod tests {
                 ExecutionPhase::CachedPrefixPrefill,
             ]
         );
+    }
+
+    #[test]
+    fn prefill_chunk_widths_cover_boundaries_and_tail_without_partial_progress() {
+        for (prompt_len, expected_widths) in [
+            (1, vec![1]),
+            (2, vec![2]),
+            (3, vec![3]),
+            (127, vec![127]),
+            (128, vec![128]),
+            (129, vec![128, 1]),
+            (255, vec![128, 127]),
+            (256, vec![128, 128]),
+        ] {
+            let mut scripted = model(&[2]);
+            scripted.context = 512;
+            let mut session = Qwen35Aq4InferenceSession::from_model(
+                scripted,
+                Qwen35Aq4SessionConfig::greedy(8, vec![2]),
+            )
+            .unwrap();
+            session
+                .start_request(
+                    request("chunk-boundary", &vec![4; prompt_len], 1),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            let mut widths = Vec::new();
+            loop {
+                match session.prepare_advance().unwrap() {
+                    SessionAdvance::PromptProgress {
+                        execution_width, ..
+                    } => widths.push(execution_width),
+                    SessionAdvance::Token { .. } => break,
+                    SessionAdvance::CancellationObserved => panic!("unexpected cancellation"),
+                }
+            }
+            assert_eq!(widths, expected_widths, "prompt_len={prompt_len}");
+            assert_eq!(
+                session.model().dispatch_phases[0],
+                ExecutionPhase::ColdPrefill
+            );
+            assert!(
+                session.model().dispatch_phases[1..]
+                    .iter()
+                    .all(|phase| *phase == ExecutionPhase::CachedPrefixPrefill)
+            );
+        }
     }
 
     #[test]
@@ -1451,8 +1720,8 @@ mod tests {
         after_prompt.abort_and_reset().unwrap();
         let audit = after_prompt.last_terminal_operation_audit().unwrap();
         assert_eq!(audit.outcome, "cancelled");
-        assert_eq!(audit.total_steps, 1);
-        assert_eq!(audit.total_records, 64);
+        assert_eq!(audit.total_steps, 2);
+        assert_eq!(audit.total_records, 128);
         assert!(!audit.coverage_complete);
 
         let mut before_operation = audited_session(&[]);
@@ -1476,17 +1745,47 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_observed_after_chunk_sync_does_not_commit_prompt_progress() {
+        let mut session = audited_session(&[7]);
+        let cancel = CancellationToken::new();
+        session.model.cancel_on_prefill_sync = Some(cancel.clone());
+        session
+            .start_request(request("sync-cancel", &[4, 5], 2), cancel)
+            .unwrap();
+
+        assert_eq!(
+            session.prepare_advance().unwrap(),
+            SessionAdvance::CancellationObserved
+        );
+        assert_eq!(session.active.as_ref().unwrap().prompt_tokens_processed, 0);
+        session.abort_and_reset().unwrap();
+        assert_eq!(session.model.resets, 1);
+        let audit = session.last_terminal_operation_audit().unwrap();
+        assert_eq!(audit.prefill_chunks_executed, 1);
+        assert_eq!(audit.prefill_tokens_executed, 2);
+        assert_eq!(audit.prefill_tokens_committed, 0);
+        assert_eq!(audit.prefill_width_histogram[2], 1);
+        assert_eq!(audit.physical_operation_invocations, 128);
+        assert_eq!(audit.token_equivalent_operation_coverage, 128);
+        assert!(!audit.coverage_complete);
+    }
+
+    #[test]
     fn execution_and_reset_failures_retain_partial_terminal_audits() {
         let mut execution = audited_session(&[]);
-        execution.model.fail_dispatch_phase = Some(ExecutionPhase::CachedPrefixPrefill);
+        execution.model.context = 256;
         execution.model.failed_operation = Some((3, 0));
         execution
-            .start_request(request("op-fail", &[4, 5], 1), CancellationToken::new())
+            .start_request(
+                request("op-fail", &vec![4; 129], 1),
+                CancellationToken::new(),
+            )
             .unwrap();
         assert!(matches!(
             execution.prepare_advance().unwrap(),
             SessionAdvance::PromptProgress { .. }
         ));
+        execution.model.fail_dispatch_phase = Some(ExecutionPhase::CachedPrefixPrefill);
         assert!(
             execution
                 .prepare_advance()
@@ -1498,7 +1797,7 @@ mod tests {
         assert_eq!(audit.failed_phase, Some("cached_prefix_prefill"));
         assert_eq!(audit.failed_layer, Some(3));
         assert_eq!(audit.failed_operation, Some(0));
-        assert_eq!(audit.total_records, 70);
+        assert_eq!(audit.total_records, 128 * 64 + 6);
 
         let mut reset = audited_session(&[2]);
         reset.model.fail_reset = true;

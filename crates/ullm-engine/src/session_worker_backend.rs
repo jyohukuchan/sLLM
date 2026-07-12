@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn structured_backend_log_contains_counts_but_no_prompt_or_token_content() {
         let audit = OperationExecutionAudit {
-            schema_version: "ullm.backend_operation.request.v1",
+            schema_version: "ullm.backend_operation.request.v2",
             outcome: "stop",
             expected_layers_per_step: 32,
             expected_records_per_layer: 2,
@@ -229,6 +229,16 @@ mod tests {
             decode_steps: 1,
             total_steps: 4,
             total_records: 256,
+            physical_operation_invocations: 256,
+            token_equivalent_operation_coverage: 256,
+            prefill_chunks_executed: 1,
+            prefill_tokens_executed: 3,
+            prefill_tokens_committed: 3,
+            prefill_width_histogram: {
+                let mut histogram = vec![0; 129];
+                histogram[3] = 1;
+                histogram
+            },
             implementation_counts: std::array::from_fn(|index| {
                 crate::backend_operation_registry::OperationExecutionCount {
                     kind: "kind",
@@ -263,7 +273,7 @@ mod tests {
         assert_eq!(value["outcome"], "stop");
         assert_eq!(
             value["operation_execution_audit"]["schema_version"],
-            "ullm.backend_operation.request.v1"
+            "ullm.backend_operation.request.v2"
         );
         assert_eq!(value["operation_execution_audit"]["total_records"], 256);
         assert_eq!(

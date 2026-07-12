@@ -1071,6 +1071,15 @@ pub struct OperationExecutionAudit {
     pub decode_steps: u64,
     pub total_steps: u64,
     pub total_records: u64,
+    /// Actual registry-routed operation invocations, including successful partial work.
+    pub physical_operation_invocations: u64,
+    /// M1-equivalent operation coverage. One fully covered Qwen3.5 token contributes 64.
+    pub token_equivalent_operation_coverage: u64,
+    pub prefill_chunks_executed: u64,
+    pub prefill_tokens_executed: u64,
+    pub prefill_tokens_committed: u64,
+    /// Index is the execution width. Index zero is reserved and must remain zero.
+    pub prefill_width_histogram: Vec<u64>,
     pub implementation_counts: [OperationExecutionCount; 6],
     #[serde(serialize_with = "serialize_sha256_hex")]
     pub deterministic_digest_sha256: [u8; 32],
