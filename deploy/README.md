@@ -107,6 +107,14 @@ curl --fail --silent http://127.0.0.1:3000/health
 docker inspect --format '{{.State.Health.Status}}' open-webui
 ```
 
+## Known v0.1 limitations
+
+- The product runs one active GPU request with no waiting queue or request batching. A concurrent request receives `429` with `Retry-After: 1`; OpenWebUI v0.9.4 may present this as a visible HTTP 400 busy error.
+- The context limit is 4096 tokens and the gateway rejects overflow without truncating chat history.
+- The API is text-only Chat Completions for one loaded model. Tools, structured output guarantees, multimodal input, embeddings, and the Responses API are not supported.
+- Request stop strings and automatic whole-turn history truncation are not implemented. Model EOS, maximum-token completion, and the OpenWebUI Stop action are supported.
+- TLS termination and multi-tenant authorization are outside this local bridge-only deployment.
+
 ## Operations
 
 ```bash
