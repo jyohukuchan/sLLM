@@ -648,6 +648,85 @@ pub enum GraphNodeKind {
     /// mandatory; a second state can represent an explicit companion such as a
     /// convolution history and is validated by schema composition.
     RecurrentAttention { state_width: usize },
+    /// Causal channel-wise one-dimensional cross-correlation.
+    ///
+    /// `inputs` is `[values]`, `outputs` is `[filtered]`, `weights` is
+    /// `[kernel]`, and `states` contains zero or one convolution-history state.
+    /// Values and output have shape `L + [T, channels]`; kernel has canonical
+    /// shape `[channels, 1, kernel_size]`.  For sequence-local token `t` and
+    /// channel `c`, output is `sum_j kernel[c, 0, j] * x[t + j + 1 - K, c]`.
+    /// Thus weight index zero is the oldest sample and index `K - 1` is the
+    /// current sample: this is cross-correlation, not a reversed convolution.
+    /// Missing prefix samples are zero when no state is bound. With state, let
+    /// `H = K - 1`. The node reads canonical logical history
+    /// `[channels, H]` in channel-major RowMajor order:
+    /// `flat_index = channel * H + age`, where `age = 0` is the oldest sample
+    /// and `age = H - 1` is the newest sample immediately before the chunk.
+    /// For the chunk's first token, history age `age` pairs with kernel index
+    /// `age`, while kernel index `K - 1` pairs with the current input. The node
+    /// returns every output in the chunk and prepares the last `H` samples of
+    /// `(prior history || chunk)` in the same oldest-to-newest age order. Thus a
+    /// short chunk retains the required suffix of prior history before its new
+    /// samples; it does not reorder the age axis.
+    /// This is a whole-chunk semantic and does not require a backend token loop.
+    /// `kernel_size == 1` has no history and therefore permits no state.
+    ///
+    /// Leading dimensions identify independent sequences for dense layouts;
+    /// packed sequence bounds come from the execution batch.  The canonical
+    /// channel, age, and kernel order above is normative. A backend may keep a
+    /// time-major or otherwise tiled physical buffer, but must convert at the
+    /// snapshot/import/export boundary. Source checkpoint and persistent-state
+    /// canonicalization are blocking adapter admission checks, not optional
+    /// implementation details.
+    CausalDepthwiseConv1d { channels: usize, kernel_size: usize },
+    /// Produces token-local decay and update parameters for a gated scan.
+    ///
+    /// `inputs` is `[decay_control, update_control]`, `weights` is
+    /// `[log_rate, time_bias]`, and `outputs` is `[log_decay, update_rate]`.
+    /// Values have shape `L + [T, channels]`; weights have shape `[channels]`.
+    /// The semantic is
+    /// `log_decay = -exp(log_rate) * softplus(decay_control + time_bias)` and
+    /// `update_rate = sigmoid(update_control)`, independently per token and
+    /// channel. Stable softplus is
+    /// `max(x, 0) + ln(1 + exp(-abs(x)))`. Stable sigmoid is
+    /// `1 / (1 + exp(-x))` for nonnegative `x`, and
+    /// `exp(x) / (1 + exp(x))` otherwise.
+    ///
+    /// The input, weight, and output orders are canonical. Any source checkpoint
+    /// permutation or fusion is an adapter responsibility.
+    GatedDecayParameters { channels: usize },
+    /// Causal gated delta-rule scan over a bank of recurrent matrices.
+    ///
+    /// `inputs` is `[query, key, value, log_decay, update_rate]`, the sole output
+    /// is `context`, there are no weights, and `states` contains zero or one
+    /// recurrent-bank state in canonical value-head order with logical shape
+    /// `[value_heads, key_dim, value_dim]`. Query/key are
+    /// `L + [T, key_heads * key_dim]`;
+    /// value/context are `L + [T, value_heads * value_dim]`; decay/update are
+    /// `L + [T, value_heads]`. Canonical flattened head order is head-major with
+    /// the feature coordinate contiguous. Source reordering is an adapter
+    /// responsibility.
+    ///
+    /// Value head `hv` uses key head
+    /// `hv / (value_heads / key_heads)`. For each token and value head, with
+    /// state matrix `S[key_dim, value_dim]`, the ordered semantic is:
+    /// `S = exp(log_decay) * S`; `prediction = S^T * key`;
+    /// `S += outer(key, (value - prediction) * update_rate)`;
+    /// `context = S^T * query`.  Without state, every sequence starts from zero.
+    /// With state, `scan(S0, chunk)` produces all token outputs and one prepared
+    /// final state `S1`. Splitting a sequence into contiguous chunks and feeding
+    /// each committed result into the next scan is semantically equivalent to
+    /// one scan over the concatenated sequence.
+    ///
+    /// Dense leading dimensions and each `PackedRagged` boundary are independent
+    /// sequences. Packed state bindings are request-local and must never cross a
+    /// sequence boundary.
+    GatedDeltaRuleScan {
+        key_heads: usize,
+        value_heads: usize,
+        key_dim: usize,
+        value_dim: usize,
+    },
     /// Pointwise activation.
     Activation { kind: ActivationKind },
     /// Multiplies values by an activated gate element by element.
@@ -784,6 +863,28 @@ impl GraphNodeKind {
             Self::RecurrentAttention { state_width } => {
                 ensure_nonzero(*state_width, "recurrent attention state_width")
             }
+            Self::CausalDepthwiseConv1d {
+                channels,
+                kernel_size,
+            } => {
+                ensure_nonzero(*channels, "causal depthwise conv1d channels")?;
+                ensure_nonzero(*kernel_size, "causal depthwise conv1d kernel_size")?;
+                checked_dimension_product(
+                    *channels,
+                    *kernel_size,
+                    "causal depthwise conv1d kernel elements",
+                )?;
+                Ok(())
+            }
+            Self::GatedDecayParameters { channels } => {
+                ensure_nonzero(*channels, "gated decay parameters channels")
+            }
+            Self::GatedDeltaRuleScan {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+            } => validate_gated_delta_rule_geometry(*key_heads, *value_heads, *key_dim, *value_dim),
             Self::Activation { kind } => kind.validate(),
             Self::GatedMultiply { activation } => {
                 activation.validate()?;
@@ -862,6 +963,27 @@ impl GraphNodeKind {
                 } else {
                     Err(
                         "recurrent attention requires 1 input, 1 output, exactly 1 weight, and one or two states"
+                            .into(),
+                    )
+                }
+            }
+            Self::CausalDepthwiseConv1d { kernel_size, .. } => {
+                let expected_states = usize::from(*kernel_size > 1);
+                if inputs == 1 && outputs == 1 && weights == 1 && states <= expected_states {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "causal depthwise conv1d requires 1 input, 1 output, 1 weight, and zero or at most {expected_states} state"
+                    ))
+                }
+            }
+            Self::GatedDecayParameters { .. } => exact(2, 2, 2, 0),
+            Self::GatedDeltaRuleScan { .. } => {
+                if inputs == 5 && outputs == 1 && weights == 0 && states <= 1 {
+                    Ok(())
+                } else {
+                    Err(
+                        "gated delta-rule scan requires 5 ordered inputs, 1 output, zero weights, and zero or one state"
                             .into(),
                     )
                 }
@@ -1398,6 +1520,45 @@ impl GraphNode {
                     self.id.as_str(),
                 )
             }
+            GraphNodeKind::CausalDepthwiseConv1d {
+                channels,
+                kernel_size,
+            } => validate_causal_depthwise_conv1d(
+                value(&self.inputs[0], "causal depthwise conv1d input")?,
+                value(&self.outputs[0], "causal depthwise conv1d output")?,
+                weight(&self.weights[0], "causal depthwise conv1d kernel")?,
+                *channels,
+                *kernel_size,
+                self.id.as_str(),
+            ),
+            GraphNodeKind::GatedDecayParameters { channels } => validate_gated_decay_parameters(
+                value(&self.inputs[0], "gated decay control")?,
+                value(&self.inputs[1], "gated update control")?,
+                weight(&self.weights[0], "gated decay log rate")?,
+                weight(&self.weights[1], "gated decay time bias")?,
+                value(&self.outputs[0], "gated log decay")?,
+                value(&self.outputs[1], "gated update rate")?,
+                *channels,
+                self.id.as_str(),
+            ),
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+            } => validate_gated_delta_rule_scan(
+                value(&self.inputs[0], "gated delta-rule query")?,
+                value(&self.inputs[1], "gated delta-rule key")?,
+                value(&self.inputs[2], "gated delta-rule value")?,
+                value(&self.inputs[3], "gated delta-rule log decay")?,
+                value(&self.inputs[4], "gated delta-rule update rate")?,
+                value(&self.outputs[0], "gated delta-rule context")?,
+                *key_heads,
+                *value_heads,
+                *key_dim,
+                *value_dim,
+                self.id.as_str(),
+            ),
             GraphNodeKind::Activation { .. } => require_same_shape(
                 value(&self.inputs[0], "activation input")?,
                 value(&self.outputs[0], "activation output")?,
@@ -1675,6 +1836,196 @@ impl ModelGraph {
         self.validate()?;
         bindings.validate_against(&self.weights)
     }
+}
+
+fn validate_causal_depthwise_conv1d(
+    input: &TensorSpec,
+    output: &TensorSpec,
+    kernel: &TensorSpec,
+    channels: usize,
+    kernel_size: usize,
+    node_id: &str,
+) -> Result<(), String> {
+    validate_real_sequence_tensor(input, "causal depthwise conv1d input", node_id)?;
+    require_same_shape(
+        input,
+        output,
+        "causal depthwise conv1d input and output",
+        node_id,
+    )?;
+    require_matching_format_layout(
+        input,
+        output,
+        "causal depthwise conv1d input and output",
+        node_id,
+    )?;
+    if feature_width(input, "causal depthwise conv1d input", node_id)? != channels {
+        return Err(format!(
+            "node {node_id} causal depthwise conv1d input feature width must equal channels {channels}"
+        ));
+    }
+    if kernel.shape.as_slice() != [channels, 1, kernel_size] {
+        return Err(format!(
+            "node {node_id} causal depthwise conv1d kernel must have shape [{channels}, 1, {kernel_size}], got {:?}",
+            kernel.shape
+        ));
+    }
+    if kernel.layout != TensorLayout::RowMajor {
+        return Err(format!(
+            "node {node_id} causal depthwise conv1d kernel must use RowMajor layout"
+        ));
+    }
+    if kernel.format != input.format {
+        return Err(format!(
+            "node {node_id} causal depthwise conv1d kernel format must match input"
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_gated_decay_parameters(
+    decay_control: &TensorSpec,
+    update_control: &TensorSpec,
+    log_rate: &TensorSpec,
+    time_bias: &TensorSpec,
+    log_decay: &TensorSpec,
+    update_rate: &TensorSpec,
+    channels: usize,
+    node_id: &str,
+) -> Result<(), String> {
+    validate_real_sequence_tensor(decay_control, "gated decay control", node_id)?;
+    for (tensor, label) in [
+        (update_control, "gated update control"),
+        (log_decay, "gated log decay"),
+        (update_rate, "gated update rate"),
+    ] {
+        require_same_shape(
+            decay_control,
+            tensor,
+            "gated decay parameter values",
+            node_id,
+        )?;
+        require_matching_format_layout(decay_control, tensor, label, node_id)?;
+    }
+    if feature_width(decay_control, "gated decay control", node_id)? != channels {
+        return Err(format!(
+            "node {node_id} gated decay parameter feature width must equal channels {channels}"
+        ));
+    }
+    for (tensor, label) in [(log_rate, "log_rate"), (time_bias, "time_bias")] {
+        require_vector_shape(tensor, channels, label, node_id)?;
+        if tensor.layout != TensorLayout::RowMajor {
+            return Err(format!(
+                "node {node_id} gated decay {label} weight must use RowMajor layout"
+            ));
+        }
+        if tensor.format != decay_control.format {
+            return Err(format!(
+                "node {node_id} gated decay {label} format must match value tensors"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_gated_delta_rule_scan(
+    query: &TensorSpec,
+    key: &TensorSpec,
+    value: &TensorSpec,
+    log_decay: &TensorSpec,
+    update_rate: &TensorSpec,
+    context: &TensorSpec,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    node_id: &str,
+) -> Result<(), String> {
+    validate_real_sequence_tensor(query, "gated delta-rule query", node_id)?;
+    let rank = query.shape.len();
+    for (tensor, label) in [
+        (key, "gated delta-rule key"),
+        (value, "gated delta-rule value"),
+        (log_decay, "gated delta-rule log decay"),
+        (update_rate, "gated delta-rule update rate"),
+        (context, "gated delta-rule context"),
+    ] {
+        if tensor.shape.len() != rank || tensor.shape[..rank - 1] != query.shape[..rank - 1] {
+            return Err(format!(
+                "node {node_id} gated delta-rule tensors must have equal rank and leading dimensions"
+            ));
+        }
+        require_matching_format_layout(query, tensor, label, node_id)?;
+    }
+
+    let key_width = checked_dimension_product(key_heads, key_dim, "gated delta-rule key width")?;
+    let value_width =
+        checked_dimension_product(value_heads, value_dim, "gated delta-rule value width")?;
+    for (tensor, label) in [(query, "query"), (key, "key")] {
+        if feature_width(tensor, label, node_id)? != key_width {
+            return Err(format!(
+                "node {node_id} gated delta-rule {label} width must equal key_heads * key_dim {key_width}"
+            ));
+        }
+    }
+    for (tensor, label) in [(value, "value"), (context, "context")] {
+        if feature_width(tensor, label, node_id)? != value_width {
+            return Err(format!(
+                "node {node_id} gated delta-rule {label} width must equal value_heads * value_dim {value_width}"
+            ));
+        }
+    }
+    for (tensor, label) in [(log_decay, "log_decay"), (update_rate, "update_rate")] {
+        if feature_width(tensor, label, node_id)? != value_heads {
+            return Err(format!(
+                "node {node_id} gated delta-rule {label} width must equal value_heads {value_heads}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_real_sequence_tensor(
+    tensor: &TensorSpec,
+    label: &str,
+    node_id: &str,
+) -> Result<(), String> {
+    if tensor.shape.len() < 2 {
+        return Err(format!("node {node_id} {label} must have rank at least 2"));
+    }
+    if !matches!(
+        tensor.format,
+        NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+    ) {
+        return Err(format!(
+            "node {node_id} {label} must use F32, BF16, or FP16"
+        ));
+    }
+    if !matches!(
+        tensor.layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden | TensorLayout::PackedRagged
+    ) {
+        return Err(format!(
+            "node {node_id} {label} must use RowMajor, TokensHidden, or PackedRagged layout"
+        ));
+    }
+    Ok(())
+}
+
+fn require_matching_format_layout(
+    reference: &TensorSpec,
+    tensor: &TensorSpec,
+    label: &str,
+    node_id: &str,
+) -> Result<(), String> {
+    if tensor.format != reference.format || tensor.layout != reference.layout {
+        return Err(format!(
+            "node {node_id} {label} format and layout must match"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_causal_gqa_attention_core(
@@ -1958,6 +2309,31 @@ fn validate_attention_geometry(
     softmax_scale.validate(&format!("{label} softmax_scale"))
 }
 
+fn validate_gated_delta_rule_geometry(
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+) -> Result<(), String> {
+    ensure_nonzero(key_heads, "gated delta-rule key_heads")?;
+    ensure_nonzero(value_heads, "gated delta-rule value_heads")?;
+    ensure_nonzero(key_dim, "gated delta-rule key_dim")?;
+    ensure_nonzero(value_dim, "gated delta-rule value_dim")?;
+    if value_heads % key_heads != 0 {
+        return Err("gated delta-rule value_heads must divide evenly by key_heads".into());
+    }
+    checked_dimension_product(key_heads, key_dim, "gated delta-rule key width")?;
+    checked_dimension_product(value_heads, value_dim, "gated delta-rule value width")?;
+    let matrix_elements =
+        checked_dimension_product(key_dim, value_dim, "gated delta-rule matrix elements")?;
+    checked_dimension_product(
+        value_heads,
+        matrix_elements,
+        "gated delta-rule recurrent bank elements",
+    )?;
+    Ok(())
+}
+
 fn checked_dimension_product(left: usize, right: usize, label: &str) -> Result<usize, String> {
     let product = left
         .checked_mul(right)
@@ -2120,6 +2496,166 @@ mod tests {
                 kind,
             }],
         }
+    }
+
+    fn node_graph(
+        graph_id: &str,
+        inputs: Vec<GraphValue>,
+        outputs: Vec<GraphValue>,
+        weights: Vec<WeightSpec>,
+        states: Vec<StateId>,
+        kind: GraphNodeKind,
+    ) -> ModelGraph {
+        let input_ids = inputs
+            .iter()
+            .map(|value| value.id.clone())
+            .collect::<Vec<_>>();
+        let output_ids = outputs
+            .iter()
+            .map(|value| value.id.clone())
+            .collect::<Vec<_>>();
+        let weight_ids = weights
+            .iter()
+            .map(|weight| weight.id.clone())
+            .collect::<Vec<_>>();
+        let mut values = inputs;
+        values.extend(outputs);
+        ModelGraph {
+            graph_id: graph_id.into(),
+            inputs: input_ids.clone(),
+            outputs: output_ids.clone(),
+            values,
+            weights,
+            nodes: vec![GraphNode {
+                id: node_id("node"),
+                inputs: input_ids,
+                outputs: output_ids,
+                weights: weight_ids,
+                states,
+                kind,
+            }],
+        }
+    }
+
+    fn typed_value(
+        name: &str,
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+    ) -> GraphValue {
+        GraphValue {
+            id: value_id(name),
+            tensor: TensorSpec::new(shape.to_vec(), format, layout).unwrap(),
+        }
+    }
+
+    fn typed_weight(
+        name: &str,
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+    ) -> WeightSpec {
+        WeightSpec {
+            id: weight_id(name),
+            tensor: TensorSpec::new(shape.to_vec(), format, layout).unwrap(),
+        }
+    }
+
+    fn causal_depthwise_conv_graph(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        channels: usize,
+        kernel_size: usize,
+        with_state: bool,
+    ) -> ModelGraph {
+        node_graph(
+            "causal-depthwise-conv",
+            vec![typed_value("input", shape, format.clone(), layout.clone())],
+            vec![typed_value("output", shape, format.clone(), layout)],
+            vec![typed_weight(
+                "kernel",
+                &[channels, 1, kernel_size],
+                format,
+                TensorLayout::RowMajor,
+            )],
+            with_state
+                .then(|| state_id("conv-history"))
+                .into_iter()
+                .collect(),
+            GraphNodeKind::CausalDepthwiseConv1d {
+                channels,
+                kernel_size,
+            },
+        )
+    }
+
+    fn gated_decay_graph(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        channels: usize,
+    ) -> ModelGraph {
+        node_graph(
+            "gated-decay",
+            vec![
+                typed_value("decay-control", shape, format.clone(), layout.clone()),
+                typed_value("update-control", shape, format.clone(), layout.clone()),
+            ],
+            vec![
+                typed_value("log-decay", shape, format.clone(), layout.clone()),
+                typed_value("update-rate", shape, format.clone(), layout),
+            ],
+            vec![
+                typed_weight(
+                    "log-rate",
+                    &[channels],
+                    format.clone(),
+                    TensorLayout::RowMajor,
+                ),
+                typed_weight("time-bias", &[channels], format, TensorLayout::RowMajor),
+            ],
+            vec![],
+            GraphNodeKind::GatedDecayParameters { channels },
+        )
+    }
+
+    fn gated_delta_scan_graph(
+        leading: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        geometry: (usize, usize, usize, usize),
+        with_state: bool,
+    ) -> ModelGraph {
+        let (key_heads, value_heads, key_dim, value_dim) = geometry;
+        let mut key_shape = leading.to_vec();
+        key_shape.push(key_heads * key_dim);
+        let mut value_shape = leading.to_vec();
+        value_shape.push(value_heads * value_dim);
+        let mut gate_shape = leading.to_vec();
+        gate_shape.push(value_heads);
+        node_graph(
+            "gated-delta-scan",
+            vec![
+                typed_value("q", &key_shape, format.clone(), layout.clone()),
+                typed_value("k", &key_shape, format.clone(), layout.clone()),
+                typed_value("v", &value_shape, format.clone(), layout.clone()),
+                typed_value("log-decay", &gate_shape, format.clone(), layout.clone()),
+                typed_value("update-rate", &gate_shape, format.clone(), layout.clone()),
+            ],
+            vec![typed_value("context", &value_shape, format, layout)],
+            vec![],
+            with_state
+                .then(|| state_id("scan-state"))
+                .into_iter()
+                .collect(),
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+            },
+        )
     }
 
     fn grouped_last_split_graph(
@@ -3858,5 +4394,247 @@ mod tests {
             pairing: RotaryPairing::SplitHalf,
         };
         assert!(graph.validate().unwrap_err().contains("overflows usize"));
+    }
+
+    #[test]
+    fn causal_depthwise_conv1d_accepts_rank2_rank3_packed_and_stateful_chunks() {
+        for (shape, format, layout) in [
+            (&[3, 4][..], NumericalFormat::F32, TensorLayout::RowMajor),
+            (
+                &[2, 3, 4][..],
+                NumericalFormat::Bf16,
+                TensorLayout::TokensHidden,
+            ),
+            (
+                &[5, 4][..],
+                NumericalFormat::Fp16,
+                TensorLayout::PackedRagged,
+            ),
+        ] {
+            causal_depthwise_conv_graph(shape, format, layout, 4, 3, true)
+                .validate()
+                .unwrap();
+        }
+        causal_depthwise_conv_graph(
+            &[3, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            4,
+            3,
+            false,
+        )
+        .validate()
+        .unwrap();
+        causal_depthwise_conv_graph(
+            &[3, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            4,
+            1,
+            false,
+        )
+        .validate()
+        .unwrap();
+        assert!(
+            causal_depthwise_conv_graph(
+                &[3, 4],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                4,
+                1,
+                true,
+            )
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn causal_depthwise_conv1d_rejects_geometry_shape_metadata_weight_and_arity() {
+        let make = || {
+            causal_depthwise_conv_graph(
+                &[3, 4],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                4,
+                3,
+                false,
+            )
+        };
+        let mut zero = make();
+        zero.nodes[0].kind = GraphNodeKind::CausalDepthwiseConv1d {
+            channels: 0,
+            kernel_size: 3,
+        };
+        assert!(zero.validate().unwrap_err().contains("channels"));
+        let mut overflow = make();
+        overflow.nodes[0].kind = GraphNodeKind::CausalDepthwiseConv1d {
+            channels: usize::MAX,
+            kernel_size: 2,
+        };
+        assert!(overflow.validate().unwrap_err().contains("overflows usize"));
+
+        let mut shape = make();
+        shape.values[1].tensor.shape = vec![2, 4];
+        assert!(shape.validate().unwrap_err().contains("identical shapes"));
+        let mut metadata = make();
+        metadata.values[1].tensor.layout = TensorLayout::TokensHidden;
+        assert!(
+            metadata
+                .validate()
+                .unwrap_err()
+                .contains("format and layout")
+        );
+        let mut kernel_shape = make();
+        kernel_shape.weights[0].tensor.shape = vec![4, 3];
+        assert!(
+            kernel_shape
+                .validate()
+                .unwrap_err()
+                .contains("kernel must have shape")
+        );
+        let mut kernel_metadata = make();
+        kernel_metadata.weights[0].tensor.layout = TensorLayout::TokensHidden;
+        assert!(kernel_metadata.validate().unwrap_err().contains("RowMajor"));
+        let mut arity = make();
+        arity.nodes[0].weights.clear();
+        assert!(arity.validate().unwrap_err().contains("requires 1 input"));
+    }
+
+    #[test]
+    fn gated_decay_parameters_accepts_canonical_shapes_and_rejects_mismatches() {
+        for (shape, format, layout) in [
+            (&[3, 4][..], NumericalFormat::F32, TensorLayout::RowMajor),
+            (
+                &[2, 3, 4][..],
+                NumericalFormat::Bf16,
+                TensorLayout::TokensHidden,
+            ),
+            (
+                &[5, 4][..],
+                NumericalFormat::Fp16,
+                TensorLayout::PackedRagged,
+            ),
+        ] {
+            gated_decay_graph(shape, format, layout, 4)
+                .validate()
+                .unwrap();
+        }
+
+        let mut zero = gated_decay_graph(&[3, 4], NumericalFormat::F32, TensorLayout::RowMajor, 4);
+        zero.nodes[0].kind = GraphNodeKind::GatedDecayParameters { channels: 0 };
+        assert!(zero.validate().unwrap_err().contains("channels"));
+        let mut shape = gated_decay_graph(&[3, 4], NumericalFormat::F32, TensorLayout::RowMajor, 4);
+        shape.values[1].tensor.shape = vec![2, 4];
+        assert!(shape.validate().unwrap_err().contains("identical shapes"));
+        let mut metadata =
+            gated_decay_graph(&[3, 4], NumericalFormat::F32, TensorLayout::RowMajor, 4);
+        metadata.values[3].tensor.format = NumericalFormat::Bf16;
+        assert!(
+            metadata
+                .validate()
+                .unwrap_err()
+                .contains("format and layout")
+        );
+        let mut weight_shape =
+            gated_decay_graph(&[3, 4], NumericalFormat::F32, TensorLayout::RowMajor, 4);
+        weight_shape.weights[0].tensor.shape = vec![2, 2];
+        assert!(
+            weight_shape
+                .validate()
+                .unwrap_err()
+                .contains("logical shape [4]")
+        );
+        let mut arity = gated_decay_graph(&[3, 4], NumericalFormat::F32, TensorLayout::RowMajor, 4);
+        arity.nodes[0].outputs.pop();
+        assert!(arity.validate().unwrap_err().contains("outputs=1"));
+    }
+
+    #[test]
+    fn gated_delta_rule_scan_accepts_rank2_rank3_packed_and_optional_state() {
+        for (leading, format, layout) in [
+            (&[3][..], NumericalFormat::F32, TensorLayout::RowMajor),
+            (
+                &[2, 3][..],
+                NumericalFormat::Bf16,
+                TensorLayout::TokensHidden,
+            ),
+            (&[5][..], NumericalFormat::Fp16, TensorLayout::PackedRagged),
+        ] {
+            for with_state in [false, true] {
+                gated_delta_scan_graph(
+                    leading,
+                    format.clone(),
+                    layout.clone(),
+                    (2, 4, 3, 5),
+                    with_state,
+                )
+                .validate()
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn gated_delta_rule_scan_rejects_geometry_shape_metadata_and_arity() {
+        let make = || {
+            gated_delta_scan_graph(
+                &[3],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                (2, 4, 3, 5),
+                false,
+            )
+        };
+        for kind in [
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads: 0,
+                value_heads: 4,
+                key_dim: 3,
+                value_dim: 5,
+            },
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads: 3,
+                value_heads: 4,
+                key_dim: 3,
+                value_dim: 5,
+            },
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads: usize::MAX,
+                value_heads: usize::MAX,
+                key_dim: 2,
+                value_dim: 1,
+            },
+        ] {
+            let mut graph = make();
+            graph.nodes[0].kind = kind;
+            assert!(graph.validate().is_err());
+        }
+
+        let mut shape = make();
+        shape.values[2].tensor.shape = vec![4, 20];
+        assert!(shape.validate().unwrap_err().contains("leading dimensions"));
+        let mut width = make();
+        width.values[4].tensor.shape = vec![3, 3];
+        assert!(width.validate().unwrap_err().contains("update_rate width"));
+        let mut metadata = make();
+        metadata.values[5].tensor.layout = TensorLayout::PackedRagged;
+        assert!(
+            metadata
+                .validate()
+                .unwrap_err()
+                .contains("format and layout")
+        );
+        let mut arity = make();
+        arity.nodes[0].inputs.pop();
+        assert!(
+            arity
+                .validate()
+                .unwrap_err()
+                .contains("requires 5 ordered inputs")
+        );
+        let mut weight = make();
+        weight.nodes[0].weights.push(weight_id("unexpected"));
+        assert!(weight.validate().unwrap_err().contains("zero weights"));
     }
 }

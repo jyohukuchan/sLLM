@@ -278,6 +278,9 @@ pub enum CpuReferenceNodeKind {
     CausalGqaAttentionCore,
     DenseAttention,
     RecurrentAttention,
+    CausalDepthwiseConv1d,
+    GatedDecayParameters,
+    GatedDeltaRuleScan,
     Activation,
     GatedMultiply,
     GatedMlp,
@@ -300,6 +303,9 @@ impl From<&GraphNodeKind> for CpuReferenceNodeKind {
             GraphNodeKind::CausalGqaAttentionCore { .. } => Self::CausalGqaAttentionCore,
             GraphNodeKind::DenseAttention { .. } => Self::DenseAttention,
             GraphNodeKind::RecurrentAttention { .. } => Self::RecurrentAttention,
+            GraphNodeKind::CausalDepthwiseConv1d { .. } => Self::CausalDepthwiseConv1d,
+            GraphNodeKind::GatedDecayParameters { .. } => Self::GatedDecayParameters,
+            GraphNodeKind::GatedDeltaRuleScan { .. } => Self::GatedDeltaRuleScan,
             GraphNodeKind::Activation { .. } => Self::Activation,
             GraphNodeKind::GatedMultiply { .. } => Self::GatedMultiply,
             GraphNodeKind::GatedMlp { .. } => Self::GatedMlp,
@@ -324,6 +330,9 @@ impl CpuReferenceNodeKind {
             Self::CausalGqaAttentionCore => "CausalGqaAttentionCore",
             Self::DenseAttention => "DenseAttention",
             Self::RecurrentAttention => "RecurrentAttention",
+            Self::CausalDepthwiseConv1d => "CausalDepthwiseConv1d",
+            Self::GatedDecayParameters => "GatedDecayParameters",
+            Self::GatedDeltaRuleScan => "GatedDeltaRuleScan",
             Self::Activation => "Activation",
             Self::GatedMultiply => "GatedMultiply",
             Self::GatedMlp => "GatedMlp",
@@ -1193,6 +1202,9 @@ impl CpuReferenceExecutor {
             }
             GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
+            | GraphNodeKind::CausalDepthwiseConv1d { .. }
+            | GraphNodeKind::GatedDecayParameters { .. }
+            | GraphNodeKind::GatedDeltaRuleScan { .. }
             | GraphNodeKind::Sampling { .. } => Err(CpuReferenceFault::node(
                 CpuReferenceFailureClass::Unsupported,
                 node,
@@ -2323,6 +2335,23 @@ fn preflight_graph(
                         softmax_scale.get(),
                     ),
                 )?;
+            }
+            GraphNodeKind::CausalDepthwiseConv1d { .. }
+            | GraphNodeKind::GatedDeltaRuleScan { .. } => {
+                return Err(CpuReferenceFault::node(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "stateful_operator",
+                    "CPU reference does not implement this state-capable operator",
+                ));
+            }
+            GraphNodeKind::GatedDecayParameters { .. } => {
+                return Err(CpuReferenceFault::node(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "operator",
+                    "CPU reference does not implement this operator",
+                ));
             }
             GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
@@ -4545,6 +4574,9 @@ fn node_kind_name(kind: &GraphNodeKind) -> &'static str {
         GraphNodeKind::CausalGqaAttentionCore { .. } => "CausalGqaAttentionCore",
         GraphNodeKind::DenseAttention { .. } => "DenseAttention",
         GraphNodeKind::RecurrentAttention { .. } => "RecurrentAttention",
+        GraphNodeKind::CausalDepthwiseConv1d { .. } => "CausalDepthwiseConv1d",
+        GraphNodeKind::GatedDecayParameters { .. } => "GatedDecayParameters",
+        GraphNodeKind::GatedDeltaRuleScan { .. } => "GatedDeltaRuleScan",
         GraphNodeKind::Activation { .. } => "Activation",
         GraphNodeKind::GatedMultiply { .. } => "GatedMultiply",
         GraphNodeKind::GatedMlp { .. } => "GatedMlp",
@@ -6545,6 +6577,188 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("node linear (DenseAttention)"));
         assert!(error.contains("unsupported"));
+    }
+
+    #[test]
+    fn new_scan_conv_and_decay_nodes_are_typed_unsupported_before_payload() {
+        let conv = ModelGraph {
+            graph_id: "unsupported-causal-depthwise-conv".into(),
+            inputs: vec![value_id("conv-input")],
+            outputs: vec![value_id("conv-output")],
+            values: vec![
+                value(
+                    "conv-input",
+                    &[1, 2, 2],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                ),
+                value(
+                    "conv-output",
+                    &[1, 2, 2],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                ),
+            ],
+            weights: vec![weight("conv-kernel", &[2, 1, 3])],
+            nodes: vec![GraphNode {
+                id: node_id("conv"),
+                inputs: vec![value_id("conv-input")],
+                outputs: vec![value_id("conv-output")],
+                weights: vec![weight_id("conv-kernel")],
+                states: vec![],
+                kind: GraphNodeKind::CausalDepthwiseConv1d {
+                    channels: 2,
+                    kernel_size: 3,
+                },
+            }],
+        };
+        let decay = ModelGraph {
+            graph_id: "unsupported-gated-decay".into(),
+            inputs: vec![value_id("decay-control"), value_id("update-control")],
+            outputs: vec![value_id("log-decay"), value_id("update-rate")],
+            values: [
+                "decay-control",
+                "update-control",
+                "log-decay",
+                "update-rate",
+            ]
+            .into_iter()
+            .map(|name| {
+                value(
+                    name,
+                    &[1, 2, 2],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                )
+            })
+            .collect(),
+            weights: vec![weight("log-rate", &[2]), weight("time-bias", &[2])],
+            nodes: vec![GraphNode {
+                id: node_id("decay"),
+                inputs: vec![value_id("decay-control"), value_id("update-control")],
+                outputs: vec![value_id("log-decay"), value_id("update-rate")],
+                weights: vec![weight_id("log-rate"), weight_id("time-bias")],
+                states: vec![],
+                kind: GraphNodeKind::GatedDecayParameters { channels: 2 },
+            }],
+        };
+        let scan = ModelGraph {
+            graph_id: "unsupported-gated-delta-scan".into(),
+            inputs: vec![
+                value_id("query"),
+                value_id("key"),
+                value_id("scan-value"),
+                value_id("scan-log-decay"),
+                value_id("scan-update-rate"),
+            ],
+            outputs: vec![value_id("context")],
+            values: [
+                "query",
+                "key",
+                "scan-value",
+                "scan-log-decay",
+                "scan-update-rate",
+                "context",
+            ]
+            .into_iter()
+            .map(|name| {
+                value(
+                    name,
+                    &[1, 2, 2],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                )
+            })
+            .collect(),
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("scan"),
+                inputs: vec![
+                    value_id("query"),
+                    value_id("key"),
+                    value_id("scan-value"),
+                    value_id("scan-log-decay"),
+                    value_id("scan-update-rate"),
+                ],
+                outputs: vec![value_id("context")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::GatedDeltaRuleScan {
+                    key_heads: 1,
+                    value_heads: 2,
+                    key_dim: 2,
+                    value_dim: 1,
+                },
+            }],
+        };
+        let mut stateful_conv = conv.clone();
+        stateful_conv.nodes[0].states = vec![StateId::new("conv-history").unwrap()];
+        let mut stateful_scan = scan.clone();
+        stateful_scan.nodes[0].states = vec![StateId::new("scan-bank").unwrap()];
+
+        for (graph, expected_id, expected_kind, reason) in [
+            (
+                conv,
+                node_id("conv"),
+                CpuReferenceNodeKind::CausalDepthwiseConv1d,
+                "stateful_operator",
+            ),
+            (
+                decay,
+                node_id("decay"),
+                CpuReferenceNodeKind::GatedDecayParameters,
+                "operator",
+            ),
+            (
+                scan,
+                node_id("scan"),
+                CpuReferenceNodeKind::GatedDeltaRuleScan,
+                "stateful_operator",
+            ),
+        ] {
+            graph.validate().unwrap();
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, reason);
+            assert_eq!(error.trace.completed_node_count, 0);
+            assert_eq!(
+                error.failed_node,
+                Some(CpuReferenceNodeRef {
+                    id: expected_id,
+                    kind: expected_kind
+                })
+            );
+        }
+
+        for (graph, expected_id, expected_kind) in [
+            (
+                stateful_conv,
+                node_id("conv"),
+                CpuReferenceNodeKind::CausalDepthwiseConv1d,
+            ),
+            (
+                stateful_scan,
+                node_id("scan"),
+                CpuReferenceNodeKind::GatedDeltaRuleScan,
+            ),
+        ] {
+            graph.validate().unwrap();
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, "stateful_node");
+            assert_eq!(error.trace.completed_node_count, 0);
+            assert_eq!(
+                error.failed_node,
+                Some(CpuReferenceNodeRef {
+                    id: expected_id,
+                    kind: expected_kind,
+                })
+            );
+        }
     }
 
     #[test]

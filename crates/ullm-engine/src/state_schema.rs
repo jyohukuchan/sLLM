@@ -109,7 +109,23 @@ pub enum StateLayout {
         /// Matrix columns.
         cols: usize,
     },
+    /// A fixed bank of independent recurrent matrices.
+    RecurrentBank {
+        /// Number of independent matrix instances.
+        instances: usize,
+        /// Rows in each matrix.
+        rows: usize,
+        /// Columns in each matrix.
+        cols: usize,
+    },
     /// Per-channel causal convolution history.
+    ///
+    /// The canonical logical axes are `[channel, age]`. RowMajor flat storage
+    /// uses `channel * history_tokens + age`; age zero is the oldest retained
+    /// sample and `history_tokens - 1` is the newest. This describes the graph
+    /// transaction representation, not a backend's private physical layout.
+    /// Backends using time-major or tiled storage must convert at
+    /// snapshot/import/export boundaries.
     ConvolutionHistory {
         /// Number of channels.
         channels: usize,
@@ -293,7 +309,12 @@ impl StateSchema {
     /// The graph does not yet expose an explicit graph-layer index, so this
     /// method intentionally does not infer or validate
     /// [`StateOwnership::RequestLayer`] `layer_index` values. A later adapter
-    /// mapping contract must validate that relationship explicitly.
+    /// mapping contract must validate that relationship explicitly. This is a
+    /// blocking adapter admission requirement: an unresolved or mismatched
+    /// layer association must not proceed to allocation or execution. The same
+    /// gate must prove any source/backend layout conversion into the canonical
+    /// state representation documented by [`StateLayout`]; this method does not
+    /// claim to perform that conversion.
     ///
     /// [`StateKind::PositionCacheLength`] is request-owned graph-level execution
     /// state. It is consumed by [`crate::execution_batch::ExecutionBatch`]
@@ -410,6 +431,13 @@ fn validate_node_state_contract(node: &GraphNode, states: &[&StateSpec]) -> Resu
                     first.id.as_str()
                 ));
             }
+            if !matches!(first.layout, StateLayout::Recurrent { .. }) {
+                return Err(format!(
+                    "recurrent-attention node {} first state {} must use the legacy Recurrent layout",
+                    node.id.as_str(),
+                    first.id.as_str()
+                ));
+            }
             require_request_layer_ownership(node, first, "recurrent-attention")?;
             if let Some(second) = rest.first() {
                 if second.kind != StateKind::ConvolutionHistory {
@@ -429,11 +457,125 @@ fn validate_node_state_contract(node: &GraphNode, states: &[&StateSpec]) -> Resu
             }
             Ok(())
         }
+        GraphNodeKind::CausalDepthwiseConv1d {
+            channels,
+            kernel_size,
+        } => match states {
+            [] => Ok(()),
+            [state] => {
+                if *kernel_size == 1 {
+                    return Err(format!(
+                        "causal-depthwise-conv1d node {} with kernel_size 1 cannot bind history state",
+                        node.id.as_str()
+                    ));
+                }
+                if state.kind != StateKind::ConvolutionHistory {
+                    return Err(format!(
+                        "causal-depthwise-conv1d node {} state {} must be ConvolutionHistory",
+                        node.id.as_str(),
+                        state.id.as_str()
+                    ));
+                }
+                let StateLayout::ConvolutionHistory {
+                    channels: state_channels,
+                    history_tokens,
+                } = &state.layout
+                else {
+                    return Err(format!(
+                        "causal-depthwise-conv1d node {} state {} must use ConvolutionHistory layout",
+                        node.id.as_str(),
+                        state.id.as_str()
+                    ));
+                };
+                let expected_history = kernel_size
+                    .checked_sub(1)
+                    .ok_or_else(|| "causal depthwise conv1d kernel_size underflows".to_string())?;
+                if *state_channels != *channels || *history_tokens != expected_history {
+                    return Err(format!(
+                        "causal-depthwise-conv1d node {} state geometry must be channels={} history_tokens={expected_history}",
+                        node.id.as_str(),
+                        channels
+                    ));
+                }
+                require_request_layer_ownership(node, state, "causal-depthwise-conv1d")?;
+                require_prepare_execute_commit(node, state, "causal-depthwise-conv1d")
+            }
+            _ => Err(format!(
+                "causal-depthwise-conv1d node {} must use zero or one state",
+                node.id.as_str()
+            )),
+        },
+        GraphNodeKind::GatedDeltaRuleScan {
+            value_heads,
+            key_dim,
+            value_dim,
+            ..
+        } => match states {
+            [] => Ok(()),
+            [state] => {
+                if state.kind != StateKind::Recurrent {
+                    return Err(format!(
+                        "gated-delta-rule-scan node {} state {} must be Recurrent",
+                        node.id.as_str(),
+                        state.id.as_str()
+                    ));
+                }
+                let StateLayout::RecurrentBank {
+                    instances,
+                    rows,
+                    cols,
+                } = &state.layout
+                else {
+                    return Err(format!(
+                        "gated-delta-rule-scan node {} state {} must use RecurrentBank layout",
+                        node.id.as_str(),
+                        state.id.as_str()
+                    ));
+                };
+                if *instances != *value_heads || *rows != *key_dim || *cols != *value_dim {
+                    return Err(format!(
+                        "gated-delta-rule-scan node {} state geometry must be instances={} rows={} cols={}",
+                        node.id.as_str(),
+                        value_heads,
+                        key_dim,
+                        value_dim
+                    ));
+                }
+                require_request_layer_ownership(node, state, "gated-delta-rule-scan")?;
+                require_prepare_execute_commit(node, state, "gated-delta-rule-scan")
+            }
+            _ => Err(format!(
+                "gated-delta-rule-scan node {} must use zero or one state",
+                node.id.as_str()
+            )),
+        },
         _ if states.is_empty() => Ok(()),
         _ => Err(format!(
             "node {} kind does not permit state bindings",
             node.id.as_str()
         )),
+    }
+}
+
+fn require_prepare_execute_commit(
+    node: &GraphNode,
+    state: &StateSpec,
+    node_kind: &str,
+) -> Result<(), String> {
+    if matches!(
+        state.transaction,
+        StateTransactionContract::Transactional {
+            execution: StateExecutionProtocol::PrepareExecuteCommit,
+            ..
+        }
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{node_kind} node {} state {} must use PrepareExecuteCommit transaction",
+            node.id.as_str(),
+            state.id.as_str()
+        ))
     }
 }
 
@@ -458,6 +600,7 @@ fn validate_kind_layout(kind: &StateKind, layout: &StateLayout) -> Result<(), St
         (StateKind::PagedKv, StateLayout::PagedKv { .. })
         | (StateKind::SlidingWindowKv, StateLayout::SlidingWindowKv { .. })
         | (StateKind::Recurrent, StateLayout::Recurrent { .. })
+        | (StateKind::Recurrent, StateLayout::RecurrentBank { .. })
         | (StateKind::ConvolutionHistory, StateLayout::ConvolutionHistory { .. })
         | (StateKind::PositionCacheLength, StateLayout::PositionCacheLength) => Ok(()),
         (StateKind::Custom(id), StateLayout::Custom { .. }) => id.validate(),
@@ -508,6 +651,14 @@ fn validate_layout(layout: &StateLayout) -> Result<(), String> {
         ),
         StateLayout::Recurrent { rows, cols } => {
             checked_positive_product(*rows, *cols, "recurrent state")?;
+            Ok(())
+        }
+        StateLayout::RecurrentBank {
+            instances,
+            rows,
+            cols,
+        } => {
+            checked_positive_product3(*instances, *rows, *cols, "recurrent state bank")?;
             Ok(())
         }
         StateLayout::ConvolutionHistory {
@@ -688,6 +839,11 @@ fn layout_logical_element_count(layout: &StateLayout) -> Result<u64, String> {
         StateLayout::Recurrent { rows, cols } => {
             checked_positive_product(*rows, *cols, "recurrent state")
         }
+        StateLayout::RecurrentBank {
+            instances,
+            rows,
+            cols,
+        } => checked_positive_product3(*instances, *rows, *cols, "recurrent state bank"),
         StateLayout::ConvolutionHistory {
             channels,
             history_tokens,
@@ -714,6 +870,24 @@ fn checked_positive_product(left: usize, right: usize, label: &str) -> Result<u6
     let left = u64::try_from(left).map_err(|_| format!("{label} dimension exceeds u64"))?;
     let right = u64::try_from(right).map_err(|_| format!("{label} dimension exceeds u64"))?;
     left.checked_mul(right)
+        .ok_or_else(|| format!("{label} element count overflows u64"))
+}
+
+fn checked_positive_product3(
+    first: usize,
+    second: usize,
+    third: usize,
+    label: &str,
+) -> Result<u64, String> {
+    if first == 0 || second == 0 || third == 0 {
+        return Err(format!("{label} dimensions must be positive"));
+    }
+    let first = u64::try_from(first).map_err(|_| format!("{label} dimension exceeds u64"))?;
+    let second = u64::try_from(second).map_err(|_| format!("{label} dimension exceeds u64"))?;
+    let third = u64::try_from(third).map_err(|_| format!("{label} dimension exceeds u64"))?;
+    first
+        .checked_mul(second)
+        .and_then(|value| value.checked_mul(third))
         .ok_or_else(|| format!("{label} element count overflows u64"))
 }
 
@@ -752,6 +926,7 @@ fn state_layout_name(layout: &StateLayout) -> &'static str {
         StateLayout::PagedKv { .. } => "paged KV",
         StateLayout::SlidingWindowKv { .. } => "sliding-window KV",
         StateLayout::Recurrent { .. } => "recurrent",
+        StateLayout::RecurrentBank { .. } => "recurrent bank",
         StateLayout::ConvolutionHistory { .. } => "convolution history",
         StateLayout::PositionCacheLength => "position/cache length",
         StateLayout::Custom { .. } => "custom",
@@ -947,6 +1122,107 @@ mod tests {
                     softmax_scale: PositiveF32::new(1.0, "dense scale").unwrap(),
                 },
             }],
+        }
+    }
+
+    fn conv_graph_with_state(state: Option<&str>, kernel_size: usize) -> ModelGraph {
+        let input = ValueId::new("conv-input").unwrap();
+        let output = ValueId::new("conv-output").unwrap();
+        let kernel = WeightId::new("conv-kernel").unwrap();
+        let tensor =
+            TensorSpec::new(vec![2, 8], NumericalFormat::F32, TensorLayout::TokensHidden).unwrap();
+        ModelGraph {
+            graph_id: "conv-state-composition".into(),
+            inputs: vec![input.clone()],
+            outputs: vec![output.clone()],
+            values: vec![
+                GraphValue {
+                    id: input.clone(),
+                    tensor: tensor.clone(),
+                },
+                GraphValue {
+                    id: output.clone(),
+                    tensor,
+                },
+            ],
+            weights: vec![WeightSpec {
+                id: kernel.clone(),
+                tensor: TensorSpec::new(
+                    vec![8, 1, kernel_size],
+                    NumericalFormat::F32,
+                    TensorLayout::RowMajor,
+                )
+                .unwrap(),
+            }],
+            nodes: vec![GraphNode {
+                id: NodeId::new("conv").unwrap(),
+                inputs: vec![input],
+                outputs: vec![output],
+                weights: vec![kernel],
+                states: state.into_iter().map(state_id).collect(),
+                kind: GraphNodeKind::CausalDepthwiseConv1d {
+                    channels: 8,
+                    kernel_size,
+                },
+            }],
+        }
+    }
+
+    fn scan_graph_with_state(state: Option<&str>) -> ModelGraph {
+        let names_shapes = [
+            ("q", vec![2, 6]),
+            ("k", vec![2, 6]),
+            ("v", vec![2, 20]),
+            ("log-decay", vec![2, 4]),
+            ("update-rate", vec![2, 4]),
+            ("context", vec![2, 20]),
+        ];
+        let values = names_shapes
+            .iter()
+            .map(|(name, shape)| GraphValue {
+                id: ValueId::new(*name).unwrap(),
+                tensor: TensorSpec::new(
+                    shape.clone(),
+                    NumericalFormat::F32,
+                    TensorLayout::PackedRagged,
+                )
+                .unwrap(),
+            })
+            .collect::<Vec<_>>();
+        ModelGraph {
+            graph_id: "scan-state-composition".into(),
+            inputs: values[..5].iter().map(|value| value.id.clone()).collect(),
+            outputs: vec![values[5].id.clone()],
+            values: values.clone(),
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: NodeId::new("scan").unwrap(),
+                inputs: values[..5].iter().map(|value| value.id.clone()).collect(),
+                outputs: vec![values[5].id.clone()],
+                weights: vec![],
+                states: state.into_iter().map(state_id).collect(),
+                kind: GraphNodeKind::GatedDeltaRuleScan {
+                    key_heads: 2,
+                    value_heads: 4,
+                    key_dim: 3,
+                    value_dim: 5,
+                },
+            }],
+        }
+    }
+
+    fn recurrent_bank(id: &str) -> StateSpec {
+        StateSpec {
+            id: state_id(id),
+            kind: StateKind::Recurrent,
+            ownership: StateOwnership::RequestLayer { layer_index: 1 },
+            format: NumericalFormat::F32,
+            layout: StateLayout::RecurrentBank {
+                instances: 4,
+                rows: 3,
+                cols: 5,
+            },
+            transaction: transactional(),
         }
     }
 
@@ -1288,5 +1564,188 @@ mod tests {
             custom.known_logical_value_bytes_per_request().unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn recurrent_bank_counts_bytes_and_preserves_legacy_recurrent_layout() {
+        let bank = recurrent_bank("bank");
+        assert_eq!(bank.logical_element_count().unwrap(), 60);
+        assert_eq!(
+            bank.known_logical_value_bytes_per_request().unwrap(),
+            Some(240)
+        );
+        recurrent("legacy")
+            .validate()
+            .expect("legacy recurrent matrix remains valid");
+
+        let mut overflow = recurrent_bank("overflow");
+        overflow.layout = StateLayout::RecurrentBank {
+            instances: usize::MAX,
+            rows: usize::MAX,
+            cols: 2,
+        };
+        assert!(overflow.validate().unwrap_err().contains("overflows u64"));
+
+        if usize::BITS >= 64 {
+            let mut byte_overflow = recurrent_bank("byte-overflow");
+            byte_overflow.layout = StateLayout::RecurrentBank {
+                instances: (u64::MAX / 4 + 1) as usize,
+                rows: 1,
+                cols: 1,
+            };
+            byte_overflow
+                .validate()
+                .expect("logical element count still fits u64");
+            assert!(
+                byte_overflow
+                    .known_logical_value_bytes_per_request()
+                    .unwrap_err()
+                    .contains("byte estimate overflows")
+            );
+        }
+
+        let schema = StateSchema::new("legacy-bank", vec![recurrent_bank("legacy-state")]).unwrap();
+        assert!(
+            schema
+                .validate_against_graph(&graph_with_state("legacy-state"))
+                .unwrap_err()
+                .contains("legacy Recurrent layout")
+        );
+    }
+
+    #[test]
+    fn causal_depthwise_conv_state_free_stateful_and_kernel_one_compose() {
+        StateSchema::new("conv-stateless", vec![])
+            .unwrap()
+            .validate_against_graph(&conv_graph_with_state(None, 5))
+            .unwrap();
+        StateSchema::new("conv-stateful", vec![convolution("conv-history")])
+            .unwrap()
+            .validate_against_graph(&conv_graph_with_state(Some("conv-history"), 5))
+            .unwrap();
+        StateSchema::new("conv-k1", vec![])
+            .unwrap()
+            .validate_against_graph(&conv_graph_with_state(None, 1))
+            .unwrap();
+        assert!(
+            conv_graph_with_state(Some("conv-history"), 1)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn convolution_history_layout_keeps_channel_then_age_axes() {
+        let history = convolution("history");
+        let StateLayout::ConvolutionHistory {
+            channels,
+            history_tokens,
+        } = &history.layout
+        else {
+            panic!("convolution fixture must use convolution history layout");
+        };
+        assert_eq!((*channels, *history_tokens), (8, 4));
+        assert_eq!(history.logical_element_count().unwrap(), 32);
+        assert_eq!(
+            history.known_logical_value_bytes_per_request().unwrap(),
+            Some(128)
+        );
+    }
+
+    #[test]
+    fn causal_depthwise_conv_rejects_wrong_state_contracts_and_geometry() {
+        let graph = conv_graph_with_state(Some("conv-history"), 5);
+
+        let mut wrong_kind = convolution("conv-history");
+        wrong_kind.kind = StateKind::Recurrent;
+        wrong_kind.layout = StateLayout::Recurrent { rows: 8, cols: 4 };
+        assert!(
+            StateSchema::new("conv-wrong-kind", vec![wrong_kind])
+                .unwrap()
+                .validate_against_graph(&graph)
+                .unwrap_err()
+                .contains("must be ConvolutionHistory")
+        );
+
+        let mut wrong_geometry = convolution("conv-history");
+        wrong_geometry.layout = StateLayout::ConvolutionHistory {
+            channels: 7,
+            history_tokens: 4,
+        };
+        assert!(
+            StateSchema::new("conv-wrong-geometry", vec![wrong_geometry])
+                .unwrap()
+                .validate_against_graph(&graph)
+                .unwrap_err()
+                .contains("state geometry")
+        );
+
+        let mut wrong_owner = convolution("conv-history");
+        wrong_owner.ownership = StateOwnership::Request;
+        assert!(StateSchema::new("conv-wrong-owner", vec![wrong_owner]).is_err());
+
+        let mut wrong_transaction = convolution("conv-history");
+        wrong_transaction.transaction = StateTransactionContract::ReadOnly;
+        assert!(StateSchema::new("conv-wrong-transaction", vec![wrong_transaction]).is_err());
+    }
+
+    #[test]
+    fn gated_delta_rule_scan_state_free_and_stateful_compose() {
+        StateSchema::new("scan-stateless", vec![])
+            .unwrap()
+            .validate_against_graph(&scan_graph_with_state(None))
+            .unwrap();
+        StateSchema::new("scan-stateful", vec![recurrent_bank("scan-state")])
+            .unwrap()
+            .validate_against_graph(&scan_graph_with_state(Some("scan-state")))
+            .unwrap();
+    }
+
+    #[test]
+    fn gated_delta_rule_scan_rejects_wrong_state_contracts_and_geometry() {
+        let graph = scan_graph_with_state(Some("scan-state"));
+
+        let legacy = StateSchema::new("scan-legacy", vec![recurrent("scan-state")]).unwrap();
+        assert!(
+            legacy
+                .validate_against_graph(&graph)
+                .unwrap_err()
+                .contains("RecurrentBank layout")
+        );
+
+        let mut wrong_kind = recurrent_bank("scan-state");
+        wrong_kind.kind = StateKind::ConvolutionHistory;
+        wrong_kind.layout = StateLayout::ConvolutionHistory {
+            channels: 4,
+            history_tokens: 15,
+        };
+        assert!(
+            StateSchema::new("scan-wrong-kind", vec![wrong_kind])
+                .unwrap()
+                .validate_against_graph(&graph)
+                .unwrap_err()
+                .contains("must be Recurrent")
+        );
+
+        let mut wrong_geometry = recurrent_bank("scan-state");
+        wrong_geometry.layout = StateLayout::RecurrentBank {
+            instances: 4,
+            rows: 3,
+            cols: 4,
+        };
+        assert!(
+            StateSchema::new("scan-wrong-geometry", vec![wrong_geometry])
+                .unwrap()
+                .validate_against_graph(&graph)
+                .unwrap_err()
+                .contains("state geometry")
+        );
+
+        let mut wrong_owner = recurrent_bank("scan-state");
+        wrong_owner.ownership = StateOwnership::Request;
+        assert!(StateSchema::new("scan-wrong-owner", vec![wrong_owner]).is_err());
+        let mut wrong_transaction = recurrent_bank("scan-state");
+        wrong_transaction.transaction = StateTransactionContract::ReadOnly;
+        assert!(StateSchema::new("scan-wrong-transaction", vec![wrong_transaction]).is_err());
     }
 }
