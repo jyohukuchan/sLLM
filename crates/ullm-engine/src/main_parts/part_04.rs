@@ -3,23 +3,6 @@ mod package_token_ids_logits_tests {
     use super::*;
 
     #[test]
-    fn package_token_ids_layer_indices_default_to_qwen35_layers() {
-        let layers = parse_package_token_ids_layer_indices(None).unwrap();
-        assert_eq!(layers.len(), QWEN35_9B_DEFAULT_LAYER_COUNT);
-        assert_eq!(layers.first().copied(), Some(0));
-        assert_eq!(
-            layers.last().copied(),
-            Some(QWEN35_9B_DEFAULT_LAYER_COUNT - 1)
-        );
-
-        let layers = parse_package_token_ids_layer_indices(Some("all".to_string())).unwrap();
-        assert_eq!(layers.len(), QWEN35_9B_DEFAULT_LAYER_COUNT);
-
-        let layers = parse_package_token_ids_layer_indices(Some("0,2,4".to_string())).unwrap();
-        assert_eq!(layers, vec![0, 2, 4]);
-    }
-
-    #[test]
     fn package_prompt_token_ids_accepts_len_form() {
         let tokens = parse_package_prompt_token_ids(Some("len:5".to_string())).unwrap();
         assert_eq!(tokens, vec![1, 2, 3, 4, 5]);
@@ -326,50 +309,6 @@ mod package_token_ids_logits_tests {
             cold_prefill_attention_work_tokens_from_lengths(&[512, 512]).unwrap(),
             262656
         );
-    }
-
-    #[test]
-    fn package_stop_token_ids_accepts_none_or_csv() {
-        assert_eq!(
-            parse_package_stop_token_ids(None).unwrap(),
-            Vec::<usize>::new()
-        );
-        assert_eq!(
-            parse_package_stop_token_ids(Some("none".to_string())).unwrap(),
-            Vec::<usize>::new()
-        );
-        assert_eq!(
-            parse_package_stop_token_ids(Some("1, 2,3".to_string())).unwrap(),
-            vec![1, 2, 3]
-        );
-        assert!(parse_package_stop_token_ids(Some("1,,2".to_string())).is_err());
-    }
-
-    #[test]
-    fn package_stop_token_sequences_accepts_none_or_semicolon_csv() {
-        assert_eq!(
-            parse_package_stop_token_sequences(None).unwrap(),
-            Vec::<Vec<usize>>::new()
-        );
-        assert_eq!(
-            parse_package_stop_token_sequences(Some("none".to_string())).unwrap(),
-            Vec::<Vec<usize>>::new()
-        );
-        assert_eq!(
-            parse_package_stop_token_sequences(Some("1, 2; 3,4,5".to_string())).unwrap(),
-            vec![vec![1, 2], vec![3, 4, 5]]
-        );
-        assert!(parse_package_stop_token_sequences(Some("1,2;;3".to_string())).is_err());
-    }
-
-    #[test]
-    fn matched_stop_token_sequence_matches_only_suffix() {
-        assert_eq!(
-            matched_stop_token_sequence(&[9, 1, 2], &[vec![1, 2]]),
-            Some(vec![1, 2])
-        );
-        assert_eq!(matched_stop_token_sequence(&[9, 1], &[vec![1, 2]]), None);
-        assert_eq!(matched_stop_token_sequence(&[1, 2, 9], &[vec![1, 2]]), None);
     }
 
     #[test]

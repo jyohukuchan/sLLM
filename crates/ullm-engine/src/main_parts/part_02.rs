@@ -31,132 +31,6 @@ fn golden_fixture_default_layer_range(
     Ok((min_layer, end_exclusive))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PackageDecoderLayerKind {
-    SelfAttention,
-    LinearAttention,
-}
-
-impl PackageDecoderLayerKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SelfAttention => "self_attention",
-            Self::LinearAttention => "linear_attention",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PackageManifestLayerEntry {
-    layer_index: usize,
-    kind: PackageDecoderLayerKind,
-}
-
-fn package_manifest_layer_entries(path: &str) -> Result<Vec<PackageManifestLayerEntry>, String> {
-    let bundles = list_tensor_payload_bundles(path)?;
-    let mut layers =
-        std::collections::BTreeMap::<usize, std::collections::BTreeSet<&'static str>>::new();
-    for bundle in bundles {
-        record_package_layer_kind_from_suffix(
-            &mut layers,
-            &bundle.tensor_name,
-            ".self_attn.q_proj.weight",
-            "self_attention",
-        );
-        record_package_layer_kind_from_suffix(
-            &mut layers,
-            &bundle.tensor_name,
-            ".linear_attn.in_proj_qkv.weight",
-            "linear_attention",
-        );
-    }
-    for layer_index in package_self_attn_passthrough_layer_set(path)? {
-        layers
-            .entry(layer_index)
-            .or_default()
-            .insert("self_attention");
-    }
-    if layers.is_empty() {
-        return Err(format!(
-            "package {path} has no supported self_attn or linear_attn layer tensors"
-        ));
-    }
-
-    let mut entries = Vec::with_capacity(layers.len());
-    for (layer_index, kinds) in layers {
-        let kind = if kinds.len() == 1 && kinds.contains("self_attention") {
-            PackageDecoderLayerKind::SelfAttention
-        } else if kinds.len() == 1 && kinds.contains("linear_attention") {
-            PackageDecoderLayerKind::LinearAttention
-        } else {
-            return Err(format!(
-                "package {path} layer {layer_index} has ambiguous layer kinds: {:?}",
-                kinds
-            ));
-        };
-        entries.push(PackageManifestLayerEntry { layer_index, kind });
-    }
-    Ok(entries)
-}
-
-fn record_package_layer_kind_from_suffix(
-    layers: &mut std::collections::BTreeMap<
-        usize,
-        std::collections::BTreeSet<&'static str>,
-    >,
-    tensor_name: &str,
-    suffix: &str,
-    kind: &'static str,
-) {
-    if let Some(layer_index) = parse_language_model_layer_tensor_suffix(tensor_name, suffix) {
-        layers.entry(layer_index).or_default().insert(kind);
-    }
-}
-
-fn package_layer_entries_for_indices(
-    path: &str,
-    layer_indices: &[usize],
-) -> Result<Vec<PackageManifestLayerEntry>, String> {
-    layer_indices
-        .iter()
-        .copied()
-        .map(|layer_index| {
-            package_decoder_layer_kind(path, layer_index)
-                .map(|kind| PackageManifestLayerEntry { layer_index, kind })
-        })
-        .collect()
-}
-
-fn package_layer_entries_are_contiguous(entries: &[PackageManifestLayerEntry]) -> bool {
-    entries
-        .windows(2)
-        .all(|window| window[0].layer_index + 1 == window[1].layer_index)
-}
-
-fn package_decoder_layer_kind(
-    path: &str,
-    layer_index: usize,
-) -> Result<PackageDecoderLayerKind, String> {
-    let self_attn_q = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
-    if select_tensor_payload_bundle(path, &TensorSelector::Name(self_attn_q)).is_ok() {
-        return Ok(PackageDecoderLayerKind::SelfAttention);
-    }
-
-    let linear_qkv =
-        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
-    if select_tensor_payload_bundle(path, &TensorSelector::Name(linear_qkv)).is_ok() {
-        return Ok(PackageDecoderLayerKind::LinearAttention);
-    }
-
-    if package_self_attn_passthrough_layer_set(path)?.contains(&layer_index) {
-        return Ok(PackageDecoderLayerKind::SelfAttention);
-    }
-
-    Err(format!(
-        "package layer {layer_index} has neither supported self_attn nor linear_attn package tensors"
-    ))
-}
-
 #[cfg(test)]
 #[test]
 fn sq_fp8_offline_serving_workload_entry_to_report_maps_known_fields() {
@@ -3303,49 +3177,13 @@ fn parse_package_token_ids_model_loop_layer_indices(
 }
 
 fn package_model_loop_self_attn_layer_indices(path: &str) -> Result<Vec<usize>, String> {
-    let q_norm_layers = package_self_attn_passthrough_layer_set(path)?;
+    let q_norm_layers = package_self_attention_layer_indices(path)?;
     if q_norm_layers.is_empty() {
         return Err(format!(
             "package {path} has no manifest self-attention q_norm layers"
         ));
     }
     Ok(q_norm_layers.into_iter().collect())
-}
-
-fn package_self_attn_passthrough_layer_set(
-    path: &str,
-) -> Result<std::collections::BTreeSet<usize>, String> {
-    let bundles = list_passthrough_payload_bundles(path)?;
-    let mut q_norm_layers = std::collections::BTreeSet::new();
-    let mut k_norm_layers = std::collections::BTreeSet::new();
-    for bundle in bundles {
-        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
-            &bundle.tensor_name,
-            ".self_attn.q_norm.weight",
-        ) {
-            q_norm_layers.insert(layer_index);
-        }
-        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
-            &bundle.tensor_name,
-            ".self_attn.k_norm.weight",
-        ) {
-            k_norm_layers.insert(layer_index);
-        }
-    }
-    if q_norm_layers.is_empty() && k_norm_layers.is_empty() {
-        return Ok(std::collections::BTreeSet::new());
-    }
-    if q_norm_layers != k_norm_layers {
-        return Err(format!(
-            "package {path} has mismatched self-attention q_norm/k_norm layer sets: q_norm={:?} k_norm={:?}",
-            q_norm_layers, k_norm_layers
-        ));
-    }
-    Ok(q_norm_layers)
-}
-
-fn parse_language_model_layer_tensor_suffix(tensor_name: &str, suffix: &str) -> Option<usize> {
-    ullm_engine::qwen3_names::qwen3_layer_index_from_tensor_suffix(tensor_name, suffix)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4955,8 +4793,6 @@ fn package_mixed_request_state_layers_batch_step(
     Ok(items.len())
 }
 
-const QWEN35_9B_DEFAULT_LAYER_COUNT: usize = 32;
-
 fn parse_package_lm_head_mode(value: Option<String>) -> Result<PackageLmHeadMode, ExitCode> {
     match value.as_deref() {
         None | Some("") | Some("cpu") | Some("cpu_chunked") => Ok(PackageLmHeadMode::CpuChunked),
@@ -4968,34 +4804,14 @@ fn parse_package_lm_head_mode(value: Option<String>) -> Result<PackageLmHeadMode
     }
 }
 
-fn parse_package_token_ids_layer_indices(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
-    match value.as_deref() {
-        None | Some("") | Some("all") | Some("default") => {
-            Ok((0..QWEN35_9B_DEFAULT_LAYER_COUNT).collect())
-        }
-        Some(raw) => parse_usize_csv(raw, "layer list"),
-    }
-}
-
 fn parse_package_token_ids_layer_indices_for_package(
     path: &str,
     value: Option<String>,
 ) -> Result<Vec<usize>, ExitCode> {
-    match value.as_deref() {
-        Some("manifest-all") | Some("manifest_all") | Some("all-manifest")
-        | Some("all_manifest") => package_manifest_layer_entries(path)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .map(|entry| entry.layer_index)
-                    .collect::<Vec<_>>()
-            })
-            .map_err(|err| {
-                eprintln!("{err}");
-                ExitCode::from(2)
-            }),
-        _ => parse_package_token_ids_layer_indices(value),
-    }
+    select_package_layer_indices(path, value.as_deref()).map_err(|err| {
+        eprintln!("{err}");
+        ExitCode::from(2)
+    })
 }
 
 fn parse_package_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
@@ -5038,50 +4854,17 @@ fn parse_package_prompt_token_ids(value: Option<String>) -> Result<Vec<usize>, E
 }
 
 fn parse_package_stop_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
-    match value {
-        Some(raw) => match raw.trim() {
-            "" | "-" | "none" | "None" | "NONE" => Ok(Vec::new()),
-            _ => parse_usize_csv(&raw, "stop token IDs"),
-        },
-        None => Ok(Vec::new()),
-    }
+    parse_stop_token_ids(value.as_deref()).map_err(|err| {
+        eprintln!("{err}");
+        ExitCode::from(2)
+    })
 }
 
 fn parse_package_stop_token_sequences(value: Option<String>) -> Result<Vec<Vec<usize>>, ExitCode> {
-    match value {
-        Some(raw) => match raw.trim() {
-            "" | "-" | "none" | "None" | "NONE" => Ok(Vec::new()),
-            _ => {
-                let mut sequences = Vec::new();
-                for raw_sequence in raw.split(';') {
-                    let sequence = raw_sequence.trim();
-                    if sequence.is_empty() {
-                        eprintln!("invalid stop token sequences {raw:?}: empty sequence");
-                        return Err(ExitCode::from(2));
-                    }
-                    sequences.push(parse_usize_csv(sequence, "stop token sequence")?);
-                }
-                Ok(sequences)
-            }
-        },
-        None => Ok(Vec::new()),
-    }
-}
-
-fn matched_stop_token_sequence(
-    generated_token_ids: &[usize],
-    stop_token_sequences: &[Vec<usize>],
-) -> Option<Vec<usize>> {
-    for sequence in stop_token_sequences {
-        if sequence.is_empty() || generated_token_ids.len() < sequence.len() {
-            continue;
-        }
-        let start = generated_token_ids.len() - sequence.len();
-        if generated_token_ids[start..] == sequence[..] {
-            return Some(sequence.clone());
-        }
-    }
-    None
+    parse_stop_token_sequences(value.as_deref()).map_err(|err| {
+        eprintln!("{err}");
+        ExitCode::from(2)
+    })
 }
 
 fn parse_package_token_ids_rotary_dim(

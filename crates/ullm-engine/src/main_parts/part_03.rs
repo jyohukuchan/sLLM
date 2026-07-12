@@ -4434,8 +4434,8 @@ fn package_token_ids_generate_recompute_smoke_impl(
         let next = package_report_top_token_id(&prefill_report, "prefill")?;
         generated_token_ids.push(next);
         sequence_ids.push(next);
-        if stop_token_ids.contains(&next) {
-            stopped_on_token_id = Some(next);
+        if let Some(stop_id) = matched_stop_token_id(&generated_token_ids, &stop_token_ids) {
+            stopped_on_token_id = Some(stop_id);
         } else if let Some(sequence) =
             matched_stop_token_sequence(&generated_token_ids, &stop_token_sequences)
         {
@@ -4471,8 +4471,8 @@ fn package_token_ids_generate_recompute_smoke_impl(
         decode_sequence_lengths.push(sequence_ids.len());
         generated_token_ids.push(next);
         sequence_ids.push(next);
-        if stop_token_ids.contains(&next) {
-            stopped_on_token_id = Some(next);
+        if let Some(stop_id) = matched_stop_token_id(&generated_token_ids, &stop_token_ids) {
+            stopped_on_token_id = Some(stop_id);
         } else if let Some(sequence) =
             matched_stop_token_sequence(&generated_token_ids, &stop_token_sequences)
         {
@@ -5583,8 +5583,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
     if generated_tokens > 0 {
         generated_token_ids.push(first_generated);
         sequence_ids.push(first_generated);
-        if stop_token_ids.contains(&first_generated) {
-            stopped_on_token_id = Some(first_generated);
+        if let Some(stop_id) = matched_stop_token_id(&generated_token_ids, &stop_token_ids) {
+            stopped_on_token_id = Some(stop_id);
         } else if let Some(sequence) =
             matched_stop_token_sequence(&generated_token_ids, &stop_token_sequences)
         {
@@ -5752,8 +5752,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
         decode_positions.push(position);
         generated_token_ids.push(next);
         sequence_ids.push(next);
-        if stop_token_ids.contains(&next) {
-            stopped_on_token_id = Some(next);
+        if let Some(stop_id) = matched_stop_token_id(&generated_token_ids, &stop_token_ids) {
+            stopped_on_token_id = Some(stop_id);
         } else if let Some(sequence) =
             matched_stop_token_sequence(&generated_token_ids, &stop_token_sequences)
         {

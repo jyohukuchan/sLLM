@@ -51,8 +51,8 @@ use ullm_engine::loader::{
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
-    ReferencedFile, ReferencedFileRole, TensorSelector, list_passthrough_payload_bundles,
-    list_tensor_payload_bundles, select_tensor_payload_bundle,
+    ReferencedFile, ReferencedFileRole, TensorSelector, list_tensor_payload_bundles,
+    select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
@@ -76,6 +76,17 @@ use ullm_engine::qwen35_aq4_head_runtime::{
     PackageTokenLogit, QWEN3_EMBED_TOKENS_TENSOR, QWEN3_FINAL_NORM_TENSOR,
     QWEN3_LM_HEAD_TENSOR, copy_f32_values_to_runtime_buffer_chunked,
     package_embedding_shape, package_lm_head_top_k_from_rows,
+};
+use ullm_engine::qwen35_package_contract::{
+    PackageDecoderLayerKind, matched_stop_token_id, matched_stop_token_sequence,
+    package_decoder_layer_kind, package_layer_entries_are_contiguous,
+    package_layer_entries_for_indices,
+    package_self_attention_layer_indices, parse_stop_token_ids, parse_stop_token_sequences,
+    select_package_layer_indices,
+};
+#[cfg(test)]
+use ullm_engine::qwen35_package_contract::{
+    PackageManifestLayerEntry, package_manifest_layer_entries,
 };
 use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
