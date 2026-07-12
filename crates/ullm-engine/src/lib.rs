@@ -13,6 +13,7 @@ pub mod host_bytes;
 pub mod inference_api;
 pub mod loader;
 pub mod package;
+pub mod qwen35_aq4_layer_runtime;
 pub mod qwen3_loader;
 pub mod qwen3_names;
 pub mod scheduler;

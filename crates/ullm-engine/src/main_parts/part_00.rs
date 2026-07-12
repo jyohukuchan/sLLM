@@ -2,12 +2,10 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use ullm_engine::aq4_package_runtime::{
-    PackageAq4ResidentMatvec, PackageResidentSharedBufferRegistry,
-    SQ8_0_MODEL_ARCH_QWEN_FAMILY, SqFp8ProjectionDispatches, SqFp8ProjectionTelemetry,
-    package_resident_f32_buffer, reset_sq_fp8_projection_telemetry,
+    PackageAq4ResidentMatvec, SQ8_0_MODEL_ARCH_QWEN_FAMILY, SqFp8ProjectionDispatches,
+    SqFp8ProjectionTelemetry, reset_sq_fp8_projection_telemetry,
     snapshot_sq_fp8_projection_telemetry,
 };
 #[cfg(test)]
@@ -65,6 +63,14 @@ use ullm_engine::qwen3_loader::{
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
     qwen3_self_attn_runtime_weights_from_package,
 };
+use ullm_engine::qwen35_aq4_layer_runtime::{
+    MixedRequestStateBatchStepItem, PackageLinearAttnComponentStepMs,
+    PackageLinearAttnResidentStepBatchLayer, PackageLinearAttnResidentStepLayer,
+    PackageMixedRequestStateLayer, PackageSelfAttnComponentStepMs,
+    PackageSelfAttnResidentStepBatchLayer, PackageSelfAttnResidentStepLayer, format_f32_preview,
+    reset_sq_diagnostic_host_staging_telemetry, runtime_host_linear_attn_gate_beta_f32,
+    runtime_host_linear_attn_recurrent_f32, snapshot_sq_diagnostic_host_staging_telemetry,
+};
 use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
     SchedulerState,
@@ -74,52 +80,6 @@ use ullm_engine::sq::{
     select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
 
-
-#[derive(Clone, Copy, Debug, Default)]
-struct SqDiagnosticHostStagingTelemetry {
-    read_count: u64,
-    write_count: u64,
-    read_bytes: u64,
-    write_bytes: u64,
-}
-
-static SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT: AtomicU64 = AtomicU64::new(0);
-static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES: AtomicU64 = AtomicU64::new(0);
-static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
-
-
-
-fn reset_sq_diagnostic_host_staging_telemetry() {
-    SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.store(0, Ordering::Relaxed);
-    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.store(0, Ordering::Relaxed);
-    SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.store(0, Ordering::Relaxed);
-    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.store(0, Ordering::Relaxed);
-}
-
-
-fn snapshot_sq_diagnostic_host_staging_telemetry() -> SqDiagnosticHostStagingTelemetry {
-    SqDiagnosticHostStagingTelemetry {
-        read_count: SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.load(Ordering::Relaxed),
-        write_count: SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.load(Ordering::Relaxed),
-        read_bytes: SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.load(Ordering::Relaxed),
-        write_bytes: SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.load(Ordering::Relaxed),
-    }
-}
-
-
-fn record_sq_diagnostic_host_staging_write_bytes(bytes: usize) {
-    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
-    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-
-fn record_sq_diagnostic_host_staging_f32_write(
-    elements: usize,
-    label: &str,
-) -> Result<(), String> {
-    record_sq_diagnostic_host_staging_write_bytes(checked_f32_byte_len(elements, label)?);
-    Ok(())
-}
 
 fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
     let mut boundaries = Vec::new();

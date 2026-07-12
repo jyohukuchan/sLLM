@@ -4688,13 +4688,6 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     ))
 }
 
-struct MixedRequestStateBatchStepItem {
-    request_id: RequestId,
-    residual: Vec<f32>,
-    rope_position: usize,
-    cache_position: usize,
-}
-
 fn usize_csv(values: &[usize]) -> String {
     values
         .iter()

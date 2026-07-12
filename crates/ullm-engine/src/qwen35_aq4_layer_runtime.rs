@@ -1,27 +1,858 @@
+//! Resident Qwen3.5 AQ4/SQ8 decoder layer state and execution.
+
+use crate::aq4_package_runtime::{
+    PackageAq4ResidentMatvec, PackageResidentSharedBufferRegistry, package_resident_f32_buffer,
+};
+use crate::decoder::PagedDecodeShape;
+use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
+use crate::loader::{WeightRegistry, effective_rmsnorm_weight_values, read_named_passthrough_f32};
+use crate::qwen3_loader::Qwen3PackageSqOverlay;
+use crate::scheduler::RequestId;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn format_u64_shape(shape: &[u64]) -> String {
+    shape
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join("x")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageSelfAttnQProjectionLayout {
+    Plain,
+    Qwen35Gated,
+}
+
+impl PackageSelfAttnQProjectionLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::Qwen35Gated => "qwen3.5-gated",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MixedRequestStateBatchStepItem {
+    pub request_id: RequestId,
+    pub residual: Vec<f32>,
+    pub rope_position: usize,
+    pub cache_position: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SqDiagnosticHostStagingTelemetry {
+    pub read_count: u64,
+    pub write_count: u64,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+}
+
+static SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn reset_sq_diagnostic_host_staging_telemetry() {
+    SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.store(0, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.store(0, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.store(0, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.store(0, Ordering::Relaxed);
+}
+
+pub fn snapshot_sq_diagnostic_host_staging_telemetry() -> SqDiagnosticHostStagingTelemetry {
+    SqDiagnosticHostStagingTelemetry {
+        read_count: SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.load(Ordering::Relaxed),
+        write_count: SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.load(Ordering::Relaxed),
+        read_bytes: SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.load(Ordering::Relaxed),
+        write_bytes: SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+fn record_sq_diagnostic_host_staging_f32_write(elements: usize, label: &str) -> Result<(), String> {
+    let bytes = checked_f32_byte_len(elements, label)?;
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct PackageLinearAttnComponentStepMs {
+    input_rmsnorm_ms: f64,
+    qkv_projection_ms: f64,
+    z_projection_ms: f64,
+    qkv_prepare_ms: f64,
+    gate_beta_projection_ms: f64,
+    recurrent_ms: f64,
+    attention_post_ms: f64,
+    out_projection_residual_ms: f64,
+    post_rmsnorm_ms: f64,
+    mlp_gate_up_activation_ms: f64,
+    mlp_down_residual_ms: f64,
+}
+
+impl PackageLinearAttnComponentStepMs {
+    pub fn add_assign(&mut self, other: Self) {
+        self.input_rmsnorm_ms += other.input_rmsnorm_ms;
+        self.qkv_projection_ms += other.qkv_projection_ms;
+        self.z_projection_ms += other.z_projection_ms;
+        self.qkv_prepare_ms += other.qkv_prepare_ms;
+        self.gate_beta_projection_ms += other.gate_beta_projection_ms;
+        self.recurrent_ms += other.recurrent_ms;
+        self.attention_post_ms += other.attention_post_ms;
+        self.out_projection_residual_ms += other.out_projection_residual_ms;
+        self.post_rmsnorm_ms += other.post_rmsnorm_ms;
+        self.mlp_gate_up_activation_ms += other.mlp_gate_up_activation_ms;
+        self.mlp_down_residual_ms += other.mlp_down_residual_ms;
+    }
+
+    pub fn total_ms(&self) -> f64 {
+        self.input_rmsnorm_ms
+            + self.qkv_projection_ms
+            + self.z_projection_ms
+            + self.qkv_prepare_ms
+            + self.gate_beta_projection_ms
+            + self.recurrent_ms
+            + self.attention_post_ms
+            + self.out_projection_residual_ms
+            + self.post_rmsnorm_ms
+            + self.mlp_gate_up_activation_ms
+            + self.mlp_down_residual_ms
+    }
+
+    pub fn report_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "input_rmsnorm_ms": self.input_rmsnorm_ms,
+            "qkv_projection_ms": self.qkv_projection_ms,
+            "z_projection_ms": self.z_projection_ms,
+            "qkv_prepare_ms": self.qkv_prepare_ms,
+            "gate_beta_projection_ms": self.gate_beta_projection_ms,
+            "recurrent_ms": self.recurrent_ms,
+            "attention_post_ms": self.attention_post_ms,
+            "out_projection_residual_ms": self.out_projection_residual_ms,
+            "post_rmsnorm_ms": self.post_rmsnorm_ms,
+            "mlp_gate_up_activation_ms": self.mlp_gate_up_activation_ms,
+            "mlp_down_residual_ms": self.mlp_down_residual_ms,
+            "total_ms": self.total_ms(),
+        })
+    }
+
+    pub fn report_summary_json(self, count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "count": count,
+            "input_rmsnorm_ms": component_total_mean_json(self.input_rmsnorm_ms, count),
+            "qkv_projection_ms": component_total_mean_json(self.qkv_projection_ms, count),
+            "z_projection_ms": component_total_mean_json(self.z_projection_ms, count),
+            "qkv_prepare_ms": component_total_mean_json(self.qkv_prepare_ms, count),
+            "gate_beta_projection_ms": component_total_mean_json(self.gate_beta_projection_ms, count),
+            "recurrent_ms": component_total_mean_json(self.recurrent_ms, count),
+            "attention_post_ms": component_total_mean_json(self.attention_post_ms, count),
+            "out_projection_residual_ms": component_total_mean_json(self.out_projection_residual_ms, count),
+            "post_rmsnorm_ms": component_total_mean_json(self.post_rmsnorm_ms, count),
+            "mlp_gate_up_activation_ms": component_total_mean_json(self.mlp_gate_up_activation_ms, count),
+            "mlp_down_residual_ms": component_total_mean_json(self.mlp_down_residual_ms, count),
+            "total_ms": component_total_mean_json(self.total_ms(), count),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct PackageSelfAttnComponentStepMs {
+    input_rmsnorm_ms: f64,
+    qkv_projection_ms: f64,
+    qk_norm_rope_kv_write_ms: f64,
+    paged_decode_ms: f64,
+    output_gate_ms: f64,
+    o_projection_residual_ms: f64,
+    post_rmsnorm_ms: f64,
+    mlp_gate_up_activation_ms: f64,
+    mlp_down_residual_ms: f64,
+}
+
+impl PackageSelfAttnComponentStepMs {
+    pub fn add_assign(&mut self, other: Self) {
+        self.input_rmsnorm_ms += other.input_rmsnorm_ms;
+        self.qkv_projection_ms += other.qkv_projection_ms;
+        self.qk_norm_rope_kv_write_ms += other.qk_norm_rope_kv_write_ms;
+        self.paged_decode_ms += other.paged_decode_ms;
+        self.output_gate_ms += other.output_gate_ms;
+        self.o_projection_residual_ms += other.o_projection_residual_ms;
+        self.post_rmsnorm_ms += other.post_rmsnorm_ms;
+        self.mlp_gate_up_activation_ms += other.mlp_gate_up_activation_ms;
+        self.mlp_down_residual_ms += other.mlp_down_residual_ms;
+    }
+
+    pub fn total_ms(&self) -> f64 {
+        self.input_rmsnorm_ms
+            + self.qkv_projection_ms
+            + self.qk_norm_rope_kv_write_ms
+            + self.paged_decode_ms
+            + self.output_gate_ms
+            + self.o_projection_residual_ms
+            + self.post_rmsnorm_ms
+            + self.mlp_gate_up_activation_ms
+            + self.mlp_down_residual_ms
+    }
+
+    pub fn report_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "input_rmsnorm_ms": self.input_rmsnorm_ms,
+            "qkv_projection_ms": self.qkv_projection_ms,
+            "qk_norm_rope_kv_write_ms": self.qk_norm_rope_kv_write_ms,
+            "paged_decode_ms": self.paged_decode_ms,
+            "output_gate_ms": self.output_gate_ms,
+            "o_projection_residual_ms": self.o_projection_residual_ms,
+            "post_rmsnorm_ms": self.post_rmsnorm_ms,
+            "mlp_gate_up_activation_ms": self.mlp_gate_up_activation_ms,
+            "mlp_down_residual_ms": self.mlp_down_residual_ms,
+            "total_ms": self.total_ms(),
+        })
+    }
+
+    pub fn report_summary_json(self, count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "count": count,
+            "input_rmsnorm_ms": component_total_mean_json(self.input_rmsnorm_ms, count),
+            "qkv_projection_ms": component_total_mean_json(self.qkv_projection_ms, count),
+            "qk_norm_rope_kv_write_ms": component_total_mean_json(self.qk_norm_rope_kv_write_ms, count),
+            "paged_decode_ms": component_total_mean_json(self.paged_decode_ms, count),
+            "output_gate_ms": component_total_mean_json(self.output_gate_ms, count),
+            "o_projection_residual_ms": component_total_mean_json(self.o_projection_residual_ms, count),
+            "post_rmsnorm_ms": component_total_mean_json(self.post_rmsnorm_ms, count),
+            "mlp_gate_up_activation_ms": component_total_mean_json(self.mlp_gate_up_activation_ms, count),
+            "mlp_down_residual_ms": component_total_mean_json(self.mlp_down_residual_ms, count),
+            "total_ms": component_total_mean_json(self.total_ms(), count),
+        })
+    }
+}
+
+fn component_total_mean_json(total_ms: f64, count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "total_ms": total_ms,
+        "mean_ms": if count > 0 {
+            Some(total_ms / count as f64)
+        } else {
+            None
+        },
+    })
+}
+
+fn checked_f32_byte_len(elements: usize, label: &str) -> Result<usize, String> {
+    elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("{label} byte size overflows"))
+}
+
+fn read_runtime_buffer_f32(
+    buffer: &ullm_runtime_sys::RuntimeBuffer,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    elements: usize,
+    label: &str,
+) -> Result<Vec<f32>, String> {
+    let mut bytes = vec![0_u8; checked_f32_byte_len(elements, label)?];
+    buffer
+        .copy_to_host(0, &mut bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} from runtime: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize {label} runtime copy: {err}"))?;
+    Ok(decode_f32_le_values(&bytes))
+}
+
+static AQ4_MATVEC_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_PAIR_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_TRIPLE_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_SILU_MUL_PREWARMED: AtomicBool = AtomicBool::new(false);
+static QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_PREWARMED: AtomicBool = AtomicBool::new(false);
+static LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
+static LINEAR_ATTN_POST_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
+
+fn prewarm_aq4_matvec_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; matrix.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        matrix.matvec(input_buffer, output_buffer, stream, label)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn prewarm_aq4_matvec_pair_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    left: &PackageAq4ResidentMatvec,
+    right: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    left_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    right_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_PAIR_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; left.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        left.matvec_pair_with(
+            right,
+            input_buffer,
+            left_output_buffer,
+            right_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_PAIR_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_aq4_matvec_triple_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    first: &PackageAq4ResidentMatvec,
+    second: &PackageAq4ResidentMatvec,
+    third: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    first_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    second_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    third_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_TRIPLE_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; first.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        first.matvec_triple_with(
+            second,
+            third,
+            input_buffer,
+            first_output_buffer,
+            second_output_buffer,
+            third_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_TRIPLE_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_aq4_matvec_qkv_z_gate_beta_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    qkv: &PackageAq4ResidentMatvec,
+    z: &PackageAq4ResidentMatvec,
+    a: &PackageAq4ResidentMatvec,
+    b: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    a_log_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    dt_bias_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    qkv_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    z_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    beta_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; qkv.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        qkv.matvec_qkv_z_gate_beta_with(
+            z,
+            a,
+            b,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            qkv_output_buffer,
+            z_output_buffer,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn prewarm_aq4_matvec_add_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    residual_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_ADD_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; matrix.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        residual_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; matrix.rows]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm residual: {err}"))?;
+        matrix.matvec_add(input_buffer, residual_buffer, output_buffer, stream, label)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_ADD_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_aq4_matvec_gate_beta_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    a: &PackageAq4ResidentMatvec,
+    b: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    a_log_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    dt_bias_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    beta_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_GATE_BETA_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; a.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        a.matvec_gate_beta_with(
+            b,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_GATE_BETA_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn prewarm_aq4_matvec_silu_mul_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    gate: &PackageAq4ResidentMatvec,
+    up: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_SILU_MUL_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; gate.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        gate.matvec_silu_mul_with(up, input_buffer, output_buffer, stream, label)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_SILU_MUL_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    q_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    v_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    q_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    k_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    block_table_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    q_rope_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_cache_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    v_cache_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        let q_projected_elements = q_heads
+            .checked_mul(head_dim)
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| format!("{label} prewarm q projected element count overflows"))?;
+        let k_projected_elements = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("{label} prewarm k projected element count overflows"))?;
+        let v_projected_elements = kv_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} prewarm v projected element count overflows"))?;
+        q_projected_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; q_projected_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm q projected: {err}"))?;
+        k_projected_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; k_projected_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm k projected: {err}"))?;
+        v_projected_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; v_projected_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm v projected: {err}"))?;
+        let rotary_dim = if head_dim.is_multiple_of(2) {
+            head_dim
+        } else {
+            head_dim.saturating_sub(1)
+        };
+        ullm_runtime_sys::qwen35_qk_norm_rope_paged_kv_write_f32(
+            q_projected_buffer,
+            k_projected_buffer,
+            v_projected_buffer,
+            q_weight_buffer,
+            k_weight_buffer,
+            block_table_buffer,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            0,
+            10000.0_f32,
+            1e-5_f32,
+            0,
+            block_size,
+            cache_blocks,
+            q_gate_output_buffer,
+            q_rope_output_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn linear_attn_qkv_prepare_prewarm_mask(device_id: i32) -> Option<u64> {
+    let bit = u32::try_from(device_id).ok()?.checked_add(1)?;
+    (bit < u64::BITS).then(|| 1_u64 << bit)
+}
+
+fn claim_linear_attn_qkv_prepare_prewarm(device_id: i32) -> bool {
+    let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) else {
+        return true;
+    };
+    LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES.fetch_or(mask, Ordering::AcqRel) & mask == 0
+}
+
+fn release_linear_attn_qkv_prepare_prewarm(device_id: i32) {
+    if let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) {
+        LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES.fetch_and(!mask, Ordering::AcqRel);
+    }
+}
+
+fn claim_linear_attn_post_prewarm(device_id: i32) -> bool {
+    let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) else {
+        return true;
+    };
+    LINEAR_ATTN_POST_PREWARMED_DEVICES.fetch_or(mask, Ordering::AcqRel) & mask == 0
+}
+
+fn release_linear_attn_post_prewarm(device_id: i32) {
+    if let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) {
+        LINEAR_ATTN_POST_PREWARMED_DEVICES.fetch_and(!mask, Ordering::AcqRel);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_linear_attn_qkv_prepare_once(
+    device_id: i32,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    qkv_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    conv_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    conv_history_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    kernel_size: usize,
+    q_scale: f32,
+    qk_l2_norm: bool,
+    conv_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    q_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    v_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if !claim_linear_attn_qkv_prepare_prewarm(device_id) {
+        return Ok(());
+    }
+    let result = (|| {
+        let q_elements = key_heads
+            .checked_mul(key_dim)
+            .ok_or_else(|| format!("{label} prewarm q element count overflows"))?;
+        let v_elements = value_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} prewarm v element count overflows"))?;
+        let channels = q_elements
+            .checked_add(q_elements)
+            .and_then(|value| value.checked_add(v_elements))
+            .ok_or_else(|| format!("{label} prewarm channel count overflows"))?;
+        let history_elements = channels
+            .checked_mul(kernel_size)
+            .ok_or_else(|| format!("{label} prewarm history element count overflows"))?;
+        qkv_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; channels]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm qkv: {err}"))?;
+        ullm_runtime_sys::linear_attn_qkv_prepare_f32(
+            qkv_buffer,
+            conv_weight_buffer,
+            conv_history_buffer,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            q_scale,
+            qk_l2_norm,
+            conv_output_buffer,
+            q_output_buffer,
+            k_output_buffer,
+            v_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        conv_history_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; history_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to reset {label} prewarm history: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        release_linear_attn_qkv_prepare_prewarm(device_id);
+    }
+    result
+}
+
+fn prewarm_linear_attn_post_once(
+    device_id: i32,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    recurrent_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    attn_norm_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    z_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    value_heads: usize,
+    value_dim: usize,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if !claim_linear_attn_post_prewarm(device_id) {
+        return Ok(());
+    }
+    let result = (|| {
+        let elements = value_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} prewarm element count overflows"))?;
+        let zero_bytes = encode_f32_to_bytes(&vec![0.0_f32; elements]);
+        recurrent_output_buffer
+            .copy_from_host(0, &zero_bytes, Some(stream))
+            .map_err(|err| format!("failed to zero {label} prewarm recurrent output: {err}"))?;
+        z_buffer
+            .copy_from_host(0, &zero_bytes, Some(stream))
+            .map_err(|err| format!("failed to zero {label} prewarm z: {err}"))?;
+        ullm_runtime_sys::segmented_rmsnorm_silu_mul_f32(
+            recurrent_output_buffer,
+            attn_norm_weight_buffer,
+            z_buffer,
+            value_heads,
+            value_dim,
+            1e-6_f32,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        release_linear_attn_post_prewarm(device_id);
+    }
+    result
+}
+
 #[derive(Clone, Copy)]
-enum PackageSelfAttnResidentStepInput<'a> {
+pub enum PackageSelfAttnResidentStepInput<'a> {
     InternalInputBuffer,
     ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
 #[derive(Clone, Copy)]
-enum PackageSelfAttnAttentionProjectionInput {
+pub enum PackageSelfAttnAttentionProjectionInput {
     AttentionOutput,
     AttentionProjectionInput,
 }
 
-struct PackageSelfAttnResidentStepWeights {
+pub struct PackageSelfAttnResidentStepWeights {
     sync_component_timing: bool,
     use_paged_decode_sigmoid_gate: bool,
-    hidden: usize,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    value_dim: usize,
+    pub hidden: usize,
+    pub q_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub value_dim: usize,
     attention_elements: usize,
     block_size: usize,
     cache_blocks: usize,
-    q_projection_layout: PackageSelfAttnQProjectionLayout,
+    pub q_projection_layout: PackageSelfAttnQProjectionLayout,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     q_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     k_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
@@ -35,7 +866,7 @@ struct PackageSelfAttnResidentStepWeights {
     mlp_down_matrix: PackageAq4ResidentMatvec,
 }
 
-struct PackageSelfAttnResidentStepLayer {
+pub struct PackageSelfAttnResidentStepLayer {
     weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
     last_component_step_ms: Option<PackageSelfAttnComponentStepMs>,
     written_len: usize,
@@ -70,7 +901,7 @@ impl std::ops::Deref for PackageSelfAttnResidentStepLayer {
 
 impl PackageSelfAttnResidentStepLayer {
     #[allow(clippy::too_many_arguments)]
-    fn load(
+    pub fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         path: &str,
@@ -97,7 +928,7 @@ impl PackageSelfAttnResidentStepLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn load_with_registry(
+    pub fn load_with_registry(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
@@ -560,7 +1391,7 @@ impl PackageSelfAttnResidentStepLayer {
         })
     }
 
-    fn load_state_with_weights(
+    pub fn load_state_with_weights(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
@@ -717,7 +1548,7 @@ impl PackageSelfAttnResidentStepLayer {
         })
     }
 
-    fn step_from_host_to_device(
+    pub fn step_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         residual: &[f32],
@@ -748,7 +1579,7 @@ impl PackageSelfAttnResidentStepLayer {
         )
     }
 
-    fn step_from_device_to_device(
+    pub fn step_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
@@ -778,7 +1609,7 @@ impl PackageSelfAttnResidentStepLayer {
         )
     }
 
-    fn read_output(
+    pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
     ) -> Result<Vec<f32>, String> {
@@ -790,16 +1621,16 @@ impl PackageSelfAttnResidentStepLayer {
         )
     }
 
-    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+    pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         &self.layer_output_buffer
     }
 
-    fn take_last_component_step_ms(&mut self) -> Option<PackageSelfAttnComponentStepMs> {
+    pub fn take_last_component_step_ms(&mut self) -> Option<PackageSelfAttnComponentStepMs> {
         self.last_component_step_ms.take()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_device_step_input(
+    pub fn run_device_step_input(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         input: PackageSelfAttnResidentStepInput<'_>,
@@ -848,7 +1679,7 @@ impl PackageSelfAttnResidentStepLayer {
         Ok(())
     }
 
-    fn run_device_step_qkv_projection(
+    pub fn run_device_step_qkv_projection(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         sync_component_timing: bool,
@@ -921,7 +1752,7 @@ impl PackageSelfAttnResidentStepLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_device_step_after_qkv_projection(
+    pub fn run_device_step_after_qkv_projection(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         input: PackageSelfAttnResidentStepInput<'_>,
@@ -933,17 +1764,16 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<(), String> {
-        let projection_input_buffer = self
-            .run_device_step_after_qkv_projection_input(
-                stream,
-                rotary_dim,
-                rope_base,
-                rope_position,
-                cache_position,
-                sync_component_timing,
-                component_step_ms,
-                label,
-            )?;
+        let projection_input_buffer = self.run_device_step_after_qkv_projection_input(
+            stream,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            sync_component_timing,
+            component_step_ms,
+            label,
+        )?;
         let hidden = self.weights.hidden;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
@@ -1027,7 +1857,7 @@ impl PackageSelfAttnResidentStepLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_device_step_after_qkv_projection_input(
+    pub fn run_device_step_after_qkv_projection_input(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         rotary_dim: usize,
@@ -1204,7 +2034,9 @@ impl PackageSelfAttnResidentStepLayer {
 
         let component_started = Instant::now();
         let projection_input_buffer = match q_projection_layout {
-            PackageSelfAttnQProjectionLayout::Plain => PackageSelfAttnAttentionProjectionInput::AttentionOutput,
+            PackageSelfAttnQProjectionLayout::Plain => {
+                PackageSelfAttnAttentionProjectionInput::AttentionOutput
+            }
             PackageSelfAttnQProjectionLayout::Qwen35Gated
                 if self.weights.use_paged_decode_sigmoid_gate =>
             {
@@ -1243,7 +2075,7 @@ impl PackageSelfAttnResidentStepLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_device_step(
+    pub fn run_device_step(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         input: PackageSelfAttnResidentStepInput<'_>,
@@ -1262,8 +2094,19 @@ impl PackageSelfAttnResidentStepLayer {
         let sync_component_timing = self.weights.sync_component_timing;
         let mut component_step_ms = PackageSelfAttnComponentStepMs::default();
         self.last_component_step_ms = None;
-        self.run_device_step_input(stream, input, sync_component_timing, &mut component_step_ms, label)?;
-        self.run_device_step_qkv_projection(stream, sync_component_timing, &mut component_step_ms, label)?;
+        self.run_device_step_input(
+            stream,
+            input,
+            sync_component_timing,
+            &mut component_step_ms,
+            label,
+        )?;
+        self.run_device_step_qkv_projection(
+            stream,
+            sync_component_timing,
+            &mut component_step_ms,
+            label,
+        )?;
         self.run_device_step_after_qkv_projection(
             stream,
             input,
@@ -1282,7 +2125,7 @@ impl PackageSelfAttnResidentStepLayer {
     }
 }
 
-struct PackageLinearAttnResidentStepWeights {
+pub struct PackageLinearAttnResidentStepWeights {
     layer_index: usize,
     sync_component_timing: bool,
     use_qkv_z_gate_beta_fusion: bool,
@@ -1311,7 +2154,7 @@ struct PackageLinearAttnResidentStepWeights {
     mlp_down_matrix: PackageAq4ResidentMatvec,
 }
 
-struct PackageLinearAttnResidentStepLayer {
+pub struct PackageLinearAttnResidentStepLayer {
     weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
     last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
     conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -1343,13 +2186,13 @@ impl std::ops::Deref for PackageLinearAttnResidentStepLayer {
 }
 
 #[derive(Clone, Copy)]
-enum PackageLinearAttnResidentStepInput<'a> {
+pub enum PackageLinearAttnResidentStepInput<'a> {
     InternalInputBuffer,
     ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
 impl PackageLinearAttnResidentStepLayer {
-    fn load(
+    pub fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         path: &str,
@@ -1369,7 +2212,7 @@ impl PackageLinearAttnResidentStepLayer {
         )
     }
 
-    fn load_with_registry(
+    pub fn load_with_registry(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
@@ -1911,7 +2754,7 @@ impl PackageLinearAttnResidentStepLayer {
         })
     }
 
-    fn load_state_with_weights(
+    pub fn load_state_with_weights(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
@@ -2056,7 +2899,7 @@ impl PackageLinearAttnResidentStepLayer {
         })
     }
 
-    fn step(
+    pub fn step(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         residual: &[f32],
@@ -2065,7 +2908,7 @@ impl PackageLinearAttnResidentStepLayer {
         self.read_output(stream)
     }
 
-    fn step_from_host_to_device(
+    pub fn step_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         residual: &[f32],
@@ -2089,7 +2932,7 @@ impl PackageLinearAttnResidentStepLayer {
         )
     }
 
-    fn step_from_device_to_device(
+    pub fn step_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
@@ -2111,7 +2954,7 @@ impl PackageLinearAttnResidentStepLayer {
         )
     }
 
-    fn read_output(
+    pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
     ) -> Result<Vec<f32>, String> {
@@ -2123,15 +2966,15 @@ impl PackageLinearAttnResidentStepLayer {
         )
     }
 
-    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+    pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         &self.layer_output_buffer
     }
 
-    fn take_last_component_step_ms(&mut self) -> Option<PackageLinearAttnComponentStepMs> {
+    pub fn take_last_component_step_ms(&mut self) -> Option<PackageLinearAttnComponentStepMs> {
         self.last_component_step_ms.take()
     }
 
-    fn run_device_step(
+    pub fn run_device_step(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         input: PackageLinearAttnResidentStepInput<'_>,
@@ -2375,7 +3218,7 @@ impl PackageLinearAttnResidentStepLayer {
 }
 
 #[allow(dead_code)]
-struct PackageSelfAttnResidentStepBatchLayer {
+pub struct PackageSelfAttnResidentStepBatchLayer {
     layer_index: usize,
     hidden: usize,
     q_heads: usize,
@@ -2404,7 +3247,7 @@ struct PackageSelfAttnResidentStepBatchLayer {
 #[allow(dead_code)]
 impl PackageSelfAttnResidentStepBatchLayer {
     #[allow(clippy::too_many_arguments)]
-    fn load(
+    pub fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         path: &str,
@@ -2540,13 +3383,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
             format!("self-attn resident batch layer {layer_index} has no request slots")
         })?;
         let max_batch_count = request_ids.len();
-        let batch_input_normed_elements = hidden
-            .checked_mul(max_batch_count)
-            .ok_or_else(|| {
-                format!(
-                    "self-attn resident batch layer {layer_index} input normed batch overflows"
-                )
-            })?;
+        let batch_input_normed_elements = hidden.checked_mul(max_batch_count).ok_or_else(|| {
+            format!("self-attn resident batch layer {layer_index} input normed batch overflows")
+        })?;
         let first_weights = layers
             .first()
             .ok_or_else(|| format!("self-attn resident batch layer {layer_index} has no states"))?
@@ -2597,15 +3436,12 @@ impl PackageSelfAttnResidentStepBatchLayer {
                         "self-attn resident batch layer {layer_index} attention block output batch overflows"
                     )
                 })?;
-        let batch_post_normed_elements =
-            first_weights
-                .hidden
-                .checked_mul(max_batch_count)
-                .ok_or_else(|| {
-                    format!(
-                        "self-attn resident batch layer {layer_index} post-normed batch overflows"
-                    )
-                })?;
+        let batch_post_normed_elements = first_weights
+            .hidden
+            .checked_mul(max_batch_count)
+            .ok_or_else(|| {
+                format!("self-attn resident batch layer {layer_index} post-normed batch overflows")
+            })?;
         let batch_mlp_intermediate = first_weights
             .mlp_gate_matrix
             .rows
@@ -2671,12 +3507,13 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 "self-attn resident batch attention block output",
             )?)
             .map_err(|err| {
-                format!(
-                    "failed to allocate self-attn resident batch attention block output: {err}"
-                )
+                format!("failed to allocate self-attn resident batch attention block output: {err}")
             })?;
         let batch_post_normed_buffer = context
-            .alloc_buffer(checked_f32_byte_len(batch_post_normed_elements, "self-attn resident batch post normed")?)
+            .alloc_buffer(checked_f32_byte_len(
+                batch_post_normed_elements,
+                "self-attn resident batch post normed",
+            )?)
             .map_err(|err| {
                 format!("failed to allocate self-attn resident batch post normed: {err}")
             })?;
@@ -2686,9 +3523,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 "self-attn resident batch MLP activation",
             )?)
             .map_err(|err| {
-                format!(
-                    "failed to allocate self-attn resident batch MLP activation: {err}"
-                )
+                format!("failed to allocate self-attn resident batch MLP activation: {err}")
             })?;
         let batch_mlp_gate_buffer = context
             .alloc_buffer(checked_f32_byte_len(
@@ -2703,18 +3538,14 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 batch_mlp_intermediate,
                 "self-attn resident batch MLP up",
             )?)
-            .map_err(|err| {
-                format!("failed to allocate self-attn resident batch MLP up: {err}")
-            })?;
+            .map_err(|err| format!("failed to allocate self-attn resident batch MLP up: {err}"))?;
         let batch_layer_output_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 batch_attention_block_output_elements,
                 "self-attn resident batch layer output",
             )?)
             .map_err(|err| {
-                format!(
-                    "failed to allocate self-attn resident batch layer output: {err}"
-                )
+                format!("failed to allocate self-attn resident batch layer output: {err}")
             })?;
         Ok(Self {
             layer_index,
@@ -2751,47 +3582,47 @@ impl PackageSelfAttnResidentStepBatchLayer {
         })
     }
 
-    fn request_ids(&self) -> &[RequestId] {
+    pub fn request_ids(&self) -> &[RequestId] {
         &self.request_ids
     }
 
-    fn request_count(&self) -> usize {
+    pub fn request_count(&self) -> usize {
         self.request_ids.len()
     }
 
-    fn layer_index(&self) -> usize {
+    pub fn layer_index(&self) -> usize {
         self.layer_index
     }
 
-    fn hidden(&self) -> usize {
+    pub fn hidden(&self) -> usize {
         self.hidden
     }
 
-    fn block_size(&self) -> usize {
+    pub fn block_size(&self) -> usize {
         self.block_size
     }
 
-    fn cache_blocks(&self) -> usize {
+    pub fn cache_blocks(&self) -> usize {
         self.cache_blocks
     }
 
-    fn q_heads(&self) -> usize {
+    pub fn q_heads(&self) -> usize {
         self.q_heads
     }
 
-    fn kv_heads(&self) -> usize {
+    pub fn kv_heads(&self) -> usize {
         self.kv_heads
     }
 
-    fn head_dim(&self) -> usize {
+    pub fn head_dim(&self) -> usize {
         self.head_dim
     }
 
-    fn value_dim(&self) -> usize {
+    pub fn value_dim(&self) -> usize {
         self.value_dim
     }
 
-    fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
+    pub fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
         self.request_index.get(&request_id).copied().ok_or_else(|| {
             format!(
                 "self-attn resident batch layer {} has no state slot for request {request_id:?}",
@@ -2800,7 +3631,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
         })
     }
 
-    fn layer_for_request_mut(
+    pub fn layer_for_request_mut(
         &mut self,
         request_id: RequestId,
     ) -> Result<&mut PackageSelfAttnResidentStepLayer, String> {
@@ -2813,7 +3644,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
         })
     }
 
-    fn layer_for_request(
+    pub fn layer_for_request(
         &self,
         request_id: RequestId,
     ) -> Result<&PackageSelfAttnResidentStepLayer, String> {
@@ -2827,7 +3658,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_batch_from_host_to_device(
+    pub fn step_batch_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         items: &[MixedRequestStateBatchStepItem],
@@ -2879,20 +3710,16 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let input_normed_elements = self.hidden.checked_mul(batch_count).ok_or_else(|| {
             format!("{label} self-attn resident batch input normed elements overflow")
         })?;
-        let attention_block_output_elements = self
-            .hidden
-            .checked_mul(batch_count)
-            .ok_or_else(|| {
-                format!(
-                    "{label} self-attn resident batch attention block output elements overflow"
-                )
+        let attention_block_output_elements =
+            self.hidden.checked_mul(batch_count).ok_or_else(|| {
+                format!("{label} self-attn resident batch attention block output elements overflow")
             })?;
-        let mlp_activation_elements = mlp_intermediate
-            .checked_mul(batch_count)
-            .ok_or_else(|| {
+        let mlp_activation_elements =
+            mlp_intermediate.checked_mul(batch_count).ok_or_else(|| {
                 format!("{label} self-attn resident batch MLP activation elements overflow")
             })?;
-        let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn resident hidden slice")?;
+        let hidden_bytes =
+            checked_f32_byte_len(hidden_elements, "self-attn resident hidden slice")?;
         let q_projected_bytes =
             checked_f32_byte_len(q_projected_rows, "self-attn resident q projected slice")?;
         let k_projected_bytes =
@@ -2967,11 +3794,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     slots[batch_index], item.request_id
                 )
             })?;
-            let residual_src_offset = batch_index
-                .checked_mul(self.hidden)
-                .ok_or_else(|| {
-                    format!("{label} self-attn resident batch residual offset overflows")
-                })?;
+            let residual_src_offset = batch_index.checked_mul(self.hidden).ok_or_else(|| {
+                format!("{label} self-attn resident batch residual offset overflows")
+            })?;
             let residual_src_offset = checked_f32_byte_len(
                 residual_src_offset,
                 "self-attn resident batch residual offset",
@@ -3127,11 +3952,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 item.rope_position,
                 item.cache_position,
                 sync_component_timing,
-                component_step_ms
-                    .get_mut(batch_index)
-                    .ok_or_else(|| {
-                        format!("{label} self-attn resident batch component timing is missing")
-                    })?,
+                component_step_ms.get_mut(batch_index).ok_or_else(|| {
+                    format!("{label} self-attn resident batch component timing is missing")
+                })?,
                 &item_label,
             )?;
             let projection_input_dst_offset = checked_f32_byte_len(
@@ -3140,10 +3963,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
             )?;
             let (projection_input_source, projection_input_source_label) =
                 match projection_input_buffer {
-                    PackageSelfAttnAttentionProjectionInput::AttentionOutput => (
-                        &layer.attention_output_buffer,
-                        "attention output",
-                    ),
+                    PackageSelfAttnAttentionProjectionInput::AttentionOutput => {
+                        (&layer.attention_output_buffer, "attention output")
+                    }
                     PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => (
                         &layer.attention_projection_input_buffer,
                         "attention projection input",
@@ -3165,9 +3987,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
         }
 
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
-                               started: Instant,
-                               sync_component_timing: bool,
-                               component_label: &str|
+                                started: Instant,
+                                sync_component_timing: bool,
+                                component_label: &str|
          -> Result<f64, String> {
             if sync_component_timing {
                 stream.synchronize().map_err(|err| {
@@ -3303,13 +4125,13 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     slots[batch_index], item.request_id
                 )
             })?;
-            let layer_output_start = batch_index
-                .checked_mul(hidden_elements)
-                .ok_or_else(|| {
-                    format!("{label} self-attn resident batch layer output offset overflows")
-                })?;
-            let layer_output_src_offset =
-                checked_f32_byte_len(layer_output_start, "self-attn resident batch layer output offset")?;
+            let layer_output_start = batch_index.checked_mul(hidden_elements).ok_or_else(|| {
+                format!("{label} self-attn resident batch layer output offset overflows")
+            })?;
+            let layer_output_src_offset = checked_f32_byte_len(
+                layer_output_start,
+                "self-attn resident batch layer output offset",
+            )?;
             layer
                 .layer_output_buffer
                 .copy_from_buffer(
@@ -3331,7 +4153,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_batch_from_device_to_device(
+    pub fn step_batch_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         items: &[(RequestId, &ullm_runtime_sys::RuntimeBuffer, usize, usize)],
@@ -3380,20 +4202,16 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let hidden_elements = self.hidden;
         let mlp_intermediate = weights.mlp_gate_matrix.rows;
         let batch_count = items.len();
-        let attention_block_output_elements = self
-            .hidden
-            .checked_mul(batch_count)
-            .ok_or_else(|| {
-                format!(
-                    "{label} self-attn resident batch attention block output elements overflow"
-                )
+        let attention_block_output_elements =
+            self.hidden.checked_mul(batch_count).ok_or_else(|| {
+                format!("{label} self-attn resident batch attention block output elements overflow")
             })?;
-        let mlp_activation_elements = mlp_intermediate
-            .checked_mul(batch_count)
-            .ok_or_else(|| {
+        let mlp_activation_elements =
+            mlp_intermediate.checked_mul(batch_count).ok_or_else(|| {
                 format!("{label} self-attn resident batch MLP activation elements overflow")
             })?;
-        let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn resident hidden slice")?;
+        let hidden_bytes =
+            checked_f32_byte_len(hidden_elements, "self-attn resident hidden slice")?;
         let q_projected_bytes =
             checked_f32_byte_len(q_projected_rows, "self-attn resident q projected slice")?;
         let k_projected_bytes =
@@ -3405,7 +4223,8 @@ impl PackageSelfAttnResidentStepBatchLayer {
             "self-attn resident attention projection input slice",
         )?;
 
-        let expected_input_bytes = checked_f32_byte_len(self.hidden, "self-attn resident batch input")?;
+        let expected_input_bytes =
+            checked_f32_byte_len(self.hidden, "self-attn resident batch input")?;
         let mut slots = Vec::with_capacity(batch_count);
         let mut component_step_ms = Vec::with_capacity(batch_count);
         for (batch_index, &(request_id, residual_buffer, rope_position, cache_position)) in
@@ -3415,9 +4234,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 "{label} request={} position={}",
                 request_id.0, rope_position
             );
-            let actual_bytes = residual_buffer
-                .size()
-                .map_err(|err| format!("failed to query {item_label} self-attn residual size: {err}"))?;
+            let actual_bytes = residual_buffer.size().map_err(|err| {
+                format!("failed to query {item_label} self-attn residual size: {err}")
+            })?;
             if actual_bytes < expected_input_bytes {
                 return Err(format!(
                     "{item_label} self-attn resident residual buffer too small: got {actual_bytes} bytes expected at least {expected_input_bytes}"
@@ -3439,13 +4258,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
             layer.last_component_step_ms = None;
             layer
                 .input_buffer
-                .copy_from_buffer(
-                    0,
-                    residual_buffer,
-                    0,
-                    expected_input_bytes,
-                    Some(stream),
-                )
+                .copy_from_buffer(0, residual_buffer, 0, expected_input_bytes, Some(stream))
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident residual: {err}")
                 })?;
@@ -3606,11 +4419,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 rope_position,
                 cache_position,
                 sync_component_timing,
-                component_step_ms
-                    .get_mut(batch_index)
-                    .ok_or_else(|| {
-                        format!("{label} self-attn resident batch component timing is missing")
-                    })?,
+                component_step_ms.get_mut(batch_index).ok_or_else(|| {
+                    format!("{label} self-attn resident batch component timing is missing")
+                })?,
                 &item_label,
             )?;
             let projection_input_dst_offset = checked_f32_byte_len(
@@ -3619,10 +4430,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
             )?;
             let (projection_input_source, projection_input_source_label) =
                 match projection_input_buffer {
-                    PackageSelfAttnAttentionProjectionInput::AttentionOutput => (
-                        &layer.attention_output_buffer,
-                        "attention output",
-                    ),
+                    PackageSelfAttnAttentionProjectionInput::AttentionOutput => {
+                        (&layer.attention_output_buffer, "attention output")
+                    }
                     PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => (
                         &layer.attention_projection_input_buffer,
                         "attention projection input",
@@ -3644,9 +4454,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
         }
 
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
-                               started: Instant,
-                               sync_component_timing: bool,
-                               component_label: &str|
+                                started: Instant,
+                                sync_component_timing: bool,
+                                component_label: &str|
          -> Result<f64, String> {
             if sync_component_timing {
                 stream.synchronize().map_err(|err| {
@@ -3783,13 +4593,13 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     slots[batch_index], request_id
                 )
             })?;
-            let layer_output_start = batch_index
-                .checked_mul(hidden_elements)
-                .ok_or_else(|| {
-                    format!("{label} self-attn resident batch layer output offset overflows")
-                })?;
-            let layer_output_src_offset =
-                checked_f32_byte_len(layer_output_start, "self-attn resident batch layer output offset")?;
+            let layer_output_start = batch_index.checked_mul(hidden_elements).ok_or_else(|| {
+                format!("{label} self-attn resident batch layer output offset overflows")
+            })?;
+            let layer_output_src_offset = checked_f32_byte_len(
+                layer_output_start,
+                "self-attn resident batch layer output offset",
+            )?;
             layer
                 .layer_output_buffer
                 .copy_from_buffer(
@@ -3811,7 +4621,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_from_host_to_device(
+    pub fn step_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -3835,7 +4645,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_from_device_to_device(
+    pub fn step_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -3858,14 +4668,14 @@ impl PackageSelfAttnResidentStepBatchLayer {
             )
     }
 
-    fn output_buffer(
+    pub fn output_buffer(
         &self,
         request_id: RequestId,
     ) -> Result<&ullm_runtime_sys::RuntimeBuffer, String> {
         Ok(self.layer_for_request(request_id)?.output_buffer())
     }
 
-    fn read_output(
+    pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -3873,7 +4683,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
         self.layer_for_request(request_id)?.read_output(stream)
     }
 
-    fn take_last_component_step_ms(
+    pub fn take_last_component_step_ms(
         &mut self,
         request_id: RequestId,
     ) -> Result<Option<PackageSelfAttnComponentStepMs>, String> {
@@ -3884,7 +4694,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
 }
 
 #[allow(dead_code)]
-struct PackageLinearAttnResidentStepBatchLayer {
+pub struct PackageLinearAttnResidentStepBatchLayer {
     layer_index: usize,
     hidden: usize,
     request_index: std::collections::BTreeMap<RequestId, usize>,
@@ -3894,7 +4704,7 @@ struct PackageLinearAttnResidentStepBatchLayer {
 
 #[allow(dead_code)]
 impl PackageLinearAttnResidentStepBatchLayer {
-    fn load(
+    pub fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         path: &str,
@@ -3956,23 +4766,23 @@ impl PackageLinearAttnResidentStepBatchLayer {
         })
     }
 
-    fn request_ids(&self) -> &[RequestId] {
+    pub fn request_ids(&self) -> &[RequestId] {
         &self.request_ids
     }
 
-    fn request_count(&self) -> usize {
+    pub fn request_count(&self) -> usize {
         self.request_ids.len()
     }
 
-    fn layer_index(&self) -> usize {
+    pub fn layer_index(&self) -> usize {
         self.layer_index
     }
 
-    fn hidden(&self) -> usize {
+    pub fn hidden(&self) -> usize {
         self.hidden
     }
 
-    fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
+    pub fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
         self.request_index.get(&request_id).copied().ok_or_else(|| {
             format!(
                 "linear-attn resident batch layer {} has no state slot for request {request_id:?}",
@@ -3981,7 +4791,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
         })
     }
 
-    fn layer_for_request_mut(
+    pub fn layer_for_request_mut(
         &mut self,
         request_id: RequestId,
     ) -> Result<&mut PackageLinearAttnResidentStepLayer, String> {
@@ -3994,7 +4804,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
         })
     }
 
-    fn layer_for_request(
+    pub fn layer_for_request(
         &self,
         request_id: RequestId,
     ) -> Result<&PackageLinearAttnResidentStepLayer, String> {
@@ -4007,7 +4817,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
         })
     }
 
-    fn step_from_host_to_device(
+    pub fn step_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -4018,7 +4828,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
             .step_from_host_to_device(stream, residual, label)
     }
 
-    fn step_from_device_to_device(
+    pub fn step_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -4029,14 +4839,14 @@ impl PackageLinearAttnResidentStepBatchLayer {
             .step_from_device_to_device(stream, residual_buffer, label)
     }
 
-    fn output_buffer(
+    pub fn output_buffer(
         &self,
         request_id: RequestId,
     ) -> Result<&ullm_runtime_sys::RuntimeBuffer, String> {
         Ok(self.layer_for_request(request_id)?.output_buffer())
     }
 
-    fn read_output(
+    pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -4044,7 +4854,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
         self.layer_for_request(request_id)?.read_output(stream)
     }
 
-    fn take_last_component_step_ms(
+    pub fn take_last_component_step_ms(
         &mut self,
         request_id: RequestId,
     ) -> Result<Option<PackageLinearAttnComponentStepMs>, String> {
@@ -4055,42 +4865,42 @@ impl PackageLinearAttnResidentStepBatchLayer {
 }
 
 #[allow(dead_code)]
-enum PackageMixedRequestStateLayer {
+pub enum PackageMixedRequestStateLayer {
     LinearAttention(PackageLinearAttnResidentStepBatchLayer),
     SelfAttention(PackageSelfAttnResidentStepBatchLayer),
 }
 
 #[allow(dead_code)]
 impl PackageMixedRequestStateLayer {
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
-            Self::LinearAttention(_) => PackageDecoderLayerKind::LinearAttention.as_str(),
-            Self::SelfAttention(_) => PackageDecoderLayerKind::SelfAttention.as_str(),
+            Self::LinearAttention(_) => "linear_attention",
+            Self::SelfAttention(_) => "self_attention",
         }
     }
 
-    fn layer_index(&self) -> usize {
+    pub fn layer_index(&self) -> usize {
         match self {
             Self::LinearAttention(layer) => layer.layer_index(),
             Self::SelfAttention(layer) => layer.layer_index(),
         }
     }
 
-    fn hidden(&self) -> usize {
+    pub fn hidden(&self) -> usize {
         match self {
             Self::LinearAttention(layer) => layer.hidden(),
             Self::SelfAttention(layer) => layer.hidden(),
         }
     }
 
-    fn self_attn_head_dim(&self) -> Option<usize> {
+    pub fn self_attn_head_dim(&self) -> Option<usize> {
         match self {
             Self::LinearAttention(_) => None,
             Self::SelfAttention(layer) => Some(layer.head_dim()),
         }
     }
 
-    fn self_attn_shape_json(&self) -> Option<serde_json::Value> {
+    pub fn self_attn_shape_json(&self) -> Option<serde_json::Value> {
         match self {
             Self::LinearAttention(_) => None,
             Self::SelfAttention(layer) => Some(serde_json::json!({
@@ -4106,7 +4916,7 @@ impl PackageMixedRequestStateLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_from_host_to_device(
+    pub fn step_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -4135,7 +4945,7 @@ impl PackageMixedRequestStateLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_batch_from_host_to_device(
+    pub fn step_batch_from_host_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         items: &[MixedRequestStateBatchStepItem],
@@ -4158,14 +4968,14 @@ impl PackageMixedRequestStateLayer {
                 }
                 Ok(())
             }
-            Self::SelfAttention(layer) => layer.step_batch_from_host_to_device(
-                stream, items, rotary_dim, rope_base, label,
-            ),
+            Self::SelfAttention(layer) => {
+                layer.step_batch_from_host_to_device(stream, items, rotary_dim, rope_base, label)
+            }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_batch_from_device_to_device(
+    pub fn step_batch_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         items: &[(RequestId, &ullm_runtime_sys::RuntimeBuffer, usize, usize)],
@@ -4188,18 +4998,14 @@ impl PackageMixedRequestStateLayer {
                 }
                 Ok(())
             }
-            Self::SelfAttention(layer) => layer.step_batch_from_device_to_device(
-                stream,
-                items,
-                rotary_dim,
-                rope_base,
-                label,
-            ),
+            Self::SelfAttention(layer) => {
+                layer.step_batch_from_device_to_device(stream, items, rotary_dim, rope_base, label)
+            }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_from_device_to_device(
+    pub fn step_from_device_to_device(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -4227,7 +5033,7 @@ impl PackageMixedRequestStateLayer {
         }
     }
 
-    fn output_buffer(
+    pub fn output_buffer(
         &self,
         request_id: RequestId,
     ) -> Result<&ullm_runtime_sys::RuntimeBuffer, String> {
@@ -4237,7 +5043,7 @@ impl PackageMixedRequestStateLayer {
         }
     }
 
-    fn read_output(
+    pub fn read_output(
         &self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         request_id: RequestId,
@@ -4279,7 +5085,7 @@ fn package_request_slot_index(
     Ok(index)
 }
 
-fn runtime_host_linear_attn_gate_beta_f32(
+pub fn runtime_host_linear_attn_gate_beta_f32(
     a: &[f32],
     b: &[f32],
     a_log: &[f32],
@@ -4313,7 +5119,7 @@ fn runtime_host_linear_attn_gate_beta_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn runtime_host_linear_attn_recurrent_f32(
+pub fn runtime_host_linear_attn_recurrent_f32(
     q: &[f32],
     k: &[f32],
     v: &[f32],
@@ -4410,11 +5216,255 @@ fn runtime_host_linear_attn_recurrent_f32(
 }
 
 #[cfg(test)]
+mod linear_attn_step_test_support {
+    pub(super) fn verify_f32_close(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        abs_floor: f32,
+        rel_scale: f32,
+    ) -> Result<f32, String> {
+        if actual.len() != expected.len() {
+            return Err(format!(
+                "{label} size mismatch: expected {} got {}",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        let mut max_abs_diff = 0.0_f32;
+        for (actual_value, expected_value) in actual.iter().zip(expected.iter()) {
+            let diff = (actual_value - expected_value).abs();
+            let tolerance = abs_floor.max(expected_value.abs() * rel_scale);
+            if diff > tolerance {
+                return Err(format!(
+                    "{label} mismatch: max_abs_diff={diff} tolerance={tolerance}"
+                ));
+            }
+            if diff > max_abs_diff {
+                max_abs_diff = diff;
+            }
+        }
+        Ok(max_abs_diff)
+    }
+    pub(super) struct LinearAttnQkvSplit {
+        pub(super) q: Vec<f32>,
+        pub(super) k: Vec<f32>,
+        pub(super) v: Vec<f32>,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn split_linear_attn_qkv_for_recurrent(
+        conv_output: &[f32],
+        sequence_len: usize,
+        key_heads: usize,
+        value_heads: usize,
+        key_dim: usize,
+        value_dim: usize,
+        qk_l2_norm: bool,
+        q_scale: f32,
+    ) -> Result<LinearAttnQkvSplit, String> {
+        if sequence_len == 0 || key_heads == 0 || value_heads == 0 || key_dim == 0 || value_dim == 0
+        {
+            return Err("linear attention q/k/v layout contains a zero dimension".to_string());
+        }
+        let q_elements_per_step = key_heads
+            .checked_mul(key_dim)
+            .ok_or_else(|| "q element count overflows".to_string())?;
+        let k_elements_per_step = q_elements_per_step;
+        let v_elements_per_step = value_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| "v element count overflows".to_string())?;
+        let step_elements = q_elements_per_step
+            .checked_add(k_elements_per_step)
+            .and_then(|value| value.checked_add(v_elements_per_step))
+            .ok_or_else(|| "linear attention q/k/v step element count overflows".to_string())?;
+        let expected_elements = step_elements
+            .checked_mul(sequence_len)
+            .ok_or_else(|| "linear attention q/k/v sequence element count overflows".to_string())?;
+        if conv_output.len() != expected_elements {
+            return Err(format!(
+                "conv output element count mismatch: expected {expected_elements} got {}",
+                conv_output.len()
+            ));
+        }
+
+        let mut q = vec![0.0_f32; sequence_len * q_elements_per_step];
+        let mut k = vec![0.0_f32; sequence_len * k_elements_per_step];
+        let mut v = vec![0.0_f32; sequence_len * v_elements_per_step];
+        for timestep in 0..sequence_len {
+            let step_base = timestep * step_elements;
+            let q_base = step_base;
+            let k_base = q_base + q_elements_per_step;
+            let v_base = k_base + k_elements_per_step;
+
+            for head in 0..key_heads {
+                let source_start = q_base + head * key_dim;
+                let target_start = (timestep * key_heads + head) * key_dim;
+                q[target_start..target_start + key_dim]
+                    .copy_from_slice(&conv_output[source_start..source_start + key_dim]);
+                if qk_l2_norm {
+                    let norm = (q[target_start..target_start + key_dim]
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f32>()
+                        + 1e-6_f32)
+                        .sqrt();
+                    for value in &mut q[target_start..target_start + key_dim] {
+                        *value = (*value / norm) * q_scale;
+                    }
+                } else {
+                    for value in &mut q[target_start..target_start + key_dim] {
+                        *value *= q_scale;
+                    }
+                }
+
+                let source_start = k_base + head * key_dim;
+                let target_start = (timestep * key_heads + head) * key_dim;
+                k[target_start..target_start + key_dim]
+                    .copy_from_slice(&conv_output[source_start..source_start + key_dim]);
+                if qk_l2_norm {
+                    let norm = (k[target_start..target_start + key_dim]
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f32>()
+                        + 1e-6_f32)
+                        .sqrt();
+                    for value in &mut k[target_start..target_start + key_dim] {
+                        *value /= norm;
+                    }
+                }
+            }
+
+            let target_v_base = timestep * v_elements_per_step;
+            v[target_v_base..target_v_base + v_elements_per_step]
+                .copy_from_slice(&conv_output[v_base..v_base + v_elements_per_step]);
+        }
+        Ok(LinearAttnQkvSplit { q, k, v })
+    }
+    pub(super) fn runtime_host_silu_f32(values: &[f32]) -> Vec<f32> {
+        values
+            .iter()
+            .map(|value| {
+                let value = *value;
+                value * (1.0_f32 / (1.0_f32 + (-value).exp()))
+            })
+            .collect()
+    }
+    pub(super) fn runtime_host_depthwise_conv1d_f32(
+        input: &[f32],
+        weight: &[f32],
+        channels: usize,
+        sequence_len: usize,
+        kernel_size: usize,
+    ) -> Vec<f32> {
+        if channels == 0
+            || sequence_len == 0
+            || kernel_size == 0
+            || input.len() != channels * sequence_len
+            || weight.len() != channels * kernel_size
+        {
+            return Vec::new();
+        }
+        let mut output = vec![0.0_f32; channels * sequence_len];
+        for timestep in 0..sequence_len {
+            for channel in 0..channels {
+                let mut value = 0.0_f32;
+                for kernel in 0..kernel_size {
+                    let left_padding = kernel_size - 1 - kernel;
+                    if timestep < left_padding {
+                        continue;
+                    }
+                    value += input[(timestep - left_padding) * channels + channel]
+                        * weight[channel * kernel_size + kernel];
+                }
+                output[timestep * channels + channel] = value;
+            }
+        }
+        output
+    }
+
+    #[derive(Debug, Clone)]
+    pub(super) struct LinearAttnConv1dStepState {
+        channels: usize,
+        kernel_size: usize,
+        history: Vec<f32>,
+        pub(super) seen_tokens: usize,
+    }
+
+    impl LinearAttnConv1dStepState {
+        pub(super) fn new(channels: usize, kernel_size: usize) -> Result<Self, String> {
+            if channels == 0 {
+                return Err(
+                    "linear attention conv1d step channels must be greater than zero".into(),
+                );
+            }
+            if kernel_size == 0 {
+                return Err(
+                    "linear attention conv1d step kernel_size must be greater than zero".into(),
+                );
+            }
+            let history_len = channels
+                .checked_mul(kernel_size)
+                .ok_or_else(|| "linear attention conv1d step history size overflows".to_string())?;
+            Ok(Self {
+                channels,
+                kernel_size,
+                history: vec![0.0_f32; history_len],
+                seen_tokens: 0,
+            })
+        }
+
+        pub(super) fn step(&mut self, current: &[f32], weight: &[f32]) -> Result<Vec<f32>, String> {
+            if current.len() != self.channels {
+                return Err(format!(
+                    "linear attention conv1d step input length mismatch: got {} expected {}",
+                    current.len(),
+                    self.channels
+                ));
+            }
+            let expected_weight = self
+                .channels
+                .checked_mul(self.kernel_size)
+                .ok_or_else(|| "linear attention conv1d step weight size overflows".to_string())?;
+            if weight.len() != expected_weight {
+                return Err(format!(
+                    "linear attention conv1d step weight length mismatch: got {} expected {}",
+                    weight.len(),
+                    expected_weight
+                ));
+            }
+
+            if self.kernel_size > 1 {
+                self.history.rotate_left(self.channels);
+            }
+            let latest_start = (self.kernel_size - 1) * self.channels;
+            self.history[latest_start..latest_start + self.channels].copy_from_slice(current);
+            self.seen_tokens = self
+                .seen_tokens
+                .checked_add(1)
+                .ok_or_else(|| "linear attention conv1d step count overflows".to_string())?;
+
+            let mut output = vec![0.0_f32; self.channels];
+            for channel in 0..self.channels {
+                let mut value = 0.0_f32;
+                for kernel in 0..self.kernel_size {
+                    value += self.history[kernel * self.channels + channel]
+                        * weight[channel * self.kernel_size + kernel];
+                }
+                output[channel] = value;
+            }
+            Ok(output)
+        }
+    }
+}
+
+#[cfg(test)]
 mod linear_attn_step_state_tests {
+    use super::linear_attn_step_test_support::*;
     use super::*;
 
     #[test]
-    fn linear_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
+    pub fn linear_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
         assert!(package_linear_attn_request_slot_index(&[], "test batch").is_err());
         assert!(
             package_linear_attn_request_slot_index(
@@ -4426,7 +5476,7 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
-    fn linear_attn_request_slot_index_preserves_request_order() {
+    pub fn linear_attn_request_slot_index_preserves_request_order() {
         let index = package_linear_attn_request_slot_index(
             &[RequestId(42), RequestId(7), RequestId(99)],
             "test batch",
@@ -4440,7 +5490,7 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
-    fn self_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
+    pub fn self_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
         assert!(package_self_attn_request_slot_index(&[], "test batch").is_err());
         assert!(
             package_self_attn_request_slot_index(
@@ -4452,7 +5502,7 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
-    fn self_attn_request_slot_index_preserves_request_order() {
+    pub fn self_attn_request_slot_index_preserves_request_order() {
         let index = package_self_attn_request_slot_index(
             &[RequestId(142), RequestId(107), RequestId(199)],
             "test batch",
@@ -4466,7 +5516,7 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
-    fn linear_attn_conv1d_step_matches_full_causal_conv() {
+    pub fn linear_attn_conv1d_step_matches_full_causal_conv() {
         let channels = 5_usize;
         let sequence_len = 6_usize;
         let kernel_size = 3_usize;
@@ -4498,7 +5548,7 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
-    fn linear_attn_stateful_host_steps_match_full_recurrent() {
+    pub fn linear_attn_stateful_host_steps_match_full_recurrent() {
         let key_heads = 2_usize;
         let value_heads = 4_usize;
         let key_dim = 3_usize;
@@ -4639,7 +5689,7 @@ mod linear_attn_step_state_tests {
     }
 }
 
-fn format_f32_preview(values: &[f32]) -> String {
+pub fn format_f32_preview(values: &[f32]) -> String {
     let joined = values
         .iter()
         .map(|value| format!("{value:.7}"))
