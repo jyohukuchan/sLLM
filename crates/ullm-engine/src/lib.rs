@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod adapter_admission;
+pub mod adapter_fixtures;
 pub mod aq;
 pub mod aq4_package_runtime;
 pub mod aq4_worker_backend;

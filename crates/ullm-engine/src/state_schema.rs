@@ -400,6 +400,22 @@ impl StateSchema {
 
 fn validate_node_state_contract(node: &GraphNode, states: &[&StateSpec]) -> Result<(), String> {
     match &node.kind {
+        GraphNodeKind::CausalGqaAttentionCore {
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            ..
+        } => match states {
+            [] => Ok(()),
+            [state] => validate_causal_gqa_kv_state(
+                node, state, *q_heads, *kv_heads, *head_dim, *value_dim,
+            ),
+            _ => Err(format!(
+                "causal-GQA-attention-core node {} must use zero or one state",
+                node.id.as_str()
+            )),
+        },
         GraphNodeKind::DenseAttention { .. } => match states {
             [] => Ok(()),
             [state] => {
@@ -555,6 +571,80 @@ fn validate_node_state_contract(node: &GraphNode, states: &[&StateSpec]) -> Resu
             node.id.as_str()
         )),
     }
+}
+
+fn validate_causal_gqa_kv_state(
+    node: &GraphNode,
+    state: &StateSpec,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> Result<(), String> {
+    if !matches!(state.kind, StateKind::PagedKv | StateKind::SlidingWindowKv) {
+        return Err(format!(
+            "causal-GQA-attention-core node {} state {} must be PagedKv or SlidingWindowKv",
+            node.id.as_str(),
+            state.id.as_str()
+        ));
+    }
+    validate_kind_format(&state.kind, &state.format)?;
+    if !matches!(
+        state.format,
+        NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+    ) {
+        return Err(format!(
+            "causal-GQA-attention-core node {} state {} must use F32, BF16, or FP16 format",
+            node.id.as_str(),
+            state.id.as_str()
+        ));
+    }
+    let (state_q_heads, state_kv_heads, state_head_dim, state_value_dim) = match (
+        &state.kind,
+        &state.layout,
+    ) {
+        (
+            StateKind::PagedKv,
+            StateLayout::PagedKv {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                ..
+            },
+        )
+        | (
+            StateKind::SlidingWindowKv,
+            StateLayout::SlidingWindowKv {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                ..
+            },
+        ) => (*q_heads, *kv_heads, *head_dim, *value_dim),
+        _ => {
+            return Err(format!(
+                "causal-GQA-attention-core node {} state {} must use the layout matching its KV kind",
+                node.id.as_str(),
+                state.id.as_str()
+            ));
+        }
+    };
+    if (
+        state_q_heads,
+        state_kv_heads,
+        state_head_dim,
+        state_value_dim,
+    ) != (q_heads, kv_heads, head_dim, value_dim)
+    {
+        return Err(format!(
+            "causal-GQA-attention-core node {} state geometry must be q_heads={q_heads} kv_heads={kv_heads} head_dim={head_dim} value_dim={value_dim}",
+            node.id.as_str()
+        ));
+    }
+    require_request_layer_ownership(node, state, "causal-GQA-attention-core")?;
+    require_prepare_execute_commit(node, state, "causal-GQA-attention-core")
 }
 
 fn require_prepare_execute_commit(
@@ -1125,6 +1215,54 @@ mod tests {
         }
     }
 
+    fn causal_gqa_graph_with_state(state: Option<&str>) -> ModelGraph {
+        let query = ValueId::new("gqa-query").unwrap();
+        let key = ValueId::new("gqa-key").unwrap();
+        let value = ValueId::new("gqa-value").unwrap();
+        let output = ValueId::new("gqa-output").unwrap();
+        let tensor = |shape: Vec<usize>| {
+            TensorSpec::new(shape, NumericalFormat::F32, TensorLayout::TokensHidden).unwrap()
+        };
+        ModelGraph {
+            graph_id: "causal-gqa-state-composition".into(),
+            inputs: vec![query.clone(), key.clone(), value.clone()],
+            outputs: vec![output.clone()],
+            values: vec![
+                GraphValue {
+                    id: query.clone(),
+                    tensor: tensor(vec![1, 1, 8 * 64]),
+                },
+                GraphValue {
+                    id: key.clone(),
+                    tensor: tensor(vec![1, 1, 2 * 64]),
+                },
+                GraphValue {
+                    id: value.clone(),
+                    tensor: tensor(vec![1, 1, 2 * 64]),
+                },
+                GraphValue {
+                    id: output.clone(),
+                    tensor: tensor(vec![1, 1, 8 * 64]),
+                },
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: NodeId::new("causal-gqa").unwrap(),
+                inputs: vec![query, key, value],
+                outputs: vec![output],
+                weights: vec![],
+                states: state.into_iter().map(state_id).collect(),
+                kind: GraphNodeKind::CausalGqaAttentionCore {
+                    q_heads: 8,
+                    kv_heads: 2,
+                    head_dim: 64,
+                    value_dim: 64,
+                    softmax_scale: PositiveF32::new(0.125, "causal GQA scale").unwrap(),
+                },
+            }],
+        }
+    }
+
     fn conv_graph_with_state(state: Option<&str>, kernel_size: usize) -> ModelGraph {
         let input = ValueId::new("conv-input").unwrap();
         let output = ValueId::new("conv-output").unwrap();
@@ -1454,6 +1592,106 @@ mod tests {
             .unwrap()
             .validate_against_graph(&stateless_dense)
             .expect("stateless dense attention fixture must be permitted");
+
+        StateSchema::new("dense-existing-contract", vec![paged_kv("dense-kv", 0)])
+            .unwrap()
+            .validate_against_graph(&dense_graph_with_state("dense-kv"))
+            .expect("existing dense attention KV contract must remain unchanged");
+    }
+
+    #[test]
+    fn causal_gqa_state_contract_accepts_stateless_paged_and_sliding_kv() {
+        StateSchema::new("causal-gqa-stateless", vec![])
+            .unwrap()
+            .validate_against_graph(&causal_gqa_graph_with_state(None))
+            .expect("causal GQA without state must remain legal");
+
+        StateSchema::new("causal-gqa-paged", vec![paged_kv("gqa-kv", 3)])
+            .unwrap()
+            .validate_against_graph(&causal_gqa_graph_with_state(Some("gqa-kv")))
+            .expect("matching paged KV state must compose");
+
+        let mut sliding = sliding_window_kv("gqa-window", 32);
+        if let StateTransactionContract::Transactional { initialization, .. } =
+            &mut sliding.transaction
+        {
+            *initialization = StateInitialization::FromSnapshot;
+        }
+        StateSchema::new("causal-gqa-sliding", vec![sliding])
+            .unwrap()
+            .validate_against_graph(&causal_gqa_graph_with_state(Some("gqa-window")))
+            .expect("matching sliding-window KV restored from a snapshot must compose");
+    }
+
+    #[test]
+    fn causal_gqa_state_contract_rejects_kind_layout_geometry_and_protocol_mismatches() {
+        let graph = causal_gqa_graph_with_state(Some("gqa-kv"));
+        let node = &graph.nodes[0];
+
+        let wrong_kind = recurrent("gqa-kv");
+        assert!(
+            validate_node_state_contract(node, &[&wrong_kind])
+                .unwrap_err()
+                .contains("must be PagedKv or SlidingWindowKv")
+        );
+
+        let mut wrong_layout = paged_kv("gqa-kv", 0);
+        wrong_layout.layout = sliding_window_kv("other", 32).layout;
+        assert!(
+            validate_node_state_contract(node, &[&wrong_layout])
+                .unwrap_err()
+                .contains("layout matching its KV kind")
+        );
+
+        for field in ["q_heads", "kv_heads", "head_dim", "value_dim"] {
+            let mut wrong_geometry = paged_kv("gqa-kv", 0);
+            let StateLayout::PagedKv {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                ..
+            } = &mut wrong_geometry.layout
+            else {
+                panic!("test fixture must use paged KV layout");
+            };
+            match field {
+                "q_heads" => *q_heads = 4,
+                "kv_heads" => *kv_heads = 1,
+                "head_dim" => *head_dim = 32,
+                "value_dim" => *value_dim = 32,
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_node_state_contract(node, &[&wrong_geometry])
+                    .unwrap_err()
+                    .contains("state geometry")
+            );
+        }
+
+        let mut wrong_ownership = paged_kv("gqa-kv", 0);
+        wrong_ownership.ownership = StateOwnership::Request;
+        assert!(
+            validate_node_state_contract(node, &[&wrong_ownership])
+                .unwrap_err()
+                .contains("RequestLayer ownership")
+        );
+
+        let mut wrong_transaction = paged_kv("gqa-kv", 0);
+        wrong_transaction.transaction = StateTransactionContract::ReadOnly;
+        assert!(
+            validate_node_state_contract(node, &[&wrong_transaction])
+                .unwrap_err()
+                .contains("PrepareExecuteCommit transaction")
+        );
+
+        let mut wrong_format = paged_kv("gqa-kv", 0);
+        wrong_format.format = NumericalFormat::Sq8_0;
+        let format_error = StateSchema::new("causal-gqa-format", vec![wrong_format])
+            .unwrap()
+            .validate_against_graph(&graph)
+            .expect_err("quantized KV state must not compose with the real-valued causal GQA core");
+        assert!(format_error.contains("must use F32, BF16, or FP16 format"));
     }
 
     #[test]
