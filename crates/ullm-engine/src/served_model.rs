@@ -160,49 +160,20 @@ pub struct WorkerProfileSnapshot {
 }
 
 impl WorkerProfileSnapshot {
-    pub fn install_environment(&self) -> Result<()> {
-        let mixed = LEGACY_MODEL_ENVIRONMENT
-            .iter()
-            .copied()
-            .filter(|name| std::env::var_os(name).is_some())
-            .collect::<Vec<_>>();
-        if !mixed.is_empty() {
-            return Err(ServedModelError(format!(
-                "served-model manifest mode cannot be mixed with legacy model environment: {}",
-                mixed.join(",")
-            )));
+    pub fn into_worker_profile(self) -> crate::sq8_worker_protocol::Sq8WorkerProfile {
+        crate::sq8_worker_protocol::Sq8WorkerProfile {
+            model: self.model,
+            model_revision: self.model_revision,
+            artifact_content_sha256: self.artifact_content_sha256,
+            package_manifest_sha256: self.package_manifest_sha256,
+            device: self.device,
+            execution_profile: self.execution_profile,
+            context_length: self.context_length,
+            max_new_tokens: self.max_new_tokens,
+            vocab_size: self.vocab_size,
+            eos_token_ids: self.eos_token_ids,
+            top_k: self.top_k,
         }
-        let eos = self
-            .eos_token_ids
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let values = [
-            ("ULLM_MODEL_ID", self.model.clone()),
-            ("ULLM_MODEL_REVISION", self.model_revision.clone()),
-            (
-                "ULLM_ARTIFACT_CONTENT_SHA256",
-                self.artifact_content_sha256.clone(),
-            ),
-            (
-                "ULLM_PACKAGE_MANIFEST_SHA256",
-                self.package_manifest_sha256.clone(),
-            ),
-            ("ULLM_DEVICE", self.device.clone()),
-            ("ULLM_EXECUTION_PROFILE", self.execution_profile.clone()),
-            ("ULLM_MODEL_CONTEXT_LENGTH", self.context_length.to_string()),
-            ("ULLM_MAX_NEW_TOKENS", self.max_new_tokens.to_string()),
-            ("ULLM_VOCAB_SIZE", self.vocab_size.to_string()),
-            ("ULLM_EOS_TOKEN_IDS", eos),
-            ("ULLM_TOP_K", self.top_k.to_string()),
-        ];
-        for (name, value) in values {
-            // SAFETY: worker binaries call this before creating any reader, writer, or inference
-            // thread. Manifest and legacy modes are rejected above before the first mutation.
-            unsafe { std::env::set_var(name, value) };
-        }
-        Ok(())
     }
 }
 
@@ -260,6 +231,17 @@ impl ServedModel {
         kind: WorkerBackendKind,
         current_exe: &Path,
     ) -> Result<WorkerStartupConfig> {
+        let mixed = LEGACY_MODEL_ENVIRONMENT
+            .iter()
+            .copied()
+            .filter(|name| std::env::var_os(name).is_some())
+            .collect::<Vec<_>>();
+        if !mixed.is_empty() {
+            return Err(ServedModelError(format!(
+                "served-model manifest mode cannot be mixed with legacy model environment: {}",
+                mixed.join(",")
+            )));
+        }
         if self.worker.protocol != "ullm.worker.v1" {
             return Err(ServedModelError("worker protocol is unsupported".into()));
         }

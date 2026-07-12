@@ -11,8 +11,9 @@ use crate::sq8_worker_protocol::{
     Sq8JsonlFramingError, Sq8JsonlRead, Sq8OrderedJsonlWriter, Sq8PromptProgressTracker,
     Sq8ReadyFlushAck, Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerCommand,
     Sq8WorkerCommandKind, Sq8WorkerControl, Sq8WorkerControlErrorKind, Sq8WorkerErrorCode,
-    Sq8WorkerEvent, Sq8WorkerLifecycle, Sq8WorkerProtocolErrorKind, Sq8WorkerShutdownDisposition,
-    Sq8WorkerTimings, configured_worker_profile, inspect_sq8_worker_command,
+    Sq8WorkerEvent, Sq8WorkerLifecycle, Sq8WorkerProfile, Sq8WorkerProtocolErrorKind,
+    Sq8WorkerShutdownDisposition, Sq8WorkerTimings, configured_worker_profile,
+    inspect_sq8_worker_command,
 };
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -165,13 +166,23 @@ pub fn spawn_sq8_ordered_writer<W>(
 where
     W: Write + Send + 'static,
 {
+    spawn_sq8_ordered_writer_with_profile(output, configured_worker_profile())
+}
+
+pub fn spawn_sq8_ordered_writer_with_profile<W>(
+    output: W,
+    profile: Sq8WorkerProfile,
+) -> Result<(Sq8WorkerEventPublisher, Sq8WriterThread<W>), String>
+where
+    W: Write + Send + 'static,
+{
     let (sender, receiver) = sync_channel(1);
     let poisoned = Arc::new(AtomicBool::new(false));
     let writer_poisoned = Arc::clone(&poisoned);
     let closer = sender.clone();
     let join = thread::Builder::new()
         .name("ullm-sq8-writer".into())
-        .spawn(move || run_sq8_ordered_writer(output, receiver, writer_poisoned))
+        .spawn(move || run_sq8_ordered_writer(output, receiver, writer_poisoned, profile))
         .map_err(|_| "failed to spawn SQ8 ordered writer thread".to_string())?;
     let thread_poisoned = Arc::clone(&poisoned);
     Ok((
@@ -188,8 +199,9 @@ fn run_sq8_ordered_writer<W: Write>(
     output: W,
     receiver: Receiver<Sq8WriterEnvelope>,
     poisoned: Arc<AtomicBool>,
+    profile: Sq8WorkerProfile,
 ) -> Result<W, String> {
-    let mut writer = Sq8OrderedJsonlWriter::new(output);
+    let mut writer = Sq8OrderedJsonlWriter::with_profile(output, profile);
     while let Ok(envelope) = receiver.recv() {
         if matches!(envelope.publication, Sq8WriterPublication::Close) {
             let Some(acknowledgement) = envelope.acknowledgement else {
@@ -303,14 +315,32 @@ pub struct Sq8RequestEventPublisher<'a> {
     completion_tokens: usize,
     last_token_was_eos: bool,
     released: bool,
+    profile: Sq8WorkerProfile,
 }
 
 impl<'a> Sq8RequestEventPublisher<'a> {
+    #[cfg(test)]
     fn new(
         control: &'a Sq8WorkerControl,
         events: &'a Sq8WorkerEventPublisher,
         request: &Sq8ServingRequest,
         admission: &Sq8WorkerAdmission,
+    ) -> Result<Self, String> {
+        Self::new_with_profile(
+            control,
+            events,
+            request,
+            admission,
+            &configured_worker_profile(),
+        )
+    }
+
+    fn new_with_profile(
+        control: &'a Sq8WorkerControl,
+        events: &'a Sq8WorkerEventPublisher,
+        request: &Sq8ServingRequest,
+        admission: &Sq8WorkerAdmission,
+        profile: &Sq8WorkerProfile,
     ) -> Result<Self, String> {
         if request.request_id != admission.request_id {
             return Err("SQ8 request and admission IDs do not match".into());
@@ -334,11 +364,12 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             prompt_tokens,
             max_new_tokens: request.max_new_tokens,
             eos_token_ids: request.eos_token_ids.clone(),
-            progress: Sq8PromptProgressTracker::new(prompt_tokens)?,
+            progress: Sq8PromptProgressTracker::new_with_profile(prompt_tokens, profile)?,
             started: false,
             completion_tokens: 0,
             last_token_was_eos: false,
             released: false,
+            profile: profile.clone(),
         })
     }
 
@@ -385,7 +416,7 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             || !self.progress.transition_emitted()
             || self.completion_tokens >= self.max_new_tokens
             || self.last_token_was_eos
-            || token_id >= configured_worker_profile().vocab_size
+            || token_id >= self.profile.vocab_size
         {
             return Err("SQ8 token publication is out of order or range".into());
         }
@@ -637,11 +668,38 @@ where
     B: Sq8InferenceBackend + 'static,
     F: FnOnce() -> Result<B, String> + Send + 'static,
 {
+    spawn_sq8_inference_thread_with_profile(
+        control,
+        events,
+        commands,
+        configured_worker_profile(),
+        build_backend,
+    )
+}
+
+pub fn spawn_sq8_inference_thread_with_profile<B, F>(
+    control: Arc<Sq8WorkerControl>,
+    events: Sq8WorkerEventPublisher,
+    commands: Receiver<Sq8InferenceCommand>,
+    profile: Sq8WorkerProfile,
+    build_backend: F,
+) -> Result<Sq8InferenceThread, String>
+where
+    B: Sq8InferenceBackend + 'static,
+    F: FnOnce() -> Result<B, String> + Send + 'static,
+{
     let (startup_sender, startup) = sync_channel(0);
     let join = thread::Builder::new()
         .name("ullm-sq8-inference".into())
         .spawn(move || {
-            run_sq8_inference_thread(control, events, commands, build_backend, startup_sender)
+            run_sq8_inference_thread(
+                control,
+                events,
+                commands,
+                &profile,
+                build_backend,
+                startup_sender,
+            )
         })
         .map_err(|_| "failed to spawn SQ8 inference thread".to_string())?;
     Ok(Sq8InferenceThread {
@@ -654,6 +712,7 @@ fn run_sq8_inference_thread<B, F>(
     control: Arc<Sq8WorkerControl>,
     events: Sq8WorkerEventPublisher,
     commands: Receiver<Sq8InferenceCommand>,
+    profile: &Sq8WorkerProfile,
     build_backend: F,
     startup: SyncSender<Result<(), String>>,
 ) -> Result<(), String>
@@ -675,7 +734,7 @@ where
             return Err(error);
         }
     };
-    let ready = match events.publish_ready(Sq8WorkerEvent::ready()) {
+    let ready = match events.publish_ready(Sq8WorkerEvent::ready_with_profile(profile)) {
         Ok(acknowledgement) => acknowledgement,
         Err(error) => {
             let _ = control.mark_failed();
@@ -724,15 +783,20 @@ where
         match command {
             Sq8InferenceCommand::Generate { request, admission } => {
                 let completed_generation = admission.generation;
-                let mut publications =
-                    Sq8RequestEventPublisher::new(control.as_ref(), &events, &request, &admission)
-                        .map_err(|_| {
-                            fail_inference(
-                                &control,
-                                &events,
-                                "SQ8 admitted request publication state is invalid",
-                            )
-                        })?;
+                let mut publications = Sq8RequestEventPublisher::new_with_profile(
+                    control.as_ref(),
+                    &events,
+                    &request,
+                    &admission,
+                    profile,
+                )
+                .map_err(|_| {
+                    fail_inference(
+                        &control,
+                        &events,
+                        "SQ8 admitted request publication state is invalid",
+                    )
+                })?;
                 if let Err(error) = backend.execute(request, admission, &mut publications) {
                     let _ =
                         fail_inference(&control, &events, "SQ8 admitted request execution failed");
@@ -844,13 +908,29 @@ where
     B: Sq8InferenceBackend + 'static,
     F: FnOnce() -> Result<B, String> + Send + 'static,
 {
+    run_sq8_worker_process_with_profile(input, output, configured_worker_profile(), build_backend)
+}
+
+pub fn run_sq8_worker_process_with_profile<R, W, B, F>(
+    input: R,
+    output: W,
+    profile: Sq8WorkerProfile,
+    build_backend: F,
+) -> Result<Sq8CommandReaderExit, String>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+    B: Sq8InferenceBackend + 'static,
+    F: FnOnce() -> Result<B, String> + Send + 'static,
+{
     let control = Arc::new(Sq8WorkerControl::new());
-    let (events, writer) = spawn_sq8_ordered_writer(output)?;
+    let (events, writer) = spawn_sq8_ordered_writer_with_profile(output, profile.clone())?;
     let (commands, command_receiver) = sync_channel(1);
-    let inference = match spawn_sq8_inference_thread(
+    let inference = match spawn_sq8_inference_thread_with_profile(
         Arc::clone(&control),
         events.clone(),
         command_receiver,
+        profile.clone(),
         build_backend,
     ) {
         Ok(inference) => inference,
@@ -881,8 +961,15 @@ where
     let reader_events = events.clone();
     let reader = match thread::Builder::new()
         .name("ullm-sq8-reader".into())
-        .spawn(move || run_sq8_command_reader(input, &reader_control, &reader_events, &commands))
-    {
+        .spawn(move || {
+            run_sq8_command_reader_with_profile(
+                input,
+                &reader_control,
+                &reader_events,
+                &commands,
+                &profile,
+            )
+        }) {
         Ok(reader) => reader,
         Err(_) => {
             let inference_result = inference.join();
@@ -950,11 +1037,24 @@ pub fn run_sq8_command_reader<R: BufRead>(
     events: &Sq8WorkerEventPublisher,
     inference: &SyncSender<Sq8InferenceCommand>,
 ) -> Result<Sq8CommandReaderExit, String> {
+    let profile = configured_worker_profile();
+    run_sq8_command_reader_with_profile(input, control, events, inference, &profile)
+}
+
+pub fn run_sq8_command_reader_with_profile<R: BufRead>(
+    input: R,
+    control: &Arc<Sq8WorkerControl>,
+    events: &Sq8WorkerEventPublisher,
+    inference: &SyncSender<Sq8InferenceCommand>,
+    profile: &Sq8WorkerProfile,
+) -> Result<Sq8CommandReaderExit, String> {
     let mut reader = Sq8BoundedJsonlReader::new(input);
     loop {
         match reader.next_record() {
             Ok(Sq8JsonlRead::Record(payload)) => {
-                if let Some(exit) = dispatch_record(&payload, control, events, inference)? {
+                if let Some(exit) =
+                    dispatch_record_with_profile(&payload, control, events, inference, profile)?
+                {
                     return Ok(exit);
                 }
             }
@@ -975,11 +1075,28 @@ pub fn run_sq8_command_reader<R: BufRead>(
     }
 }
 
+#[cfg(test)]
 fn dispatch_record(
     payload: &[u8],
     control: &Arc<Sq8WorkerControl>,
     events: &Sq8WorkerEventPublisher,
     inference: &SyncSender<Sq8InferenceCommand>,
+) -> Result<Option<Sq8CommandReaderExit>, String> {
+    dispatch_record_with_profile(
+        payload,
+        control,
+        events,
+        inference,
+        &configured_worker_profile(),
+    )
+}
+
+fn dispatch_record_with_profile(
+    payload: &[u8],
+    control: &Arc<Sq8WorkerControl>,
+    events: &Sq8WorkerEventPublisher,
+    inference: &SyncSender<Sq8InferenceCommand>,
+    profile: &Sq8WorkerProfile,
 ) -> Result<Option<Sq8CommandReaderExit>, String> {
     let inspection = match inspect_sq8_worker_command(payload) {
         Ok(inspection) => inspection,
@@ -1019,7 +1136,7 @@ fn dispatch_record(
         }
     }
 
-    let command = match inspection.decode() {
+    let command = match inspection.decode_with_profile(profile) {
         Ok(command) => command,
         Err(error) => {
             let code = match error.kind {
@@ -1041,7 +1158,7 @@ fn dispatch_record(
         Sq8WorkerCommand::Generate(generate) => {
             let request_id = generate.request_id.clone();
             let event_request_id = inspected_request_id;
-            let request = match generate.into_serving_request() {
+            let request = match generate.into_serving_request_with_profile(profile) {
                 Ok(request) => request,
                 Err(_) => {
                     publish_recoverable(

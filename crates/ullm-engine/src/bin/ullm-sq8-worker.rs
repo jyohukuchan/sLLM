@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use ullm_engine::served_model::{WorkerBackendKind, load_served_model};
 use ullm_engine::sq8_worker_backend::{Qwen3Sq8WorkerBackend, Qwen3Sq8WorkerBackendConfig};
-use ullm_engine::sq8_worker_runtime::run_sq8_worker_process;
+use ullm_engine::sq8_worker_protocol::configured_worker_profile;
+use ullm_engine::sq8_worker_runtime::run_sq8_worker_process_with_profile;
 
 const PROCESS_IO_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -54,8 +55,10 @@ fn main() -> ExitCode {
 }
 
 fn run_worker(source: WorkerSource) -> ExitCode {
-    let paths = match source {
-        WorkerSource::Legacy(args) => Ok((args.artifact, args.package)),
+    let startup = match source {
+        WorkerSource::Legacy(args) => {
+            Ok((args.artifact, args.package, configured_worker_profile()))
+        }
         WorkerSource::ServedModelManifest(path) => load_served_model(path)
             .and_then(|model| {
                 let current_exe = env::current_exe().map_err(|error| {
@@ -64,15 +67,15 @@ fn run_worker(source: WorkerSource) -> ExitCode {
                 model.worker_startup(WorkerBackendKind::Sq8, &current_exe)
             })
             .and_then(|startup| {
-                startup.profile.install_environment()?;
                 Ok((
                     startup.artifact_dir.expect("SQ8 startup has an artifact"),
                     startup.package_dir,
+                    startup.profile.into_worker_profile(),
                 ))
             }),
     };
-    let (artifact, package) = match paths {
-        Ok(paths) => paths,
+    let (artifact, package, profile) = match startup {
+        Ok(startup) => startup,
         Err(_) => {
             write_process_log("error", "manifest_failed", Some("invalid_manifest"), None);
             return ExitCode::FAILURE;
@@ -87,7 +90,9 @@ fn run_worker(source: WorkerSource) -> ExitCode {
     };
     let input = BufReader::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdin());
     let output = BufWriter::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdout());
-    match run_sq8_worker_process(input, output, move || Qwen3Sq8WorkerBackend::load(config)) {
+    match run_sq8_worker_process_with_profile(input, output, profile, move || {
+        Qwen3Sq8WorkerBackend::load(config)
+    }) {
         Ok(_) => {
             write_process_log("info", "process_stopped", None, None);
             ExitCode::SUCCESS

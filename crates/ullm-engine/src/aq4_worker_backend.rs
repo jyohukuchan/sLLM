@@ -235,13 +235,15 @@ impl InferenceBackend for Qwen35Aq4WorkerBackend {
         } else {
             ReleaseOutcomeEvent::Length
         };
-        let timings = WorkerTimings::from_elapsed_millis(
+        let timings = WorkerTimings::from_elapsed_millis_with_limits(
             request.prompt_token_ids.len(),
             report.prefill.wall_ms.max(0.001),
             report.generated_token_ids.len(),
             report.decode.wall_ms.max(0.001),
+            request.prompt_token_ids.len(),
+            request.max_new_tokens,
         )
-        .map_err(|error| error.to_string())?;
+        .ok_or_else(|| "AQ4 engine timings violate the request bounds".to_string())?;
         publications.publish_released_with_timings(outcome, timings)
     }
 }

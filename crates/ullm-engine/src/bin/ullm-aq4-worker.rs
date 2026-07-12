@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use ullm_engine::aq4_worker_backend::{Qwen35Aq4WorkerBackend, Qwen35Aq4WorkerBackendConfig};
 use ullm_engine::served_model::{ServedModelError, WorkerBackendKind, load_served_model};
-use ullm_engine::sq8_worker_runtime::run_sq8_worker_process;
+use ullm_engine::sq8_worker_protocol::Sq8WorkerProfile;
+use ullm_engine::sq8_worker_runtime::run_sq8_worker_process_with_profile;
 
 const PROCESS_IO_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -59,11 +60,8 @@ fn main() -> ExitCode {
 }
 
 fn run_worker(source: WorkerSource) -> ExitCode {
-    let args = match source {
-        WorkerSource::Legacy(args) => {
-            ensure_aq4_profile_defaults();
-            Ok(args)
-        }
+    let startup = match source {
+        WorkerSource::Legacy(args) => Ok((args, configured_aq4_worker_profile())),
         WorkerSource::ServedModelManifest(path) => load_served_model(path)
             .and_then(|model| {
                 let current_exe =
@@ -79,8 +77,8 @@ fn run_worker(source: WorkerSource) -> ExitCode {
                 ))
             }),
     };
-    let args = match args {
-        Ok(args) => args,
+    let (args, profile) = match startup {
+        Ok(startup) => startup,
         Err(_) => {
             write_process_log("error", "manifest_failed", Some("invalid_manifest"), None);
             return ExitCode::FAILURE;
@@ -98,7 +96,9 @@ fn run_worker(source: WorkerSource) -> ExitCode {
     };
     let input = BufReader::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdin());
     let output = BufWriter::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdout());
-    match run_sq8_worker_process(input, output, move || Qwen35Aq4WorkerBackend::load(config)) {
+    match run_sq8_worker_process_with_profile(input, output, profile, move || {
+        Qwen35Aq4WorkerBackend::load(config)
+    }) {
         Ok(_) => {
             write_process_log("info", "process_stopped", None, None);
             ExitCode::SUCCESS
@@ -186,26 +186,21 @@ fn default_engine_path() -> Result<PathBuf, String> {
         .map_err(|error| format!("failed to resolve AQ4 worker executable: {error}"))
 }
 
-fn ensure_aq4_profile_defaults() {
-    let zero_sha256 = "0".repeat(64);
-    for (name, value) in [
-        ("ULLM_MODEL_ID", "ullm-qwen3.5-9b-aq4"),
-        ("ULLM_MODEL_REVISION", "aq4-cli-compat-v0.1"),
-        ("ULLM_ARTIFACT_CONTENT_SHA256", zero_sha256.as_str()),
-        ("ULLM_PACKAGE_MANIFEST_SHA256", zero_sha256.as_str()),
-        ("ULLM_DEVICE", "gfx1201"),
-        ("ULLM_EXECUTION_PROFILE", "rdna4_aq4_cli_compat"),
-        ("ULLM_MODEL_CONTEXT_LENGTH", "4096"),
-        ("ULLM_MAX_NEW_TOKENS", "512"),
-        ("ULLM_VOCAB_SIZE", "248320"),
-        ("ULLM_EOS_TOKEN_IDS", "248044,248046"),
-        ("ULLM_TOP_K", "1"),
-    ] {
-        if env::var_os(name).is_none() {
-            // SAFETY: no worker reader, writer, or inference thread exists yet.
-            unsafe { env::set_var(name, value) };
-        }
-    }
+fn configured_aq4_worker_profile() -> Sq8WorkerProfile {
+    let defaults = Sq8WorkerProfile {
+        model: "ullm-qwen3.5-9b-aq4".into(),
+        model_revision: "aq4-cli-compat-v0.1".into(),
+        artifact_content_sha256: "0".repeat(64),
+        package_manifest_sha256: "0".repeat(64),
+        device: "gfx1201".into(),
+        execution_profile: "rdna4_aq4_cli_compat".into(),
+        context_length: 4096,
+        max_new_tokens: 512,
+        vocab_size: 248320,
+        eos_token_ids: vec![248044, 248046],
+        top_k: 1,
+    };
+    Sq8WorkerProfile::from_environment_with_defaults(&defaults)
 }
 
 #[derive(Serialize)]

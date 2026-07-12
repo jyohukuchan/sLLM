@@ -47,30 +47,46 @@ pub struct Sq8WorkerProfile {
 }
 
 pub fn configured_worker_profile() -> Sq8WorkerProfile {
-    Sq8WorkerProfile {
-        model: env_string("ULLM_MODEL_ID", SQ8_WORKER_MODEL),
-        model_revision: env_string("ULLM_MODEL_REVISION", SQ8_WORKER_MODEL_REVISION),
-        artifact_content_sha256: env_string(
-            "ULLM_ARTIFACT_CONTENT_SHA256",
-            QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256,
-        ),
-        package_manifest_sha256: env_string(
-            "ULLM_PACKAGE_MANIFEST_SHA256",
-            QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256,
-        ),
-        device: env_string("ULLM_DEVICE", SQ8_WORKER_DEVICE),
-        execution_profile: env_string("ULLM_EXECUTION_PROFILE", SQ8_WORKER_EXECUTION_PROFILE),
-        context_length: env_usize(
-            "ULLM_MODEL_CONTEXT_LENGTH",
-            QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
-        ),
-        max_new_tokens: env_usize("ULLM_MAX_NEW_TOKENS", QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS),
-        vocab_size: env_usize("ULLM_VOCAB_SIZE", QWEN3_14B_VOCAB_SIZE),
-        eos_token_ids: env_usize_csv(
-            "ULLM_EOS_TOKEN_IDS",
-            &crate::sq8_serving_runtime::QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS,
-        ),
-        top_k: env_usize("ULLM_TOP_K", QWEN3_14B_SQ8_SERVING_TOP_K),
+    Sq8WorkerProfile::from_environment_with_defaults(&Sq8WorkerProfile::sq8_defaults())
+}
+
+impl Sq8WorkerProfile {
+    pub fn sq8_defaults() -> Self {
+        Self {
+            model: SQ8_WORKER_MODEL.to_string(),
+            model_revision: SQ8_WORKER_MODEL_REVISION.to_string(),
+            artifact_content_sha256: QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256.to_string(),
+            package_manifest_sha256: QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256.to_string(),
+            device: SQ8_WORKER_DEVICE.to_string(),
+            execution_profile: SQ8_WORKER_EXECUTION_PROFILE.to_string(),
+            context_length: QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+            max_new_tokens: QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS,
+            vocab_size: QWEN3_14B_VOCAB_SIZE,
+            eos_token_ids: crate::sq8_serving_runtime::QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS.to_vec(),
+            top_k: QWEN3_14B_SQ8_SERVING_TOP_K,
+        }
+    }
+
+    pub fn from_environment_with_defaults(defaults: &Self) -> Self {
+        Self {
+            model: env_string("ULLM_MODEL_ID", &defaults.model),
+            model_revision: env_string("ULLM_MODEL_REVISION", &defaults.model_revision),
+            artifact_content_sha256: env_string(
+                "ULLM_ARTIFACT_CONTENT_SHA256",
+                &defaults.artifact_content_sha256,
+            ),
+            package_manifest_sha256: env_string(
+                "ULLM_PACKAGE_MANIFEST_SHA256",
+                &defaults.package_manifest_sha256,
+            ),
+            device: env_string("ULLM_DEVICE", &defaults.device),
+            execution_profile: env_string("ULLM_EXECUTION_PROFILE", &defaults.execution_profile),
+            context_length: env_usize("ULLM_MODEL_CONTEXT_LENGTH", defaults.context_length),
+            max_new_tokens: env_usize("ULLM_MAX_NEW_TOKENS", defaults.max_new_tokens),
+            vocab_size: env_usize("ULLM_VOCAB_SIZE", defaults.vocab_size),
+            eos_token_ids: env_usize_csv("ULLM_EOS_TOKEN_IDS", &defaults.eos_token_ids),
+            top_k: env_usize("ULLM_TOP_K", defaults.top_k),
+        }
     }
 }
 
@@ -274,6 +290,13 @@ pub struct Sq8GenerateCommand {
 impl Sq8GenerateCommand {
     pub fn into_serving_request(self) -> Result<Sq8ServingRequest, Sq8WorkerProtocolError> {
         let profile = configured_worker_profile();
+        self.into_serving_request_with_profile(&profile)
+    }
+
+    pub fn into_serving_request_with_profile(
+        self,
+        profile: &Sq8WorkerProfile,
+    ) -> Result<Sq8ServingRequest, Sq8WorkerProtocolError> {
         if !self.sampling.temperature.is_finite()
             || !(0.0..=2.0).contains(&self.sampling.temperature)
             || !self.sampling.top_p.is_finite()
@@ -352,7 +375,15 @@ impl Sq8WorkerCommandInspection<'_> {
     }
 
     pub fn decode(self) -> Result<Sq8WorkerCommand, Sq8WorkerProtocolError> {
-        decode_inspected_sq8_worker_command(self.payload, self.kind)
+        let profile = configured_worker_profile();
+        self.decode_with_profile(&profile)
+    }
+
+    pub fn decode_with_profile(
+        self,
+        profile: &Sq8WorkerProfile,
+    ) -> Result<Sq8WorkerCommand, Sq8WorkerProtocolError> {
+        decode_inspected_sq8_worker_command(self.payload, self.kind, profile.context_length)
     }
 }
 
@@ -882,11 +913,32 @@ impl<'de> Deserialize<'de> for RawWorkerCommand {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(RawWorkerCommandVisitor)
+        deserializer.deserialize_map(RawWorkerCommandVisitor {
+            token_id_limit: configured_worker_profile().context_length,
+        })
     }
 }
 
-struct RawWorkerCommandVisitor;
+struct RawWorkerCommandSeed {
+    token_id_limit: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for RawWorkerCommandSeed {
+    type Value = RawWorkerCommand;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(RawWorkerCommandVisitor {
+            token_id_limit: self.token_id_limit,
+        })
+    }
+}
+
+struct RawWorkerCommandVisitor {
+    token_id_limit: usize,
+}
 
 impl<'de> Visitor<'de> for RawWorkerCommandVisitor {
     type Value = RawWorkerCommand;
@@ -914,7 +966,9 @@ impl<'de> Visitor<'de> for RawWorkerCommandVisitor {
                 "prompt_token_ids" => {
                     set_once(
                         &mut fields.prompt_token_ids,
-                        object.next_value_seed(BoundedTokenIdsSeed)?,
+                        object.next_value_seed(BoundedTokenIdsSeed {
+                            limit: self.token_id_limit,
+                        })?,
                     )?;
                 }
                 "max_new_tokens" => {
@@ -929,7 +983,9 @@ impl<'de> Visitor<'de> for RawWorkerCommandVisitor {
                 "eos_token_ids" => {
                     set_once(
                         &mut fields.eos_token_ids,
-                        object.next_value_seed(BoundedTokenIdsSeed)?,
+                        object.next_value_seed(BoundedTokenIdsSeed {
+                            limit: self.token_id_limit,
+                        })?,
                     )?;
                 }
                 "reason" => {
@@ -1050,12 +1106,17 @@ pub fn inspect_sq8_worker_command(
 fn decode_inspected_sq8_worker_command(
     payload: &[u8],
     inspected_kind: Sq8WorkerCommandKind,
+    token_id_limit: usize,
 ) -> Result<Sq8WorkerCommand, Sq8WorkerProtocolError> {
-    let raw = serde_json::from_slice::<RawWorkerCommand>(payload).map_err(|_| {
-        Sq8WorkerProtocolError::invalid_command(
-            "command does not match the strict SQ8 worker schema",
-        )
-    })?;
+    let mut deserializer = serde_json::Deserializer::from_slice(payload);
+    let raw = RawWorkerCommandSeed { token_id_limit }
+        .deserialize(&mut deserializer)
+        .and_then(|value| deserializer.end().map(|()| value))
+        .map_err(|_| {
+            Sq8WorkerProtocolError::invalid_command(
+                "command does not match the strict SQ8 worker schema",
+            )
+        })?;
     match raw {
         RawWorkerCommand::Generate {
             schema_version,
@@ -1402,7 +1463,9 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
     }
 }
 
-struct BoundedTokenIdsSeed;
+struct BoundedTokenIdsSeed {
+    limit: usize,
+}
 
 impl<'de> DeserializeSeed<'de> for BoundedTokenIdsSeed {
     type Value = Vec<u64>;
@@ -1411,11 +1474,13 @@ impl<'de> DeserializeSeed<'de> for BoundedTokenIdsSeed {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(BoundedTokenIdsVisitor)
+        deserializer.deserialize_seq(BoundedTokenIdsVisitor { limit: self.limit })
     }
 }
 
-struct BoundedTokenIdsVisitor;
+struct BoundedTokenIdsVisitor {
+    limit: usize,
+}
 
 impl<'de> Visitor<'de> for BoundedTokenIdsVisitor {
     type Value = Vec<u64>;
@@ -1428,11 +1493,9 @@ impl<'de> Visitor<'de> for BoundedTokenIdsVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let context_length = configured_worker_profile().context_length;
-        let mut values =
-            Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(context_length + 1));
+        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.limit + 1));
         while let Some(value) = sequence.next_element::<u64>()? {
-            if values.len() == context_length + 1 {
+            if values.len() == self.limit + 1 {
                 return Err(de::Error::custom("token ID array exceeds protocol limit"));
             }
             values.push(value);
@@ -1457,6 +1520,22 @@ impl Sq8WorkerTimings {
         predicted_ms: f64,
     ) -> Result<Self, Sq8WorkerProtocolError> {
         let profile = configured_worker_profile();
+        Self::from_elapsed_millis_with_profile(
+            prompt_n,
+            prompt_ms,
+            predicted_n,
+            predicted_ms,
+            &profile,
+        )
+    }
+
+    pub fn from_elapsed_millis_with_profile(
+        prompt_n: usize,
+        prompt_ms: f64,
+        predicted_n: usize,
+        predicted_ms: f64,
+        profile: &Sq8WorkerProfile,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
         Self::from_elapsed_millis_with_limits(
             prompt_n,
             prompt_ms,
@@ -1566,14 +1645,18 @@ pub enum Sq8WorkerEvent {
 impl Sq8WorkerEvent {
     pub fn ready() -> Self {
         let profile = configured_worker_profile();
+        Self::ready_with_profile(&profile)
+    }
+
+    pub fn ready_with_profile(profile: &Sq8WorkerProfile) -> Self {
         Self::Ready {
             schema_version: SQ8_WORKER_SCHEMA_VERSION,
-            model: profile.model,
-            model_revision: profile.model_revision,
-            artifact_content_sha256: profile.artifact_content_sha256,
-            package_manifest_sha256: profile.package_manifest_sha256,
-            device: profile.device,
-            execution_profile: profile.execution_profile,
+            model: profile.model.clone(),
+            model_revision: profile.model_revision.clone(),
+            artifact_content_sha256: profile.artifact_content_sha256.clone(),
+            package_manifest_sha256: profile.package_manifest_sha256.clone(),
+            device: profile.device.clone(),
+            execution_profile: profile.execution_profile.clone(),
             context_length: profile.context_length,
             max_new_tokens: profile.max_new_tokens,
         }
@@ -1700,8 +1783,7 @@ impl Sq8WorkerEvent {
         })
     }
 
-    fn validate(&self) -> Result<(), String> {
-        let profile = configured_worker_profile();
+    fn validate_with_profile(&self, profile: &Sq8WorkerProfile) -> Result<(), String> {
         match self {
             Self::Ready {
                 schema_version,
@@ -1820,13 +1902,19 @@ fn validate_event_common(schema_version: &str, request_id: &str) -> Result<(), S
 pub struct Sq8OrderedJsonlWriter<W> {
     inner: W,
     failed: bool,
+    profile: Sq8WorkerProfile,
 }
 
 impl<W: Write> Sq8OrderedJsonlWriter<W> {
     pub fn new(inner: W) -> Self {
+        Self::with_profile(inner, configured_worker_profile())
+    }
+
+    pub fn with_profile(inner: W, profile: Sq8WorkerProfile) -> Self {
         Self {
             inner,
             failed: false,
+            profile,
         }
     }
 
@@ -1835,7 +1923,7 @@ impl<W: Write> Sq8OrderedJsonlWriter<W> {
             return Err("SQ8 worker event writer is failed".into());
         }
         let result = (|| {
-            event.validate()?;
+            event.validate_with_profile(&self.profile)?;
             serde_json::to_writer(&mut self.inner, event)
                 .map_err(|_| "failed to serialize SQ8 worker event".to_string())?;
             self.inner
@@ -1914,7 +2002,15 @@ pub struct Sq8PromptProgressTracker {
 
 impl Sq8PromptProgressTracker {
     pub fn new(prompt_tokens: usize) -> Result<Self, String> {
-        if !(1..=configured_worker_profile().context_length).contains(&prompt_tokens) {
+        let profile = configured_worker_profile();
+        Self::new_with_profile(prompt_tokens, &profile)
+    }
+
+    pub fn new_with_profile(
+        prompt_tokens: usize,
+        profile: &Sq8WorkerProfile,
+    ) -> Result<Self, String> {
+        if !(1..=profile.context_length).contains(&prompt_tokens) {
             return Err("SQ8 worker progress prompt length is out of range".into());
         }
         Ok(Self {
