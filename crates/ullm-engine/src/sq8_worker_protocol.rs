@@ -2027,8 +2027,15 @@ impl Sq8PromptProgressTracker {
         execution_width: usize,
     ) -> Result<Option<usize>, String> {
         let remaining = self.prompt_tokens.saturating_sub(self.last_observed);
-        let expected_width = if remaining >= 128 { 128 } else { 1 };
-        if execution_width != expected_width
+        let valid_width = match execution_width {
+            // Token-at-a-time prefill is used by resident runtimes such as AQ4.
+            1 => remaining >= 1,
+            // Batched prefill remains aligned to the public 128-token progress
+            // cadence. The tail may continue token-at-a-time.
+            128 => remaining >= 128 && self.last_observed % 128 == 0,
+            _ => false,
+        };
+        if !valid_width
             || processed_prompt_tokens <= self.last_observed
             || processed_prompt_tokens > self.prompt_tokens
             || processed_prompt_tokens - self.last_observed != execution_width
@@ -2036,7 +2043,7 @@ impl Sq8PromptProgressTracker {
             return Err("SQ8 worker prompt progress is non-contiguous".into());
         }
         self.last_observed = processed_prompt_tokens;
-        if execution_width == 128 || processed_prompt_tokens == self.prompt_tokens {
+        if processed_prompt_tokens % 128 == 0 || processed_prompt_tokens == self.prompt_tokens {
             self.last_emitted = processed_prompt_tokens;
             if processed_prompt_tokens == self.prompt_tokens {
                 self.transition_emitted = true;
@@ -2938,7 +2945,7 @@ mod tests {
         );
     }
 
-    fn progress_points(prompt_tokens: usize) -> Vec<usize> {
+    fn batched_progress_points(prompt_tokens: usize) -> Vec<usize> {
         let mut tracker = Sq8PromptProgressTracker::new(prompt_tokens).unwrap();
         let mut points = Vec::new();
         let mut processed = 0;
@@ -2959,17 +2966,58 @@ mod tests {
         points
     }
 
+    fn tokenwise_progress_points(prompt_tokens: usize) -> Vec<usize> {
+        let mut tracker = Sq8PromptProgressTracker::new(prompt_tokens).unwrap();
+        let mut points = Vec::new();
+        for processed in 1..=prompt_tokens {
+            if let Some(point) = tracker.observe_unit(processed, 1).unwrap() {
+                points.push(point);
+            }
+        }
+        assert_eq!(tracker.observe_transition().unwrap(), None);
+        points
+    }
+
     #[test]
-    fn m128_progress_points_match_the_selected_product_cadence() {
-        assert_eq!(progress_points(127), vec![127]);
-        assert_eq!(progress_points(128), vec![128]);
-        assert_eq!(progress_points(129), vec![128, 129]);
-        assert_eq!(progress_points(256), vec![128, 256]);
-        assert_eq!(progress_points(257), vec![128, 256, 257]);
-        let points = progress_points(4095);
+    fn tokenwise_and_batched_prefill_have_the_same_wire_progress() {
+        for (prompt_tokens, expected) in [
+            (127, vec![127]),
+            (128, vec![128]),
+            (129, vec![128, 129]),
+            (1011, vec![128, 256, 384, 512, 640, 768, 896, 1011]),
+        ] {
+            assert_eq!(batched_progress_points(prompt_tokens), expected);
+            assert_eq!(tokenwise_progress_points(prompt_tokens), expected);
+        }
+
+        assert_eq!(batched_progress_points(256), vec![128, 256]);
+        assert_eq!(batched_progress_points(257), vec![128, 256, 257]);
+        let points = batched_progress_points(4095);
         assert_eq!(points.first(), Some(&128));
         assert_eq!(points.get(points.len() - 2), Some(&3968));
         assert_eq!(points.last(), Some(&4095));
         assert_eq!(points.len(), 32);
+    }
+
+    #[test]
+    fn prompt_progress_rejects_non_contiguous_invalid_and_overshooting_units() {
+        let mut non_contiguous = Sq8PromptProgressTracker::new(129).unwrap();
+        assert!(non_contiguous.observe_unit(2, 1).is_err());
+
+        let mut invalid_width = Sq8PromptProgressTracker::new(129).unwrap();
+        assert!(invalid_width.observe_unit(2, 2).is_err());
+
+        let mut unaligned_batch = Sq8PromptProgressTracker::new(256).unwrap();
+        assert_eq!(unaligned_batch.observe_unit(1, 1).unwrap(), None);
+        assert!(unaligned_batch.observe_unit(129, 128).is_err());
+
+        let mut overshoot = Sq8PromptProgressTracker::new(127).unwrap();
+        for processed in 1..127 {
+            overshoot.observe_unit(processed, 1).unwrap();
+        }
+        assert!(overshoot.observe_unit(128, 1).is_err());
+
+        let mut short_batch = Sq8PromptProgressTracker::new(127).unwrap();
+        assert!(short_batch.observe_unit(128, 128).is_err());
     }
 }

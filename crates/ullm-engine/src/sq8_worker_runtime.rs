@@ -2051,7 +2051,7 @@ mod tests {
             );
             publications.publish_started().unwrap();
             assert!(publications.publish_started().is_err());
-            assert!(publications.observe_prompt_unit(1, 1).is_err());
+            assert!(publications.observe_prompt_unit(2, 1).is_err());
             publications.observe_prompt_unit(128, 128).unwrap();
             assert!(publications.observe_prompt_unit(129, 128).is_err());
             publications.observe_prompt_unit(129, 1).unwrap();
