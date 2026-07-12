@@ -389,6 +389,73 @@ impl PositiveF32 {
     }
 }
 
+/// Mathematical normalization family.
+///
+/// These variants fix the real-valued mathematical operation. Accumulation
+/// precision and reduction order (for example F32 or F64 accumulation) are
+/// executor or backend implementation attributes and must be fixed by
+/// validation evidence; they do not change this graph semantic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizationKind {
+    /// Root-mean-square normalization without mean subtraction.
+    ///
+    /// For each vector normalized along the configured axis, this computes
+    /// `inv = 1 / sqrt(mean(x^2) + epsilon)` and applies `x * inv` before the
+    /// configured affine parameters. Epsilon is inside the square root.
+    Rms,
+    /// Layer normalization with mean subtraction and population variance.
+    ///
+    /// For each vector normalized along the configured axis, this computes
+    /// `mean = mean(x)`, `variance = mean((x - mean)^2)`, and
+    /// `inv = 1 / sqrt(variance + epsilon)`, then applies `(x - mean) * inv`
+    /// before the configured affine parameters.
+    Layer,
+}
+
+/// Learned affine parameters applied after normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizationAffine {
+    /// Multiplies normalized values by the sole learned scale vector.
+    ///
+    /// `GraphNode::weights` is `[scale]`.
+    Scale,
+    /// Multiplies normalized values by one plus the learned scale vector.
+    ///
+    /// This represents a unit-offset scale parameterization without tying the
+    /// graph contract to a model family or checkpoint tensor name.
+    /// `GraphNode::weights` is `[scale]`.
+    UnitOffsetScale,
+    /// Multiplies normalized values by a learned scale vector and adds a
+    /// learned bias vector.
+    ///
+    /// `GraphNode::weights` is `[scale, bias]` in that order.
+    ScaleAndBias,
+}
+
+impl NormalizationAffine {
+    fn weight_count(self) -> usize {
+        match self {
+            Self::Scale | Self::UnitOffsetScale => 1,
+            Self::ScaleAndBias => 2,
+        }
+    }
+}
+
+/// Logical tensor axis normalized by a normalization operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizationAxis {
+    /// Normalizes independently across the final logical tensor dimension.
+    Last,
+}
+
+impl NormalizationAxis {
+    fn validate(self) -> Result<(), String> {
+        match self {
+            Self::Last => Ok(()),
+        }
+    }
+}
+
 /// Typed activation semantic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationKind {
@@ -420,8 +487,19 @@ pub enum GraphNodeKind {
         vocab_size: usize,
         hidden_size: usize,
     },
-    /// Normalization.
-    Norm { epsilon: PositiveF32 },
+    /// Normalization with an explicit mathematical and affine contract.
+    ///
+    /// `GraphNode::weights` is `[scale]` for [`NormalizationAffine::Scale`]
+    /// and [`NormalizationAffine::UnitOffsetScale`], or `[scale, bias]` for
+    /// [`NormalizationAffine::ScaleAndBias`]. Scale and bias have the same
+    /// required shape, so adapters must bind them in this order; graph
+    /// validation cannot infer a reversed binding from tensor shapes.
+    Norm {
+        epsilon: PositiveF32,
+        kind: NormalizationKind,
+        affine: NormalizationAffine,
+        axis: NormalizationAxis,
+    },
     /// One linear projection.
     Linear { has_bias: bool },
     /// A group of projections with compatible input semantics.
@@ -461,8 +539,19 @@ pub enum GraphNodeKind {
     },
     /// Residual addition.
     Residual,
-    /// Final normalization.
-    FinalNorm { epsilon: PositiveF32 },
+    /// Final normalization with an explicit mathematical and affine contract.
+    ///
+    /// `GraphNode::weights` is `[scale]` for [`NormalizationAffine::Scale`]
+    /// and [`NormalizationAffine::UnitOffsetScale`], or `[scale, bias]` for
+    /// [`NormalizationAffine::ScaleAndBias`]. Scale and bias have the same
+    /// required shape, so adapters must bind them in this order; graph
+    /// validation cannot infer a reversed binding from tensor shapes.
+    FinalNorm {
+        epsilon: PositiveF32,
+        kind: NormalizationKind,
+        affine: NormalizationAffine,
+        axis: NormalizationAxis,
+    },
     /// Language-model head.
     LmHead { vocab_size: usize },
     /// Sampling operation.
@@ -479,8 +568,9 @@ impl GraphNodeKind {
                 ensure_nonzero(*vocab_size, "embedding vocab_size")?;
                 ensure_nonzero(*hidden_size, "embedding hidden_size")
             }
-            Self::Norm { epsilon } | Self::FinalNorm { epsilon } => {
-                epsilon.validate("normalization epsilon")
+            Self::Norm { epsilon, axis, .. } | Self::FinalNorm { epsilon, axis, .. } => {
+                epsilon.validate("normalization epsilon")?;
+                axis.validate()
             }
             Self::Linear { .. } | Self::Residual => Ok(()),
             Self::FusedLinearGroup { output_count } => {
@@ -547,7 +637,9 @@ impl GraphNodeKind {
         };
         match self {
             Self::Embedding { .. } => exact(1, 1, 1, 0),
-            Self::Norm { .. } | Self::FinalNorm { .. } => exact(1, 1, 1, 0),
+            Self::Norm { affine, .. } | Self::FinalNorm { affine, .. } => {
+                exact(1, 1, affine.weight_count(), 0)
+            }
             Self::Linear { has_bias } => exact(1, 1, if *has_bias { 2 } else { 1 }, 0),
             Self::FusedLinearGroup { output_count } => exact(1, *output_count, *output_count, 0),
             Self::RotaryPosition { .. } | Self::Activation { .. } => exact(1, 1, 0, 0),
@@ -678,7 +770,8 @@ impl GraphNode {
                     self.id.as_str(),
                 )
             }
-            GraphNodeKind::Norm { .. } | GraphNodeKind::FinalNorm { .. } => {
+            GraphNodeKind::Norm { affine, axis, .. }
+            | GraphNodeKind::FinalNorm { affine, axis, .. } => {
                 let input = value(&self.inputs[0], "normalization input")?;
                 let output = value(&self.outputs[0], "normalization output")?;
                 let scale = weight(&self.weights[0], "normalization scale")?;
@@ -690,10 +783,29 @@ impl GraphNode {
                 )?;
                 require_vector_shape(
                     scale,
-                    feature_width(input, "normalization input", self.id.as_str())?,
+                    normalization_axis_width(
+                        input,
+                        *axis,
+                        "normalization input",
+                        self.id.as_str(),
+                    )?,
                     "normalization scale",
                     self.id.as_str(),
-                )
+                )?;
+                if *affine == NormalizationAffine::ScaleAndBias {
+                    require_vector_shape(
+                        weight(&self.weights[1], "normalization bias")?,
+                        normalization_axis_width(
+                            input,
+                            *axis,
+                            "normalization input",
+                            self.id.as_str(),
+                        )?,
+                        "normalization bias",
+                        self.id.as_str(),
+                    )?;
+                }
+                Ok(())
             }
             GraphNodeKind::Linear { has_bias } => {
                 let input = value(&self.inputs[0], "linear input")?;
@@ -1173,6 +1285,17 @@ fn feature_width(tensor: &TensorSpec, label: &str, node_id: &str) -> Result<usiz
         .ok_or_else(|| format!("node {node_id} {label} must have at least one logical dimension"))
 }
 
+fn normalization_axis_width(
+    tensor: &TensorSpec,
+    axis: NormalizationAxis,
+    label: &str,
+    node_id: &str,
+) -> Result<usize, String> {
+    match axis {
+        NormalizationAxis::Last => feature_width(tensor, label, node_id),
+    }
+}
+
 fn checked_dimension_product(left: usize, right: usize, label: &str) -> Result<usize, String> {
     let product = left
         .checked_mul(right)
@@ -1377,6 +1500,9 @@ mod tests {
                     states: vec![],
                     kind: GraphNodeKind::Norm {
                         epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                        kind: NormalizationKind::Rms,
+                        affine: NormalizationAffine::Scale,
+                        axis: NormalizationAxis::Last,
                     },
                 },
                 GraphNode {
@@ -1550,6 +1676,116 @@ mod tests {
     }
 
     #[test]
+    fn model_graph_normalization_affines_validate_arity_and_bias_shape() {
+        let normalization = |kind, affine| GraphNodeKind::Norm {
+            epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+            kind,
+            affine,
+            axis: NormalizationAxis::Last,
+        };
+        let graph = |kind, affine, weights| {
+            unary_graph(
+                value("input", &[2, 4]),
+                vec![value("output", &[2, 4])],
+                weights,
+                vec![],
+                normalization(kind, affine),
+            )
+        };
+
+        graph(
+            NormalizationKind::Rms,
+            NormalizationAffine::Scale,
+            vec![weight("scale", &[4])],
+        )
+        .validate()
+        .unwrap();
+        graph(
+            NormalizationKind::Rms,
+            NormalizationAffine::UnitOffsetScale,
+            vec![weight("scale", &[4])],
+        )
+        .validate()
+        .unwrap();
+        graph(
+            NormalizationKind::Layer,
+            NormalizationAffine::ScaleAndBias,
+            vec![weight("scale", &[4]), weight("bias", &[4])],
+        )
+        .validate()
+        .unwrap();
+
+        let scale_extra_weight = graph(
+            NormalizationKind::Rms,
+            NormalizationAffine::Scale,
+            vec![weight("scale", &[4]), weight("unexpected-bias", &[4])],
+        );
+        assert!(
+            scale_extra_weight
+                .validate()
+                .unwrap_err()
+                .contains("weights=2")
+        );
+
+        let unit_offset_extra_weight = graph(
+            NormalizationKind::Rms,
+            NormalizationAffine::UnitOffsetScale,
+            vec![weight("scale", &[4]), weight("unexpected-bias", &[4])],
+        );
+        assert!(
+            unit_offset_extra_weight
+                .validate()
+                .unwrap_err()
+                .contains("weights=2")
+        );
+
+        let scale_and_bias_missing_bias = graph(
+            NormalizationKind::Layer,
+            NormalizationAffine::ScaleAndBias,
+            vec![weight("scale", &[4])],
+        );
+        assert!(
+            scale_and_bias_missing_bias
+                .validate()
+                .unwrap_err()
+                .contains("weights=1")
+        );
+
+        let mut scale_and_bias_bad_bias = graph(
+            NormalizationKind::Layer,
+            NormalizationAffine::ScaleAndBias,
+            vec![weight("scale", &[4]), weight("bias", &[4])],
+        );
+        scale_and_bias_bad_bias.weights[1].tensor = spec(&[3]);
+        assert!(
+            scale_and_bias_bad_bias
+                .validate()
+                .unwrap_err()
+                .contains("normalization bias")
+        );
+    }
+
+    #[test]
+    fn model_graph_final_norm_scale_and_bias_validates_bias_shape() {
+        let mut graph = unary_graph(
+            value("input", &[2, 4]),
+            vec![value("output", &[2, 4])],
+            vec![weight("scale", &[4]), weight("bias", &[4])],
+            vec![],
+            GraphNodeKind::FinalNorm {
+                epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                kind: NormalizationKind::Layer,
+                affine: NormalizationAffine::ScaleAndBias,
+                axis: NormalizationAxis::Last,
+            },
+        );
+        graph.validate().unwrap();
+
+        graph.weights[1].tensor = spec(&[3]);
+        assert!(graph.validate().unwrap_err().contains("normalization bias"));
+    }
+
+    #[test]
     fn model_graph_rejects_linear_fused_final_norm_and_lm_head_shape_mismatches() {
         let mut graph = unary_graph(
             value("input", &[2, 4]),
@@ -1596,6 +1832,9 @@ mod tests {
             vec![],
             GraphNodeKind::FinalNorm {
                 epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                kind: NormalizationKind::Rms,
+                affine: NormalizationAffine::Scale,
+                axis: NormalizationAxis::Last,
             },
         );
         graph.weights[0].tensor = spec(&[2, 2]);

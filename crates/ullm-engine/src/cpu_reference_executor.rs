@@ -12,16 +12,21 @@
 //! `TokensHidden`. `PackedRagged` and custom layouts carry no offset or stride metadata
 //! here, so they are rejected rather than interpreted incorrectly. `ActivationKind::Gelu`
 //! is also rejected because `ModelGraph` does not yet distinguish exact GELU from a tanh
-//! approximation.
+//! approximation. F32 host payloads must contain only finite values: this executor
+//! fail-closes NaN and infinity at execution admission, and checks generated F32 outputs
+//! before exposing them.
 //!
-//! TODO(P1-B2): integrate a typed partial-failure trace with
-//! `ProductionExecutionTrace`. This P1-B1 API returns no trace on error.
+//! This module records a bounded in-memory CPU trace, but does not generate a
+//! `ProductionExecutionTrace` JSON artifact. P2's resolved-registry trace collector owns
+//! that conversion because it adds implementation selection, phase, workspace, identity,
+//! and fallback evidence that does not belong to this stateless executor.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::model_graph::{
-    ActivationKind, GraphNode, GraphNodeKind, ModelGraph, NumericalFormat, TensorLayout,
-    TensorSpec, ValueId, WeightId,
+    ActivationKind, GraphNode, GraphNodeKind, MAX_GRAPH_DECLARATIONS, MAX_GRAPH_ENDPOINTS,
+    ModelGraph, NumericalFormat, TensorLayout, TensorSpec, ValueId, WeightId,
 };
 
 /// Maximum elements allowed in one CPU reference tensor.
@@ -34,6 +39,10 @@ pub const MAX_CPU_REFERENCE_TOTAL_ELEMENTS: usize = 8_388_608;
 /// one work unit. This guard keeps the deterministic reference path from accidentally
 /// becoming a long-running production kernel.
 pub const MAX_CPU_REFERENCE_WORK_UNITS: u64 = 50_000_000;
+/// Maximum completed node records retained in a typed CPU reference trace.
+pub const MAX_CPU_REFERENCE_TRACE_NODES: usize = 4_096;
+/// Maximum UTF-8 bytes retained in a typed CPU reference failure message.
+pub const MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES: usize = 1_024;
 
 /// Dense host tensor payloads for the CPU reference path.
 ///
@@ -41,6 +50,8 @@ pub const MAX_CPU_REFERENCE_WORK_UNITS: u64 = 50_000_000;
 /// values only as `RowMajor` or `TokensHidden`, and accepts token/index tensors only as
 /// `RowMajor`; constructors preserve other validated graph layouts so that execution can
 /// reject them explicitly instead of silently reinterpreting the payload.
+/// Shape and layout validation do not imply numerical admission: CPU reference execution
+/// rejects every non-finite F32 payload rather than propagating NaN or infinity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostTensor {
     /// Dense F32 values.
@@ -220,29 +231,353 @@ pub struct CpuReferenceExecution {
     pub outputs: BTreeMap<ValueId, HostTensor>,
 }
 
+/// Stable high-level classification of a failed CPU reference execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuReferenceFailureClass {
+    /// Graph, binding, input map, or host payload validation failed.
+    InvalidInput,
+    /// The graph requests a semantic, format, or layout this executor cannot run.
+    Unsupported,
+    /// A checked element, work, metadata, or allocation resource limit was reached.
+    Resource,
+    /// A numerical contract such as finiteness failed.
+    Numerical,
+    /// An executor invariant failed after valid admission.
+    Internal,
+}
+
+/// Attribute-free semantic node kind retained in a bounded execution trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuReferenceNodeKind {
+    Embedding,
+    Norm,
+    Linear,
+    FusedLinearGroup,
+    RotaryPosition,
+    DenseAttention,
+    RecurrentAttention,
+    Activation,
+    GatedMlp,
+    Residual,
+    FinalNorm,
+    LmHead,
+    Sampling,
+}
+
+impl From<&GraphNodeKind> for CpuReferenceNodeKind {
+    fn from(kind: &GraphNodeKind) -> Self {
+        match kind {
+            GraphNodeKind::Embedding { .. } => Self::Embedding,
+            GraphNodeKind::Norm { .. } => Self::Norm,
+            GraphNodeKind::Linear { .. } => Self::Linear,
+            GraphNodeKind::FusedLinearGroup { .. } => Self::FusedLinearGroup,
+            GraphNodeKind::RotaryPosition { .. } => Self::RotaryPosition,
+            GraphNodeKind::DenseAttention { .. } => Self::DenseAttention,
+            GraphNodeKind::RecurrentAttention { .. } => Self::RecurrentAttention,
+            GraphNodeKind::Activation { .. } => Self::Activation,
+            GraphNodeKind::GatedMlp { .. } => Self::GatedMlp,
+            GraphNodeKind::Residual => Self::Residual,
+            GraphNodeKind::FinalNorm { .. } => Self::FinalNorm,
+            GraphNodeKind::LmHead { .. } => Self::LmHead,
+            GraphNodeKind::Sampling { .. } => Self::Sampling,
+        }
+    }
+}
+
+impl CpuReferenceNodeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedding => "Embedding",
+            Self::Norm => "Norm",
+            Self::Linear => "Linear",
+            Self::FusedLinearGroup => "FusedLinearGroup",
+            Self::RotaryPosition => "RotaryPosition",
+            Self::DenseAttention => "DenseAttention",
+            Self::RecurrentAttention => "RecurrentAttention",
+            Self::Activation => "Activation",
+            Self::GatedMlp => "GatedMlp",
+            Self::Residual => "Residual",
+            Self::FinalNorm => "FinalNorm",
+            Self::LmHead => "LmHead",
+            Self::Sampling => "Sampling",
+        }
+    }
+}
+
+/// Stable node identity and semantic kind for a completed or failed node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuReferenceNodeRef {
+    pub id: crate::model_graph::NodeId,
+    pub kind: CpuReferenceNodeKind,
+}
+
+impl CpuReferenceNodeRef {
+    fn from_node(node: &GraphNode) -> Self {
+        Self {
+            id: node.id.clone(),
+            kind: CpuReferenceNodeKind::from(&node.kind),
+        }
+    }
+}
+
+/// Bounded ordered completion evidence shared by successful and failed executions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CpuReferenceExecutionTrace {
+    /// Exact count of nodes that completed successfully.
+    pub completed_node_count: usize,
+    /// Ordered prefix of completed nodes, bounded by [`MAX_CPU_REFERENCE_TRACE_NODES`].
+    pub completed_nodes: Vec<CpuReferenceNodeRef>,
+    /// Whether node IDs after the retained ordered prefix were omitted.
+    pub completed_nodes_truncated: bool,
+}
+
+/// Typed terminal failure with bounded diagnostic context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuReferenceExecutionFailure {
+    pub class: CpuReferenceFailureClass,
+    /// `None` only when no graph node can be identified, such as map validation.
+    pub failed_node: Option<CpuReferenceNodeRef>,
+    pub trace: CpuReferenceExecutionTrace,
+    /// Low-cardinality static diagnostic code for later registry-trace conversion.
+    pub reason_code: &'static str,
+    /// UTF-8-safe bounded diagnostic text without prompt or token content.
+    pub message: String,
+}
+
+impl fmt::Display for CpuReferenceExecutionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(node) = &self.failed_node {
+            return write!(
+                formatter,
+                "CPU reference node {} ({}) failed: {}",
+                node.id.as_str(),
+                node.kind.as_str(),
+                self.message
+            );
+        }
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CpuReferenceExecutionFailure {}
+
+/// Successful typed CPU reference result with outputs and bounded completion evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpuReferenceTracedExecution {
+    pub outputs: BTreeMap<ValueId, HostTensor>,
+    pub trace: CpuReferenceExecutionTrace,
+}
+
+#[derive(Debug, Clone)]
+struct CpuReferenceFault {
+    class: CpuReferenceFailureClass,
+    failed_node: Option<CpuReferenceNodeRef>,
+    reason_code: &'static str,
+    message: String,
+}
+
+impl CpuReferenceFault {
+    fn global(
+        class: CpuReferenceFailureClass,
+        reason_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            class,
+            failed_node: None,
+            reason_code,
+            message: bounded_failure_message(message.into()),
+        }
+    }
+
+    fn node(
+        class: CpuReferenceFailureClass,
+        node: &GraphNode,
+        reason_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        let prefix = node_error_prefix(node);
+        let message = message.strip_prefix(&prefix).unwrap_or(&message).to_owned();
+        Self {
+            class,
+            failed_node: Some(CpuReferenceNodeRef::from_node(node)),
+            reason_code,
+            message: bounded_failure_message(message),
+        }
+    }
+
+    fn into_failure(self, trace: CpuReferenceExecutionTrace) -> CpuReferenceExecutionFailure {
+        CpuReferenceExecutionFailure {
+            class: self.class,
+            failed_node: self.failed_node,
+            trace,
+            reason_code: self.reason_code,
+            message: self.message,
+        }
+    }
+}
+
+fn bounded_failure_message(mut message: String) -> String {
+    if message.len() <= MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES {
+        return message;
+    }
+    let mut end = MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message
+}
+
+trait CompletedNodeSink {
+    fn record_completed(&mut self, node: &GraphNode) -> Result<(), CpuReferenceFault>;
+}
+
+#[derive(Debug)]
+struct BoundedCompletedNodes {
+    trace: CpuReferenceExecutionTrace,
+    limit: usize,
+}
+
+impl BoundedCompletedNodes {
+    fn new() -> Self {
+        Self::with_limit(MAX_CPU_REFERENCE_TRACE_NODES)
+    }
+
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            trace: CpuReferenceExecutionTrace::default(),
+            limit,
+        }
+    }
+
+    fn into_trace(self) -> CpuReferenceExecutionTrace {
+        self.trace
+    }
+}
+
+impl CompletedNodeSink for BoundedCompletedNodes {
+    fn record_completed(&mut self, node: &GraphNode) -> Result<(), CpuReferenceFault> {
+        // ModelGraph validation bounds the node count, so saturation is unreachable
+        // in admitted executions while still keeping trace collection panic-free.
+        self.trace.completed_node_count = self.trace.completed_node_count.saturating_add(1);
+        if self.trace.completed_nodes_truncated || self.trace.completed_nodes.len() >= self.limit {
+            self.trace.completed_nodes_truncated = true;
+            return Ok(());
+        }
+        if self.trace.completed_nodes.try_reserve(1).is_err() {
+            self.trace.completed_nodes_truncated = true;
+            return Ok(());
+        }
+        self.trace
+            .completed_nodes
+            .push(CpuReferenceNodeRef::from_node(node));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct LegacyCompletedNodes {
+    ids: Vec<crate::model_graph::NodeId>,
+}
+
+impl CompletedNodeSink for LegacyCompletedNodes {
+    fn record_completed(&mut self, node: &GraphNode) -> Result<(), CpuReferenceFault> {
+        self.ids.try_reserve(1).map_err(|_| {
+            CpuReferenceFault::node(
+                CpuReferenceFailureClass::Resource,
+                node,
+                "trace_metadata_allocation",
+                "CPU reference execution trace allocation failed",
+            )
+        })?;
+        self.ids.push(node.id.clone());
+        Ok(())
+    }
+}
+
 /// Stateless deterministic CPU reference executor.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuReferenceExecutor;
 
 impl CpuReferenceExecutor {
-    /// Executes the supported stateless F32 graph subset.
+    /// Compatibility wrapper that retains the existing result type and string-error surface.
     ///
-    /// Inputs and logical weights must be exact maps: missing and extra entries are
-    /// rejected so that a mistaken binding cannot be hidden by unused data.
+    /// Successful results retain [`CpuReferenceExecution::executed_node_ids`] and
+    /// [`CpuReferenceExecution::outputs`]. Failures are rendered as the legacy `String`
+    /// surface. This wrapper applies the current executor contract, including fail-closed
+    /// rejection of non-finite F32 payloads; new integrations should use
+    /// [`Self::execute_traced`] for the typed class, failed-node identity, and bounded
+    /// completion evidence.
     pub fn execute(
         &self,
         graph: &ModelGraph,
         inputs: BTreeMap<ValueId, HostTensor>,
         weights: BTreeMap<WeightId, HostTensor>,
     ) -> Result<CpuReferenceExecution, String> {
-        graph.validate()?;
-        validate_exact_keys(&inputs, &graph.inputs, "graph input")?;
-        let mut graph_weight_ids = Vec::new();
-        graph_weight_ids
-            .try_reserve(graph.weights.len())
-            .map_err(|_| "CPU reference logical weight ID allocation failed")?;
-        graph_weight_ids.extend(graph.weights.iter().map(|weight| weight.id.clone()));
-        validate_exact_keys(&weights, &graph_weight_ids, "logical weight")?;
+        let mut completed = LegacyCompletedNodes::default();
+        let outputs = self
+            .execute_core(graph, inputs, weights, &mut completed)
+            .map_err(|fault| {
+                fault
+                    .into_failure(CpuReferenceExecutionTrace::default())
+                    .to_string()
+            })?;
+        Ok(CpuReferenceExecution {
+            executed_node_ids: completed.ids,
+            outputs,
+        })
+    }
+
+    /// Executes with typed terminal failure information and bounded completion evidence.
+    pub fn execute_traced(
+        &self,
+        graph: &ModelGraph,
+        inputs: BTreeMap<ValueId, HostTensor>,
+        weights: BTreeMap<WeightId, HostTensor>,
+    ) -> Result<CpuReferenceTracedExecution, CpuReferenceExecutionFailure> {
+        let mut completed = BoundedCompletedNodes::new();
+        match self.execute_core(graph, inputs, weights, &mut completed) {
+            Ok(outputs) => Ok(CpuReferenceTracedExecution {
+                outputs,
+                trace: completed.into_trace(),
+            }),
+            Err(fault) => Err(fault.into_failure(completed.into_trace())),
+        }
+    }
+
+    fn execute_core<S: CompletedNodeSink>(
+        &self,
+        graph: &ModelGraph,
+        inputs: BTreeMap<ValueId, HostTensor>,
+        weights: BTreeMap<WeightId, HostTensor>,
+        completed: &mut S,
+    ) -> Result<BTreeMap<ValueId, HostTensor>, CpuReferenceFault> {
+        graph.validate().map_err(|message| {
+            CpuReferenceFault::global(
+                CpuReferenceFailureClass::InvalidInput,
+                "graph_validation",
+                message,
+            )
+        })?;
+        validate_binding_map_admission(&inputs, MAX_GRAPH_ENDPOINTS, "graph input").map_err(
+            |message| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "input_map",
+                    message,
+                )
+            },
+        )?;
+        validate_binding_map_admission(&weights, MAX_GRAPH_DECLARATIONS, "logical weight")
+            .map_err(|message| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "weight_map",
+                    message,
+                )
+            })?;
 
         let value_specs = graph
             .values
@@ -254,65 +589,166 @@ impl CpuReferenceExecutor {
             .iter()
             .map(|weight| (weight.id.clone(), &weight.tensor))
             .collect::<BTreeMap<_, _>>();
+        let graph_input_ids = graph
+            .inputs
+            .iter()
+            .map(|input_id| (input_id.clone(), ()))
+            .collect::<BTreeMap<_, _>>();
+        validate_exact_keys(&inputs, &graph_input_ids, "graph input").map_err(|message| {
+            CpuReferenceFault::global(CpuReferenceFailureClass::InvalidInput, "input_map", message)
+        })?;
+        validate_exact_keys(&weights, &weight_specs, "logical weight").map_err(|message| {
+            CpuReferenceFault::global(
+                CpuReferenceFailureClass::InvalidInput,
+                "weight_map",
+                message,
+            )
+        })?;
         let resource_plan = preflight_graph(graph, &value_specs, &weight_specs)?;
 
         for input_id in &graph.inputs {
-            let tensor = inputs
-                .get(input_id)
-                .ok_or_else(|| format!("missing graph input {}", input_id.as_str()))?;
+            let tensor = inputs.get(input_id).ok_or_else(|| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "input_map",
+                    format!("missing graph input {}", input_id.as_str()),
+                )
+            })?;
             validate_tensor_against(
                 tensor,
-                value_specs
-                    .get(input_id)
-                    .ok_or_else(|| format!("missing graph input spec {}", input_id.as_str()))?,
+                value_specs.get(input_id).ok_or_else(|| {
+                    CpuReferenceFault::global(
+                        CpuReferenceFailureClass::Internal,
+                        "value_spec_lookup",
+                        format!("missing graph input spec {}", input_id.as_str()),
+                    )
+                })?,
                 &format!("graph input {}", input_id.as_str()),
-            )?;
+            )
+            .map_err(|message| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "input_payload",
+                    message,
+                )
+            })?;
+            validate_finite_host_tensor(tensor, &format!("graph input {}", input_id.as_str()))
+                .map_err(|message| {
+                    CpuReferenceFault::global(
+                        CpuReferenceFailureClass::Numerical,
+                        "nonfinite_input",
+                        message,
+                    )
+                })?;
             validate_cpu_input_layout(
-                value_specs
-                    .get(input_id)
-                    .ok_or_else(|| format!("missing graph input spec {}", input_id.as_str()))?,
+                value_specs.get(input_id).ok_or_else(|| {
+                    CpuReferenceFault::global(
+                        CpuReferenceFailureClass::Internal,
+                        "value_spec_lookup",
+                        format!("missing graph input spec {}", input_id.as_str()),
+                    )
+                })?,
                 &format!("graph input {}", input_id.as_str()),
-            )?;
+            )
+            .map_err(|message| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::Unsupported,
+                    "input_layout",
+                    message,
+                )
+            })?;
         }
         for (weight_id, tensor) in &weights {
-            let spec = weight_specs
-                .get(weight_id)
-                .ok_or_else(|| format!("unknown logical weight {}", weight_id.as_str()))?;
+            let spec = weight_specs.get(weight_id).ok_or_else(|| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "weight_map",
+                    format!("unknown logical weight {}", weight_id.as_str()),
+                )
+            })?;
             if spec.format != NumericalFormat::F32 {
-                return Err(format!(
-                    "CPU reference does not materialize non-F32 logical weight {} with format {}",
-                    weight_id.as_str(),
-                    spec.format.as_str()
+                return Err(CpuReferenceFault::global(
+                    CpuReferenceFailureClass::Unsupported,
+                    "weight_format",
+                    format!(
+                        "CPU reference does not materialize non-F32 logical weight {} with format {}",
+                        weight_id.as_str(),
+                        spec.format.as_str()
+                    ),
                 ));
             }
             validate_tensor_against(
                 tensor,
                 spec,
                 &format!("logical weight {}", weight_id.as_str()),
-            )?;
-            validate_cpu_weight_layout(spec, &format!("logical weight {}", weight_id.as_str()))?;
+            )
+            .map_err(|message| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "weight_payload",
+                    message,
+                )
+            })?;
+            validate_finite_host_tensor(tensor, &format!("logical weight {}", weight_id.as_str()))
+                .map_err(|message| {
+                    CpuReferenceFault::global(
+                        CpuReferenceFailureClass::Numerical,
+                        "nonfinite_weight",
+                        message,
+                    )
+                })?;
+            validate_cpu_weight_layout(spec, &format!("logical weight {}", weight_id.as_str()))
+                .map_err(|message| {
+                    CpuReferenceFault::global(
+                        CpuReferenceFailureClass::Unsupported,
+                        "weight_layout",
+                        message,
+                    )
+                })?;
         }
 
-        let initial_payload_elements = checked_payload_elements(&inputs, "graph input payload")?
-            .checked_add(checked_payload_elements(
-                &weights,
-                "logical weight payload",
-            )?)
+        let initial_payload_elements = checked_payload_elements(&inputs, "graph input payload")
+            .map_err(|message| {
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "input_payload",
+                    message,
+                )
+            })?
+            .checked_add(
+                checked_payload_elements(&weights, "logical weight payload").map_err(
+                    |message| {
+                        CpuReferenceFault::global(
+                            CpuReferenceFailureClass::InvalidInput,
+                            "weight_payload",
+                            message,
+                        )
+                    },
+                )?,
+            )
             .ok_or_else(|| {
-                "CPU reference initial payload element count overflows usize".to_string()
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::Resource,
+                    "element_budget",
+                    "CPU reference initial payload element count overflows usize",
+                )
             })?;
         let planned_total_elements = checked_total_element_budget(
             initial_payload_elements,
             resource_plan.execution_elements,
             MAX_CPU_REFERENCE_TOTAL_ELEMENTS,
-        )?;
+        )
+        .map_err(|message| {
+            CpuReferenceFault::global(
+                CpuReferenceFailureClass::Resource,
+                "element_budget",
+                message,
+            )
+        })?;
 
         let mut values = inputs;
         let mut allocated_elements = initial_payload_elements;
-        let mut executed_node_ids = Vec::new();
-        executed_node_ids
-            .try_reserve(graph.nodes.len())
-            .map_err(|_| "CPU reference execution trace allocation failed")?;
+        let mut runtime = RuntimeExecutionContext::default();
         for node in &graph.nodes {
             let node_outputs = self.execute_node(
                 node,
@@ -321,37 +757,54 @@ impl CpuReferenceExecutor {
                 &value_specs,
                 &weight_specs,
                 &mut allocated_elements,
+                &mut runtime,
             )?;
             for (value_id, tensor) in node_outputs {
+                validate_finite_host_tensor(&tensor, &format!("node output {}", value_id.as_str()))
+                    .map_err(|message| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Numerical,
+                            node,
+                            "nonfinite_output",
+                            message,
+                        )
+                    })?;
                 if values.contains_key(&value_id) {
-                    return Err(node_error(
+                    return Err(CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Internal,
                         node,
-                        &format!("would overwrite existing value {}", value_id.as_str()),
+                        "output_overwrite",
+                        format!("would overwrite existing value {}", value_id.as_str()),
                     ));
                 }
                 values.insert(value_id, tensor);
             }
-            executed_node_ids.push(node.id.clone());
+            completed.record_completed(node)?;
         }
 
         if allocated_elements != planned_total_elements {
-            return Err("CPU reference allocation plan disagrees with execution accounting".into());
+            return Err(CpuReferenceFault::global(
+                CpuReferenceFailureClass::Internal,
+                "allocation_plan_mismatch",
+                "CPU reference allocation plan disagrees with execution accounting",
+            ));
         }
 
         let mut outputs = BTreeMap::new();
         for output_id in &graph.outputs {
             let output = values.remove(output_id).ok_or_else(|| {
-                format!(
-                    "CPU reference final output {} is unavailable",
-                    output_id.as_str()
+                CpuReferenceFault::global(
+                    CpuReferenceFailureClass::Internal,
+                    "output_unavailable",
+                    format!(
+                        "CPU reference final output {} is unavailable",
+                        output_id.as_str()
+                    ),
                 )
             })?;
             outputs.insert(output_id.clone(), output);
         }
-        Ok(CpuReferenceExecution {
-            executed_node_ids,
-            outputs,
-        })
+        Ok(outputs)
     }
 
     fn execute_node(
@@ -362,15 +815,16 @@ impl CpuReferenceExecutor {
         value_specs: &BTreeMap<ValueId, &TensorSpec>,
         weight_specs: &BTreeMap<WeightId, &TensorSpec>,
         allocated_elements: &mut usize,
-    ) -> Result<Vec<(ValueId, HostTensor)>, String> {
+        runtime: &mut RuntimeExecutionContext,
+    ) -> Result<Vec<(ValueId, HostTensor)>, CpuReferenceFault> {
         match &node.kind {
             GraphNodeKind::Embedding {
                 vocab_size,
                 hidden_size,
             } => {
-                let input = node_input(node, values, 0)?;
-                let weight = node_weight(node, weights, weight_specs, 0)?;
-                let output_spec = node_output_spec(node, value_specs, 0)?;
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let weight = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
                 let output = embedding_f32(
                     input,
                     weight,
@@ -378,57 +832,84 @@ impl CpuReferenceExecutor {
                     *hidden_size,
                     output_spec,
                     allocated_elements,
+                    runtime,
                 )
-                .map_err(|error| node_error(node, &error))?;
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::Linear { has_bias } => {
-                let input = node_input(node, values, 0)?;
-                let matrix = node_weight(node, weights, weight_specs, 0)?;
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let matrix = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
                 let bias = if *has_bias {
-                    Some(node_weight(node, weights, weight_specs, 1)?)
+                    Some(node_internal(
+                        node,
+                        node_weight(node, weights, weight_specs, 1),
+                    )?)
                 } else {
                     None
                 };
-                let output_spec = node_output_spec(node, value_specs, 0)?;
-                let output = linear_f32(input, matrix, bias, output_spec, allocated_elements)
-                    .map_err(|error| node_error(node, &error))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = linear_f32(
+                    input,
+                    matrix,
+                    bias,
+                    output_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::FusedLinearGroup { output_count } => {
-                let input = node_input(node, values, 0)?;
+                let input = node_internal(node, node_input(node, values, 0))?;
                 let mut outputs = Vec::new();
                 outputs.try_reserve(*output_count).map_err(|_| {
-                    node_error(node, "fused linear output metadata allocation failed")
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "metadata_allocation",
+                        "fused linear output metadata allocation failed",
+                    )
                 })?;
                 for index in 0..*output_count {
-                    let matrix = node_weight(node, weights, weight_specs, index)?;
-                    let output_spec = node_output_spec(node, value_specs, index)?;
-                    let output = linear_f32(input, matrix, None, output_spec, allocated_elements)
-                        .map_err(|error| node_error(node, &error))?;
+                    let matrix =
+                        node_internal(node, node_weight(node, weights, weight_specs, index))?;
+                    let output_spec =
+                        node_internal(node, node_output_spec(node, value_specs, index))?;
+                    let output = linear_f32(
+                        input,
+                        matrix,
+                        None,
+                        output_spec,
+                        allocated_elements,
+                        runtime,
+                    )
+                    .map_err(|error| runtime_node_fault(node, runtime, error))?;
                     outputs.push((node.outputs[index].clone(), output));
                 }
                 Ok(outputs)
             }
             GraphNodeKind::Activation { kind } => {
-                let input = node_input(node, values, 0)?;
-                let output_spec = node_output_spec(node, value_specs, 0)?;
-                let output = activation_f32(input, kind, output_spec, allocated_elements)
-                    .map_err(|error| node_error(node, &error))?;
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = activation_f32(input, kind, output_spec, allocated_elements, runtime)
+                    .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::GatedMlp {
                 intermediate_size,
                 activation,
             } => {
-                let input = node_input(node, values, 0)?;
-                let gate = node_weight(node, weights, weight_specs, 0)?;
-                let up = node_weight(node, weights, weight_specs, 1)?;
-                let down = node_weight(node, weights, weight_specs, 2)?;
-                let output_spec = node_output_spec(node, value_specs, 0)?;
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let gate = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let up = node_internal(node, node_weight(node, weights, weight_specs, 1))?;
+                let down = node_internal(node, node_weight(node, weights, weight_specs, 2))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
                 if node.weights.len() != 3 {
-                    return Err(node_error(
+                    return Err(CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Internal,
                         node,
+                        "node_arity",
                         "CPU reference gated MLP requires exactly gate, up, and down weights",
                     ));
                 }
@@ -441,41 +922,93 @@ impl CpuReferenceExecutor {
                     activation,
                     output_spec,
                     allocated_elements,
+                    runtime,
                 )
-                .map_err(|error| node_error(node, &error))?;
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::Residual => {
-                let left = node_input(node, values, 0)?;
-                let right = node_input(node, values, 1)?;
-                let output_spec = node_output_spec(node, value_specs, 0)?;
-                let output = residual_f32(left, right, output_spec, allocated_elements)
-                    .map_err(|error| node_error(node, &error))?;
+                let left = node_internal(node, node_input(node, values, 0))?;
+                let right = node_internal(node, node_input(node, values, 1))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = residual_f32(left, right, output_spec, allocated_elements, runtime)
+                    .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::LmHead { .. } => {
-                let input = node_input(node, values, 0)?;
-                let matrix = node_weight(node, weights, weight_specs, 0)?;
-                let output_spec = node_output_spec(node, value_specs, 0)?;
-                let output = linear_f32(input, matrix, None, output_spec, allocated_elements)
-                    .map_err(|error| node_error(node, &error))?;
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let matrix = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = linear_f32(
+                    input,
+                    matrix,
+                    None,
+                    output_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
-            GraphNodeKind::Norm { .. } | GraphNodeKind::FinalNorm { .. } => Err(node_error(
-                node,
-                "unsupported CPU reference node: normalization semantic is not yet specified as RMSNorm or another contract",
-            )),
+            GraphNodeKind::Norm { .. } | GraphNodeKind::FinalNorm { .. } => {
+                Err(CpuReferenceFault::node(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "unsupported_node",
+                    "unsupported CPU reference node: normalization semantic is not yet specified as RMSNorm or another contract",
+                ))
+            }
             GraphNodeKind::RotaryPosition { .. }
             | GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
-            | GraphNodeKind::Sampling { .. } => Err(node_error(
+            | GraphNodeKind::Sampling { .. } => Err(CpuReferenceFault::node(
+                CpuReferenceFailureClass::Unsupported,
                 node,
+                "unsupported_node",
                 &format!(
                     "unsupported CPU reference node kind {}",
                     node_kind_name(&node.kind)
                 ),
             )),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RuntimeExecutionContext {
+    allocation_failed: bool,
+}
+
+fn node_internal<T>(node: &GraphNode, result: Result<T, String>) -> Result<T, CpuReferenceFault> {
+    result.map_err(|message| {
+        CpuReferenceFault::node(
+            CpuReferenceFailureClass::Internal,
+            node,
+            "runtime_invariant",
+            message,
+        )
+    })
+}
+
+fn runtime_node_fault(
+    node: &GraphNode,
+    runtime: &RuntimeExecutionContext,
+    message: String,
+) -> CpuReferenceFault {
+    if runtime.allocation_failed {
+        CpuReferenceFault::node(
+            CpuReferenceFailureClass::Resource,
+            node,
+            "allocation",
+            message,
+        )
+    } else {
+        CpuReferenceFault::node(
+            CpuReferenceFailureClass::InvalidInput,
+            node,
+            "runtime_input",
+            message,
+        )
     }
 }
 
@@ -489,198 +1022,490 @@ fn preflight_graph(
     graph: &ModelGraph,
     value_specs: &BTreeMap<ValueId, &TensorSpec>,
     weight_specs: &BTreeMap<WeightId, &TensorSpec>,
-) -> Result<ResourcePlan, String> {
+) -> Result<ResourcePlan, CpuReferenceFault> {
     let mut plan = ResourcePlan::default();
     for node in &graph.nodes {
         if !node.states.is_empty() {
-            return Err(node_error(
+            return Err(CpuReferenceFault::node(
+                CpuReferenceFailureClass::Unsupported,
                 node,
+                "stateful_node",
                 "stateful execution is unsupported by the stateless CPU reference",
             ));
         }
         match &node.kind {
             GraphNodeKind::Embedding { .. } => {
-                let input = node_input_spec(node, value_specs, 0)?;
-                let output = node_output_spec(node, value_specs, 0)?;
-                let weight = node_weight_spec(node, weight_specs, 0)?;
-                validate_cpu_token_spec(input).map_err(|error| node_error(node, &error))?;
-                validate_cpu_embedding_output_spec(output)
-                    .map_err(|error| node_error(node, &error))?;
-                validate_cpu_weight_layout(weight, "embedding weight")
-                    .map_err(|error| node_error(node, &error))?;
-                reserve_output_elements(&mut plan, node, output)?;
-                let output_elements = spec_elements(output, "embedding output")
-                    .map_err(|error| node_error(node, &error))?;
-                add_work_units(
-                    &mut plan,
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    u64::try_from(output_elements)
-                        .map_err(|_| node_error(node, "embedding output elements exceed u64"))?,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                let weight = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "token_contract",
+                    validate_cpu_token_spec(input),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "embedding_layout",
+                    validate_cpu_embedding_output_spec(output),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "weight_layout",
+                    validate_cpu_weight_layout(weight, "embedding weight"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                let output_elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(output, "embedding output"),
+                )?;
+                let work = u64::try_from(output_elements).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        "embedding output elements exceed u64",
+                    )
+                })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
                 )?;
             }
             GraphNodeKind::Linear { has_bias } => {
-                let input = node_input_spec(node, value_specs, 0)?;
-                let output = node_output_spec(node, value_specs, 0)?;
-                validate_cpu_value_spec(input, "linear input")
-                    .map_err(|error| node_error(node, &error))?;
-                validate_cpu_value_spec(output, "linear output")
-                    .map_err(|error| node_error(node, &error))?;
-                require_matching_value_layout(
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    "linear input",
-                    input,
-                    "linear output",
-                    output,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
                 )?;
-                validate_cpu_weight_layout(
-                    node_weight_spec(node, weight_specs, 0)?,
-                    "linear weight",
-                )
-                .map_err(|error| node_error(node, &error))?;
-                if *has_bias {
-                    validate_cpu_weight_layout(
-                        node_weight_spec(node, weight_specs, 1)?,
-                        "linear bias",
-                    )
-                    .map_err(|error| node_error(node, &error))?;
-                }
-                plan_linear(&mut plan, node, input, output)?;
-            }
-            GraphNodeKind::FusedLinearGroup { output_count } => {
-                let input = node_input_spec(node, value_specs, 0)?;
-                validate_cpu_value_spec(input, "fused linear input")
-                    .map_err(|error| node_error(node, &error))?;
-                for index in 0..*output_count {
-                    let output = node_output_spec(node, value_specs, index)?;
-                    validate_cpu_value_spec(output, "fused linear output")
-                        .map_err(|error| node_error(node, &error))?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "linear input"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(output, "linear output"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
                     require_matching_value_layout(
                         node,
-                        "fused linear input",
+                        "linear input",
                         input,
-                        "fused linear output",
+                        "linear output",
                         output,
+                    ),
+                )?;
+                let weight = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "weight_layout",
+                    validate_cpu_weight_layout(weight, "linear weight"),
+                )?;
+                if *has_bias {
+                    let bias = preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_weight_spec(node, weight_specs, 1),
                     )?;
-                    validate_cpu_weight_layout(
-                        node_weight_spec(node, weight_specs, index)?,
-                        "fused linear weight",
-                    )
-                    .map_err(|error| node_error(node, &error))?;
-                    plan_linear(&mut plan, node, input, output)?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "weight_layout",
+                        validate_cpu_weight_layout(bias, "linear bias"),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    plan_linear(&mut plan, node, input, output),
+                )?;
+            }
+            GraphNodeKind::FusedLinearGroup { output_count } => {
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "fused linear input"),
+                )?;
+                for index in 0..*output_count {
+                    let output = preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_output_spec(node, value_specs, index),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(output, "fused linear output"),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "layout_mismatch",
+                        require_matching_value_layout(
+                            node,
+                            "fused linear input",
+                            input,
+                            "fused linear output",
+                            output,
+                        ),
+                    )?;
+                    let weight = preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_weight_spec(node, weight_specs, index),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "weight_layout",
+                        validate_cpu_weight_layout(weight, "fused linear weight"),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        plan_linear(&mut plan, node, input, output),
+                    )?;
                 }
             }
             GraphNodeKind::Activation { kind } => {
-                let input = node_input_spec(node, value_specs, 0)?;
-                let output = node_output_spec(node, value_specs, 0)?;
-                validate_cpu_value_spec(input, "activation input")
-                    .map_err(|error| node_error(node, &error))?;
-                validate_cpu_value_spec(output, "activation output")
-                    .map_err(|error| node_error(node, &error))?;
-                require_matching_value_layout(
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    "activation input",
-                    input,
-                    "activation output",
-                    output,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
                 )?;
-                validate_cpu_activation(kind).map_err(|error| node_error(node, &error))?;
-                reserve_output_elements(&mut plan, node, output)?;
-                let output_elements = spec_elements(output, "activation output")
-                    .map_err(|error| node_error(node, &error))?;
-                add_work_units(
-                    &mut plan,
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    u64::try_from(output_elements)
-                        .map_err(|_| node_error(node, "activation output elements exceed u64"))?,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "activation input"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(output, "activation output"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "activation input",
+                        input,
+                        "activation output",
+                        output,
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "activation",
+                    validate_cpu_activation(kind),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                let elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(output, "activation output"),
+                )?;
+                let work = u64::try_from(elements).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        "activation output elements exceed u64",
+                    )
+                })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
                 )?;
             }
             GraphNodeKind::GatedMlp {
                 intermediate_size,
                 activation,
             } => {
-                let input = node_input_spec(node, value_specs, 0)?;
-                let output = node_output_spec(node, value_specs, 0)?;
-                validate_cpu_value_spec(input, "gated MLP input")
-                    .map_err(|error| node_error(node, &error))?;
-                validate_cpu_value_spec(output, "gated MLP output")
-                    .map_err(|error| node_error(node, &error))?;
-                require_matching_value_layout(
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    "gated MLP input",
-                    input,
-                    "gated MLP output",
-                    output,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "gated MLP input"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(output, "gated MLP output"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "gated MLP input",
+                        input,
+                        "gated MLP output",
+                        output,
+                    ),
                 )?;
                 for index in 0..3 {
-                    validate_cpu_weight_layout(
-                        node_weight_spec(node, weight_specs, index)?,
-                        "gated MLP weight",
-                    )
-                    .map_err(|error| node_error(node, &error))?;
+                    let weight = preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_weight_spec(node, weight_specs, index),
+                    )?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "weight_layout",
+                        validate_cpu_weight_layout(weight, "gated MLP weight"),
+                    )?;
                 }
-                validate_cpu_activation(activation).map_err(|error| node_error(node, &error))?;
-                plan_gated_mlp(&mut plan, node, input, output, *intermediate_size)?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "activation",
+                    validate_cpu_activation(activation),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    plan_gated_mlp(&mut plan, node, input, output, *intermediate_size),
+                )?;
             }
             GraphNodeKind::Residual => {
-                let left = node_input_spec(node, value_specs, 0)?;
-                let right = node_input_spec(node, value_specs, 1)?;
-                let output = node_output_spec(node, value_specs, 0)?;
+                let left = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let right = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 1),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
                 for (label, spec) in [
                     ("residual left input", left),
                     ("residual right input", right),
                     ("residual output", output),
                 ] {
-                    validate_cpu_value_spec(spec, label)
-                        .map_err(|error| node_error(node, &error))?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, label),
+                    )?;
                 }
-                require_matching_value_layout(
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
                     node,
-                    "residual left input",
-                    left,
-                    "residual right input",
-                    right,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "residual left input",
+                        left,
+                        "residual right input",
+                        right,
+                    ),
                 )?;
-                require_matching_value_layout(
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
                     node,
-                    "residual left input",
-                    left,
-                    "residual output",
-                    output,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "residual left input",
+                        left,
+                        "residual output",
+                        output,
+                    ),
                 )?;
-                reserve_output_elements(&mut plan, node, output)?;
-                let output_elements = spec_elements(output, "residual output")
-                    .map_err(|error| node_error(node, &error))?;
-                add_work_units(
-                    &mut plan,
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
                     node,
-                    u64::try_from(output_elements)
-                        .map_err(|_| node_error(node, "residual output elements exceed u64"))?,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                let elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(output, "residual output"),
+                )?;
+                let work = u64::try_from(elements).map_err(|_| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        "residual output elements exceed u64",
+                    )
+                })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
                 )?;
             }
             GraphNodeKind::LmHead { .. } => {
-                let input = node_input_spec(node, value_specs, 0)?;
-                let output = node_output_spec(node, value_specs, 0)?;
-                validate_cpu_value_spec(input, "LM head input")
-                    .map_err(|error| node_error(node, &error))?;
-                validate_cpu_value_spec(output, "LM head output")
-                    .map_err(|error| node_error(node, &error))?;
-                require_matching_value_layout(
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    "LM head input",
-                    input,
-                    "LM head output",
-                    output,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
                 )?;
-                validate_cpu_weight_layout(
-                    node_weight_spec(node, weight_specs, 0)?,
-                    "LM head weight",
-                )
-                .map_err(|error| node_error(node, &error))?;
-                plan_linear(&mut plan, node, input, output)?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(input, "LM head input"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "value_layout",
+                    validate_cpu_value_spec(output, "LM head output"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "LM head input",
+                        input,
+                        "LM head output",
+                        output,
+                    ),
+                )?;
+                let weight = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "weight_layout",
+                    validate_cpu_weight_layout(weight, "LM head weight"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    plan_linear(&mut plan, node, input, output),
+                )?;
             }
             GraphNodeKind::Norm { .. } | GraphNodeKind::FinalNorm { .. } => {
-                return Err(node_error(
+                return Err(CpuReferenceFault::node(
+                    CpuReferenceFailureClass::Unsupported,
                     node,
+                    "unsupported_node",
                     "unsupported CPU reference node: normalization semantic is not yet specified as RMSNorm or another contract",
                 ));
             }
@@ -688,8 +1513,10 @@ fn preflight_graph(
             | GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
             | GraphNodeKind::Sampling { .. } => {
-                return Err(node_error(
+                return Err(CpuReferenceFault::node(
+                    CpuReferenceFailureClass::Unsupported,
                     node,
+                    "unsupported_node",
                     &format!(
                         "unsupported CPU reference node kind {}",
                         node_kind_name(&node.kind)
@@ -699,6 +1526,15 @@ fn preflight_graph(
         }
     }
     Ok(plan)
+}
+
+fn preflight_result<T>(
+    class: CpuReferenceFailureClass,
+    node: &GraphNode,
+    reason_code: &'static str,
+    result: Result<T, String>,
+) -> Result<T, CpuReferenceFault> {
+    result.map_err(|message| CpuReferenceFault::node(class, node, reason_code, message))
 }
 
 fn node_input_spec<'a>(
@@ -1034,6 +1870,7 @@ fn embedding_f32(
     hidden_size: usize,
     output_spec: &TensorSpec,
     allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
 ) -> Result<HostTensor, String> {
     let (token_shape, _token_layout, token_values) = tokens.token_parts()?;
     if token_values.len() != checked_elements(token_shape, "embedding token shape")? {
@@ -1050,12 +1887,17 @@ fn embedding_f32(
     output_shape.push(hidden_size);
     require_f32_shape(output_spec, &output_shape, "embedding")?;
     let output_elements = checked_elements(&output_shape, "embedding output shape")?;
-    let mut output = allocate_f32(output_elements, allocated_elements, "embedding output")?;
+    let mut output = allocate_f32(
+        output_elements,
+        allocated_elements,
+        runtime,
+        "embedding output",
+    )?;
     for token_index in 0..token_values.len() {
         let token = token_values.get_usize(token_index)?;
         if token >= vocab_size {
             return Err(format!(
-                "embedding token index {token} exceeds vocab size {vocab_size}"
+                "embedding token position {token_index} is outside vocabulary size {vocab_size}"
             ));
         }
         let source_start = token
@@ -1076,6 +1918,7 @@ fn linear_f32(
     bias: Option<&HostTensor>,
     output_spec: &TensorSpec,
     allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
 ) -> Result<HostTensor, String> {
     let (input_shape, input_layout, input_data) = input.f32_parts()?;
     let input_features = *input_shape
@@ -1116,7 +1959,12 @@ fn linear_f32(
     let output_elements = rows
         .checked_mul(output_features)
         .ok_or_else(|| "linear output element count overflows usize".to_string())?;
-    let mut output = allocate_f32(output_elements, allocated_elements, "linear output")?;
+    let mut output = allocate_f32(
+        output_elements,
+        allocated_elements,
+        runtime,
+        "linear output",
+    )?;
     for row in 0..rows {
         let input_start = row
             .checked_mul(input_features)
@@ -1144,10 +1992,16 @@ fn activation_f32(
     kind: &ActivationKind,
     output_spec: &TensorSpec,
     allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
 ) -> Result<HostTensor, String> {
     let (shape, layout, input_data) = input.f32_parts()?;
     require_f32_output_spec(output_spec, shape, layout, "activation")?;
-    let mut output = allocate_f32(input_data.len(), allocated_elements, "activation output")?;
+    let mut output = allocate_f32(
+        input_data.len(),
+        allocated_elements,
+        runtime,
+        "activation output",
+    )?;
     for (destination, source) in output.iter_mut().zip(input_data) {
         *destination = activate(*source, kind)?;
     }
@@ -1163,6 +2017,7 @@ fn gated_mlp_f32(
     activation: &ActivationKind,
     output_spec: &TensorSpec,
     allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
 ) -> Result<HostTensor, String> {
     let (input_shape, input_layout, _) = input.f32_parts()?;
     let input_features = *input_shape
@@ -1174,11 +2029,30 @@ fn gated_mlp_f32(
         NumericalFormat::F32,
         input_layout.clone(),
     )?;
-    let gate_values = linear_f32(input, gate, None, &intermediate_spec, allocated_elements)?;
-    let up_values = linear_f32(input, up, None, &intermediate_spec, allocated_elements)?;
+    let gate_values = linear_f32(
+        input,
+        gate,
+        None,
+        &intermediate_spec,
+        allocated_elements,
+        runtime,
+    )?;
+    let up_values = linear_f32(
+        input,
+        up,
+        None,
+        &intermediate_spec,
+        allocated_elements,
+        runtime,
+    )?;
     let (_, _, gate_data) = gate_values.f32_parts()?;
     let (_, _, up_data) = up_values.f32_parts()?;
-    let mut activated = allocate_f32(gate_data.len(), allocated_elements, "gated MLP activation")?;
+    let mut activated = allocate_f32(
+        gate_data.len(),
+        allocated_elements,
+        runtime,
+        "gated MLP activation",
+    )?;
     for index in 0..activated.len() {
         activated[index] = activate(gate_data[index], activation)? * up_data[index];
     }
@@ -1200,6 +2074,7 @@ fn gated_mlp_f32(
         None,
         output_spec,
         allocated_elements,
+        runtime,
     )?;
     if input_features == 0 {
         return Err("gated MLP input feature width must be nonzero".into());
@@ -1212,6 +2087,7 @@ fn residual_f32(
     right: &HostTensor,
     output_spec: &TensorSpec,
     allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
 ) -> Result<HostTensor, String> {
     let (left_shape, left_layout, left_data) = left.f32_parts()?;
     let (right_shape, right_layout, right_data) = right.f32_parts()?;
@@ -1219,7 +2095,12 @@ fn residual_f32(
         return Err("residual inputs must have identical shape and layout".into());
     }
     require_f32_output_spec(output_spec, left_shape, left_layout, "residual")?;
-    let mut output = allocate_f32(left_data.len(), allocated_elements, "residual output")?;
+    let mut output = allocate_f32(
+        left_data.len(),
+        allocated_elements,
+        runtime,
+        "residual output",
+    )?;
     for index in 0..output.len() {
         output[index] = left_data[index] + right_data[index];
     }
@@ -1304,21 +2185,123 @@ fn validate_tensor_against(
     Ok(())
 }
 
-fn validate_exact_keys<K, V>(
+fn validate_finite_host_tensor(tensor: &HostTensor, label: &str) -> Result<(), String> {
+    if let HostTensor::F32 { data, .. } = tensor {
+        if data.iter().any(|value| !value.is_finite()) {
+            return Err(format!("{label} contains a non-finite F32 value"));
+        }
+    }
+    Ok(())
+}
+
+const MAX_CPU_REFERENCE_KEY_DIAGNOSTIC_IDS: usize = 8;
+
+trait CpuReferenceBindingId: Ord {
+    fn validate_binding_id(&self) -> Result<(), String>;
+    fn binding_id_text(&self) -> &str;
+}
+
+impl CpuReferenceBindingId for ValueId {
+    fn validate_binding_id(&self) -> Result<(), String> {
+        self.validate()
+    }
+
+    fn binding_id_text(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl CpuReferenceBindingId for WeightId {
+    fn validate_binding_id(&self) -> Result<(), String> {
+        self.validate()
+    }
+
+    fn binding_id_text(&self) -> &str {
+        self.as_str()
+    }
+}
+
+#[derive(Debug)]
+struct BindingKeyDiagnostic<'a> {
+    count: usize,
+    first: [Option<&'a str>; MAX_CPU_REFERENCE_KEY_DIAGNOSTIC_IDS],
+}
+
+impl<'a> BindingKeyDiagnostic<'a> {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            first: [None; MAX_CPU_REFERENCE_KEY_DIAGNOSTIC_IDS],
+        }
+    }
+
+    fn record(&mut self, id: &'a str) {
+        if self.count < self.first.len() {
+            self.first[self.count] = Some(id);
+        }
+        self.count += 1;
+    }
+}
+
+impl fmt::Display for BindingKeyDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[")?;
+        for (index, id) in self.first.iter().flatten().enumerate() {
+            if index != 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(formatter, "{id:?}")?;
+        }
+        formatter.write_str("]")
+    }
+}
+
+fn validate_binding_map_admission<K, V>(
     map: &BTreeMap<K, V>,
-    expected: &[K],
+    limit: usize,
     label: &str,
 ) -> Result<(), String>
 where
-    K: Ord + Clone + std::fmt::Debug,
+    K: CpuReferenceBindingId,
 {
-    let expected = expected.iter().cloned().collect::<BTreeSet<_>>();
-    let actual = map.keys().cloned().collect::<BTreeSet<_>>();
-    if expected != actual {
-        let missing = expected.difference(&actual).collect::<Vec<_>>();
-        let extra = actual.difference(&expected).collect::<Vec<_>>();
+    if map.len() > limit {
         return Err(format!(
-            "{label} map mismatch: missing={missing:?} extra={extra:?}"
+            "{label} map entry count {} exceeds limit {limit}",
+            map.len()
+        ));
+    }
+    for (index, id) in map.keys().enumerate() {
+        id.validate_binding_id().map_err(|message| {
+            format!("{label} map key at sorted position {index} is invalid: {message}")
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_exact_keys<K, V, E>(
+    map: &BTreeMap<K, V>,
+    expected: &BTreeMap<K, E>,
+    label: &str,
+) -> Result<(), String>
+where
+    K: CpuReferenceBindingId,
+{
+    let mut missing = BindingKeyDiagnostic::new();
+    for id in expected.keys() {
+        if !map.contains_key(id) {
+            missing.record(id.binding_id_text());
+        }
+    }
+    let mut extra = BindingKeyDiagnostic::new();
+    for id in map.keys() {
+        if !expected.contains_key(id) {
+            extra.record(id.binding_id_text());
+        }
+    }
+    if missing.count != 0 || extra.count != 0 {
+        return Err(format!(
+            "{label} map mismatch: missing_count={} missing_first={missing} extra_count={} extra_first={extra}",
+            missing.count, extra.count,
         ));
     }
     Ok(())
@@ -1388,28 +2371,36 @@ fn checked_elements(shape: &[usize], label: &str) -> Result<usize, String> {
 fn allocate_f32(
     elements: usize,
     allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
     label: &str,
 ) -> Result<Vec<f32>, String> {
-    let next_total = allocated_elements
-        .checked_add(elements)
-        .ok_or_else(|| "CPU reference allocation count overflows usize".to_string())?;
+    let next_total = allocated_elements.checked_add(elements).ok_or_else(|| {
+        runtime.allocation_failed = true;
+        "CPU reference allocation count overflows usize".to_string()
+    })?;
     if next_total > MAX_CPU_REFERENCE_TOTAL_ELEMENTS {
+        runtime.allocation_failed = true;
         return Err(format!(
             "{label} would exceed CPU reference total allocation limit {MAX_CPU_REFERENCE_TOTAL_ELEMENTS}"
         ));
     }
     let mut output = Vec::new();
-    output
-        .try_reserve_exact(elements)
-        .map_err(|_| format!("{label} allocation failed"))?;
+    output.try_reserve_exact(elements).map_err(|_| {
+        runtime.allocation_failed = true;
+        format!("{label} allocation failed")
+    })?;
     output.resize(elements, 0.0);
     *allocated_elements = next_total;
     Ok(output)
 }
 
 fn node_error(node: &GraphNode, message: &str) -> String {
+    format!("{}{message}", node_error_prefix(node))
+}
+
+fn node_error_prefix(node: &GraphNode) -> String {
     format!(
-        "CPU reference node {} ({}) failed: {message}",
+        "CPU reference node {} ({}) failed: ",
         node.id.as_str(),
         node_kind_name(&node.kind)
     )
@@ -1493,6 +2484,247 @@ mod tests {
         I: IntoIterator<Item = (T, HostTensor)>,
     {
         entries.into_iter().collect()
+    }
+
+    #[test]
+    fn traced_success_records_node_id_kind_order_and_legacy_wrapper_matches() {
+        let graph = simple_linear_graph();
+        let inputs = map([(
+            value_id("input"),
+            f32(&[1, 1], TensorLayout::TokensHidden, &[3.0]),
+        )]);
+        let weights = map([(
+            weight_id("weight"),
+            f32(&[1, 1], TensorLayout::RowMajor, &[2.0]),
+        )]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), weights.clone())
+            .unwrap();
+        assert_eq!(traced.trace.completed_node_count, 1);
+        assert!(!traced.trace.completed_nodes_truncated);
+        assert_eq!(
+            traced.trace.completed_nodes,
+            vec![CpuReferenceNodeRef {
+                id: node_id("linear"),
+                kind: CpuReferenceNodeKind::Linear,
+            }]
+        );
+        let legacy = executor().execute(&graph, inputs, weights).unwrap();
+        assert_eq!(legacy.executed_node_ids, vec![node_id("linear")]);
+        assert_eq!(legacy.outputs, traced.outputs);
+    }
+
+    #[test]
+    fn traced_invalid_map_and_payload_fail_without_node() {
+        let graph = simple_linear_graph();
+        let missing = executor()
+            .execute_traced(
+                &graph,
+                BTreeMap::new(),
+                map([(
+                    weight_id("weight"),
+                    f32(&[1, 1], TensorLayout::RowMajor, &[1.0]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(missing.class, CpuReferenceFailureClass::InvalidInput);
+        assert_eq!(missing.reason_code, "input_map");
+        assert!(missing.failed_node.is_none());
+        assert_eq!(missing.trace.completed_node_count, 0);
+
+        let malformed = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    HostTensor::F32 {
+                        shape: vec![1, 1],
+                        layout: TensorLayout::TokensHidden,
+                        data: vec![],
+                    },
+                )]),
+                map([(
+                    weight_id("weight"),
+                    f32(&[1, 1], TensorLayout::RowMajor, &[1.0]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(malformed.class, CpuReferenceFailureClass::InvalidInput);
+        assert_eq!(malformed.reason_code, "input_payload");
+        assert!(malformed.failed_node.is_none());
+
+        let nonfinite = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    f32(&[1, 1], TensorLayout::TokensHidden, &[f32::NAN]),
+                )]),
+                map([(
+                    weight_id("weight"),
+                    f32(&[1, 1], TensorLayout::RowMajor, &[1.0]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(nonfinite.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(nonfinite.reason_code, "nonfinite_input");
+    }
+
+    #[test]
+    fn traced_unsupported_preflight_keeps_zero_completed_nodes() {
+        let mut graph = simple_linear_graph();
+        graph.values.push(value(
+            "gelu-out",
+            &[1, 1],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+        ));
+        graph.outputs = vec![value_id("gelu-out")];
+        graph.nodes.push(GraphNode {
+            id: node_id("gelu"),
+            inputs: vec![value_id("out")],
+            outputs: vec![value_id("gelu-out")],
+            weights: vec![],
+            states: vec![],
+            kind: GraphNodeKind::Activation {
+                kind: ActivationKind::Gelu,
+            },
+        });
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+                )]),
+                map([(
+                    weight_id("weight"),
+                    f32(&[1, 1], TensorLayout::RowMajor, &[1.0]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(error.reason_code, "activation");
+        assert_eq!(error.trace.completed_node_count, 0);
+        assert_eq!(
+            error.failed_node.unwrap(),
+            CpuReferenceNodeRef {
+                id: node_id("gelu"),
+                kind: CpuReferenceNodeKind::Activation,
+            }
+        );
+    }
+
+    #[test]
+    fn traced_runtime_token_error_keeps_completed_prefix() {
+        let graph = linear_then_embedding_graph();
+        let secret_token = 3_333_333_333_u32;
+        let inputs = map([
+            (
+                value_id("pre"),
+                f32(&[1, 1], TensorLayout::TokensHidden, &[2.0]),
+            ),
+            (value_id("tokens"), u32_tokens(&[secret_token])),
+        ]);
+        let weights = map([
+            (
+                weight_id("linear-weight"),
+                f32(&[1, 1], TensorLayout::RowMajor, &[1.0]),
+            ),
+            (
+                weight_id("embedding"),
+                f32(&[3, 1], TensorLayout::RowMajor, &[1.0, 2.0, 3.0]),
+            ),
+        ]);
+        let error = executor()
+            .execute_traced(&graph, inputs.clone(), weights.clone())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::InvalidInput);
+        assert_eq!(error.reason_code, "runtime_input");
+        assert_eq!(
+            error.message,
+            "embedding token position 0 is outside vocabulary size 3"
+        );
+        assert!(!error.message.contains(&secret_token.to_string()));
+        assert!(!error.to_string().contains(&secret_token.to_string()));
+        assert_eq!(
+            error.failed_node.unwrap(),
+            CpuReferenceNodeRef {
+                id: node_id("embedding"),
+                kind: CpuReferenceNodeKind::Embedding,
+            }
+        );
+        assert_eq!(error.trace.completed_node_count, 1);
+        assert_eq!(error.trace.completed_nodes[0].id, node_id("linear"));
+
+        let legacy_error = executor().execute(&graph, inputs, weights).unwrap_err();
+        assert!(legacy_error.contains("embedding token position 0 is outside vocabulary size 3"));
+        assert!(!legacy_error.contains(&secret_token.to_string()));
+    }
+
+    #[test]
+    fn binding_map_admission_rejects_unvalidated_or_excessive_keys_without_copying_them() {
+        let graph = simple_linear_graph();
+        let untrusted_id = "x".repeat(MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES * 4);
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    ValueId(untrusted_id.clone()),
+                    f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+                )]),
+                map([(
+                    weight_id("weight"),
+                    f32(&[1, 1], TensorLayout::RowMajor, &[1.0]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::InvalidInput);
+        assert_eq!(error.reason_code, "input_map");
+        assert!(error.failed_node.is_none());
+        assert!(error.message.len() <= MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES);
+        assert!(!error.message.contains(&untrusted_id));
+
+        let mut excessive = BTreeMap::<ValueId, ()>::new();
+        for index in 0..=MAX_GRAPH_ENDPOINTS {
+            excessive.insert(ValueId::new(format!("input-{index}")).unwrap(), ());
+        }
+        let count_error =
+            validate_binding_map_admission(&excessive, MAX_GRAPH_ENDPOINTS, "graph input")
+                .unwrap_err();
+        assert_eq!(
+            count_error,
+            format!(
+                "graph input map entry count {} exceeds limit {MAX_GRAPH_ENDPOINTS}",
+                MAX_GRAPH_ENDPOINTS + 1
+            )
+        );
+
+        let expected = BTreeMap::<ValueId, ()>::new();
+        let extras = (0..=MAX_CPU_REFERENCE_KEY_DIAGNOSTIC_IDS)
+            .map(|index| (ValueId::new(format!("extra-{index}")).unwrap(), ()))
+            .collect::<BTreeMap<_, _>>();
+        let mismatch = validate_exact_keys(&extras, &expected, "graph input").unwrap_err();
+        assert!(mismatch.contains("extra_count=9"));
+        assert!(mismatch.contains("extra-7"));
+        assert!(!mismatch.contains("extra-8"));
+    }
+
+    #[test]
+    fn bounded_trace_and_failure_message_are_utf8_safe() {
+        let graph = simple_linear_graph();
+        let node = &graph.nodes[0];
+        let mut trace = BoundedCompletedNodes::with_limit(1);
+        trace.record_completed(node).unwrap();
+        trace.record_completed(node).unwrap();
+        let trace = trace.into_trace();
+        assert_eq!(trace.completed_node_count, 2);
+        assert_eq!(trace.completed_nodes.len(), 1);
+        assert!(trace.completed_nodes_truncated);
+
+        let message = bounded_failure_message("é".repeat(MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES));
+        assert!(message.len() <= MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES);
+        assert!(message.is_char_boundary(message.len()));
     }
 
     #[test]
@@ -2067,8 +3299,15 @@ mod tests {
             .map(|weight| (weight.id.clone(), &weight.tensor))
             .collect();
         let error = preflight_graph(&graph, &value_specs, &weight_specs).unwrap_err();
-        assert!(error.contains("node large-linear (Linear)"));
-        assert!(error.contains("work-unit budget"));
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "work_budget");
+        assert_eq!(
+            error.failed_node.as_ref().unwrap().id,
+            node_id("large-linear")
+        );
+        assert!(error.message.contains("work-unit budget"));
+        let failure = error.into_failure(CpuReferenceExecutionTrace::default());
+        assert_eq!(failure.trace.completed_node_count, 0);
     }
 
     #[test]
@@ -2200,6 +3439,60 @@ mod tests {
                 states: vec![],
                 kind: GraphNodeKind::Linear { has_bias: false },
             }],
+        }
+    }
+
+    fn linear_then_embedding_graph() -> ModelGraph {
+        ModelGraph {
+            graph_id: "linear-then-embedding".into(),
+            inputs: vec![value_id("pre"), value_id("tokens")],
+            outputs: vec![value_id("embedded")],
+            values: vec![
+                value(
+                    "pre",
+                    &[1, 1],
+                    NumericalFormat::F32,
+                    TensorLayout::TokensHidden,
+                ),
+                value("tokens", &[1], NumericalFormat::U32, TensorLayout::RowMajor),
+                value(
+                    "linear-out",
+                    &[1, 1],
+                    NumericalFormat::F32,
+                    TensorLayout::TokensHidden,
+                ),
+                value(
+                    "embedded",
+                    &[1, 1],
+                    NumericalFormat::F32,
+                    TensorLayout::TokensHidden,
+                ),
+            ],
+            weights: vec![
+                weight("linear-weight", &[1, 1]),
+                weight("embedding", &[3, 1]),
+            ],
+            nodes: vec![
+                GraphNode {
+                    id: node_id("linear"),
+                    inputs: vec![value_id("pre")],
+                    outputs: vec![value_id("linear-out")],
+                    weights: vec![weight_id("linear-weight")],
+                    states: vec![],
+                    kind: GraphNodeKind::Linear { has_bias: false },
+                },
+                GraphNode {
+                    id: node_id("embedding"),
+                    inputs: vec![value_id("tokens")],
+                    outputs: vec![value_id("embedded")],
+                    weights: vec![weight_id("embedding")],
+                    states: vec![],
+                    kind: GraphNodeKind::Embedding {
+                        vocab_size: 3,
+                        hidden_size: 1,
+                    },
+                },
+            ],
         }
     }
 
