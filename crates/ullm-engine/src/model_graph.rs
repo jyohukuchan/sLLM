@@ -446,12 +446,34 @@ impl NormalizationAffine {
 pub enum NormalizationAxis {
     /// Normalizes independently across the final logical tensor dimension.
     Last,
+    /// Splits the final logical dimension into contiguous, equal-width groups.
+    ///
+    /// The final axis is head/group-major with exactly `groups` contiguous
+    /// blocks of `group_width` values. [`NormalizationKind`] is applied to
+    /// each block independently, and its reduction index resets to zero for
+    /// every group; this is normalization grouping, not coordinate pairing.
+    /// Scale and bias have logical shape `[group_width]` and are shared by all
+    /// groups. Distinct affine parameters per group require a future semantic.
+    GroupedLast { groups: usize, group_width: usize },
 }
 
 impl NormalizationAxis {
     fn validate(self) -> Result<(), String> {
         match self {
             Self::Last => Ok(()),
+            Self::GroupedLast {
+                groups,
+                group_width,
+            } => {
+                ensure_nonzero(groups, "grouped normalization groups")?;
+                ensure_nonzero(group_width, "grouped normalization group_width")?;
+                checked_dimension_product(
+                    groups,
+                    group_width,
+                    "grouped normalization groups * group_width",
+                )?;
+                Ok(())
+            }
         }
     }
 }
@@ -1576,6 +1598,23 @@ fn normalization_axis_width(
 ) -> Result<usize, String> {
     match axis {
         NormalizationAxis::Last => feature_width(tensor, label, node_id),
+        NormalizationAxis::GroupedLast {
+            groups,
+            group_width,
+        } => {
+            let final_width = feature_width(tensor, label, node_id)?;
+            let grouped_width = checked_dimension_product(
+                groups,
+                group_width,
+                "grouped normalization groups * group_width",
+            )?;
+            if grouped_width != final_width {
+                return Err(format!(
+                    "node {node_id} {label} final width {final_width} does not match grouped normalization groups * group_width {grouped_width}"
+                ));
+            }
+            Ok(group_width)
+        }
     }
 }
 
@@ -2527,6 +2566,129 @@ mod tests {
                 .validate()
                 .unwrap_err()
                 .contains("normalization bias")
+        );
+    }
+
+    #[test]
+    fn model_graph_grouped_last_normalization_accepts_shared_affines_and_rank3() {
+        let grouped = |shape: &[usize], affine, weights| {
+            unary_graph(
+                value("input", shape),
+                vec![value("output", shape)],
+                weights,
+                vec![],
+                GraphNodeKind::Norm {
+                    epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                    kind: NormalizationKind::Rms,
+                    affine,
+                    axis: NormalizationAxis::GroupedLast {
+                        groups: 2,
+                        group_width: 4,
+                    },
+                },
+            )
+        };
+
+        grouped(
+            &[2, 8],
+            NormalizationAffine::Scale,
+            vec![weight("scale", &[4])],
+        )
+        .validate()
+        .unwrap();
+        grouped(
+            &[2, 8],
+            NormalizationAffine::UnitOffsetScale,
+            vec![weight("scale", &[4])],
+        )
+        .validate()
+        .unwrap();
+        grouped(
+            &[2, 8],
+            NormalizationAffine::ScaleAndBias,
+            vec![weight("scale", &[4]), weight("bias", &[4])],
+        )
+        .validate()
+        .unwrap();
+        grouped(
+            &[2, 3, 8],
+            NormalizationAffine::Scale,
+            vec![weight("scale", &[4])],
+        )
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn model_graph_grouped_last_normalization_rejects_invalid_geometry_and_affine_width() {
+        let graph = |axis, scale_width| {
+            unary_graph(
+                value("input", &[2, 8]),
+                vec![value("output", &[2, 8])],
+                vec![weight("scale", &[scale_width])],
+                vec![],
+                GraphNodeKind::Norm {
+                    epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                    kind: NormalizationKind::Rms,
+                    affine: NormalizationAffine::Scale,
+                    axis,
+                },
+            )
+        };
+
+        for axis in [
+            NormalizationAxis::GroupedLast {
+                groups: 0,
+                group_width: 4,
+            },
+            NormalizationAxis::GroupedLast {
+                groups: 2,
+                group_width: 0,
+            },
+        ] {
+            assert!(
+                graph(axis, 4)
+                    .validate()
+                    .unwrap_err()
+                    .contains("greater than zero")
+            );
+        }
+
+        assert!(
+            graph(
+                NormalizationAxis::GroupedLast {
+                    groups: usize::MAX,
+                    group_width: 2,
+                },
+                4,
+            )
+            .validate()
+            .unwrap_err()
+            .contains("overflows")
+        );
+        assert!(
+            graph(
+                NormalizationAxis::GroupedLast {
+                    groups: 2,
+                    group_width: 3,
+                },
+                3,
+            )
+            .validate()
+            .unwrap_err()
+            .contains("final width")
+        );
+        assert!(
+            graph(
+                NormalizationAxis::GroupedLast {
+                    groups: 2,
+                    group_width: 4,
+                },
+                8,
+            )
+            .validate()
+            .unwrap_err()
+            .contains("normalization scale")
         );
     }
 
