@@ -2227,7 +2227,7 @@ pub struct PackageLinearAttnResidentStepWeights {
     value_heads: usize,
     key_dim: usize,
     value_dim: usize,
-    hidden: usize,
+    pub hidden: usize,
     q_scale: f32,
     qk_l2_norm: bool,
     kernel_size: usize,

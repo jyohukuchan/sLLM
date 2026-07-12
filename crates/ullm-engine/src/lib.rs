@@ -15,6 +15,7 @@ pub mod loader;
 pub mod package;
 pub mod qwen35_aq4_head_runtime;
 pub mod qwen35_aq4_layer_runtime;
+pub mod qwen35_aq4_model_runtime;
 pub mod qwen35_package_contract;
 pub mod qwen3_loader;
 pub mod qwen3_names;

@@ -89,8 +89,12 @@ fn read_runtime_buffer_f32(
 
 fn env_flag_enabled(name: &str) -> bool {
     env::var(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .map(|value| flag_value_enabled(&value))
         .unwrap_or(false)
+}
+
+fn flag_value_enabled(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
 pub enum PackageLmHeadRuntime {
@@ -110,6 +114,8 @@ pub enum PackageLmHeadRuntime {
         top1_partial_values_host: Vec<u8>,
         top1_partial_indices_host: Vec<u8>,
         logits_host: Vec<u8>,
+        /// Immutable execution policy captured while the resident head is loaded.
+        direct_top1_enabled: bool,
     },
     GpuResidentF32 {
         dtype: String,
@@ -143,6 +149,7 @@ impl PackageLmHeadRuntime {
         match mode {
             PackageLmHeadMode::CpuChunked => Ok(Self::CpuChunked { chunk_rows }),
             PackageLmHeadMode::GpuResidentF32 => {
+                let direct_top1_enabled = env_flag_enabled("ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1");
                 let selector = TensorSelector::Name(QWEN3_LM_HEAD_TENSOR.to_string());
                 if select_tensor_payload_bundle(path, &selector).is_ok() {
                     let mut registry = WeightRegistry::new();
@@ -230,6 +237,7 @@ impl PackageLmHeadRuntime {
                         &mut top1_partial_indices_host,
                         &mut logits_host,
                         1,
+                        direct_top1_enabled,
                     )
                     .map_err(|err| format!("failed to prewarm resident AQ4 lm_head: {err}"))?;
                     return Ok(Self::GpuResidentAq4 {
@@ -245,6 +253,7 @@ impl PackageLmHeadRuntime {
                         top1_partial_values_host,
                         top1_partial_indices_host,
                         logits_host,
+                        direct_top1_enabled,
                     });
                 }
                 let bundle = select_passthrough_payload_bundle(path, &selector)
@@ -439,6 +448,7 @@ impl PackageLmHeadRuntime {
                 top1_partial_values_host,
                 top1_partial_indices_host,
                 logits_host,
+                direct_top1_enabled,
                 ..
             } => {
                 if hidden_values.len() != *hidden {
@@ -464,6 +474,7 @@ impl PackageLmHeadRuntime {
                     top1_partial_indices_host,
                     logits_host,
                     top_k,
+                    *direct_top1_enabled,
                 )
             }
             Self::GpuResidentF32 {
@@ -536,6 +547,7 @@ impl PackageLmHeadRuntime {
                 top1_partial_values_host,
                 top1_partial_indices_host,
                 logits_host,
+                direct_top1_enabled,
                 ..
             } => package_gpu_resident_aq4_lm_head_top_logits(
                 stream,
@@ -550,6 +562,7 @@ impl PackageLmHeadRuntime {
                 top1_partial_indices_host,
                 logits_host,
                 top_k,
+                *direct_top1_enabled,
             ),
             Self::GpuResidentF32 {
                 vocab,
@@ -1103,6 +1116,7 @@ fn package_gpu_resident_aq4_lm_head_top_logits(
     top1_partial_indices_host: &mut [u8],
     logits_host: &mut [u8],
     top_k: usize,
+    direct_top1_enabled: bool,
 ) -> Result<Vec<PackageTokenLogit>, String> {
     if matrix.rows != vocab || matrix.cols != hidden {
         return Err(format!(
@@ -1119,7 +1133,7 @@ fn package_gpu_resident_aq4_lm_head_top_logits(
             "resident AQ4 lm_head input buffer is too small: got {input_bytes} bytes expected at least {required_input_bytes}"
         ));
     }
-    if top_k == 1 && env_flag_enabled("ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1") {
+    if top_k == 1 && direct_top1_enabled {
         let first_stage_partial_count = matrix.matvec_top1(
             input_buffer,
             top1_partial_values_buffer,
@@ -1535,6 +1549,16 @@ mod tests {
             PackageLmHeadMode::GpuResidentF32.as_str(),
             "gpu_resident_f32"
         );
+    }
+
+    #[test]
+    fn direct_top1_load_flag_has_a_closed_default_and_explicit_true_values() {
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(flag_value_enabled(value));
+        }
+        for value in ["", "0", "false", "True", "on"] {
+            assert!(!flag_value_enabled(value));
+        }
     }
 
     #[test]
