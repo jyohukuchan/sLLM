@@ -32,3 +32,5 @@ pub mod sq_optimized_reference;
 pub mod sq_reference;
 pub mod sq_runtime;
 pub mod worker_driver;
+pub mod worker_protocol;
+pub mod worker_runtime;

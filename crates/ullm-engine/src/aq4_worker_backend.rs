@@ -8,9 +8,9 @@
 //! available to the product protocol without duplicating the prototype model loop. Moving that
 //! model loop into a reusable resident session remains separate work.
 
-use crate::inference_api::InferenceRequest as Sq8ServingRequest;
-use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerTimings};
-use crate::sq8_worker_runtime::{Sq8InferenceBackend, Sq8RequestEventPublisher};
+use crate::inference_api::InferenceRequest;
+use crate::worker_protocol::{ReleaseOutcomeEvent, WorkerAdmission, WorkerTimings};
+use crate::worker_runtime::{InferenceBackend, RequestEventPublisher};
 use serde::Deserialize;
 use std::ffi::OsString;
 use std::io::Read;
@@ -119,7 +119,7 @@ impl Qwen35Aq4WorkerBackend {
         Ok(Self { config })
     }
 
-    fn command_args(&self, request: &Sq8ServingRequest) -> Vec<OsString> {
+    fn command_args(&self, request: &InferenceRequest) -> Vec<OsString> {
         let prompt = request
             .prompt_token_ids
             .iter()
@@ -155,7 +155,7 @@ impl Qwen35Aq4WorkerBackend {
         .into()
     }
 
-    fn spawn(&self, request: &Sq8ServingRequest) -> Result<Child, String> {
+    fn spawn(&self, request: &InferenceRequest) -> Result<Child, String> {
         let mut command = Command::new(&self.config.engine);
         command
             .args(self.command_args(request))
@@ -171,12 +171,12 @@ impl Qwen35Aq4WorkerBackend {
     }
 }
 
-impl Sq8InferenceBackend for Qwen35Aq4WorkerBackend {
+impl InferenceBackend for Qwen35Aq4WorkerBackend {
     fn execute(
         &mut self,
-        request: Sq8ServingRequest,
-        admission: Sq8WorkerAdmission,
-        publications: &mut Sq8RequestEventPublisher<'_>,
+        request: InferenceRequest,
+        admission: WorkerAdmission,
+        publications: &mut RequestEventPublisher<'_>,
     ) -> Result<(), String> {
         publications.publish_started()?;
         let mut child = self.spawn(&request)?;
@@ -194,7 +194,7 @@ impl Sq8InferenceBackend for Qwen35Aq4WorkerBackend {
                 report_reader
                     .join()
                     .map_err(|_| "AQ4 report reader panicked after cancellation".to_string())??;
-                publications.publish_released(Sq8ReleaseOutcomeEvent::Cancelled)?;
+                publications.publish_released(ReleaseOutcomeEvent::Cancelled)?;
                 return Ok(());
             }
             if let Some(status) = child
@@ -231,11 +231,11 @@ impl Sq8InferenceBackend for Qwen35Aq4WorkerBackend {
             .last()
             .is_some_and(|token| request.eos_token_ids.contains(token))
         {
-            Sq8ReleaseOutcomeEvent::Stop
+            ReleaseOutcomeEvent::Stop
         } else {
-            Sq8ReleaseOutcomeEvent::Length
+            ReleaseOutcomeEvent::Length
         };
-        let timings = Sq8WorkerTimings::from_elapsed_millis(
+        let timings = WorkerTimings::from_elapsed_millis(
             request.prompt_token_ids.len(),
             report.prefill.wall_ms.max(0.001),
             report.generated_token_ids.len(),
@@ -283,7 +283,7 @@ struct Aq4WallTiming {
     wall_ms: f64,
 }
 
-fn validate_report(report: &Aq4GenerateReport, request: &Sq8ServingRequest) -> Result<(), String> {
+fn validate_report(report: &Aq4GenerateReport, request: &InferenceRequest) -> Result<(), String> {
     if !report.verified
         || report.generated_token_ids.is_empty()
         || report.generated_token_ids.len() > request.max_new_tokens
@@ -310,14 +310,14 @@ fn validate_report(report: &Aq4GenerateReport, request: &Sq8ServingRequest) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sq8_serving_runtime::Sq8SamplingParams;
+    use crate::inference_api::SamplingParams;
 
-    fn request() -> Sq8ServingRequest {
-        let mut request = Sq8ServingRequest::new(
+    fn request() -> InferenceRequest {
+        let mut request = InferenceRequest::new(
             "aq4-test",
             vec![1, 2, 3],
             3,
-            Sq8SamplingParams {
+            SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
                 top_k: 8,
