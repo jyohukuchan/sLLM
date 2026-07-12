@@ -479,6 +479,31 @@ impl ActivationKind {
     }
 }
 
+/// Pairing of rotary coordinates within the configured prefix.
+///
+/// For pair index `i`, the rotation angle is
+/// `theta = position / base^(2i / rotary_dim)`. For the selected coordinate
+/// pair `(a, b)`, the output is `y_a = x_a cos(theta) - x_b sin(theta)` and
+/// `y_b = x_a sin(theta) + x_b cos(theta)`. Coordinates after the rotary
+/// prefix are unchanged. The final feature axis is head-major: it contains
+/// `heads` contiguous blocks of `head_dim` coordinates. Pair index `i` and
+/// frequency index `i` reset to zero for each head. Every element of the
+/// explicit `positions` tensor is the position for its corresponding token
+/// and is shared by all heads of that token. The angle `theta` is in radians,
+/// and each head's suffix `[rotary_dim, head_dim)` is unchanged. This is a
+/// mathematical graph semantic; calculation precision, reduction order, and
+/// other implementation details are backend evidence concerns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotaryPairing {
+    /// Pairs the rotary prefix's first half with its second half at the same
+    /// index: `(a, b) = (i, rotary_dim / 2 + i)` for
+    /// `0 <= i < rotary_dim / 2`.
+    SplitHalf,
+    /// Pairs adjacent rotary coordinates: `(a, b) = (2i, 2i + 1)` for
+    /// `0 <= i < rotary_dim / 2`.
+    Interleaved,
+}
+
 /// Typed graph-node semantics without a model-name or generic attribute bag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphNodeKind {
@@ -507,9 +532,21 @@ pub enum GraphNodeKind {
     /// `GraphNode::weights` is paired with `GraphNode::outputs` by index.
     FusedLinearGroup { output_count: usize },
     /// Rotary position operation.
+    ///
+    /// `GraphNode::inputs` is `[values, positions]`. `values` has rank at
+    /// least two and its final feature axis is `heads * head_dim`; `positions`
+    /// has the same shape as `values` without that final axis. The output
+    /// preserves the values tensor's shape, format, and layout. The final
+    /// feature axis is head-major, with contiguous `head_dim` blocks for each
+    /// head; each head resets pair and frequency indices to zero, and its
+    /// suffix `[rotary_dim, head_dim)` is unchanged. Each position applies to
+    /// the corresponding token across all heads and is interpreted in radians.
     RotaryPosition {
+        heads: usize,
+        head_dim: usize,
         rotary_dim: usize,
         base: PositiveF32,
+        pairing: RotaryPairing,
     },
     /// Dense attention with explicit head geometry.
     ///
@@ -576,11 +613,23 @@ impl GraphNodeKind {
             Self::FusedLinearGroup { output_count } => {
                 ensure_nonzero(*output_count, "fused linear output_count")
             }
-            Self::RotaryPosition { rotary_dim, base } => {
+            Self::RotaryPosition {
+                heads,
+                head_dim,
+                rotary_dim,
+                base,
+                ..
+            } => {
+                ensure_nonzero(*heads, "rotary heads")?;
+                ensure_nonzero(*head_dim, "rotary head_dim")?;
                 ensure_nonzero(*rotary_dim, "rotary_dim")?;
                 if rotary_dim % 2 != 0 {
                     return Err("rotary_dim must be even".into());
                 }
+                if rotary_dim > head_dim {
+                    return Err("rotary_dim must not exceed rotary head_dim".into());
+                }
+                checked_dimension_product(*heads, *head_dim, "rotary heads * head_dim")?;
                 base.validate("rotary base")
             }
             Self::DenseAttention {
@@ -642,7 +691,8 @@ impl GraphNodeKind {
             }
             Self::Linear { has_bias } => exact(1, 1, if *has_bias { 2 } else { 1 }, 0),
             Self::FusedLinearGroup { output_count } => exact(1, *output_count, *output_count, 0),
-            Self::RotaryPosition { .. } | Self::Activation { .. } => exact(1, 1, 0, 0),
+            Self::RotaryPosition { .. } => exact(2, 1, 0, 0),
+            Self::Activation { .. } => exact(1, 1, 0, 0),
             Self::DenseAttention { .. } => {
                 if inputs == 1 && outputs == 1 && weights == 4 && states <= 1 {
                     Ok(())
@@ -845,14 +895,88 @@ impl GraphNode {
                 }
                 Ok(())
             }
-            GraphNodeKind::RotaryPosition { rotary_dim, .. } => {
-                let input = value(&self.inputs[0], "rotary input")?;
+            GraphNodeKind::RotaryPosition {
+                heads,
+                head_dim,
+                rotary_dim,
+                ..
+            } => {
+                let values = value(&self.inputs[0], "rotary values input")?;
+                let positions = value(&self.inputs[1], "rotary positions input")?;
                 let output = value(&self.outputs[0], "rotary output")?;
-                require_same_shape(input, output, "rotary input and output", self.id.as_str())?;
-                let hidden = feature_width(input, "rotary input", self.id.as_str())?;
-                if *rotary_dim > hidden {
+                if values.shape.len() < 2 {
                     return Err(format!(
-                        "node {} rotary_dim {rotary_dim} exceeds input feature width {hidden}",
+                        "node {} rotary values input must have rank at least 2",
+                        self.id.as_str()
+                    ));
+                }
+                if !matches!(
+                    values.format,
+                    NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+                ) {
+                    return Err(format!(
+                        "node {} rotary values input must use F32, BF16, or FP16",
+                        self.id.as_str()
+                    ));
+                }
+                if !matches!(
+                    values.layout,
+                    TensorLayout::RowMajor
+                        | TensorLayout::TokensHidden
+                        | TensorLayout::PackedRagged
+                ) {
+                    return Err(format!(
+                        "node {} rotary values input must use RowMajor, TokensHidden, or PackedRagged layout",
+                        self.id.as_str()
+                    ));
+                }
+                if output.shape != values.shape {
+                    return Err(format!(
+                        "node {} rotary output shape must match values shape, got {:?} and {:?}",
+                        self.id.as_str(),
+                        values.shape,
+                        output.shape
+                    ));
+                }
+                if output.format != values.format || output.layout != values.layout {
+                    return Err(format!(
+                        "node {} rotary output format and layout must match values input",
+                        self.id.as_str()
+                    ));
+                }
+                if !matches!(
+                    positions.format,
+                    NumericalFormat::U32 | NumericalFormat::U64
+                ) {
+                    return Err(format!(
+                        "node {} rotary positions input must use U32 or U64",
+                        self.id.as_str()
+                    ));
+                }
+                if positions.layout != TensorLayout::RowMajor {
+                    return Err(format!(
+                        "node {} rotary positions input must use RowMajor layout",
+                        self.id.as_str()
+                    ));
+                }
+                if positions.shape.as_slice() != &values.shape[..values.shape.len() - 1] {
+                    return Err(format!(
+                        "node {} rotary positions shape must match values shape without the final feature axis",
+                        self.id.as_str()
+                    ));
+                }
+                let hidden = feature_width(values, "rotary values input", self.id.as_str())?;
+                let expected_hidden =
+                    checked_dimension_product(*heads, *head_dim, "rotary heads * head_dim")?;
+                if hidden != expected_hidden {
+                    return Err(format!(
+                        "node {} rotary values feature width {hidden} does not match heads * head_dim {expected_hidden}",
+                        self.id.as_str(),
+                    ));
+                }
+                if *rotary_dim > *head_dim {
+                    return Err(format!(
+                        "node {} rotary_dim {rotary_dim} exceeds head_dim {head_dim}",
                         self.id.as_str()
                     ));
                 }
@@ -1385,6 +1509,10 @@ mod tests {
         .unwrap()
     }
 
+    fn rotary_spec(shape: &[usize], format: NumericalFormat, layout: TensorLayout) -> TensorSpec {
+        TensorSpec::new(shape.to_vec(), format, layout).unwrap()
+    }
+
     fn value(name: &str, shape: &[usize]) -> GraphValue {
         GraphValue {
             id: value_id(name),
@@ -1890,5 +2018,208 @@ mod tests {
                 .unwrap_err()
                 .contains("recurrent attention projection")
         );
+    }
+
+    fn rotary_graph(pairing: RotaryPairing) -> ModelGraph {
+        ModelGraph {
+            graph_id: "rotary-contract".into(),
+            inputs: vec![value_id("values"), value_id("positions")],
+            outputs: vec![value_id("output")],
+            values: vec![
+                GraphValue {
+                    id: value_id("values"),
+                    tensor: rotary_spec(&[2, 8], NumericalFormat::F32, TensorLayout::RowMajor),
+                },
+                GraphValue {
+                    id: value_id("positions"),
+                    tensor: rotary_spec(&[2], NumericalFormat::U32, TensorLayout::RowMajor),
+                },
+                GraphValue {
+                    id: value_id("output"),
+                    tensor: rotary_spec(&[2, 8], NumericalFormat::F32, TensorLayout::RowMajor),
+                },
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("rotary"),
+                inputs: vec![value_id("values"), value_id("positions")],
+                outputs: vec![value_id("output")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::RotaryPosition {
+                    heads: 2,
+                    head_dim: 4,
+                    rotary_dim: 4,
+                    base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
+                    pairing,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn rotary_position_accepts_both_pairing_semantics() {
+        for pairing in [RotaryPairing::SplitHalf, RotaryPairing::Interleaved] {
+            rotary_graph(pairing).validate().unwrap();
+        }
+
+        for format in [NumericalFormat::Bf16, NumericalFormat::Fp16] {
+            let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+            graph.values[0].tensor =
+                rotary_spec(&[2, 8], format.clone(), TensorLayout::TokensHidden);
+            graph.values[2].tensor = rotary_spec(&[2, 8], format, TensorLayout::TokensHidden);
+            graph.validate().unwrap();
+        }
+
+        let mut partial = rotary_graph(RotaryPairing::Interleaved);
+        partial.nodes[0].kind = GraphNodeKind::RotaryPosition {
+            heads: 2,
+            head_dim: 4,
+            rotary_dim: 2,
+            base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
+            pairing: RotaryPairing::Interleaved,
+        };
+        partial.validate().unwrap();
+
+        let mut packed = rotary_graph(RotaryPairing::SplitHalf);
+        packed.values[0].tensor =
+            rotary_spec(&[2, 8], NumericalFormat::F32, TensorLayout::PackedRagged);
+        packed.values[2].tensor =
+            rotary_spec(&[2, 8], NumericalFormat::F32, TensorLayout::PackedRagged);
+        packed.validate().unwrap();
+
+        let mut rank3 = rotary_graph(RotaryPairing::Interleaved);
+        rank3.values[0].tensor =
+            rotary_spec(&[2, 3, 8], NumericalFormat::F32, TensorLayout::TokensHidden);
+        rank3.values[1].tensor = rotary_spec(&[2, 3], NumericalFormat::U64, TensorLayout::RowMajor);
+        rank3.values[2].tensor =
+            rotary_spec(&[2, 3, 8], NumericalFormat::F32, TensorLayout::TokensHidden);
+        rank3.validate().unwrap();
+    }
+
+    #[test]
+    fn rotary_position_rejects_bad_arity_and_feature_width() {
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.nodes[0].inputs.pop();
+        assert!(graph.validate().unwrap_err().contains("expected inputs=2"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.nodes[0].weights.push(weight_id("unexpected"));
+        assert!(graph.validate().unwrap_err().contains("weights=1"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.nodes[0].states.push(state_id("unexpected"));
+        assert!(graph.validate().unwrap_err().contains("states=1"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[0].tensor = rotary_spec(&[2, 7], NumericalFormat::F32, TensorLayout::RowMajor);
+        graph.values[2].tensor = rotary_spec(&[2, 7], NumericalFormat::F32, TensorLayout::RowMajor);
+        assert!(graph.validate().unwrap_err().contains("feature width"));
+    }
+
+    #[test]
+    fn rotary_position_rejects_bad_positions_and_output_metadata() {
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[1].tensor = rotary_spec(&[2, 1], NumericalFormat::U32, TensorLayout::RowMajor);
+        assert!(graph.validate().unwrap_err().contains("positions shape"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[1].tensor = rotary_spec(&[2], NumericalFormat::F32, TensorLayout::RowMajor);
+        assert!(graph.validate().unwrap_err().contains("U32 or U64"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[1].tensor =
+            rotary_spec(&[2], NumericalFormat::U64, TensorLayout::TokensHidden);
+        assert!(graph.validate().unwrap_err().contains("RowMajor"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[2].tensor =
+            rotary_spec(&[2, 8], NumericalFormat::Bf16, TensorLayout::RowMajor);
+        assert!(graph.validate().unwrap_err().contains("format and layout"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[2].tensor =
+            rotary_spec(&[2, 8], NumericalFormat::F32, TensorLayout::TokensHidden);
+        assert!(graph.validate().unwrap_err().contains("format and layout"));
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.values[2].tensor = rotary_spec(&[2, 7], NumericalFormat::F32, TensorLayout::RowMajor);
+        assert!(graph.validate().unwrap_err().contains("output shape"));
+    }
+
+    #[test]
+    fn rotary_position_rejects_non_real_values_and_ambiguous_layouts() {
+        for format in [
+            NumericalFormat::U32,
+            NumericalFormat::U64,
+            NumericalFormat::Aq4_0,
+            NumericalFormat::Sq8_0,
+            NumericalFormat::custom("future-format").unwrap(),
+        ] {
+            let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+            graph.values[0].tensor = rotary_spec(&[2, 8], format.clone(), TensorLayout::RowMajor);
+            graph.values[2].tensor = rotary_spec(&[2, 8], format, TensorLayout::RowMajor);
+            assert!(
+                graph
+                    .validate()
+                    .unwrap_err()
+                    .contains("must use F32, BF16, or FP16")
+            );
+        }
+
+        for layout in [TensorLayout::Custom("future-layout".into())] {
+            let mut graph = rotary_graph(RotaryPairing::Interleaved);
+            graph.values[0].tensor = rotary_spec(&[2, 8], NumericalFormat::F32, layout.clone());
+            graph.values[2].tensor = rotary_spec(&[2, 8], NumericalFormat::F32, layout);
+            assert!(
+                graph
+                    .validate()
+                    .unwrap_err()
+                    .contains("must use RowMajor, TokensHidden, or PackedRagged layout")
+            );
+        }
+    }
+
+    #[test]
+    fn rotary_position_rejects_invalid_geometry_and_overflow() {
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.nodes[0].kind = GraphNodeKind::RotaryPosition {
+            heads: 2,
+            head_dim: 4,
+            rotary_dim: 3,
+            base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
+            pairing: RotaryPairing::SplitHalf,
+        };
+        assert!(
+            graph
+                .validate()
+                .unwrap_err()
+                .contains("rotary_dim must be even")
+        );
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.nodes[0].kind = GraphNodeKind::RotaryPosition {
+            heads: 2,
+            head_dim: 4,
+            rotary_dim: 6,
+            base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
+            pairing: RotaryPairing::SplitHalf,
+        };
+        assert!(
+            graph
+                .validate()
+                .unwrap_err()
+                .contains("must not exceed rotary head_dim")
+        );
+
+        let mut graph = rotary_graph(RotaryPairing::SplitHalf);
+        graph.nodes[0].kind = GraphNodeKind::RotaryPosition {
+            heads: usize::MAX,
+            head_dim: 2,
+            rotary_dim: 2,
+            base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
+            pairing: RotaryPairing::SplitHalf,
+        };
+        assert!(graph.validate().unwrap_err().contains("overflows usize"));
     }
 }
