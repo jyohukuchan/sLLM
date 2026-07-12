@@ -255,6 +255,54 @@ fn checked_f32_byte_len(elements: usize, label: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("{label} byte size overflows"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResidentRequestState {
+    Ready,
+    Poisoned,
+}
+
+impl ResidentRequestState {
+    fn begin_reset(&mut self, label: &str) -> Result<(), String> {
+        // Reset is deliberately fail-closed. The caller must mark the state ready only
+        // after every queued zero and the final stream synchronization have succeeded.
+        match self {
+            Self::Ready => {
+                *self = Self::Poisoned;
+                Ok(())
+            }
+            Self::Poisoned => Err(format!(
+                "{label} resident request state is poisoned and cannot be reset again"
+            )),
+        }
+    }
+
+    fn mark_ready(&mut self) {
+        *self = Self::Ready;
+    }
+
+    fn ensure_ready(self, label: &str) -> Result<(), String> {
+        match self {
+            Self::Ready => Ok(()),
+            Self::Poisoned => Err(format!(
+                "{label} resident request state is not reusable after an incomplete reset"
+            )),
+        }
+    }
+}
+
+fn zero_entire_runtime_buffer(
+    buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    label: &str,
+) -> Result<(), String> {
+    let bytes = buffer
+        .size()
+        .map_err(|err| format!("failed to query {label} size: {err}"))?;
+    buffer
+        .zero(0, bytes, Some(stream))
+        .map_err(|err| format!("failed to zero {label}: {err}"))
+}
+
 fn read_runtime_buffer_f32(
     buffer: &ullm_runtime_sys::RuntimeBuffer,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -868,6 +916,7 @@ pub struct PackageSelfAttnResidentStepWeights {
 
 pub struct PackageSelfAttnResidentStepLayer {
     weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
+    request_state: ResidentRequestState,
     last_component_step_ms: Option<PackageSelfAttnComponentStepMs>,
     written_len: usize,
     block_table_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -1367,6 +1416,7 @@ impl PackageSelfAttnResidentStepLayer {
 
         Ok(Self {
             weights,
+            request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
             written_len: 0,
             block_table_buffer,
@@ -1524,6 +1574,7 @@ impl PackageSelfAttnResidentStepLayer {
 
         Ok(Self {
             weights,
+            request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
             written_len: 0,
             block_table_buffer,
@@ -1558,6 +1609,7 @@ impl PackageSelfAttnResidentStepLayer {
         cache_position: usize,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         if residual.len() != self.hidden {
             return Err(format!(
                 "{label} self-attn resident residual length mismatch: got {} expected {}",
@@ -1589,6 +1641,7 @@ impl PackageSelfAttnResidentStepLayer {
         cache_position: usize,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         let expected_bytes = checked_f32_byte_len(self.hidden, "self-attn resident input")?;
         let actual_bytes = residual_buffer
             .size()
@@ -1629,6 +1682,41 @@ impl PackageSelfAttnResidentStepLayer {
         self.last_component_step_ms.take()
     }
 
+    pub fn request_state_is_reusable(&self) -> bool {
+        self.request_state == ResidentRequestState::Ready
+    }
+
+    /// Clears request-owned KV state while retaining the resident layer weights.
+    ///
+    /// The state becomes permanently unusable if synchronization or device zeroing fails;
+    /// callers must then discard this layer state instead of attempting another request.
+    pub fn reset_request_state_synchronized(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        self.request_state.begin_reset("self-attn")?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize self-attn resident request state before reset: {err}")
+        })?;
+        zero_entire_runtime_buffer(
+            &mut self.k_cache_buffer,
+            stream,
+            "self-attn resident k cache",
+        )?;
+        zero_entire_runtime_buffer(
+            &mut self.v_cache_buffer,
+            stream,
+            "self-attn resident v cache",
+        )?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize self-attn resident request state reset: {err}")
+        })?;
+        self.written_len = 0;
+        self.last_component_step_ms = None;
+        self.request_state.mark_ready();
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run_device_step_input(
         &mut self,
@@ -1638,6 +1726,7 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         let hidden = self.weights.hidden;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
@@ -1686,6 +1775,7 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         let component_started = Instant::now();
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
@@ -1764,6 +1854,7 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         let projection_input_buffer = self.run_device_step_after_qkv_projection_input(
             stream,
             rotary_dim,
@@ -1868,6 +1959,7 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<PackageSelfAttnAttentionProjectionInput, String> {
+        self.request_state.ensure_ready(label)?;
         let q_projection_layout = self.weights.q_projection_layout;
         let q_heads = self.weights.q_heads;
         let kv_heads = self.weights.kv_heads;
@@ -2085,6 +2177,7 @@ impl PackageSelfAttnResidentStepLayer {
         cache_position: usize,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         if cache_position != self.written_len {
             return Err(format!(
                 "{label} self-attn resident cache_position {cache_position} does not match written_len {}",
@@ -2156,6 +2249,7 @@ pub struct PackageLinearAttnResidentStepWeights {
 
 pub struct PackageLinearAttnResidentStepLayer {
     weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
+    request_state: ResidentRequestState,
     last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
     conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -2732,6 +2826,7 @@ impl PackageLinearAttnResidentStepLayer {
 
         Ok(Self {
             weights,
+            request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
             conv_history_buffer,
             recurrent_state_buffer,
@@ -2877,6 +2972,7 @@ impl PackageLinearAttnResidentStepLayer {
 
         Ok(Self {
             weights,
+            request_state: ResidentRequestState::Ready,
             last_component_step_ms: None,
             conv_history_buffer,
             recurrent_state_buffer,
@@ -2914,6 +3010,7 @@ impl PackageLinearAttnResidentStepLayer {
         residual: &[f32],
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         if residual.len() != self.hidden {
             return Err(format!(
                 "linear-attn resident layer {} residual length mismatch: got {} expected {}",
@@ -2938,6 +3035,7 @@ impl PackageLinearAttnResidentStepLayer {
         residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         let expected_bytes = checked_f32_byte_len(self.hidden, "linear-attn resident input")?;
         let actual_bytes = residual_buffer
             .size()
@@ -2974,12 +3072,47 @@ impl PackageLinearAttnResidentStepLayer {
         self.last_component_step_ms.take()
     }
 
+    pub fn request_state_is_reusable(&self) -> bool {
+        self.request_state == ResidentRequestState::Ready
+    }
+
+    /// Clears request-owned convolution and recurrent state while retaining resident weights.
+    ///
+    /// The state becomes permanently unusable if synchronization or device zeroing fails;
+    /// callers must then discard this layer state instead of attempting another request.
+    pub fn reset_request_state_synchronized(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        self.request_state.begin_reset("linear-attn")?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident request state before reset: {err}")
+        })?;
+        zero_entire_runtime_buffer(
+            &mut self.conv_history_buffer,
+            stream,
+            "linear-attn resident convolution history",
+        )?;
+        zero_entire_runtime_buffer(
+            &mut self.recurrent_state_buffer,
+            stream,
+            "linear-attn resident recurrent state",
+        )?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident request state reset: {err}")
+        })?;
+        self.last_component_step_ms = None;
+        self.request_state.mark_ready();
+        Ok(())
+    }
+
     pub fn run_device_step(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         input: PackageLinearAttnResidentStepInput<'_>,
         label: &str,
     ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
         self.last_component_step_ms = None;
         let weights = self.weights.as_ref();
         let hidden = weights.hidden;
@@ -3754,6 +3887,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     item.request_id
                 )
             })?;
+            layer.request_state.ensure_ready(&item_label)?;
             if item.cache_position != layer.written_len {
                 return Err(format!(
                     "{item_label} self-attn resident cache_position {} does not match written_len {}",
@@ -4249,6 +4383,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     request_id
                 )
             })?;
+            layer.request_state.ensure_ready(&item_label)?;
             if cache_position != layer.written_len {
                 return Err(format!(
                     "{item_label} self-attn resident cache_position {} does not match written_len {}",
@@ -5462,6 +5597,56 @@ mod linear_attn_step_test_support {
 mod linear_attn_step_state_tests {
     use super::linear_attn_step_test_support::*;
     use super::*;
+
+    #[test]
+    fn resident_request_state_reset_is_fail_closed_and_reusable_after_success() {
+        let mut state = ResidentRequestState::Ready;
+        state.ensure_ready("test").unwrap();
+
+        state.begin_reset("test").unwrap();
+        let error = state.ensure_ready("test").unwrap_err();
+        assert!(error.contains("not reusable after an incomplete reset"));
+
+        state.mark_ready();
+        state.ensure_ready("test").unwrap();
+    }
+
+    #[test]
+    fn resident_request_state_incomplete_reset_remains_poisoned() {
+        let mut state = ResidentRequestState::Ready;
+        state.begin_reset("test").unwrap();
+
+        assert_eq!(state, ResidentRequestState::Poisoned);
+        assert!(state.ensure_ready("test").is_err());
+        let retry_error = state.begin_reset("test").unwrap_err();
+        assert!(retry_error.contains("poisoned and cannot be reset again"));
+        assert_eq!(state, ResidentRequestState::Poisoned);
+    }
+
+    #[test]
+    fn resident_request_reset_zeroes_runtime_buffer_on_cpu() {
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        assert_eq!(context.device_info().unwrap().backend, "cpu");
+        let mut stream = context.create_stream().unwrap();
+        let values = [1.0_f32, -2.0, 3.5, 9.0];
+        let bytes = encode_f32_to_bytes(&values);
+        let mut buffer = context.alloc_buffer(bytes.len()).unwrap();
+        buffer.copy_from_host(0, &bytes, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        zero_entire_runtime_buffer(&mut buffer, &mut stream, "test request buffer").unwrap();
+        stream.synchronize().unwrap();
+
+        let mut reset_bytes = vec![0_u8; bytes.len()];
+        buffer
+            .copy_to_host(0, &mut reset_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            decode_f32_le_values(&reset_bytes),
+            vec![0.0_f32; values.len()]
+        );
+    }
 
     #[test]
     pub fn linear_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
