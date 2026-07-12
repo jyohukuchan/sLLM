@@ -59,6 +59,13 @@ pub trait InferenceSession {
     fn finish_and_reset(&mut self) -> Result<ReleaseSummary, String>;
 
     fn abort_and_reset(&mut self) -> Result<ReleaseSummary, String>;
+
+    /// Validate the reusable idle baseline before the worker exits.
+    ///
+    /// Sessions without resident resources may keep the default implementation.
+    fn shutdown(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub trait RequestPublications {
@@ -323,7 +330,7 @@ pub fn validate_release_summary(
         || !summary.reset_complete
     {
         return Err(format!(
-            "SQ8 worker release summary does not match the completed request: {summary:?}"
+            "worker release summary does not match the completed request: {summary:?}"
         ));
     }
     Ok(())

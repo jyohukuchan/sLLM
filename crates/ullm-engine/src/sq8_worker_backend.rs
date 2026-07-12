@@ -3,12 +3,10 @@
 
 //! Resident Qwen3 SQ8 session backend for the JSONL worker.
 
+use crate::inference_api::{CancellationToken, InferenceRequest, ReleaseSummary};
 #[cfg(test)]
-use crate::inference_api::FinishReason as Sq8FinishReason;
-use crate::inference_api::{
-    CancellationToken as Sq8CancellationToken, InferenceRequest as Sq8ServingRequest,
-    ReleaseOutcome as Sq8ReleaseOutcome, ReleaseSummary as Sq8ReleaseSummary,
-};
+use crate::inference_api::{FinishReason, ReleaseOutcome};
+use crate::session_worker_backend::SessionInferenceBackend;
 use crate::sq_canonical::read_sq8_canonical_artifact;
 use crate::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
 use crate::sq8_layer_runtime::{
@@ -22,24 +20,13 @@ use crate::sq8_serving_runtime::{
     Qwen3Sq8ServingSession, Sq8PreparedAdvance, Sq8PreparedToken, Sq8ServingAdvance,
     Sq8ServingPrefillMode, Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
 };
-#[cfg(test)]
-use crate::sq8_worker_protocol::Sq8WorkerTimings;
-use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission};
-use crate::sq8_worker_runtime::{Sq8InferenceBackend, Sq8RequestEventPublisher};
-use crate::worker_driver::{
-    InferenceSession as Sq8WorkerSessionDriver, PublishedAdvance as DriverPublished,
-    RequestPublications as Sq8WorkerRequestPublications, SessionAdvance as DriverAdvance,
-    drive_worker_request,
-};
+use crate::worker_driver::{InferenceSession, PublishedAdvance, SessionAdvance};
 #[cfg(test)]
 use crate::worker_driver::{
-    LLAMA_SERVER_MIN_TIMING_MS, RequestTimingTracker as Sq8RequestTimingTracker,
+    LLAMA_SERVER_MIN_TIMING_MS, RequestPublications, RequestTimingTracker, drive_worker_request,
     validate_release_summary,
 };
-use serde::Serialize;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream, device_count, device_info};
 
 pub const SQ8_WORKER_UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
@@ -71,20 +58,17 @@ impl Qwen3Sq8WorkerBackendConfig {
     }
 }
 
-#[derive(Debug)]
-pub struct Qwen3Sq8WorkerBackend {
-    driver: Sq8SessionDriver<Qwen3Sq8SessionOwner>,
-}
+pub type Qwen3Sq8WorkerBackend = SessionInferenceBackend<Qwen3Sq8InferenceSession>;
 
 /// Field order keeps the session and stream alive until before the context is destroyed.
 #[derive(Debug)]
-struct Qwen3Sq8SessionOwner {
+pub struct Qwen3Sq8InferenceSession {
     session: Qwen3Sq8ServingSession,
     stream: RuntimeStream,
     _context: RuntimeContext,
 }
 
-impl Qwen3Sq8WorkerBackend {
+impl SessionInferenceBackend<Qwen3Sq8InferenceSession> {
     pub fn load(config: Qwen3Sq8WorkerBackendConfig) -> Result<Self, String> {
         require_sq8_worker_build_feature()?;
         require_sq8_worker_hip_guards()?;
@@ -105,20 +89,108 @@ impl Qwen3Sq8WorkerBackend {
             Sq8ServingPrefillMode::FixedM128Chunks,
         )
         .map_err(|error| error.to_string())?;
-        let owner = Qwen3Sq8SessionOwner {
+        let session = Qwen3Sq8InferenceSession {
             session,
             stream,
             _context: context,
         };
-        Ok(Self {
-            driver: Sq8SessionDriver { ops: owner },
-        })
+        Ok(Self::new(session))
+    }
+}
+
+fn require_sq8_worker_build_feature() -> Result<(), String> {
+    if cfg!(feature = "rocm-ck-gfx1201") {
+        Ok(())
+    } else {
+        Err("SQ8 worker binary requires the rocm-ck-gfx1201 build feature".into())
+    }
+}
+
+impl InferenceSession for Qwen3Sq8InferenceSession {
+    type Prepared = Sq8PreparedToken;
+
+    fn start_request(
+        &mut self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.session
+            .start(request, cancel, &mut self.stream)
+            .map_err(|error| error.to_string())
     }
 
-    fn validate_ready_baseline(&mut self) -> Result<(), String> {
-        let owner = &mut self.driver.ops;
-        owner.stream.synchronize()?;
-        let snapshot = owner.session.snapshot();
+    fn prepare_advance(&mut self) -> Result<SessionAdvance<Self::Prepared>, String> {
+        match self
+            .session
+            .prepare_advance_synchronized(&mut self.stream)
+            .map_err(|error| error.to_string())?
+        {
+            Sq8PreparedAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            } => Ok(SessionAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            }),
+            Sq8PreparedAdvance::Token(prepared) => Ok(SessionAdvance::Token {
+                token_id: prepared.token_id,
+                generated_index: prepared.generated_index,
+                cache_len: prepared.cache_len,
+                terminal_reason: prepared.terminal_reason,
+                prepared,
+            }),
+            Sq8PreparedAdvance::CancellationObserved => Ok(SessionAdvance::CancellationObserved),
+        }
+    }
+
+    fn publish_prepared<F>(
+        &mut self,
+        prepared: Self::Prepared,
+        publish: F,
+    ) -> Result<PublishedAdvance, String>
+    where
+        F: FnOnce(usize) -> Result<(), String>,
+    {
+        match self
+            .session
+            .publish_prepared_token(prepared, &mut self.stream, |token| publish(token.token_id))
+            .map_err(|error| error.to_string())?
+        {
+            Sq8ServingAdvance::Token {
+                token_id,
+                generated_index,
+                cache_len,
+                terminal_reason,
+            } => Ok(PublishedAdvance::Token {
+                token_id,
+                generated_index,
+                cache_len,
+                terminal_reason,
+            }),
+            Sq8ServingAdvance::CancellationObserved => Ok(PublishedAdvance::CancellationObserved),
+            Sq8ServingAdvance::PromptProgress { .. } => {
+                Err("SQ8 prepared token publication returned prompt progress".into())
+            }
+        }
+    }
+
+    fn finish_and_reset(&mut self) -> Result<ReleaseSummary, String> {
+        self.session
+            .finish_and_reset_synchronized(&mut self.stream)
+            .map_err(|error| error.to_string())
+    }
+
+    fn abort_and_reset(&mut self) -> Result<ReleaseSummary, String> {
+        self.session
+            .abort_and_reset_synchronized(&mut self.stream)
+            .map_err(|error| error.to_string())
+    }
+
+    fn shutdown(&mut self) -> Result<(), String> {
+        self.stream.synchronize()?;
+        let snapshot = self.session.snapshot();
         if snapshot.status != Sq8ServingRuntimeStatus::Ready
             || snapshot.active_request_id.is_some()
             || snapshot.prompt_tokens != 0
@@ -132,323 +204,10 @@ impl Qwen3Sq8WorkerBackend {
             || snapshot.allocator.allocated_blocks != 0
         {
             return Err(format!(
-                "SQ8 worker backend is not at the reusable baseline: {snapshot:?}"
+                "SQ8 worker session is not at the reusable baseline: {snapshot:?}"
             ));
         }
         Ok(())
-    }
-}
-
-fn require_sq8_worker_build_feature() -> Result<(), String> {
-    if cfg!(feature = "rocm-ck-gfx1201") {
-        Ok(())
-    } else {
-        Err("SQ8 worker binary requires the rocm-ck-gfx1201 build feature".into())
-    }
-}
-
-impl Sq8InferenceBackend for Qwen3Sq8WorkerBackend {
-    fn execute(
-        &mut self,
-        request: Sq8ServingRequest,
-        admission: Sq8WorkerAdmission,
-        publications: &mut Sq8RequestEventPublisher<'_>,
-    ) -> Result<(), String> {
-        let request_id = request.request_id.clone();
-        let prompt_tokens = request.prompt_token_ids.len();
-        let started = Instant::now();
-        write_backend_log(Sq8BackendLog {
-            schema_version: "ullm.worker.log.v1",
-            level: "info",
-            event: "request_admitted",
-            request_id: &request_id,
-            phase: "start",
-            prompt_tokens,
-            completion_tokens: 0,
-            elapsed_ms: 0,
-            outcome: None,
-            error_code: None,
-        });
-        let result = drive_sq8_worker_request(&mut self.driver, request, admission, publications);
-        match result {
-            Ok(outcome) => {
-                write_backend_log(Sq8BackendLog {
-                    schema_version: "ullm.worker.log.v1",
-                    level: "info",
-                    event: "request_released",
-                    request_id: &request_id,
-                    phase: "reset_complete",
-                    prompt_tokens,
-                    completion_tokens: publications.completion_tokens(),
-                    elapsed_ms: elapsed_millis(started),
-                    outcome: Some(release_event_name(outcome)),
-                    error_code: None,
-                });
-                Ok(())
-            }
-            Err(error) => {
-                write_backend_log(Sq8BackendLog {
-                    schema_version: "ullm.worker.log.v1",
-                    level: "error",
-                    event: "request_failed",
-                    request_id: &request_id,
-                    phase: "execute",
-                    prompt_tokens,
-                    completion_tokens: publications.completion_tokens(),
-                    elapsed_ms: elapsed_millis(started),
-                    outcome: None,
-                    error_code: Some("runtime_failed"),
-                });
-                Err(error)
-            }
-        }
-    }
-
-    fn shutdown(&mut self) -> Result<(), String> {
-        self.validate_ready_baseline()
-    }
-}
-
-#[derive(Serialize)]
-struct Sq8BackendLog<'a> {
-    schema_version: &'static str,
-    level: &'static str,
-    event: &'static str,
-    request_id: &'a str,
-    phase: &'static str,
-    prompt_tokens: usize,
-    completion_tokens: usize,
-    elapsed_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    outcome: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<&'static str>,
-}
-
-fn write_backend_log(record: Sq8BackendLog<'_>) {
-    let mut stderr = std::io::stderr().lock();
-    let _ = serde_json::to_writer(&mut stderr, &record);
-    let _ = stderr.write_all(b"\n");
-    let _ = stderr.flush();
-}
-
-fn elapsed_millis(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-fn release_event_name(outcome: Sq8ReleaseOutcomeEvent) -> &'static str {
-    match outcome {
-        Sq8ReleaseOutcomeEvent::Stop => "stop",
-        Sq8ReleaseOutcomeEvent::Length => "length",
-        Sq8ReleaseOutcomeEvent::Cancelled => "cancelled",
-    }
-}
-
-impl Sq8WorkerRequestPublications for Sq8RequestEventPublisher<'_> {
-    fn publish_started(&mut self) -> Result<(), String> {
-        Sq8RequestEventPublisher::publish_started(self)
-    }
-
-    fn observe_prompt_unit(
-        &mut self,
-        prompt_tokens_processed: usize,
-        execution_width: usize,
-    ) -> Result<(), String> {
-        Sq8RequestEventPublisher::observe_prompt_unit(
-            self,
-            prompt_tokens_processed,
-            execution_width,
-        )
-    }
-
-    fn observe_prefill_transition(&mut self) -> Result<(), String> {
-        Sq8RequestEventPublisher::observe_prefill_transition(self)
-    }
-
-    fn publish_token(&mut self, token_id: usize) -> Result<(), String> {
-        Sq8RequestEventPublisher::publish_token(self, token_id)
-    }
-
-    fn publish_released(
-        &mut self,
-        outcome: Sq8ReleaseOutcome,
-        timings: Option<crate::inference_api::GenerationTimings>,
-    ) -> Result<(), String> {
-        let event_outcome = match outcome {
-            Sq8ReleaseOutcome::Stop => Sq8ReleaseOutcomeEvent::Stop,
-            Sq8ReleaseOutcome::Length => Sq8ReleaseOutcomeEvent::Length,
-            Sq8ReleaseOutcome::Cancelled => Sq8ReleaseOutcomeEvent::Cancelled,
-        };
-        match timings {
-            Some(timings) => self.publish_released_with_timings(event_outcome, timings),
-            None => Sq8RequestEventPublisher::publish_released(self, event_outcome),
-        }
-    }
-
-    fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
-    where
-        F: FnOnce() -> Result<T, String>,
-    {
-        Sq8RequestEventPublisher::run_terminal_cleanup(self, cleanup)
-    }
-
-    fn completion_tokens(&self) -> usize {
-        Sq8RequestEventPublisher::completion_tokens(self)
-    }
-}
-
-trait Sq8SessionOps {
-    fn start(
-        &mut self,
-        request: Sq8ServingRequest,
-        cancel: Sq8CancellationToken,
-    ) -> Result<(), String>;
-
-    fn prepare(&mut self) -> Result<Sq8PreparedAdvance, String>;
-
-    fn publish<F>(
-        &mut self,
-        prepared: Sq8PreparedToken,
-        publish: F,
-    ) -> Result<Sq8ServingAdvance, String>
-    where
-        F: FnOnce(&Sq8PreparedToken) -> Result<(), String>;
-
-    fn finish_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String>;
-
-    fn abort_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String>;
-}
-
-impl Sq8SessionOps for Qwen3Sq8SessionOwner {
-    fn start(
-        &mut self,
-        request: Sq8ServingRequest,
-        cancel: Sq8CancellationToken,
-    ) -> Result<(), String> {
-        self.session
-            .start(request, cancel, &mut self.stream)
-            .map_err(|error| error.to_string())
-    }
-
-    fn prepare(&mut self) -> Result<Sq8PreparedAdvance, String> {
-        self.session
-            .prepare_advance_synchronized(&mut self.stream)
-            .map_err(|error| error.to_string())
-    }
-
-    fn publish<F>(
-        &mut self,
-        prepared: Sq8PreparedToken,
-        publish: F,
-    ) -> Result<Sq8ServingAdvance, String>
-    where
-        F: FnOnce(&Sq8PreparedToken) -> Result<(), String>,
-    {
-        self.session
-            .publish_prepared_token(prepared, &mut self.stream, publish)
-            .map_err(|error| error.to_string())
-    }
-
-    fn finish_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String> {
-        self.session
-            .finish_and_reset_synchronized(&mut self.stream)
-            .map_err(|error| error.to_string())
-    }
-
-    fn abort_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String> {
-        self.session
-            .abort_and_reset_synchronized(&mut self.stream)
-            .map_err(|error| error.to_string())
-    }
-}
-
-#[derive(Debug)]
-struct Sq8SessionDriver<O> {
-    ops: O,
-}
-
-impl<O: Sq8SessionOps> Sq8WorkerSessionDriver for Sq8SessionDriver<O> {
-    type Prepared = Sq8PreparedToken;
-
-    fn start_request(
-        &mut self,
-        request: Sq8ServingRequest,
-        cancel: Sq8CancellationToken,
-    ) -> Result<(), String> {
-        self.ops.start(request, cancel)
-    }
-
-    fn prepare_advance(&mut self) -> Result<DriverAdvance<Self::Prepared>, String> {
-        match self.ops.prepare()? {
-            Sq8PreparedAdvance::PromptProgress {
-                prompt_tokens_processed,
-                cache_len,
-                execution_width,
-            } => Ok(DriverAdvance::PromptProgress {
-                prompt_tokens_processed,
-                cache_len,
-                execution_width,
-            }),
-            Sq8PreparedAdvance::Token(prepared) => Ok(DriverAdvance::Token {
-                token_id: prepared.token_id,
-                generated_index: prepared.generated_index,
-                cache_len: prepared.cache_len,
-                terminal_reason: prepared.terminal_reason,
-                prepared,
-            }),
-            Sq8PreparedAdvance::CancellationObserved => Ok(DriverAdvance::CancellationObserved),
-        }
-    }
-
-    fn publish_prepared<F>(
-        &mut self,
-        prepared: Self::Prepared,
-        publish: F,
-    ) -> Result<DriverPublished, String>
-    where
-        F: FnOnce(usize) -> Result<(), String>,
-    {
-        match self
-            .ops
-            .publish(prepared, |token| publish(token.token_id))?
-        {
-            Sq8ServingAdvance::Token {
-                token_id,
-                generated_index,
-                cache_len,
-                terminal_reason,
-            } => Ok(DriverPublished::Token {
-                token_id,
-                generated_index,
-                cache_len,
-                terminal_reason,
-            }),
-            Sq8ServingAdvance::CancellationObserved => Ok(DriverPublished::CancellationObserved),
-            Sq8ServingAdvance::PromptProgress { .. } => {
-                Err("SQ8 prepared token publication returned prompt progress".into())
-            }
-        }
-    }
-
-    fn finish_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String> {
-        self.ops.finish_and_reset()
-    }
-
-    fn abort_and_reset(&mut self) -> Result<Sq8ReleaseSummary, String> {
-        self.ops.abort_and_reset()
-    }
-}
-
-fn drive_sq8_worker_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublications>(
-    driver: &mut D,
-    request: Sq8ServingRequest,
-    admission: Sq8WorkerAdmission,
-    publications: &mut P,
-) -> Result<Sq8ReleaseOutcomeEvent, String> {
-    match drive_worker_request(driver, request, admission.cancel, publications)? {
-        Sq8ReleaseOutcome::Stop => Ok(Sq8ReleaseOutcomeEvent::Stop),
-        Sq8ReleaseOutcome::Length => Ok(Sq8ReleaseOutcomeEvent::Length),
-        Sq8ReleaseOutcome::Cancelled => Ok(Sq8ReleaseOutcomeEvent::Cancelled),
     }
 }
 
@@ -505,19 +264,44 @@ fn isolated_sq8_worker_device() -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_api::GenerationTimings as Sq8WorkerTimings;
     use crate::sq8_worker_protocol::{
-        Sq8CancelReason, Sq8OrderedJsonlWriter, Sq8WorkerControl, Sq8WorkerEvent,
+        Sq8CancelReason, Sq8OrderedJsonlWriter, Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission,
+        Sq8WorkerControl, Sq8WorkerEvent,
     };
     use crate::sq8_worker_runtime::{
-        Sq8InferenceCommand, Sq8WorkerEventPublisher, spawn_sq8_inference_thread,
-        spawn_sq8_ordered_writer,
+        Sq8InferenceBackend, Sq8InferenceCommand, Sq8RequestEventPublisher,
+        Sq8WorkerEventPublisher, spawn_sq8_inference_thread, spawn_sq8_ordered_writer,
     };
     use serde_json::Value;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, SyncSender, sync_channel};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    type DriverAdvance<P> = SessionAdvance<P>;
+    type DriverPublished = PublishedAdvance;
+    type Sq8CancellationToken = CancellationToken;
+    type Sq8FinishReason = FinishReason;
+    type Sq8ReleaseOutcome = ReleaseOutcome;
+    type Sq8ReleaseSummary = ReleaseSummary;
+    type Sq8ServingRequest = InferenceRequest;
+    use crate::worker_driver::InferenceSession as Sq8WorkerSessionDriver;
+    use crate::worker_driver::RequestPublications as Sq8WorkerRequestPublications;
+
+    fn drive_test_request<D: InferenceSession, P: RequestPublications>(
+        driver: &mut D,
+        request: InferenceRequest,
+        admission: Sq8WorkerAdmission,
+        publications: &mut P,
+    ) -> Result<Sq8ReleaseOutcomeEvent, String> {
+        match drive_worker_request(driver, request, admission.cancel, publications)? {
+            ReleaseOutcome::Stop => Ok(Sq8ReleaseOutcomeEvent::Stop),
+            ReleaseOutcome::Length => Ok(Sq8ReleaseOutcomeEvent::Length),
+            ReleaseOutcome::Cancelled => Ok(Sq8ReleaseOutcomeEvent::Cancelled),
+        }
+    }
 
     struct ScriptedPublishBarrier {
         prepared: mpsc::Sender<()>,
@@ -620,6 +404,104 @@ mod tests {
             self.abort
                 .take()
                 .ok_or_else(|| "scripted abort summary is missing".to_string())
+        }
+    }
+
+    trait Sq8SessionOps {
+        fn start(
+            &mut self,
+            request: InferenceRequest,
+            cancel: CancellationToken,
+        ) -> Result<(), String>;
+        fn prepare(&mut self) -> Result<Sq8PreparedAdvance, String>;
+        fn publish<F>(
+            &mut self,
+            prepared: Sq8PreparedToken,
+            publish: F,
+        ) -> Result<Sq8ServingAdvance, String>
+        where
+            F: FnOnce(&Sq8PreparedToken) -> Result<(), String>;
+        fn finish_and_reset(&mut self) -> Result<ReleaseSummary, String>;
+        fn abort_and_reset(&mut self) -> Result<ReleaseSummary, String>;
+    }
+
+    struct Sq8SessionDriver<O> {
+        ops: O,
+    }
+
+    impl<O: Sq8SessionOps> InferenceSession for Sq8SessionDriver<O> {
+        type Prepared = Sq8PreparedToken;
+
+        fn start_request(
+            &mut self,
+            request: InferenceRequest,
+            cancel: CancellationToken,
+        ) -> Result<(), String> {
+            self.ops.start(request, cancel)
+        }
+
+        fn prepare_advance(&mut self) -> Result<SessionAdvance<Self::Prepared>, String> {
+            match self.ops.prepare()? {
+                Sq8PreparedAdvance::PromptProgress {
+                    prompt_tokens_processed,
+                    cache_len,
+                    execution_width,
+                } => Ok(SessionAdvance::PromptProgress {
+                    prompt_tokens_processed,
+                    cache_len,
+                    execution_width,
+                }),
+                Sq8PreparedAdvance::Token(prepared) => Ok(SessionAdvance::Token {
+                    token_id: prepared.token_id,
+                    generated_index: prepared.generated_index,
+                    cache_len: prepared.cache_len,
+                    terminal_reason: prepared.terminal_reason,
+                    prepared,
+                }),
+                Sq8PreparedAdvance::CancellationObserved => {
+                    Ok(SessionAdvance::CancellationObserved)
+                }
+            }
+        }
+
+        fn publish_prepared<F>(
+            &mut self,
+            prepared: Self::Prepared,
+            publish: F,
+        ) -> Result<PublishedAdvance, String>
+        where
+            F: FnOnce(usize) -> Result<(), String>,
+        {
+            match self
+                .ops
+                .publish(prepared, |token| publish(token.token_id))?
+            {
+                Sq8ServingAdvance::Token {
+                    token_id,
+                    generated_index,
+                    cache_len,
+                    terminal_reason,
+                } => Ok(PublishedAdvance::Token {
+                    token_id,
+                    generated_index,
+                    cache_len,
+                    terminal_reason,
+                }),
+                Sq8ServingAdvance::CancellationObserved => {
+                    Ok(PublishedAdvance::CancellationObserved)
+                }
+                Sq8ServingAdvance::PromptProgress { .. } => {
+                    Err("SQ8 prepared token publication returned prompt progress".into())
+                }
+            }
+        }
+
+        fn finish_and_reset(&mut self) -> Result<ReleaseSummary, String> {
+            self.ops.finish_and_reset()
+        }
+
+        fn abort_and_reset(&mut self) -> Result<ReleaseSummary, String> {
+            self.ops.abort_and_reset()
         }
     }
 
@@ -847,7 +729,7 @@ mod tests {
     }
 
     struct ScriptedBackend {
-        driver: ScriptedDriver,
+        backend: SessionInferenceBackend<ScriptedDriver>,
         completed: mpsc::Sender<Result<(), String>>,
     }
 
@@ -858,11 +740,18 @@ mod tests {
             admission: Sq8WorkerAdmission,
             publications: &mut Sq8RequestEventPublisher<'_>,
         ) -> Result<(), String> {
-            let result =
-                drive_sq8_worker_request(&mut self.driver, request, admission, publications)
-                    .map(|_| ());
+            let result = crate::worker_runtime::InferenceBackend::execute(
+                &mut self.backend,
+                request,
+                admission,
+                publications,
+            );
             let _ = self.completed.send(result.clone());
             result
+        }
+
+        fn shutdown(&mut self) -> Result<(), String> {
+            crate::worker_runtime::InferenceBackend::shutdown(&mut self.backend)
         }
     }
 
@@ -884,7 +773,12 @@ mod tests {
             Arc::clone(&control),
             events.clone(),
             command_receiver,
-            move || Ok(ScriptedBackend { driver, completed }),
+            move || {
+                Ok(ScriptedBackend {
+                    backend: SessionInferenceBackend::new(driver),
+                    completed,
+                })
+            },
         )
         .unwrap();
         inference.wait_until_ready().unwrap();
@@ -916,7 +810,7 @@ mod tests {
     #[test]
     fn timing_tracker_uses_first_to_last_sample_with_llama_server_counts() {
         let prompt_started_at = Instant::now();
-        let mut tracker = Sq8RequestTimingTracker::new(prompt_started_at);
+        let mut tracker = RequestTimingTracker::new(prompt_started_at);
         tracker
             .observe_sample(prompt_started_at + Duration::from_millis(12))
             .unwrap();
@@ -1138,7 +1032,7 @@ mod tests {
             timings: None,
         };
 
-        let outcome = drive_sq8_worker_request(
+        let outcome = drive_test_request(
             &mut driver,
             Sq8ServingRequest::greedy("req-adapter", vec![1, 2, 3], 2),
             admission,
@@ -1212,7 +1106,7 @@ mod tests {
             timings: None,
         };
 
-        let outcome = drive_sq8_worker_request(
+        let outcome = drive_test_request(
             &mut driver,
             Sq8ServingRequest::greedy("req-adapter-cancel", vec![1, 2, 3], 2),
             admission,
@@ -1288,7 +1182,7 @@ mod tests {
             timings: None,
         };
 
-        let outcome = drive_sq8_worker_request(
+        let outcome = drive_test_request(
             &mut driver,
             Sq8ServingRequest::greedy("req-stop", vec![1, 2, 3], 2),
             admission,
@@ -1362,7 +1256,7 @@ mod tests {
             timings: None,
         };
 
-        let outcome = drive_sq8_worker_request(
+        let outcome = drive_test_request(
             &mut driver,
             Sq8ServingRequest::greedy("req-cancel-order", vec![1, 2, 3], 2),
             admission,
@@ -1438,30 +1332,5 @@ mod tests {
             require_sq8_worker_build_feature().is_ok(),
             cfg!(feature = "rocm-ck-gfx1201")
         );
-    }
-
-    #[test]
-    fn structured_backend_log_contains_counts_but_no_prompt_or_token_content() {
-        let value = serde_json::to_value(Sq8BackendLog {
-            schema_version: "ullm.worker.log.v1",
-            level: "error",
-            event: "request_failed",
-            request_id: "req-log",
-            phase: "execute",
-            prompt_tokens: 128,
-            completion_tokens: 3,
-            elapsed_ms: 42,
-            outcome: None,
-            error_code: Some("runtime_failed"),
-        })
-        .unwrap();
-        assert_eq!(value["schema_version"], "ullm.worker.log.v1");
-        assert_eq!(value["request_id"], "req-log");
-        assert_eq!(value["prompt_tokens"], 128);
-        assert_eq!(value["completion_tokens"], 3);
-        assert_eq!(value["error_code"], "runtime_failed");
-        assert!(value.get("prompt_token_ids").is_none());
-        assert!(value.get("token_id").is_none());
-        assert!(value.get("message").is_none());
     }
 }
