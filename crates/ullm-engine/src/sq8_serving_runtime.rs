@@ -196,13 +196,31 @@ impl Sq8ServingRequest {
     }
 
     pub fn validate(&self) -> Result<(), Sq8ServingError> {
+        self.validate_for_worker(
+            QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+            QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS,
+            QWEN3_14B_VOCAB_SIZE,
+            &QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS,
+            QWEN3_14B_SQ8_SERVING_TOP_K,
+        )
+    }
+
+    pub fn validate_for_worker(
+        &self,
+        context_tokens: usize,
+        max_new_tokens: usize,
+        vocab_size: usize,
+        eos_token_ids: &[usize],
+        top_k: usize,
+    ) -> Result<(), Sq8ServingError> {
         validate_request_id(&self.request_id)?;
-        if self.prompt_token_ids.is_empty()
-            || self.prompt_token_ids.len() > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+        if context_tokens == 0
+            || self.prompt_token_ids.is_empty()
+            || self.prompt_token_ids.len() > context_tokens
         {
             return Err(Sq8ServingError::invalid_request(format!(
                 "prompt token count must be in 1..={}, got {}",
-                QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+                context_tokens,
                 self.prompt_token_ids.len()
             )));
         }
@@ -211,16 +229,16 @@ impl Sq8ServingRequest {
             .iter()
             .copied()
             .enumerate()
-            .find(|(_, token_id)| *token_id >= QWEN3_14B_VOCAB_SIZE)
+            .find(|(_, token_id)| *token_id >= vocab_size)
         {
             return Err(Sq8ServingError::invalid_request(format!(
-                "prompt_token_ids[{index}]={token_id} exceeds vocabulary size {QWEN3_14B_VOCAB_SIZE}"
+                "prompt_token_ids[{index}]={token_id} exceeds vocabulary size {vocab_size}"
             )));
         }
-        if !(1..=QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS).contains(&self.max_new_tokens) {
+        if !(1..=max_new_tokens).contains(&self.max_new_tokens) {
             return Err(Sq8ServingError::invalid_request(format!(
                 "max_new_tokens must be in 1..={}, got {}",
-                QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS, self.max_new_tokens
+                max_new_tokens, self.max_new_tokens
             )));
         }
         let reserved_tokens = self
@@ -228,18 +246,29 @@ impl Sq8ServingRequest {
             .len()
             .checked_add(self.max_new_tokens)
             .ok_or_else(|| Sq8ServingError::invalid_request("context token count overflows"))?;
-        if reserved_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
+        if reserved_tokens > context_tokens {
             return Err(Sq8ServingError::invalid_request(format!(
-                "prompt plus completion exceeds context: requested={reserved_tokens} context={QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS}"
+                "prompt plus completion exceeds context: requested={reserved_tokens} context={context_tokens}"
             )));
         }
-        if self.eos_token_ids != QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS {
+        if self.eos_token_ids != eos_token_ids {
             return Err(Sq8ServingError::invalid_request(format!(
                 "eos_token_ids must be {:?}, got {:?}",
-                QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS, self.eos_token_ids
+                eos_token_ids, self.eos_token_ids
             )));
         }
-        self.sampling.validate()
+        if !self.sampling.temperature.is_finite()
+            || !(0.0..=2.0).contains(&self.sampling.temperature)
+            || !self.sampling.top_p.is_finite()
+            || self.sampling.top_p <= 0.0
+            || self.sampling.top_p > 1.0
+            || self.sampling.top_k != top_k
+        {
+            return Err(Sq8ServingError::invalid_request(
+                "sampling violates the configured worker limits",
+            ));
+        }
+        Ok(())
     }
 }
 

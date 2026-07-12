@@ -28,6 +28,78 @@ pub const SQ8_WORKER_MODEL_REVISION: &str = "9a283b4a5efbc09ce247e0ae5b02b744739
 pub const SQ8_WORKER_DEVICE: &str = "gfx1201";
 pub const SQ8_WORKER_EXECUTION_PROFILE: &str = "rdna4_w8a8_block_ck";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sq8WorkerProfile {
+    pub model: String,
+    pub model_revision: String,
+    pub artifact_content_sha256: String,
+    pub package_manifest_sha256: String,
+    pub device: String,
+    pub execution_profile: String,
+    pub context_length: usize,
+    pub max_new_tokens: usize,
+    pub vocab_size: usize,
+    pub eos_token_ids: Vec<usize>,
+    pub top_k: usize,
+}
+
+pub fn configured_worker_profile() -> Sq8WorkerProfile {
+    Sq8WorkerProfile {
+        model: env_string("ULLM_MODEL_ID", SQ8_WORKER_MODEL),
+        model_revision: env_string("ULLM_MODEL_REVISION", SQ8_WORKER_MODEL_REVISION),
+        artifact_content_sha256: env_string(
+            "ULLM_ARTIFACT_CONTENT_SHA256",
+            QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256,
+        ),
+        package_manifest_sha256: env_string(
+            "ULLM_PACKAGE_MANIFEST_SHA256",
+            QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256,
+        ),
+        device: env_string("ULLM_DEVICE", SQ8_WORKER_DEVICE),
+        execution_profile: env_string("ULLM_EXECUTION_PROFILE", SQ8_WORKER_EXECUTION_PROFILE),
+        context_length: env_usize(
+            "ULLM_MODEL_CONTEXT_LENGTH",
+            QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+        ),
+        max_new_tokens: env_usize("ULLM_MAX_NEW_TOKENS", QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS),
+        vocab_size: env_usize("ULLM_VOCAB_SIZE", QWEN3_14B_VOCAB_SIZE),
+        eos_token_ids: env_usize_csv(
+            "ULLM_EOS_TOKEN_IDS",
+            &crate::sq8_serving_runtime::QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS,
+        ),
+        top_k: env_usize("ULLM_TOP_K", QWEN3_14B_SQ8_SERVING_TOP_K),
+    }
+}
+
+fn env_string(name: &str, default: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_usize_csv(name: &str, default: &[usize]) -> Vec<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::parse)
+                .collect::<Result<Vec<usize>, _>>()
+                .ok()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| default.to_vec())
+}
+
 const DUPLICATE_KEY_ERROR: &str = "duplicate object key";
 const JSON_DEPTH_ERROR: &str = "JSON nesting exceeds protocol limit";
 
@@ -198,12 +270,13 @@ pub struct Sq8GenerateCommand {
 
 impl Sq8GenerateCommand {
     pub fn into_serving_request(self) -> Result<Sq8ServingRequest, Sq8WorkerProtocolError> {
+        let profile = configured_worker_profile();
         if !self.sampling.temperature.is_finite()
             || !(0.0..=2.0).contains(&self.sampling.temperature)
             || !self.sampling.top_p.is_finite()
             || self.sampling.top_p <= 0.0
             || self.sampling.top_p > 1.0
-            || self.sampling.top_k != QWEN3_14B_SQ8_SERVING_TOP_K
+            || self.sampling.top_k != profile.top_k
         {
             return Err(Sq8WorkerProtocolError::invalid_request(
                 "generate sampling violates the fixed SQ8 product limits",
@@ -222,11 +295,19 @@ impl Sq8GenerateCommand {
             sampling,
         );
         request.eos_token_ids = self.eos_token_ids;
-        request.validate().map_err(|_| {
-            Sq8WorkerProtocolError::invalid_request(
-                "generate request violates the fixed SQ8 product limits",
+        request
+            .validate_for_worker(
+                profile.context_length,
+                profile.max_new_tokens,
+                profile.vocab_size,
+                &profile.eos_token_ids,
+                profile.top_k,
             )
-        })?;
+            .map_err(|_| {
+                Sq8WorkerProtocolError::invalid_request(
+                    "generate request violates the fixed SQ8 product limits",
+                )
+            })?;
         Ok(request)
     }
 }
@@ -1344,14 +1425,11 @@ impl<'de> Visitor<'de> for BoundedTokenIdsVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut values = Vec::with_capacity(
-            sequence
-                .size_hint()
-                .unwrap_or(0)
-                .min(QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS + 1),
-        );
+        let context_length = configured_worker_profile().context_length;
+        let mut values =
+            Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(context_length + 1));
         while let Some(value) = sequence.next_element::<u64>()? {
-            if values.len() == QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS + 1 {
+            if values.len() == context_length + 1 {
                 return Err(de::Error::custom("token ID array exceeds protocol limit"));
             }
             values.push(value);
@@ -1388,8 +1466,9 @@ impl Sq8WorkerTimings {
         predicted_n: usize,
         predicted_ms: f64,
     ) -> Result<Self, Sq8WorkerProtocolError> {
-        if !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(&prompt_n)
-            || !(1..=QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS).contains(&predicted_n)
+        let profile = configured_worker_profile();
+        if !(1..=profile.context_length).contains(&prompt_n)
+            || !(1..=profile.max_new_tokens).contains(&predicted_n)
             || !prompt_ms.is_finite()
             || prompt_ms <= 0.0
             || !predicted_ms.is_finite()
@@ -1493,12 +1572,12 @@ pub enum Sq8WorkerEvent {
     #[serde(rename = "ready")]
     Ready {
         schema_version: &'static str,
-        model: &'static str,
-        model_revision: &'static str,
-        artifact_content_sha256: &'static str,
-        package_manifest_sha256: &'static str,
-        device: &'static str,
-        execution_profile: &'static str,
+        model: String,
+        model_revision: String,
+        artifact_content_sha256: String,
+        package_manifest_sha256: String,
+        device: String,
+        execution_profile: String,
         context_length: usize,
         max_new_tokens: usize,
     },
@@ -1547,16 +1626,17 @@ pub enum Sq8WorkerEvent {
 
 impl Sq8WorkerEvent {
     pub fn ready() -> Self {
+        let profile = configured_worker_profile();
         Self::Ready {
             schema_version: SQ8_WORKER_SCHEMA_VERSION,
-            model: SQ8_WORKER_MODEL,
-            model_revision: SQ8_WORKER_MODEL_REVISION,
-            artifact_content_sha256: QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256,
-            package_manifest_sha256: QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256,
-            device: SQ8_WORKER_DEVICE,
-            execution_profile: SQ8_WORKER_EXECUTION_PROFILE,
-            context_length: QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
-            max_new_tokens: QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS,
+            model: profile.model,
+            model_revision: profile.model_revision,
+            artifact_content_sha256: profile.artifact_content_sha256,
+            package_manifest_sha256: profile.package_manifest_sha256,
+            device: profile.device,
+            execution_profile: profile.execution_profile,
+            context_length: profile.context_length,
+            max_new_tokens: profile.max_new_tokens,
         }
     }
 
@@ -1682,6 +1762,7 @@ impl Sq8WorkerEvent {
     }
 
     fn validate(&self) -> Result<(), String> {
+        let profile = configured_worker_profile();
         match self {
             Self::Ready {
                 schema_version,
@@ -1695,14 +1776,14 @@ impl Sq8WorkerEvent {
                 max_new_tokens,
             } => {
                 if *schema_version != SQ8_WORKER_SCHEMA_VERSION
-                    || *model != SQ8_WORKER_MODEL
-                    || *model_revision != SQ8_WORKER_MODEL_REVISION
-                    || *artifact_content_sha256 != QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256
-                    || *package_manifest_sha256 != QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256
-                    || *device != SQ8_WORKER_DEVICE
-                    || *execution_profile != SQ8_WORKER_EXECUTION_PROFILE
-                    || *context_length != QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
-                    || *max_new_tokens != QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS
+                    || *model != profile.model
+                    || *model_revision != profile.model_revision
+                    || *artifact_content_sha256 != profile.artifact_content_sha256
+                    || *package_manifest_sha256 != profile.package_manifest_sha256
+                    || *device != profile.device
+                    || *execution_profile != profile.execution_profile
+                    || *context_length != profile.context_length
+                    || *max_new_tokens != profile.max_new_tokens
                 {
                     return Err("SQ8 ready event identity changed".into());
                 }
@@ -1713,7 +1794,7 @@ impl Sq8WorkerEvent {
                 prompt_tokens,
             } => {
                 validate_event_common(schema_version, request_id)?;
-                if !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(prompt_tokens) {
+                if !(1..=profile.context_length).contains(prompt_tokens) {
                     return Err("SQ8 started prompt count is out of range".into());
                 }
             }
@@ -1725,7 +1806,7 @@ impl Sq8WorkerEvent {
             } => {
                 validate_event_common(schema_version, request_id)?;
                 if *phase != "prefill"
-                    || !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(processed_prompt_tokens)
+                    || !(1..=profile.context_length).contains(processed_prompt_tokens)
                 {
                     return Err("SQ8 progress event is out of range".into());
                 }
@@ -1737,9 +1818,7 @@ impl Sq8WorkerEvent {
                 token_id,
             } => {
                 validate_event_common(schema_version, request_id)?;
-                if *index >= QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS
-                    || *token_id >= QWEN3_14B_VOCAB_SIZE
-                {
+                if *index >= profile.max_new_tokens || *token_id >= profile.vocab_size {
                     return Err("SQ8 token event is out of range".into());
                 }
             }
@@ -1755,8 +1834,8 @@ impl Sq8WorkerEvent {
             } => {
                 validate_event_common(schema_version, request_id)?;
                 if matches!(outcome, Sq8ReleaseOutcomeEvent::Cancelled) != cancel_reason.is_some()
-                    || !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(prompt_tokens)
-                    || *completion_tokens > QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS
+                    || !(1..=profile.context_length).contains(prompt_tokens)
+                    || *completion_tokens > profile.max_new_tokens
                     || (*outcome == Sq8ReleaseOutcomeEvent::Cancelled && timings.is_some())
                     || !reset_complete
                 {
@@ -1896,7 +1975,7 @@ pub struct Sq8PromptProgressTracker {
 
 impl Sq8PromptProgressTracker {
     pub fn new(prompt_tokens: usize) -> Result<Self, String> {
-        if !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(&prompt_tokens) {
+        if !(1..=configured_worker_profile().context_length).contains(&prompt_tokens) {
             return Err("SQ8 worker progress prompt length is out of range".into());
         }
         Ok(Self {

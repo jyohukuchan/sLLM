@@ -3,6 +3,7 @@
 
 //! CPU-side thread and channel topology for the resident SQ8 worker.
 
+#[cfg(test)]
 use crate::sq8_model_head_runtime::QWEN3_14B_VOCAB_SIZE;
 use crate::sq8_serving_runtime::Sq8ServingRequest;
 use crate::sq8_worker_protocol::{
@@ -11,7 +12,7 @@ use crate::sq8_worker_protocol::{
     Sq8ReadyFlushAck, Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerCommand,
     Sq8WorkerCommandKind, Sq8WorkerControl, Sq8WorkerControlErrorKind, Sq8WorkerErrorCode,
     Sq8WorkerEvent, Sq8WorkerLifecycle, Sq8WorkerProtocolErrorKind, Sq8WorkerShutdownDisposition,
-    Sq8WorkerTimings, inspect_sq8_worker_command,
+    Sq8WorkerTimings, configured_worker_profile, inspect_sq8_worker_command,
 };
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -384,7 +385,7 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             || !self.progress.transition_emitted()
             || self.completion_tokens >= self.max_new_tokens
             || self.last_token_was_eos
-            || token_id >= QWEN3_14B_VOCAB_SIZE
+            || token_id >= configured_worker_profile().vocab_size
         {
             return Err("SQ8 token publication is out of order or range".into());
         }
