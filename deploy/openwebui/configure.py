@@ -10,13 +10,14 @@ import sqlite3
 import stat
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 
 BASE_URL = "http://172.20.0.1:8000/v1"
 MODEL_ID = "ullm-qwen3-14b-sq8"
 MODEL_NAME = "uLLM Qwen3 14B SQ8"
 CONTEXT_LENGTH = 4_096
+MODEL_DESCRIPTION = "Qwen3 14B served locally by uLLM SQ8_0."
 MAX_KEY_BYTES = 65_536
 
 
@@ -49,7 +50,10 @@ def require_mapping(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
-def configure_provider(data: dict[str, Any], api_key: str) -> int:
+def configure_provider(
+    data: dict[str, Any], api_key: str, base_url: str = BASE_URL
+) -> int:
+    base_url = require_nonempty(base_url, "OpenAI base URL")
     openai = require_mapping(data.setdefault("openai", {}), "openai")
     base_urls = openai.setdefault("api_base_urls", [])
     api_keys = openai.setdefault("api_keys", [])
@@ -66,10 +70,10 @@ def configure_provider(data: dict[str, Any], api_key: str) -> int:
         raise ConfigurationError("openai.api_keys must be a string list")
 
     try:
-        provider_index = base_urls.index(BASE_URL)
+        provider_index = base_urls.index(base_url)
     except ValueError:
         provider_index = len(base_urls)
-        base_urls.append(BASE_URL)
+        base_urls.append(base_url)
 
     while len(api_keys) <= provider_index:
         api_keys.append("")
@@ -103,7 +107,28 @@ def parse_json_object(raw: Any, label: str) -> dict[str, Any]:
     return require_mapping(raw, label)
 
 
-def model_values(connection: sqlite3.Connection) -> tuple[str, str, str]:
+def require_nonempty(value: str, label: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ConfigurationError(f"{label} must not be empty")
+    return value
+
+
+def require_context_length(value: int, label: str = "context length") -> int:
+    if value <= 0:
+        raise ConfigurationError(f"{label} must be greater than zero")
+    return value
+
+
+def model_values(
+    connection: sqlite3.Connection,
+    model_id: str = MODEL_ID,
+    context_length: int = CONTEXT_LENGTH,
+    description: str = MODEL_DESCRIPTION,
+) -> tuple[str, str, str]:
+    model_id = require_nonempty(model_id, "model id")
+    context_length = require_context_length(context_length)
+    description = require_nonempty(description, "model description")
     owner = connection.execute(
         "SELECT id FROM user ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, created_at LIMIT 1"
     ).fetchone()
@@ -111,7 +136,7 @@ def model_values(connection: sqlite3.Connection) -> tuple[str, str, str]:
         raise ConfigurationError("OpenWebUI has no model owner")
 
     existing = connection.execute(
-        "SELECT meta, params FROM model WHERE id = ?", (MODEL_ID,)
+        "SELECT meta, params FROM model WHERE id = ?", (model_id,)
     ).fetchone()
     meta = parse_json_object(existing[0], "model.meta") if existing else {}
     params = parse_json_object(existing[1], "model.params") if existing else {}
@@ -135,9 +160,9 @@ def model_values(connection: sqlite3.Connection) -> tuple[str, str, str]:
     meta.update(
         {
             "profile_image_url": "/static/favicon.png",
-            "description": "Qwen3 14B served locally by uLLM SQ8_0.",
-            "n_ctx_train": CONTEXT_LENGTH,
-            "context_length": CONTEXT_LENGTH,
+            "description": description,
+            "n_ctx_train": context_length,
+            "context_length": context_length,
         }
     )
     # Context length is metadata only in OpenWebUI v0.9.4. Do not set num_ctx,
@@ -165,9 +190,23 @@ def backup_database(connection: sqlite3.Connection, backup_dir: Path) -> Path:
     return backup_path
 
 
-def configure(database: Path, key_file: Path, backup_dir: Path) -> tuple[int, Path]:
+def configure(
+    database: Path,
+    key_file: Path,
+    backup_dir: Path,
+    model_id: str = MODEL_ID,
+    model_name: str = MODEL_NAME,
+    context_length: int = CONTEXT_LENGTH,
+    description: str = MODEL_DESCRIPTION,
+    base_url: str = BASE_URL,
+) -> tuple[int, Path]:
     if not database.is_file():
         raise ConfigurationError("OpenWebUI database does not exist")
+    model_id = require_nonempty(model_id, "model id")
+    model_name = require_nonempty(model_name, "model name")
+    context_length = require_context_length(context_length)
+    description = require_nonempty(description, "model description")
+    base_url = require_nonempty(base_url, "OpenAI base URL")
     api_key = read_api_key(key_file)
     connection = sqlite3.connect(database, timeout=30)
     try:
@@ -179,8 +218,10 @@ def configure(database: Path, key_file: Path, backup_dir: Path) -> tuple[int, Pa
         if config_row is None:
             raise ConfigurationError("OpenWebUI config row does not exist")
         data = parse_json_object(config_row[1], "config.data")
-        provider_index = configure_provider(data, api_key)
-        owner_id, meta, params = model_values(connection)
+        provider_index = configure_provider(data, api_key, base_url)
+        owner_id, meta, params = model_values(
+            connection, model_id, context_length, description
+        )
         backup_path = backup_database(connection, backup_dir)
 
         now = int(time.time())
@@ -207,30 +248,93 @@ def configure(database: Path, key_file: Path, backup_dir: Path) -> tuple[int, Pa
                     updated_at = excluded.updated_at,
                     is_active = 1
                 """,
-                (MODEL_ID, owner_id, MODEL_NAME, meta, params, now, now),
+                (model_id, owner_id, model_name, meta, params, now, now),
             )
         return provider_index, backup_path
     finally:
         connection.close()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return value
+
+
+def environment_default(
+    environ: Mapping[str, str], name: str, fallback: str
+) -> str:
+    value = environ.get(name, fallback)
+    if not value.strip():
+        raise ConfigurationError(f"{name} must not be empty")
+    return value
+
+
+def parse_args(
+    argv: Sequence[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> argparse.Namespace:
+    if environ is None:
+        environ = os.environ
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, default=Path("/data/webui.db"))
     parser.add_argument(
         "--api-key-file", type=Path, default=Path("/run/secrets/ullm-api-key")
     )
     parser.add_argument("--backup-dir", type=Path, default=Path("/data/backups"))
-    return parser.parse_args()
+    parser.add_argument(
+        "--model-id",
+        default=environment_default(environ, "ULLM_MODEL_ID", MODEL_ID),
+    )
+    parser.add_argument(
+        "--model-name",
+        default=environment_default(environ, "ULLM_MODEL_NAME", MODEL_NAME),
+    )
+    parser.add_argument(
+        "--context-length",
+        type=parse_positive_int,
+        default=parse_positive_int(
+            environment_default(
+                environ, "ULLM_MODEL_CONTEXT_LENGTH", str(CONTEXT_LENGTH)
+            )
+        ),
+    )
+    parser.add_argument(
+        "--description",
+        default=environment_default(
+            environ, "ULLM_MODEL_DESCRIPTION", MODEL_DESCRIPTION
+        ),
+    )
+    parser.add_argument(
+        "--base-url",
+        default=environment_default(environ, "ULLM_OPENAI_BASE_URL", BASE_URL),
+    )
+    args = parser.parse_args(argv)
+    args.model_id = require_nonempty(args.model_id, "model id")
+    args.model_name = require_nonempty(args.model_name, "model name")
+    args.description = require_nonempty(args.description, "model description")
+    args.base_url = require_nonempty(args.base_url, "OpenAI base URL")
+    return args
 
 
 def main() -> None:
     args = parse_args()
     provider_index, backup_path = configure(
-        args.database, args.api_key_file, args.backup_dir
+        args.database,
+        args.api_key_file,
+        args.backup_dir,
+        args.model_id,
+        args.model_name,
+        args.context_length,
+        args.description,
+        args.base_url,
     )
     print(
-        f"Configured provider index {provider_index} and model {MODEL_ID}; "
+        f"Configured provider index {provider_index} and model {args.model_id}; "
         f"backup={backup_path}"
     )
 

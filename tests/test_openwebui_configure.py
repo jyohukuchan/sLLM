@@ -180,3 +180,90 @@ def test_configure_enables_usage_and_preserves_existing_state(tmp_path: Path) ->
         )
     assert backup_config == existing_config
     assert backup_meta == existing_meta
+
+
+def test_configure_adds_custom_model_without_replacing_sq8(tmp_path: Path) -> None:
+    database = tmp_path / "webui.db"
+    key_file = tmp_path / "api-key"
+    backup_dir = tmp_path / "backups"
+    _create_database(database)
+    key_file.write_text("new-api-key\n", encoding="ascii")
+
+    model_id = "ullm-qwen3.5-9b-aq4"
+    model_name = "uLLM Qwen3.5 9B AQ4"
+    description = "Qwen3.5 9B served locally by uLLM AQ4_0."
+    base_url = "http://172.20.0.1:18000/v1"
+    CONFIGURE.configure(
+        database,
+        key_file,
+        backup_dir,
+        model_id=model_id,
+        model_name=model_name,
+        context_length=32_768,
+        description=description,
+        base_url=base_url,
+    )
+
+    with sqlite3.connect(database) as connection:
+        config = json.loads(
+            connection.execute("SELECT data FROM config WHERE id = 1").fetchone()[0]
+        )
+        sq8_row = connection.execute(
+            "SELECT name FROM model WHERE id = ?", (CONFIGURE.MODEL_ID,)
+        ).fetchone()
+        aq4_row = connection.execute(
+            "SELECT name, meta, params, is_active FROM model WHERE id = ?",
+            (model_id,),
+        ).fetchone()
+
+    assert sq8_row == ("Existing uLLM model",)
+    assert config["openai"]["api_base_urls"][-1] == base_url
+    assert aq4_row is not None
+    name, meta_raw, params_raw, is_active = aq4_row
+    meta = json.loads(meta_raw)
+    params = json.loads(params_raw)
+    assert (name, is_active) == (model_name, 1)
+    assert meta["description"] == description
+    assert meta["n_ctx_train"] == 32_768
+    assert meta["context_length"] == 32_768
+    assert meta["capabilities"]["usage"] is True
+    assert "num_ctx" not in params
+    assert "max_tokens" not in params
+
+
+def test_parse_args_reads_model_environment_and_allows_cli_override() -> None:
+    environ = {
+        "ULLM_OPENAI_BASE_URL": "http://127.0.0.1:18000/v1",
+        "ULLM_MODEL_ID": "ullm-qwen3.5-9b-aq4",
+        "ULLM_MODEL_NAME": "uLLM Qwen3.5 9B AQ4",
+        "ULLM_MODEL_CONTEXT_LENGTH": "32768",
+        "ULLM_MODEL_DESCRIPTION": "AQ4 environment description.",
+    }
+
+    environment_args = CONFIGURE.parse_args([], environ)
+    cli_args = CONFIGURE.parse_args(
+        [
+            "--model-id",
+            "custom-model",
+            "--model-name",
+            "Custom name",
+            "--context-length",
+            "8192",
+            "--description",
+            "Custom description.",
+            "--base-url",
+            "http://127.0.0.1:28000/v1",
+        ],
+        environ,
+    )
+
+    assert environment_args.model_id == environ["ULLM_MODEL_ID"]
+    assert environment_args.base_url == environ["ULLM_OPENAI_BASE_URL"]
+    assert environment_args.model_name == environ["ULLM_MODEL_NAME"]
+    assert environment_args.context_length == 32_768
+    assert environment_args.description == environ["ULLM_MODEL_DESCRIPTION"]
+    assert cli_args.model_id == "custom-model"
+    assert cli_args.model_name == "Custom name"
+    assert cli_args.context_length == 8_192
+    assert cli_args.description == "Custom description."
+    assert cli_args.base_url == "http://127.0.0.1:28000/v1"

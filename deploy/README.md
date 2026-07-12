@@ -1,11 +1,13 @@
 # uLLM OpenWebUI deployment
 
-This deployment runs exactly one resident SQ8 worker behind the local
-OpenAI-compatible gateway. Port 8000 is bound to the fixed
+This deployment runs exactly one resident worker behind the local
+OpenAI-compatible gateway. SQ8 remains the default, while the worker and model
+metadata can be switched to AQ4 without changing the OpenWebUI configuration
+tool. Port 8000 is bound to the fixed
 `open-webui-network` gateway and is dropped by nftables on every other input
 interface.
 
-## Fixed identities
+## Default identities
 
 - gateway address: `http://172.20.0.1:8000/v1`
 - Docker network: `open-webui-network` (`172.20.0.0/16`)
@@ -77,7 +79,7 @@ docker run --rm --network open-webui-network \
 
 Stop OpenWebUI before editing its SQLite database. The configuration tool uses
 SQLite's backup API, retains every existing provider, adds or updates only the
-uLLM provider/model, records the 4096-token model context as metadata, and
+selected uLLM provider/model, records the selected model context as metadata, and
 enables terminal usage collection while disabling title, follow-up, and tag
 background generation. OpenWebUI then requests the final usage chunk and merges
 the gateway's llama-server-compatible `timings` into the response information
@@ -95,6 +97,7 @@ docker compose -f deploy/openwebui/compose.yaml build open-webui
 deploy/openwebui/verify-derived-image.sh
 docker stop open-webui 2>/dev/null || true
 docker run --rm \
+  --env-file /etc/ullm/openai-gateway.env \
   -v open-webui:/data \
   -v /etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro \
   -v "$PWD/deploy/openwebui/configure.py:/configure.py:ro" \
@@ -103,6 +106,37 @@ docker run --rm \
   /configure.py
 docker compose -f deploy/openwebui/compose.yaml up -d --no-build
 ```
+
+`configure.py` reads the following variables from the gateway environment file.
+Every value also has a matching command-line option, and an explicit option
+takes precedence over the environment:
+
+| Environment variable | Command-line option | SQ8 default |
+| --- | --- | --- |
+| `ULLM_OPENAI_BASE_URL` | `--base-url` | `http://172.20.0.1:8000/v1` |
+| `ULLM_MODEL_ID` | `--model-id` | `ullm-qwen3-14b-sq8` |
+| `ULLM_MODEL_NAME` | `--model-name` | `uLLM Qwen3 14B SQ8` |
+| `ULLM_MODEL_CONTEXT_LENGTH` | `--context-length` | `4096` |
+| `ULLM_MODEL_DESCRIPTION` | `--description` | `Qwen3 14B served locally by uLLM SQ8_0.` |
+
+For Qwen3.5 9B AQ4, set the worker, product root, and tokenizer paths for that
+runtime, then use values such as the following in
+`/etc/ullm/openai-gateway.env`:
+
+```ini
+ULLM_MODEL_ID=ullm-qwen3.5-9b-aq4
+ULLM_MODEL_NAME=uLLM Qwen3.5 9B AQ4
+ULLM_MODEL_CONTEXT_LENGTH=4096
+ULLM_MODEL_DESCRIPTION=Qwen3.5 9B served locally by uLLM AQ4_0.
+ULLM_OPENAI_BASE_URL=http://172.20.0.1:8000/v1
+```
+
+Restart the gateway before re-running the configuration command. Reusing the
+same base URL switches the single resident backend while retaining the prior
+SQ8 model row in OpenWebUI. A different base URL adds another provider. The
+gateway model ID and `configure.py` model ID must always match; otherwise
+OpenWebUI will select a model that the endpoint rejects. Only one worker needs
+to be resident when the workers share the same GPU lock.
 
 OpenWebUI is ready when both commands succeed:
 
@@ -115,7 +149,7 @@ docker inspect --format '{{.State.Health.Status}}' open-webui
 
 - The product runs one active GPU request with no waiting queue or request batching. A concurrent request receives `429` with `Retry-After: 1`; OpenWebUI v0.9.4 may present this as a visible HTTP 400 busy error.
 - The context limit is 4096 tokens and the gateway rejects overflow without truncating chat history.
-- The API is text-only Chat Completions for one loaded model. Tools, structured output guarantees, multimodal input, embeddings, and the Responses API are not supported.
+- The API is text-only Chat Completions for one loaded model at a time. Tools, structured output guarantees, multimodal input, embeddings, and the Responses API are not supported.
 - Request stop strings and automatic whole-turn history truncation are not implemented. Model EOS, maximum-token completion, and the OpenWebUI Stop action are supported.
 - TLS termination and multi-tenant authorization are outside this local bridge-only deployment.
 
