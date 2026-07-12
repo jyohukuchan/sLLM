@@ -166,9 +166,25 @@ docker run --rm \
   ullm/open-webui:0.9.4-ullm.1 \
   /configure.py \
   --served-model-manifest /etc/ullm/served-models/active.json \
+  --previous-managed-model-id ullm-qwen3-14b-sq8 \
   --base-url http://172.20.0.1:8000/v1
 docker compose -f deploy/openwebui/compose.yaml up -d --no-build
 ```
+
+The previous-model argument is explicit migration authority for a uLLM model
+row created before `meta.ullm` management markers existed. It may be repeated,
+and only those unmarked IDs are marked as uLLM-managed and made inactive. A
+safer identity-preserving alternative is
+`--previous-served-model-manifest /etc/ullm/served-models/candidates/qwen3-14b-sq8.json`,
+which also records the previous manifest digest. Existing marked uLLM rows at
+the same base URL continue to be reconciled automatically. No model-name or ID
+prefix inference is performed, and unrelated model/provider rows are unchanged.
+Both previous-model options require manifest mode.
+
+For non-interactive invocation, `ULLM_PREVIOUS_MANAGED_MODEL_IDS` is a JSON
+string array and `ULLM_PREVIOUS_SERVED_MODEL_MANIFEST` is one manifest path.
+They correspond to the repeatable command-line options. Duplicate previous IDs,
+including an ID supplied once directly and once through a manifest, are rejected.
 
 `configure.py` reads the following variables from the gateway environment file.
 Every value also has a matching command-line option, and an explicit option
@@ -271,13 +287,13 @@ sudo python3 tools/activate-served-model.py \
   --check-command-json '["/usr/bin/systemctl","restart","ullm-openai.service"]' \
   --check-command-json '["/usr/bin/docker","run","--rm","--network","open-webui-network","--entrypoint","curl","ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff","--fail","--silent","--show-error","--retry","120","--retry-delay","2","--retry-max-time","600","--retry-all-errors","http://172.20.0.1:8000/readyz"]' \
   --reconcile-command-json '["/usr/bin/docker","stop","open-webui"]' \
-  --reconcile-command-json '["/usr/bin/docker","run","--rm","-v","open-webui:/data","-v","/etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro","-v","/etc/ullm/served-models:/etc/ullm/served-models:ro","-v","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/configure.py:/configure.py:ro","--entrypoint","python","ullm/open-webui:0.9.4-ullm.1","/configure.py","--served-model-manifest","/etc/ullm/served-models/active.json","--base-url","http://172.20.0.1:8000/v1"]' \
+  --reconcile-command-json '["/usr/bin/docker","run","--rm","-v","open-webui:/data","-v","/etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro","-v","/etc/ullm/served-models:/etc/ullm/served-models:ro","-v","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/configure.py:/configure.py:ro","--entrypoint","python","ullm/open-webui:0.9.4-ullm.1","/configure.py","--served-model-manifest","/etc/ullm/served-models/active.json","--previous-served-model-manifest","/etc/ullm/served-models/candidates/qwen3-14b-sq8.json","--base-url","http://172.20.0.1:8000/v1"]' \
   --reconcile-command-json '["/usr/bin/docker","compose","-f","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/compose.yaml","up","-d","--no-build"]' \
   --final-check-command-json '["/usr/bin/curl","--fail","--silent","--show-error","--retry","30","--retry-delay","2","--retry-connrefused","http://127.0.0.1:3000/health"]' \
   --rollback-command-json '["/usr/bin/systemctl","restart","ullm-openai.service"]' \
   --rollback-command-json '["/usr/bin/docker","run","--rm","--network","open-webui-network","--entrypoint","curl","ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff","--fail","--silent","--show-error","--retry","120","--retry-delay","2","--retry-max-time","600","--retry-all-errors","http://172.20.0.1:8000/readyz"]' \
   --rollback-command-json '["/usr/bin/docker","stop","open-webui"]' \
-  --rollback-command-json '["/usr/bin/docker","run","--rm","-v","open-webui:/data","-v","/etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro","-v","/etc/ullm/served-models:/etc/ullm/served-models:ro","-v","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/configure.py:/configure.py:ro","--entrypoint","python","ullm/open-webui:0.9.4-ullm.1","/configure.py","--served-model-manifest","/etc/ullm/served-models/active.json","--base-url","http://172.20.0.1:8000/v1"]' \
+  --rollback-command-json '["/usr/bin/docker","run","--rm","-v","open-webui:/data","-v","/etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro","-v","/etc/ullm/served-models:/etc/ullm/served-models:ro","-v","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/configure.py:/configure.py:ro","--entrypoint","python","ullm/open-webui:0.9.4-ullm.1","/configure.py","--served-model-manifest","/etc/ullm/served-models/active.json","--previous-served-model-manifest","/etc/ullm/served-models/candidates/qwen35-9b-aq4.json","--base-url","http://172.20.0.1:8000/v1"]' \
   --rollback-command-json '["/usr/bin/docker","compose","-f","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/compose.yaml","up","-d","--no-build"]'
 ```
 
@@ -286,6 +302,9 @@ They must therefore restart the gateway and reconcile OpenWebUI again from the
 fixed active path. Hook stdout and stderr are intentionally discarded. If a
 rollback hook fails, the tool reports `activation and rollback failed`; inspect
 the systemd and Docker journals before attempting another activation.
+The example is specifically an SQ8-to-AQ4 activation: its reconcile hook names
+the old SQ8 candidate manifest, while its rollback hook retires the attempted
+AQ4 candidate. Update both previous-manifest paths for a different transition.
 
 `docker compose down` does not remove the external OpenWebUI volume. Never add
 `--volumes` during routine recovery. Stopping `ullm-openai-firewall.service`

@@ -18,17 +18,24 @@ CONFIGURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONFIGURE)
 
 
-def _write_manifest(path: Path) -> bytes:
+def _write_manifest(
+    path: Path,
+    *,
+    model_id: str = "ullm-qwen3.5-9b-aq4",
+    model_name: str = "uLLM Qwen3.5 9B AQ4",
+    description: str = "Qwen3.5 9B served locally by uLLM AQ4_0.",
+    context_length: int = 32_768,
+) -> bytes:
     raw = json.dumps(
         {
             "schema_version": "ullm.served_model.v1",
             "public": {
-                "id": "ullm-qwen3.5-9b-aq4",
-                "name": "uLLM Qwen3.5 9B AQ4",
-                "description": "Qwen3.5 9B served locally by uLLM AQ4_0.",
+                "id": model_id,
+                "name": model_name,
+                "description": description,
                 "upstream_id": "Qwen/Qwen3.5-9B",
                 "revision": "test-revision",
-                "context_length": 32_768,
+                "context_length": context_length,
             },
             "generation": {"max_completion_tokens": 512},
             "format": {},
@@ -348,6 +355,7 @@ def test_manifest_mode_reconciles_managed_models_for_same_base_url(
         key_file,
         backup_dir,
         served_model_manifest=manifest,
+        previous_managed_model_ids=["old-managed-model"],
     )
 
     with sqlite3.connect(database) as connection:
@@ -369,6 +377,145 @@ def test_manifest_mode_reconciles_managed_models_for_same_base_url(
         "managed": True,
         "base_url": CONFIGURE.BASE_URL,
         "served_model_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+    }
+
+
+def test_manifest_mode_first_migration_retires_only_explicit_unmarked_sq8(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "webui.db"
+    key_file = tmp_path / "api-key"
+    backup_dir = tmp_path / "backups"
+    aq4_manifest = tmp_path / "aq4.json"
+    _create_database(database)
+    key_file.write_text("new-api-key\n", encoding="ascii")
+    _write_manifest(aq4_manifest)
+
+    unrelated_meta = {"description": "same provider, not managed by this migration"}
+    other_provider_meta = {
+        "ullm": {
+            "managed": True,
+            "base_url": "http://other-provider.example/v1",
+            "served_model_manifest_sha256": "7" * 64,
+        },
+        "retained": True,
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE model SET is_active = 1 WHERE id = ?", (CONFIGURE.MODEL_ID,)
+        )
+        for model_id, name, meta in (
+            ("unrelated-same-base", "Unrelated same-base model", unrelated_meta),
+            ("other-provider-model", "Other provider model", other_provider_meta),
+        ):
+            connection.execute(
+                """
+                INSERT INTO model (
+                    id, user_id, base_model_id, name, meta, params,
+                    created_at, updated_at, is_active
+                ) VALUES (?, 'owner', 'retained-base', ?, ?, '{"temperature":0.4}', 5, 6, 1)
+                """,
+                (model_id, name, json.dumps(meta, sort_keys=True)),
+            )
+        before_unrelated = dict(
+            connection.execute(
+                "SELECT id, json_object('base_model_id', base_model_id, 'name', name, "
+                "'meta', meta, 'params', params, 'created_at', created_at, "
+                "'updated_at', updated_at, 'is_active', is_active) FROM model "
+                "WHERE id IN ('unrelated-same-base', 'other-provider-model')"
+            )
+        )
+        connection.commit()
+
+    CONFIGURE.configure(
+        database,
+        key_file,
+        backup_dir,
+        served_model_manifest=aq4_manifest,
+        previous_managed_model_ids=[CONFIGURE.MODEL_ID],
+    )
+
+    with sqlite3.connect(database) as connection:
+        sq8_active, sq8_meta_raw = connection.execute(
+            "SELECT is_active, meta FROM model WHERE id = ?", (CONFIGURE.MODEL_ID,)
+        ).fetchone()
+        aq4_active = connection.execute(
+            "SELECT is_active FROM model WHERE id = 'ullm-qwen3.5-9b-aq4'"
+        ).fetchone()[0]
+        after_unrelated = dict(
+            connection.execute(
+                "SELECT id, json_object('base_model_id', base_model_id, 'name', name, "
+                "'meta', meta, 'params', params, 'created_at', created_at, "
+                "'updated_at', updated_at, 'is_active', is_active) FROM model "
+                "WHERE id IN ('unrelated-same-base', 'other-provider-model')"
+            )
+        )
+
+    sq8_meta = json.loads(sq8_meta_raw)
+    assert sq8_active == 0
+    assert aq4_active == 1
+    assert sq8_meta["retained_meta"] == {"value": 7}
+    assert sq8_meta["ullm"] == {
+        "managed": True,
+        "base_url": CONFIGURE.BASE_URL,
+        "served_model_manifest_sha256": None,
+    }
+    assert after_unrelated == before_unrelated
+
+
+def test_manifest_mode_rollback_uses_previous_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "webui.db"
+    key_file = tmp_path / "api-key"
+    backup_dir = tmp_path / "backups"
+    aq4_manifest = tmp_path / "aq4.json"
+    sq8_manifest = tmp_path / "sq8.json"
+    _create_database(database)
+    key_file.write_text("new-api-key\n", encoding="ascii")
+    aq4_raw = _write_manifest(aq4_manifest)
+    sq8_raw = _write_manifest(
+        sq8_manifest,
+        model_id=CONFIGURE.MODEL_ID,
+        model_name=CONFIGURE.MODEL_NAME,
+        description=CONFIGURE.MODEL_DESCRIPTION,
+        context_length=CONFIGURE.CONTEXT_LENGTH,
+    )
+
+    CONFIGURE.configure(
+        database,
+        key_file,
+        backup_dir,
+        served_model_manifest=aq4_manifest,
+        previous_managed_model_ids=[CONFIGURE.MODEL_ID],
+    )
+    CONFIGURE.configure(
+        database,
+        key_file,
+        backup_dir,
+        served_model_manifest=sq8_manifest,
+        previous_served_model_manifests=[aq4_manifest],
+    )
+
+    with sqlite3.connect(database) as connection:
+        rows = {
+            model_id: (is_active, json.loads(meta))
+            for model_id, is_active, meta in connection.execute(
+                "SELECT id, is_active, meta FROM model WHERE id IN (?, ?)",
+                (CONFIGURE.MODEL_ID, "ullm-qwen3.5-9b-aq4"),
+            )
+        }
+
+    assert rows[CONFIGURE.MODEL_ID][0] == 1
+    assert (
+        rows[CONFIGURE.MODEL_ID][1]["ullm"]["served_model_manifest_sha256"]
+        == hashlib.sha256(sq8_raw).hexdigest()
+    )
+    assert rows["ullm-qwen3.5-9b-aq4"][0] == 0
+    assert rows["ullm-qwen3.5-9b-aq4"][1]["ullm"] == {
+        "managed": True,
+        "base_url": CONFIGURE.BASE_URL,
+        "served_model_manifest_sha256": hashlib.sha256(aq4_raw).hexdigest(),
     }
 
 
@@ -397,6 +544,67 @@ def test_manifest_mode_from_environment_rejects_legacy_model_settings(
     ):
         with pytest.raises(CONFIGURE.ConfigurationError, match="cannot be mixed"):
             CONFIGURE.parse_args(argv, environ)
+
+
+def test_manifest_mode_parses_explicit_previous_model_inputs(tmp_path: Path) -> None:
+    active = tmp_path / "active.json"
+    previous = tmp_path / "previous.json"
+    _write_manifest(active)
+    _write_manifest(
+        previous,
+        model_id=CONFIGURE.MODEL_ID,
+        model_name=CONFIGURE.MODEL_NAME,
+        description=CONFIGURE.MODEL_DESCRIPTION,
+        context_length=CONFIGURE.CONTEXT_LENGTH,
+    )
+
+    args = CONFIGURE.parse_args(
+        ["--previous-managed-model-id", "cli-old-model"],
+        {
+            "ULLM_SERVED_MODEL_MANIFEST": str(active),
+            "ULLM_PREVIOUS_MANAGED_MODEL_IDS": '["environment-old-model"]',
+            "ULLM_PREVIOUS_SERVED_MODEL_MANIFEST": str(previous),
+        },
+    )
+
+    assert args.previous_managed_model_id == [
+        "environment-old-model",
+        "cli-old-model",
+    ]
+    assert args.previous_served_model_manifest == [previous]
+
+    with pytest.raises(CONFIGURE.ConfigurationError, match="duplicated"):
+        CONFIGURE.collect_previous_models(
+            [CONFIGURE.MODEL_ID],
+            [previous],
+        )
+    with pytest.raises(CONFIGURE.ConfigurationError, match="JSON string array"):
+        CONFIGURE.parse_args(
+            [],
+            {
+                "ULLM_SERVED_MODEL_MANIFEST": str(active),
+                "ULLM_PREVIOUS_MANAGED_MODEL_IDS": "not-json",
+            },
+        )
+    with pytest.raises(CONFIGURE.ConfigurationError, match="require"):
+        CONFIGURE.parse_args(
+            ["--previous-managed-model-id", CONFIGURE.MODEL_ID],
+            {},
+        )
+
+    database = tmp_path / "webui.db"
+    key_file = tmp_path / "api-key"
+    _create_database(database)
+    key_file.write_text("new-api-key\n", encoding="ascii")
+    with pytest.raises(CONFIGURE.ConfigurationError, match="active model id"):
+        CONFIGURE.configure(
+            database,
+            key_file,
+            tmp_path / "backups",
+            served_model_manifest=active,
+            previous_managed_model_ids=["ullm-qwen3.5-9b-aq4"],
+        )
+    assert not (tmp_path / "backups").exists()
 
 
 def test_manifest_mode_rejects_invalid_or_non_regular_manifest(tmp_path: Path) -> None:

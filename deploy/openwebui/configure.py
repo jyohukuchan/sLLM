@@ -111,6 +111,16 @@ def read_served_model_manifest(path: Path) -> tuple[str, str, int, str, str]:
     )
 
 
+def parse_model_id_list(raw: str, label: str) -> list[str]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ConfigurationError(f"{label} must be a JSON string array") from error
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigurationError(f"{label} must be a JSON string array")
+    return [require_model_id(item, label) for item in value]
+
+
 def read_api_key(path: Path) -> str:
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode):
@@ -207,6 +217,15 @@ def require_nonempty(value: str, label: str) -> str:
     return value
 
 
+def require_model_id(value: str, label: str = "model id") -> str:
+    value = require_nonempty(value, label)
+    if len(value.encode("utf-8")) > 256 or any(
+        ord(character) < 0x20 for character in value
+    ):
+        raise ConfigurationError(f"{label} must be bounded text")
+    return value
+
+
 def require_text_field(value: Mapping[str, Any], name: str, maximum_bytes: int) -> str:
     field = value.get(name)
     if not isinstance(field, str):
@@ -297,8 +316,8 @@ def model_values(
 
 def managed_models_at_base_url(
     connection: sqlite3.Connection, base_url: str, active_model_id: str
-) -> list[str]:
-    managed: list[str] = []
+) -> dict[str, str | None]:
+    managed: dict[str, str | None] = {}
     for model_id, raw_meta in connection.execute(
         "SELECT id, meta FROM model WHERE id != ? AND is_active = 1",
         (active_model_id,),
@@ -313,8 +332,84 @@ def managed_models_at_base_url(
             and marker.get("managed") is True
             and marker.get("base_url") == base_url
         ):
-            managed.append(model_id)
+            manifest_sha256 = marker.get("served_model_manifest_sha256")
+            managed[model_id] = (
+                manifest_sha256
+                if isinstance(manifest_sha256, str) and len(manifest_sha256) == 64
+                else None
+            )
     return managed
+
+
+def previous_managed_model_updates(
+    connection: sqlite3.Connection,
+    explicit_previous_models: Mapping[str, str | None],
+    base_url: str,
+    active_model_id: str,
+) -> list[tuple[str, str]]:
+    if active_model_id in explicit_previous_models:
+        raise ConfigurationError(
+            "active model id cannot also be a previous managed model id"
+        )
+    previous_models = managed_models_at_base_url(connection, base_url, active_model_id)
+    previous_models.update(explicit_previous_models)
+    updates: list[tuple[str, str]] = []
+    for model_id, manifest_sha256 in sorted(previous_models.items()):
+        row = connection.execute(
+            "SELECT meta FROM model WHERE id = ?", (model_id,)
+        ).fetchone()
+        if row is None:
+            continue
+        meta = parse_json_object(row[0], f"previous managed model {model_id!r} meta")
+        marker = require_mapping(
+            meta.setdefault("ullm", {}),
+            f"previous managed model {model_id!r} uLLM metadata",
+        )
+        if manifest_sha256 is None:
+            existing_sha256 = marker.get("served_model_manifest_sha256")
+            if not isinstance(existing_sha256, str) or len(existing_sha256) != 64:
+                existing_sha256 = None
+            manifest_sha256 = existing_sha256
+        marker.update(
+            {
+                "managed": True,
+                "base_url": base_url,
+                "served_model_manifest_sha256": manifest_sha256,
+            }
+        )
+        updates.append(
+            (
+                model_id,
+                json.dumps(
+                    meta,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
+    return updates
+
+
+def collect_previous_models(
+    previous_managed_model_ids: Sequence[str],
+    previous_served_model_manifests: Sequence[Path],
+) -> dict[str, str | None]:
+    previous_models: dict[str, str | None] = {}
+
+    def add(model_id: str, manifest_sha256: str | None) -> None:
+        if model_id in previous_models:
+            raise ConfigurationError(f"previous model id {model_id!r} is duplicated")
+        previous_models[model_id] = manifest_sha256
+
+    for previous_model_id in previous_managed_model_ids:
+        add(require_model_id(previous_model_id, "previous model id"), None)
+    for previous_manifest in previous_served_model_manifests:
+        previous_model_id, _, _, _, previous_manifest_sha256 = (
+            read_served_model_manifest(previous_manifest)
+        )
+        add(previous_model_id, previous_manifest_sha256)
+    return previous_models
 
 
 def backup_database(connection: sqlite3.Connection, backup_dir: Path) -> Path:
@@ -341,6 +436,8 @@ def configure(
     description: str | None = None,
     base_url: str = BASE_URL,
     served_model_manifest: Path | None = None,
+    previous_managed_model_ids: Sequence[str] = (),
+    previous_served_model_manifests: Sequence[Path] = (),
 ) -> tuple[int, Path]:
     if not database.is_file():
         raise ConfigurationError("OpenWebUI database does not exist")
@@ -359,16 +456,23 @@ def configure(
             manifest_sha256,
         ) = read_served_model_manifest(served_model_manifest)
     else:
+        if previous_managed_model_ids or previous_served_model_manifests:
+            raise ConfigurationError(
+                "previous managed models require served-model manifest mode"
+            )
         model_id = MODEL_ID if model_id is None else model_id
         model_name = MODEL_NAME if model_name is None else model_name
         context_length = CONTEXT_LENGTH if context_length is None else context_length
         description = MODEL_DESCRIPTION if description is None else description
-        model_id = require_nonempty(model_id, "model id")
+        model_id = require_model_id(model_id)
         model_name = require_nonempty(model_name, "model name")
         description = require_nonempty(description, "model description")
 
     context_length = require_context_length(context_length)
     base_url = require_nonempty(base_url, "OpenAI base URL")
+    previous_models = collect_previous_models(
+        previous_managed_model_ids, previous_served_model_manifests
+    )
     api_key = read_api_key(key_file)
     connection = sqlite3.connect(database, timeout=30)
     try:
@@ -389,7 +493,9 @@ def configure(
             base_url,
             manifest_sha256,
         )
-        inactive_model_ids = managed_models_at_base_url(connection, base_url, model_id)
+        previous_updates = previous_managed_model_updates(
+            connection, previous_models, base_url, model_id
+        )
         backup_path = backup_database(connection, backup_dir)
 
         now = int(time.time())
@@ -398,8 +504,8 @@ def configure(
         )
         with connection:
             connection.executemany(
-                "UPDATE model SET is_active = 0, updated_at = ? WHERE id = ?",
-                ((now, inactive_id) for inactive_id in inactive_model_ids),
+                "UPDATE model SET meta = ?, is_active = 0, updated_at = ? WHERE id = ?",
+                ((meta, now, previous_id) for previous_id, meta in previous_updates),
             )
             connection.execute(
                 "UPDATE config SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -464,6 +570,37 @@ def parse_args(
         type=Path,
         default=Path(manifest_environment) if manifest_environment else None,
     )
+    previous_ids_environment = environ.get("ULLM_PREVIOUS_MANAGED_MODEL_IDS")
+    previous_ids = (
+        parse_model_id_list(previous_ids_environment, "ULLM_PREVIOUS_MANAGED_MODEL_IDS")
+        if previous_ids_environment is not None
+        else []
+    )
+    parser.add_argument(
+        "--previous-managed-model-id",
+        action="append",
+        default=previous_ids,
+        help="explicit prior uLLM model id to mark managed and inactive; repeatable",
+    )
+    previous_manifest_environment = environ.get("ULLM_PREVIOUS_SERVED_MODEL_MANIFEST")
+    if (
+        previous_manifest_environment is not None
+        and not previous_manifest_environment.strip()
+    ):
+        raise ConfigurationError(
+            "ULLM_PREVIOUS_SERVED_MODEL_MANIFEST must not be empty"
+        )
+    parser.add_argument(
+        "--previous-served-model-manifest",
+        action="append",
+        type=Path,
+        default=(
+            [Path(previous_manifest_environment)]
+            if previous_manifest_environment is not None
+            else []
+        ),
+        help="prior served-model manifest whose model row must be retired; repeatable",
+    )
     parser.add_argument(
         "--model-id",
         default=environ.get("ULLM_MODEL_ID"),
@@ -502,6 +639,10 @@ def parse_args(
                 "served-model manifest mode cannot be mixed with legacy model settings"
             )
     else:
+        if args.previous_managed_model_id or args.previous_served_model_manifest:
+            raise ConfigurationError(
+                "previous managed models require served-model manifest mode"
+            )
         args.model_id = MODEL_ID if args.model_id is None else args.model_id
         args.model_name = MODEL_NAME if args.model_name is None else args.model_name
         args.context_length = (
@@ -510,7 +651,7 @@ def parse_args(
         args.description = (
             MODEL_DESCRIPTION if args.description is None else args.description
         )
-        args.model_id = require_nonempty(args.model_id, "model id")
+        args.model_id = require_model_id(args.model_id)
         args.model_name = require_nonempty(args.model_name, "model name")
         args.description = require_nonempty(args.description, "model description")
     args.base_url = require_nonempty(args.base_url, "OpenAI base URL")
@@ -529,6 +670,8 @@ def main() -> None:
         description=args.description,
         base_url=args.base_url,
         served_model_manifest=args.served_model_manifest,
+        previous_managed_model_ids=args.previous_managed_model_id,
+        previous_served_model_manifests=args.previous_served_model_manifest,
     )
     configured_model = (
         f"manifest {args.served_model_manifest}"
