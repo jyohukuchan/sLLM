@@ -1,0 +1,61 @@
+{
+  "schema_version": "ullm.aq4_prefill_crossover.v1",
+  "rows": [
+    {
+      "width": 2,
+      "native_tps": 16.426086642712068,
+      "m1_tps": 39.71479534588668,
+      "speedup": 0.41360119068102774,
+      "tokens_match": true
+    },
+    {
+      "width": 3,
+      "native_tps": 78.68110122174178,
+      "m1_tps": 77.82421548715897,
+      "speedup": 1.0110105283968356,
+      "tokens_match": true
+    },
+    {
+      "width": 4,
+      "native_tps": 84.61533677517498,
+      "m1_tps": 78.80653336896177,
+      "speedup": 1.0737096679410725,
+      "tokens_match": true
+    },
+    {
+      "width": 8,
+      "native_tps": 94.80104885984439,
+      "m1_tps": 80.04656388667853,
+      "speedup": 1.1843237767714014,
+      "tokens_match": true
+    },
+    {
+      "width": 16,
+      "native_tps": 99.40461049393721,
+      "m1_tps": 80.29059696194331,
+      "speedup": 1.238060423701342,
+      "tokens_match": true
+    },
+    {
+      "width": 32,
+      "native_tps": 102.72062937854106,
+      "m1_tps": 80.22290515814252,
+      "speedup": 1.2804401582820895,
+      "tokens_match": true
+    },
+    {
+      "width": 64,
+      "native_tps": 103.29228469964376,
+      "m1_tps": 79.8209796022488,
+      "speedup": 1.2940493240543205,
+      "tokens_match": true
+    },
+    {
+      "width": 96,
+      "native_tps": 102.58681392564962,
+      "m1_tps": 79.1887523443923,
+      "speedup": 1.2954720321832958,
+      "tokens_match": true
+    }
+  ]
+}
