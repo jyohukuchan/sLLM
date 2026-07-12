@@ -15,6 +15,7 @@ pub mod package;
 pub mod qwen3_loader;
 pub mod qwen3_names;
 pub mod scheduler;
+pub mod served_model;
 pub mod sq;
 pub mod sq8_embedding_runtime;
 pub mod sq8_generation_runtime;
