@@ -63,6 +63,50 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ullm-openai.service
 ```
 
+The installed service above remains the legacy environment deployment. Do not
+install the manifest-mode drop-in until the selected release worker accepts
+`--served-model-manifest` and a real, validated candidate manifest has been
+generated. This keeps the currently deployed AQ4 compatibility service
+unchanged while manifest mode is prepared.
+
+### Enable manifest mode
+
+Manifest mode uses `/etc/ullm/served-models/active.json` as the single active
+model contract. It is an atomically replaced regular file, not a symlink.
+Candidate manifests remain separately named files under
+`/etc/ullm/served-models/candidates/`. Install the operations-only environment
+and the optional systemd drop-in as follows, but do not restart the service
+until the first active manifest has passed validation:
+
+```bash
+sudo install -d -m 0750 -o root -g homelab1 /etc/ullm/served-models
+sudo install -d -m 0750 -o root -g homelab1 /etc/ullm/served-models/candidates
+sudo install -m 0644 deploy/systemd/ullm-openai-manifest.env.example \
+  /etc/ullm/openai-gateway-manifest.env
+sudo install -d -m 0755 /etc/systemd/system/ullm-openai.service.d
+sudo install -m 0644 \
+  deploy/systemd/ullm-openai.service.d/10-served-model.conf \
+  /etc/systemd/system/ullm-openai.service.d/10-served-model.conf
+sudo systemd-analyze verify ullm-openai.service
+sudo systemctl daemon-reload
+```
+
+The drop-in clears the base unit's legacy `EnvironmentFile` before loading
+`/etc/ullm/openai-gateway-manifest.env`. Its `ExecStartPre` runs
+`tools/validate-served-model.py` against the active manifest. A missing,
+modified, unsafe, or identity-mismatched manifest therefore prevents the
+gateway from starting. The gateway validates the same document again before
+launching the worker.
+
+Manifest mode and legacy model variables are mutually exclusive. In
+particular, never place `ULLM_WORKER_BINARY`, `ULLM_PRODUCT_ROOT`,
+`ULLM_TOKENIZER_DIR`, `ULLM_MODEL_ID`, `ULLM_MODEL_NAME`,
+`ULLM_MODEL_DESCRIPTION`, model limits, hashes, worker arguments, tokenizer
+profiles, or `ULLM_HIP_GUARDS` in
+`/etc/ullm/openai-gateway-manifest.env`. The gateway rejects the process if any
+legacy model variable is present with `ULLM_SERVED_MODEL_MANIFEST`; it does not
+choose one source by precedence.
+
 The gateway remains unready while the model is loading. Check readiness from
 the Docker network because the host firewall intentionally rejects loopback
 and LAN access to the bridge address.
@@ -107,6 +151,25 @@ docker run --rm \
 docker compose -f deploy/openwebui/compose.yaml up -d --no-build
 ```
 
+In manifest mode, mount the active-manifest directory read-only and pass the
+manifest explicitly. Do not also pass the four legacy model metadata options
+or their environment variables:
+
+```bash
+docker stop open-webui 2>/dev/null || true
+docker run --rm \
+  -v open-webui:/data \
+  -v /etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro \
+  -v /etc/ullm/served-models:/etc/ullm/served-models:ro \
+  -v "$PWD/deploy/openwebui/configure.py:/configure.py:ro" \
+  --entrypoint python \
+  ullm/open-webui:0.9.4-ullm.1 \
+  /configure.py \
+  --served-model-manifest /etc/ullm/served-models/active.json \
+  --base-url http://172.20.0.1:8000/v1
+docker compose -f deploy/openwebui/compose.yaml up -d --no-build
+```
+
 `configure.py` reads the following variables from the gateway environment file.
 Every value also has a matching command-line option, and an explicit option
 takes precedence over the environment:
@@ -146,6 +209,9 @@ ULLM_HIP_GUARDS=
 ULLM_OPENAI_BASE_URL=http://172.20.0.1:8000/v1
 ```
 
+This block is a legacy-mode example only. None of these model profile values
+may be copied into the manifest-mode environment file.
+
 Restart the gateway before re-running the configuration command. Reusing the
 same base URL switches the single resident backend while retaining the prior
 SQ8 model row in OpenWebUI. A different base URL adds another provider. The
@@ -181,6 +247,45 @@ docker compose -f deploy/openwebui/compose.yaml logs -f --tail=100
 docker compose -f deploy/openwebui/compose.yaml restart
 docker compose -f deploy/openwebui/compose.yaml down
 ```
+
+### Atomic manifest activation and rollback
+
+`tools/activate-served-model.py` validates and copies a candidate, atomically
+replaces `/etc/ullm/served-models/active.json`, and restores the prior bytes if
+any later command fails. Commands are JSON arrays executed directly without a
+shell. The tool supplies `ULLM_ACTIVE_MANIFEST`,
+`ULLM_ACTIVE_MANIFEST_SHA256`, `ULLM_ACTIVE_MODEL_ID`, and
+`ULLM_ACTIVATION_STAGE` to each hook. Arguments are not shell-expanded, so the
+examples use the fixed active path where a child process needs it.
+
+The following example restarts the gateway, waits for its unauthenticated
+bridge-only readiness endpoint, reconciles OpenWebUI from the same active
+manifest, and verifies the UI health endpoint. `curl` retry behavior is inside
+the fixed container command; no shell wrapper is involved.
+
+```bash
+sudo python3 tools/activate-served-model.py \
+  --candidate /etc/ullm/served-models/candidates/qwen35-9b-aq4.json \
+  --active-manifest /etc/ullm/served-models/active.json \
+  --command-timeout-seconds 650 \
+  --check-command-json '["/usr/bin/systemctl","restart","ullm-openai.service"]' \
+  --check-command-json '["/usr/bin/docker","run","--rm","--network","open-webui-network","--entrypoint","curl","ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff","--fail","--silent","--show-error","--retry","120","--retry-delay","2","--retry-max-time","600","--retry-all-errors","http://172.20.0.1:8000/readyz"]' \
+  --reconcile-command-json '["/usr/bin/docker","stop","open-webui"]' \
+  --reconcile-command-json '["/usr/bin/docker","run","--rm","-v","open-webui:/data","-v","/etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro","-v","/etc/ullm/served-models:/etc/ullm/served-models:ro","-v","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/configure.py:/configure.py:ro","--entrypoint","python","ullm/open-webui:0.9.4-ullm.1","/configure.py","--served-model-manifest","/etc/ullm/served-models/active.json","--base-url","http://172.20.0.1:8000/v1"]' \
+  --reconcile-command-json '["/usr/bin/docker","compose","-f","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/compose.yaml","up","-d","--no-build"]' \
+  --final-check-command-json '["/usr/bin/curl","--fail","--silent","--show-error","--retry","30","--retry-delay","2","--retry-connrefused","http://127.0.0.1:3000/health"]' \
+  --rollback-command-json '["/usr/bin/systemctl","restart","ullm-openai.service"]' \
+  --rollback-command-json '["/usr/bin/docker","run","--rm","--network","open-webui-network","--entrypoint","curl","ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff","--fail","--silent","--show-error","--retry","120","--retry-delay","2","--retry-max-time","600","--retry-all-errors","http://172.20.0.1:8000/readyz"]' \
+  --rollback-command-json '["/usr/bin/docker","stop","open-webui"]' \
+  --rollback-command-json '["/usr/bin/docker","run","--rm","-v","open-webui:/data","-v","/etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro","-v","/etc/ullm/served-models:/etc/ullm/served-models:ro","-v","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/configure.py:/configure.py:ro","--entrypoint","python","ullm/open-webui:0.9.4-ullm.1","/configure.py","--served-model-manifest","/etc/ullm/served-models/active.json","--base-url","http://172.20.0.1:8000/v1"]' \
+  --rollback-command-json '["/usr/bin/docker","compose","-f","/home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/openwebui/compose.yaml","up","-d","--no-build"]'
+```
+
+Rollback hooks run only after the old active-manifest bytes have been restored.
+They must therefore restart the gateway and reconcile OpenWebUI again from the
+fixed active path. Hook stdout and stderr are intentionally discarded. If a
+rollback hook fails, the tool reports `activation and rollback failed`; inspect
+the systemd and Docker journals before attempting another activation.
 
 `docker compose down` does not remove the external OpenWebUI volume. Never add
 `--volumes` during routine recovery. Stopping `ullm-openai-firewall.service`
