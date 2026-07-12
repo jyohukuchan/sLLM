@@ -101,7 +101,7 @@ impl Sq8WorkerEventPublisher {
         event: Sq8WorkerEvent,
     ) -> Result<Sq8WriterReceipt, String> {
         if self.poisoned.load(Ordering::Acquire) {
-            return Err("SQ8 ordered writer is poisoned".into());
+            return Err("ordered writer is poisoned".into());
         }
         let (acknowledgement, result) = sync_channel(0);
         self.sender
@@ -110,10 +110,10 @@ impl Sq8WorkerEventPublisher {
                 event: Some(event),
                 acknowledgement: Some(acknowledgement),
             })
-            .map_err(|_| "SQ8 ordered writer channel is closed".to_string())?;
+            .map_err(|_| "ordered writer channel is closed".to_string())?;
         result
             .recv()
-            .map_err(|_| "SQ8 ordered writer exited before acknowledging an event".to_string())?
+            .map_err(|_| "ordered writer exited before acknowledging an event".to_string())?
     }
 }
 
@@ -149,12 +149,12 @@ impl<W> Sq8WriterThread<W> {
         let was_poisoned = poisoned.load(Ordering::Acquire);
         let output = join
             .join()
-            .map_err(|_| "SQ8 ordered writer thread panicked".to_string())??;
+            .map_err(|_| "ordered writer thread panicked".to_string())??;
         if let Some(error) = close_error {
             return Err(error);
         }
         if was_poisoned || poisoned.load(Ordering::Acquire) {
-            return Err("SQ8 ordered writer closed after process poison".into());
+            return Err("ordered writer closed after process poison".into());
         }
         Ok(output)
     }
@@ -183,7 +183,7 @@ where
     let join = thread::Builder::new()
         .name("ullm-sq8-writer".into())
         .spawn(move || run_sq8_ordered_writer(output, receiver, writer_poisoned, profile))
-        .map_err(|_| "failed to spawn SQ8 ordered writer thread".to_string())?;
+        .map_err(|_| "failed to spawn ordered writer thread".to_string())?;
     let thread_poisoned = Arc::clone(&poisoned);
     Ok((
         Sq8WorkerEventPublisher { sender, poisoned },
@@ -217,13 +217,13 @@ fn run_sq8_ordered_writer<W: Write>(
             if is_fatal_event(&event) {
                 let _ = writer.write_event(&event);
             }
-            return Err("SQ8 ordered writer received fatal process poison".into());
+            return Err("ordered writer received fatal process poison".into());
         }
         if poisoned.load(Ordering::Acquire) {
             if let Some(acknowledgement) = envelope.acknowledgement {
-                let _ = acknowledgement.send(Err("SQ8 ordered writer is poisoned".into()));
+                let _ = acknowledgement.send(Err("ordered writer is poisoned".into()));
             }
-            return Err("SQ8 ordered writer stopped after process poison".into());
+            return Err("ordered writer stopped after process poison".into());
         }
         let Some(event) = envelope.event else {
             poisoned.store(true, Ordering::Release);
@@ -258,7 +258,7 @@ fn run_sq8_ordered_writer<W: Write>(
         }
         if failed {
             poisoned.store(true, Ordering::Release);
-            return Err(failure.unwrap_or_else(|| "SQ8 ordered writer failed".into()));
+            return Err(failure.unwrap_or_else(|| "ordered writer failed".into()));
         }
     }
     Ok(writer.into_inner())
@@ -728,7 +728,7 @@ where
                 &events,
                 None,
                 Sq8WorkerErrorCode::LoadFailed,
-                "SQ8 resident backend failed to load",
+                "resident backend failed to load",
             );
             let _ = startup.send(Err(error.clone()));
             return Err(error);
@@ -876,7 +876,7 @@ fn shutdown_inference_backend<B: Sq8InferenceBackend>(
     events: &Sq8WorkerEventPublisher,
 ) -> Result<(), String> {
     backend.shutdown().inspect_err(|_| {
-        let _ = fail_inference(control, events, "SQ8 resident backend shutdown failed");
+        let _ = fail_inference(control, events, "resident backend shutdown failed");
     })
 }
 

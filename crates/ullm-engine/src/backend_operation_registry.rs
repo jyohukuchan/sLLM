@@ -90,6 +90,29 @@ fn probe_fault_checkpoint(stage: u8, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Aq4ProbeBinding {
+    scale_count: usize,
+    group_size: usize,
+    tensor_scale_bits: u32,
+    row_scale_count: usize,
+    rows: usize,
+    cols: usize,
+    batch_count: usize,
+}
+
+const fn aq4_probe_binding(batch_count: usize) -> Aq4ProbeBinding {
+    Aq4ProbeBinding {
+        scale_count: 2,
+        group_size: 2,
+        tensor_scale_bits: 1.0_f32.to_bits(),
+        row_scale_count: 0,
+        rows: 2,
+        cols: 3,
+        batch_count,
+    }
+}
+
 /// A hard bound that prevents a package or plugin from growing registry memory without limit.
 pub const MAX_BACKEND_OPERATION_IMPLEMENTATIONS: usize = 4_096;
 pub const MAX_OPERATION_IDENTIFIER_BYTES: usize = 128;
@@ -503,7 +526,7 @@ impl DeviceCapabilities {
             }
         }
         if policy.contains(RuntimeFeature::HipAq4MatvecBatch) {
-            const BATCH_COUNT: usize = 128;
+            let binding = aq4_probe_binding(128);
             let mut index = context.alloc_buffer(3)?;
             index.copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(stream))?;
             let mut scale = context.alloc_buffer(3)?;
@@ -519,8 +542,8 @@ impl DeviceCapabilities {
                 .flat_map(f32::to_le_bytes)
                 .collect::<Vec<_>>();
             scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
-            let input = zeros(context, stream, BATCH_COUNT * 3)?;
-            let mut output = zeros(context, stream, BATCH_COUNT * 2)?;
+            let input = zeros(context, stream, binding.batch_count * binding.cols)?;
+            let mut output = zeros(context, stream, binding.batch_count * binding.rows)?;
             ullm_runtime_sys::aq4_matvec_batch_f32(
                 &index,
                 &scale,
@@ -528,13 +551,13 @@ impl DeviceCapabilities {
                 &scale_values,
                 &input,
                 None,
-                BATCH_COUNT,
-                2,
-                1.0,
-                0,
-                2,
-                3,
-                2,
+                binding.scale_count,
+                binding.group_size,
+                f32::from_bits(binding.tensor_scale_bits),
+                binding.row_scale_count,
+                binding.rows,
+                binding.cols,
+                binding.batch_count,
                 &mut output,
                 Some(stream),
             )?;
@@ -3609,6 +3632,24 @@ mod tests {
             assert!(error.contains(label));
             probe_fault_checkpoint(checkpoint, label).unwrap();
         }
+    }
+
+    #[test]
+    fn aq4_m128_probe_binding_keeps_scale_count_distinct_from_batch_count() {
+        let binding = aq4_probe_binding(128);
+        assert_eq!(binding.scale_count, 2);
+        assert_eq!(binding.group_size, 2);
+        assert_eq!(binding.tensor_scale_bits, 1.0_f32.to_bits());
+        assert_eq!(binding.row_scale_count, 0);
+        assert_eq!(binding.rows, 2);
+        assert_eq!(binding.cols, 3);
+        assert_eq!(binding.batch_count, 128);
+        assert_ne!(binding.scale_count, binding.batch_count);
+
+        force_probe_failure(ProbeFaultStage::Aq4MatvecBatch);
+        let error = probe_fault_checkpoint(9, "aq4-matvec-batch").unwrap_err();
+        assert!(error.contains("aq4-matvec-batch"));
+        probe_fault_checkpoint(9, "aq4-matvec-batch").unwrap();
     }
 
     #[test]
