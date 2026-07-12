@@ -798,8 +798,7 @@ where
                     )
                 })?;
                 if let Err(error) = backend.execute(request, admission, &mut publications) {
-                    let _ =
-                        fail_inference(&control, &events, "SQ8 admitted request execution failed");
+                    let _ = fail_inference(&control, &events, "admitted request execution failed");
                     return Err(error);
                 }
                 let snapshot = control.snapshot().map_err(|_| {
@@ -2642,6 +2641,7 @@ mod tests {
             vec!["ready", "started", "error"]
         );
         assert_eq!(lines[2]["code"], "runtime_failed");
+        assert_eq!(lines[2]["message"], "admitted request execution failed");
         assert!(!lines.iter().any(|line| line["type"] == "released"));
     }
 

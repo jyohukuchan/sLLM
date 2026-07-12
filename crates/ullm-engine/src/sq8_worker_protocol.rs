@@ -26,6 +26,12 @@ pub const SQ8_WORKER_SCHEMA_VERSION: &str = "ullm.worker.v1";
 pub const SQ8_WORKER_MAX_RECORD_BYTES: usize = 4_194_304;
 pub const SQ8_WORKER_MAX_JSON_DEPTH: usize = 16;
 pub const SQ8_WORKER_MAX_ERROR_MESSAGE_BYTES: usize = 1024;
+/// Maximum number of prompt tokens that one worker execution unit may cover.
+///
+/// This is a worker protocol bound rather than a model or quantization-specific
+/// execution width. Backends may use any contiguous unit from one token through
+/// this bound, while progress events remain coalesced at this cadence.
+pub const MAX_WORKER_PROGRESS_EXECUTION_WIDTH: usize = 128;
 pub const SQ8_WORKER_MODEL: &str = "ullm-qwen3-14b-sq8";
 pub const SQ8_WORKER_MODEL_REVISION: &str = "9a283b4a5efbc09ce247e0ae5b02b744739e525a";
 pub const SQ8_WORKER_DEVICE: &str = "gfx1201";
@@ -2026,24 +2032,30 @@ impl Sq8PromptProgressTracker {
         processed_prompt_tokens: usize,
         execution_width: usize,
     ) -> Result<Option<usize>, String> {
-        let remaining = self.prompt_tokens.saturating_sub(self.last_observed);
-        let valid_width = match execution_width {
-            // Token-at-a-time prefill is used by resident runtimes such as AQ4.
-            1 => remaining >= 1,
-            // Batched prefill remains aligned to the public 128-token progress
-            // cadence. The tail may continue token-at-a-time.
-            128 => remaining >= 128 && self.last_observed % 128 == 0,
-            _ => false,
-        };
-        if !valid_width
-            || processed_prompt_tokens <= self.last_observed
-            || processed_prompt_tokens > self.prompt_tokens
-            || processed_prompt_tokens - self.last_observed != execution_width
-        {
-            return Err("SQ8 worker prompt progress is non-contiguous".into());
+        if !(1..=MAX_WORKER_PROGRESS_EXECUTION_WIDTH).contains(&execution_width) {
+            return Err("worker prompt progress execution width is out of range".into());
         }
+        let remaining = self
+            .prompt_tokens
+            .checked_sub(self.last_observed)
+            .ok_or_else(|| "worker prompt progress remaining token count overflowed".to_string())?;
+        if execution_width > remaining {
+            return Err("worker prompt progress execution width exceeds remaining prompt".into());
+        }
+        let expected_processed = self
+            .last_observed
+            .checked_add(execution_width)
+            .ok_or_else(|| "worker prompt progress token count overflowed".to_string())?;
+        if processed_prompt_tokens != expected_processed {
+            return Err("worker prompt progress is non-contiguous".into());
+        }
+        let accumulated_since_emit = processed_prompt_tokens
+            .checked_sub(self.last_emitted)
+            .ok_or_else(|| "worker prompt progress emission count overflowed".to_string())?;
         self.last_observed = processed_prompt_tokens;
-        if processed_prompt_tokens % 128 == 0 || processed_prompt_tokens == self.prompt_tokens {
+        if accumulated_since_emit >= MAX_WORKER_PROGRESS_EXECUTION_WIDTH
+            || processed_prompt_tokens == self.prompt_tokens
+        {
             self.last_emitted = processed_prompt_tokens;
             if processed_prompt_tokens == self.prompt_tokens {
                 self.transition_emitted = true;
@@ -2057,9 +2069,17 @@ impl Sq8PromptProgressTracker {
         if self.transition_emitted {
             return Ok(None);
         }
-        let final_width = self.prompt_tokens.saturating_sub(self.last_observed);
-        if !matches!(final_width, 1 | 128) {
-            return Err("SQ8 worker prefill transition has an invalid final unit".into());
+        let final_width = self
+            .prompt_tokens
+            .checked_sub(self.last_observed)
+            .ok_or_else(|| {
+                "worker prefill transition remaining token count overflowed".to_string()
+            })?;
+        if self.last_emitted > self.last_observed {
+            return Err("worker prefill transition emission count overflowed".into());
+        }
+        if !(1..=MAX_WORKER_PROGRESS_EXECUTION_WIDTH).contains(&final_width) {
+            return Err("worker prefill transition has an invalid final unit".into());
         }
         self.last_observed = self.prompt_tokens;
         self.last_emitted = self.prompt_tokens;
@@ -3000,16 +3020,72 @@ mod tests {
     }
 
     #[test]
+    fn prompt_progress_accepts_bounded_execution_widths() {
+        for execution_width in [2, 3, 8, 127, 128] {
+            let mut tracker = Sq8PromptProgressTracker::new(execution_width + 1).unwrap();
+            assert_eq!(
+                tracker
+                    .observe_unit(execution_width, execution_width)
+                    .unwrap(),
+                (execution_width == 128).then_some(execution_width)
+            );
+            assert_eq!(
+                tracker.observe_transition().unwrap(),
+                Some(execution_width + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_progress_unit_sequences_preserve_wire_cadence() {
+        for (prompt_tokens, units, expected_events) in [
+            (127, [127].as_slice(), vec![127]),
+            (129, [128, 1].as_slice(), vec![128, 129]),
+            (255, [128, 127].as_slice(), vec![128, 255]),
+        ] {
+            let mut tracker = Sq8PromptProgressTracker::new(prompt_tokens).unwrap();
+            let mut processed = 0;
+            let mut events = Vec::new();
+            for &width in units {
+                processed += width;
+                if let Some(event) = tracker.observe_unit(processed, width).unwrap() {
+                    events.push(event);
+                }
+            }
+            assert_eq!(tracker.observe_transition().unwrap(), None);
+            assert_eq!(events, expected_events);
+        }
+    }
+
+    #[test]
+    fn prompt_progress_transition_accepts_any_bounded_final_tail() {
+        for final_tail in [1, 2, 3, 8, 127, 128] {
+            let mut tracker = Sq8PromptProgressTracker::new(final_tail).unwrap();
+            assert_eq!(tracker.observe_transition().unwrap(), Some(final_tail));
+        }
+    }
+
+    #[test]
     fn prompt_progress_rejects_non_contiguous_invalid_and_overshooting_units() {
+        let mut zero_width = Sq8PromptProgressTracker::new(129).unwrap();
+        assert!(zero_width.observe_unit(0, 0).is_err());
+
+        let mut oversized_width = Sq8PromptProgressTracker::new(129).unwrap();
+        assert!(
+            oversized_width
+                .observe_unit(
+                    MAX_WORKER_PROGRESS_EXECUTION_WIDTH + 1,
+                    MAX_WORKER_PROGRESS_EXECUTION_WIDTH + 1
+                )
+                .is_err()
+        );
+
         let mut non_contiguous = Sq8PromptProgressTracker::new(129).unwrap();
         assert!(non_contiguous.observe_unit(2, 1).is_err());
 
-        let mut invalid_width = Sq8PromptProgressTracker::new(129).unwrap();
-        assert!(invalid_width.observe_unit(2, 2).is_err());
-
         let mut unaligned_batch = Sq8PromptProgressTracker::new(256).unwrap();
         assert_eq!(unaligned_batch.observe_unit(1, 1).unwrap(), None);
-        assert!(unaligned_batch.observe_unit(129, 128).is_err());
+        assert_eq!(unaligned_batch.observe_unit(129, 128).unwrap(), Some(129));
 
         let mut overshoot = Sq8PromptProgressTracker::new(127).unwrap();
         for processed in 1..127 {
@@ -3019,5 +3095,38 @@ mod tests {
 
         let mut short_batch = Sq8PromptProgressTracker::new(127).unwrap();
         assert!(short_batch.observe_unit(128, 128).is_err());
+
+        let mut remaining_overflow = Sq8PromptProgressTracker {
+            prompt_tokens: 1,
+            last_observed: 2,
+            last_emitted: 0,
+            transition_emitted: false,
+        };
+        assert!(remaining_overflow.observe_unit(3, 1).is_err());
+        assert!(remaining_overflow.observe_transition().is_err());
+
+        let mut emission_overflow = Sq8PromptProgressTracker {
+            prompt_tokens: 1,
+            last_observed: 0,
+            last_emitted: usize::MAX,
+            transition_emitted: false,
+        };
+        assert!(emission_overflow.observe_unit(1, 1).is_err());
+
+        let mut transition_without_tail = Sq8PromptProgressTracker {
+            prompt_tokens: 1,
+            last_observed: 1,
+            last_emitted: 0,
+            transition_emitted: false,
+        };
+        assert!(transition_without_tail.observe_transition().is_err());
+
+        let mut transition_emission_overflow = Sq8PromptProgressTracker {
+            prompt_tokens: 2,
+            last_observed: 0,
+            last_emitted: 1,
+            transition_emitted: false,
+        };
+        assert!(transition_emission_overflow.observe_transition().is_err());
     }
 }
