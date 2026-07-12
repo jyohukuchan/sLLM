@@ -90,6 +90,7 @@ class NormalizedMessage:
 
 @dataclass(frozen=True, slots=True)
 class NormalizedChatRequest:
+    model_id: str
     messages: tuple[NormalizedMessage, ...]
     stream: bool
     include_usage: bool
@@ -141,11 +142,16 @@ def decode_json_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def normalize_chat_request(value: dict[str, Any]) -> NormalizedChatRequest:
+def normalize_chat_request(
+    value: dict[str, Any],
+    *,
+    model_id: str = MODEL_ID,
+    max_completion_tokens: int = MAX_COMPLETION_TOKENS,
+) -> NormalizedChatRequest:
     model = _required(value, "model")
     if not isinstance(model, str):
         raise invalid_request("model must be a string.", "model")
-    if model != MODEL_ID:
+    if model != model_id:
         raise model_not_found()
 
     raw_messages = _required(value, "messages")
@@ -160,7 +166,7 @@ def normalize_chat_request(value: dict[str, Any]) -> NormalizedChatRequest:
     messages = _normalize_messages(raw_messages)
     stream = _optional_bool(value, "stream", False)
     include_usage = _normalize_stream_options(value.get("stream_options"), stream)
-    maximum = _normalize_maximum(value)
+    maximum = _normalize_maximum(value, max_completion_tokens=max_completion_tokens)
     temperature = _optional_number(
         value, "temperature", DEFAULT_TEMPERATURE, minimum=0.0, maximum=2.0
     )
@@ -177,6 +183,7 @@ def normalize_chat_request(value: dict[str, Any]) -> NormalizedChatRequest:
     if value.get("user") is not None and not isinstance(value["user"], str):
         raise invalid_request("user must be a string.", "user")
     return NormalizedChatRequest(
+        model_id=model_id,
         messages=messages,
         stream=stream,
         include_usage=include_usage,
@@ -290,20 +297,22 @@ def _normalize_stream_options(value: Any, stream: bool) -> bool:
     return include_usage
 
 
-def _normalize_maximum(value: dict[str, Any]) -> int:
+def _normalize_maximum(value: dict[str, Any], *, max_completion_tokens: int) -> int:
     first = value.get("max_tokens")
     second = value.get("max_completion_tokens")
     if first is not None and second is not None:
         raise unsupported_parameter("max_completion_tokens")
     maximum = second if second is not None else first
     if maximum is None:
-        return DEFAULT_MAX_COMPLETION_TOKENS
+        return min(DEFAULT_MAX_COMPLETION_TOKENS, max_completion_tokens)
     if isinstance(maximum, bool) or not isinstance(maximum, int):
         field = "max_completion_tokens" if second is not None else "max_tokens"
         raise invalid_request("The completion maximum must be an integer.", field)
-    if not 1 <= maximum <= MAX_COMPLETION_TOKENS:
+    if not 1 <= maximum <= max_completion_tokens:
         field = "max_completion_tokens" if second is not None else "max_tokens"
-        raise invalid_request("The completion maximum is outside 1..512.", field)
+        raise invalid_request(
+            f"The completion maximum is outside 1..{max_completion_tokens}.", field
+        )
     return maximum
 
 

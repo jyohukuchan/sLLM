@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,19 @@ DEFAULT_PRODUCT_ROOT = Path(
 )
 DEFAULT_TOKENIZER_DIR = Path(
     "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8"
+)
+
+DEFAULT_HIP_GUARDS = (
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL",
+    "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
 )
 
 
@@ -30,6 +44,24 @@ class GatewaySettings:
     gpu_lock_file: Path
     bind_host: str = "127.0.0.1"
     bind_port: int = 8000
+    model_id: str = "ullm-qwen3-14b-sq8"
+    model_revision: str = "9a283b4a5efbc09ce247e0ae5b02b744739e525a"
+    artifact_content_sha256: str = (
+        "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147"
+    )
+    package_manifest_sha256: str = (
+        "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb"
+    )
+    device: str = "gfx1201"
+    execution_profile: str = "rdna4_w8a8_block_ck"
+    context_length: int = 4_096
+    max_new_tokens: int = 512
+    vocab_size: int = 151_936
+    eos_token_ids: tuple[int, ...] = (151_645, 151_643)
+    top_k: int = 20
+    hip_visible_devices: str = "1"
+    hip_guards: tuple[str, ...] = DEFAULT_HIP_GUARDS
+    worker_extra_args: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -58,6 +90,30 @@ class GatewaySettings:
             ),
             bind_host=os.environ.get("ULLM_BIND_HOST", "127.0.0.1"),
             bind_port=_parse_port(os.environ.get("ULLM_BIND_PORT", "8000")),
+            model_id=_required_text("ULLM_MODEL_ID", "ullm-qwen3-14b-sq8"),
+            model_revision=_required_text(
+                "ULLM_MODEL_REVISION", "9a283b4a5efbc09ce247e0ae5b02b744739e525a"
+            ),
+            artifact_content_sha256=_sha256(
+                "ULLM_ARTIFACT_CONTENT_SHA256",
+                "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+            ),
+            package_manifest_sha256=_sha256(
+                "ULLM_PACKAGE_MANIFEST_SHA256",
+                "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+            ),
+            device=_required_text("ULLM_DEVICE", "gfx1201"),
+            execution_profile=_required_text(
+                "ULLM_EXECUTION_PROFILE", "rdna4_w8a8_block_ck"
+            ),
+            context_length=_positive_integer("ULLM_MODEL_CONTEXT_LENGTH", "4096"),
+            max_new_tokens=_positive_integer("ULLM_MAX_NEW_TOKENS", "512"),
+            vocab_size=_positive_integer("ULLM_VOCAB_SIZE", "151936"),
+            eos_token_ids=_integer_list("ULLM_EOS_TOKEN_IDS", "151645,151643"),
+            top_k=_positive_integer("ULLM_TOP_K", "20"),
+            hip_visible_devices=_required_text("ULLM_HIP_VISIBLE_DEVICES", "1"),
+            hip_guards=_name_list("ULLM_HIP_GUARDS", DEFAULT_HIP_GUARDS),
+            worker_extra_args=_shell_arguments("ULLM_WORKER_EXTRA_ARGS"),
         )
 
     def validate_paths(self) -> None:
@@ -77,6 +133,10 @@ class GatewaySettings:
             raise SettingsError(
                 "bind host must be loopback or the fixed OpenWebUI bridge"
             )
+        if self.max_new_tokens > self.context_length:
+            raise SettingsError("maximum new tokens exceed the model context length")
+        if any(token_id >= self.vocab_size for token_id in self.eos_token_ids):
+            raise SettingsError("EOS token ID is outside the model vocabulary")
 
 
 def _parse_port(raw: str) -> int:
@@ -87,6 +147,68 @@ def _parse_port(raw: str) -> int:
     if not 1 <= value <= 65_535:
         raise SettingsError("bind port is outside 1..65535")
     return value
+
+
+def _required_text(name: str, default: str) -> str:
+    value = os.environ.get(name, default)
+    if not value or any(character in value for character in "\r\n\0"):
+        raise SettingsError(f"{name} must be nonempty single-line text")
+    return value
+
+
+def _positive_integer(name: str, default: str) -> int:
+    raw = os.environ.get(name, default)
+    try:
+        value = int(raw, 10)
+    except ValueError as error:
+        raise SettingsError(f"{name} must be an integer") from error
+    if value <= 0:
+        raise SettingsError(f"{name} must be positive")
+    return value
+
+
+def _integer_list(name: str, default: str) -> tuple[int, ...]:
+    raw = os.environ.get(name, default)
+    try:
+        values = tuple(int(item, 10) for item in raw.split(","))
+    except ValueError as error:
+        raise SettingsError(f"{name} must be a comma-separated integer list") from error
+    if (
+        not values
+        or any(value < 0 for value in values)
+        or len(set(values)) != len(values)
+    ):
+        raise SettingsError(f"{name} must contain unique nonnegative integers")
+    return values
+
+
+def _sha256(name: str, default: str) -> str:
+    value = _required_text(name, default)
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise SettingsError(f"{name} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _name_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if not raw:
+        return ()
+    values = tuple(raw.split(","))
+    if any(not value or not value.replace("_", "").isalnum() for value in values):
+        raise SettingsError(f"{name} must be a comma-separated environment-name list")
+    return values
+
+
+def _shell_arguments(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    try:
+        return tuple(shlex.split(raw))
+    except ValueError as error:
+        raise SettingsError(f"{name} contains invalid shell quoting") from error
 
 
 def read_api_key(path: Path) -> bytes:

@@ -421,6 +421,47 @@ def test_health_readiness_and_exact_model_list(client: TestClient) -> None:
     }
 
 
+def test_configured_model_id_is_used_for_validation_and_responses(
+    tmp_path: Path,
+) -> None:
+    model_id = "ullm-qwen3.5-9b-aq4"
+    configured = settings(tmp_path)
+    configured = GatewaySettings(
+        **{
+            field: getattr(configured, field)
+            for field in (
+                "worker_binary",
+                "artifact_dir",
+                "package_dir",
+                "tokenizer_dir",
+                "api_key_file",
+                "gpu_lock_file",
+            )
+        },
+        model_id=model_id,
+        context_length=128,
+    )
+    app = create_app(
+        configured,
+        tokenizer=FakeTokenizer(),
+        worker=FakeWorker(),
+        api_key=API_KEY,
+    )
+    with TestClient(app) as instance:
+        models = instance.get("/v1/models", headers=AUTH)
+        completion = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(model=model_id),
+        )
+        old_model = instance.post("/v1/chat/completions", headers=AUTH, json=body())
+
+    assert models.json()["data"][0]["id"] == model_id
+    assert completion.status_code == 200
+    assert completion.json()["model"] == model_id
+    assert old_model.status_code == 404
+
+
 def test_authentication_precedes_body_parsing(client: TestClient) -> None:
     response = client.post(
         "/v1/chat/completions",

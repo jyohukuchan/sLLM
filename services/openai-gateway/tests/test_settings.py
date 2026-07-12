@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ullm_openai_gateway.settings import GatewaySettings, SettingsError, read_api_key
+from ullm_openai_gateway.worker import WorkerConfig
 
 
 @pytest.mark.parametrize(
@@ -63,3 +64,61 @@ def test_settings_reject_unspecified_or_named_bind_host(tmp_path: Path) -> None:
             configured(host).validate_paths()
     configured("127.0.0.1").validate_paths()
     configured("172.20.0.1").validate_paths()
+
+
+def test_model_and_worker_contract_can_be_configured_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "ULLM_MODEL_ID": "ullm-qwen3.5-9b-aq4",
+        "ULLM_MODEL_REVISION": "aq4-revision",
+        "ULLM_ARTIFACT_CONTENT_SHA256": "a" * 64,
+        "ULLM_PACKAGE_MANIFEST_SHA256": "b" * 64,
+        "ULLM_DEVICE": "gfx1201",
+        "ULLM_EXECUTION_PROFILE": "rdna4_aq4",
+        "ULLM_MODEL_CONTEXT_LENGTH": "32768",
+        "ULLM_MAX_NEW_TOKENS": "1024",
+        "ULLM_VOCAB_SIZE": "248320",
+        "ULLM_EOS_TOKEN_IDS": "248044,248046",
+        "ULLM_TOP_K": "40",
+        "ULLM_HIP_VISIBLE_DEVICES": "0",
+        "ULLM_HIP_GUARDS": "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+        "ULLM_WORKER_EXTRA_ARGS": "--temperature-floor 0.1",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    settings = GatewaySettings.from_env()
+    config = WorkerConfig.from_settings(settings)
+
+    assert settings.model_id == "ullm-qwen3.5-9b-aq4"
+    assert settings.context_length == 32_768
+    assert settings.vocab_size == 248_320
+    assert settings.eos_token_ids == (248_044, 248_046)
+    assert config.command[-2:] == ("--temperature-floor", "0.1")
+    assert config.environment["HIP_VISIBLE_DEVICES"] == "0"
+    assert config.environment["ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL"] == "1"
+    assert config.model_id == settings.model_id
+    assert config.execution_profile == "rdna4_aq4"
+    assert config.context_length == 32_768
+    assert config.vocab_size == 248_320
+    assert config.eos_token_ids == (248_044, 248_046)
+    assert config.top_k == 40
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("ULLM_ARTIFACT_CONTENT_SHA256", "not-a-digest"),
+        ("ULLM_MODEL_CONTEXT_LENGTH", "0"),
+        ("ULLM_EOS_TOKEN_IDS", "1,1"),
+        ("ULLM_HIP_GUARDS", "INVALID-NAME"),
+        ("ULLM_WORKER_EXTRA_ARGS", "'unterminated"),
+    ],
+)
+def test_invalid_model_contract_environment_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(SettingsError):
+        GatewaySettings.from_env()

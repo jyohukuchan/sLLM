@@ -1,4 +1,4 @@
-"""Resident SQ8 worker supervision and strict JSONL event validation."""
+"""Resident model worker supervision and strict JSONL event validation."""
 
 from __future__ import annotations
 
@@ -90,12 +90,25 @@ class WorkerConfig:
     progress_timeout_seconds: float = 30.0
     cancel_timeout_seconds: float = 5.0
     terminate_grace_seconds: float = 2.0
+    model_id: str = MODEL_ID
+    model_revision: str = MODEL_REVISION
+    artifact_content_sha256: str = ARTIFACT_CONTENT_SHA256
+    package_manifest_sha256: str = PACKAGE_MANIFEST_SHA256
+    device: str = DEVICE
+    execution_profile: str = EXECUTION_PROFILE
+    context_length: int = CONTEXT_LENGTH
+    max_new_tokens: int = MAX_NEW_TOKENS
+    vocab_size: int = VOCAB_SIZE
+    eos_token_ids: tuple[int, ...] = EOS_TOKEN_IDS
+    top_k: int = TOP_K
 
     @classmethod
     def from_settings(cls, settings: GatewaySettings) -> "WorkerConfig":
         environment = dict(os.environ)
-        environment["HIP_VISIBLE_DEVICES"] = "1"
+        environment["HIP_VISIBLE_DEVICES"] = settings.hip_visible_devices
         for name in HIP_GUARDS:
+            environment.pop(name, None)
+        for name in settings.hip_guards:
             environment[name] = "1"
         return cls(
             command=(
@@ -104,9 +117,21 @@ class WorkerConfig:
                 str(settings.artifact_dir),
                 "--package",
                 str(settings.package_dir),
+                *settings.worker_extra_args,
             ),
             lock_file=settings.gpu_lock_file,
             environment=environment,
+            model_id=settings.model_id,
+            model_revision=settings.model_revision,
+            artifact_content_sha256=settings.artifact_content_sha256,
+            package_manifest_sha256=settings.package_manifest_sha256,
+            device=settings.device,
+            execution_profile=settings.execution_profile,
+            context_length=settings.context_length,
+            max_new_tokens=settings.max_new_tokens,
+            vocab_size=settings.vocab_size,
+            eos_token_ids=settings.eos_token_ids,
+            top_k=settings.top_k,
         )
 
 
@@ -261,7 +286,7 @@ class WorkerSupervisor:
         await asyncio.shield(self._ready_future)
 
     async def admit(self, request: WorkerGenerationRequest) -> GenerationHandle:
-        _validate_generation_request(request)
+        _validate_generation_request(request, self._config)
         loop = asyncio.get_running_loop()
         async with self._state_lock:
             if not self.ready:
@@ -302,10 +327,10 @@ class WorkerSupervisor:
             "sampling": {
                 "temperature": request.temperature,
                 "top_p": request.top_p,
-                "top_k": TOP_K,
+                "top_k": self._config.top_k,
                 "seed": request.seed,
             },
-            "eos_token_ids": list(EOS_TOKEN_IDS),
+            "eos_token_ids": list(self._config.eos_token_ids),
         }
         _log_lifecycle(
             "request_admitted",
@@ -581,14 +606,14 @@ class WorkerSupervisor:
         expected = {
             "schema_version": WORKER_SCHEMA,
             "type": "ready",
-            "model": MODEL_ID,
-            "model_revision": MODEL_REVISION,
-            "artifact_content_sha256": ARTIFACT_CONTENT_SHA256,
-            "package_manifest_sha256": PACKAGE_MANIFEST_SHA256,
-            "device": DEVICE,
-            "execution_profile": EXECUTION_PROFILE,
-            "context_length": CONTEXT_LENGTH,
-            "max_new_tokens": MAX_NEW_TOKENS,
+            "model": self._config.model_id,
+            "model_revision": self._config.model_revision,
+            "artifact_content_sha256": self._config.artifact_content_sha256,
+            "package_manifest_sha256": self._config.package_manifest_sha256,
+            "device": self._config.device,
+            "execution_profile": self._config.execution_profile,
+            "context_length": self._config.context_length,
+            "max_new_tokens": self._config.max_new_tokens,
         }
         if value != expected or self._state != "loading" or self._active is not None:
             raise WorkerProtocolError("worker ready identity or ordering differs")
@@ -674,7 +699,7 @@ class WorkerSupervisor:
             not active.started
             or active.processed_prompt_tokens != len(active.request.prompt_token_ids)
             or index != len(active.token_ids)
-            or not 0 <= token_id < VOCAB_SIZE
+            or not 0 <= token_id < self._config.vocab_size
             or len(active.token_ids) >= active.request.max_new_tokens
             or active.terminal_outcome is not None
         ):
@@ -688,7 +713,7 @@ class WorkerSupervisor:
                 stream=active.request.stream,
                 completion_tokens=1,
             )
-        if token_id in EOS_TOKEN_IDS:
+        if token_id in self._config.eos_token_ids:
             active.terminal_outcome = "stop"
         elif len(active.token_ids) == active.request.max_new_tokens:
             active.terminal_outcome = "length"
@@ -1006,15 +1031,18 @@ def _acquire_singleton_lock(path: Path) -> int:
     return descriptor
 
 
-def _validate_generation_request(request: WorkerGenerationRequest) -> None:
+def _validate_generation_request(
+    request: WorkerGenerationRequest, config: WorkerConfig
+) -> None:
     if (
         not request.prompt_token_ids
-        or len(request.prompt_token_ids) + request.max_new_tokens > CONTEXT_LENGTH
-        or not 1 <= request.max_new_tokens <= MAX_NEW_TOKENS
+        or len(request.prompt_token_ids) + request.max_new_tokens
+        > config.context_length
+        or not 1 <= request.max_new_tokens <= config.max_new_tokens
         or any(
             isinstance(item, bool)
             or not isinstance(item, int)
-            or not 0 <= item < VOCAB_SIZE
+            or not 0 <= item < config.vocab_size
             for item in request.prompt_token_ids
         )
         or isinstance(request.temperature, bool)

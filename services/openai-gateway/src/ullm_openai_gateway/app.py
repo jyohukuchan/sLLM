@@ -148,6 +148,8 @@ def create_app(
         app.state.stream_tokenizer_lock = asyncio.Lock()
         app.state.stream_tokenizer_executor = stream_tokenizer_executor
         app.state.worker = loaded_worker
+        app.state.model_id = configured.model_id
+        app.state.context_length = configured.context_length
         app.state.request_gate = _RequestGate()
         await loaded_worker.launch()
         try:
@@ -205,7 +207,9 @@ def create_app(
         return JSONResponse(
             {
                 "object": "list",
-                "data": [{"id": MODEL_ID, "object": "model", "owned_by": "ullm"}],
+                "data": [
+                    {"id": configured.model_id, "object": "model", "owned_by": "ullm"}
+                ],
             }
         )
 
@@ -214,7 +218,11 @@ def create_app(
         _authenticate(request)
         _reject_query(request)
         raw = await _read_json_body(request)
-        normalized = normalize_chat_request(decode_json_object(raw))
+        normalized = normalize_chat_request(
+            decode_json_object(raw),
+            model_id=configured.model_id,
+            max_completion_tokens=configured.max_new_tokens,
+        )
         return await _serve_chat_completion(request, normalized)
 
     return app
@@ -233,7 +241,9 @@ async def _serve_chat_completion(
             "internal_error",
             "The request could not be processed.",
         ) from error
-    if len(prompt.token_ids) + normalized.max_completion_tokens > CONTEXT_LENGTH:
+    if len(prompt.token_ids) + normalized.max_completion_tokens > getattr(
+        request.app.state, "context_length", CONTEXT_LENGTH
+    ):
         raise context_length_exceeded()
 
     worker = cast(WorkerSupervisor, request.app.state.worker)
@@ -337,7 +347,7 @@ async def _serve_claimed_chat_completion(
         "id": completion_id,
         "object": "chat.completion",
         "created": created,
-        "model": MODEL_ID,
+        "model": normalized.model_id,
         "choices": [
             {
                 "index": 0,
@@ -352,7 +362,10 @@ async def _serve_claimed_chat_completion(
             "total_tokens": result.prompt_tokens + completion_tokens,
         },
     }
-    timings = _completion_timings(result)
+    timings = _completion_timings(
+        result,
+        context_length=getattr(request.app.state, "context_length", CONTEXT_LENGTH),
+    )
     if timings is not None:
         value["timings"] = timings
     return JSONResponse(value)
@@ -776,7 +789,8 @@ async def _stream_completion(
     )
     queue_task: asyncio.Task[int] | None = None
     try:
-        yield _sse_record(_role_chunk(completion_id, created))
+        model_id = getattr(request.app.state, "model_id", MODEL_ID)
+        yield _sse_record(_role_chunk(completion_id, created, model_id=model_id))
         while True:
             if stream.aborted_reason is not None:
                 try:
@@ -809,7 +823,9 @@ async def _stream_completion(
             if stream.aborted_reason is not None:
                 continue
             if suffix:
-                yield _sse_record(_content_chunk(completion_id, created, suffix))
+                yield _sse_record(
+                    _content_chunk(completion_id, created, suffix, model_id=model_id)
+                )
 
         result = result_task.result()
         if stream.aborted_reason is not None or result.outcome == "cancelled":
@@ -821,18 +837,33 @@ async def _stream_completion(
                 break
             suffix = await _decode_stream_token(request, decoder, token_id)
             if suffix:
-                yield _sse_record(_content_chunk(completion_id, created, suffix))
+                yield _sse_record(
+                    _content_chunk(completion_id, created, suffix, model_id=model_id)
+                )
         suffix = await _finish_stream_decode(request, decoder)
         if suffix:
-            yield _sse_record(_content_chunk(completion_id, created, suffix))
-        timings = _completion_timings(result)
-        final_chunk = _final_chunk(completion_id, created, result.outcome)
+            yield _sse_record(
+                _content_chunk(completion_id, created, suffix, model_id=model_id)
+            )
+        timings = _completion_timings(
+            result,
+            context_length=getattr(request.app.state, "context_length", CONTEXT_LENGTH),
+        )
+        final_chunk = _final_chunk(
+            completion_id, created, result.outcome, model_id=model_id
+        )
         if timings is not None and not include_usage:
             final_chunk["timings"] = timings
         yield _sse_record(final_chunk)
         if include_usage:
             yield _sse_record(
-                _usage_chunk(completion_id, created, result, timings=timings)
+                _usage_chunk(
+                    completion_id,
+                    created,
+                    result,
+                    timings=timings,
+                    model_id=model_id,
+                )
             )
         yield b"data: [DONE]\n\n"
     except WorkerFatal:
@@ -920,17 +951,21 @@ def _sse_record(value: dict[str, Any]) -> bytes:
     return b"data: " + payload + b"\n\n"
 
 
-def _chunk_base(completion_id: str, created: int) -> dict[str, Any]:
+def _chunk_base(
+    completion_id: str, created: int, *, model_id: str = MODEL_ID
+) -> dict[str, Any]:
     return {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": created,
-        "model": MODEL_ID,
+        "model": model_id,
     }
 
 
-def _role_chunk(completion_id: str, created: int) -> dict[str, Any]:
-    value = _chunk_base(completion_id, created)
+def _role_chunk(
+    completion_id: str, created: int, *, model_id: str = MODEL_ID
+) -> dict[str, Any]:
+    value = _chunk_base(completion_id, created, model_id=model_id)
     value["choices"] = [
         {
             "index": 0,
@@ -942,10 +977,16 @@ def _role_chunk(completion_id: str, created: int) -> dict[str, Any]:
     return value
 
 
-def _content_chunk(completion_id: str, created: int, content: str) -> dict[str, Any]:
+def _content_chunk(
+    completion_id: str,
+    created: int,
+    content: str,
+    *,
+    model_id: str = MODEL_ID,
+) -> dict[str, Any]:
     if not content:
         raise ValueError("SSE content chunk must be nonempty")
-    value = _chunk_base(completion_id, created)
+    value = _chunk_base(completion_id, created, model_id=model_id)
     value["choices"] = [
         {
             "index": 0,
@@ -958,9 +999,13 @@ def _content_chunk(completion_id: str, created: int, content: str) -> dict[str, 
 
 
 def _final_chunk(
-    completion_id: str, created: int, finish_reason: str
+    completion_id: str,
+    created: int,
+    finish_reason: str,
+    *,
+    model_id: str = MODEL_ID,
 ) -> dict[str, Any]:
-    value = _chunk_base(completion_id, created)
+    value = _chunk_base(completion_id, created, model_id=model_id)
     value["choices"] = [
         {
             "index": 0,
@@ -978,9 +1023,10 @@ def _usage_chunk(
     result: WorkerGenerationResult,
     *,
     timings: dict[str, Any] | None = None,
+    model_id: str = MODEL_ID,
 ) -> dict[str, Any]:
     completion_tokens = len(result.token_ids)
-    value = _chunk_base(completion_id, created)
+    value = _chunk_base(completion_id, created, model_id=model_id)
     value["choices"] = []
     value["usage"] = {
         "prompt_tokens": result.prompt_tokens,
@@ -992,13 +1038,15 @@ def _usage_chunk(
     return value
 
 
-def _completion_timings(result: WorkerGenerationResult) -> dict[str, Any] | None:
+def _completion_timings(
+    result: WorkerGenerationResult, *, context_length: int = CONTEXT_LENGTH
+) -> dict[str, Any] | None:
     timings = result.timings
     if timings is None:
         return None
     if result.outcome == "stop":
         termination_reason = "eos_token"
-    elif result.prompt_tokens + len(result.token_ids) == CONTEXT_LENGTH:
+    elif result.prompt_tokens + len(result.token_ids) == context_length:
         termination_reason = "context_length"
     else:
         termination_reason = "max_tokens"
