@@ -1,6 +1,6 @@
 # Generic production inference optimization plan v0.1
 
-Status: active; P0 contracts completed, P1 implementation not started
+Status: active; P0 contracts and P1-A typed execution contracts completed, P1-B CPU reference executor next
 
 ## 前回の要点
 
@@ -19,7 +19,7 @@ Status: active; P0 contracts completed, P1 implementation not started
 
 ## 次の行動
 
-P1でtyped model graph/state schema/execution batchの型とCPU reference executorの実装を開始する。AQ4 kernelの変更から先に始めない。
+P1-BでCPU reference executorを実装し、その後にQwen3.5/Qwen3 adapterのgraph生成fixtureを追加する。AQ4 kernelの変更から先に始めない。
 
 ## 1. 目的
 
@@ -258,6 +258,8 @@ Gate:
 - component性能をproduction性能としてpromotionできないschemaになる。
 
 ### P1: typed graphとCPU reference executor
+
+Status: P1-A completed (`model_graph`, `state_schema`, and `execution_batch`); P1-B CPU reference executor and adapter fixtures remain.
 
 実装:
 
