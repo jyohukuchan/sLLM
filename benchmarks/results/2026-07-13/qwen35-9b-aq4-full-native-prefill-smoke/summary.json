@@ -1,0 +1,177 @@
+{
+  "schema_version": "ullm.aq4_full_native_prefill_evidence_summary.v1",
+  "sources": {
+    "full_native_resident": "benchmarks/results/2026-07-13/qwen35-9b-aq4-full-native-prefill-smoke/resident-evidence.json",
+    "linear_native_resident": "benchmarks/results/2026-07-13/qwen35-9b-aq4-native-prefill-smoke/resident-evidence.json",
+    "m1_baseline": "benchmarks/results/2026-07-13/qwen35-9b-aq4-native-prefill-smoke/m1-baseline-evidence.json",
+    "crossover": "benchmarks/results/2026-07-13/qwen35-9b-aq4-native-prefill-smoke/crossover.json",
+    "full_native_source_commit": "ca0e11fbddedfab3f5e65b8daf575d9b8c2f4197",
+    "linear_native_source_commit": "9a9594848632137c5e0ec6e16852ad87374f70de",
+    "m1_source_commit": "2e8dbc024a46ae8eaabab8754e85f4d796aa3cd3",
+    "sha256": {
+      "full_native_resident": "c339c0930d7b7eacbb46a41686ede76efd451c1019cad7f205c3e77b75fa0e56",
+      "linear_native_resident": "fe14beae23e1e922a5e571f541a3f49711c4b9863e2831208896faf23ffc2885",
+      "m1_baseline": "8971f3a74b2761c461f6541ec567932fb944a0cadefd59ce004ef4e9ecac1303",
+      "crossover": "c536c33e053cfd43b77a5a1b90b4dfc54f36d6d7d9796fccc03997a3ecd8d7e5"
+    }
+  },
+  "method": {
+    "hardware": "gfx1201 / AMD Radeon Graphics",
+    "execution_profile": "rdna4_aq4_resident",
+    "model": "ullm-qwen3.5-9b-aq4",
+    "format": "AQ4_0",
+    "sampling": "top_k=1, temperature=false, top_p=false",
+    "max_new_tokens": 4,
+    "case_prompt_tokens": [1, 8, 127, 128, 129, 255, 256],
+    "prefill_chunk_formula": "width=min(remaining_prompt_tokens,128); commit progress after each successful chunk",
+    "audit_source": "full-native resident-evidence.json resident.stderr_tail request_released.operation_execution_audit",
+    "physical_formula": "full-native prefill=64*chunks, decode=64*3, total=prefill+decode",
+    "token_equivalent_formula": "prefill=64*prompt_tokens, decode=64*3, total=prefill+decode",
+    "native_chunk_ids": [
+      "hip.paged-kv-write-chunk-f32.m2-m128",
+      "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128"
+    ]
+  },
+  "verification": {
+    "json_parse_all": true,
+    "case_count": 7,
+    "case_ids_equal_all": true,
+    "prompt_token_ids_equal_all": true,
+    "generated_tokens_equal_all": true,
+    "progress_formula": "repeat min(remaining_tokens,128), recording cumulative progress",
+    "progress_valid_all": true,
+    "outcome_length_all": true,
+    "reset_complete_full_native": true,
+    "clean_shutdown_full_native": true,
+    "child_processes_clean_full_native": true,
+    "audit_total_physical_formula_valid": true,
+    "audit_token_equivalent_formula_valid": true,
+    "audit_native_chunk_ids_valid": true,
+    "coverage_complete_all": true,
+    "m128_audit": {
+      "prompt_tokens": 128,
+      "total_physical": 256,
+      "prefill_physical": 64,
+      "decode_physical": 192,
+      "token_equivalent": 8384,
+      "prefill_token_equivalent": 8192,
+      "decode_token_equivalent": 192,
+      "native_chunk_ids_each": 8,
+      "coverage_complete": true
+    },
+    "m256_audit": {
+      "prompt_tokens": 256,
+      "total_physical": 320,
+      "prefill_physical": 128,
+      "decode_physical": 192,
+      "token_equivalent": 16576,
+      "prefill_token_equivalent": 16384,
+      "decode_token_equivalent": 192,
+      "native_chunk_ids_each": 16,
+      "coverage_complete": true
+    },
+    "comparison_files_untouched": true,
+    "rocprofv3_untouched": true
+  },
+  "cases": [
+    {
+      "id": "raw-p0001-g0004",
+      "prompt_tokens": 1,
+      "generated_tokens": 4,
+      "prompt_progress": [1],
+      "expected_progress": [1],
+      "generated_token_sha256": "cea7a4dd22a8fe3cc4740be89e628f13a16b701b9dbfff755ca84e57289f5505",
+      "prompt_tps": {"m1": 24.57970245041199, "linear_native": 23.83908711553363, "full_native": 22.011351033614524},
+      "speed_ratio": {"linear_native_over_m1": 0.9698688242311921, "full_native_over_linear_native": 0.9233302821932243, "full_native_over_m1": 0.8955092551677973},
+      "audit": {"physical_total": 256, "prefill_physical": 64, "decode_physical": 192, "token_equivalent_total": 256, "prefill_token_equivalent": 64, "decode_token_equivalent": 192, "chunks": 1, "widths": [1], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 0, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 0, "hip.paged-kv-write-chunk-f32.m2-m128": 0, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 0}, "coverage_complete": true}
+    },
+    {
+      "id": "raw-p0008-g0004",
+      "prompt_tokens": 8,
+      "generated_tokens": 4,
+      "prompt_progress": [8],
+      "expected_progress": [8],
+      "generated_token_sha256": "019ce49c3c7a6e4ecff35af33c5d122661087035b51b8797b19209ff4a0aa6e4",
+      "prompt_tps": {"m1": 80.44274641873166, "linear_native": 45.90024096708503, "full_native": 47.474999427926264},
+      "speed_ratio": {"linear_native_over_m1": 0.5705951500979191, "full_native_over_linear_native": 1.0343082830865853, "full_native_over_m1": 0.5901712900353111},
+      "audit": {"physical_total": 256, "prefill_physical": 64, "decode_physical": 192, "token_equivalent_total": 704, "prefill_token_equivalent": 512, "decode_token_equivalent": 192, "chunks": 1, "widths": [8], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 24, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 24, "hip.paged-kv-write-chunk-f32.m2-m128": 8, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 8}, "coverage_complete": true}
+    },
+    {
+      "id": "raw-p0127-g0004",
+      "prompt_tokens": 127,
+      "generated_tokens": 4,
+      "prompt_progress": [127],
+      "expected_progress": [127],
+      "generated_token_sha256": "5fad5ff521ddfe03c711a3cc7165c476aceb4c3d83a5f48e07f701b3362a09fe",
+      "prompt_tps": {"m1": 78.96369607140491, "linear_native": 102.5788672936483, "full_native": 116.60856947691124},
+      "speed_ratio": {"linear_native_over_m1": 1.2990636507299351, "full_native_over_linear_native": 1.136769907422556, "full_native_over_m1": 1.476736465976276},
+      "audit": {"physical_total": 256, "prefill_physical": 64, "decode_physical": 192, "token_equivalent_total": 8320, "prefill_token_equivalent": 8128, "decode_token_equivalent": 192, "chunks": 1, "widths": [127], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 24, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 24, "hip.paged-kv-write-chunk-f32.m2-m128": 8, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 8}, "coverage_complete": true}
+    },
+    {
+      "id": "raw-p0128-g0004",
+      "prompt_tokens": 128,
+      "generated_tokens": 4,
+      "prompt_progress": [128],
+      "expected_progress": [128],
+      "generated_token_sha256": "a9129a88649b1a328d49df3090f2dab986b44ab42b39f1d01cfbc970ecdf912c",
+      "prompt_tps": {"m1": 78.84927554536128, "linear_native": 102.14887051575815, "full_native": 116.56120198487007},
+      "speed_ratio": {"linear_native_over_m1": 1.2954953588253684, "full_native_over_linear_native": 1.141091442287544, "full_native_over_m1": 1.478278667478859},
+      "audit": {"physical_total": 256, "prefill_physical": 64, "decode_physical": 192, "token_equivalent_total": 8384, "prefill_token_equivalent": 8192, "decode_token_equivalent": 192, "chunks": 1, "widths": [128], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 24, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 24, "hip.paged-kv-write-chunk-f32.m2-m128": 8, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 8}, "coverage_complete": true}
+    },
+    {
+      "id": "raw-p0129-g0004",
+      "prompt_tokens": 129,
+      "generated_tokens": 4,
+      "prompt_progress": [128, 129],
+      "expected_progress": [128, 129],
+      "generated_token_sha256": "0aa7c9816e8d5ae3f288a63edb9f4c043103f51a0b4782f055a884e8117c2adb",
+      "prompt_tps": {"m1": 78.72802270628469, "linear_native": 101.79228139699413, "full_native": 115.97169595507725},
+      "speed_ratio": {"linear_native_over_m1": 1.2929612341053787, "full_native_over_linear_native": 1.139297541655274, "full_native_over_m1": 1.473067555471827},
+      "audit": {"physical_total": 320, "prefill_physical": 128, "decode_physical": 192, "token_equivalent_total": 8448, "prefill_token_equivalent": 8256, "decode_token_equivalent": 192, "chunks": 2, "widths": [1, 128], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 24, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 24, "hip.paged-kv-write-chunk-f32.m2-m128": 8, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 8}, "coverage_complete": true}
+    },
+    {
+      "id": "raw-p0255-g0004",
+      "prompt_tokens": 255,
+      "generated_tokens": 4,
+      "prompt_progress": [128, 255],
+      "expected_progress": [128, 255],
+      "generated_token_sha256": "6c4cc4ff7039d30b9c0b9fc2d92a009655ad1d6e168c8aba386318ca5cf19a05",
+      "prompt_tps": {"m1": 76.55566791325714, "linear_native": 98.21358664056767, "full_native": 115.84745069221073},
+      "speed_ratio": {"linear_native_over_m1": 1.2829041835524242, "full_native_over_linear_native": 1.179546075597236, "full_native_over_m1": 1.5132445950765383},
+      "audit": {"physical_total": 320, "prefill_physical": 128, "decode_physical": 192, "token_equivalent_total": 16512, "prefill_token_equivalent": 16320, "decode_token_equivalent": 192, "chunks": 2, "widths": [127, 128], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 48, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 48, "hip.paged-kv-write-chunk-f32.m2-m128": 16, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 16}, "coverage_complete": true}
+    },
+    {
+      "id": "raw-p0256-g0004",
+      "prompt_tokens": 256,
+      "generated_tokens": 4,
+      "prompt_progress": [128, 256],
+      "expected_progress": [128, 256],
+      "generated_token_sha256": "2b94311e40cb5d543231bd6106201e39bba8c1897aa5d41b8558044904c50fa6",
+      "prompt_tps": {"m1": 76.40568001950298, "linear_native": 98.02804900307294, "full_native": 115.59014817906564},
+      "speed_ratio": {"linear_native_over_m1": 1.28299426139589, "full_native_over_linear_native": 1.179153817245125, "full_native_over_m1": 1.512847580828554},
+      "audit": {"physical_total": 320, "prefill_physical": 128, "decode_physical": 192, "token_equivalent_total": 16576, "prefill_token_equivalent": 16384, "decode_token_equivalent": 192, "chunks": 2, "widths": [128, 128], "native_ids": {"hip.linear-attention-qkv-prepare-batch-f32.m2-m128": 48, "hip.linear-attention-recurrent-sequence-f32.m2-m128": 48, "hip.paged-kv-write-chunk-f32.m2-m128": 16, "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128": 16}, "coverage_complete": true}
+    }
+  ],
+  "speed_interpretation": {
+    "steady_state_prompt_boundaries": [127, 128, 129, 255, 256],
+    "cold_overhead_separated": {
+      "case_id": "raw-p0008-g0004",
+      "reason": "the first native p8 request includes first-call/cold-launch overhead",
+      "full_native_prompt_tps": 47.474999427926264,
+      "linear_native_prompt_tps": 45.90024096708503,
+      "m1_prompt_tps": 80.44274641873166,
+      "excluded_from_steady_state": true
+    },
+    "max_full_native_prompt_tps": 116.60856947691124,
+    "max_full_native_prompt_tps_case": "raw-p0127-g0004",
+    "max_full_native_generation_tps": 95.4234553000155,
+    "below_thousands_tokens_per_second": true,
+    "note": "full-native reaches at most 116.61 prompt tok/s and remains far below thousands of tok/s; p8 cold overhead is not used to judge the steady-state boundary comparison"
+  },
+  "limitations": [
+    "The comparison is a seven-case resident smoke on one gfx1201 device, not a broad throughput benchmark.",
+    "M1 and linear-native are existing comparison artifacts from separate source commits and binaries; token equality is checked, but run-to-run thermal and launch variance is not controlled.",
+    "Self-attention chunk IDs are audited from the worker stderr tail; the tail is bounded, so this evidence does not replace a persistent complete raw stderr log.",
+    "No claim of thousands of tokens per second is made; the measured maximum is 116.61 prompt tok/s."
+  ]
+}
