@@ -1,15 +1,27 @@
 use std::env;
-use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+use ullm_engine::aq4_package_runtime::{
+    PackageAq4ResidentMatvec, PackageResidentSharedBufferRegistry,
+    SQ8_0_MODEL_ARCH_QWEN_FAMILY, SqFp8ProjectionDispatches, SqFp8ProjectionTelemetry,
+    package_resident_f32_buffer, reset_sq_fp8_projection_telemetry,
+    snapshot_sq_fp8_projection_telemetry,
+};
+#[cfg(test)]
+use ullm_engine::aq4_package_runtime::{
+    SqFp8ProjectionDispatch, dispatchable_sq8_projection_gpu_name,
+    select_sq_fp8_projection_implementation_id,
+};
 use ullm_engine::backend_dispatch::{
-    BackendImplementation, BackendRequest, select_sq8_projection_implementation_id, select_backend,
-    sq8_0_projection_descriptor_family, Sq8ProjectionFamily,
+    BackendImplementation, BackendRequest, Sq8ProjectionFamily, select_backend,
+};
+#[cfg(test)]
+use ullm_engine::backend_dispatch::{
     Sq8ProjectionMatvecOperation as SqFp8ProjectionMatvecOperation,
-    SQ8_0_PROJECTION_DISPATCH_PHASE,
+    sq8_0_projection_descriptor_family,
 };
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
@@ -57,21 +69,11 @@ use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
     SchedulerState,
 };
-use ullm_engine::sq8_model_head_runtime::validate_qwen3_14b_sq8_r9700_device_info;
 use ullm_engine::sq::{
-    fp8_e4m3fn_to_f32,
     materialize_sq_fp8_tensor_rows_to_runtime_f32, read_sq_fp8_artifact,
     select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
-use ullm_engine::sq_runtime::{Sq8ResidentRuntimeTensorRef, load_sq8_resident_tensor};
 
-#[derive(Clone, Copy, Debug, Default)]
-struct SqFp8ProjectionTelemetry {
-    single_matvec_count: u64,
-    batch_matvec_count: u64,
-    pair_matvec_count: u64,
-    triple_matvec_count: u64,
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SqDiagnosticHostStagingTelemetry {
@@ -81,91 +83,12 @@ struct SqDiagnosticHostStagingTelemetry {
     write_bytes: u64,
 }
 
-static SQ_FP8_SINGLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
-static SQ_FP8_BATCH_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
-static SQ_FP8_PAIR_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
-static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, Debug)]
-struct SqFp8ProjectionDispatch {
-    operation: SqFp8ProjectionMatvecOperation,
-    implementation_id: &'static str,
-    family: Option<Sq8ProjectionFamily>,
-}
 
-impl SqFp8ProjectionDispatch {
-    fn label(&self) -> &'static str {
-        self.operation.label()
-    }
-
-    fn require_direct_family(&self, label: &str) -> Result<(), String> {
-        match self.family {
-            Some(Sq8ProjectionFamily::Direct) => Ok(()),
-            None => Err(format!(
-                "{label} SQ8_0 projection dispatch has no direct kernel family: operation={} implementation_id={}",
-                self.operation.label(),
-                self.implementation_id
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct SqFp8ProjectionDispatches {
-    single: SqFp8ProjectionDispatch,
-    batch: SqFp8ProjectionDispatch,
-    pair: SqFp8ProjectionDispatch,
-    triple: SqFp8ProjectionDispatch,
-}
-
-const SQ8_0_MODEL_ARCH_QWEN_FAMILY: &str = "Qwen3";
-
-impl SqFp8ProjectionDispatches {
-    fn from_info(info: &ullm_runtime_sys::DeviceInfo, model_arch: Option<&str>) -> Self {
-        Self {
-            single: sq_fp8_projection_dispatch(
-                SqFp8ProjectionMatvecOperation::Single,
-                info,
-                model_arch,
-            ),
-            batch: sq_fp8_projection_dispatch(
-                SqFp8ProjectionMatvecOperation::Batch,
-                info,
-                model_arch,
-            ),
-            pair: sq_fp8_projection_dispatch(
-                SqFp8ProjectionMatvecOperation::Pair,
-                info,
-                model_arch,
-            ),
-            triple: sq_fp8_projection_dispatch(
-                SqFp8ProjectionMatvecOperation::Triple,
-                info,
-                model_arch,
-            ),
-        }
-    }
-
-    fn for_operation(&self, operation: SqFp8ProjectionMatvecOperation) -> SqFp8ProjectionDispatch {
-        match operation {
-            SqFp8ProjectionMatvecOperation::Single => self.single,
-            SqFp8ProjectionMatvecOperation::Batch => self.batch,
-            SqFp8ProjectionMatvecOperation::Pair => self.pair,
-            SqFp8ProjectionMatvecOperation::Triple => self.triple,
-        }
-    }
-}
-
-fn reset_sq_fp8_projection_telemetry() {
-    SQ_FP8_SINGLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
-    SQ_FP8_BATCH_MATVEC_COUNT.store(0, Ordering::Relaxed);
-    SQ_FP8_PAIR_MATVEC_COUNT.store(0, Ordering::Relaxed);
-    SQ_FP8_TRIPLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
-}
 
 fn reset_sq_diagnostic_host_staging_telemetry() {
     SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.store(0, Ordering::Relaxed);
@@ -174,14 +97,6 @@ fn reset_sq_diagnostic_host_staging_telemetry() {
     SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.store(0, Ordering::Relaxed);
 }
 
-fn snapshot_sq_fp8_projection_telemetry() -> SqFp8ProjectionTelemetry {
-    SqFp8ProjectionTelemetry {
-        single_matvec_count: SQ_FP8_SINGLE_MATVEC_COUNT.load(Ordering::Relaxed),
-        batch_matvec_count: SQ_FP8_BATCH_MATVEC_COUNT.load(Ordering::Relaxed),
-        pair_matvec_count: SQ_FP8_PAIR_MATVEC_COUNT.load(Ordering::Relaxed),
-        triple_matvec_count: SQ_FP8_TRIPLE_MATVEC_COUNT.load(Ordering::Relaxed),
-    }
-}
 
 fn snapshot_sq_diagnostic_host_staging_telemetry() -> SqDiagnosticHostStagingTelemetry {
     SqDiagnosticHostStagingTelemetry {
@@ -192,22 +107,6 @@ fn snapshot_sq_diagnostic_host_staging_telemetry() -> SqDiagnosticHostStagingTel
     }
 }
 
-fn record_sq_fp8_projection_dispatch(dispatch: SqFp8ProjectionDispatch) {
-    match dispatch.operation {
-        SqFp8ProjectionMatvecOperation::Single => {
-            SQ_FP8_SINGLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-        SqFp8ProjectionMatvecOperation::Batch => {
-            SQ_FP8_BATCH_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-        SqFp8ProjectionMatvecOperation::Pair => {
-            SQ_FP8_PAIR_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-        SqFp8ProjectionMatvecOperation::Triple => {
-            SQ_FP8_TRIPLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
 
 fn record_sq_diagnostic_host_staging_write_bytes(bytes: usize) {
     SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -243,35 +142,6 @@ fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
     }
 }
 
-fn select_sq_fp8_projection_implementation_id(
-    operation: SqFp8ProjectionMatvecOperation,
-    info: &ullm_runtime_sys::DeviceInfo,
-    model_arch: Option<&str>,
-) -> &'static str {
-    let gpu_name = dispatchable_sq8_projection_gpu_name(info);
-    let request = BackendRequest {
-        operation: operation.operation_id(),
-        phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch,
-        gpu_arch: runtime_device_gpu_arch(info),
-        gpu_name: Some(gpu_name.as_ref()),
-    };
-    select_sq8_projection_implementation_id(&request)
-}
-
-fn sq_fp8_projection_dispatch(
-    operation: SqFp8ProjectionMatvecOperation,
-    info: &ullm_runtime_sys::DeviceInfo,
-    model_arch: Option<&str>,
-) -> SqFp8ProjectionDispatch {
-    let implementation_id = select_sq_fp8_projection_implementation_id(operation, info, model_arch);
-    SqFp8ProjectionDispatch {
-        operation,
-        implementation_id,
-        family: sq8_0_projection_descriptor_family(implementation_id),
-    }
-}
 
 fn sq_fp8_projection_implementation_ids(
     telemetry: SqFp8ProjectionTelemetry,
@@ -365,18 +235,11 @@ fn sq_fp8_projection_kernel_families(
     }
 }
 
+#[cfg(test)]
 const RDNA4_GFX1201_R9700_NAME: &str = "AMD Radeon Graphics";
+#[cfg(test)]
 const RDNA4_GFX1201_R9700_CANONICAL_NAME: &str = "Radeon_AI_PRO_R9700";
 
-fn dispatchable_sq8_projection_gpu_name(
-    info: &ullm_runtime_sys::DeviceInfo,
-) -> Cow<'_, str> {
-    if validate_qwen3_14b_sq8_r9700_device_info(info).is_ok() {
-        Cow::Borrowed(RDNA4_GFX1201_R9700_CANONICAL_NAME)
-    } else {
-        Cow::Borrowed(info.name.as_str())
-    }
-}
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
