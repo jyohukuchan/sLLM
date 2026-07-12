@@ -4955,53 +4955,7 @@ fn package_mixed_request_state_layers_batch_step(
     Ok(items.len())
 }
 
-const QWEN3_EMBED_TOKENS_TENSOR: &str = "model.language_model.embed_tokens.weight";
-const QWEN3_FINAL_NORM_TENSOR: &str = "model.language_model.norm.weight";
-const QWEN3_LM_HEAD_TENSOR: &str = "lm_head.weight";
 const QWEN35_9B_DEFAULT_LAYER_COUNT: usize = 32;
-
-#[derive(Debug, Clone)]
-struct PackageTokenLogit {
-    token_id: usize,
-    logit: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PackageLmHeadMode {
-    CpuChunked,
-    GpuResidentF32,
-}
-
-impl PackageLmHeadMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::CpuChunked => "cpu_chunked",
-            Self::GpuResidentF32 => "gpu_resident_f32",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum PackageLmHeadMatrixStorage {
-    F32,
-    Bf16,
-}
-
-impl PackageLmHeadMatrixStorage {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::F32 => "F32",
-            Self::Bf16 => "BF16",
-        }
-    }
-
-    fn element_size(self) -> usize {
-        match self {
-            Self::F32 => std::mem::size_of::<f32>(),
-            Self::Bf16 => std::mem::size_of::<u16>(),
-        }
-    }
-}
 
 fn parse_package_lm_head_mode(value: Option<String>) -> Result<PackageLmHeadMode, ExitCode> {
     match value.as_deref() {

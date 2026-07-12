@@ -46,13 +46,13 @@ use ullm_engine::loader::{
     LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry,
     effective_rmsnorm_weight_values, load_package_tensor_prefix, materialize_config,
     materialize_selected_aq4_matrix, matrix_shape_rows_cols, read_named_passthrough_f32,
-    read_named_passthrough_f32_row_range, read_named_passthrough_f32_rows,
+    read_named_passthrough_f32_rows,
     read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
     ReferencedFile, ReferencedFileRole, TensorSelector, list_passthrough_payload_bundles,
-    list_tensor_payload_bundles, select_passthrough_payload_bundle, select_tensor_payload_bundle,
+    list_tensor_payload_bundles, select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
@@ -70,6 +70,12 @@ use ullm_engine::qwen35_aq4_layer_runtime::{
     PackageSelfAttnResidentStepBatchLayer, PackageSelfAttnResidentStepLayer, format_f32_preview,
     reset_sq_diagnostic_host_staging_telemetry, runtime_host_linear_attn_gate_beta_f32,
     runtime_host_linear_attn_recurrent_f32, snapshot_sq_diagnostic_host_staging_telemetry,
+};
+use ullm_engine::qwen35_aq4_head_runtime::{
+    PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
+    PackageTokenLogit, QWEN3_EMBED_TOKENS_TENSOR, QWEN3_FINAL_NORM_TENSOR,
+    QWEN3_LM_HEAD_TENSOR, copy_f32_values_to_runtime_buffer_chunked,
+    package_embedding_shape, package_lm_head_top_k_from_rows,
 };
 use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
