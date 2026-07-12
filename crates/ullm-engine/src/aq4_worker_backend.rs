@@ -230,7 +230,7 @@ impl InferenceBackend for Qwen35Aq4WorkerBackend {
         let mut processed_prompt_tokens = 0;
         while processed_prompt_tokens < request.prompt_token_ids.len() {
             let remaining = request.prompt_token_ids.len() - processed_prompt_tokens;
-            let execution_width = if remaining >= 128 { 128 } else { 1 };
+            let execution_width = native_prefill_execution_width(remaining);
             processed_prompt_tokens += execution_width;
             publications.observe_prompt_unit(processed_prompt_tokens, execution_width)?;
         }
@@ -257,6 +257,18 @@ impl InferenceBackend for Qwen35Aq4WorkerBackend {
         )
         .ok_or_else(|| "AQ4 engine timings violate the request bounds".to_string())?;
         publications.publish_released_with_timings(outcome, timings)
+    }
+}
+
+/// Returns the session-equivalent prefill width for one remaining prompt suffix.
+///
+/// Widths `2..=128` are native Mchunk executions.  A one-token suffix stays on the M1 path so
+/// that singleton tails do not get forced through a native sequence implementation.
+fn native_prefill_execution_width(remaining: usize) -> usize {
+    if remaining == 1 {
+        1
+    } else {
+        remaining.min(128)
     }
 }
 
@@ -378,6 +390,16 @@ mod tests {
         assert!(validate_report(&report(vec![4, 5, 6]), &request).is_ok());
         assert!(validate_report(&report(vec![9, 4]), &request).is_err());
         assert!(validate_report(&report(vec![4]), &request).is_err());
+    }
+
+    #[test]
+    fn native_prefill_width_promotes_non_singleton_tails_and_caps_at_128() {
+        assert_eq!(native_prefill_execution_width(1), 1);
+        assert_eq!(native_prefill_execution_width(2), 2);
+        assert_eq!(native_prefill_execution_width(3), 3);
+        assert_eq!(native_prefill_execution_width(127), 127);
+        assert_eq!(native_prefill_execution_width(128), 128);
+        assert_eq!(native_prefill_execution_width(129), 128);
     }
 
     #[test]

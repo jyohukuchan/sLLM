@@ -1139,7 +1139,7 @@ impl BackendOperationRegistry {
     }
 
     /// Resolves exactly once. A tied highest rank is an error, never declaration-order selection.
-    fn resolve(&self, request: &OperationRequest) -> Result<ResolvedOperationPlan, String> {
+    pub fn resolve(&self, request: &OperationRequest) -> Result<ResolvedOperationPlan, String> {
         validate_request(request)?;
         let mut best: Option<(&ImplementationDescriptor, OperationWorkspace)> = None;
         let mut tied_id: Option<&str> = None;
@@ -1354,7 +1354,7 @@ pub struct OperationExecutionAudit {
     pub prefill_tokens_committed: u64,
     /// Index is the execution width. Index zero is reserved and must remain zero.
     pub prefill_width_histogram: Vec<u64>,
-    pub implementation_counts: [OperationExecutionCount; 8],
+    pub implementation_counts: [OperationExecutionCount; 10],
     #[serde(serialize_with = "serialize_sha256_hex")]
     pub deterministic_digest_sha256: [u8; 32],
     pub coverage_complete: bool,
@@ -1364,6 +1364,8 @@ pub struct OperationExecutionAudit {
     pub failed_layer: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_operation: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_execution_width: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

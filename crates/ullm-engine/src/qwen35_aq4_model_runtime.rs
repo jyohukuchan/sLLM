@@ -24,6 +24,7 @@ use crate::qwen35_aq4_layer_runtime::{
     PackageLinearAttnComponentStepMs, PackageLinearAttnResidentStepLayer,
     PackageLinearAttnSequenceGeometry, PackageLinearAttnSequenceWorkspace,
     PackageSelfAttnComponentStepMs, PackageSelfAttnResidentStepLayer,
+    PackageSelfAttnSequenceGeometry, PackageSelfAttnSequenceWorkspace,
 };
 use crate::qwen35_package_contract::{
     PackageDecoderLayerKind, PackageManifestLayerEntry, package_manifest_layer_entries,
@@ -110,6 +111,7 @@ fn qwen35_retained_activation_bytes(
     let h = u64::try_from(hidden).map_err(|_| "hidden does not fit u64".to_string())?;
     let mut elements = 0_u64;
     let mut maximum_linear_intermediate = None::<u64>;
+    let mut maximum_self_workspace = None::<(u64, u64, u64, u64, u64)>;
     for layer in layers {
         let prefix = format!("model.language_model.layers.{}", layer.layer_index);
         let intermediate = rows(&format!("{prefix}.mlp.gate_proj.weight"))?;
@@ -130,6 +132,33 @@ fn qwen35_retained_activation_bytes(
                 let q_rows = rows(&format!("{prefix}.self_attn.q_proj.weight"))?;
                 let k_rows = rows(&format!("{prefix}.self_attn.k_proj.weight"))?;
                 let v_rows = rows(&format!("{prefix}.self_attn.v_proj.weight"))?;
+                let head_dim = rows(&format!("{prefix}.self_attn.q_norm.weight"))?;
+                let gated_q_rows = h
+                    .checked_mul(2)
+                    .ok_or_else(|| "self-attention gated Q row geometry overflows".to_string())?;
+                let two_head_dim = head_dim
+                    .checked_mul(2)
+                    .ok_or_else(|| "self-attention head geometry overflows".to_string())?;
+                if q_rows != gated_q_rows || head_dim == 0 || q_rows % two_head_dim != 0 {
+                    return Err(format!(
+                        "Qwen3.5 AQ4 self-attention layer {} does not have a supported gated Q projection geometry",
+                        layer.layer_index
+                    ));
+                }
+                if q_rows == gated_q_rows && head_dim > 0 && q_rows % two_head_dim == 0 {
+                    let intermediate = intermediate;
+                    let candidate = (q_rows, k_rows, v_rows, head_dim, intermediate);
+                    maximum_self_workspace = Some(maximum_self_workspace.map_or(
+                        candidate,
+                        |previous| {
+                            if candidate.4 > previous.4 {
+                                candidate
+                            } else {
+                                previous
+                            }
+                        },
+                    ));
+                }
                 let q = q_rows / 2;
                 let attention = q;
                 5_u64
@@ -159,13 +188,68 @@ fn qwen35_retained_activation_bytes(
             .ok_or_else(|| "shared prefill workspace row elements overflow".to_string())?;
         let shared = per_row
             .checked_mul(QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH as u64)
-            .and_then(|value| value.checked_add(2 * 128 * h))
-            .and_then(|value| value.checked_add(h))
             .ok_or_else(|| "shared prefill workspace elements overflow".to_string())?;
         elements = elements
             .checked_add(shared)
             .ok_or_else(|| "retained prefill workspace elements overflow".to_string())?;
     }
+    if let Some((q_rows, k_rows, v_rows, head_dim, intermediate)) = maximum_self_workspace {
+        let q_heads = q_rows
+            .checked_div(2_u64.checked_mul(head_dim).ok_or_else(|| {
+                "shared self-attention workspace head geometry overflows".to_string()
+            })?)
+            .ok_or_else(|| "shared self-attention workspace Q heads overflow".to_string())?;
+        let kv_heads = k_rows
+            .checked_div(head_dim)
+            .ok_or_else(|| "shared self-attention workspace KV heads overflow".to_string())?;
+        let attention = q_heads.checked_mul(head_dim).ok_or_else(|| {
+            "shared self-attention workspace attention geometry overflows".to_string()
+        })?;
+        let kv_attention = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "shared self-attention workspace KV geometry overflows".to_string())?;
+        // The residual is the external model ping/pong buffer and is deliberately not counted
+        // here. Qwen3.5 native self-attention uses one model-wide arena for all eight layers.
+        let per_row = [
+            h,
+            q_rows,
+            attention,
+            k_rows,
+            v_rows,
+            kv_attention,
+            attention,
+            attention,
+            attention,
+            h,
+            h,
+            intermediate,
+            intermediate,
+            intermediate,
+            h,
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, value| {
+            total
+                .checked_add(value)
+                .ok_or_else(|| "shared self-attention workspace row elements overflow".to_string())
+        })?;
+        let shared = per_row
+            .checked_mul(QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH as u64)
+            .ok_or_else(|| "shared self-attention workspace elements overflow".to_string())?;
+        elements = elements
+            .checked_add(shared)
+            .ok_or_else(|| "retained self-attention workspace elements overflow".to_string())?;
+    }
+    // Both native sequence ping/pong buffers are model-owned and exist for every model that
+    // uses the sequence stack, independent of whether linear-attention layers are present.
+    elements = elements
+        .checked_add(
+            2_u64
+                .checked_mul(QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH as u64)
+                .and_then(|value| value.checked_mul(h))
+                .ok_or_else(|| "shared prefill ping/pong elements overflow".to_string())?,
+        )
+        .ok_or_else(|| "shared prefill ping/pong elements overflow".to_string())?;
     // Embedding output, final-norm weight/output, lm-head input/logits, and a conservative
     // per-vocabulary upper bound for top-1 partial value/index buffers.
     let vocab = u64::try_from(vocab).map_err(|_| "vocab does not fit u64".to_string())?;
@@ -433,8 +517,8 @@ pub struct Qwen35Aq4ModelRuntime {
     final_norm_runtime: Option<PackageFinalNormRuntime>,
     lm_head: PackageLmHeadRuntime,
     prefill_sequence_workspace: Option<PackageLinearAttnSequenceWorkspace>,
+    prefill_self_attention_sequence_workspace: Option<PackageSelfAttnSequenceWorkspace>,
     prefill_ping_buffers: [ullm_runtime_sys::RuntimeBuffer; 2],
-    prefill_row_input_buffer: ullm_runtime_sys::RuntimeBuffer,
     // Runtime handles -- stream must precede context for destruction order.
     stream: ullm_runtime_sys::RuntimeStream,
     _context: ullm_runtime_sys::RuntimeContext,
@@ -630,6 +714,41 @@ impl Qwen35Aq4ModelRuntime {
                 )
             })
             .transpose()?;
+        let self_sequence_geometry = resident_layers
+            .iter()
+            .filter_map(|layer| match layer {
+                Qwen35Aq4ResidentLayer::SelfAttention(layer) => Some(layer.sequence_geometry()),
+                Qwen35Aq4ResidentLayer::LinearAttention(_) => None,
+            })
+            .try_fold(None, |previous: Option<PackageSelfAttnSequenceGeometry>, current| {
+                if let Some(previous) = previous
+                    && previous != current
+                {
+                    return Err(format!(
+                        "Qwen3.5 AQ4 self-attention sequence geometry changed: previous={previous:?} current={current:?}"
+                    ));
+                }
+                Ok(Some(current))
+            })?;
+        let prefill_self_attention_sequence_workspace = self_sequence_geometry
+            .filter(|geometry| {
+                geometry.q_projection_layout ==
+                    crate::qwen35_aq4_layer_runtime::PackageSelfAttnQProjectionLayout::Qwen35Gated
+            })
+            .map(|geometry| {
+                PackageSelfAttnSequenceWorkspace::allocate(
+                    &mut context,
+                    QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH,
+                    geometry,
+                )
+            })
+            .transpose()?;
+        if self_sequence_geometry.is_some() && prefill_self_attention_sequence_workspace.is_none() {
+            return Err(
+                "Qwen3.5 AQ4 self-attention layers require a native gated sequence workspace"
+                    .into(),
+            );
+        }
         let max_prefill_elements = QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH
             .checked_mul(hidden)
             .ok_or_else(|| "Qwen3.5 AQ4 prefill ping element count overflows".to_string())?;
@@ -643,15 +762,6 @@ impl Qwen35Aq4ModelRuntime {
             .alloc_buffer(prefill_ping_bytes)
             .map_err(|error| format!("failed to allocate Qwen3.5 AQ4 prefill ping 1: {error}"))?;
         let prefill_ping_buffers = [prefill_ping_0, prefill_ping_1];
-        let prefill_row_input_buffer = context
-            .alloc_buffer(
-                hidden
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or_else(|| "Qwen3.5 AQ4 prefill row byte count overflows".to_string())?,
-            )
-            .map_err(|error| {
-                format!("failed to allocate Qwen3.5 AQ4 prefill row input: {error}")
-            })?;
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize Qwen3.5 AQ4 model load: {err}"))?;
@@ -663,8 +773,8 @@ impl Qwen35Aq4ModelRuntime {
             final_norm_runtime,
             lm_head,
             prefill_sequence_workspace,
+            prefill_self_attention_sequence_workspace,
             prefill_ping_buffers,
-            prefill_row_input_buffer,
             stream,
             _context: context,
             package_dir: config.package_dir,
@@ -951,96 +1061,74 @@ impl Qwen35Aq4ModelRuntime {
                     });
                 }
                 Qwen35Aq4ResidentLayer::SelfAttention(layer) => {
-                    for row in 0..sequence_len {
-                        let row_offset = row
-                            .checked_mul(hidden_bytes)
-                            .ok_or_else(|| format!("{layer_label} row offset overflows"))?;
-                        self.prefill_row_input_buffer
-                            .copy_from_buffer(
-                                0,
-                                source,
-                                row_offset,
-                                hidden_bytes,
-                                Some(&mut self.stream),
-                            )
-                            .map_err(|error| {
-                                format!("failed to gather {layer_label} row {row}: {error}")
-                            })?;
-                        let position = absolute_start
-                            .checked_add(row)
-                            .ok_or_else(|| format!("{layer_label} row position overflows"))?;
-                        let token_phase = if position == 0 {
-                            ExecutionPhase::ColdPrefill
-                        } else {
-                            ExecutionPhase::CachedPrefixPrefill
-                        };
-                        let row_label = format!("{layer_label} row {row} position {position}");
-                        if let Err(error) = layer.step_from_device_to_device_for_phase(
+                    if let Some(workspace) = self.prefill_self_attention_sequence_workspace.as_mut()
+                    {
+                        let records = match layer.run_device_sequence_for_phase(
                             &mut self.stream,
-                            &self.prefill_row_input_buffer,
+                            source,
+                            sequence_len,
                             rotary_dim,
                             rope_base,
-                            position,
-                            position,
-                            token_phase,
-                            &row_label,
+                            absolute_start,
+                            phase,
+                            workspace,
+                            &layer_label,
                         ) {
-                            let partial = layer.take_last_operation_executions();
-                            self.last_partial_operation_executions.push(partial);
-                            self.last_partial_prefill_invocations.push(
-                                Qwen35Aq4FailedPrefillInvocation {
-                                    layer_index: layer_position,
-                                    execution_width: 1,
-                                    phase: token_phase,
-                                    records: partial,
-                                },
-                            );
-                            return Err(error);
-                        }
-                        let [first, second] = layer.take_last_operation_executions();
-                        let Some(first) = first else {
-                            layer.mark_request_execution_failed();
-                            return Err(format!("{row_label} did not record its first operation"));
+                            Ok(records) => records,
+                            Err(error) => {
+                                let partial = layer.take_last_operation_executions();
+                                self.last_partial_operation_executions.push(partial);
+                                self.last_partial_prefill_invocations.push(
+                                    Qwen35Aq4FailedPrefillInvocation {
+                                        layer_index: layer_position,
+                                        execution_width: sequence_len,
+                                        phase,
+                                        records: partial,
+                                    },
+                                );
+                                return Err(error);
+                            }
                         };
-                        let Some(second) = second else {
-                            layer.mark_request_execution_failed();
-                            return Err(format!("{row_label} did not record its second operation"));
-                        };
-                        let records = [first, second];
                         if let Err(error) = destination.copy_from_buffer(
-                            row_offset,
-                            layer.output_buffer(),
                             0,
-                            hidden_bytes,
+                            workspace.output_buffer(),
+                            0,
+                            sequence_bytes,
                             Some(&mut self.stream),
                         ) {
                             layer.mark_request_execution_failed();
                             self.last_partial_prefill_invocations.push(
                                 Qwen35Aq4FailedPrefillInvocation {
                                     layer_index: layer_position,
-                                    execution_width: 1,
-                                    phase: token_phase,
+                                    execution_width: sequence_len,
+                                    phase,
                                     records: [Some(records[0]), Some(records[1])],
                                 },
                             );
-                            return Err(format!("failed to scatter {row_label} output: {error}"));
+                            return Err(format!(
+                                "failed to copy {layer_label} self-attn sequence output: {error}"
+                            ));
                         }
                         self.last_partial_operation_executions
                             .push([Some(records[0]), Some(records[1])]);
                         self.last_partial_prefill_invocations.push(
                             Qwen35Aq4FailedPrefillInvocation {
                                 layer_index: layer_position,
-                                execution_width: 1,
-                                phase: token_phase,
+                                execution_width: sequence_len,
+                                phase,
                                 records: [Some(records[0]), Some(records[1])],
                             },
                         );
                         invocations.push(Qwen35Aq4PrefillInvocation {
                             layer_index: layer_position,
-                            execution_width: 1,
-                            phase: token_phase,
+                            execution_width: sequence_len,
+                            phase,
                             records,
                         });
+                    } else {
+                        return Err(format!(
+                            "{layer_label} native self-attn sequence workspace is unavailable"
+                        ));
                     }
                 }
             }

@@ -242,7 +242,7 @@ mod tests {
             implementation_counts: std::array::from_fn(|index| {
                 crate::backend_operation_registry::OperationExecutionCount {
                     kind: "kind",
-                    implementation_id: ["a", "b", "c", "d", "e", "f", "g", "h"][index],
+                    implementation_id: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"][index],
                     count: index as u64,
                 }
             }),
@@ -250,6 +250,7 @@ mod tests {
             coverage_complete: true,
             failed_phase: None,
             failed_layer: None,
+            failed_execution_width: None,
             failed_operation: None,
         };
         let value = serde_json::to_value(BackendLog {
@@ -297,7 +298,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            8
+            10
         );
         assert_eq!(
             value["operation_execution_audit"]["coverage_complete"],

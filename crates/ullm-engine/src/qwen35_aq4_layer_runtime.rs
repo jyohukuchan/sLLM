@@ -4,9 +4,10 @@ use crate::aq4_package_runtime::{
     PackageAq4ResidentMatvec, PackageResidentSharedBufferRegistry, package_resident_f32_buffer,
 };
 use crate::backend_operation_registry::{
-    DeviceCapabilities, OperationExecutionRecord, OperationExecutionStatus, OperationGeometry,
-    OperationKind, OperationResolutionTrace, QueryScale, ResolvedOperationPlan, ResolvedPhasePlans,
-    RuntimeFeature, RuntimeFeatureSet, qwen35_m1_production_registry,
+    DeviceCapabilities, OperationBackend, OperationExecutionRecord, OperationExecutionStatus,
+    OperationGeometry, OperationKind, OperationResolutionTrace, QueryScale, ResolvedOperationPlan,
+    ResolvedPhasePlans, RuntimeFeature, RuntimeFeatureSet, qwen35_m1_production_registry,
+    qwen35_paged_chunk_operation_request, qwen35_paged_chunk_production_registry,
 };
 use crate::decoder::PagedDecodeShape;
 use crate::execution_batch::ExecutionPhase;
@@ -962,6 +963,176 @@ pub struct PackageSelfAttnResidentStepWeights {
     mlp_gate_matrix: PackageAq4ResidentMatvec,
     mlp_up_matrix: PackageAq4ResidentMatvec,
     mlp_down_matrix: PackageAq4ResidentMatvec,
+    sequence_device: DeviceCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackageSelfAttnSequenceGeometry {
+    pub hidden: usize,
+    pub q_projection_rows: usize,
+    pub k_projection_rows: usize,
+    pub v_projection_rows: usize,
+    pub q_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub value_dim: usize,
+    pub attention_elements: usize,
+    pub intermediate: usize,
+    pub q_projection_layout: PackageSelfAttnQProjectionLayout,
+}
+
+/// One model-owned scratch arena for native self-attention prompt chunks.
+///
+/// A self-attention layer still owns its request-specific paged KV cache and M1 buffers. This
+/// arena owns only transient `[M, ...]` activations and is reused by every self-attention layer in
+/// model order, so eight Qwen3.5 self layers do not each reserve another `[128, H]` workspace.
+pub struct PackageSelfAttnSequenceWorkspace {
+    max_width: usize,
+    geometry: PackageSelfAttnSequenceGeometry,
+    input_normed: ullm_runtime_sys::RuntimeBuffer,
+    q_projected: ullm_runtime_sys::RuntimeBuffer,
+    q_gate: ullm_runtime_sys::RuntimeBuffer,
+    k_projected: ullm_runtime_sys::RuntimeBuffer,
+    v_projected: ullm_runtime_sys::RuntimeBuffer,
+    q_rope: ullm_runtime_sys::RuntimeBuffer,
+    k_rope: ullm_runtime_sys::RuntimeBuffer,
+    attention_output: ullm_runtime_sys::RuntimeBuffer,
+    attention_projection_input: ullm_runtime_sys::RuntimeBuffer,
+    attention_block_output: ullm_runtime_sys::RuntimeBuffer,
+    post_normed: ullm_runtime_sys::RuntimeBuffer,
+    mlp_gate: ullm_runtime_sys::RuntimeBuffer,
+    mlp_up: ullm_runtime_sys::RuntimeBuffer,
+    mlp_activation: ullm_runtime_sys::RuntimeBuffer,
+    layer_output: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl PackageSelfAttnSequenceWorkspace {
+    fn allocation_columns(geometry: PackageSelfAttnSequenceGeometry) -> Result<usize, String> {
+        let kv_attention = geometry
+            .kv_heads
+            .checked_mul(geometry.head_dim)
+            .ok_or_else(|| "self-attn sequence K geometry overflows".to_string())?;
+        [
+            geometry.hidden,
+            geometry.q_projection_rows,
+            geometry.attention_elements,
+            geometry.k_projection_rows,
+            geometry.v_projection_rows,
+            kv_attention,
+            geometry.attention_elements,
+            geometry.attention_elements,
+            geometry.attention_elements,
+            geometry.hidden,
+            geometry.hidden,
+            geometry.intermediate,
+            geometry.intermediate,
+            geometry.intermediate,
+            geometry.hidden,
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, value| {
+            total
+                .checked_add(value)
+                .ok_or_else(|| "self-attn sequence workspace element count overflows".to_string())
+        })
+    }
+
+    pub fn allocate(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        max_width: usize,
+        geometry: PackageSelfAttnSequenceGeometry,
+    ) -> Result<Self, String> {
+        if !(2..=128).contains(&max_width) {
+            return Err(format!(
+                "self-attn sequence workspace width must be in 2..=128, got {max_width}"
+            ));
+        }
+        for (name, value) in [
+            ("hidden", geometry.hidden),
+            ("Q projection rows", geometry.q_projection_rows),
+            ("K projection rows", geometry.k_projection_rows),
+            ("V projection rows", geometry.v_projection_rows),
+            ("Q heads", geometry.q_heads),
+            ("KV heads", geometry.kv_heads),
+            ("head dimension", geometry.head_dim),
+            ("value dimension", geometry.value_dim),
+            ("attention elements", geometry.attention_elements),
+            ("intermediate", geometry.intermediate),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "self-attn sequence workspace {name} must be positive"
+                ));
+            }
+        }
+        let elements = |columns: usize, label: &str| {
+            max_width
+                .checked_mul(columns)
+                .ok_or_else(|| format!("{label} element count overflows"))
+        };
+        let mut alloc = |columns: usize, label: &str| {
+            context
+                .alloc_buffer(checked_f32_byte_len(elements(columns, label)?, label)?)
+                .map_err(|error| format!("failed to allocate {label}: {error}"))
+        };
+        Ok(Self {
+            max_width,
+            geometry,
+            input_normed: alloc(geometry.hidden, "self-attn sequence input normed")?,
+            q_projected: alloc(geometry.q_projection_rows, "self-attn sequence Q projected")?,
+            q_gate: alloc(geometry.attention_elements, "self-attn sequence Q gate")?,
+            k_projected: alloc(geometry.k_projection_rows, "self-attn sequence K projected")?,
+            v_projected: alloc(geometry.v_projection_rows, "self-attn sequence V projected")?,
+            q_rope: alloc(geometry.attention_elements, "self-attn sequence Q RoPE")?,
+            k_rope: alloc(
+                geometry
+                    .kv_heads
+                    .checked_mul(geometry.head_dim)
+                    .ok_or_else(|| "self-attn sequence K RoPE geometry overflows")?,
+                "self-attn sequence K RoPE",
+            )?,
+            attention_output: alloc(
+                geometry.attention_elements,
+                "self-attn sequence attention output",
+            )?,
+            attention_projection_input: alloc(
+                geometry.attention_elements,
+                "self-attn sequence attention projection input",
+            )?,
+            attention_block_output: alloc(
+                geometry.hidden,
+                "self-attn sequence attention block output",
+            )?,
+            post_normed: alloc(geometry.hidden, "self-attn sequence post normed")?,
+            mlp_gate: alloc(geometry.intermediate, "self-attn sequence MLP gate")?,
+            mlp_up: alloc(geometry.intermediate, "self-attn sequence MLP up")?,
+            mlp_activation: alloc(geometry.intermediate, "self-attn sequence MLP activation")?,
+            layer_output: alloc(geometry.hidden, "self-attn sequence layer output")?,
+        })
+    }
+
+    pub fn max_width(&self) -> usize {
+        self.max_width
+    }
+
+    pub fn sequence_geometry(&self) -> PackageSelfAttnSequenceGeometry {
+        self.geometry
+    }
+
+    pub fn allocated_bytes(&self) -> Result<u64, String> {
+        let elements = Self::allocation_columns(self.geometry)?
+            .checked_mul(self.max_width)
+            .ok_or_else(|| "self-attn sequence workspace byte count overflows".to_string())?;
+        let bytes = elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "self-attn sequence workspace byte count overflows".to_string())?;
+        u64::try_from(bytes)
+            .map_err(|_| "self-attn sequence workspace bytes exceed u64".to_string())
+    }
+
+    pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.layer_output
+    }
 }
 
 pub struct PackageSelfAttnResidentStepLayer {
@@ -1048,6 +1219,14 @@ impl PackageSelfAttnResidentStepLayer {
                 block_table.len()
             ));
         }
+        if block_table
+            .iter()
+            .any(|&block| usize::try_from(block).map_or(true, |index| index >= cache_blocks))
+        {
+            return Err(format!(
+                "self-attn resident block table contains an entry outside cache block range 0..{cache_blocks}"
+            ));
+        }
         let input_norm_tensor =
             format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
         let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
@@ -1127,6 +1306,14 @@ impl PackageSelfAttnResidentStepLayer {
             device.require_features(RuntimeFeatureSet::from_feature(
                 RuntimeFeature::HipFusedQkNormRopePagedKvWrite,
             ))?;
+            if matches!(device.backend, OperationBackend::Hip) {
+                device.require_features(
+                    RuntimeFeatureSet::EMPTY
+                        .with(RuntimeFeature::HipPagedKvWriteChunk)
+                        .with(RuntimeFeature::HipPagedCausalGqaChunk)
+                        .with(RuntimeFeature::HipQkNormRopeBatch),
+                )?;
+            }
         } else {
             device.require_features(RuntimeFeatureSet::from_feature(
                 RuntimeFeature::HipPagedKvWrite,
@@ -1574,6 +1761,7 @@ impl PackageSelfAttnResidentStepLayer {
             mlp_gate_matrix,
             mlp_up_matrix,
             mlp_down_matrix,
+            sequence_device: device,
         });
 
         Ok(Self {
@@ -1619,6 +1807,14 @@ impl PackageSelfAttnResidentStepLayer {
             return Err(format!(
                 "self-attn resident shared-weight block table length {} does not match cache blocks {}",
                 block_table.len(),
+                weights.cache_blocks
+            ));
+        }
+        if block_table.iter().any(|&block| {
+            usize::try_from(block).map_or(true, |index| index >= weights.cache_blocks)
+        }) {
+            return Err(format!(
+                "self-attn resident shared-weight block table contains an entry outside cache block range 0..{}",
                 weights.cache_blocks
             ));
         }
@@ -1877,6 +2073,22 @@ impl PackageSelfAttnResidentStepLayer {
 
     pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         &self.layer_output_buffer
+    }
+
+    pub fn sequence_geometry(&self) -> PackageSelfAttnSequenceGeometry {
+        PackageSelfAttnSequenceGeometry {
+            hidden: self.weights.hidden,
+            q_projection_rows: self.weights.q_matrix.rows,
+            k_projection_rows: self.weights.k_matrix.rows,
+            v_projection_rows: self.weights.v_matrix.rows,
+            q_heads: self.weights.q_heads,
+            kv_heads: self.weights.kv_heads,
+            head_dim: self.weights.head_dim,
+            value_dim: self.weights.value_dim,
+            attention_elements: self.weights.attention_elements,
+            intermediate: self.weights.mlp_gate_matrix.rows,
+            q_projection_layout: self.weights.q_projection_layout,
+        }
     }
 
     pub fn take_last_component_step_ms(&mut self) -> Option<PackageSelfAttnComponentStepMs> {
@@ -2450,6 +2662,476 @@ impl PackageSelfAttnResidentStepLayer {
             self.last_component_step_ms = Some(component_step_ms);
         }
         Ok(())
+    }
+
+    /// Runs one native self-attention prompt chunk without host staging.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_device_sequence_for_phase(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        rotary_dim: usize,
+        rope_base: f32,
+        cache_start: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageSelfAttnSequenceWorkspace,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], String> {
+        self.request_state.ensure_ready(label)?;
+        if !(2..=128).contains(&sequence_len) || sequence_len > workspace.max_width {
+            return Err(format!(
+                "{label} self-attn sequence width must be in 2..={} and workspace capacity, got {sequence_len}",
+                workspace.max_width
+            ));
+        }
+        let cache_limit = self
+            .weights
+            .block_size
+            .checked_mul(self.weights.cache_blocks)
+            .ok_or_else(|| format!("{label} self-attn sequence cache capacity overflows"))?;
+        if cache_start != self.written_len
+            || cache_start
+                .checked_add(sequence_len)
+                .is_none_or(|end| end > cache_limit)
+        {
+            return Err(format!(
+                "{label} self-attn sequence cache range {cache_start}..{} is invalid for written_len {} capacity {cache_limit}",
+                cache_start.saturating_add(sequence_len),
+                self.written_len
+            ));
+        }
+        if rotary_dim == 0 || rotary_dim > self.weights.head_dim || !rotary_dim.is_multiple_of(2) {
+            return Err(format!(
+                "{label} self-attn sequence rotary_dim {rotary_dim} is invalid for head_dim {}",
+                self.weights.head_dim
+            ));
+        }
+        if !rope_base.is_finite() || rope_base <= 1.0 {
+            return Err(format!("{label} self-attn sequence RoPE base is invalid"));
+        }
+        let geometry = self.sequence_geometry();
+        if workspace.geometry != geometry {
+            return Err(format!(
+                "{label} self-attn sequence workspace geometry mismatch: layer={geometry:?} workspace={:?}",
+                workspace.geometry
+            ));
+        }
+        if geometry.q_projection_layout != PackageSelfAttnQProjectionLayout::Qwen35Gated {
+            return Err(format!(
+                "{label} native self-attn sequence requires the Qwen3.5 gated Q projection layout"
+            ));
+        }
+        if !self.weights.use_paged_decode_sigmoid_gate {
+            return Err(format!(
+                "{label} native self-attn sequence requires the paged sigmoid-gate reader"
+            ));
+        }
+        let hidden_elements = sequence_len
+            .checked_mul(self.weights.hidden)
+            .ok_or_else(|| format!("{label} self-attn sequence hidden elements overflow"))?;
+        let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn sequence hidden")?;
+        let residual_bytes = residual
+            .size()
+            .map_err(|error| format!("failed to query {label} residual size: {error}"))?;
+        if residual_bytes < hidden_bytes {
+            return Err(format!(
+                "{label} self-attn sequence residual buffer is too small: got {residual_bytes} bytes expected at least {hidden_bytes}"
+            ));
+        }
+        self.operation_phase = phase;
+        self.last_operation_executions = [None, None];
+        self.last_component_step_ms = None;
+        let fail = |layer: &mut Self, message: String| {
+            layer.request_state.mark_execution_failed();
+            Err(message)
+        };
+
+        if let Err(error) = ullm_runtime_sys::segmented_rmsnorm_f32(
+            residual,
+            self.weights.input_norm_weight_buffer.as_ref(),
+            sequence_len,
+            self.weights.hidden,
+            1e-6_f32,
+            &mut workspace.input_normed,
+            Some(stream),
+        ) {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn sequence input RMSNorm: {error}"),
+            );
+        }
+        let q_result = self.weights.q_matrix.matvec_batch_for_phase(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.q_projected,
+            stream,
+            phase,
+            "self-attn sequence Q projection",
+        );
+        if let Err(error) = q_result {
+            return fail(self, error);
+        }
+        let k_result = self.weights.k_matrix.matvec_batch_for_phase(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.k_projected,
+            stream,
+            phase,
+            "self-attn sequence K projection",
+        );
+        if let Err(error) = k_result {
+            return fail(self, error);
+        }
+        let v_result = self.weights.v_matrix.matvec_batch_for_phase(
+            &workspace.input_normed,
+            sequence_len,
+            &mut workspace.v_projected,
+            stream,
+            phase,
+            "self-attn sequence V projection",
+        );
+        if let Err(error) = v_result {
+            return fail(self, error);
+        }
+        let qk_result = match self.weights.q_projection_layout {
+            PackageSelfAttnQProjectionLayout::Qwen35Gated => {
+                ullm_runtime_sys::qwen35_qk_norm_rope_batch_f32(
+                    &workspace.q_projected,
+                    &workspace.k_projected,
+                    self.weights.q_norm_weight_buffer.as_ref(),
+                    self.weights.k_norm_weight_buffer.as_ref(),
+                    self.weights.q_heads,
+                    self.weights.kv_heads,
+                    sequence_len,
+                    self.weights.head_dim,
+                    rotary_dim,
+                    cache_start,
+                    rope_base,
+                    1e-5_f32,
+                    &mut workspace.q_gate,
+                    &mut workspace.q_rope,
+                    &mut workspace.k_rope,
+                    Some(stream),
+                )
+            }
+            PackageSelfAttnQProjectionLayout::Plain => Err(
+                "native self-attention sequence requires Qwen3.5 gated projection layout".into(),
+            ),
+        };
+        if let Err(error) = qk_result {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn sequence Q/K norm RoPE: {error}"),
+            );
+        }
+
+        let writer_geometry = OperationGeometry::PagedKvWrite {
+            kv_heads: self.weights.kv_heads,
+            head_dim: self.weights.head_dim,
+            value_dim: self.weights.value_dim,
+            block_size: self.weights.block_size,
+            cache_blocks: self.weights.cache_blocks,
+        };
+        let writer_registry = match qwen35_paged_chunk_production_registry(
+            OperationKind::PagedKvWrite,
+            writer_geometry,
+            &self.weights.sequence_device,
+        ) {
+            Ok(registry) => registry,
+            Err(error) => {
+                return fail(
+                    self,
+                    format!("failed to resolve {label} self-attn chunk writer registry: {error}"),
+                );
+            }
+        };
+        let writer_request = match qwen35_paged_chunk_operation_request(
+            OperationKind::PagedKvWrite,
+            phase,
+            writer_geometry,
+            sequence_len as u64,
+            self.weights.sequence_device.clone(),
+            self.weights.sequence_device.workspace_capacity_bytes,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return fail(
+                    self,
+                    format!("failed to build {label} self-attn chunk writer request: {error}"),
+                );
+            }
+        };
+        let writer_plan = match writer_registry.resolve(&writer_request) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return fail(
+                    self,
+                    format!("failed to resolve {label} self-attn chunk writer: {error}"),
+                );
+            }
+        };
+        self.last_operation_executions[0] =
+            Some(writer_plan.execution_record(OperationExecutionStatus::Started));
+        let writer_result = writer_plan
+            .attempt()
+            .start()
+            .execute_paged_kv_write_chunk_f32(
+                &workspace.k_rope,
+                &workspace.v_projected,
+                &self.block_table_buffer,
+                cache_start,
+                &mut self.k_cache_buffer,
+                &mut self.v_cache_buffer,
+                stream,
+            );
+        self.last_operation_executions[0] =
+            Some(writer_plan.execution_record(if writer_result.is_ok() {
+                OperationExecutionStatus::Succeeded
+            } else {
+                OperationExecutionStatus::Failed
+            }));
+        if let Err(error) = writer_result {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn paged KV chunk write: {error}"),
+            );
+        }
+        let written_end = cache_start + sequence_len;
+        self.written_len = written_end;
+
+        let reader_geometry = OperationGeometry::PagedCausalGqaRead {
+            q_heads: self.weights.q_heads,
+            kv_heads: self.weights.kv_heads,
+            head_dim: self.weights.head_dim,
+            value_dim: self.weights.value_dim,
+            block_size: self.weights.block_size,
+            cache_blocks: self.weights.cache_blocks,
+            sigmoid_gate: true,
+        };
+        let reader_registry = match qwen35_paged_chunk_production_registry(
+            OperationKind::PagedCausalGqaRead,
+            reader_geometry,
+            &self.weights.sequence_device,
+        ) {
+            Ok(registry) => registry,
+            Err(error) => {
+                return fail(
+                    self,
+                    format!("failed to resolve {label} self-attn chunk reader registry: {error}"),
+                );
+            }
+        };
+        let reader_request = match qwen35_paged_chunk_operation_request(
+            OperationKind::PagedCausalGqaRead,
+            phase,
+            reader_geometry,
+            sequence_len as u64,
+            self.weights.sequence_device.clone(),
+            self.weights.sequence_device.workspace_capacity_bytes,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return fail(
+                    self,
+                    format!("failed to build {label} self-attn chunk reader request: {error}"),
+                );
+            }
+        };
+        let reader_plan = match reader_registry.resolve(&reader_request) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return fail(
+                    self,
+                    format!("failed to resolve {label} self-attn chunk reader: {error}"),
+                );
+            }
+        };
+        self.last_operation_executions[1] =
+            Some(reader_plan.execution_record(OperationExecutionStatus::Started));
+        let reader_result = reader_plan
+            .attempt()
+            .start()
+            .execute_paged_causal_gqa_chunk_sigmoid_gate_f32(
+                &workspace.q_rope,
+                &workspace.q_gate,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                cache_start,
+                &mut workspace.attention_output,
+                stream,
+            );
+        self.last_operation_executions[1] =
+            Some(reader_plan.execution_record(if reader_result.is_ok() {
+                OperationExecutionStatus::Succeeded
+            } else {
+                OperationExecutionStatus::Failed
+            }));
+        if let Err(error) = reader_result {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn paged causal GQA chunk: {error}"),
+            );
+        }
+        let projection_input = &workspace.attention_output;
+        if let Err(error) = self.weights.o_matrix.matvec_batch_for_phase(
+            projection_input,
+            sequence_len,
+            &mut workspace.layer_output,
+            stream,
+            phase,
+            "self-attn sequence O projection",
+        ) {
+            return fail(self, error);
+        }
+        if let Err(error) = ullm_runtime_sys::add_f32(
+            &workspace.layer_output,
+            residual,
+            hidden_elements,
+            &mut workspace.attention_block_output,
+            Some(stream),
+        ) {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn sequence O residual: {error}"),
+            );
+        }
+        if let Err(error) = ullm_runtime_sys::segmented_rmsnorm_f32(
+            &workspace.attention_block_output,
+            self.weights.post_norm_weight_buffer.as_ref(),
+            sequence_len,
+            self.weights.hidden,
+            1e-5_f32,
+            &mut workspace.post_normed,
+            Some(stream),
+        ) {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn sequence post RMSNorm: {error}"),
+            );
+        }
+        let gate_result = self.weights.mlp_gate_matrix.matvec_batch_for_phase(
+            &workspace.post_normed,
+            sequence_len,
+            &mut workspace.mlp_gate,
+            stream,
+            phase,
+            "self-attn sequence MLP gate projection",
+        );
+        if let Err(error) = gate_result {
+            return fail(self, error);
+        }
+        let up_result = self.weights.mlp_up_matrix.matvec_batch_for_phase(
+            &workspace.post_normed,
+            sequence_len,
+            &mut workspace.mlp_up,
+            stream,
+            phase,
+            "self-attn sequence MLP up projection",
+        );
+        if let Err(error) = up_result {
+            return fail(self, error);
+        }
+        let mlp_elements = match sequence_len.checked_mul(self.weights.mlp_gate_matrix.rows) {
+            Some(elements) => elements,
+            None => {
+                return fail(
+                    self,
+                    format!("{label} self-attn sequence MLP activation overflows"),
+                );
+            }
+        };
+        if let Err(error) = ullm_runtime_sys::silu_mul_f32(
+            &workspace.mlp_gate,
+            &workspace.mlp_up,
+            mlp_elements,
+            &mut workspace.mlp_activation,
+            Some(stream),
+        ) {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn sequence MLP activation: {error}"),
+            );
+        }
+        if let Err(error) = self.weights.mlp_down_matrix.matvec_batch_for_phase(
+            &workspace.mlp_activation,
+            sequence_len,
+            &mut workspace.attention_projection_input,
+            stream,
+            phase,
+            "self-attn sequence MLP down projection",
+        ) {
+            return fail(self, error);
+        }
+        if let Err(error) = ullm_runtime_sys::add_f32(
+            &workspace.attention_projection_input,
+            &workspace.attention_block_output,
+            hidden_elements,
+            &mut workspace.layer_output,
+            Some(stream),
+        ) {
+            return fail(
+                self,
+                format!("failed to run {label} self-attn sequence MLP residual: {error}"),
+            );
+        }
+        let last_row_offset = match sequence_len
+            .checked_sub(1)
+            .and_then(|row| row.checked_mul(self.weights.hidden))
+        {
+            Some(offset) => offset,
+            None => {
+                return fail(
+                    self,
+                    format!("{label} self-attn sequence final row offset overflows"),
+                );
+            }
+        };
+        let last_row_offset_bytes =
+            match checked_f32_byte_len(last_row_offset, "self-attn sequence final row") {
+                Ok(bytes) => bytes,
+                Err(error) => return fail(self, error),
+            };
+        let one_row_bytes =
+            match checked_f32_byte_len(self.weights.hidden, "self-attn sequence final row") {
+                Ok(bytes) => bytes,
+                Err(error) => return fail(self, error),
+            };
+        if let Err(error) = self.layer_output_buffer.copy_from_buffer(
+            0,
+            &workspace.layer_output,
+            last_row_offset_bytes,
+            one_row_bytes,
+            Some(stream),
+        ) {
+            return fail(
+                self,
+                format!("failed to retain {label} self-attn sequence final row: {error}"),
+            );
+        }
+        if self.weights.sync_component_timing {
+            self.last_component_step_ms = Some(PackageSelfAttnComponentStepMs::default());
+        }
+        let first = match self.last_operation_executions[0] {
+            Some(record) => record,
+            None => {
+                return fail(
+                    self,
+                    format!("{label} self-attn sequence writer record missing"),
+                );
+            }
+        };
+        let second = match self.last_operation_executions[1] {
+            Some(record) => record,
+            None => {
+                return fail(
+                    self,
+                    format!("{label} self-attn sequence reader record missing"),
+                );
+            }
+        };
+        Ok([first, second])
     }
 }
 
@@ -6366,6 +7048,39 @@ mod linear_attn_step_test_support {
 mod linear_attn_step_state_tests {
     use super::linear_attn_step_test_support::*;
     use super::*;
+
+    #[test]
+    fn self_attention_sequence_workspace_qwen9b_is_one_39_5_mib_arena() {
+        let geometry = PackageSelfAttnSequenceGeometry {
+            hidden: 4096,
+            q_projection_rows: 8192,
+            k_projection_rows: 1024,
+            v_projection_rows: 1024,
+            q_heads: 16,
+            kv_heads: 4,
+            head_dim: 256,
+            value_dim: 256,
+            attention_elements: 4096,
+            intermediate: 12288,
+            q_projection_layout: PackageSelfAttnQProjectionLayout::Qwen35Gated,
+        };
+        let workspace = PackageSelfAttnSequenceWorkspace::allocate(
+            &mut ullm_runtime_sys::RuntimeContext::create(0).unwrap(),
+            128,
+            geometry,
+        );
+        // Keep this a pure checked-size contract test when no device is available to the test
+        // runner; the arithmetic is also asserted through the public byte estimate below.
+        if let Ok(workspace) = workspace {
+            assert_eq!(workspace.allocated_bytes().unwrap(), 79 * 1024 * 1024 / 2);
+        } else {
+            let columns = PackageSelfAttnSequenceWorkspace::allocation_columns(geometry).unwrap();
+            assert_eq!(
+                columns * 128 * std::mem::size_of::<f32>(),
+                79 * 1024 * 1024 / 2
+            );
+        }
+    }
 
     #[test]
     fn resident_request_state_reset_is_fail_closed_and_reusable_after_success() {
