@@ -548,6 +548,37 @@ pub enum GraphNodeKind {
         base: PositiveF32,
         pairing: RotaryPairing,
     },
+    /// Causal grouped-query attention over prepared query, key, and value tensors.
+    ///
+    /// `GraphNode::inputs` is ordered `[query, key, value]` and the sole output is
+    /// `context`; this operator owns no projections, normalization, RoPE, gate, or
+    /// output projection. Let `L` denote all leading dimensions, `T` the
+    /// penultimate token dimension, and the final axis the feature dimension:
+    /// query is `L + [T, q_heads * head_dim]`, key is
+    /// `L + [T, kv_heads * head_dim]`, value is
+    /// `L + [T, kv_heads * value_dim]`, and context is
+    /// `L + [T, q_heads * value_dim]`.
+    ///
+    /// Query head `h` maps to grouped-query key/value head
+    /// `h / (q_heads / kv_heads)`. For each token, score is
+    /// `dot(query, key) * softmax_scale`; causal softmax attends only to token
+    /// positions at or before the query position within the same sequence,
+    /// subtracts the row maximum before exponentiation, and computes context as
+    /// the weighted value sum. With one state reference, a committed key/value
+    /// prefix is placed first and the current key/value chunk is appended as a
+    /// causal overlay for reads; transaction owners define commit semantics.
+    ///
+    /// `RowMajor` and `TokensHidden` separate sequences through leading
+    /// dimensions. `PackedRagged` receives sequence boundaries from execution
+    /// batch offsets. These are mathematical graph semantics; accumulation
+    /// precision and reduction order require backend evidence.
+    CausalGqaAttentionCore {
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: PositiveF32,
+    },
     /// Dense attention with explicit head geometry.
     ///
     /// `GraphNode::weights` is ordered query, key, value, output. The node has
@@ -638,16 +669,28 @@ impl GraphNodeKind {
                 head_dim,
                 value_dim,
                 softmax_scale,
-            } => {
-                ensure_nonzero(*q_heads, "dense attention q_heads")?;
-                ensure_nonzero(*kv_heads, "dense attention kv_heads")?;
-                ensure_nonzero(*head_dim, "dense attention head_dim")?;
-                ensure_nonzero(*value_dim, "dense attention value_dim")?;
-                if q_heads % kv_heads != 0 {
-                    return Err("dense attention q_heads must divide evenly by kv_heads".into());
-                }
-                softmax_scale.validate("dense attention softmax_scale")
-            }
+            } => validate_attention_geometry(
+                *q_heads,
+                *kv_heads,
+                *head_dim,
+                *value_dim,
+                *softmax_scale,
+                "dense attention",
+            ),
+            Self::CausalGqaAttentionCore {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            } => validate_attention_geometry(
+                *q_heads,
+                *kv_heads,
+                *head_dim,
+                *value_dim,
+                *softmax_scale,
+                "causal GQA attention core",
+            ),
             Self::RecurrentAttention { state_width } => {
                 ensure_nonzero(*state_width, "recurrent attention state_width")
             }
@@ -693,6 +736,16 @@ impl GraphNodeKind {
             Self::FusedLinearGroup { output_count } => exact(1, *output_count, *output_count, 0),
             Self::RotaryPosition { .. } => exact(2, 1, 0, 0),
             Self::Activation { .. } => exact(1, 1, 0, 0),
+            Self::CausalGqaAttentionCore { .. } => {
+                if inputs == 3 && outputs == 1 && weights == 0 && states <= 1 {
+                    Ok(())
+                } else {
+                    Err(
+                        "causal GQA attention core requires 3 inputs, 1 output, zero weights, and zero or one state"
+                            .into(),
+                    )
+                }
+            }
             Self::DenseAttention { .. } => {
                 if inputs == 1 && outputs == 1 && weights == 4 && states <= 1 {
                     Ok(())
@@ -981,6 +1034,29 @@ impl GraphNode {
                     ));
                 }
                 Ok(())
+            }
+            GraphNodeKind::CausalGqaAttentionCore {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                ..
+            } => {
+                let query = value(&self.inputs[0], "causal GQA query")?;
+                let key = value(&self.inputs[1], "causal GQA key")?;
+                let value_tensor = value(&self.inputs[2], "causal GQA value")?;
+                let output = value(&self.outputs[0], "causal GQA context")?;
+                validate_causal_gqa_attention_core(
+                    query,
+                    key,
+                    value_tensor,
+                    output,
+                    *q_heads,
+                    *kv_heads,
+                    *head_dim,
+                    *value_dim,
+                    self.id.as_str(),
+                )
             }
             GraphNodeKind::DenseAttention {
                 q_heads,
@@ -1302,6 +1378,89 @@ impl ModelGraph {
     }
 }
 
+fn validate_causal_gqa_attention_core(
+    query: &TensorSpec,
+    key: &TensorSpec,
+    value: &TensorSpec,
+    output: &TensorSpec,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    node_id: &str,
+) -> Result<(), String> {
+    let rank = query.shape.len();
+    if rank < 2 || key.shape.len() < 2 || value.shape.len() < 2 || output.shape.len() < 2 {
+        return Err(format!(
+            "node {node_id} causal GQA query, key, value, and context must have rank at least 2"
+        ));
+    }
+    if key.shape.len() != rank || value.shape.len() != rank || output.shape.len() != rank {
+        return Err(format!(
+            "node {node_id} causal GQA query, key, value, and context must have equal rank"
+        ));
+    }
+    if key.shape[..rank - 1] != query.shape[..rank - 1]
+        || value.shape[..rank - 1] != query.shape[..rank - 1]
+        || output.shape[..rank - 1] != query.shape[..rank - 1]
+    {
+        return Err(format!(
+            "node {node_id} causal GQA query, key, value, and context leading shapes must match"
+        ));
+    }
+    let query_width = checked_dimension_product(q_heads, head_dim, "causal GQA query width")?;
+    let key_width = checked_dimension_product(kv_heads, head_dim, "causal GQA key width")?;
+    let value_width = checked_dimension_product(kv_heads, value_dim, "causal GQA value width")?;
+    let context_width = checked_dimension_product(q_heads, value_dim, "causal GQA context width")?;
+    if feature_width(query, "causal GQA query", node_id)? != query_width {
+        return Err(format!(
+            "node {node_id} causal GQA query feature width must equal q_heads * head_dim {query_width}"
+        ));
+    }
+    if feature_width(key, "causal GQA key", node_id)? != key_width {
+        return Err(format!(
+            "node {node_id} causal GQA key feature width must equal kv_heads * head_dim {key_width}"
+        ));
+    }
+    if feature_width(value, "causal GQA value", node_id)? != value_width {
+        return Err(format!(
+            "node {node_id} causal GQA value feature width must equal kv_heads * value_dim {value_width}"
+        ));
+    }
+    if feature_width(output, "causal GQA context", node_id)? != context_width {
+        return Err(format!(
+            "node {node_id} causal GQA context feature width must equal q_heads * value_dim {context_width}"
+        ));
+    }
+    if !matches!(
+        query.format,
+        NumericalFormat::F32 | NumericalFormat::Bf16 | NumericalFormat::Fp16
+    ) {
+        return Err(format!(
+            "node {node_id} causal GQA tensors must use F32, BF16, or FP16"
+        ));
+    }
+    if key.format != query.format || value.format != query.format || output.format != query.format {
+        return Err(format!(
+            "node {node_id} causal GQA query, key, value, and context formats must match"
+        ));
+    }
+    if !matches!(
+        query.layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden | TensorLayout::PackedRagged
+    ) {
+        return Err(format!(
+            "node {node_id} causal GQA tensors use an unsupported layout"
+        ));
+    }
+    if key.layout != query.layout || value.layout != query.layout || output.layout != query.layout {
+        return Err(format!(
+            "node {node_id} causal GQA query, key, value, and context layouts must match"
+        ));
+    }
+    Ok(())
+}
+
 fn require_embedding_output_shape(
     tokens: &TensorSpec,
     output: &TensorSpec,
@@ -1418,6 +1577,28 @@ fn normalization_axis_width(
     match axis {
         NormalizationAxis::Last => feature_width(tensor, label, node_id),
     }
+}
+
+fn validate_attention_geometry(
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: PositiveF32,
+    label: &str,
+) -> Result<(), String> {
+    ensure_nonzero(q_heads, &format!("{label} q_heads"))?;
+    ensure_nonzero(kv_heads, &format!("{label} kv_heads"))?;
+    ensure_nonzero(head_dim, &format!("{label} head_dim"))?;
+    ensure_nonzero(value_dim, &format!("{label} value_dim"))?;
+    if q_heads % kv_heads != 0 {
+        return Err(format!("{label} q_heads must divide evenly by kv_heads"));
+    }
+    checked_dimension_product(q_heads, head_dim, &format!("{label} query width"))?;
+    checked_dimension_product(kv_heads, head_dim, &format!("{label} key width"))?;
+    checked_dimension_product(kv_heads, value_dim, &format!("{label} value width"))?;
+    checked_dimension_product(q_heads, value_dim, &format!("{label} context width"))?;
+    softmax_scale.validate(&format!("{label} softmax_scale"))
 }
 
 fn checked_dimension_product(left: usize, right: usize, label: &str) -> Result<usize, String> {
@@ -1684,6 +1865,462 @@ mod tests {
         );
         graph.nodes[3].inputs = vec![value_id("recurrent")];
         graph
+    }
+
+    #[test]
+    fn causal_gqa_core_accepts_rank2_stateless_and_rank3_stateful_packed_graphs() {
+        causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        )
+        .validate()
+        .unwrap();
+
+        causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::Bf16,
+            TensorLayout::PackedRagged,
+            vec![state_id("kv")],
+            4,
+            2,
+            1,
+            1,
+        )
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn causal_gqa_core_accepts_distinct_value_dimension() {
+        causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 3],
+            &[2, 6],
+            NumericalFormat::Fp16,
+            TensorLayout::RowMajor,
+            vec![],
+            2,
+            1,
+            2,
+            3,
+        )
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn causal_gqa_core_rejects_zero_divisibility_and_product_overflow() {
+        let mut zero = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        if let GraphNodeKind::CausalGqaAttentionCore { q_heads, .. } = &mut zero.nodes[0].kind {
+            *q_heads = 0;
+        }
+        assert!(zero.validate().unwrap_err().contains("q_heads"));
+
+        let indivisible = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            3,
+            2,
+            1,
+            1,
+        );
+        assert!(
+            indivisible
+                .validate()
+                .unwrap_err()
+                .contains("divide evenly")
+        );
+
+        let overflow = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            usize::MAX,
+            1,
+            2,
+            1,
+        );
+        assert!(overflow.validate().unwrap_err().contains("overflows usize"));
+    }
+
+    #[test]
+    fn causal_gqa_core_rejects_arity_and_invalid_state_cardinality() {
+        let mut inputs = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        inputs.nodes[0].inputs.pop();
+        assert!(inputs.validate().unwrap_err().contains("3 inputs"));
+
+        let mut outputs = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        outputs.nodes[0].outputs.push(value_id("unexpected"));
+        assert!(outputs.validate().unwrap_err().contains("1 output"));
+
+        let mut weights = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        weights.nodes[0].weights.push(weight_id("unexpected"));
+        assert!(weights.validate().unwrap_err().contains("zero weights"));
+
+        let states = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![state_id("kv"), state_id("other")],
+            4,
+            2,
+            1,
+            1,
+        );
+        assert!(states.validate().unwrap_err().contains("zero or one state"));
+    }
+
+    #[test]
+    fn causal_gqa_core_rejects_rank_leading_token_and_feature_shape_mismatches() {
+        let mut rank = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        rank.values[1].tensor.shape = vec![2, 3, 2, 1];
+        assert!(rank.validate().unwrap_err().contains("equal rank"));
+
+        let mut leading = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        leading.values[1].tensor.shape = vec![3, 3, 2];
+        assert!(
+            leading
+                .validate()
+                .unwrap_err()
+                .contains("leading shapes must match")
+        );
+
+        let mut token = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        token.values[2].tensor.shape = vec![2, 4, 2];
+        assert!(
+            token
+                .validate()
+                .unwrap_err()
+                .contains("leading shapes must match")
+        );
+
+        let mut query_width = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        query_width.values[0].tensor.shape = vec![2, 3, 3];
+        assert!(
+            query_width
+                .validate()
+                .unwrap_err()
+                .contains("query feature width")
+        );
+
+        let mut key_width = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        key_width.values[1].tensor.shape = vec![2, 3, 1];
+        assert!(
+            key_width
+                .validate()
+                .unwrap_err()
+                .contains("key feature width")
+        );
+
+        let mut value_width = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        value_width.values[2].tensor.shape = vec![2, 3, 1];
+        assert!(
+            value_width
+                .validate()
+                .unwrap_err()
+                .contains("value feature width")
+        );
+
+        let mut context_width = causal_gqa_graph(
+            &[2, 3, 4],
+            &[2, 3, 2],
+            &[2, 3, 2],
+            &[2, 3, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        context_width.values[3].tensor.shape = vec![2, 3, 3];
+        assert!(
+            context_width
+                .validate()
+                .unwrap_err()
+                .contains("context feature width")
+        );
+    }
+
+    #[test]
+    fn causal_gqa_core_rejects_format_and_layout_mismatches() {
+        let mut format_mismatch = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        format_mismatch.values[1].tensor.format = NumericalFormat::Bf16;
+        assert!(
+            format_mismatch
+                .validate()
+                .unwrap_err()
+                .contains("formats must match")
+        );
+
+        for format in [
+            NumericalFormat::U32,
+            NumericalFormat::Aq4_0,
+            NumericalFormat::Sq8_0,
+        ] {
+            let mut invalid = causal_gqa_graph(
+                &[2, 4],
+                &[2, 2],
+                &[2, 2],
+                &[2, 4],
+                NumericalFormat::F32,
+                TensorLayout::TokensHidden,
+                vec![],
+                4,
+                2,
+                1,
+                1,
+            );
+            invalid.values[0].tensor.format = format;
+            assert!(
+                invalid
+                    .validate()
+                    .unwrap_err()
+                    .contains("F32, BF16, or FP16")
+            );
+        }
+
+        let mut layout_mismatch = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        layout_mismatch.values[2].tensor.layout = TensorLayout::RowMajor;
+        assert!(
+            layout_mismatch
+                .validate()
+                .unwrap_err()
+                .contains("layouts must match")
+        );
+
+        let mut output_format = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        output_format.values[3].tensor.format = NumericalFormat::Fp16;
+        assert!(
+            output_format
+                .validate()
+                .unwrap_err()
+                .contains("formats must match")
+        );
+
+        let mut output_layout = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        output_layout.values[3].tensor.layout = TensorLayout::RowMajor;
+        assert!(
+            output_layout
+                .validate()
+                .unwrap_err()
+                .contains("layouts must match")
+        );
+
+        let mut custom = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+        );
+        custom.values[0].tensor.layout = TensorLayout::custom("strided").unwrap();
+        assert!(
+            custom
+                .validate()
+                .unwrap_err()
+                .contains("unsupported layout")
+        );
     }
 
     #[test]
@@ -2052,6 +2689,59 @@ mod tests {
                     rotary_dim: 4,
                     base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
                     pairing,
+                },
+            }],
+        }
+    }
+
+    fn causal_gqa_graph(
+        query_shape: &[usize],
+        key_shape: &[usize],
+        value_shape: &[usize],
+        output_shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        states: Vec<StateId>,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "causal-gqa-core".into(),
+            inputs: vec![value_id("query"), value_id("key"), value_id("value")],
+            outputs: vec![value_id("context")],
+            values: vec![
+                GraphValue {
+                    id: value_id("query"),
+                    tensor: rotary_spec(query_shape, format.clone(), layout.clone()),
+                },
+                GraphValue {
+                    id: value_id("key"),
+                    tensor: rotary_spec(key_shape, format.clone(), layout.clone()),
+                },
+                GraphValue {
+                    id: value_id("value"),
+                    tensor: rotary_spec(value_shape, format.clone(), layout.clone()),
+                },
+                GraphValue {
+                    id: value_id("context"),
+                    tensor: rotary_spec(output_shape, format, layout),
+                },
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("causal-gqa"),
+                inputs: vec![value_id("query"), value_id("key"), value_id("value")],
+                outputs: vec![value_id("context")],
+                weights: vec![],
+                states,
+                kind: GraphNodeKind::CausalGqaAttentionCore {
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
+                    softmax_scale: PositiveF32::new(1.0, "softmax scale").unwrap(),
                 },
             }],
         }

@@ -273,6 +273,7 @@ pub enum CpuReferenceNodeKind {
     Linear,
     FusedLinearGroup,
     RotaryPosition,
+    CausalGqaAttentionCore,
     DenseAttention,
     RecurrentAttention,
     Activation,
@@ -291,6 +292,7 @@ impl From<&GraphNodeKind> for CpuReferenceNodeKind {
             GraphNodeKind::Linear { .. } => Self::Linear,
             GraphNodeKind::FusedLinearGroup { .. } => Self::FusedLinearGroup,
             GraphNodeKind::RotaryPosition { .. } => Self::RotaryPosition,
+            GraphNodeKind::CausalGqaAttentionCore { .. } => Self::CausalGqaAttentionCore,
             GraphNodeKind::DenseAttention { .. } => Self::DenseAttention,
             GraphNodeKind::RecurrentAttention { .. } => Self::RecurrentAttention,
             GraphNodeKind::Activation { .. } => Self::Activation,
@@ -311,6 +313,7 @@ impl CpuReferenceNodeKind {
             Self::Linear => "Linear",
             Self::FusedLinearGroup => "FusedLinearGroup",
             Self::RotaryPosition => "RotaryPosition",
+            Self::CausalGqaAttentionCore => "CausalGqaAttentionCore",
             Self::DenseAttention => "DenseAttention",
             Self::RecurrentAttention => "RecurrentAttention",
             Self::Activation => "Activation",
@@ -1038,6 +1041,33 @@ impl CpuReferenceExecutor {
                 .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
+            GraphNodeKind::CausalGqaAttentionCore {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            } => {
+                let query = node_internal(node, node_input(node, values, 0))?;
+                let key = node_internal(node, node_input(node, values, 1))?;
+                let value = node_internal(node, node_input(node, values, 2))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = causal_gqa_attention_f32(
+                    query,
+                    key,
+                    value,
+                    *q_heads,
+                    *kv_heads,
+                    *head_dim,
+                    *value_dim,
+                    softmax_scale.get(),
+                    output_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![(node.outputs[0].clone(), output)])
+            }
             GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
             | GraphNodeKind::Sampling { .. } => Err(CpuReferenceFault::node(
@@ -1758,6 +1788,125 @@ fn preflight_graph(
                     ),
                 )?;
             }
+            GraphNodeKind::CausalGqaAttentionCore {
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            } => {
+                let query = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let key = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 1),
+                )?;
+                let value = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 2),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                for (label, spec) in [
+                    ("causal GQA query", query),
+                    ("causal GQA key", key),
+                    ("causal GQA value", value),
+                    ("causal GQA context", output),
+                ] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, label),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "causal GQA query",
+                        query,
+                        "causal GQA key",
+                        key,
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "causal GQA query",
+                        query,
+                        "causal GQA value",
+                        value,
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "causal GQA query",
+                        query,
+                        "causal GQA context",
+                        output,
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    validate_cpu_causal_gqa_contract(
+                        query,
+                        key,
+                        value,
+                        output,
+                        *q_heads,
+                        *kv_heads,
+                        *head_dim,
+                        *value_dim,
+                        softmax_scale.get(),
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    plan_causal_gqa(
+                        &mut plan,
+                        node,
+                        query,
+                        output,
+                        *q_heads,
+                        *kv_heads,
+                        *head_dim,
+                        *value_dim,
+                        softmax_scale.get(),
+                    ),
+                )?;
+            }
             GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
             | GraphNodeKind::Sampling { .. } => {
@@ -1942,6 +2091,66 @@ fn validate_cpu_rotary_positions_spec(spec: &TensorSpec) -> Result<(), String> {
     }
     if spec.layout != TensorLayout::RowMajor {
         return Err("rotary positions input requires RowMajor layout".into());
+    }
+    Ok(())
+}
+
+fn validate_cpu_causal_gqa_contract(
+    query: &TensorSpec,
+    key: &TensorSpec,
+    value: &TensorSpec,
+    output: &TensorSpec,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+) -> Result<(), String> {
+    let rank = query.shape.len();
+    if rank < 2 || key.shape.len() < 2 || value.shape.len() < 2 || output.shape.len() < 2 {
+        return Err("causal GQA tensors must have rank at least 2".into());
+    }
+    if key.shape.len() != rank || value.shape.len() != rank || output.shape.len() != rank {
+        return Err("causal GQA tensors must have equal rank".into());
+    }
+    if key.shape[..rank - 1] != query.shape[..rank - 1]
+        || value.shape[..rank - 1] != query.shape[..rank - 1]
+        || output.shape[..rank - 1] != query.shape[..rank - 1]
+    {
+        return Err("causal GQA tensors must have matching leading and token shapes".into());
+    }
+    if q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err("causal GQA geometry must be nonzero".into());
+    }
+    if q_heads % kv_heads != 0 {
+        return Err("causal GQA q_heads must divide evenly by kv_heads".into());
+    }
+    let query_width = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "causal GQA query width overflows usize".to_string())?;
+    let key_width = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "causal GQA key width overflows usize".to_string())?;
+    let value_width = kv_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "causal GQA value width overflows usize".to_string())?;
+    let context_width = q_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "causal GQA context width overflows usize".to_string())?;
+    if query.shape.last().copied() != Some(query_width) {
+        return Err("causal GQA query feature width does not match q_heads * head_dim".into());
+    }
+    if key.shape.last().copied() != Some(key_width) {
+        return Err("causal GQA key feature width does not match kv_heads * head_dim".into());
+    }
+    if value.shape.last().copied() != Some(value_width) {
+        return Err("causal GQA value feature width does not match kv_heads * value_dim".into());
+    }
+    if output.shape.last().copied() != Some(context_width) {
+        return Err("causal GQA context feature width does not match q_heads * value_dim".into());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("causal GQA softmax scale must be finite and positive".into());
     }
     Ok(())
 }
@@ -2250,6 +2459,89 @@ fn plan_rotary(
         .and_then(|units| units.checked_add(row_count))
         .ok_or_else(|| node_error(node, "rotary work-unit count overflows u64"))?;
     add_work_units(plan, node, work)
+}
+
+fn plan_causal_gqa(
+    plan: &mut ResourcePlan,
+    node: &GraphNode,
+    query: &TensorSpec,
+    output: &TensorSpec,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+) -> Result<(), String> {
+    let rank = query.shape.len();
+    if rank < 2 {
+        return Err(node_error(
+            node,
+            "causal GQA query must have rank at least 2",
+        ));
+    }
+    let sequences =
+        causal_sequence_count(&query.shape).map_err(|error| node_error(node, &error))?;
+    let tokens = query.shape[rank - 2];
+    let triangular = checked_triangular_count(tokens).map_err(|error| node_error(node, &error))?;
+    let score_count = sequences
+        .checked_mul(q_heads)
+        .and_then(|count| count.checked_mul(triangular))
+        .ok_or_else(|| node_error(node, "causal GQA score count overflows usize"))?;
+    let score_count = u64::try_from(score_count)
+        .map_err(|_| node_error(node, "causal GQA score count exceeds u64"))?;
+    let head_dim =
+        u64::try_from(head_dim).map_err(|_| node_error(node, "causal GQA head_dim exceeds u64"))?;
+    let value_dim = u64::try_from(value_dim)
+        .map_err(|_| node_error(node, "causal GQA value_dim exceeds u64"))?;
+    let score_work = head_dim
+        .checked_mul(2)
+        .and_then(|work| work.checked_add(1))
+        .and_then(|work| work.checked_mul(3))
+        .and_then(|work| work.checked_add(1))
+        .and_then(|work| work.checked_add(17))
+        .and_then(|work| work.checked_add(18))
+        .and_then(|work| work.checked_add(value_dim.checked_mul(2)?))
+        .ok_or_else(|| node_error(node, "causal GQA score work count overflows u64"))?;
+    let score_work = score_count
+        .checked_mul(score_work)
+        .ok_or_else(|| node_error(node, "causal GQA work count overflows u64"))?;
+    let output_work = u64::try_from(spec_elements(output, "causal GQA context")?)
+        .map_err(|_| node_error(node, "causal GQA output work count exceeds u64"))?;
+    let work = score_work
+        .checked_add(output_work)
+        .ok_or_else(|| node_error(node, "causal GQA work count overflows u64"))?;
+    let _ = (kv_heads, softmax_scale);
+    add_work_units(plan, node, work)
+}
+
+fn causal_sequence_count(shape: &[usize]) -> Result<usize, String> {
+    if shape.len() < 2 {
+        return Err("causal GQA shape must have rank at least 2".into());
+    }
+    shape[..shape.len() - 2]
+        .iter()
+        .try_fold(1_usize, |count, dimension| {
+            count
+                .checked_mul(*dimension)
+                .ok_or_else(|| "causal GQA sequence count overflows usize".to_string())
+        })
+}
+
+fn checked_triangular_count(tokens: usize) -> Result<usize, String> {
+    let half = tokens / 2;
+    if tokens % 2 == 0 {
+        half.checked_mul(
+            tokens
+                .checked_add(1)
+                .ok_or_else(|| "causal GQA triangular token count overflows usize".to_string())?,
+        )
+    } else {
+        tokens.checked_mul(
+            half.checked_add(1)
+                .ok_or_else(|| "causal GQA triangular token count overflows usize".to_string())?,
+        )
+    }
+    .ok_or_else(|| "causal GQA triangular token count overflows usize".to_string())
 }
 
 fn plan_gated_mlp(
@@ -2631,6 +2923,302 @@ fn rotary_f32(
         }
     }
     HostTensor::f32(values_shape.to_vec(), output_spec.layout.clone(), output)
+}
+
+fn causal_gqa_attention_f32(
+    query: &HostTensor,
+    key: &HostTensor,
+    value: &HostTensor,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output_spec: &TensorSpec,
+    allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<HostTensor, String> {
+    let (query_shape, query_layout, query_data) = query.f32_parts()?;
+    let (key_shape, key_layout, key_data) = key.f32_parts()?;
+    let (value_shape, value_layout, value_data) = value.f32_parts()?;
+    if !matches!(
+        query_layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden
+    ) || key_layout != query_layout
+        || value_layout != query_layout
+    {
+        return Err(
+            "causal GQA CPU reference requires matching RowMajor or TokensHidden layouts".into(),
+        );
+    }
+    if query_shape.len() < 2
+        || key_shape.len() != query_shape.len()
+        || value_shape.len() != query_shape.len()
+    {
+        return Err("causal GQA tensors must have equal rank at least 2".into());
+    }
+    if key_shape[..query_shape.len() - 1] != query_shape[..query_shape.len() - 1]
+        || value_shape[..query_shape.len() - 1] != query_shape[..query_shape.len() - 1]
+    {
+        return Err("causal GQA tensors must have matching leading and token shapes".into());
+    }
+    let query_width = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "causal GQA query width overflows usize".to_string())?;
+    let key_width = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "causal GQA key width overflows usize".to_string())?;
+    let value_width = kv_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "causal GQA value width overflows usize".to_string())?;
+    let context_width = q_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "causal GQA context width overflows usize".to_string())?;
+    if query_shape.last().copied() != Some(query_width)
+        || key_shape.last().copied() != Some(key_width)
+        || value_shape.last().copied() != Some(value_width)
+    {
+        return Err("causal GQA input feature widths do not match geometry".into());
+    }
+    if q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err("causal GQA geometry must be nonzero".into());
+    }
+    if q_heads % kv_heads != 0 {
+        return Err("causal GQA q_heads must divide evenly by kv_heads".into());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        runtime.numerical_failed = true;
+        return Err("causal GQA softmax scale must be finite and positive".into());
+    }
+    let rank = query_shape.len();
+    let tokens = query_shape[rank - 2];
+    let sequences = causal_sequence_count(query_shape)?;
+    let expected_output = {
+        let mut shape = query_shape.to_vec();
+        *shape
+            .last_mut()
+            .ok_or_else(|| "causal GQA output has no feature axis".to_string())? = context_width;
+        shape
+    };
+    require_f32_output_spec(output_spec, &expected_output, query_layout, "causal GQA")?;
+    let query_sequence_elements = tokens
+        .checked_mul(query_width)
+        .ok_or_else(|| "causal GQA query sequence size overflows usize".to_string())?;
+    let key_sequence_elements = tokens
+        .checked_mul(key_width)
+        .ok_or_else(|| "causal GQA key sequence size overflows usize".to_string())?;
+    let value_sequence_elements = tokens
+        .checked_mul(value_width)
+        .ok_or_else(|| "causal GQA value sequence size overflows usize".to_string())?;
+    let output_sequence_elements = tokens
+        .checked_mul(context_width)
+        .ok_or_else(|| "causal GQA output sequence size overflows usize".to_string())?;
+    if sequences.checked_mul(query_sequence_elements) != Some(query_data.len())
+        || sequences.checked_mul(key_sequence_elements) != Some(key_data.len())
+        || sequences.checked_mul(value_sequence_elements) != Some(value_data.len())
+    {
+        return Err("causal GQA payload lengths do not match sequence shapes".into());
+    }
+    let mut output = allocate_f32(
+        sequences
+            .checked_mul(output_sequence_elements)
+            .ok_or_else(|| "causal GQA output element count overflows usize".to_string())?,
+        allocated_elements,
+        runtime,
+        "causal GQA output",
+    )?;
+    let group_size = q_heads
+        .checked_div(kv_heads)
+        .ok_or_else(|| "causal GQA q_heads must divide evenly by kv_heads".to_string())?;
+    for sequence in 0..sequences {
+        let query_base = sequence
+            .checked_mul(query_sequence_elements)
+            .ok_or_else(|| "causal GQA query sequence offset overflows usize".to_string())?;
+        let key_base = sequence
+            .checked_mul(key_sequence_elements)
+            .ok_or_else(|| "causal GQA key sequence offset overflows usize".to_string())?;
+        let value_base = sequence
+            .checked_mul(value_sequence_elements)
+            .ok_or_else(|| "causal GQA value sequence offset overflows usize".to_string())?;
+        let output_base = sequence
+            .checked_mul(output_sequence_elements)
+            .ok_or_else(|| "causal GQA output sequence offset overflows usize".to_string())?;
+        for token in 0..tokens {
+            let query_token_base =
+                query_base
+                    .checked_add(token.checked_mul(query_width).ok_or_else(|| {
+                        "causal GQA query token offset overflows usize".to_string()
+                    })?)
+                    .ok_or_else(|| "causal GQA query token offset overflows usize".to_string())?;
+            let output_token_base =
+                output_base
+                    .checked_add(token.checked_mul(context_width).ok_or_else(|| {
+                        "causal GQA output token offset overflows usize".to_string()
+                    })?)
+                    .ok_or_else(|| "causal GQA output token offset overflows usize".to_string())?;
+            for query_head in 0..q_heads {
+                let kv_head = query_head / group_size;
+                let query_start = query_token_base
+                    .checked_add(query_head.checked_mul(head_dim).ok_or_else(|| {
+                        "causal GQA query head offset overflows usize".to_string()
+                    })?)
+                    .ok_or_else(|| "causal GQA query head offset overflows usize".to_string())?;
+                let query_slice = f32_slice(query_data, query_start, head_dim, "causal GQA query")?;
+                let output_start = output_token_base
+                    .checked_add(query_head.checked_mul(value_dim).ok_or_else(|| {
+                        "causal GQA context head offset overflows usize".to_string()
+                    })?)
+                    .ok_or_else(|| "causal GQA context head offset overflows usize".to_string())?;
+                let output_slice =
+                    f32_slice_mut(&mut output, output_start, value_dim, "causal GQA context")?;
+                let mut maximum = f32::NEG_INFINITY;
+                for key_token in 0..=token {
+                    let key_start =
+                        causal_gqa_key_offset(key_base, key_token, key_width, kv_head, head_dim)?;
+                    let key_slice = f32_slice(key_data, key_start, head_dim, "causal GQA key")?;
+                    let score = causal_gqa_score(query_slice, key_slice, softmax_scale).map_err(
+                        |error| {
+                            runtime.numerical_failed = true;
+                            error
+                        },
+                    )?;
+                    if score > maximum {
+                        maximum = score;
+                    }
+                }
+                let mut denominator = 0.0_f32;
+                for key_token in 0..=token {
+                    let key_start =
+                        causal_gqa_key_offset(key_base, key_token, key_width, kv_head, head_dim)?;
+                    let key_slice = f32_slice(key_data, key_start, head_dim, "causal GQA key")?;
+                    let score = causal_gqa_score(query_slice, key_slice, softmax_scale).map_err(
+                        |error| {
+                            runtime.numerical_failed = true;
+                            error
+                        },
+                    )?;
+                    let exponent = (score - maximum).exp();
+                    if !exponent.is_finite() {
+                        runtime.numerical_failed = true;
+                        return Err("causal GQA softmax exponent is non-finite".into());
+                    }
+                    denominator += exponent;
+                    if !denominator.is_finite() {
+                        runtime.numerical_failed = true;
+                        return Err("causal GQA softmax denominator is non-finite".into());
+                    }
+                }
+                if !denominator.is_finite() || denominator <= 0.0 {
+                    runtime.numerical_failed = true;
+                    return Err("causal GQA softmax denominator is not positive".into());
+                }
+                for key_token in 0..=token {
+                    let key_start =
+                        causal_gqa_key_offset(key_base, key_token, key_width, kv_head, head_dim)?;
+                    let value_start = value_base
+                        .checked_add(key_token.checked_mul(value_width).ok_or_else(|| {
+                            "causal GQA value token offset overflows usize".to_string()
+                        })?)
+                        .and_then(|offset| offset.checked_add(kv_head.checked_mul(value_dim)?))
+                        .ok_or_else(|| "causal GQA value offset overflows usize".to_string())?;
+                    let key_slice = f32_slice(key_data, key_start, head_dim, "causal GQA key")?;
+                    let value_slice =
+                        f32_slice(value_data, value_start, value_dim, "causal GQA value")?;
+                    let score = causal_gqa_score(query_slice, key_slice, softmax_scale).map_err(
+                        |error| {
+                            runtime.numerical_failed = true;
+                            error
+                        },
+                    )?;
+                    let exponent = (score - maximum).exp();
+                    let weight = exponent / denominator;
+                    if !exponent.is_finite() || !weight.is_finite() {
+                        runtime.numerical_failed = true;
+                        return Err("causal GQA softmax weight is non-finite".into());
+                    }
+                    for value_index in 0..value_dim {
+                        let product = weight * value_slice[value_index];
+                        let updated = output_slice[value_index] + product;
+                        if !product.is_finite() || !updated.is_finite() {
+                            runtime.numerical_failed = true;
+                            return Err("causal GQA context accumulation is non-finite".into());
+                        }
+                        output_slice[value_index] = updated;
+                    }
+                }
+            }
+        }
+    }
+    HostTensor::f32(expected_output, output_spec.layout.clone(), output)
+}
+
+fn causal_gqa_key_offset(
+    key_base: usize,
+    token: usize,
+    key_width: usize,
+    kv_head: usize,
+    head_dim: usize,
+) -> Result<usize, String> {
+    let token_offset = token
+        .checked_mul(key_width)
+        .ok_or_else(|| "causal GQA key token offset overflows usize")?;
+    let head_offset = kv_head
+        .checked_mul(head_dim)
+        .ok_or_else(|| "causal GQA key head offset overflows usize")?;
+    let sequence_offset = key_base
+        .checked_add(token_offset)
+        .ok_or_else(|| "causal GQA key offset overflows usize")?;
+    sequence_offset
+        .checked_add(head_offset)
+        .ok_or_else(|| "causal GQA key offset overflows usize".into())
+}
+
+fn causal_gqa_score(query: &[f32], key: &[f32], softmax_scale: f32) -> Result<f32, String> {
+    if query.len() != key.len() {
+        return Err("causal GQA query/key head widths do not match".into());
+    }
+    let mut dot = 0.0_f32;
+    for (&query_value, &key_value) in query.iter().zip(key) {
+        let product = query_value * key_value;
+        if !product.is_finite() {
+            return Err("causal GQA dot product is non-finite".into());
+        }
+        dot += product;
+        if !dot.is_finite() {
+            return Err("causal GQA dot accumulation is non-finite".into());
+        }
+    }
+    let score = dot * softmax_scale;
+    if !score.is_finite() {
+        return Err("causal GQA score is non-finite".into());
+    }
+    Ok(score)
+}
+
+fn f32_slice<'a>(
+    data: &'a [f32],
+    start: usize,
+    len: usize,
+    label: &str,
+) -> Result<&'a [f32], String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| format!("{label} slice end overflows usize"))?;
+    data.get(start..end)
+        .ok_or_else(|| format!("{label} slice is outside payload"))
+}
+
+fn f32_slice_mut<'a>(
+    data: &'a mut [f32],
+    start: usize,
+    len: usize,
+    label: &str,
+) -> Result<&'a mut [f32], String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| format!("{label} mutable slice end overflows usize"))?;
+    data.get_mut(start..end)
+        .ok_or_else(|| format!("{label} mutable slice is outside payload"))
 }
 
 fn rms_norm_f32(
@@ -3195,6 +3783,7 @@ fn node_kind_name(kind: &GraphNodeKind) -> &'static str {
         GraphNodeKind::Linear { .. } => "Linear",
         GraphNodeKind::FusedLinearGroup { .. } => "FusedLinearGroup",
         GraphNodeKind::RotaryPosition { .. } => "RotaryPosition",
+        GraphNodeKind::CausalGqaAttentionCore { .. } => "CausalGqaAttentionCore",
         GraphNodeKind::DenseAttention { .. } => "DenseAttention",
         GraphNodeKind::RecurrentAttention { .. } => "RecurrentAttention",
         GraphNodeKind::Activation { .. } => "Activation",
@@ -3877,6 +4466,347 @@ mod tests {
             node_id("rotary-2")
         );
         assert_eq!(execution_error.trace.completed_node_count, 0);
+    }
+
+    #[test]
+    fn causal_gqa_matches_literal_causal_grouped_query_attention() {
+        let graph = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 2],
+            &[2, 4],
+            TensorLayout::TokensHidden,
+            vec![],
+            4,
+            2,
+            1,
+            1,
+            1.0,
+        );
+        let inputs = map([
+            (
+                value_id("query"),
+                f32(&[2, 4], TensorLayout::TokensHidden, &[0.0; 8]),
+            ),
+            (
+                value_id("key"),
+                f32(&[2, 2], TensorLayout::TokensHidden, &[1.0, 2.0, 3.0, 4.0]),
+            ),
+            (
+                value_id("value"),
+                f32(&[2, 2], TensorLayout::TokensHidden, &[1.0, 10.0, 3.0, 14.0]),
+            ),
+        ]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &traced.outputs[&value_id("context")],
+            &[1.0, 1.0, 10.0, 10.0, 2.0, 2.0, 12.0, 12.0],
+            1e-6,
+        );
+        assert_eq!(
+            traced.trace.completed_nodes[0].kind,
+            CpuReferenceNodeKind::CausalGqaAttentionCore
+        );
+        let legacy = executor().execute(&graph, inputs, BTreeMap::new()).unwrap();
+        assert_eq!(legacy.outputs, traced.outputs);
+    }
+
+    #[test]
+    fn causal_gqa_stable_softmax_matches_literal_value() {
+        let graph = causal_gqa_graph(
+            &[2, 1],
+            &[2, 1],
+            &[2, 1],
+            &[2, 1],
+            TensorLayout::RowMajor,
+            vec![],
+            1,
+            1,
+            1,
+            1,
+            1.0,
+        );
+        let run = executor()
+            .execute(
+                &graph,
+                map([
+                    (
+                        value_id("query"),
+                        f32(&[2, 1], TensorLayout::RowMajor, &[0.0, 1.0]),
+                    ),
+                    (
+                        value_id("key"),
+                        f32(&[2, 1], TensorLayout::RowMajor, &[1.0, 2.0]),
+                    ),
+                    (
+                        value_id("value"),
+                        f32(&[2, 1], TensorLayout::RowMajor, &[2.0, 6.0]),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &run.outputs[&value_id("context")],
+            &[2.0, 4.924_234_4],
+            1e-5,
+        );
+
+        // At token 1 the literal scores are 100 and 200. Computing exp(score)
+        // directly overflows f32, while max-subtracted softmax converges to the
+        // second value. Keep this expected value independent of implementation
+        // helpers so removing the stability shift makes the test fail.
+        let overflow_without_shift = executor()
+            .execute(
+                &graph,
+                map([
+                    (
+                        value_id("query"),
+                        f32(&[2, 1], TensorLayout::RowMajor, &[0.0, 100.0]),
+                    ),
+                    (
+                        value_id("key"),
+                        f32(&[2, 1], TensorLayout::RowMajor, &[1.0, 2.0]),
+                    ),
+                    (
+                        value_id("value"),
+                        f32(&[2, 1], TensorLayout::RowMajor, &[2.0, 6.0]),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &overflow_without_shift.outputs[&value_id("context")],
+            &[2.0, 6.0],
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn causal_gqa_rank3_sequences_are_independent_and_value_dim_can_differ() {
+        let rank3 = causal_gqa_graph(
+            &[2, 2, 1],
+            &[2, 2, 1],
+            &[2, 2, 1],
+            &[2, 2, 1],
+            TensorLayout::TokensHidden,
+            vec![],
+            1,
+            1,
+            1,
+            1,
+            1.0,
+        );
+        let rank3_run = executor()
+            .execute(
+                &rank3,
+                map([
+                    (
+                        value_id("query"),
+                        f32(&[2, 2, 1], TensorLayout::TokensHidden, &[0.0; 4]),
+                    ),
+                    (
+                        value_id("key"),
+                        f32(&[2, 2, 1], TensorLayout::TokensHidden, &[1.0; 4]),
+                    ),
+                    (
+                        value_id("value"),
+                        f32(
+                            &[2, 2, 1],
+                            TensorLayout::TokensHidden,
+                            &[1.0, 3.0, 10.0, 30.0],
+                        ),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &rank3_run.outputs[&value_id("context")],
+            &[1.0, 2.0, 10.0, 20.0],
+            1e-6,
+        );
+
+        let value_dim = causal_gqa_graph(
+            &[2, 4],
+            &[2, 2],
+            &[2, 3],
+            &[2, 6],
+            TensorLayout::TokensHidden,
+            vec![],
+            2,
+            1,
+            2,
+            3,
+            1.0,
+        );
+        let value_dim_run = executor()
+            .execute(
+                &value_dim,
+                map([
+                    (
+                        value_id("query"),
+                        f32(&[2, 4], TensorLayout::TokensHidden, &[0.0; 8]),
+                    ),
+                    (
+                        value_id("key"),
+                        f32(&[2, 2], TensorLayout::TokensHidden, &[1.0; 4]),
+                    ),
+                    (
+                        value_id("value"),
+                        f32(
+                            &[2, 3],
+                            TensorLayout::TokensHidden,
+                            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                        ),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &value_dim_run.outputs[&value_id("context")],
+            &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 2.5, 3.5, 4.5, 2.5, 3.5, 4.5],
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn causal_gqa_rejects_state_packed_and_non_f32_capabilities_before_payload() {
+        let stateful = causal_gqa_graph(
+            &[2, 1],
+            &[2, 1],
+            &[2, 1],
+            &[2, 1],
+            TensorLayout::TokensHidden,
+            vec![StateId::new("kv").unwrap()],
+            1,
+            1,
+            1,
+            1,
+            1.0,
+        );
+        let state_error = executor()
+            .execute_traced(&stateful, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(state_error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(state_error.reason_code, "stateful_node");
+        assert_eq!(state_error.trace.completed_node_count, 0);
+        assert_eq!(
+            state_error.failed_node.unwrap().kind,
+            CpuReferenceNodeKind::CausalGqaAttentionCore
+        );
+
+        let packed = causal_gqa_graph(
+            &[2, 1],
+            &[2, 1],
+            &[2, 1],
+            &[2, 1],
+            TensorLayout::PackedRagged,
+            vec![],
+            1,
+            1,
+            1,
+            1,
+            1.0,
+        );
+        let packed_error = executor()
+            .execute_traced(&packed, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(packed_error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(packed_error.reason_code, "value_layout");
+
+        for format in [NumericalFormat::Bf16, NumericalFormat::Fp16] {
+            let mut graph = causal_gqa_graph(
+                &[2, 1],
+                &[2, 1],
+                &[2, 1],
+                &[2, 1],
+                TensorLayout::TokensHidden,
+                vec![],
+                1,
+                1,
+                1,
+                1,
+                1.0,
+            );
+            for value in &mut graph.values {
+                value.tensor.format = format.clone();
+            }
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, "value_layout");
+        }
+    }
+
+    #[test]
+    fn causal_gqa_work_budget_rejects_before_payload_and_max_dot_is_numerical() {
+        let huge = causal_gqa_graph(
+            &[10_000, 1],
+            &[10_000, 1],
+            &[10_000, 1],
+            &[10_000, 1],
+            TensorLayout::TokensHidden,
+            vec![],
+            1,
+            1,
+            1,
+            1,
+            1.0,
+        );
+        let work_error = executor()
+            .execute_traced(&huge, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(work_error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(work_error.reason_code, "work_budget");
+        assert_eq!(work_error.failed_node.unwrap().id, node_id("causal-gqa"));
+        assert_eq!(work_error.trace.completed_node_count, 0);
+
+        let numerical = causal_gqa_graph(
+            &[1, 1],
+            &[1, 1],
+            &[1, 1],
+            &[1, 1],
+            TensorLayout::TokensHidden,
+            vec![],
+            1,
+            1,
+            1,
+            1,
+            1.0,
+        );
+        let numerical_error = executor()
+            .execute_traced(
+                &numerical,
+                map([
+                    (
+                        value_id("query"),
+                        f32(&[1, 1], TensorLayout::TokensHidden, &[f32::MAX]),
+                    ),
+                    (
+                        value_id("key"),
+                        f32(&[1, 1], TensorLayout::TokensHidden, &[f32::MAX]),
+                    ),
+                    (
+                        value_id("value"),
+                        f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(numerical_error.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(numerical_error.reason_code, "runtime_numerical");
+        assert_eq!(
+            numerical_error.failed_node.unwrap().id,
+            node_id("causal-gqa")
+        );
+        assert_eq!(numerical_error.trace.completed_node_count, 0);
     }
 
     #[test]
@@ -5425,6 +6355,47 @@ mod tests {
             }
         }
         expected
+    }
+
+    fn causal_gqa_graph(
+        query_shape: &[usize],
+        key_shape: &[usize],
+        value_shape: &[usize],
+        context_shape: &[usize],
+        layout: TensorLayout,
+        states: Vec<StateId>,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "causal-gqa-reference".into(),
+            inputs: vec![value_id("query"), value_id("key"), value_id("value")],
+            outputs: vec![value_id("context")],
+            values: vec![
+                value("query", query_shape, NumericalFormat::F32, layout.clone()),
+                value("key", key_shape, NumericalFormat::F32, layout.clone()),
+                value("value", value_shape, NumericalFormat::F32, layout.clone()),
+                value("context", context_shape, NumericalFormat::F32, layout),
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("causal-gqa"),
+                inputs: vec![value_id("query"), value_id("key"), value_id("value")],
+                outputs: vec![value_id("context")],
+                weights: vec![],
+                states,
+                kind: GraphNodeKind::CausalGqaAttentionCore {
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
+                    softmax_scale: PositiveF32::new(softmax_scale, "softmax scale").unwrap(),
+                },
+            }],
+        }
     }
 
     fn linear_then_embedding_graph() -> ModelGraph {
