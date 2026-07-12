@@ -101,24 +101,46 @@ class WorkerConfig:
     vocab_size: int = VOCAB_SIZE
     eos_token_ids: tuple[int, ...] = EOS_TOKEN_IDS
     top_k: int = TOP_K
+    worker_schema: str = WORKER_SCHEMA
 
     @classmethod
     def from_settings(cls, settings: GatewaySettings) -> "WorkerConfig":
         environment = dict(os.environ)
         environment["HIP_VISIBLE_DEVICES"] = settings.hip_visible_devices
-        for name in HIP_GUARDS:
-            environment.pop(name, None)
-        for name in settings.hip_guards:
-            environment[name] = "1"
-        return cls(
-            command=(
+        guards = settings.hip_guards
+        if settings.served_model is not None:
+            for name in tuple(environment):
+                if name.startswith("ULLM_REQUIRE_HIP_"):
+                    environment.pop(name)
+            contract = settings.served_model.worker
+            if contract.protocol != WORKER_SCHEMA:
+                raise WorkerProtocolError("served-model worker protocol is unsupported")
+            command = (
+                str(contract.binary),
+                *(
+                    str(settings.served_model.manifest_path)
+                    if argument == "{manifest}"
+                    else argument
+                    for argument in contract.arguments
+                ),
+            )
+            worker_schema = contract.protocol
+        else:
+            for name in HIP_GUARDS:
+                environment.pop(name, None)
+            command = (
                 str(settings.worker_binary),
                 "--artifact",
                 str(settings.artifact_dir),
                 "--package",
                 str(settings.package_dir),
                 *settings.worker_extra_args,
-            ),
+            )
+            worker_schema = WORKER_SCHEMA
+        for name in guards:
+            environment[name] = "1"
+        return cls(
+            command=command,
             lock_file=settings.gpu_lock_file,
             environment=environment,
             model_id=settings.model_id,
@@ -132,6 +154,7 @@ class WorkerConfig:
             vocab_size=settings.vocab_size,
             eos_token_ids=settings.eos_token_ids,
             top_k=settings.top_k,
+            worker_schema=worker_schema,
         )
 
 
@@ -319,7 +342,7 @@ class WorkerSupervisor:
                 f"ullm-request-{active.generation}-deadline",
             )
         command = {
-            "schema_version": WORKER_SCHEMA,
+            "schema_version": self._config.worker_schema,
             "type": "generate",
             "request_id": request_id,
             "prompt_token_ids": list(request.prompt_token_ids),
@@ -392,7 +415,7 @@ class WorkerSupervisor:
             try:
                 await self._write_command(
                     {
-                        "schema_version": WORKER_SCHEMA,
+                        "schema_version": self._config.worker_schema,
                         "type": "cancel",
                         "request_id": handle.request_id,
                         "reason": reason,
@@ -442,7 +465,10 @@ class WorkerSupervisor:
             if self._process.returncode is None:
                 try:
                     await self._write_command(
-                        {"schema_version": WORKER_SCHEMA, "type": "shutdown"}
+                        {
+                            "schema_version": self._config.worker_schema,
+                            "type": "shutdown",
+                        }
                     )
                     await asyncio.wait_for(
                         asyncio.shield(self._process.wait()),
@@ -576,7 +602,7 @@ class WorkerSupervisor:
             await self._handle_event_locked(value)
 
     async def _handle_event_locked(self, value: dict[str, Any]) -> None:
-        if value.get("schema_version") != WORKER_SCHEMA:
+        if value.get("schema_version") != self._config.worker_schema:
             raise WorkerProtocolError("worker schema version differs")
         event_type = value.get("type")
         if event_type == "ready":
@@ -604,7 +630,7 @@ class WorkerSupervisor:
 
     async def _handle_ready(self, value: dict[str, Any]) -> None:
         expected = {
-            "schema_version": WORKER_SCHEMA,
+            "schema_version": self._config.worker_schema,
             "type": "ready",
             "model": self._config.model_id,
             "model_revision": self._config.model_revision,

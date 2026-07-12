@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from ullm_openai_gateway.schemas import MODEL_ID, normalize_chat_request
+from ullm_openai_gateway.served_model import load_served_model
 from ullm_openai_gateway.tokenizer import (
     FrozenQwen3Tokenizer,
     StableIncrementalDecoder,
@@ -17,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/sq8-serving-v0.1/chat-template/fixtures"
 MODEL_DIR = Path("/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8")
 QWEN35_MODEL_DIR = Path("/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B")
+MANIFEST_FIXTURES = Path(__file__).parent / "fixtures/served-model"
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +38,41 @@ def test_qwen35_frozen_tokenizer_profile_loads() -> None:
         pytest.skip("frozen local Qwen3.5 tokenizer is unavailable")
     loaded = FrozenQwen3Tokenizer.load(QWEN35_MODEL_DIR, "qwen35-9b")
     assert loaded._tokenizer.__class__.__name__ == "Qwen2Tokenizer"
+
+
+@pytest.mark.parametrize("fixture", ["sq8", "aq4"])
+def test_manifest_tokenizer_contract_uses_declared_identity_and_options(
+    fixture: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = load_served_model(
+        MANIFEST_FIXTURES / fixture / "served-model.json"
+    ).tokenizer
+    tokenizer_config = json.loads(
+        (contract.root / "tokenizer_config.json").read_text(encoding="utf-8")
+    )
+    tokenizer_class = type(
+        "Qwen2Tokenizer",
+        (),
+        {"chat_template": tokenizer_config["chat_template"]},
+    )
+
+    class AutoTokenizer:
+        @staticmethod
+        def from_pretrained(*_: object, **__: object) -> object:
+            return tokenizer_class()
+
+    transformers = types.ModuleType("transformers")
+    transformers.__version__ = contract.transformers_version  # type: ignore[attr-defined]
+    transformers.AutoTokenizer = AutoTokenizer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    loaded = FrozenQwen3Tokenizer.load_contract(contract)
+
+    assert loaded._tokenizer.__class__.__name__ == contract.class_name
+    assert loaded._template_options == {
+        "add_generation_prompt": contract.add_generation_prompt,
+        "enable_thinking": contract.enable_thinking,
+    }
 
 
 def test_all_frozen_chat_template_fixtures_match_exactly(

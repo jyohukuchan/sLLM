@@ -147,6 +147,8 @@ def normalize_chat_request(
     *,
     model_id: str = MODEL_ID,
     max_completion_tokens: int = MAX_COMPLETION_TOKENS,
+    temperature_supported: bool = True,
+    top_p_supported: bool = True,
 ) -> NormalizedChatRequest:
     model = _required(value, "model")
     if not isinstance(model, str):
@@ -168,16 +170,24 @@ def normalize_chat_request(
     include_usage = _normalize_stream_options(value.get("stream_options"), stream)
     maximum = _normalize_maximum(value, max_completion_tokens=max_completion_tokens)
     temperature = _optional_number(
-        value, "temperature", DEFAULT_TEMPERATURE, minimum=0.0, maximum=2.0
+        value,
+        "temperature",
+        DEFAULT_TEMPERATURE if temperature_supported else 0.0,
+        minimum=0.0,
+        maximum=2.0,
     )
     top_p = _optional_number(
         value,
         "top_p",
-        DEFAULT_TOP_P,
+        DEFAULT_TOP_P if top_p_supported else 1.0,
         minimum=0.0,
         maximum=1.0,
         minimum_inclusive=False,
     )
+    if not temperature_supported and temperature != 0.0:
+        raise unsupported_parameter("temperature")
+    if not top_p_supported and top_p != 1.0:
+        raise unsupported_parameter("top_p")
     seed = _normalize_seed(value.get("seed"))
     _normalize_neutral_fields(value)
     if value.get("user") is not None and not isinstance(value["user"], str):

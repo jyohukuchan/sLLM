@@ -21,7 +21,7 @@ from ullm_openai_gateway.app import (
     create_app,
 )
 from ullm_openai_gateway.schemas import EOS_TOKEN_IDS, MODEL_ID, NormalizedMessage
-from ullm_openai_gateway.settings import GatewaySettings
+from ullm_openai_gateway.settings import GatewaySettings, LEGACY_MODEL_ENVIRONMENT
 from ullm_openai_gateway.tokenizer import (
     StableIncrementalDecoder,
     TokenizedPrompt,
@@ -40,6 +40,7 @@ from ullm_openai_gateway.worker import (
 
 API_KEY = b"test-secret"
 AUTH = {"Authorization": "Bearer test-secret"}
+MANIFEST_FIXTURES = Path(__file__).parent / "fixtures/served-model"
 
 
 def generation_timings(
@@ -460,6 +461,86 @@ def test_configured_model_id_is_used_for_validation_and_responses(
     assert completion.status_code == 200
     assert completion.json()["model"] == model_id
     assert old_model.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("fixture", "model_id"),
+    [
+        ("sq8", "ullm-qwen3-14b-sq8"),
+        ("aq4", "ullm-qwen3.5-9b-aq4"),
+    ],
+)
+def test_manifest_models_share_the_same_http_application_path(
+    fixture: str,
+    model_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "ULLM_SERVED_MODEL_MANIFEST",
+        str(MANIFEST_FIXTURES / fixture / "served-model.json"),
+    )
+    configured = GatewaySettings.from_env()
+    fake_worker = FakeWorker()
+    app = create_app(
+        configured,
+        tokenizer=FakeTokenizer(),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+
+    with TestClient(app) as instance:
+        models = instance.get("/v1/models", headers=AUTH)
+        completion = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(model=model_id),
+        )
+
+    assert models.status_code == 200
+    assert models.json()["data"] == [
+        {"id": model_id, "object": "model", "owned_by": "ullm"}
+    ]
+    assert completion.status_code == 200
+    assert completion.json()["model"] == model_id
+    assert fake_worker.generate_count == 1
+
+
+def test_manifest_sampling_capabilities_are_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "ULLM_SERVED_MODEL_MANIFEST",
+        str(MANIFEST_FIXTURES / "aq4/served-model.json"),
+    )
+    fake_worker = FakeWorker()
+    app = create_app(
+        GatewaySettings.from_env(),
+        tokenizer=FakeTokenizer(),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+
+    with TestClient(app) as instance:
+        temperature = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(model="ullm-qwen3.5-9b-aq4", temperature=0.6),
+        )
+        top_p = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(model="ullm-qwen3.5-9b-aq4", top_p=0.95),
+        )
+
+    assert temperature.status_code == 400
+    assert temperature.json()["error"]["code"] == "unsupported_parameter"
+    assert top_p.status_code == 400
+    assert top_p.json()["error"]["code"] == "unsupported_parameter"
+    assert fake_worker.generate_count == 0
 
 
 def test_authentication_precedes_body_parsing(client: TestClient) -> None:

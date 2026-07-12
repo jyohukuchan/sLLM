@@ -26,7 +26,7 @@
     "root": "tokenizer",
     "transformers_version": "5.12.1",
     "class": "Qwen2Tokenizer",
-    "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "chat_template_sha256": "80085adb3ee6de33eabcadea884eaa0486858b635f0112c6255b26884b34c997",
     "files": {
       "tokenizer.json": "fbf7a252a02bd1c2aa304add04605701307ffa5386a98f61802ff07a4d5b6b20",
       "tokenizer_config.json": "061eda209bdec61e59e77034995ca5c1793e467eb972442665cf87584ac2b9a0"

@@ -8,6 +8,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from .served_model import ServedModel, ServedModelError, load_served_model
+
 
 DEFAULT_PRODUCT_ROOT = Path(
     "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1"
@@ -27,6 +29,32 @@ DEFAULT_HIP_GUARDS = (
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_ROPE_KERNEL",
     "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+)
+
+LEGACY_MODEL_ENVIRONMENT = frozenset(
+    {
+        "ULLM_WORKER_BINARY",
+        "ULLM_PRODUCT_ROOT",
+        "ULLM_ARTIFACT_DIR",
+        "ULLM_PACKAGE_DIR",
+        "ULLM_TOKENIZER_DIR",
+        "ULLM_MODEL_ID",
+        "ULLM_MODEL_NAME",
+        "ULLM_MODEL_DESCRIPTION",
+        "ULLM_MODEL_REVISION",
+        "ULLM_ARTIFACT_CONTENT_SHA256",
+        "ULLM_PACKAGE_MANIFEST_SHA256",
+        "ULLM_DEVICE",
+        "ULLM_EXECUTION_PROFILE",
+        "ULLM_MODEL_CONTEXT_LENGTH",
+        "ULLM_MAX_NEW_TOKENS",
+        "ULLM_VOCAB_SIZE",
+        "ULLM_EOS_TOKEN_IDS",
+        "ULLM_TOP_K",
+        "ULLM_HIP_GUARDS",
+        "ULLM_WORKER_EXTRA_ARGS",
+        "ULLM_TOKENIZER_PROFILE",
+    }
 )
 
 
@@ -63,9 +91,68 @@ class GatewaySettings:
     hip_guards: tuple[str, ...] = DEFAULT_HIP_GUARDS
     worker_extra_args: tuple[str, ...] = ()
     tokenizer_profile: str = "qwen3-14b"
+    served_model: ServedModel | None = None
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
+        manifest = os.environ.get("ULLM_SERVED_MODEL_MANIFEST")
+        if manifest is not None:
+            if not manifest:
+                raise SettingsError("ULLM_SERVED_MODEL_MANIFEST must be nonempty")
+            mixed = sorted(LEGACY_MODEL_ENVIRONMENT.intersection(os.environ))
+            if mixed:
+                raise SettingsError(
+                    "served-model manifest mode cannot be mixed with legacy model settings"
+                )
+            try:
+                served_model = load_served_model(Path(manifest))
+            except ServedModelError as error:
+                raise SettingsError(
+                    "served-model manifest validation failed"
+                ) from error
+            artifact = served_model.product.artifact
+            artifact_dir = (
+                served_model.product.root / Path(artifact.manifest_path).parent
+                if artifact is not None
+                else served_model.product.root
+            )
+            package_dir = (
+                served_model.product.root
+                / Path(served_model.product.package.manifest_path).parent
+            )
+            return cls(
+                worker_binary=served_model.worker.binary,
+                artifact_dir=artifact_dir,
+                package_dir=package_dir,
+                tokenizer_dir=served_model.tokenizer.root,
+                api_key_file=Path(
+                    os.environ.get("ULLM_API_KEY_FILE", "/etc/ullm/openai-api-key")
+                ),
+                gpu_lock_file=Path(
+                    os.environ.get("ULLM_GPU_LOCK_FILE", "/run/lock/ullm-r9700.lock")
+                ),
+                bind_host=os.environ.get("ULLM_BIND_HOST", "127.0.0.1"),
+                bind_port=_parse_port(os.environ.get("ULLM_BIND_PORT", "8000")),
+                model_id=served_model.public.id,
+                model_revision=served_model.public.revision,
+                artifact_content_sha256=(
+                    artifact.content_sha256
+                    if artifact is not None
+                    else served_model.product.package.manifest_sha256
+                ),
+                package_manifest_sha256=(served_model.product.package.manifest_sha256),
+                device=served_model.worker.identity.device,
+                execution_profile=(served_model.worker.identity.execution_profile),
+                context_length=served_model.public.context_length,
+                max_new_tokens=served_model.generation.max_completion_tokens,
+                vocab_size=served_model.generation.vocab_size,
+                eos_token_ids=served_model.generation.eos_token_ids,
+                top_k=served_model.generation.sampling.top_k,
+                hip_visible_devices=_required_text("ULLM_HIP_VISIBLE_DEVICES", "1"),
+                hip_guards=served_model.worker.required_environment,
+                tokenizer_profile="manifest",
+                served_model=served_model,
+            )
         product_root = Path(os.environ.get("ULLM_PRODUCT_ROOT", DEFAULT_PRODUCT_ROOT))
         return cls(
             worker_binary=Path(
@@ -121,17 +208,20 @@ class GatewaySettings:
         )
 
     def validate_paths(self) -> None:
-        for path, label in (
-            (self.worker_binary, "worker binary"),
-            (self.artifact_dir, "artifact directory"),
-            (self.package_dir, "package directory"),
-            (self.tokenizer_dir, "tokenizer directory"),
-        ):
-            if label == "worker binary":
-                if not path.is_file() or not os.access(path, os.X_OK):
-                    raise SettingsError(f"{label} is not an executable regular file")
-            elif not path.is_dir():
-                raise SettingsError(f"{label} is not a directory")
+        if self.served_model is None:
+            for path, label in (
+                (self.worker_binary, "worker binary"),
+                (self.artifact_dir, "artifact directory"),
+                (self.package_dir, "package directory"),
+                (self.tokenizer_dir, "tokenizer directory"),
+            ):
+                if label == "worker binary":
+                    if not path.is_file() or not os.access(path, os.X_OK):
+                        raise SettingsError(
+                            f"{label} is not an executable regular file"
+                        )
+                elif not path.is_dir():
+                    raise SettingsError(f"{label} is not a directory")
 
         if self.bind_host not in {"127.0.0.1", "172.20.0.1"}:
             raise SettingsError(

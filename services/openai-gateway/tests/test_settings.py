@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from ullm_openai_gateway.settings import GatewaySettings, SettingsError, read_api_key
+from ullm_openai_gateway.settings import LEGACY_MODEL_ENVIRONMENT
 from ullm_openai_gateway.worker import WorkerConfig
+
+
+MANIFEST_FIXTURES = Path(__file__).parent / "fixtures/served-model"
 
 
 @pytest.mark.parametrize(
@@ -124,4 +128,85 @@ def test_invalid_model_contract_environment_is_rejected(
 ) -> None:
     monkeypatch.setenv(name, value)
     with pytest.raises(SettingsError):
+        GatewaySettings.from_env()
+
+
+@pytest.mark.parametrize(
+    ("fixture", "model_id", "vocab_size", "artifact_digest"),
+    [
+        (
+            "sq8",
+            "ullm-qwen3-14b-sq8",
+            151_936,
+            "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+        ),
+        (
+            "aq4",
+            "ullm-qwen3.5-9b-aq4",
+            248_320,
+            "6cd84661eb27933b61d960d4f3af3c5ff60c571997d47ab96b0065d8191e0ed6",
+        ),
+    ],
+)
+def test_manifest_mode_builds_gateway_and_worker_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture: str,
+    model_id: str,
+    vocab_size: int,
+    artifact_digest: str,
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    manifest = MANIFEST_FIXTURES / fixture / "served-model.json"
+    monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
+    monkeypatch.setenv("ULLM_HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("ULLM_REQUIRE_HIP_STALE_KERNEL", "1")
+
+    settings = GatewaySettings.from_env()
+    config = WorkerConfig.from_settings(settings)
+
+    assert settings.served_model is not None
+    assert settings.model_id == model_id
+    assert settings.vocab_size == vocab_size
+    assert settings.artifact_content_sha256 == artifact_digest
+    assert settings.tokenizer_dir == settings.served_model.tokenizer.root
+    assert config.command == (
+        str(settings.served_model.worker.binary),
+        "--served-model-manifest",
+        str(manifest.resolve()),
+    )
+    assert config.worker_schema == "ullm.worker.v1"
+    assert config.model_id == model_id
+    assert config.vocab_size == vocab_size
+    assert config.environment["HIP_VISIBLE_DEVICES"] == "0"
+    assert "ULLM_REQUIRE_HIP_STALE_KERNEL" not in config.environment
+    for guard in settings.served_model.worker.required_environment:
+        assert config.environment[guard] == "1"
+    settings.validate_paths()
+
+
+@pytest.mark.parametrize("legacy_name", sorted(LEGACY_MODEL_ENVIRONMENT))
+def test_manifest_mode_rejects_every_legacy_model_environment_setting(
+    monkeypatch: pytest.MonkeyPatch, legacy_name: str
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "ULLM_SERVED_MODEL_MANIFEST",
+        str(MANIFEST_FIXTURES / "sq8/served-model.json"),
+    )
+    monkeypatch.setenv(legacy_name, "legacy-value")
+    with pytest.raises(SettingsError, match="cannot be mixed"):
+        GatewaySettings.from_env()
+
+
+def test_manifest_mode_wraps_manifest_validation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    path = tmp_path / "served-model.json"
+    path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(path))
+    with pytest.raises(SettingsError, match="validation failed"):
         GatewaySettings.from_env()

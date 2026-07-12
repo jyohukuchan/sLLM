@@ -123,12 +123,23 @@ def create_app(
         )
         if not loaded_key:
             raise RuntimeError("configured API key is empty")
-        loaded_tokenizer = tokenizer or FrozenQwen3Tokenizer.load(
-            configured.tokenizer_dir, configured.tokenizer_profile
-        )
-        stream_tokenizer = tokenizer or FrozenQwen3Tokenizer.load(
-            configured.tokenizer_dir, configured.tokenizer_profile
-        )
+        if tokenizer is not None:
+            loaded_tokenizer = tokenizer
+            stream_tokenizer = tokenizer
+        elif configured.served_model is not None:
+            loaded_tokenizer = FrozenQwen3Tokenizer.load_contract(
+                configured.served_model.tokenizer
+            )
+            stream_tokenizer = FrozenQwen3Tokenizer.load_contract(
+                configured.served_model.tokenizer
+            )
+        else:
+            loaded_tokenizer = FrozenQwen3Tokenizer.load(
+                configured.tokenizer_dir, configured.tokenizer_profile
+            )
+            stream_tokenizer = FrozenQwen3Tokenizer.load(
+                configured.tokenizer_dir, configured.tokenizer_profile
+            )
         loaded_worker = worker or WorkerSupervisor(
             WorkerConfig.from_settings(configured)
         )
@@ -218,10 +229,19 @@ def create_app(
         _authenticate(request)
         _reject_query(request)
         raw = await _read_json_body(request)
+        sampling = (
+            configured.served_model.generation.sampling
+            if configured.served_model is not None
+            else None
+        )
         normalized = normalize_chat_request(
             decode_json_object(raw),
             model_id=configured.model_id,
             max_completion_tokens=configured.max_new_tokens,
+            temperature_supported=(
+                sampling.temperature if sampling is not None else True
+            ),
+            top_p_supported=sampling.top_p if sampling is not None else True,
         )
         return await _serve_chat_completion(request, normalized)
 

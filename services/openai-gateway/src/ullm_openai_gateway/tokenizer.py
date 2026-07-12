@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .schemas import NormalizedMessage
+from .served_model import TokenizerContract
 
 
 EXPECTED_TRANSFORMERS_VERSION = "5.12.1"
@@ -60,8 +61,18 @@ class TokenizedPrompt:
 
 
 class FrozenQwen3Tokenizer:
-    def __init__(self, tokenizer: Any) -> None:
+    def __init__(
+        self,
+        tokenizer: Any,
+        *,
+        add_generation_prompt: bool = True,
+        enable_thinking: bool = False,
+    ) -> None:
         self._tokenizer = tokenizer
+        self._template_options = {
+            "add_generation_prompt": add_generation_prompt,
+            "enable_thinking": enable_thinking,
+        }
 
     @classmethod
     def load(
@@ -73,6 +84,40 @@ class FrozenQwen3Tokenizer:
             ]
         except KeyError as error:
             raise TokenizerError("the tokenizer profile is unsupported") from error
+        return cls._load_identity(
+            directory,
+            transformers_version=EXPECTED_TRANSFORMERS_VERSION,
+            expected_class=expected_class,
+            expected_template=expected_template,
+            expected_files=expected_files,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    @classmethod
+    def load_contract(cls, contract: TokenizerContract) -> "FrozenQwen3Tokenizer":
+        return cls._load_identity(
+            contract.root,
+            transformers_version=contract.transformers_version,
+            expected_class=contract.class_name,
+            expected_template=contract.chat_template_sha256,
+            expected_files={item.path: item.sha256 for item in contract.files},
+            add_generation_prompt=contract.add_generation_prompt,
+            enable_thinking=contract.enable_thinking,
+        )
+
+    @classmethod
+    def _load_identity(
+        cls,
+        directory: Path,
+        *,
+        transformers_version: str,
+        expected_class: str,
+        expected_template: str,
+        expected_files: Mapping[str, str],
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+    ) -> "FrozenQwen3Tokenizer":
         _validate_files(directory, expected_files)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -84,7 +129,7 @@ class FrozenQwen3Tokenizer:
             raise TokenizerError(
                 "the pinned Transformers package is unavailable"
             ) from error
-        if transformers.__version__ != EXPECTED_TRANSFORMERS_VERSION:
+        if transformers.__version__ != transformers_version:
             raise TokenizerError("Transformers version differs from the frozen version")
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -102,21 +147,24 @@ class FrozenQwen3Tokenizer:
             or _sha256_bytes(template.encode("utf-8")) != expected_template
         ):
             raise TokenizerError("chat template differs from the frozen template")
-        return cls(tokenizer)
+        return cls(
+            tokenizer,
+            add_generation_prompt=add_generation_prompt,
+            enable_thinking=enable_thinking,
+        )
 
     def render(self, messages: Iterable[NormalizedMessage]) -> TokenizedPrompt:
         normalized = [message.as_template_value() for message in messages]
-        options = {"add_generation_prompt": True, "enable_thinking": False}
         try:
             rendered = self._tokenizer.apply_chat_template(
                 normalized,
                 tokenize=False,
-                **options,
+                **self._template_options,
             )
             token_ids = self._tokenizer.apply_chat_template(
                 normalized,
                 tokenize=True,
-                **options,
+                **self._template_options,
             )
         except Exception as error:
             raise TokenizerError("chat template application failed") from error
