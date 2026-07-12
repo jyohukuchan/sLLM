@@ -993,6 +993,215 @@
     }
 
     #[test]
+    fn first_hip_aq4_tiled_batch_matches_cpu_for_production_shapes_when_available() {
+        let selected_device = (1..device_count().unwrap()).find(|&device_index| {
+            device_info(device_index)
+                .map(|info| info.gcn_arch_name == "gfx1201")
+                .unwrap_or(false)
+        });
+        let Some(device_index) = selected_device else {
+            return;
+        };
+        let _experimental = Aq4TiledExperimentalEnvGuard::new(Some("1"));
+
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next_unit = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed as f32) / (u32::MAX as f32)
+        };
+        for &(batch_count, rows, cols) in &[
+            (8_usize, 32_usize, 128_usize),
+            (8, 32, 256),
+            (8, 64, 128),
+            (8, 64, 256),
+            (16, 32, 128),
+            (16, 32, 256),
+            (16, 64, 128),
+            (16, 64, 256),
+            (127, 32, 128),
+            (127, 32, 256),
+            (127, 64, 128),
+            (127, 64, 256),
+            (128, 32, 128),
+            (128, 32, 256),
+            (128, 64, 128),
+            (128, 64, 256),
+        ] {
+            assert!(aq4_matvec_batch_dispatch_tiled_for_shape(
+                device_index,
+                16,
+                rows,
+                cols,
+                batch_count
+            ));
+            let elements = rows * cols;
+            let index_bytes = (elements + 1) / 2;
+            let groups = elements / 16;
+            let scale_count = 7_usize;
+            let mut indices = vec![0_u8; index_bytes];
+            for byte in &mut indices {
+                let low = (next_unit() * 16.0) as u8 & 0x0f;
+                let high = (next_unit() * 16.0) as u8 & 0x0f;
+                *byte = low | (high << 4);
+            }
+            let scale_indices: Vec<u8> = (0..groups)
+                .map(|_| (next_unit() * scale_count as f32) as u8)
+                .collect();
+            let codebook_values: Vec<f32> = (0..16)
+                .map(|_| next_unit() * 1.0 - 0.5)
+                .collect();
+            let scale_values: Vec<f32> = (0..scale_count)
+                .map(|_| 0.5 + next_unit() * 0.5)
+                .collect();
+            let input_values: Vec<f32> = (0..batch_count * cols)
+                .map(|_| next_unit() * 2.0 - 1.0)
+                .collect();
+            let use_row_scales = (batch_count + rows + cols) % 2 == 0;
+            let row_scales: Vec<f32> = (0..rows)
+                .map(|_| 0.75 + next_unit() * 0.5)
+                .collect();
+            let row_scale_count = if use_row_scales { rows } else { 0 };
+            let tensor_scale = 0.75_f32;
+
+            let mut cpu_context = RuntimeContext::create(0).unwrap();
+            let mut cpu_stream = cpu_context.create_stream().unwrap();
+            let mut cpu_index = cpu_context.alloc_buffer(index_bytes).unwrap();
+            let mut cpu_scale = cpu_context.alloc_buffer(groups).unwrap();
+            let mut cpu_codebook = cpu_context
+                .alloc_buffer(16 * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut cpu_scale_values = cpu_context
+                .alloc_buffer(scale_count * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut cpu_input = cpu_context
+                .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut cpu_row_scale = if use_row_scales {
+                Some(cpu_context.alloc_buffer(rows * std::mem::size_of::<f32>()).unwrap())
+            } else {
+                None
+            };
+            let mut cpu_output = cpu_context
+                .alloc_buffer(batch_count * rows * std::mem::size_of::<f32>())
+                .unwrap();
+            cpu_index.copy_from_host(0, &indices, Some(&mut cpu_stream)).unwrap();
+            cpu_scale
+                .copy_from_host(0, &scale_indices, Some(&mut cpu_stream))
+                .unwrap();
+            cpu_codebook
+                .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut cpu_stream))
+                .unwrap();
+            cpu_scale_values
+                .copy_from_host(0, &f32s_to_le_bytes(&scale_values), Some(&mut cpu_stream))
+                .unwrap();
+            cpu_input
+                .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut cpu_stream))
+                .unwrap();
+            if let Some(row_scale) = cpu_row_scale.as_mut() {
+                row_scale
+                    .copy_from_host(0, &f32s_to_le_bytes(&row_scales), Some(&mut cpu_stream))
+                    .unwrap();
+            }
+            cpu_stream.synchronize().unwrap();
+            aq4_matvec_batch_f32(
+                &cpu_index,
+                &cpu_scale,
+                &cpu_codebook,
+                &cpu_scale_values,
+                &cpu_input,
+                cpu_row_scale.as_ref(),
+                scale_count,
+                16,
+                tensor_scale,
+                row_scale_count,
+                rows,
+                cols,
+                batch_count,
+                &mut cpu_output,
+                Some(&mut cpu_stream),
+            )
+            .unwrap();
+            cpu_stream.synchronize().unwrap();
+            let mut cpu_output_bytes = vec![0_u8; batch_count * rows * std::mem::size_of::<f32>()];
+            cpu_output
+                .copy_to_host(0, &mut cpu_output_bytes, Some(&mut cpu_stream))
+                .unwrap();
+            cpu_stream.synchronize().unwrap();
+            let expected = le_bytes_to_f32s(&cpu_output_bytes);
+
+            let mut hip_context = RuntimeContext::create(device_index).unwrap();
+            let mut hip_stream = hip_context.create_stream().unwrap();
+            let mut hip_index = hip_context.alloc_buffer(index_bytes).unwrap();
+            let mut hip_scale = hip_context.alloc_buffer(groups).unwrap();
+            let mut hip_codebook = hip_context
+                .alloc_buffer(16 * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut hip_scale_values = hip_context
+                .alloc_buffer(scale_count * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut hip_input = hip_context
+                .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut hip_row_scale = if use_row_scales {
+                Some(hip_context.alloc_buffer(rows * std::mem::size_of::<f32>()).unwrap())
+            } else {
+                None
+            };
+            let mut hip_output = hip_context
+                .alloc_buffer(batch_count * rows * std::mem::size_of::<f32>())
+                .unwrap();
+            hip_index.copy_from_host(0, &indices, Some(&mut hip_stream)).unwrap();
+            hip_scale
+                .copy_from_host(0, &scale_indices, Some(&mut hip_stream))
+                .unwrap();
+            hip_codebook
+                .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut hip_stream))
+                .unwrap();
+            hip_scale_values
+                .copy_from_host(0, &f32s_to_le_bytes(&scale_values), Some(&mut hip_stream))
+                .unwrap();
+            hip_input
+                .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut hip_stream))
+                .unwrap();
+            if let Some(row_scale) = hip_row_scale.as_mut() {
+                row_scale
+                    .copy_from_host(0, &f32s_to_le_bytes(&row_scales), Some(&mut hip_stream))
+                    .unwrap();
+            }
+            hip_stream.synchronize().unwrap();
+            aq4_matvec_batch_f32(
+                &hip_index,
+                &hip_scale,
+                &hip_codebook,
+                &hip_scale_values,
+                &hip_input,
+                hip_row_scale.as_ref(),
+                scale_count,
+                16,
+                tensor_scale,
+                row_scale_count,
+                rows,
+                cols,
+                batch_count,
+                &mut hip_output,
+                Some(&mut hip_stream),
+            )
+            .unwrap();
+            hip_stream.synchronize().unwrap();
+            let mut hip_output_bytes = vec![0_u8; batch_count * rows * std::mem::size_of::<f32>()];
+            hip_output
+                .copy_to_host(0, &mut hip_output_bytes, Some(&mut hip_stream))
+                .unwrap();
+            hip_stream.synchronize().unwrap();
+            assert_f32s_close(
+                &le_bytes_to_f32s(&hip_output_bytes),
+                &expected,
+                1e-4,
+            );
+        }
+    }
+
+    #[test]
     fn first_hip_aq4_matvec_top1_f32_writes_partial_maximum_when_available() {
         if device_count().unwrap() < 2 {
             return;

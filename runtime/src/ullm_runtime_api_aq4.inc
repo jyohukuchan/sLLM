@@ -660,6 +660,18 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
 
+    // CPU buffers are directly inspectable, so validate every scale index before touching output.
+    // HIP metadata validation remains a load-time/package responsibility: synchronizing a D2H
+    // copy here would add a per-call barrier to every production projection.
+    if (index_buffer->backend == BackendKind::Cpu) {
+        if (!aq4_scale_indices_host_are_valid(
+                static_cast<const std::uint8_t *>(scale_buffer->ptr),
+                groups,
+                scale_count)) {
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
     if (index_buffer->backend == BackendKind::Cpu) {
         const auto *indices = static_cast<const std::uint8_t *>(index_buffer->ptr);
         const auto *scale_indices = static_cast<const std::uint8_t *>(scale_buffer->ptr);
@@ -691,6 +703,37 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
     }
 
     std::string hip_kernel_error;
+    const Aq4MatvecBatchDispatchKind dispatch_kind =
+        aq4_matvec_batch_dispatch_kind_for_device(
+            index_buffer->hip_device_id,
+            group_size,
+            rows,
+            cols,
+            batch_count);
+    if (dispatch_kind == Aq4MatvecBatchDispatchKind::Tiled &&
+        aq4_matvec_batch_f32_tiled_hip_kernel(
+            index_buffer,
+            scale_buffer,
+            codebook_buffer,
+            scale_values_buffer,
+            input_buffer,
+            row_scale_buffer,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    if (dispatch_kind == Aq4MatvecBatchDispatchKind::Tiled && !hip_kernel_error.empty()) {
+        hip_kernel_error.append("\n");
+    }
     if (aq4_matvec_batch_f32_hip_kernel(
             index_buffer,
             scale_buffer,
@@ -739,6 +782,26 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
         codebook_entries,
         output_buffer,
         stream);
+}
+
+ullm_aq4_matvec_batch_dispatch_kind ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
+    uint32_t device_index,
+    size_t group_size,
+    size_t rows,
+    size_t cols,
+    size_t batch_count) {
+    if (device_index == 0u) {
+        return ULLM_AQ4_MATVEC_BATCH_DISPATCH_LEGACY;
+    }
+    const Aq4MatvecBatchDispatchKind kind = aq4_matvec_batch_dispatch_kind_for_device(
+        static_cast<int>(device_index - 1u),
+        group_size,
+        rows,
+        cols,
+        batch_count);
+    return kind == Aq4MatvecBatchDispatchKind::Tiled ?
+        ULLM_AQ4_MATVEC_BATCH_DISPATCH_TILED :
+        ULLM_AQ4_MATVEC_BATCH_DISPATCH_LEGACY;
 }
 
 ullm_status ullm_runtime_aq4_matvec_top1_f32(

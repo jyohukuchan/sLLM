@@ -33,6 +33,12 @@ typedef enum ullm_sq8_ck_implementation {
     ULLM_SQ8_CK_MEM_V1_DEFAULT_TILE_16X128X256 = 4,
 } ullm_sq8_ck_implementation;
 
+/* Stable, test-visible AQ4 batch dispatch classification. */
+typedef enum ullm_aq4_matvec_batch_dispatch_kind {
+    ULLM_AQ4_MATVEC_BATCH_DISPATCH_LEGACY = 0,
+    ULLM_AQ4_MATVEC_BATCH_DISPATCH_TILED = 1,
+} ullm_aq4_matvec_batch_dispatch_kind;
+
 typedef struct ullm_device_info {
     int32_t device_id;
     char backend[16];
@@ -228,6 +234,17 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
     size_t batch_count,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
+
+/*
+ * Classifies the production AQ4 batch path without launching or timing a kernel.
+ * device_index follows ullm_runtime_context_create: 0 is CPU and HIP devices start at 1.
+ */
+ullm_aq4_matvec_batch_dispatch_kind ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
+    uint32_t device_index,
+    size_t group_size,
+    size_t rows,
+    size_t cols,
+    size_t batch_count);
 
 ullm_status ullm_runtime_aq4_matvec_top1_f32(
     const ullm_runtime_buffer *index_buffer,

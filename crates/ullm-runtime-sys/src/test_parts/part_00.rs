@@ -1,3 +1,33 @@
+    struct Aq4TiledExperimentalEnvGuard {
+        previous: Option<String>,
+    }
+
+    impl Aq4TiledExperimentalEnvGuard {
+        fn new(value: Option<&str>) -> Self {
+            const NAME: &str = "ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM";
+            let previous = std::env::var(NAME).ok();
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(NAME, value),
+                    None => std::env::remove_var(NAME),
+                }
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for Aq4TiledExperimentalEnvGuard {
+        fn drop(&mut self) {
+            const NAME: &str = "ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM";
+            unsafe {
+                match self.previous.as_deref() {
+                    Some(value) => std::env::set_var(NAME, value),
+                    None => std::env::remove_var(NAME),
+                }
+            }
+        }
+    }
+
     #[test]
     fn runtime_reports_abi_version() {
         assert_eq!(abi_version(), 1);
@@ -9,6 +39,53 @@
         assert!(count >= 1);
         let info = device_info(0).unwrap();
         assert_eq!(info.backend, "cpu");
+    }
+
+    #[test]
+    fn aq4_batch_dispatch_classifier_is_conservative_on_cpu_and_ragged_shapes() {
+        let disabled = Aq4TiledExperimentalEnvGuard::new(None);
+        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(0, 16, 32, 128, 8));
+        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 8, 32, 128, 8));
+        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 16, 31, 128, 8));
+        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 16, 32, 127, 8));
+        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 16, 32, 128, 7));
+        for device_index in 1..device_count().unwrap() {
+            if device_info(device_index)
+                .map(|info| info.gcn_arch_name == "gfx1201")
+                .unwrap_or(false)
+            {
+                assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(
+                    device_index,
+                    16,
+                    32,
+                    128,
+                    7
+                ));
+                assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(
+                    device_index,
+                    16,
+                    32,
+                    128,
+                    8
+                ));
+            }
+        }
+        drop(disabled);
+        let _enabled = Aq4TiledExperimentalEnvGuard::new(Some("1"));
+        for device_index in 1..device_count().unwrap() {
+            if device_info(device_index)
+                .map(|info| info.gcn_arch_name == "gfx1201")
+                .unwrap_or(false)
+            {
+                assert!(aq4_matvec_batch_dispatch_tiled_for_shape(
+                    device_index,
+                    16,
+                    32,
+                    128,
+                    8
+                ));
+            }
+        }
     }
 
     #[test]
@@ -4197,6 +4274,75 @@
             le_bytes_to_f32s(&output_bytes),
             vec![112.5, 30.0, -25.0, -12.5]
         );
+    }
+
+    #[test]
+    fn cpu_aq4_matvec_batch_invalid_scale_index_fails_before_output_mutation() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(3).unwrap();
+        let mut scale = context.alloc_buffer(3).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(2 * 3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * 2 * std::mem::size_of::<f32>())
+            .unwrap();
+        index.copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream)).unwrap();
+        // The last group points beyond scale_count and must be rejected before any output write.
+        scale.copy_from_host(0, &[0_u8, 1, 2], Some(&mut stream)).unwrap();
+        codebook
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&(0..16).map(|value| value as f32).collect::<Vec<_>>()),
+                Some(&mut stream),
+            )
+            .unwrap();
+        scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[0.5, -1.0, 2.0, 1.0, 0.0, -0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        let sentinel = f32s_to_le_bytes(&[13.0, -7.0, 3.5, 99.0]);
+        output.copy_from_host(0, &sentinel, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let error = aq4_matvec_batch_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            2,
+            2,
+            10.0,
+            0,
+            2,
+            3,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap_err();
+        assert!(error.contains("scale index"), "{error}");
+        let mut output_bytes = vec![0_u8; sentinel.len()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(output_bytes, sentinel);
     }
 
     #[test]

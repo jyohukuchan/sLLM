@@ -164,6 +164,13 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
+        device_index: u32,
+        group_size: usize,
+        rows: usize,
+        cols: usize,
+        batch_count: usize,
+    ) -> c_int;
     fn ullm_runtime_aq4_matvec_top1_f32(
         index_buffer: *const RawRuntimeBuffer,
         scale_buffer: *const RawRuntimeBuffer,
@@ -1544,6 +1551,29 @@ pub fn aq4_matvec_batch_f32(
             stream,
         )
     })
+}
+
+/// Returns the runtime's shape-only AQ4 batch dispatch decision.
+///
+/// `device_index` uses the public runtime indexing convention (CPU is 0, HIP starts at 1).
+/// A value of `true` means the gfx1201 tiled GEMM candidate is selected; `false` is the exact
+/// legacy/fallback path.
+pub fn aq4_matvec_batch_dispatch_tiled_for_shape(
+    device_index: u32,
+    group_size: usize,
+    rows: usize,
+    cols: usize,
+    batch_count: usize,
+) -> bool {
+    unsafe {
+        ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
+            device_index,
+            group_size,
+            rows,
+            cols,
+            batch_count,
+        ) == 1
+    }
 }
 
 pub fn aq4_matvec_top1_partial_count(rows: usize) -> Result<usize, String> {

@@ -546,6 +546,14 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
                aq4_matvec_batch_kernel_source();
     }
 
+    static std::string aq4_matvec_tiled_kernel_source_for_arch(const std::string &arch) {
+        // The first tiled production slice is intentionally gfx1201-only at dispatch time.
+        // Keep the source architecture-neutral so a future exact-arch rule can opt in without
+        // changing the cache or kernel name.
+        (void)arch;
+        return aq4_matvec_tiled_kernel_source();
+    }
+
     static std::string aq4_matvec_top1_kernel_source_for_arch(const std::string &arch) {
         std::string preamble =
             aq4_rows_per_block_preamble_for_rows(aq4_matvec_top1_rows_per_block_from_env());
@@ -825,6 +833,105 @@ extern "C" __global__ void ullm_aq4_matvec_batch_f32_kernel(
             value *= row_scales[row];
         }
         output[batch * rows + row] = value;
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_tiled_kernel_source() {
+        return R"(
+#define ULLM_AQ4_TILED_BM 8u
+#define ULLM_AQ4_TILED_BN 32u
+#define ULLM_AQ4_TILED_BK 128u
+#define ULLM_AQ4_TILED_THREADS 256u
+static_assert(ULLM_AQ4_TILED_BM * ULLM_AQ4_TILED_BN == ULLM_AQ4_TILED_THREADS,
+              "AQ4 tiled kernel requires one thread per output");
+static_assert(ULLM_AQ4_TILED_BK % 16u == 0u,
+              "AQ4 tiled kernel requires group16-compatible K tile");
+
+extern "C" __global__ void ullm_aq4_gemm_tiled_f32_kernel(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    const float *row_scales,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row_scale_count,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    constexpr unsigned int BM = ULLM_AQ4_TILED_BM;
+    constexpr unsigned int BN = ULLM_AQ4_TILED_BN;
+    constexpr unsigned int BK = ULLM_AQ4_TILED_BK;
+    constexpr unsigned int tid_count = ULLM_AQ4_TILED_THREADS;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int tile_m = tid / BN;
+    const unsigned int tile_n = tid - tile_m * BN;
+    const unsigned long long row =
+        static_cast<unsigned long long>(blockIdx.x) * BN + tile_n;
+    const unsigned long long batch =
+        static_cast<unsigned long long>(blockIdx.y) * BM + tile_m;
+    __shared__ float weight_tile[BN * BK];
+    __shared__ float input_tile[BM * BK];
+    float sum = 0.0f;
+    const unsigned long long groups_per_row = cols / group_size;
+
+    // The dispatch classifier admits only group_size == 16 and cols divisible by BK.
+    // Keep an explicit guard so an accidental direct launch cannot read malformed metadata.
+    const bool valid_geometry = group_size == 16ull && groups_per_row * group_size == cols;
+    for (unsigned long long k_base = 0ull; k_base < cols; k_base += BK) {
+        for (unsigned int flat = tid; flat < BN * BK; flat += tid_count) {
+            const unsigned int local_n = flat / BK;
+            const unsigned int local_k = flat - local_n * BK;
+            const unsigned long long load_row =
+                static_cast<unsigned long long>(blockIdx.x) * BN + local_n;
+            const unsigned long long load_col = k_base + local_k;
+            float value = 0.0f;
+            if (valid_geometry && load_row < rows && load_col < cols) {
+                const unsigned long long element = load_row * cols + load_col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                const unsigned long long group = load_row * groups_per_row + load_col / group_size;
+                const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+                // Host validation rejects this case before launch. Keep the load fail-closed for
+                // safety if a caller bypasses that validation.
+                if (scale_index < scale_count) {
+                    value = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                }
+            }
+            weight_tile[flat] = value;
+        }
+        for (unsigned int flat = tid; flat < BM * BK; flat += tid_count) {
+            const unsigned int local_m = flat / BK;
+            const unsigned int local_k = flat - local_m * BK;
+            const unsigned long long load_batch =
+                static_cast<unsigned long long>(blockIdx.y) * BM + local_m;
+            const unsigned long long load_col = k_base + local_k;
+            input_tile[flat] =
+                load_batch < batch_count && load_col < cols ? input[load_batch * cols + load_col] : 0.0f;
+        }
+        __syncthreads();
+        if (row < rows && batch < batch_count && valid_geometry) {
+            const unsigned int weight_offset = tile_n * BK;
+            const unsigned int input_offset = tile_m * BK;
+            // One thread owns each output, so accumulation is deterministic in ascending K
+            // order. This differs from the legacy lane-partial reduction order by design.
+            for (unsigned int k = 0; k < BK; ++k) {
+                sum += weight_tile[weight_offset + k] * input_tile[input_offset + k];
+            }
+        }
+        __syncthreads();
+    }
+    if (row < rows && batch < batch_count && valid_geometry) {
+        if (row_scales != nullptr && row < row_scale_count) {
+            sum *= row_scales[row];
+        }
+        output[batch * rows + row] = sum;
     }
 }
 )";
