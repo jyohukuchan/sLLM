@@ -29,7 +29,17 @@ use std::fmt;
 use crate::model_graph::{
     ActivationKind, GraphNode, GraphNodeKind, MAX_GRAPH_DECLARATIONS, MAX_GRAPH_ENDPOINTS,
     ModelGraph, NormalizationAffine, NormalizationAxis, NormalizationKind, NumericalFormat,
-    RotaryPairing, TensorLayout, TensorSpec, ValueId, WeightId,
+    RotaryPairing, StateId, TensorLayout, TensorSpec, ValueId, WeightId,
+};
+use crate::{
+    execution_batch::{ExecutionBatch, ExecutionPhase},
+    state_schema::{
+        StateInitialization, StateLayout, StateOwnership, StateSchema, StateTransactionContract,
+    },
+    state_transaction::{
+        PreparedStateDelta, StateBaseVersion, StateKey, StateProgress, StateSnapshotSet,
+        StateTransactionError,
+    },
 };
 
 /// Maximum elements allowed in one CPU reference tensor.
@@ -48,6 +58,8 @@ pub const MAX_EXACT_F32_INTEGER: u64 = 16_777_216;
 pub const MAX_CPU_REFERENCE_TRACE_NODES: usize = 4_096;
 /// Maximum UTF-8 bytes retained in a typed CPU reference failure message.
 pub const MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES: usize = 1_024;
+/// Maximum state edges and entries admitted by the stateful CPU reference mode.
+pub const MAX_CPU_REFERENCE_STATE_ENTRIES: usize = 4_096;
 
 /// Dense host tensor payloads for the CPU reference path.
 ///
@@ -408,6 +420,188 @@ pub struct CpuReferenceTracedExecution {
     pub trace: CpuReferenceExecutionTrace,
 }
 
+/// Canonical CPU snapshot payload for one logical state.
+#[derive(Debug, PartialEq)]
+pub struct CpuStatePayload {
+    format: NumericalFormat,
+    layout: StateLayout,
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuStatePayloadErrorClass {
+    Invalid,
+    Resource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuStatePayloadError {
+    class: CpuStatePayloadErrorClass,
+    message: String,
+}
+
+impl CpuStatePayloadError {
+    pub const fn class(&self) -> CpuStatePayloadErrorClass {
+        self.class
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn new(class: CpuStatePayloadErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: bounded_failure_message(message.into()),
+        }
+    }
+}
+
+impl fmt::Display for CpuStatePayloadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CpuStatePayloadError {}
+
+impl CpuStatePayload {
+    /// Constructs a finite canonical F32 state payload.
+    pub fn new(
+        format: NumericalFormat,
+        layout: StateLayout,
+        values: Vec<f32>,
+    ) -> Result<Self, CpuStatePayloadError> {
+        if format != NumericalFormat::F32 {
+            return Err(CpuStatePayloadError::new(
+                CpuStatePayloadErrorClass::Invalid,
+                "CPU state payload requires F32 format",
+            ));
+        }
+        let expected = match &layout {
+            StateLayout::ConvolutionHistory {
+                channels,
+                history_tokens,
+            } => channels.checked_mul(*history_tokens).ok_or_else(|| {
+                CpuStatePayloadError::new(
+                    CpuStatePayloadErrorClass::Resource,
+                    "CPU state payload element count overflows usize",
+                )
+            })?,
+            _ => {
+                return Err(CpuStatePayloadError::new(
+                    CpuStatePayloadErrorClass::Invalid,
+                    "CPU state payload currently requires ConvolutionHistory layout",
+                ));
+            }
+        };
+        if expected > MAX_CPU_REFERENCE_TENSOR_ELEMENTS {
+            return Err(CpuStatePayloadError::new(
+                CpuStatePayloadErrorClass::Resource,
+                format!("CPU state payload element count {expected} exceeds limit"),
+            ));
+        }
+        if values.len() != expected {
+            return Err(CpuStatePayloadError::new(
+                CpuStatePayloadErrorClass::Invalid,
+                format!(
+                    "CPU state payload length {} does not match expected {expected}",
+                    values.len()
+                ),
+            ));
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(CpuStatePayloadError::new(
+                CpuStatePayloadErrorClass::Invalid,
+                "CPU state payload contains a non-finite value",
+            ));
+        }
+        Ok(Self {
+            format,
+            layout,
+            values,
+        })
+    }
+
+    /// Returns the logical numerical format.
+    pub fn format(&self) -> &NumericalFormat {
+        &self.format
+    }
+
+    /// Returns the canonical logical state layout.
+    pub fn layout(&self) -> &StateLayout {
+        &self.layout
+    }
+
+    /// Returns the immutable canonical state values.
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+}
+
+/// One prepared CPU state value and its post-chunk progress.
+#[derive(Debug, PartialEq)]
+pub struct CpuPreparedStateEntry {
+    key: StateKey,
+    progress: StateProgress,
+    payload: CpuStatePayload,
+}
+
+impl CpuPreparedStateEntry {
+    /// Returns the exact leased state key inherited from the snapshot.
+    pub fn key(&self) -> &StateKey {
+        &self.key
+    }
+
+    /// Returns the progress after this prepared chunk.
+    pub const fn progress(&self) -> StateProgress {
+        self.progress
+    }
+
+    /// Returns the uncommitted final state payload.
+    pub fn payload(&self) -> &CpuStatePayload {
+        &self.payload
+    }
+}
+
+/// All state values prepared by one successful CPU execution.
+#[derive(Debug, PartialEq)]
+pub struct CpuPreparedStatePayload {
+    entries: Vec<CpuPreparedStateEntry>,
+}
+
+impl CpuPreparedStatePayload {
+    /// Returns every prepared state entry.
+    pub fn entries(&self) -> &[CpuPreparedStateEntry] {
+        &self.entries
+    }
+}
+
+/// Outputs and an uncommitted state delta prepared by the CPU reference.
+#[must_use = "outputs do not imply that the prepared state delta was committed"]
+pub struct CpuReferencePreparedExecution {
+    pub execution: CpuReferenceTracedExecution,
+    pub state_delta: PreparedStateDelta<CpuPreparedStatePayload>,
+}
+
+/// Distinguishes graph execution failures from transaction-protocol failures.
+#[derive(Debug)]
+pub enum CpuReferenceStatefulExecutionError {
+    Execution(CpuReferenceExecutionFailure),
+    Transaction(StateTransactionError),
+}
+
+impl fmt::Display for CpuReferenceStatefulExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Execution(error) => error.fmt(formatter),
+            Self::Transaction(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CpuReferenceStatefulExecutionError {}
+
 #[derive(Debug, Clone)]
 struct CpuReferenceFault {
     class: CpuReferenceFailureClass,
@@ -468,6 +662,15 @@ fn bounded_failure_message(mut message: String) -> String {
     }
     message.truncate(end);
     message
+}
+
+fn fallible_state_id_clone(state_id: &StateId) -> Result<StateId, String> {
+    let mut value = String::new();
+    value
+        .try_reserve_exact(state_id.as_str().len())
+        .map_err(|_| "state ID clone allocation failed".to_string())?;
+    value.push_str(state_id.as_str());
+    StateId::new(value)
 }
 
 trait CompletedNodeSink {
@@ -537,9 +740,21 @@ impl CompletedNodeSink for LegacyCompletedNodes {
     }
 }
 
-/// Stateless deterministic CPU reference executor.
+/// Deterministic CPU reference executor with legacy stateless entry points and a
+/// narrowly scoped state-preparation entry point.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CpuReferenceExecutor;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuExecutionMode {
+    Stateless,
+    StatefulSingleRequestDense,
+}
+
+struct StatefulExecutionContext<'a> {
+    snapshots: Vec<(&'a StateId, &'a CpuStatePayload)>,
+    final_values: Vec<(StateId, Vec<f32>)>,
+}
 
 impl CpuReferenceExecutor {
     /// Compatibility wrapper that retains the existing result type and string-error surface.
@@ -558,7 +773,15 @@ impl CpuReferenceExecutor {
     ) -> Result<CpuReferenceExecution, String> {
         let mut completed = LegacyCompletedNodes::default();
         let outputs = self
-            .execute_core(graph, inputs, weights, &mut completed)
+            .execute_core(
+                graph,
+                inputs,
+                weights,
+                &mut completed,
+                CpuExecutionMode::Stateless,
+                0,
+                None,
+            )
             .map_err(|fault| {
                 fault
                     .into_failure(CpuReferenceExecutionTrace::default())
@@ -578,7 +801,15 @@ impl CpuReferenceExecutor {
         weights: BTreeMap<WeightId, HostTensor>,
     ) -> Result<CpuReferenceTracedExecution, CpuReferenceExecutionFailure> {
         let mut completed = BoundedCompletedNodes::new();
-        match self.execute_core(graph, inputs, weights, &mut completed) {
+        match self.execute_core(
+            graph,
+            inputs,
+            weights,
+            &mut completed,
+            CpuExecutionMode::Stateless,
+            0,
+            None,
+        ) {
             Ok(outputs) => Ok(CpuReferenceTracedExecution {
                 outputs,
                 trace: completed.into_trace(),
@@ -587,12 +818,516 @@ impl CpuReferenceExecutor {
         }
     }
 
+    /// Executes one dense single-request chunk and prepares, but does not commit,
+    /// convolution-history state updates.
+    pub fn execute_stateful_traced(
+        &self,
+        graph: &ModelGraph,
+        state_schema: &StateSchema,
+        batch: &ExecutionBatch,
+        snapshots: &StateSnapshotSet<CpuStatePayload>,
+        inputs: BTreeMap<ValueId, HostTensor>,
+        weights: BTreeMap<WeightId, HostTensor>,
+    ) -> Result<CpuReferencePreparedExecution, CpuReferenceStatefulExecutionError> {
+        let fail = |class, reason_code, message: String| {
+            CpuReferenceStatefulExecutionError::Execution(
+                CpuReferenceFault::global(class, reason_code, message)
+                    .into_failure(CpuReferenceExecutionTrace::default()),
+            )
+        };
+        let early_state_edges = graph
+            .nodes
+            .iter()
+            .try_fold(0_usize, |count, node| count.checked_add(node.states.len()));
+        let early_bindings = batch.items.iter().try_fold(0_usize, |count, item| {
+            count.checked_add(item.state_bindings.len())
+        });
+        if early_state_edges.is_none()
+            || early_bindings.is_none()
+            || early_state_edges.unwrap_or(usize::MAX) > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || early_bindings.unwrap_or(usize::MAX) > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || state_schema.entries.len() > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || snapshots.entries().len() > MAX_CPU_REFERENCE_STATE_ENTRIES
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::Resource,
+                "state_metadata",
+                "stateful CPU metadata exceeds the 4096-entry limit".into(),
+            ));
+        }
+        batch
+            .validate()
+            .map_err(|message| fail(CpuReferenceFailureClass::InvalidInput, "batch", message))?;
+        snapshots
+            .validate()
+            .map_err(CpuReferenceStatefulExecutionError::Transaction)?;
+        state_schema
+            .validate_against_graph(graph)
+            .map_err(|message| {
+                fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_schema",
+                    message,
+                )
+            })?;
+        if batch.items.len() != 1 {
+            return Err(fail(
+                CpuReferenceFailureClass::Unsupported,
+                "batch_shape",
+                "stateful CPU reference requires exactly one request item".into(),
+            ));
+        }
+        if snapshots.batch_nonce().get() != batch.commit_nonce {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "snapshot_nonce",
+                "snapshot batch nonce does not match execution batch commit nonce".into(),
+            ));
+        }
+        let item = &batch.items[0];
+        if !item.block_table.is_empty()
+            || item
+                .state_bindings
+                .iter()
+                .any(|binding| binding.uses_paged_kv)
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::Unsupported,
+                "paged_state",
+                "stateful CPU reference convolution mode does not accept paged KV metadata".into(),
+            ));
+        }
+        let chunk = usize::try_from(batch.common_chunk_width).map_err(|_| {
+            fail(
+                CpuReferenceFailureClass::Resource,
+                "batch_shape",
+                "common chunk width does not fit usize".into(),
+            )
+        })?;
+
+        let state_edge_count = graph
+            .nodes
+            .iter()
+            .try_fold(0_usize, |count, node| count.checked_add(node.states.len()))
+            .ok_or_else(|| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "state_metadata",
+                    "state edge count overflows usize".into(),
+                )
+            })?;
+        if state_edge_count > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || state_schema.entries.len() > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || item.state_bindings.len() > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || snapshots.entries().len() > MAX_CPU_REFERENCE_STATE_ENTRIES
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::Resource,
+                "state_metadata",
+                "stateful CPU metadata exceeds the 4096-entry limit".into(),
+            ));
+        }
+        let mut used = Vec::<(&StateId, &GraphNode)>::new();
+        used.try_reserve_exact(state_edge_count).map_err(|_| {
+            fail(
+                CpuReferenceFailureClass::Resource,
+                "metadata_allocation",
+                "state edge index allocation failed".into(),
+            )
+        })?;
+        for node in &graph.nodes {
+            if node.states.is_empty() {
+                continue;
+            }
+            if !matches!(node.kind, GraphNodeKind::CausalDepthwiseConv1d { .. })
+                || node.states.len() != 1
+            {
+                return Err(CpuReferenceStatefulExecutionError::Execution(
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "stateful_node",
+                        "only stateful CausalDepthwiseConv1d is supported in this CPU mode",
+                    )
+                    .into_failure(CpuReferenceExecutionTrace::default()),
+                ));
+            }
+            let state_id = &node.states[0];
+            used.push((state_id, node));
+            let input_spec = graph
+                .values
+                .iter()
+                .find(|value| value.id == node.inputs[0])
+                .map(|value| &value.tensor)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Internal,
+                        "value_spec_lookup",
+                        "stateful node input spec is missing".into(),
+                    )
+                })?;
+            if input_spec.shape.len() != 2
+                || input_spec.shape[0] != chunk
+                || !matches!(
+                    input_spec.layout,
+                    TensorLayout::RowMajor | TensorLayout::TokensHidden
+                )
+            {
+                return Err(fail(
+                    CpuReferenceFailureClass::Unsupported,
+                    "stateful_dense_shape",
+                    "stateful convolution input must be dense rank-2 [chunk, width]".into(),
+                ));
+            }
+        }
+        if used.is_empty() {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_mapping",
+                "stateful execution requires at least one supported state edge".into(),
+            ));
+        }
+        used.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        if used.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_reuse",
+                "one logical state is referenced by multiple graph nodes".into(),
+            ));
+        }
+
+        let mut bindings = Vec::new();
+        bindings
+            .try_reserve_exact(item.state_bindings.len())
+            .map_err(|_| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "metadata_allocation",
+                    "state binding index allocation failed".into(),
+                )
+            })?;
+        bindings.extend(item.state_bindings.iter());
+        bindings.sort_unstable_by(|left, right| left.state_id.cmp(&right.state_id));
+        if bindings
+            .windows(2)
+            .any(|pair| pair[0].state_id == pair[1].state_id)
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_binding",
+                "duplicate batch state binding".into(),
+            ));
+        }
+        let mut snapshot_index = Vec::new();
+        snapshot_index
+            .try_reserve_exact(snapshots.entries().len())
+            .map_err(|_| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "metadata_allocation",
+                    "snapshot index allocation failed".into(),
+                )
+            })?;
+        let mut snapshot_elements = 0_usize;
+        for snapshot in snapshots.entries() {
+            snapshot_index.push(snapshot);
+            snapshot_elements = snapshot_elements
+                .checked_add(snapshot.payload().values().len())
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Resource,
+                        "element_budget",
+                        "snapshot element count overflows usize".into(),
+                    )
+                })?;
+        }
+        snapshot_index.sort_unstable_by(|left, right| {
+            left.base().key().state_id.cmp(&right.base().key().state_id)
+        });
+        if snapshot_index
+            .windows(2)
+            .any(|pair| pair[0].base().key().state_id == pair[1].base().key().state_id)
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "snapshot_mapping",
+                "duplicate snapshot state ID".into(),
+            ));
+        }
+        if bindings.len() != used.len() || snapshot_index.len() != used.len() {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_mapping",
+                "graph, batch, and snapshot state sets must match exactly".into(),
+            ));
+        }
+        let mut context_snapshots = Vec::new();
+        context_snapshots
+            .try_reserve_exact(used.len())
+            .map_err(|_| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "metadata_allocation",
+                    "state runtime index allocation failed".into(),
+                )
+            })?;
+        for (state_id, _) in &used {
+            let binding = bindings
+                .binary_search_by(|entry| entry.state_id.cmp(state_id))
+                .ok()
+                .map(|index| bindings[index])
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "state_mapping",
+                        format!("missing batch binding for state {}", state_id.as_str()),
+                    )
+                })?;
+            let snapshot = snapshot_index
+                .binary_search_by(|entry| entry.base().key().state_id.cmp(state_id))
+                .ok()
+                .map(|index| snapshot_index[index])
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "state_mapping",
+                        format!("missing snapshot for state {}", state_id.as_str()),
+                    )
+                })?;
+            let key = snapshot.base().key();
+            if key.request_id != item.request_id || key.handle != binding.handle {
+                return Err(fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_key",
+                    "batch request/handle does not match snapshot state key".into(),
+                ));
+            }
+            if snapshot.progress()
+                != StateProgress::new(item.prefix_len, item.absolute_start_position)
+            {
+                return Err(fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_progress",
+                    "snapshot progress does not match batch prefix and absolute position".into(),
+                ));
+            }
+            let spec = state_schema
+                .entries
+                .iter()
+                .find(|entry| &entry.id == *state_id)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "state_mapping",
+                        "state spec is missing".into(),
+                    )
+                })?;
+            if spec.format != NumericalFormat::F32
+                || !matches!(spec.ownership, StateOwnership::RequestLayer { .. })
+                || snapshot.payload().format() != &spec.format
+                || snapshot.payload().layout() != &spec.layout
+            {
+                return Err(fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_payload",
+                    "snapshot payload does not match its F32 RequestLayer state spec".into(),
+                ));
+            }
+            if batch.phase == ExecutionPhase::ColdPrefill
+                && matches!(
+                    spec.transaction,
+                    StateTransactionContract::Transactional {
+                        initialization: StateInitialization::Zeroed,
+                        ..
+                    }
+                )
+                && snapshot
+                    .payload()
+                    .values()
+                    .iter()
+                    .any(|value| *value != 0.0)
+            {
+                return Err(fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_initialization",
+                    "ColdPrefill with Zeroed state requires an all-zero snapshot payload".into(),
+                ));
+            }
+            context_snapshots.push((*state_id, snapshot.payload()));
+        }
+
+        let mut completed = BoundedCompletedNodes::new();
+        let mut context = StatefulExecutionContext {
+            snapshots: context_snapshots,
+            final_values: {
+                let mut values = Vec::new();
+                values.try_reserve_exact(used.len()).map_err(|_| {
+                    fail(
+                        CpuReferenceFailureClass::Resource,
+                        "metadata_allocation",
+                        "final state index allocation failed".into(),
+                    )
+                })?;
+                values
+            },
+        };
+        let outputs = match self.execute_core(
+            graph,
+            inputs,
+            weights,
+            &mut completed,
+            CpuExecutionMode::StatefulSingleRequestDense,
+            snapshot_elements,
+            Some(&mut context),
+        ) {
+            Ok(outputs) => outputs,
+            Err(fault) => {
+                return Err(CpuReferenceStatefulExecutionError::Execution(
+                    fault.into_failure(completed.into_trace()),
+                ));
+            }
+        };
+        let trace = completed.into_trace();
+
+        let advance = batch.common_chunk_width;
+        let mut bases = Vec::new();
+        let mut entries = Vec::new();
+        bases
+            .try_reserve_exact(snapshots.entries().len())
+            .map_err(|_| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "metadata_allocation",
+                    "prepared state base allocation failed".into(),
+                )
+            })?;
+        entries
+            .try_reserve_exact(snapshots.entries().len())
+            .map_err(|_| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "metadata_allocation",
+                    "prepared state entry allocation failed".into(),
+                )
+            })?;
+        for snapshot in snapshots.entries() {
+            let source_key = snapshot.base().key();
+            let entry_state_id =
+                fallible_state_id_clone(&source_key.state_id).map_err(|message| {
+                    fail(
+                        CpuReferenceFailureClass::Resource,
+                        "metadata_allocation",
+                        message,
+                    )
+                })?;
+            let base_state_id =
+                fallible_state_id_clone(&source_key.state_id).map_err(|message| {
+                    fail(
+                        CpuReferenceFailureClass::Resource,
+                        "metadata_allocation",
+                        message,
+                    )
+                })?;
+            let key = StateKey::new(
+                source_key.request_id,
+                entry_state_id,
+                source_key.handle,
+                source_key.lease_generation,
+            )
+            .map_err(CpuReferenceStatefulExecutionError::Transaction)?;
+            let base_key = StateKey::new(
+                source_key.request_id,
+                base_state_id,
+                source_key.handle,
+                source_key.lease_generation,
+            )
+            .map_err(CpuReferenceStatefulExecutionError::Transaction)?;
+            let final_index = context
+                .final_values
+                .iter()
+                .position(|(state_id, _)| state_id == &source_key.state_id)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Internal,
+                        "state_output",
+                        "completed execution did not produce every final state".into(),
+                    )
+                })?;
+            let (_, values) = context.final_values.swap_remove(final_index);
+            let spec = state_schema
+                .entries
+                .iter()
+                .find(|entry| entry.id == source_key.state_id)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Internal,
+                        "state_output",
+                        "state spec disappeared after admission".into(),
+                    )
+                })?;
+            let layout = match spec.layout {
+                StateLayout::ConvolutionHistory {
+                    channels,
+                    history_tokens,
+                } => StateLayout::ConvolutionHistory {
+                    channels,
+                    history_tokens,
+                },
+                _ => {
+                    return Err(fail(
+                        CpuReferenceFailureClass::Internal,
+                        "state_output",
+                        "prepared convolution state has a non-convolution layout".into(),
+                    ));
+                }
+            };
+            let payload =
+                CpuStatePayload::new(NumericalFormat::F32, layout, values).map_err(|message| {
+                    fail(
+                        CpuReferenceFailureClass::Internal,
+                        "state_output",
+                        message.to_string(),
+                    )
+                })?;
+            let progress = snapshot
+                .progress()
+                .checked_advance(advance)
+                .map_err(CpuReferenceStatefulExecutionError::Transaction)?;
+            bases.push(
+                StateBaseVersion::new(base_key, snapshot.base().committed_generation())
+                    .map_err(CpuReferenceStatefulExecutionError::Transaction)?,
+            );
+            entries.push(CpuPreparedStateEntry {
+                key,
+                progress,
+                payload,
+            });
+        }
+        let state_delta = PreparedStateDelta::new(
+            snapshots.owner_epoch(),
+            snapshots.batch_nonce(),
+            bases,
+            CpuPreparedStatePayload { entries },
+        )
+        .map_err(CpuReferenceStatefulExecutionError::Transaction)?;
+        state_delta
+            .validate_against_snapshot(snapshots)
+            .map_err(CpuReferenceStatefulExecutionError::Transaction)?;
+        Ok(CpuReferencePreparedExecution {
+            execution: CpuReferenceTracedExecution { outputs, trace },
+            state_delta,
+        })
+    }
+
     fn execute_core<S: CompletedNodeSink>(
         &self,
         graph: &ModelGraph,
         inputs: BTreeMap<ValueId, HostTensor>,
         weights: BTreeMap<WeightId, HostTensor>,
         completed: &mut S,
+        mode: CpuExecutionMode,
+        state_snapshot_elements: usize,
+        mut stateful: Option<&mut StatefulExecutionContext<'_>>,
     ) -> Result<BTreeMap<ValueId, HostTensor>, CpuReferenceFault> {
         graph.validate().map_err(|message| {
             CpuReferenceFault::global(
@@ -634,7 +1369,7 @@ impl CpuReferenceExecutor {
             .iter()
             .map(|input_id| (input_id.clone(), ()))
             .collect::<BTreeMap<_, _>>();
-        let resource_plan = preflight_graph(graph, &value_specs, &weight_specs)?;
+        let resource_plan = preflight_graph_mode(graph, &value_specs, &weight_specs, mode)?;
         validate_exact_keys(&inputs, &graph_input_ids, "graph input").map_err(|message| {
             CpuReferenceFault::global(CpuReferenceFailureClass::InvalidInput, "input_map", message)
         })?;
@@ -766,6 +1501,7 @@ impl CpuReferenceExecutor {
                     },
                 )?,
             )
+            .and_then(|elements| elements.checked_add(state_snapshot_elements))
             .ok_or_else(|| {
                 CpuReferenceFault::global(
                     CpuReferenceFailureClass::Resource,
@@ -798,6 +1534,7 @@ impl CpuReferenceExecutor {
                 &weight_specs,
                 &mut allocated_elements,
                 &mut runtime,
+                stateful.as_deref_mut(),
             )?;
             for (value_id, tensor) in node_outputs {
                 validate_finite_host_tensor(&tensor, &format!("node output {}", value_id.as_str()))
@@ -856,6 +1593,7 @@ impl CpuReferenceExecutor {
         weight_specs: &BTreeMap<WeightId, &TensorSpec>,
         allocated_elements: &mut usize,
         runtime: &mut RuntimeExecutionContext,
+        mut stateful: Option<&mut StatefulExecutionContext<'_>>,
     ) -> Result<Vec<(ValueId, HostTensor)>, CpuReferenceFault> {
         match &node.kind {
             GraphNodeKind::Embedding {
@@ -1207,16 +1945,43 @@ impl CpuReferenceExecutor {
                 let input = node_internal(node, node_input(node, values, 0))?;
                 let kernel = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
                 let spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
-                let output = causal_depthwise_conv1d_f32(
+                let initial_history = node
+                    .states
+                    .first()
+                    .and_then(|state_id| {
+                        stateful
+                            .as_ref()?
+                            .snapshots
+                            .iter()
+                            .find(|(candidate, _)| *candidate == state_id)
+                            .map(|(_, payload)| *payload)
+                    })
+                    .map(CpuStatePayload::values);
+                let (output, final_history) = causal_depthwise_conv1d_f32(
                     input,
                     kernel,
                     *channels,
                     *kernel_size,
+                    initial_history,
+                    !node.states.is_empty(),
                     spec,
                     allocated_elements,
                     runtime,
                 )
                 .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                if let (Some(state_id), Some(final_history), Some(context)) =
+                    (node.states.first(), final_history, stateful.as_deref_mut())
+                {
+                    let state_id = fallible_state_id_clone(state_id).map_err(|message| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "metadata_allocation",
+                            message,
+                        )
+                    })?;
+                    context.final_values.push((state_id, final_history));
+                }
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::GatedDecayParameters { channels } => {
@@ -1348,20 +2113,44 @@ struct ResourcePlan {
     work_units: u64,
 }
 
+#[cfg(test)]
 fn preflight_graph(
     graph: &ModelGraph,
     value_specs: &BTreeMap<ValueId, &TensorSpec>,
     weight_specs: &BTreeMap<WeightId, &TensorSpec>,
 ) -> Result<ResourcePlan, CpuReferenceFault> {
+    preflight_graph_mode(
+        graph,
+        value_specs,
+        weight_specs,
+        CpuExecutionMode::Stateless,
+    )
+}
+
+fn preflight_graph_mode(
+    graph: &ModelGraph,
+    value_specs: &BTreeMap<ValueId, &TensorSpec>,
+    weight_specs: &BTreeMap<WeightId, &TensorSpec>,
+    mode: CpuExecutionMode,
+) -> Result<ResourcePlan, CpuReferenceFault> {
     let mut plan = ResourcePlan::default();
     for node in &graph.nodes {
         if !node.states.is_empty() {
-            return Err(CpuReferenceFault::node(
-                CpuReferenceFailureClass::Unsupported,
-                node,
-                "stateful_node",
-                "stateful execution is unsupported by the stateless CPU reference",
-            ));
+            match (&mode, &node.kind, node.states.len()) {
+                (
+                    CpuExecutionMode::StatefulSingleRequestDense,
+                    GraphNodeKind::CausalDepthwiseConv1d { .. },
+                    1,
+                ) => {}
+                _ => {
+                    return Err(CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "stateful_node",
+                        "this stateful node is unsupported by the CPU reference mode",
+                    ));
+                }
+            }
         }
         match &node.kind {
             GraphNodeKind::Embedding { .. } => {
@@ -2485,6 +3274,37 @@ fn preflight_graph(
                     "work_budget",
                     add_work_units(&mut plan, node, work),
                 )?;
+                if mode == CpuExecutionMode::StatefulSingleRequestDense && !node.states.is_empty() {
+                    let history_elements =
+                        channels.checked_mul(kernel_size - 1).ok_or_else(|| {
+                            CpuReferenceFault::node(
+                                CpuReferenceFailureClass::Resource,
+                                node,
+                                "element_budget",
+                                "convolution history element count overflows usize",
+                            )
+                        })?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "element_budget",
+                        reserve_temporary_elements(&mut plan, node, history_elements),
+                    )?;
+                    let history_work = u64::try_from(history_elements).map_err(|_| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "work_budget",
+                            "convolution history copy work exceeds u64",
+                        )
+                    })?;
+                    preflight_result(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "work_budget",
+                        add_work_units(&mut plan, node, history_work),
+                    )?;
+                }
             }
             GraphNodeKind::GatedDecayParameters { channels } => {
                 let decay = preflight_result(
@@ -4436,10 +5256,12 @@ fn causal_depthwise_conv1d_f32(
     kernel: &HostTensor,
     channels: usize,
     kernel_size: usize,
+    initial_history: Option<&[f32]>,
+    prepare_final_history: bool,
     output_spec: &TensorSpec,
     allocated: &mut usize,
     runtime: &mut RuntimeExecutionContext,
-) -> Result<HostTensor, String> {
+) -> Result<(HostTensor, Option<Vec<f32>>), String> {
     let (shape, layout, data) = input.f32_parts()?;
     let (kernel_shape, kernel_layout, weights) = kernel.f32_parts()?;
     if !matches!(layout, TensorLayout::RowMajor | TensorLayout::TokensHidden)
@@ -4456,6 +5278,15 @@ fn causal_depthwise_conv1d_f32(
     require_f32_output_spec(output_spec, shape, layout, "causal depthwise conv")?;
     let tokens = shape[shape.len() - 2];
     let sequences = causal_sequence_count(shape)?;
+    if initial_history.is_some() && sequences != 1 {
+        return Err("stateful causal depthwise conv requires one dense sequence".into());
+    }
+    let history_tokens = kernel_size - 1;
+    if let Some(history) = initial_history {
+        if history.len() != channels * history_tokens {
+            return Err("causal depthwise conv history length mismatch".into());
+        }
+    }
     let mut output = allocate_f32(
         data.len(),
         allocated,
@@ -4485,13 +5316,51 @@ fn causal_depthwise_conv1d_f32(
                             runtime.numerical_failed = true;
                             return Err("conv accumulation non-finite".into());
                         }
+                    } else if let Some(history) = initial_history {
+                        let history_age = history_tokens + token - lag;
+                        let x = history[channel * history_tokens + history_age];
+                        let w = weights[channel * kernel_size + j];
+                        let product = x * w;
+                        if !product.is_finite() {
+                            runtime.numerical_failed = true;
+                            return Err("conv product non-finite".into());
+                        }
+                        sum += product;
+                        if !sum.is_finite() {
+                            runtime.numerical_failed = true;
+                            return Err("conv accumulation non-finite".into());
+                        }
                     }
                 }
                 output[base + token * channels + channel] = sum;
             }
         }
     }
-    HostTensor::f32(shape.to_vec(), output_spec.layout.clone(), output)
+    let output = HostTensor::f32(shape.to_vec(), output_spec.layout.clone(), output)?;
+    let final_history = if prepare_final_history {
+        let mut final_values = allocate_f32(
+            channels * history_tokens,
+            allocated,
+            runtime,
+            "causal depthwise conv final history",
+        )?;
+        for channel in 0..channels {
+            for age in 0..history_tokens {
+                let combined_index = tokens + age;
+                final_values[channel * history_tokens + age] = if combined_index >= history_tokens {
+                    data[(combined_index - history_tokens) * channels + channel]
+                } else {
+                    initial_history.ok_or_else(|| {
+                        "stateful causal depthwise conv requires initial history".to_string()
+                    })?[channel * history_tokens + combined_index]
+                };
+            }
+        }
+        Some(final_values)
+    } else {
+        None
+    };
+    Ok((output, final_history))
 }
 
 fn stable_softplus(value: f32) -> Result<f32, String> {
@@ -5317,10 +6186,22 @@ fn node_kind_name(kind: &GraphNodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_batch::{
+        BatchStateBinding, ExecutionBatchItem, ExecutionPhase, StateHandle, TokenRange,
+        WorkspacePlan,
+    };
     use crate::model_graph::{
         ActivationKind, GraphNode, GraphNodeKind, NodeId, NormalizationAffine, NormalizationAxis,
         NormalizationKind, PositiveF32, StateId, WeightSpec,
     };
+    use crate::state_schema::{
+        SnapshotRestorePolicy, StateExecutionProtocol, StateInitialization, StateKind,
+        StateResetProtocol, StateSpec, StateTransactionContract,
+    };
+    use crate::state_transaction::{
+        LeaseGeneration, StateBaseVersion, StateOwnerEpoch, StateSnapshot,
+    };
+    use std::num::NonZeroU64;
 
     fn value_id(name: &str) -> ValueId {
         ValueId::new(name).unwrap()
@@ -7559,6 +8440,809 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn stateful_conv_prepares_history_without_mutating_snapshot() {
+        let state_id = StateId::new("conv-state").unwrap();
+        let mut graph = conv_graph(
+            &[1, 1],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            1,
+            3,
+        );
+        graph.nodes[0].states = vec![state_id.clone()];
+        let layout = StateLayout::ConvolutionHistory {
+            channels: 1,
+            history_tokens: 2,
+        };
+        let schema = StateSchema::new(
+            "conv-state-schema",
+            vec![StateSpec {
+                id: state_id.clone(),
+                kind: StateKind::ConvolutionHistory,
+                ownership: StateOwnership::RequestLayer { layer_index: 0 },
+                format: NumericalFormat::F32,
+                layout: layout.clone(),
+                transaction: StateTransactionContract::Transactional {
+                    initialization: StateInitialization::Zeroed,
+                    execution: StateExecutionProtocol::PrepareExecuteCommit,
+                    reset: StateResetProtocol::Required,
+                    snapshot_restore: SnapshotRestorePolicy::Optional,
+                },
+            }],
+        )
+        .unwrap();
+        let handle = StateHandle::new(9).unwrap();
+        let key = StateKey::new(
+            11,
+            state_id.clone(),
+            handle,
+            LeaseGeneration::new(3).unwrap(),
+        )
+        .unwrap();
+        let snapshot = StateSnapshot::new(
+            StateBaseVersion::new(key, 4).unwrap(),
+            StateProgress::new(2, 2),
+            CpuStatePayload::new(NumericalFormat::F32, layout, vec![10.0, 20.0]).unwrap(),
+        )
+        .unwrap();
+        let snapshots = StateSnapshotSet::new(
+            StateOwnerEpoch::new(2).unwrap(),
+            NonZeroU64::new(7).unwrap(),
+            vec![snapshot],
+        )
+        .unwrap();
+        let before = snapshots.entries()[0].payload().values().to_vec();
+        let batch = ExecutionBatch {
+            phase: ExecutionPhase::CachedPrefixPrefill,
+            compatibility_key_sha256: "a".repeat(64),
+            commit_nonce: 7,
+            common_chunk_width: 1,
+            packed_token_count: 1,
+            items: vec![ExecutionBatchItem {
+                request_id: 11,
+                packed: TokenRange::new(0, 1),
+                prefix_len: 2,
+                absolute_start_position: 2,
+                source: TokenRange::new(2, 1),
+                destination: TokenRange::new(0, 1),
+                state_bindings: vec![BatchStateBinding {
+                    state_id: state_id.clone(),
+                    handle,
+                    uses_paged_kv: false,
+                }],
+                block_table: vec![],
+            }],
+            workspace: WorkspacePlan {
+                capacity_bytes: 1_000,
+                resident_bytes: 0,
+                persistent_state_bytes: 0,
+                temporary_activation_bytes: 0,
+                operator_workspace_bytes: 0,
+                required_headroom_bytes: 0,
+            },
+        };
+        let prepared = executor()
+            .execute_stateful_traced(
+                &graph,
+                &schema,
+                &batch,
+                &snapshots,
+                map([(
+                    value_id("x"),
+                    f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+                )]),
+                map([(
+                    weight_id("kernel"),
+                    f32(&[1, 1, 3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(&prepared.execution.outputs[&value_id("y")], &[31.0], 0.0);
+        assert_eq!(snapshots.entries()[0].payload().values(), before);
+        assert_eq!(prepared.state_delta.bases()[0].committed_generation(), 4);
+        let entry = &prepared.state_delta.payload().entries()[0];
+        assert_eq!(entry.progress(), StateProgress::new(3, 3));
+        assert_eq!(entry.payload().values(), &[20.0, 1.0]);
+        prepared
+            .state_delta
+            .validate_against_snapshot(&snapshots)
+            .unwrap();
+
+        let admission_error =
+            |candidate_batch: &ExecutionBatch,
+             candidate_snapshots: &StateSnapshotSet<CpuStatePayload>| {
+                match executor().execute_stateful_traced(
+                    &graph,
+                    &schema,
+                    candidate_batch,
+                    candidate_snapshots,
+                    map([(
+                        value_id("x"),
+                        f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+                    )]),
+                    map([(
+                        weight_id("kernel"),
+                        f32(&[1, 1, 3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+                    )]),
+                ) {
+                    Err(CpuReferenceStatefulExecutionError::Execution(error)) => error,
+                    Err(_) => panic!("mapping mismatch must be an execution admission error"),
+                    Ok(_) => panic!("mapping mismatch must fail"),
+                }
+            };
+        let mut missing_binding = batch.clone();
+        missing_binding.items[0].state_bindings.clear();
+        assert_eq!(
+            admission_error(&missing_binding, &snapshots).reason_code,
+            "state_mapping"
+        );
+        let mut extra_binding = batch.clone();
+        extra_binding.items[0]
+            .state_bindings
+            .push(BatchStateBinding {
+                state_id: StateId::new("extra-state").unwrap(),
+                handle: StateHandle::new(99).unwrap(),
+                uses_paged_kv: false,
+            });
+        assert_eq!(
+            admission_error(&extra_binding, &snapshots).reason_code,
+            "state_mapping"
+        );
+        let mut wrong_handle = batch.clone();
+        wrong_handle.items[0].state_bindings[0].handle = StateHandle::new(99).unwrap();
+        let wrong_handle_error = admission_error(&wrong_handle, &snapshots);
+        assert_eq!(wrong_handle_error.reason_code, "state_key");
+        assert_eq!(wrong_handle_error.trace.completed_node_count, 0);
+        assert_eq!(snapshots.entries()[0].payload().values(), before);
+        let mut unknown_state = batch.clone();
+        unknown_state.items[0].state_bindings[0].state_id =
+            StateId::new("unknown-history").unwrap();
+        let unknown_error = admission_error(&unknown_state, &snapshots);
+        assert_eq!(unknown_error.reason_code, "state_mapping");
+        assert_eq!(unknown_error.trace.completed_node_count, 0);
+        assert_eq!(snapshots.entries()[0].payload().values(), before);
+        let mut wrong_request = batch.clone();
+        wrong_request.items[0].request_id = 12;
+        assert_eq!(
+            admission_error(&wrong_request, &snapshots).reason_code,
+            "state_key"
+        );
+        let missing_snapshots = StateSnapshotSet::new(
+            StateOwnerEpoch::new(2).unwrap(),
+            NonZeroU64::new(7).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            admission_error(&batch, &missing_snapshots).reason_code,
+            "state_mapping"
+        );
+
+        let mut cold_batch = batch.clone();
+        cold_batch.phase = ExecutionPhase::ColdPrefill;
+        cold_batch.items[0].prefix_len = 0;
+        cold_batch.items[0].absolute_start_position = 0;
+        cold_batch.items[0].source = TokenRange::new(0, 1);
+        let cold_snapshots = |values| {
+            StateSnapshotSet::new(
+                StateOwnerEpoch::new(2).unwrap(),
+                NonZeroU64::new(7).unwrap(),
+                vec![
+                    StateSnapshot::new(
+                        StateBaseVersion::new(
+                            StateKey::new(
+                                11,
+                                state_id.clone(),
+                                handle,
+                                LeaseGeneration::new(3).unwrap(),
+                            )
+                            .unwrap(),
+                            4,
+                        )
+                        .unwrap(),
+                        StateProgress::new(0, 0),
+                        CpuStatePayload::new(
+                            NumericalFormat::F32,
+                            StateLayout::ConvolutionHistory {
+                                channels: 1,
+                                history_tokens: 2,
+                            },
+                            values,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap()
+        };
+        let zero = cold_snapshots(vec![0.0, 0.0]);
+        let zero_prepared = executor()
+            .execute_stateful_traced(
+                &graph,
+                &schema,
+                &cold_batch,
+                &zero,
+                map([(
+                    value_id("x"),
+                    f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+                )]),
+                map([(
+                    weight_id("kernel"),
+                    f32(&[1, 1, 3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(
+            &zero_prepared.execution.outputs[&value_id("y")],
+            &[1.0],
+            0.0,
+        );
+
+        let nonzero = cold_snapshots(vec![0.0, 1.0]);
+        let error = match executor().execute_stateful_traced(
+            &graph,
+            &schema,
+            &cold_batch,
+            &nonzero,
+            map([(
+                value_id("x"),
+                f32(&[1, 1], TensorLayout::TokensHidden, &[1.0]),
+            )]),
+            map([(
+                weight_id("kernel"),
+                f32(&[1, 1, 3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+            )]),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("nonzero ColdPrefill Zeroed snapshot must fail"),
+        };
+        let CpuReferenceStatefulExecutionError::Execution(error) = error else {
+            panic!("zero initialization mismatch must be an execution admission error");
+        };
+        assert_eq!(error.reason_code, "state_initialization");
+        assert_eq!(error.trace.completed_node_count, 0);
+    }
+
+    #[test]
+    fn stateful_conv_history_oracle_covers_long_chunk_and_chunk_equivalence() {
+        let run = |data: &[f32], history: &[f32]| {
+            let input = f32(&[data.len(), 1], TensorLayout::RowMajor, data);
+            let kernel = f32(&[1, 1, 3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]);
+            let output_spec = spec(
+                &[data.len(), 1],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+            );
+            let mut allocated = history.len();
+            let mut runtime = RuntimeExecutionContext::default();
+            causal_depthwise_conv1d_f32(
+                &input,
+                &kernel,
+                1,
+                3,
+                Some(history),
+                true,
+                &output_spec,
+                &mut allocated,
+                &mut runtime,
+            )
+            .unwrap()
+        };
+        let (full, full_history) = run(&[1.0, 2.0, 3.0], &[10.0, 20.0]);
+        assert_f32(&full, &[31.0, 23.0, 6.0], 0.0);
+        assert_eq!(full_history.as_deref(), Some(&[2.0, 3.0][..]));
+
+        let (first, first_history) = run(&[1.0], &[10.0, 20.0]);
+        let (second, split_history) = run(&[2.0, 3.0], first_history.as_deref().unwrap());
+        assert_f32(&first, &[31.0], 0.0);
+        assert_f32(&second, &[23.0, 6.0], 0.0);
+        assert_eq!(split_history, full_history);
+    }
+
+    #[test]
+    fn stateful_conv_payload_errors_and_final_history_work_are_typed_and_charged() {
+        let layout = StateLayout::ConvolutionHistory {
+            channels: 1,
+            history_tokens: 2,
+        };
+        assert_eq!(
+            CpuStatePayload::new(NumericalFormat::Bf16, layout.clone(), vec![0.0; 2])
+                .unwrap_err()
+                .class(),
+            CpuStatePayloadErrorClass::Invalid
+        );
+        assert_eq!(
+            CpuStatePayload::new(NumericalFormat::F32, layout.clone(), vec![0.0])
+                .unwrap_err()
+                .class(),
+            CpuStatePayloadErrorClass::Invalid
+        );
+        assert_eq!(
+            CpuStatePayload::new(NumericalFormat::F32, layout, vec![0.0, f32::NAN])
+                .unwrap_err()
+                .class(),
+            CpuStatePayloadErrorClass::Invalid
+        );
+        assert_eq!(
+            CpuStatePayload::new(
+                NumericalFormat::F32,
+                StateLayout::ConvolutionHistory {
+                    channels: MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1,
+                    history_tokens: 1,
+                },
+                vec![],
+            )
+            .unwrap_err()
+            .class(),
+            CpuStatePayloadErrorClass::Resource
+        );
+
+        let mut graph = conv_graph(
+            &[1_000_000, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            25,
+        );
+        let value_specs = graph
+            .values
+            .iter()
+            .map(|value| (value.id.clone(), &value.tensor))
+            .collect::<BTreeMap<_, _>>();
+        let weight_specs = graph
+            .weights
+            .iter()
+            .map(|weight| (weight.id.clone(), &weight.tensor))
+            .collect::<BTreeMap<_, _>>();
+        let stateless = preflight_graph(&graph, &value_specs, &weight_specs).unwrap();
+        assert_eq!(stateless.work_units, MAX_CPU_REFERENCE_WORK_UNITS);
+        graph.nodes[0].states = vec![StateId::new("history").unwrap()];
+        let error = preflight_graph_mode(
+            &graph,
+            &value_specs,
+            &weight_specs,
+            CpuExecutionMode::StatefulSingleRequestDense,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason_code, "work_budget");
+    }
+
+    #[test]
+    fn stateful_two_conv_states_prepare_atomically_and_failure_has_no_delta() {
+        let s1 = StateId::new("history-1").unwrap();
+        let s2 = StateId::new("history-2").unwrap();
+        let values = vec![
+            value("x", &[1, 1], NumericalFormat::F32, TensorLayout::RowMajor),
+            value("mid", &[1, 1], NumericalFormat::F32, TensorLayout::RowMajor),
+            value("y", &[1, 1], NumericalFormat::F32, TensorLayout::RowMajor),
+        ];
+        let graph = ModelGraph {
+            graph_id: "two-stateful-convs".into(),
+            inputs: vec![value_id("x")],
+            outputs: vec![value_id("y")],
+            values,
+            weights: vec![weight("k1", &[1, 1, 2]), weight("k2", &[1, 1, 2])],
+            nodes: vec![
+                GraphNode {
+                    id: node_id("conv-1"),
+                    inputs: vec![value_id("x")],
+                    outputs: vec![value_id("mid")],
+                    weights: vec![weight_id("k1")],
+                    states: vec![s1.clone()],
+                    kind: GraphNodeKind::CausalDepthwiseConv1d {
+                        channels: 1,
+                        kernel_size: 2,
+                    },
+                },
+                GraphNode {
+                    id: node_id("conv-2"),
+                    inputs: vec![value_id("mid")],
+                    outputs: vec![value_id("y")],
+                    weights: vec![weight_id("k2")],
+                    states: vec![s2.clone()],
+                    kind: GraphNodeKind::CausalDepthwiseConv1d {
+                        channels: 1,
+                        kernel_size: 2,
+                    },
+                },
+            ],
+        };
+        let state_spec = |id, layer_index| StateSpec {
+            id,
+            kind: StateKind::ConvolutionHistory,
+            ownership: StateOwnership::RequestLayer { layer_index },
+            format: NumericalFormat::F32,
+            layout: StateLayout::ConvolutionHistory {
+                channels: 1,
+                history_tokens: 1,
+            },
+            transaction: StateTransactionContract::Transactional {
+                initialization: StateInitialization::FromSnapshot,
+                execution: StateExecutionProtocol::PrepareExecuteCommit,
+                reset: StateResetProtocol::Required,
+                snapshot_restore: SnapshotRestorePolicy::Optional,
+            },
+        };
+        let schema = StateSchema::new(
+            "two-conv-states",
+            vec![state_spec(s1.clone(), 0), state_spec(s2.clone(), 1)],
+        )
+        .unwrap();
+        let h1 = StateHandle::new(9).unwrap();
+        let h2 = StateHandle::new(10).unwrap();
+        let snapshots = |v1, v2, progress| {
+            let entry = |id: StateId, handle, generation, value| {
+                StateSnapshot::new(
+                    StateBaseVersion::new(
+                        StateKey::new(11, id, handle, LeaseGeneration::new(generation).unwrap())
+                            .unwrap(),
+                        generation + 10,
+                    )
+                    .unwrap(),
+                    progress,
+                    CpuStatePayload::new(
+                        NumericalFormat::F32,
+                        StateLayout::ConvolutionHistory {
+                            channels: 1,
+                            history_tokens: 1,
+                        },
+                        vec![value],
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            };
+            StateSnapshotSet::new(
+                StateOwnerEpoch::new(5).unwrap(),
+                NonZeroU64::new(7).unwrap(),
+                vec![entry(s1.clone(), h1, 3, v1), entry(s2.clone(), h2, 4, v2)],
+            )
+            .unwrap()
+        };
+        let batch = ExecutionBatch {
+            phase: ExecutionPhase::CachedPrefixPrefill,
+            compatibility_key_sha256: "b".repeat(64),
+            commit_nonce: 7,
+            common_chunk_width: 1,
+            packed_token_count: 1,
+            items: vec![ExecutionBatchItem {
+                request_id: 11,
+                packed: TokenRange::new(0, 1),
+                prefix_len: 4,
+                absolute_start_position: 4,
+                source: TokenRange::new(4, 1),
+                destination: TokenRange::new(0, 1),
+                state_bindings: vec![
+                    BatchStateBinding {
+                        state_id: s1.clone(),
+                        handle: h1,
+                        uses_paged_kv: false,
+                    },
+                    BatchStateBinding {
+                        state_id: s2.clone(),
+                        handle: h2,
+                        uses_paged_kv: false,
+                    },
+                ],
+                block_table: vec![],
+            }],
+            workspace: WorkspacePlan {
+                capacity_bytes: 1_000,
+                resident_bytes: 0,
+                persistent_state_bytes: 0,
+                temporary_activation_bytes: 0,
+                operator_workspace_bytes: 0,
+                required_headroom_bytes: 0,
+            },
+        };
+        let good_snapshots = snapshots(10.0, 20.0, StateProgress::new(4, 4));
+        let prepared = executor()
+            .execute_stateful_traced(
+                &graph,
+                &schema,
+                &batch,
+                &good_snapshots,
+                map([(value_id("x"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0]))]),
+                map([
+                    (
+                        weight_id("k1"),
+                        f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+                    ),
+                    (
+                        weight_id("k2"),
+                        f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+                    ),
+                ]),
+            )
+            .unwrap();
+        assert_f32(&prepared.execution.outputs[&value_id("y")], &[31.0], 0.0);
+        assert_eq!(prepared.state_delta.bases().len(), 2);
+        assert_eq!(prepared.state_delta.payload().entries().len(), 2);
+        assert_eq!(prepared.state_delta.owner_epoch().get(), 5);
+        assert_eq!(prepared.state_delta.batch_nonce().get(), 7);
+        assert_eq!(prepared.state_delta.bases()[0].committed_generation(), 13);
+        assert_eq!(prepared.state_delta.bases()[0].key().handle, h1);
+        assert_eq!(
+            prepared.state_delta.bases()[0].key().lease_generation.get(),
+            3
+        );
+        assert_eq!(prepared.state_delta.bases()[1].committed_generation(), 14);
+        assert_eq!(prepared.state_delta.bases()[1].key().handle, h2);
+        assert_eq!(
+            prepared.state_delta.bases()[1].key().lease_generation.get(),
+            4
+        );
+        assert!(
+            prepared
+                .state_delta
+                .payload()
+                .entries()
+                .iter()
+                .all(|entry| entry.progress() == StateProgress::new(5, 5))
+        );
+
+        let failed_snapshots = snapshots(0.0, f32::MAX, StateProgress::new(4, 4));
+        let before = failed_snapshots
+            .entries()
+            .iter()
+            .map(|entry| entry.payload().values()[0])
+            .collect::<Vec<_>>();
+        let failure = match executor().execute_stateful_traced(
+            &graph,
+            &schema,
+            &batch,
+            &failed_snapshots,
+            map([(
+                value_id("x"),
+                f32(&[1, 1], TensorLayout::RowMajor, &[f32::MAX]),
+            )]),
+            map([
+                (
+                    weight_id("k1"),
+                    f32(&[1, 1, 2], TensorLayout::RowMajor, &[0.0, 1.0]),
+                ),
+                (
+                    weight_id("k2"),
+                    f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+                ),
+            ]),
+        ) {
+            Err(CpuReferenceStatefulExecutionError::Execution(error)) => error,
+            Err(_) => panic!("runtime overflow must be an execution failure"),
+            Ok(_) => panic!("second convolution overflow must fail"),
+        };
+        assert_eq!(failure.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(failure.trace.completed_node_count, 1);
+        assert_eq!(failure.trace.completed_nodes[0].id, node_id("conv-1"));
+        assert_eq!(
+            failed_snapshots
+                .entries()
+                .iter()
+                .map(|entry| entry.payload().values()[0])
+                .collect::<Vec<_>>(),
+            before
+        );
+
+        let wrong_progress = snapshots(0.0, 0.0, StateProgress::new(3, 4));
+        let progress_error = match executor().execute_stateful_traced(
+            &graph,
+            &schema,
+            &batch,
+            &wrong_progress,
+            map([(value_id("x"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0]))]),
+            map([
+                (
+                    weight_id("k1"),
+                    f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+                ),
+                (
+                    weight_id("k2"),
+                    f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+                ),
+            ]),
+        ) {
+            Err(CpuReferenceStatefulExecutionError::Execution(error)) => error,
+            _ => panic!("wrong snapshot progress must fail admission"),
+        };
+        assert_eq!(progress_error.reason_code, "state_progress");
+        assert_eq!(progress_error.trace.completed_node_count, 0);
+        assert!(
+            wrong_progress
+                .entries()
+                .iter()
+                .all(|entry| entry.payload().values() == [0.0])
+        );
+    }
+
+    #[test]
+    fn stateful_public_full_chunk_matches_two_prepared_chunks() {
+        let state_id = StateId::new("chunk-history").unwrap();
+        let graph = |tokens| {
+            let mut graph = conv_graph(
+                &[tokens, 1],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                1,
+                3,
+            );
+            graph.nodes[0].states = vec![state_id.clone()];
+            graph
+        };
+        let schema = StateSchema::new(
+            "chunk-schema",
+            vec![StateSpec {
+                id: state_id.clone(),
+                kind: StateKind::ConvolutionHistory,
+                ownership: StateOwnership::RequestLayer { layer_index: 0 },
+                format: NumericalFormat::F32,
+                layout: StateLayout::ConvolutionHistory {
+                    channels: 1,
+                    history_tokens: 2,
+                },
+                transaction: StateTransactionContract::Transactional {
+                    initialization: StateInitialization::FromSnapshot,
+                    execution: StateExecutionProtocol::PrepareExecuteCommit,
+                    reset: StateResetProtocol::Required,
+                    snapshot_restore: SnapshotRestorePolicy::Optional,
+                },
+            }],
+        )
+        .unwrap();
+        let handle = StateHandle::new(12).unwrap();
+        let initial = |nonce| {
+            StateSnapshotSet::new(
+                StateOwnerEpoch::new(6).unwrap(),
+                NonZeroU64::new(nonce).unwrap(),
+                vec![
+                    StateSnapshot::new(
+                        StateBaseVersion::new(
+                            StateKey::new(
+                                21,
+                                state_id.clone(),
+                                handle,
+                                LeaseGeneration::new(7).unwrap(),
+                            )
+                            .unwrap(),
+                            4,
+                        )
+                        .unwrap(),
+                        StateProgress::new(2, 2),
+                        CpuStatePayload::new(
+                            NumericalFormat::F32,
+                            StateLayout::ConvolutionHistory {
+                                channels: 1,
+                                history_tokens: 2,
+                            },
+                            vec![10.0, 20.0],
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap()
+        };
+        let batch = |width, prefix, nonce| ExecutionBatch {
+            phase: ExecutionPhase::CachedPrefixPrefill,
+            compatibility_key_sha256: "c".repeat(64),
+            commit_nonce: nonce,
+            common_chunk_width: width,
+            packed_token_count: width,
+            items: vec![ExecutionBatchItem {
+                request_id: 21,
+                packed: TokenRange::new(0, width),
+                prefix_len: prefix,
+                absolute_start_position: prefix,
+                source: TokenRange::new(prefix, width),
+                destination: TokenRange::new(0, width),
+                state_bindings: vec![BatchStateBinding {
+                    state_id: state_id.clone(),
+                    handle,
+                    uses_paged_kv: false,
+                }],
+                block_table: vec![],
+            }],
+            workspace: WorkspacePlan {
+                capacity_bytes: 1_000,
+                resident_bytes: 0,
+                persistent_state_bytes: 0,
+                temporary_activation_bytes: 0,
+                operator_workspace_bytes: 0,
+                required_headroom_bytes: 0,
+            },
+        };
+        let weights = || {
+            map([(
+                weight_id("kernel"),
+                f32(&[1, 1, 3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+            )])
+        };
+        let full_snapshots = initial(9);
+        let full = executor()
+            .execute_stateful_traced(
+                &graph(2),
+                &schema,
+                &batch(2, 2, 9),
+                &full_snapshots,
+                map([(
+                    value_id("x"),
+                    f32(&[2, 1], TensorLayout::RowMajor, &[1.0, 2.0]),
+                )]),
+                weights(),
+            )
+            .unwrap();
+        let full_output = full.execution.outputs[&value_id("y")]
+            .f32_parts()
+            .unwrap()
+            .2
+            .to_vec();
+        let full_final = full.state_delta.payload().entries()[0]
+            .payload()
+            .values()
+            .to_vec();
+
+        let first_snapshots = initial(7);
+        let first = executor()
+            .execute_stateful_traced(
+                &graph(1),
+                &schema,
+                &batch(1, 2, 7),
+                &first_snapshots,
+                map([(value_id("x"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0]))]),
+                weights(),
+            )
+            .unwrap();
+        let first_output = first.execution.outputs[&value_id("y")]
+            .f32_parts()
+            .unwrap()
+            .2[0];
+        let (_, _, first_bases, first_payload) = first.state_delta.into_parts();
+        let mut first_entries = first_payload.entries;
+        let first_entry = first_entries.pop().unwrap();
+        let next_snapshots = StateSnapshotSet::new(
+            StateOwnerEpoch::new(6).unwrap(),
+            NonZeroU64::new(8).unwrap(),
+            vec![
+                StateSnapshot::new(
+                    StateBaseVersion::new(
+                        first_entry.key,
+                        first_bases[0].committed_generation() + 1,
+                    )
+                    .unwrap(),
+                    first_entry.progress,
+                    first_entry.payload,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let second = executor()
+            .execute_stateful_traced(
+                &graph(1),
+                &schema,
+                &batch(1, 3, 8),
+                &next_snapshots,
+                map([(value_id("x"), f32(&[1, 1], TensorLayout::RowMajor, &[2.0]))]),
+                weights(),
+            )
+            .unwrap();
+        let second_output = second.execution.outputs[&value_id("y")]
+            .f32_parts()
+            .unwrap()
+            .2[0];
+        assert_eq!(full_output, vec![first_output, second_output]);
+        assert_eq!(
+            second.state_delta.payload().entries()[0].payload().values(),
+            full_final
+        );
+        assert_eq!(
+            second.state_delta.payload().entries()[0].progress(),
+            StateProgress::new(4, 4)
+        );
     }
 
     #[test]
