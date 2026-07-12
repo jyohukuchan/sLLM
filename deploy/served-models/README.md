@@ -19,12 +19,11 @@ and runs the gateway's strict validator before publishing the output. Re-run it
 after every worker build; a checked-in hash would silently become stale.
 
 The SQ8 profile can be materialized from the current promoted product. The AQ4
-resident worker implementation is available, but the compatibility product
-currently has no `promotion.json`, so AQ4 manifest generation remains
-intentionally fail-closed until the resident path passes real-model validation
-and a promotion receipt is published. Do not invent a receipt or placeholder
-hash. Update `source_commit_from_receipt` only if the reviewed AQ4 receipt uses
-a different field layout.
+profile additionally requires an `ullm.aq4_resident_promotion.v1` receipt bound
+to verified resident-vs-legacy evidence. Generate that evidence with
+`tools/run-aq4-resident-promotion-evidence.py` and publish the receipt with
+`tools/write-aq4-resident-promotion-receipt.py`. Do not invent a receipt or
+placeholder hash.
 
 Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release

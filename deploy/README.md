@@ -248,7 +248,7 @@ docker inspect --format '{{.State.Health.Status}}' open-webui
 - The context limit is 4096 tokens and the gateway rejects overflow without truncating chat history.
 - The API is text-only Chat Completions for one loaded model at a time. Tools, structured output guarantees, multimodal input, embeddings, and the Responses API are not supported.
 - Request stop strings and automatic whole-turn history truncation are not implemented. Model EOS, maximum-token completion, and the OpenWebUI Stop action are supported.
-- The initial AQ4 compatibility worker reloads the package for every request and publishes token events after generation completes. It is suitable for integration validation, but resident AQ4 weights and live token streaming remain required for interactive latency.
+- AQ4 legacy mode remains available as a transition and rollback path and reloads the package for every request. Manifest mode uses the resident AQ4 session and streams token events live; production deployments should use manifest mode.
 - TLS termination and multi-tenant authorization are outside this local bridge-only deployment.
 
 ## Operations

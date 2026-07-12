@@ -1,0 +1,45 @@
+{
+  "schema_version": "ullm.aq4_resident_openwebui_smoke.v1",
+  "manifest_sha256": "c2ce3265f2e21fcf8ef3e11ff720c860a43988df764090aee450107282edd61b",
+  "model_id": "ullm-qwen3.5-9b-aq4",
+  "worker_binary_sha256": "a7218f269cf88c1fd85e2893ee2e6632ea179defeecd898ecd5a3efd2fc80650",
+  "checks": {
+    "manifest_service_ready": true,
+    "models_endpoint": true,
+    "streaming_eos": true,
+    "max_tokens_termination": true,
+    "long_prompt": true,
+    "client_disconnect_cancel": true,
+    "post_cancel_request": true,
+    "openwebui_browser": true,
+    "openwebui_metrics_visible": true,
+    "page_errors": 0,
+    "systemd_restarts_after_fixed_deployment": 0
+  },
+  "long_prompt": {
+    "prompt_tokens": 1011,
+    "completion_tokens": 2,
+    "prompt_per_second": 63.63816192057901,
+    "predicted_per_second": 94.32785835577864,
+    "finish_reason": "length",
+    "termination_reason": "max_tokens",
+    "progress_points": [128, 256, 384, 512, 640, 768, 896, 1011]
+  },
+  "eos_response": {
+    "text": "2",
+    "finish_reason": "stop",
+    "termination_reason": "eos_token"
+  },
+  "cancel": {
+    "reason": "client_disconnect",
+    "outcome": "cancelled",
+    "reset_complete": true,
+    "post_cancel_text": "7"
+  },
+  "browser": {
+    "assistant_text": "BROWSER_OK",
+    "metrics": ["predicted_per_second", "finish_reason", "termination_reason"],
+    "screenshot": "browser-smoke.png"
+  },
+  "verified": true
+}
