@@ -5,6 +5,7 @@ pub mod aq;
 pub mod aq4_package_runtime;
 pub mod aq4_worker_backend;
 pub mod backend_dispatch;
+pub mod cpu_reference_executor;
 pub mod decode_runner;
 pub mod decoder;
 pub mod execution_batch;
