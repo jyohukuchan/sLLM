@@ -1061,6 +1061,24 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
                 ));
             }
         };
+        // Dispatch returns only after every requested invocation has been launched and its
+        // successful operation records have been collected.  Account for that physical work
+        // before the stream synchronization below: synchronization can fail after dispatch, and
+        // a partial terminal audit must still retain the invocation and token-equivalent counts.
+        // Commit/progress stay below synchronization and the post-sync cancellation check.
+        if let (Some(contract), Some(audit)) = (
+            self.execution_contract.as_deref(),
+            self.active_operation_audit.as_mut(),
+        ) {
+            if let Err(error) =
+                audit.observe_prefill_chunk(phase, execution_width, contract, &execution_steps)
+            {
+                self.model.mark_prefill_chunk_uncommitted();
+                return self.fail(format!(
+                    "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
+                ));
+            }
+        }
         if let Err(error) = self.model.synchronize_after_prefill_chunk() {
             self.model.mark_prefill_chunk_uncommitted();
             self.last_terminal_operation_audit =
@@ -1076,19 +1094,6 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             return self.fail(format!(
                 "Qwen3.5 AQ4 prefill chunk synchronization failed: {error}"
             ));
-        }
-        if let (Some(contract), Some(audit)) = (
-            self.execution_contract.as_deref(),
-            self.active_operation_audit.as_mut(),
-        ) {
-            if let Err(error) =
-                audit.observe_prefill_chunk(phase, execution_width, contract, &execution_steps)
-            {
-                self.model.mark_prefill_chunk_uncommitted();
-                return self.fail(format!(
-                    "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
-                ));
-            }
         }
         if cancel.is_cancelled() {
             self.model.mark_prefill_chunk_uncommitted();
@@ -1199,7 +1204,15 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             reset_complete: true,
         };
         let audit_layers = self.execution_contract.as_ref().map_or(0, Vec::len);
-        let terminal_audit = if let Some(audit) = self.active_operation_audit.as_ref() {
+        // A failed dispatch/synchronization already produced the authoritative terminal audit.
+        // Resetting that request is allowed as a cleanup-only transition, but must not relabel
+        // the failure as an ordinary cancellation in the retained audit.
+        let failed_terminal_audit = (self.status == Qwen35Aq4SessionStatus::Failed)
+            .then(|| self.last_terminal_operation_audit.clone())
+            .flatten();
+        let terminal_audit = if let Some(audit) = failed_terminal_audit {
+            Some(audit)
+        } else if let Some(audit) = self.active_operation_audit.as_ref() {
             if outcome == ReleaseOutcome::Cancelled {
                 Some(audit.partial(audit_layers, "cancelled", None, None, None))
             } else {
@@ -1486,10 +1499,7 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
     }
 
     fn abort_and_reset(&mut self) -> Result<ReleaseSummary, String> {
-        if matches!(
-            self.status,
-            Qwen35Aq4SessionStatus::Ready | Qwen35Aq4SessionStatus::Failed
-        ) {
+        if self.status == Qwen35Aq4SessionStatus::Ready {
             return Err(format!(
                 "Qwen3.5 AQ4 abort requires an active reusable request, got {:?}",
                 self.status
@@ -1813,6 +1823,7 @@ mod tests {
         fail_dispatch_phase: Option<ExecutionPhase>,
         failed_operation: Option<(usize, usize)>,
         cancel_on_prefill_sync: Option<CancellationToken>,
+        fail_prefill_sync: bool,
         native_hybrid_prefill: bool,
     }
 
@@ -1937,7 +1948,11 @@ mod tests {
             if let Some(cancel) = self.cancel_on_prefill_sync.take() {
                 cancel.cancel();
             }
-            Ok(())
+            if self.fail_prefill_sync {
+                Err("scripted prefill synchronization failure".to_string())
+            } else {
+                Ok(())
+            }
         }
 
         fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
@@ -2355,6 +2370,62 @@ mod tests {
         assert_eq!(audit.physical_operation_invocations, 48 + 16 * 2);
         assert_eq!(audit.token_equivalent_operation_coverage, 128);
         assert!(!audit.coverage_complete);
+    }
+
+    #[test]
+    fn native_prefill_sync_failure_retains_audit_before_and_after_reset() {
+        let execution_width = 2;
+        let mut session = audited_session(&[]);
+        session.model.context = 256;
+        session.model.native_hybrid_prefill = true;
+        session.model.fail_prefill_sync = true;
+        session.execution_contract = Some(native_hybrid_contract(execution_width));
+        session
+            .start_request(
+                request("sync-fail", &vec![4; execution_width], 1),
+                CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert!(
+            session
+                .prepare_advance()
+                .unwrap_err()
+                .contains("prefill chunk synchronization failed")
+        );
+        assert_eq!(session.status(), Qwen35Aq4SessionStatus::Failed);
+        assert_eq!(
+            session
+                .active
+                .as_ref()
+                .expect("failed sync keeps the active request for cleanup")
+                .prompt_tokens_processed,
+            0
+        );
+        let audit = session.last_terminal_operation_audit().unwrap();
+        assert_eq!(audit.outcome, "synchronization_failed");
+        assert_eq!(
+            audit.physical_operation_invocations,
+            u64::try_from(48 + 16 * execution_width).unwrap()
+        );
+        assert_eq!(
+            audit.token_equivalent_operation_coverage,
+            u64::try_from(64 * execution_width).unwrap()
+        );
+        assert_eq!(audit.prefill_chunks_executed, 1);
+        assert_eq!(audit.prefill_tokens_executed, execution_width as u64);
+        assert_eq!(audit.prefill_tokens_committed, 0);
+        assert_eq!(audit.prefill_width_histogram[execution_width], 1);
+        assert!(!audit.coverage_complete);
+
+        let summary = session.abort_and_reset().unwrap();
+        assert_eq!(summary.outcome, ReleaseOutcome::Cancelled);
+        assert_eq!(session.model.resets, 1);
+        assert_eq!(session.status(), Qwen35Aq4SessionStatus::Ready);
+        assert_eq!(
+            session.last_terminal_operation_audit().unwrap().outcome,
+            "synchronization_failed"
+        );
     }
 
     #[test]
