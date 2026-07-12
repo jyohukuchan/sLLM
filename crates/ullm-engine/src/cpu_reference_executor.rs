@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU64;
 
 use crate::model_graph::{
     ActivationKind, GraphNode, GraphNodeKind, MAX_GRAPH_DECLARATIONS, MAX_GRAPH_ENDPOINTS,
@@ -38,7 +39,8 @@ use crate::{
     },
     state_transaction::{
         PreparedStateDelta, StateBaseVersion, StateKey, StateProgress, StateSnapshotSet,
-        StateTransactionError,
+        StateTransactionError, StateTransactionErrorKind, StateTransactionErrorStage,
+        StateTransactionOwner,
     },
 };
 
@@ -597,6 +599,31 @@ pub struct CpuReferencePreparedExecution {
     pub state_delta: PreparedStateDelta<CpuPreparedStatePayload>,
 }
 
+/// Outputs made visible only after their accompanying state delta committed atomically.
+#[must_use = "a committed CPU execution contains the owner commit receipt"]
+#[derive(Debug)]
+pub struct CpuReferenceCommittedExecution<R> {
+    execution: CpuReferenceTracedExecution,
+    commit_receipt: R,
+}
+
+impl<R> CpuReferenceCommittedExecution<R> {
+    /// Returns the outputs and bounded trace released after commit success.
+    pub fn execution(&self) -> &CpuReferenceTracedExecution {
+        &self.execution
+    }
+
+    /// Returns the persistent owner's commit receipt.
+    pub fn commit_receipt(&self) -> &R {
+        &self.commit_receipt
+    }
+
+    /// Consumes the wrapper into the execution and owner receipt.
+    pub fn into_parts(self) -> (CpuReferenceTracedExecution, R) {
+        (self.execution, self.commit_receipt)
+    }
+}
+
 /// Distinguishes graph execution failures from transaction-protocol failures.
 #[derive(Debug)]
 pub enum CpuReferenceStatefulExecutionError {
@@ -614,6 +641,99 @@ impl fmt::Display for CpuReferenceStatefulExecutionError {
 }
 
 impl std::error::Error for CpuReferenceStatefulExecutionError {}
+
+/// Stable stage of an owner-driven stateful CPU execution failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuReferenceOwnerExecutionStage {
+    Admission,
+    Begin,
+    Execution,
+    Commit,
+}
+
+/// Typed failure from admission through owner commit.
+///
+/// A commit failure does not trigger `abort`: [`StateTransactionOwner::commit`] consumes the
+/// delta, and its atomic root-swap contract must leave committed state unchanged on failure.
+#[derive(Debug)]
+pub enum CpuReferenceOwnerExecutionFailure {
+    Admission(CpuReferenceExecutionFailure),
+    Begin {
+        error: StateTransactionError,
+        trace: CpuReferenceExecutionTrace,
+    },
+    Execution(CpuReferenceStatefulExecutionError),
+    Commit {
+        error: StateTransactionError,
+        trace: CpuReferenceExecutionTrace,
+    },
+}
+
+impl CpuReferenceOwnerExecutionFailure {
+    pub const fn stage(&self) -> CpuReferenceOwnerExecutionStage {
+        match self {
+            Self::Admission(_) => CpuReferenceOwnerExecutionStage::Admission,
+            Self::Begin { .. } => CpuReferenceOwnerExecutionStage::Begin,
+            Self::Execution(_) => CpuReferenceOwnerExecutionStage::Execution,
+            Self::Commit { .. } => CpuReferenceOwnerExecutionStage::Commit,
+        }
+    }
+
+    pub fn trace(&self) -> &CpuReferenceExecutionTrace {
+        match self {
+            Self::Admission(error) => &error.trace,
+            Self::Begin { trace, .. } | Self::Commit { trace, .. } => trace,
+            Self::Execution(CpuReferenceStatefulExecutionError::Execution(error)) => &error.trace,
+            Self::Execution(CpuReferenceStatefulExecutionError::Transaction(_)) => {
+                &EMPTY_CPU_REFERENCE_EXECUTION_TRACE
+            }
+        }
+    }
+
+    /// Returns the CPU reason code when the failure originated in CPU admission/execution.
+    pub fn reason_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Admission(error) => Some(error.reason_code),
+            Self::Execution(CpuReferenceStatefulExecutionError::Execution(error)) => {
+                Some(error.reason_code)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the typed transaction reason when the owner/transaction protocol failed.
+    pub fn transaction_error(&self) -> Option<&StateTransactionError> {
+        match self {
+            Self::Begin { error, .. } | Self::Commit { error, .. } => Some(error),
+            Self::Execution(CpuReferenceStatefulExecutionError::Transaction(error)) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CpuReferenceOwnerExecutionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => {
+                write!(formatter, "CPU owner execution admission failed: {error}")
+            }
+            Self::Begin { error, .. } => write!(formatter, "CPU owner begin failed: {error}"),
+            Self::Execution(error) => {
+                write!(formatter, "CPU owner execution failed: {error}")
+            }
+            Self::Commit { error, .. } => write!(formatter, "CPU owner commit failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CpuReferenceOwnerExecutionFailure {}
+
+static EMPTY_CPU_REFERENCE_EXECUTION_TRACE: CpuReferenceExecutionTrace =
+    CpuReferenceExecutionTrace {
+        completed_node_count: 0,
+        completed_nodes: Vec::new(),
+        completed_nodes_truncated: false,
+    };
 
 #[derive(Debug, Clone)]
 struct CpuReferenceFault {
@@ -831,9 +951,506 @@ impl CpuReferenceExecutor {
         }
     }
 
+    fn validate_stateful_admission(
+        &self,
+        graph: &ModelGraph,
+        state_schema: &StateSchema,
+        batch: &ExecutionBatch,
+        inputs: &BTreeMap<ValueId, HostTensor>,
+        weights: &BTreeMap<WeightId, HostTensor>,
+    ) -> Result<(), CpuReferenceExecutionFailure> {
+        let fail = |class, reason_code, message: String| {
+            CpuReferenceFault::global(class, reason_code, message)
+                .into_failure(CpuReferenceExecutionTrace::default())
+        };
+        let state_edges = graph
+            .nodes
+            .iter()
+            .try_fold(0_usize, |count, node| count.checked_add(node.states.len()));
+        let state_bindings = batch.items.iter().try_fold(0_usize, |count, item| {
+            count.checked_add(item.state_bindings.len())
+        });
+        if state_edges.is_none()
+            || state_bindings.is_none()
+            || state_edges.unwrap_or(usize::MAX) > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || state_bindings.unwrap_or(usize::MAX) > MAX_CPU_REFERENCE_STATE_ENTRIES
+            || state_schema.entries.len() > MAX_CPU_REFERENCE_STATE_ENTRIES
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::Resource,
+                "state_metadata",
+                "stateful CPU metadata exceeds the 4096-entry limit".into(),
+            ));
+        }
+        batch
+            .validate()
+            .map_err(|message| fail(CpuReferenceFailureClass::InvalidInput, "batch", message))?;
+        graph.validate().map_err(|message| {
+            fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "graph_validation",
+                message,
+            )
+        })?;
+        state_schema
+            .validate_against_graph(graph)
+            .map_err(|message| {
+                fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_schema",
+                    message,
+                )
+            })?;
+        let [item] = batch.items.as_slice() else {
+            return Err(fail(
+                CpuReferenceFailureClass::Unsupported,
+                "batch_shape",
+                "stateful CPU reference requires exactly one request item".into(),
+            ));
+        };
+        if !item.block_table.is_empty()
+            || item
+                .state_bindings
+                .iter()
+                .any(|binding| binding.uses_paged_kv)
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::Unsupported,
+                "paged_state",
+                "stateful CPU reference mode does not accept paged KV metadata".into(),
+            ));
+        }
+        let chunk = usize::try_from(batch.common_chunk_width).map_err(|_| {
+            fail(
+                CpuReferenceFailureClass::Resource,
+                "batch_shape",
+                "common chunk width does not fit usize".into(),
+            )
+        })?;
+        let mut supported_state_edges = 0_usize;
+        for node in &graph.nodes {
+            if node.states.is_empty() {
+                continue;
+            }
+            if !matches!(
+                node.kind,
+                GraphNodeKind::CausalDepthwiseConv1d { .. }
+                    | GraphNodeKind::GatedDeltaRuleScan { .. }
+            ) || node.states.len() != 1
+            {
+                return Err(CpuReferenceFault::node(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "stateful_node",
+                    "only stateful CausalDepthwiseConv1d and GatedDeltaRuleScan are supported in this CPU mode",
+                )
+                .into_failure(CpuReferenceExecutionTrace::default()));
+            }
+            supported_state_edges += 1;
+            let input_spec = graph
+                .values
+                .iter()
+                .find(|value| value.id == node.inputs[0])
+                .map(|value| &value.tensor)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Internal,
+                        "value_spec_lookup",
+                        "stateful node input spec is missing".into(),
+                    )
+                })?;
+            if input_spec.shape.len() != 2
+                || input_spec.shape[0] != chunk
+                || !matches!(
+                    input_spec.layout,
+                    TensorLayout::RowMajor | TensorLayout::TokensHidden
+                )
+            {
+                return Err(fail(
+                    CpuReferenceFailureClass::Unsupported,
+                    "stateful_dense_shape",
+                    "stateful node input must be dense rank-2 [chunk, width]".into(),
+                ));
+            }
+        }
+        if supported_state_edges == 0 {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_mapping",
+                "stateful execution requires at least one supported state edge".into(),
+            ));
+        }
+        if item.state_bindings.len() != supported_state_edges {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_mapping",
+                "graph and batch state sets must match exactly".into(),
+            ));
+        }
+        for (index, binding) in item.state_bindings.iter().enumerate() {
+            if item.state_bindings[..index]
+                .iter()
+                .any(|prior| prior.state_id == binding.state_id)
+            {
+                return Err(fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "state_binding",
+                    "duplicate batch state binding".into(),
+                ));
+            }
+            let reference_count = graph
+                .nodes
+                .iter()
+                .filter(|node| node.states.first() == Some(&binding.state_id))
+                .count();
+            if reference_count != 1 {
+                return Err(fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    if reference_count > 1 {
+                        "state_reuse"
+                    } else {
+                        "state_mapping"
+                    },
+                    "each batch state must be referenced by exactly one graph node".into(),
+                ));
+            }
+        }
+
+        validate_binding_map_admission(inputs, MAX_GRAPH_ENDPOINTS, "graph input").map_err(
+            |message| fail(CpuReferenceFailureClass::InvalidInput, "input_map", message),
+        )?;
+        validate_binding_map_admission(weights, MAX_GRAPH_DECLARATIONS, "logical weight").map_err(
+            |message| {
+                fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "weight_map",
+                    message,
+                )
+            },
+        )?;
+        if inputs.len() != graph.inputs.len()
+            || graph.inputs.iter().any(|id| !inputs.contains_key(id))
+            || inputs.keys().any(|id| !graph.inputs.contains(id))
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "input_map",
+                "graph input map does not exactly match graph inputs".into(),
+            ));
+        }
+        if weights.len() != graph.weights.len()
+            || graph
+                .weights
+                .iter()
+                .any(|spec| !weights.contains_key(&spec.id))
+            || weights
+                .keys()
+                .any(|id| !graph.weights.iter().any(|spec| &spec.id == id))
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "weight_map",
+                "logical weight map does not exactly match graph weights".into(),
+            ));
+        }
+        for input_id in &graph.inputs {
+            let tensor = inputs.get(input_id).ok_or_else(|| {
+                fail(
+                    CpuReferenceFailureClass::Internal,
+                    "input_map",
+                    "validated graph input disappeared during admission".into(),
+                )
+            })?;
+            let spec = &graph
+                .values
+                .iter()
+                .find(|value| &value.id == input_id)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Internal,
+                        "value_spec_lookup",
+                        "validated graph input has no value spec".into(),
+                    )
+                })?
+                .tensor;
+            validate_tensor_against(tensor, spec, "graph input").map_err(|message| {
+                fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "input_payload",
+                    message,
+                )
+            })?;
+            validate_cpu_input_layout(spec, "graph input").map_err(|message| {
+                fail(
+                    CpuReferenceFailureClass::Unsupported,
+                    "input_layout",
+                    message,
+                )
+            })?;
+        }
+        for weight_spec in &graph.weights {
+            let tensor = weights.get(&weight_spec.id).ok_or_else(|| {
+                fail(
+                    CpuReferenceFailureClass::Internal,
+                    "weight_map",
+                    "validated logical weight disappeared during admission".into(),
+                )
+            })?;
+            if weight_spec.tensor.format != NumericalFormat::F32 {
+                return Err(fail(
+                    CpuReferenceFailureClass::Unsupported,
+                    "weight_format",
+                    "CPU reference does not materialize non-F32 logical weights".into(),
+                ));
+            }
+            validate_tensor_against(tensor, &weight_spec.tensor, "logical weight").map_err(
+                |message| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "weight_payload",
+                        message,
+                    )
+                },
+            )?;
+            validate_cpu_weight_layout(&weight_spec.tensor, "logical weight").map_err(
+                |message| {
+                    fail(
+                        CpuReferenceFailureClass::Unsupported,
+                        "weight_layout",
+                        message,
+                    )
+                },
+            )?;
+        }
+        let value_specs = graph
+            .values
+            .iter()
+            .map(|value| (value.id.clone(), &value.tensor))
+            .collect::<BTreeMap<_, _>>();
+        let weight_specs = graph
+            .weights
+            .iter()
+            .map(|weight| (weight.id.clone(), &weight.tensor))
+            .collect::<BTreeMap<_, _>>();
+        let resource_plan = preflight_graph_mode(
+            graph,
+            &value_specs,
+            &weight_specs,
+            CpuExecutionMode::StatefulSingleRequestDense,
+        )
+        .map_err(|fault| fault.into_failure(CpuReferenceExecutionTrace::default()))?;
+        let mut bound_state_specs = Vec::new();
+        bound_state_specs
+            .try_reserve_exact(item.state_bindings.len())
+            .map_err(|_| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "metadata_allocation",
+                    "bound state spec index allocation failed".into(),
+                )
+            })?;
+        for binding in &item.state_bindings {
+            let state_spec = state_schema
+                .entries
+                .iter()
+                .find(|state_spec| state_spec.id == binding.state_id)
+                .ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "state_mapping",
+                        "batch binding has no matching state spec".into(),
+                    )
+                })?;
+            bound_state_specs.push(state_spec);
+        }
+        bound_state_specs.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        if bound_state_specs
+            .windows(2)
+            .any(|pair| pair[0].id == pair[1].id)
+        {
+            return Err(fail(
+                CpuReferenceFailureClass::InvalidInput,
+                "state_binding",
+                "duplicate bound state spec".into(),
+            ));
+        }
+        let state_elements = bound_state_specs.iter().try_fold(
+            0_usize,
+            |total, state_spec| -> Result<usize, CpuReferenceExecutionFailure> {
+                let elements = state_spec.logical_element_count().map_err(|message| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "state_schema",
+                        message,
+                    )
+                })?;
+                let elements = usize::try_from(elements).map_err(|_| {
+                    fail(
+                        CpuReferenceFailureClass::Resource,
+                        "element_budget",
+                        "state schema element count does not fit usize".into(),
+                    )
+                })?;
+                total.checked_add(elements).ok_or_else(|| {
+                    fail(
+                        CpuReferenceFailureClass::Resource,
+                        "element_budget",
+                        "state schema aggregate element count overflows usize".into(),
+                    )
+                })
+            },
+        )?;
+        let initial_elements = checked_payload_elements(inputs, "graph input payload")
+            .map_err(|message| {
+                fail(
+                    CpuReferenceFailureClass::InvalidInput,
+                    "input_payload",
+                    message,
+                )
+            })?
+            .checked_add(
+                checked_payload_elements(weights, "logical weight payload").map_err(|message| {
+                    fail(
+                        CpuReferenceFailureClass::InvalidInput,
+                        "weight_payload",
+                        message,
+                    )
+                })?,
+            )
+            .and_then(|elements| elements.checked_add(state_elements))
+            .ok_or_else(|| {
+                fail(
+                    CpuReferenceFailureClass::Resource,
+                    "element_budget",
+                    "CPU reference initial payload element count overflows usize".into(),
+                )
+            })?;
+        checked_total_element_budget(
+            initial_elements,
+            resource_plan.execution_elements,
+            MAX_CPU_REFERENCE_TOTAL_ELEMENTS,
+        )
+        .map_err(|message| {
+            fail(
+                CpuReferenceFailureClass::Resource,
+                "element_budget",
+                message,
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Runs shared admission, snapshots through the owner, prepares state, and atomically commits.
+    ///
+    /// Outputs are returned only after commit succeeds. A commit error consumes the delta and is
+    /// returned without calling `abort`; owner implementations must preserve their atomic-failure
+    /// contract. Call [`Self::execute_stateful_traced`] directly when the caller needs to choose
+    /// explicitly between commit and abort.
+    pub fn execute_stateful_with_owner_traced<O>(
+        &self,
+        owner: &mut O,
+        graph: &ModelGraph,
+        state_schema: &StateSchema,
+        batch: &ExecutionBatch,
+        inputs: BTreeMap<ValueId, HostTensor>,
+        weights: BTreeMap<WeightId, HostTensor>,
+    ) -> Result<CpuReferenceCommittedExecution<O::CommitReceipt>, CpuReferenceOwnerExecutionFailure>
+    where
+        O: StateTransactionOwner<
+                SnapshotPayload = CpuStatePayload,
+                DeltaPayload = CpuPreparedStatePayload,
+            >,
+    {
+        self.validate_stateful_admission(graph, state_schema, batch, &inputs, &weights)
+            .map_err(CpuReferenceOwnerExecutionFailure::Admission)?;
+        let snapshots =
+            owner
+                .begin(batch)
+                .map_err(|error| CpuReferenceOwnerExecutionFailure::Begin {
+                    error,
+                    trace: CpuReferenceExecutionTrace::default(),
+                })?;
+        let expected_nonce = NonZeroU64::new(batch.commit_nonce).ok_or_else(|| {
+            CpuReferenceOwnerExecutionFailure::Begin {
+                error: StateTransactionError::new(
+                    StateTransactionErrorStage::Begin,
+                    StateTransactionErrorKind::StaleNonce,
+                    "validated execution batch nonce is zero",
+                ),
+                trace: CpuReferenceExecutionTrace::default(),
+            }
+        })?;
+        if snapshots.owner_epoch() != owner.owner_epoch() {
+            return Err(CpuReferenceOwnerExecutionFailure::Begin {
+                error: StateTransactionError::new(
+                    StateTransactionErrorStage::Begin,
+                    StateTransactionErrorKind::OwnerMismatch,
+                    "owner snapshot epoch does not match current owner epoch",
+                ),
+                trace: CpuReferenceExecutionTrace::default(),
+            });
+        }
+        if snapshots.batch_nonce() != expected_nonce {
+            return Err(CpuReferenceOwnerExecutionFailure::Begin {
+                error: StateTransactionError::new(
+                    StateTransactionErrorStage::Begin,
+                    StateTransactionErrorKind::StaleNonce,
+                    "owner snapshot nonce does not match execution batch nonce",
+                ),
+                trace: CpuReferenceExecutionTrace::default(),
+            });
+        }
+        let prepared = self
+            .execute_stateful_traced_admitted(
+                graph,
+                state_schema,
+                batch,
+                &snapshots,
+                inputs,
+                weights,
+            )
+            .map_err(CpuReferenceOwnerExecutionFailure::Execution)?;
+        let CpuReferencePreparedExecution {
+            execution,
+            state_delta,
+        } = prepared;
+        let CpuReferenceTracedExecution { outputs, trace } = execution;
+        let commit_receipt = match owner.commit(state_delta) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                return Err(CpuReferenceOwnerExecutionFailure::Commit { error, trace });
+            }
+        };
+        Ok(CpuReferenceCommittedExecution {
+            execution: CpuReferenceTracedExecution { outputs, trace },
+            commit_receipt,
+        })
+    }
+
     /// Executes one dense single-request chunk and prepares, but does not commit,
     /// convolution-history state updates.
     pub fn execute_stateful_traced(
+        &self,
+        graph: &ModelGraph,
+        state_schema: &StateSchema,
+        batch: &ExecutionBatch,
+        snapshots: &StateSnapshotSet<CpuStatePayload>,
+        inputs: BTreeMap<ValueId, HostTensor>,
+        weights: BTreeMap<WeightId, HostTensor>,
+    ) -> Result<CpuReferencePreparedExecution, CpuReferenceStatefulExecutionError> {
+        self.validate_stateful_admission(graph, state_schema, batch, &inputs, &weights)
+            .map_err(CpuReferenceStatefulExecutionError::Execution)?;
+        self.execute_stateful_traced_admitted(
+            graph,
+            state_schema,
+            batch,
+            snapshots,
+            inputs,
+            weights,
+        )
+    }
+
+    fn execute_stateful_traced_admitted(
         &self,
         graph: &ModelGraph,
         state_schema: &StateSchema,
@@ -6266,8 +6883,8 @@ mod tests {
         NormalizationKind, PositiveF32, StateId, WeightSpec,
     };
     use crate::state_schema::{
-        SnapshotRestorePolicy, StateExecutionProtocol, StateInitialization, StateKind,
-        StateResetProtocol, StateSpec, StateTransactionContract,
+        CustomStateKindId, SnapshotRestorePolicy, StateExecutionProtocol, StateInitialization,
+        StateKind, StateResetProtocol, StateSpec, StateTransactionContract,
     };
     use crate::state_transaction::{
         LeaseGeneration, StateBaseVersion, StateOwnerEpoch, StateSnapshot,
@@ -10445,6 +11062,1003 @@ mod tests {
                 .collect::<Vec<_>>(),
             before
         );
+    }
+
+    fn clone_cpu_state_payload_for_test(payload: &CpuStatePayload) -> CpuStatePayload {
+        CpuStatePayload::new(
+            payload.format().clone(),
+            payload.layout().clone(),
+            payload.values().to_vec(),
+        )
+        .unwrap()
+    }
+
+    struct FakeCpuRootEntry {
+        key: StateKey,
+        generation: u64,
+        progress: StateProgress,
+        payload: CpuStatePayload,
+    }
+
+    impl FakeCpuRootEntry {
+        fn clone_for_test(&self) -> Self {
+            Self {
+                key: self.key.clone(),
+                generation: self.generation,
+                progress: self.progress,
+                payload: clone_cpu_state_payload_for_test(&self.payload),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FakeCpuCommitReceipt {
+        entry_count: usize,
+        owner_epoch: StateOwnerEpoch,
+        batch_nonce: NonZeroU64,
+    }
+
+    struct FakeCpuStateOwner {
+        epoch: StateOwnerEpoch,
+        nonce: NonZeroU64,
+        root: Vec<FakeCpuRootEntry>,
+        begin_count: usize,
+        commit_count: usize,
+        abort_count: usize,
+        root_before_commit: Option<Vec<(StateKey, u64, StateProgress, Vec<f32>)>>,
+        fail_begin: bool,
+        snapshot_fault: Option<FakeCpuSnapshotFault>,
+        inject_generation_conflict: bool,
+        fail_second_entry_fence: bool,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeCpuSnapshotFault {
+        WrongEpoch,
+        WrongNonce,
+    }
+
+    impl FakeCpuStateOwner {
+        fn transaction_error(
+            stage: StateTransactionErrorStage,
+            kind: StateTransactionErrorKind,
+            message: &'static str,
+        ) -> StateTransactionError {
+            StateTransactionError::new(stage, kind, message)
+        }
+
+        fn root_evidence(&self) -> Vec<(StateKey, u64, StateProgress, Vec<f32>)> {
+            self.root
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.key.clone(),
+                        entry.generation,
+                        entry.progress,
+                        entry.payload.values().to_vec(),
+                    )
+                })
+                .collect()
+        }
+
+        fn validate_batch_keys(&self, batch: &ExecutionBatch) -> Result<(), StateTransactionError> {
+            let [item] = batch.items.as_slice() else {
+                return Err(Self::transaction_error(
+                    StateTransactionErrorStage::Begin,
+                    StateTransactionErrorKind::InvalidInput,
+                    "fake CPU owner requires one request item",
+                ));
+            };
+            if NonZeroU64::new(batch.commit_nonce) != Some(self.nonce)
+                || item.state_bindings.len() != self.root.len()
+            {
+                return Err(Self::transaction_error(
+                    StateTransactionErrorStage::Begin,
+                    StateTransactionErrorKind::StaleNonce,
+                    "fake CPU owner batch metadata is stale",
+                ));
+            }
+            for root in &self.root {
+                let binding = item
+                    .state_bindings
+                    .iter()
+                    .find(|binding| binding.state_id == root.key.state_id)
+                    .ok_or_else(|| {
+                        Self::transaction_error(
+                            StateTransactionErrorStage::Begin,
+                            StateTransactionErrorKind::LeaseMismatch,
+                            "fake CPU owner state binding is missing",
+                        )
+                    })?;
+                if root.key.request_id != item.request_id || root.key.handle != binding.handle {
+                    return Err(Self::transaction_error(
+                        StateTransactionErrorStage::Begin,
+                        StateTransactionErrorKind::LeaseMismatch,
+                        "fake CPU owner request or handle is stale",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn validate_delta_metadata(
+            &self,
+            epoch: StateOwnerEpoch,
+            nonce: NonZeroU64,
+            bases: &[StateBaseVersion],
+            stage: StateTransactionErrorStage,
+        ) -> Result<(), StateTransactionError> {
+            if epoch != self.epoch {
+                return Err(Self::transaction_error(
+                    stage,
+                    StateTransactionErrorKind::OwnerMismatch,
+                    "fake CPU owner epoch is stale",
+                ));
+            }
+            if nonce != self.nonce {
+                return Err(Self::transaction_error(
+                    stage,
+                    StateTransactionErrorKind::StaleNonce,
+                    "fake CPU owner nonce is stale",
+                ));
+            }
+            if bases.len() != self.root.len() {
+                return Err(Self::transaction_error(
+                    stage,
+                    StateTransactionErrorKind::InvalidInput,
+                    "fake CPU owner base set is incomplete",
+                ));
+            }
+            for root in &self.root {
+                let base = bases
+                    .iter()
+                    .find(|base| base.key() == &root.key)
+                    .ok_or_else(|| {
+                        Self::transaction_error(
+                            stage,
+                            StateTransactionErrorKind::LeaseMismatch,
+                            "fake CPU owner base lease is not current",
+                        )
+                    })?;
+                if base.committed_generation() != root.generation {
+                    return Err(Self::transaction_error(
+                        stage,
+                        StateTransactionErrorKind::StaleGeneration,
+                        "fake CPU owner committed generation is stale",
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl StateTransactionOwner for FakeCpuStateOwner {
+        type SnapshotPayload = CpuStatePayload;
+        type DeltaPayload = CpuPreparedStatePayload;
+        type CommitReceipt = FakeCpuCommitReceipt;
+
+        fn owner_epoch(&self) -> StateOwnerEpoch {
+            self.epoch
+        }
+
+        fn begin(
+            &mut self,
+            batch: &ExecutionBatch,
+        ) -> Result<StateSnapshotSet<Self::SnapshotPayload>, StateTransactionError> {
+            self.begin_count += 1;
+            if self.fail_begin {
+                return Err(Self::transaction_error(
+                    StateTransactionErrorStage::Begin,
+                    StateTransactionErrorKind::Internal,
+                    "injected fake CPU owner begin failure",
+                ));
+            }
+            self.validate_batch_keys(batch)?;
+            let mut snapshots = Vec::with_capacity(self.root.len());
+            for root in &self.root {
+                snapshots.push(StateSnapshot::new(
+                    StateBaseVersion::new(root.key.clone(), root.generation)?,
+                    root.progress,
+                    clone_cpu_state_payload_for_test(&root.payload),
+                )?);
+            }
+            let epoch = match self.snapshot_fault {
+                Some(FakeCpuSnapshotFault::WrongEpoch) => {
+                    StateOwnerEpoch::new(self.epoch.get().checked_add(1).unwrap())?
+                }
+                _ => self.epoch,
+            };
+            let nonce = match self.snapshot_fault {
+                Some(FakeCpuSnapshotFault::WrongNonce) => {
+                    NonZeroU64::new(self.nonce.get().checked_add(1).unwrap()).unwrap()
+                }
+                _ => self.nonce,
+            };
+            StateSnapshotSet::new(epoch, nonce, snapshots)
+        }
+
+        fn commit(
+            &mut self,
+            delta: PreparedStateDelta<Self::DeltaPayload>,
+        ) -> Result<Self::CommitReceipt, StateTransactionError> {
+            self.commit_count += 1;
+            let (epoch, nonce, bases, payload) = delta.into_parts();
+            self.root_before_commit = Some(self.root_evidence());
+            self.validate_delta_metadata(epoch, nonce, &bases, StateTransactionErrorStage::Commit)?;
+            if self.inject_generation_conflict {
+                return Err(Self::transaction_error(
+                    StateTransactionErrorStage::Commit,
+                    StateTransactionErrorKind::StaleGeneration,
+                    "injected current-generation view conflicts with prepared bases",
+                ));
+            }
+            if payload.entries.len() != self.root.len() {
+                return Err(Self::transaction_error(
+                    StateTransactionErrorStage::Commit,
+                    StateTransactionErrorKind::InvalidInput,
+                    "fake CPU owner payload set is incomplete",
+                ));
+            }
+
+            let mut staged = self
+                .root
+                .iter()
+                .map(FakeCpuRootEntry::clone_for_test)
+                .collect::<Vec<_>>();
+            let mut seen = vec![false; self.root.len()];
+            for (index, prepared) in payload.entries.into_iter().enumerate() {
+                let root_index = self
+                    .root
+                    .iter()
+                    .position(|root| root.key == prepared.key)
+                    .ok_or_else(|| {
+                        Self::transaction_error(
+                            StateTransactionErrorStage::Commit,
+                            StateTransactionErrorKind::LeaseMismatch,
+                            "fake CPU owner prepared payload lease is not current",
+                        )
+                    })?;
+                if seen[root_index]
+                    || prepared.progress != self.root[root_index].progress.checked_advance(1)?
+                    || prepared.payload.format() != self.root[root_index].payload.format()
+                    || prepared.payload.layout() != self.root[root_index].payload.layout()
+                {
+                    return Err(Self::transaction_error(
+                        StateTransactionErrorStage::Commit,
+                        StateTransactionErrorKind::InvalidInput,
+                        "fake CPU owner prepared entry metadata is invalid",
+                    ));
+                }
+                seen[root_index] = true;
+                if self.fail_second_entry_fence && index == 1 {
+                    return Err(Self::transaction_error(
+                        StateTransactionErrorStage::Commit,
+                        StateTransactionErrorKind::Internal,
+                        "injected second-entry readiness fence failure",
+                    ));
+                }
+                staged[root_index].generation = staged[root_index]
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        Self::transaction_error(
+                            StateTransactionErrorStage::Commit,
+                            StateTransactionErrorKind::Internal,
+                            "fake CPU owner generation overflow",
+                        )
+                    })?;
+                staged[root_index].progress = prepared.progress;
+                staged[root_index].payload = prepared.payload;
+            }
+            self.root = staged;
+            Ok(FakeCpuCommitReceipt {
+                entry_count: self.root.len(),
+                owner_epoch: epoch,
+                batch_nonce: nonce,
+            })
+        }
+
+        fn abort(
+            &mut self,
+            delta: PreparedStateDelta<Self::DeltaPayload>,
+        ) -> Result<(), StateTransactionError> {
+            self.abort_count += 1;
+            let (epoch, nonce, bases, payload) = delta.into_parts();
+            self.validate_delta_metadata(epoch, nonce, &bases, StateTransactionErrorStage::Abort)?;
+            if payload.entries.len() != self.root.len() {
+                return Err(Self::transaction_error(
+                    StateTransactionErrorStage::Abort,
+                    StateTransactionErrorKind::InvalidInput,
+                    "fake CPU owner abort payload set is incomplete",
+                ));
+            }
+            for root in &self.root {
+                let prepared = payload
+                    .entries
+                    .iter()
+                    .find(|entry| entry.key == root.key)
+                    .ok_or_else(|| {
+                        Self::transaction_error(
+                            StateTransactionErrorStage::Abort,
+                            StateTransactionErrorKind::LeaseMismatch,
+                            "fake CPU owner abort payload lease is not current",
+                        )
+                    })?;
+                if prepared.progress != root.progress.checked_advance(1)?
+                    || prepared.payload.format() != root.payload.format()
+                    || prepared.payload.layout() != root.payload.layout()
+                {
+                    return Err(Self::transaction_error(
+                        StateTransactionErrorStage::Abort,
+                        StateTransactionErrorKind::InvalidInput,
+                        "fake CPU owner abort payload metadata is invalid",
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct OwnerFixture {
+        graph: ModelGraph,
+        schema: StateSchema,
+        batch: ExecutionBatch,
+        inputs: BTreeMap<ValueId, HostTensor>,
+        weights: BTreeMap<WeightId, HostTensor>,
+        owner: FakeCpuStateOwner,
+    }
+
+    fn owner_fixture() -> OwnerFixture {
+        let conv_state = StateId::new("owner-conv").unwrap();
+        let scan_state = StateId::new("owner-scan").unwrap();
+        let mut graph = conv_graph(&[1, 1], NumericalFormat::F32, TensorLayout::RowMajor, 1, 2);
+        graph.nodes[0].states = vec![conv_state.clone()];
+        let mut scan = scan_graph(
+            &[1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+            1,
+            1,
+        );
+        scan.nodes[0].states = vec![scan_state.clone()];
+        graph.graph_id = "owner-conv-scan".into();
+        graph.inputs.extend(scan.inputs);
+        graph.outputs.extend(scan.outputs);
+        graph.values.extend(scan.values);
+        graph.nodes.extend(scan.nodes);
+        let transaction = StateTransactionContract::Transactional {
+            initialization: StateInitialization::FromSnapshot,
+            execution: StateExecutionProtocol::PrepareExecuteCommit,
+            reset: StateResetProtocol::Required,
+            snapshot_restore: SnapshotRestorePolicy::Optional,
+        };
+        let schema = StateSchema::new(
+            "owner-schema",
+            vec![
+                StateSpec {
+                    id: conv_state.clone(),
+                    kind: StateKind::ConvolutionHistory,
+                    ownership: StateOwnership::RequestLayer { layer_index: 0 },
+                    format: NumericalFormat::F32,
+                    layout: StateLayout::ConvolutionHistory {
+                        channels: 1,
+                        history_tokens: 1,
+                    },
+                    transaction,
+                },
+                StateSpec {
+                    id: scan_state.clone(),
+                    kind: StateKind::Recurrent,
+                    ownership: StateOwnership::RequestLayer { layer_index: 1 },
+                    format: NumericalFormat::F32,
+                    layout: StateLayout::RecurrentBank {
+                        instances: 1,
+                        rows: 1,
+                        cols: 1,
+                    },
+                    transaction,
+                },
+            ],
+        )
+        .unwrap();
+        let conv_handle = StateHandle::new(71).unwrap();
+        let scan_handle = StateHandle::new(72).unwrap();
+        let batch = ExecutionBatch {
+            phase: ExecutionPhase::CachedPrefixPrefill,
+            compatibility_key_sha256: "f".repeat(64),
+            commit_nonce: 23,
+            common_chunk_width: 1,
+            packed_token_count: 1,
+            items: vec![ExecutionBatchItem {
+                request_id: 81,
+                packed: TokenRange::new(0, 1),
+                prefix_len: 2,
+                absolute_start_position: 2,
+                source: TokenRange::new(2, 1),
+                destination: TokenRange::new(0, 1),
+                state_bindings: vec![
+                    BatchStateBinding {
+                        state_id: conv_state.clone(),
+                        handle: conv_handle,
+                        uses_paged_kv: false,
+                    },
+                    BatchStateBinding {
+                        state_id: scan_state.clone(),
+                        handle: scan_handle,
+                        uses_paged_kv: false,
+                    },
+                ],
+                block_table: vec![],
+            }],
+            workspace: WorkspacePlan {
+                capacity_bytes: 1_000,
+                resident_bytes: 0,
+                persistent_state_bytes: 0,
+                temporary_activation_bytes: 0,
+                operator_workspace_bytes: 0,
+                required_headroom_bytes: 0,
+            },
+        };
+        let epoch = StateOwnerEpoch::new(19).unwrap();
+        let nonce = NonZeroU64::new(23).unwrap();
+        let root = vec![
+            FakeCpuRootEntry {
+                key: StateKey::new(
+                    81,
+                    conv_state,
+                    conv_handle,
+                    LeaseGeneration::new(3).unwrap(),
+                )
+                .unwrap(),
+                generation: 8,
+                progress: StateProgress::new(2, 2),
+                payload: CpuStatePayload::new(
+                    NumericalFormat::F32,
+                    StateLayout::ConvolutionHistory {
+                        channels: 1,
+                        history_tokens: 1,
+                    },
+                    vec![2.0],
+                )
+                .unwrap(),
+            },
+            FakeCpuRootEntry {
+                key: StateKey::new(
+                    81,
+                    scan_state,
+                    scan_handle,
+                    LeaseGeneration::new(4).unwrap(),
+                )
+                .unwrap(),
+                generation: 9,
+                progress: StateProgress::new(2, 2),
+                payload: CpuStatePayload::new(
+                    NumericalFormat::F32,
+                    StateLayout::RecurrentBank {
+                        instances: 1,
+                        rows: 1,
+                        cols: 1,
+                    },
+                    vec![1.0],
+                )
+                .unwrap(),
+            },
+        ];
+        OwnerFixture {
+            graph,
+            schema,
+            batch,
+            inputs: map([
+                (value_id("x"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0])),
+                (value_id("q"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0])),
+                (value_id("k"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0])),
+                (value_id("v"), f32(&[1, 1], TensorLayout::RowMajor, &[2.0])),
+                (value_id("d"), f32(&[1, 1], TensorLayout::RowMajor, &[0.0])),
+                (value_id("b"), f32(&[1, 1], TensorLayout::RowMajor, &[1.0])),
+            ]),
+            weights: map([(
+                weight_id("kernel"),
+                f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+            )]),
+            owner: FakeCpuStateOwner {
+                epoch,
+                nonce,
+                root,
+                begin_count: 0,
+                commit_count: 0,
+                abort_count: 0,
+                root_before_commit: None,
+                fail_begin: false,
+                snapshot_fault: None,
+                inject_generation_conflict: false,
+                fail_second_entry_fence: false,
+            },
+        }
+    }
+
+    #[test]
+    fn owner_convenience_commits_conv_and_scan_before_releasing_outputs() {
+        let mut fixture = owner_fixture();
+        fixture.schema.entries.push(StateSpec {
+            id: StateId::new("unbound-model-table").unwrap(),
+            kind: StateKind::Custom(CustomStateKindId::new("model-table").unwrap()),
+            ownership: StateOwnership::ModelSharedReadOnly,
+            format: NumericalFormat::F32,
+            layout: StateLayout::Custom {
+                logical_elements: MAX_CPU_REFERENCE_TOTAL_ELEMENTS,
+            },
+            transaction: StateTransactionContract::ReadOnly,
+        });
+        assert!(
+            fixture.schema.entries[2].logical_element_count().unwrap()
+                >= u64::try_from(MAX_CPU_REFERENCE_TOTAL_ELEMENTS).unwrap()
+        );
+        let before = fixture.owner.root_evidence();
+        let committed = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &fixture.graph,
+                &fixture.schema,
+                &fixture.batch,
+                fixture.inputs,
+                fixture.weights,
+            )
+            .unwrap();
+        assert_eq!(fixture.owner.begin_count, 1);
+        assert_eq!(fixture.owner.commit_count, 1);
+        assert_eq!(fixture.owner.abort_count, 0);
+        assert_eq!(fixture.owner.root_before_commit.as_ref(), Some(&before));
+        assert_eq!(committed.execution().trace.completed_node_count, 2);
+        assert_eq!(committed.execution().outputs.len(), 2);
+        assert_eq!(committed.commit_receipt().entry_count, 2);
+        assert_eq!(committed.commit_receipt().owner_epoch, fixture.owner.epoch);
+        assert_eq!(committed.commit_receipt().batch_nonce, fixture.owner.nonce);
+        for (index, entry) in fixture.owner.root.iter().enumerate() {
+            assert_eq!(entry.generation, before[index].1 + 1);
+            assert_eq!(entry.progress, StateProgress::new(3, 3));
+            assert_ne!(entry.payload.values(), before[index].3);
+        }
+        let (execution, receipt) = committed.into_parts();
+        assert_eq!(execution.trace.completed_node_count, 2);
+        assert_eq!(receipt.entry_count, 2);
+    }
+
+    #[test]
+    fn owner_convenience_execution_failure_never_commits_or_aborts() {
+        let mut fixture = owner_fixture();
+        fixture.owner.root[1].payload = CpuStatePayload::new(
+            NumericalFormat::F32,
+            StateLayout::RecurrentBank {
+                instances: 1,
+                rows: 1,
+                cols: 1,
+            },
+            vec![f32::MAX],
+        )
+        .unwrap();
+        if let HostTensor::F32 { data, .. } = fixture.inputs.get_mut(&value_id("q")).unwrap() {
+            data[0] = 2.0;
+        }
+        if let HostTensor::F32 { data, .. } = fixture.inputs.get_mut(&value_id("b")).unwrap() {
+            data[0] = 0.0;
+        }
+        let before = fixture.owner.root_evidence();
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &fixture.graph,
+                &fixture.schema,
+                &fixture.batch,
+                fixture.inputs,
+                fixture.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Execution);
+        assert_eq!(failure.trace().completed_node_count, 1);
+        assert_eq!(failure.reason_code(), Some("runtime_numerical"));
+        assert_eq!(fixture.owner.commit_count, 0);
+        assert_eq!(fixture.owner.abort_count, 0);
+        assert_eq!(fixture.owner.root_evidence(), before);
+    }
+
+    #[test]
+    fn owner_convenience_begin_failure_has_empty_trace_and_no_execution() {
+        let mut fixture = owner_fixture();
+        fixture.owner.fail_begin = true;
+        let before = fixture.owner.root_evidence();
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &fixture.graph,
+                &fixture.schema,
+                &fixture.batch,
+                fixture.inputs,
+                fixture.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Begin);
+        assert_eq!(failure.trace(), &CpuReferenceExecutionTrace::default());
+        assert_eq!(
+            failure.transaction_error().unwrap().stage(),
+            StateTransactionErrorStage::Begin
+        );
+        assert_eq!(fixture.owner.begin_count, 1);
+        assert_eq!(fixture.owner.commit_count, 0);
+        assert_eq!(fixture.owner.root_evidence(), before);
+    }
+
+    #[test]
+    fn owner_convenience_rejects_wrong_snapshot_epoch_and_nonce_at_begin_boundary() {
+        for (fault, expected_kind) in [
+            (
+                FakeCpuSnapshotFault::WrongEpoch,
+                StateTransactionErrorKind::OwnerMismatch,
+            ),
+            (
+                FakeCpuSnapshotFault::WrongNonce,
+                StateTransactionErrorKind::StaleNonce,
+            ),
+        ] {
+            let mut fixture = owner_fixture();
+            fixture.owner.snapshot_fault = Some(fault);
+            let before = fixture.owner.root_evidence();
+            let failure = executor()
+                .execute_stateful_with_owner_traced(
+                    &mut fixture.owner,
+                    &fixture.graph,
+                    &fixture.schema,
+                    &fixture.batch,
+                    fixture.inputs,
+                    fixture.weights,
+                )
+                .unwrap_err();
+            assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Begin);
+            assert_eq!(failure.trace(), &CpuReferenceExecutionTrace::default());
+            assert_eq!(failure.transaction_error().unwrap().kind(), expected_kind);
+            assert_eq!(fixture.owner.begin_count, 1);
+            assert_eq!(fixture.owner.commit_count, 0);
+            assert_eq!(fixture.owner.abort_count, 0);
+            assert_eq!(fixture.owner.root_evidence(), before);
+        }
+    }
+
+    #[test]
+    fn owner_convenience_commit_conflict_does_not_publish_or_partially_mutate() {
+        let mut fixture = owner_fixture();
+        fixture.owner.inject_generation_conflict = true;
+        let before = fixture.owner.root_evidence();
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &fixture.graph,
+                &fixture.schema,
+                &fixture.batch,
+                fixture.inputs,
+                fixture.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Commit);
+        assert_eq!(failure.trace().completed_node_count, 2);
+        assert_eq!(
+            failure.transaction_error().unwrap().kind(),
+            StateTransactionErrorKind::StaleGeneration
+        );
+        assert_eq!(fixture.owner.root[0].generation, before[0].1);
+        assert_eq!(fixture.owner.root[0].payload.values(), before[0].3);
+        assert_eq!(fixture.owner.root[1].generation, before[1].1);
+        assert_eq!(fixture.owner.root[1].payload.values(), before[1].3);
+        assert_eq!(fixture.owner.root_evidence(), before);
+        assert_eq!(fixture.owner.abort_count, 0);
+    }
+
+    #[test]
+    fn fake_owner_second_entry_failure_keeps_the_entire_root_unchanged() {
+        let mut fixture = owner_fixture();
+        fixture.owner.fail_second_entry_fence = true;
+        let before = fixture.owner.root_evidence();
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &fixture.graph,
+                &fixture.schema,
+                &fixture.batch,
+                fixture.inputs,
+                fixture.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Commit);
+        assert_eq!(fixture.owner.root_evidence(), before);
+        assert_eq!(fixture.owner.commit_count, 1);
+        assert_eq!(fixture.owner.abort_count, 0);
+    }
+
+    #[test]
+    fn low_level_cpu_prepare_remains_compatible_with_explicit_owner_abort() {
+        let mut fixture = owner_fixture();
+        let before = fixture.owner.root_evidence();
+        let snapshots = fixture.owner.begin(&fixture.batch).unwrap();
+        let prepared = executor()
+            .execute_stateful_traced(
+                &fixture.graph,
+                &fixture.schema,
+                &fixture.batch,
+                &snapshots,
+                fixture.inputs,
+                fixture.weights,
+            )
+            .unwrap();
+        fixture.owner.abort(prepared.state_delta).unwrap();
+        assert_eq!(fixture.owner.root_evidence(), before);
+        assert_eq!(fixture.owner.commit_count, 0);
+        assert_eq!(fixture.owner.abort_count, 1);
+    }
+
+    #[test]
+    fn owner_convenience_rejects_invalid_metadata_before_begin() {
+        let mut invalid_batch = owner_fixture();
+        invalid_batch.batch.commit_nonce = 0;
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut invalid_batch.owner,
+                &invalid_batch.graph,
+                &invalid_batch.schema,
+                &invalid_batch.batch,
+                invalid_batch.inputs,
+                invalid_batch.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Admission);
+        assert_eq!(invalid_batch.owner.begin_count, 0);
+
+        let mut invalid_graph = owner_fixture();
+        invalid_graph.graph.outputs.push(value_id("missing-output"));
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut invalid_graph.owner,
+                &invalid_graph.graph,
+                &invalid_graph.schema,
+                &invalid_graph.batch,
+                invalid_graph.inputs,
+                invalid_graph.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Admission);
+        assert_eq!(invalid_graph.owner.begin_count, 0);
+
+        let mut invalid_schema = owner_fixture();
+        invalid_schema.schema.entries[0].layout = StateLayout::ConvolutionHistory {
+            channels: 2,
+            history_tokens: 1,
+        };
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut invalid_schema.owner,
+                &invalid_schema.graph,
+                &invalid_schema.schema,
+                &invalid_schema.batch,
+                invalid_schema.inputs,
+                invalid_schema.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Admission);
+        assert_eq!(invalid_schema.owner.begin_count, 0);
+
+        let mut invalid_input = owner_fixture();
+        invalid_input.inputs.insert(
+            value_id("x"),
+            f32(&[1, 2], TensorLayout::RowMajor, &[1.0, 2.0]),
+        );
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut invalid_input.owner,
+                &invalid_input.graph,
+                &invalid_input.schema,
+                &invalid_input.batch,
+                invalid_input.inputs,
+                invalid_input.weights,
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Admission);
+        assert_eq!(invalid_input.owner.begin_count, 0);
+    }
+
+    #[test]
+    fn owner_convenience_rejects_stateful_work_budget_before_begin() {
+        let state_id = StateId::new("owner-work-state").unwrap();
+        let mut graph = scan_graph(
+            &[1_024],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            16,
+            64,
+            8,
+        );
+        graph.nodes[0].states = vec![state_id.clone()];
+        let schema = StateSchema::new(
+            "owner-work-schema",
+            vec![StateSpec {
+                id: state_id.clone(),
+                kind: StateKind::Recurrent,
+                ownership: StateOwnership::RequestLayer { layer_index: 0 },
+                format: NumericalFormat::F32,
+                layout: StateLayout::RecurrentBank {
+                    instances: 16,
+                    rows: 64,
+                    cols: 8,
+                },
+                transaction: StateTransactionContract::Transactional {
+                    initialization: StateInitialization::FromSnapshot,
+                    execution: StateExecutionProtocol::PrepareExecuteCommit,
+                    reset: StateResetProtocol::Required,
+                    snapshot_restore: SnapshotRestorePolicy::Optional,
+                },
+            }],
+        )
+        .unwrap();
+        let mut fixture = owner_fixture();
+        let handle = StateHandle::new(91).unwrap();
+        let batch = ExecutionBatch {
+            phase: ExecutionPhase::ColdPrefill,
+            compatibility_key_sha256: "a".repeat(64),
+            commit_nonce: 23,
+            common_chunk_width: 1_024,
+            packed_token_count: 1_024,
+            items: vec![ExecutionBatchItem {
+                request_id: 81,
+                packed: TokenRange::new(0, 1_024),
+                prefix_len: 0,
+                absolute_start_position: 0,
+                source: TokenRange::new(0, 1_024),
+                destination: TokenRange::new(0, 1_024),
+                state_bindings: vec![BatchStateBinding {
+                    state_id,
+                    handle,
+                    uses_paged_kv: false,
+                }],
+                block_table: vec![],
+            }],
+            workspace: WorkspacePlan {
+                capacity_bytes: 1_000,
+                resident_bytes: 0,
+                persistent_state_bytes: 0,
+                temporary_activation_bytes: 0,
+                operator_workspace_bytes: 0,
+                required_headroom_bytes: 0,
+            },
+        };
+        let mut inputs = BTreeMap::new();
+        for input_id in &graph.inputs {
+            let spec = &graph
+                .values
+                .iter()
+                .find(|value| &value.id == input_id)
+                .unwrap()
+                .tensor;
+            let elements = spec.shape.iter().product();
+            inputs.insert(
+                input_id.clone(),
+                HostTensor::f32(spec.shape.clone(), spec.layout.clone(), vec![0.0; elements])
+                    .unwrap(),
+            );
+        }
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &graph,
+                &schema,
+                &batch,
+                inputs,
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Admission);
+        assert_eq!(failure.reason_code(), Some("work_budget"), "{failure:?}");
+        assert_eq!(fixture.owner.begin_count, 0);
+        assert_eq!(fixture.owner.commit_count, 0);
+    }
+
+    #[test]
+    fn owner_convenience_counts_bound_request_state_for_element_budget() {
+        let state_id = StateId::new("owner-large-bound-state").unwrap();
+        let mut graph = scan_graph(
+            &[1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+            3_000,
+            3_000,
+        );
+        graph.nodes[0].states = vec![state_id.clone()];
+        let schema = StateSchema::new(
+            "owner-large-bound-schema",
+            vec![StateSpec {
+                id: state_id.clone(),
+                kind: StateKind::Recurrent,
+                ownership: StateOwnership::RequestLayer { layer_index: 0 },
+                format: NumericalFormat::F32,
+                layout: StateLayout::RecurrentBank {
+                    instances: 1,
+                    rows: 3_000,
+                    cols: 3_000,
+                },
+                transaction: StateTransactionContract::Transactional {
+                    initialization: StateInitialization::FromSnapshot,
+                    execution: StateExecutionProtocol::PrepareExecuteCommit,
+                    reset: StateResetProtocol::Required,
+                    snapshot_restore: SnapshotRestorePolicy::Optional,
+                },
+            }],
+        )
+        .unwrap();
+        let mut fixture = owner_fixture();
+        let batch = ExecutionBatch {
+            phase: ExecutionPhase::ColdPrefill,
+            compatibility_key_sha256: "b".repeat(64),
+            commit_nonce: 23,
+            common_chunk_width: 1,
+            packed_token_count: 1,
+            items: vec![ExecutionBatchItem {
+                request_id: 81,
+                packed: TokenRange::new(0, 1),
+                prefix_len: 0,
+                absolute_start_position: 0,
+                source: TokenRange::new(0, 1),
+                destination: TokenRange::new(0, 1),
+                state_bindings: vec![BatchStateBinding {
+                    state_id,
+                    handle: StateHandle::new(92).unwrap(),
+                    uses_paged_kv: false,
+                }],
+                block_table: vec![],
+            }],
+            workspace: WorkspacePlan {
+                capacity_bytes: 1_000,
+                resident_bytes: 0,
+                persistent_state_bytes: 0,
+                temporary_activation_bytes: 0,
+                operator_workspace_bytes: 0,
+                required_headroom_bytes: 0,
+            },
+        };
+        let mut inputs = BTreeMap::new();
+        for input_id in &graph.inputs {
+            let spec = &graph
+                .values
+                .iter()
+                .find(|value| &value.id == input_id)
+                .unwrap()
+                .tensor;
+            let elements = spec.shape.iter().product();
+            inputs.insert(
+                input_id.clone(),
+                HostTensor::f32(spec.shape.clone(), spec.layout.clone(), vec![0.0; elements])
+                    .unwrap(),
+            );
+        }
+        let failure = executor()
+            .execute_stateful_with_owner_traced(
+                &mut fixture.owner,
+                &graph,
+                &schema,
+                &batch,
+                inputs,
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(failure.stage(), CpuReferenceOwnerExecutionStage::Admission);
+        assert_eq!(failure.reason_code(), Some("element_budget"));
+        match failure {
+            CpuReferenceOwnerExecutionFailure::Admission(error) => {
+                assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(fixture.owner.begin_count, 0);
+        assert_eq!(fixture.owner.commit_count, 0);
     }
 
     #[test]
