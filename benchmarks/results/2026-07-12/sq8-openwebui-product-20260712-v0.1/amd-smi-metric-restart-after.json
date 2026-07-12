@@ -1,0 +1,407 @@
+{
+    "gpu_data": [
+        {
+            "gpu": 2,
+            "usage": {
+                "gfx_activity": {
+                    "value": 4,
+                    "unit": "%"
+                },
+                "umc_activity": {
+                    "value": 0,
+                    "unit": "%"
+                },
+                "mm_activity": {
+                    "value": 0,
+                    "unit": "%"
+                },
+                "vcn_activity": [
+                    {
+                        "value": 0,
+                        "unit": "%"
+                    },
+                    "N/A",
+                    "N/A",
+                    "N/A"
+                ],
+                "jpeg_activity": [
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    "N/A"
+                ],
+                "gfx_busy_inst": "N/A",
+                "jpeg_busy": "N/A",
+                "vcn_busy": "N/A"
+            },
+            "power": {
+                "socket_power": {
+                    "value": 16,
+                    "unit": "W"
+                },
+                "gfx_voltage": {
+                    "value": 706,
+                    "unit": "mV"
+                },
+                "soc_voltage": {
+                    "value": 822,
+                    "unit": "mV"
+                },
+                "mem_voltage": {
+                    "value": 1264,
+                    "unit": "mV"
+                },
+                "throttle_status": "THROTTLED",
+                "power_management": "ENABLED"
+            },
+            "clock": {
+                "gfx_0": {
+                    "clk": {
+                        "value": 121,
+                        "unit": "MHz"
+                    },
+                    "min_clk": "N/A",
+                    "max_clk": {
+                        "value": 0,
+                        "unit": "MHz"
+                    },
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_1": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_2": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_3": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_4": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_5": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_6": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "gfx_7": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "mem_0": {
+                    "clk": {
+                        "value": 96,
+                        "unit": "MHz"
+                    },
+                    "min_clk": {
+                        "value": 97,
+                        "unit": "MHz"
+                    },
+                    "max_clk": {
+                        "value": 1259,
+                        "unit": "MHz"
+                    },
+                    "clk_locked": "N/A",
+                    "deep_sleep": "ENABLED"
+                },
+                "vclk_0": {
+                    "clk": {
+                        "value": 25,
+                        "unit": "MHz"
+                    },
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "vclk_1": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "vclk_2": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "vclk_3": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "dclk_0": {
+                    "clk": {
+                        "value": 25,
+                        "unit": "MHz"
+                    },
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "dclk_1": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "dclk_2": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "dclk_3": {
+                    "clk": "N/A",
+                    "min_clk": "N/A",
+                    "max_clk": "N/A",
+                    "clk_locked": "N/A",
+                    "deep_sleep": "N/A"
+                },
+                "fclk_0": {
+                    "clk": {
+                        "value": 582,
+                        "unit": "MHz"
+                    },
+                    "min_clk": {
+                        "value": 313,
+                        "unit": "MHz"
+                    },
+                    "max_clk": {
+                        "value": 2400,
+                        "unit": "MHz"
+                    },
+                    "clk_locked": "N/A",
+                    "deep_sleep": "DISABLED"
+                },
+                "socclk_0": {
+                    "clk": {
+                        "value": 417,
+                        "unit": "MHz"
+                    },
+                    "min_clk": {
+                        "value": 417,
+                        "unit": "MHz"
+                    },
+                    "max_clk": {
+                        "value": 1476,
+                        "unit": "MHz"
+                    },
+                    "clk_locked": "N/A",
+                    "deep_sleep": "DISABLED"
+                }
+            },
+            "temperature": {
+                "edge": {
+                    "value": 49,
+                    "unit": "C"
+                },
+                "hotspot": {
+                    "value": 50,
+                    "unit": "C"
+                },
+                "mem": {
+                    "value": 48,
+                    "unit": "C"
+                }
+            },
+            "pcie": {
+                "width": 16,
+                "speed": {
+                    "value": 16,
+                    "unit": "GT/s"
+                },
+                "bandwidth": "N/A",
+                "replay_count": "N/A",
+                "l0_to_recovery_count": "N/A",
+                "replay_roll_over_count": "N/A",
+                "nak_sent_count": "N/A",
+                "nak_received_count": "N/A",
+                "current_bandwidth_sent": "N/A",
+                "current_bandwidth_received": "N/A",
+                "max_packet_size": "N/A",
+                "lc_perf_other_end_recovery": "N/A"
+            },
+            "ecc": {
+                "total_correctable_count": 0,
+                "total_uncorrectable_count": 0,
+                "total_deferred_count": 0,
+                "cache_correctable_count": 0,
+                "cache_uncorrectable_count": 0
+            },
+            "ecc_blocks": {
+                "UMC": {
+                    "correctable_count": 0,
+                    "uncorrectable_count": 0,
+                    "deferred_count": 0
+                }
+            },
+            "fan": {
+                "speed": 51,
+                "max": 255,
+                "rpm": 891,
+                "usage": {
+                    "value": 20.0,
+                    "unit": "%"
+                }
+            },
+            "voltage_curve": {
+                "point_0_frequency": "N/A",
+                "point_0_voltage": "N/A",
+                "point_1_frequency": "N/A",
+                "point_1_voltage": "N/A",
+                "point_2_frequency": "N/A",
+                "point_2_voltage": "N/A"
+            },
+            "overdrive": "N/A",
+            "mem_overdrive": "N/A",
+            "perf_level": "AMDSMI_DEV_PERF_LEVEL_AUTO",
+            "xgmi_err": "N/A",
+            "voltage": {
+                "vddboard": "N/A"
+            },
+            "energy": {
+                "total_energy_consumption": {
+                    "value": 0.0,
+                    "unit": "J"
+                }
+            },
+            "mem_usage": {
+                "total_vram": {
+                    "value": 32624,
+                    "unit": "MB"
+                },
+                "used_vram": {
+                    "value": 17512,
+                    "unit": "MB"
+                },
+                "free_vram": {
+                    "value": 15112,
+                    "unit": "MB"
+                },
+                "total_visible_vram": {
+                    "value": 32624,
+                    "unit": "MB"
+                },
+                "used_visible_vram": {
+                    "value": 17512,
+                    "unit": "MB"
+                },
+                "free_visible_vram": {
+                    "value": 15112,
+                    "unit": "MB"
+                },
+                "total_gtt": {
+                    "value": 56235,
+                    "unit": "MB"
+                },
+                "used_gtt": {
+                    "value": 32,
+                    "unit": "MB"
+                },
+                "free_gtt": {
+                    "value": 56203,
+                    "unit": "MB"
+                }
+            },
+            "throttle": {
+                "accumulation_counter": "N/A",
+                "prochot_accumulated": "N/A",
+                "ppt_accumulated": "N/A",
+                "socket_thermal_accumulated": "N/A",
+                "vr_thermal_accumulated": "N/A",
+                "hbm_thermal_accumulated": "N/A",
+                "gfx_clk_below_host_limit_accumulated": "N/A",
+                "gfx_clk_below_host_limit_power_accumulated": "N/A",
+                "gfx_clk_below_host_limit_thermal_accumulated": "N/A",
+                "total_gfx_clk_below_host_limit_accumulated": "N/A",
+                "low_utilization_accumulated": "N/A",
+                "prochot_violation_status": "N/A",
+                "ppt_violation_status": "N/A",
+                "socket_thermal_violation_status": "N/A",
+                "vr_thermal_violation_status": "N/A",
+                "hbm_thermal_violation_status": "N/A",
+                "gfx_clk_below_host_limit_violation_status": "N/A",
+                "gfx_clk_below_host_limit_power_violation_status": "N/A",
+                "gfx_clk_below_host_limit_thermal_violation_status": "N/A",
+                "total_gfx_clk_below_host_limit_violation_status": "N/A",
+                "low_utilization_violation_status": "N/A",
+                "prochot_violation_activity": "N/A",
+                "ppt_violation_activity": "N/A",
+                "socket_thermal_violation_activity": "N/A",
+                "vr_thermal_violation_activity": "N/A",
+                "hbm_thermal_violation_activity": "N/A",
+                "gfx_clk_below_host_limit_violation_activity": "N/A",
+                "gfx_clk_below_host_limit_power_violation_activity": "N/A",
+                "gfx_clk_below_host_limit_thermal_violation_activity": "N/A",
+                "total_gfx_clk_below_host_limit_violation_activity": "N/A",
+                "low_utilization_violation_activity": "N/A"
+            }
+        }
+    ]
+}

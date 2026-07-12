@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-F core deployment and OpenWebUI product path are complete; full release soak and validator remain
+Status: complete; P8-F full release campaign and independent validator passed on 2026-07-12
 
 Date: 2026-07-10
 
@@ -22,16 +22,20 @@ Concurrency definition: v0.1 has one active GPU request and no waiting request. 
 
 ## 今回の変更点
 
+- HEAD `f647a8aa8a78ddf0846b92fa700b8fa5a0995887`でP8-F full release campaignを完走し、独立validatorは全hard gateの通過を導出した。
+- 20 OpenWebUI chatとsmokeを合わせた21成功request、5種cancel、100 normal HTTP request、計画的worker failure、20 restart HTTP request、72 latency requestを完了した。
+- 公開成果物を別のvalidator実行で再構築し、`release-validation.json`のSHA-256が完全一致することを確認した。
+- campaign外のOpenWebUI通常chatはHTTP 200で`ULLM_PRODUCT_OK`を返し、gateway/workerとOpenWebUIはその後も安定している。
 - batchなしのB=1 worker、OpenAI gateway、SSE、systemd、bridge限定firewall、OpenWebUI接続まで実装した。
 - OpenWebUI v0.9.4の既存volumeとproviderを保持したまま、uLLMをindex 1のlocal providerとして追加した。
 - OpenWebUIにはOpenAI互換providerの機能的なcontext-length設定がないため、4096はmodel metadataへ記録し、実際の上限はgatewayの400判定を唯一の正とした。
 - OpenWebUIのtitle、follow-up、tag背景生成を無効化し、session署名鍵をroot管理ファイルへ固定した。
 - 日本語、英語、system、複数turn、code block、length、overflow、cancel、collision、sampling、browser描画、worker fatal restartを実機確認した。
-- コア製品smokeは合格したが、100要求のresource soak、HTTP latency matrix、post-header failure、最終validatorは未完である。
+- コア製品smokeに加え、100要求のresource soak、HTTP latency matrix、post-header failure、最終validatorも合格した。
 
 ## 次の行動
 
-P8-Fのrelease evidence schemaと`tools/validate-sq8-openwebui-release.py`を先に固定する。次に未完のStop buttonとpost-header failureを閉じ、20 chat/cancel予備soak、100 request resource soak、HTTP latency matrixの順に実行してrelease gateを閉じる。batch処理は追加しない。
+v0.1の初回OpenWebUI製品releaseは完了した。次の開発項目は実利用で得た計測値と要求から別計画として選び、request batchingは現時点で追加しない。
 
 ## 1. Objective
 
@@ -1408,8 +1412,12 @@ Implementation status (2026-07-11):
   loading, returned 200 after 44.533 seconds, and the next OpenWebUI chat passed.
 - Core evidence is at
   `benchmarks/results/2026-07-11/sq8-p8f-openwebui-product-smoke-v0.1/summary.json`.
-- This is not the final release gate. Stop-button automation, post-header
-  injected failure, full soak, latency matrix, and independent validator remain.
+- The final release campaign passed at HEAD
+  `f647a8aa8a78ddf0846b92fa700b8fa5a0995887`. Stop-button automation,
+  post-header injected failure, full soak, latency matrix, and the independent
+  validator all passed.
+- The immutable product evidence is recorded at
+  `benchmarks/results/2026-07-12/sq8-openwebui-product-20260712-v0.1/`.
 
 Tasks:
 
