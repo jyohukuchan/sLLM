@@ -1,0 +1,407 @@
+{
+  "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+  "source_commit": "9a1d292227d1dc41b71e6af70cd082d05116ce7a",
+  "created_at_unix_ns": 1783840956231212337,
+  "production_receipt_written": false,
+  "ephemeral_bundle": {
+    "receipt": {
+      "source_commit": "9a1d292227d1dc41b71e6af70cd082d05116ce7a"
+    },
+    "profile_sha256": "de6311820de861e7bc644814fb659c913e8cd0ee938239d462a44de9d8c085b2",
+    "manifest_sha256": "137ef7630be5a0e270089355af5f057b8822ad73b4df343919932cb4e16d2b5f",
+    "manifest": {
+      "schema_version": "ullm.served_model.v1",
+      "public": {
+        "id": "ullm-qwen3.5-9b-aq4",
+        "name": "uLLM Qwen3.5 9B AQ4",
+        "description": "Qwen3.5 9B served locally by uLLM AQ4_0.",
+        "upstream_id": "Qwen/Qwen3.5-9B",
+        "revision": "aq4-resident-v0.1",
+        "context_length": 4096
+      },
+      "generation": {
+        "max_completion_tokens": 512,
+        "vocab_size": 248320,
+        "eos_token_ids": [
+          248044,
+          248046
+        ],
+        "sampling": {
+          "top_k": 1,
+          "temperature": false,
+          "top_p": false
+        }
+      },
+      "format": {
+        "format_id": "AQ4_0",
+        "implementation_id": "qwen35_aq4_rdna4_v1"
+      },
+      "tokenizer": {
+        "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+        "transformers_version": "5.12.1",
+        "class": "Qwen2Tokenizer",
+        "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "files": {
+          "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+          "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        },
+        "template_options": {
+          "add_generation_prompt": true,
+          "enable_thinking": false
+        }
+      },
+      "worker": {
+        "protocol": "ullm.worker.v1",
+        "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
+        "binary_sha256": "f09c5877d4e8903f56da8d5dd550dfe02a46194b471a25fa0a609cf3b885baad",
+        "arguments": [
+          "--served-model-manifest",
+          "{manifest}"
+        ],
+        "required_environment": [
+          "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+          "ULLM_REQUIRE_HIP_ADD_KERNEL",
+          "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+          "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+          "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+          "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+          "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+          "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+          "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+          "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+          "ULLM_REQUIRE_HIP_TOP1_KERNEL"
+        ],
+        "identity": {
+          "device": "gfx1201",
+          "execution_profile": "rdna4_aq4_resident"
+        }
+      },
+      "product": {
+        "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1",
+        "artifact": null,
+        "package": {
+          "manifest_path": "package/manifest.json",
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+        }
+      },
+      "promotion": {
+        "source_commit": "9a1d292227d1dc41b71e6af70cd082d05116ce7a",
+        "receipt": "/tmp/ullm-aq4-promotion-evidence-u1x82bdx/smoke-promotion.json",
+        "receipt_sha256": "fd8d3ba285e108f1645131366f4d1696061db1b0a566eb34afc9119a5f8b5b82"
+      }
+    }
+  },
+  "worker_binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
+  "worker_binary_sha256": "f09c5877d4e8903f56da8d5dd550dfe02a46194b471a25fa0a609cf3b885baad",
+  "legacy_engine": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-engine",
+  "legacy_engine_sha256": "e132578354b2c64399dd3de6ca1a228490f2018a465c724c5bf2c7ab7180264d",
+  "resident": {
+    "mode": "resident",
+    "pid": 2396367,
+    "ready": {
+      "type": "ready",
+      "schema_version": "ullm.worker.v1",
+      "model": "ullm-qwen3.5-9b-aq4",
+      "model_revision": "aq4-resident-v0.1",
+      "artifact_content_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "device": "gfx1201",
+      "execution_profile": "rdna4_aq4_resident",
+      "context_length": 4096,
+      "max_new_tokens": 512
+    },
+    "cases": [
+      {
+        "id": "raw-p0001-g0004",
+        "prompt_token_ids": [
+          1
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          5328,
+          1438,
+          728,
+          310
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 1,
+          "prompt_ms": 96.582537,
+          "prompt_per_token_ms": 96.582537,
+          "prompt_per_second": 10.353838603349175,
+          "predicted_n": 4,
+          "predicted_ms": 71.217619,
+          "predicted_per_token_ms": 17.80440475,
+          "predicted_per_second": 56.16587659298186
+        }
+      },
+      {
+        "id": "raw-p0008-g0004",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          32948,
+          33898,
+          2110,
+          58716
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          8
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 8,
+          "prompt_ms": 163.306074,
+          "prompt_per_token_ms": 20.41325925,
+          "prompt_per_second": 48.98776759522123,
+          "predicted_n": 4,
+          "predicted_ms": 71.392921,
+          "predicted_per_token_ms": 17.84823025,
+          "predicted_per_second": 56.02796389294675
+        }
+      }
+    ],
+    "child_process_checks": [
+      {
+        "phase": "ready",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "sent:raw-p0001-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:started",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:progress",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:released",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "after:raw-p0001-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "sent:raw-p0008-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:started",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:progress",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:released",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "after:raw-p0008-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      }
+    ],
+    "clean_shutdown": true,
+    "stderr_tail": "{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"start\",\"prompt_tokens\":1,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":1,\"completion_tokens\":4,\"elapsed_ms\":170,\"outcome\":\"length\"}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"start\",\"prompt_tokens\":8,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":8,\"completion_tokens\":4,\"elapsed_ms\":236,\"outcome\":\"length\"}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"process_stopped\",\"phase\":\"process\"}\n"
+  },
+  "legacy": {
+    "mode": "legacy",
+    "pid": 2396718,
+    "ready": {
+      "type": "ready",
+      "schema_version": "ullm.worker.v1",
+      "model": "ullm-qwen3.5-9b-aq4",
+      "model_revision": "aq4-resident-v0.1",
+      "artifact_content_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "device": "gfx1201",
+      "execution_profile": "rdna4_aq4_cli_compat",
+      "context_length": 4096,
+      "max_new_tokens": 512
+    },
+    "cases": [
+      {
+        "id": "raw-p0001-g0004",
+        "prompt_token_ids": [
+          1
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          5328,
+          1438,
+          728,
+          310
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 1,
+          "prompt_ms": 95.895391,
+          "prompt_per_token_ms": 95.895391,
+          "prompt_per_second": 10.428029851820511,
+          "predicted_n": 4,
+          "predicted_ms": 70.982687,
+          "predicted_per_token_ms": 17.74567175,
+          "predicted_per_second": 56.351769270160204
+        }
+      },
+      {
+        "id": "raw-p0008-g0004",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          32948,
+          33898,
+          2110,
+          58716
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          8
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 8,
+          "prompt_ms": 234.727068,
+          "prompt_per_token_ms": 29.3408835,
+          "prompt_per_second": 34.082136620050996,
+          "predicted_n": 4,
+          "predicted_ms": 71.27432400000001,
+          "predicted_per_token_ms": 17.818581000000002,
+          "predicted_per_second": 56.12119169309834
+        }
+      }
+    ],
+    "child_process_checks": [],
+    "clean_shutdown": true,
+    "stderr_tail": "{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"process_stopped\",\"phase\":\"process\"}\n"
+  },
+  "comparisons": [
+    {
+      "id": "raw-p0001-g0004",
+      "tokens_exact_match": true
+    },
+    {
+      "id": "raw-p0008-g0004",
+      "tokens_exact_match": true
+    }
+  ],
+  "verified": true
+}
