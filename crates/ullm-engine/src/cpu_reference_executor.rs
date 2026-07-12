@@ -1889,9 +1889,15 @@ fn preflight_graph(
                     "element_budget",
                     spec_elements(output, "gated multiply output"),
                 )?;
+                let work_factor = preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "activation",
+                    gated_multiply_work_factor(activation),
+                )?;
                 let work = u64::try_from(elements)
                     .ok()
-                    .and_then(|elements| elements.checked_mul(24))
+                    .and_then(|elements| elements.checked_mul(work_factor))
                     .ok_or_else(|| {
                         CpuReferenceFault::node(
                             CpuReferenceFailureClass::Resource,
@@ -2988,10 +2994,17 @@ fn validate_cpu_activation(kind: &ActivationKind) -> Result<(), String> {
 }
 
 fn validate_cpu_gated_multiply_activation(kind: &ActivationKind) -> Result<(), String> {
-    if kind == &ActivationKind::Sigmoid {
-        Ok(())
-    } else {
-        Err("gated multiply CPU reference requires Sigmoid activation".into())
+    match kind {
+        ActivationKind::Sigmoid | ActivationKind::Silu => Ok(()),
+        _ => Err("gated multiply CPU reference requires Sigmoid or Silu activation".into()),
+    }
+}
+
+fn gated_multiply_work_factor(kind: &ActivationKind) -> Result<u64, String> {
+    match kind {
+        ActivationKind::Sigmoid => Ok(24),
+        ActivationKind::Silu => Ok(25),
+        _ => Err("gated multiply CPU reference requires Sigmoid or Silu activation".into()),
     }
 }
 
@@ -4771,10 +4784,10 @@ fn gated_multiply_f32(
     allocated_elements: &mut usize,
     runtime: &mut RuntimeExecutionContext,
 ) -> Result<HostTensor, String> {
-    if activation != &ActivationKind::Sigmoid {
+    validate_cpu_gated_multiply_activation(activation).map_err(|error| {
         runtime.unsupported_failure_reason = Some("activation");
-        return Err("gated multiply requires Sigmoid activation".into());
-    }
+        error
+    })?;
     let (value_shape, value_layout, value_data) = value_input.f32_parts()?;
     let (gate_shape, gate_layout, gate_data) = gate.f32_parts()?;
     if value_shape != gate_shape || value_layout != gate_layout {
@@ -4801,7 +4814,12 @@ fn gated_multiply_f32(
             runtime.numerical_failed = true;
             return Err("gated multiply input is non-finite".into());
         }
-        let activated = stable_sigmoid(gate_data[index]).map_err(|error| {
+        let activated = match activation {
+            ActivationKind::Sigmoid => stable_sigmoid(gate_data[index]),
+            ActivationKind::Silu => stable_silu(gate_data[index]),
+            _ => unreachable!("gated multiply activation was validated above"),
+        }
+        .map_err(|error| {
             runtime.numerical_failed = true;
             error
         })?;
@@ -4959,6 +4977,14 @@ fn stable_sigmoid(value: f32) -> Result<f32, String> {
     };
     if !result.is_finite() {
         return Err("sigmoid result is non-finite".into());
+    }
+    Ok(result)
+}
+
+fn stable_silu(value: f32) -> Result<f32, String> {
+    let result = value * stable_sigmoid(value)?;
+    if !result.is_finite() {
+        return Err("SiLU result is non-finite".into());
     }
     Ok(result)
 }
@@ -8338,6 +8364,54 @@ mod tests {
     }
 
     #[test]
+    fn gated_multiply_silu_matches_literals_extremes_and_legacy() {
+        let graph = gated_multiply_graph_with_activation(
+            &[1, 5],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            ActivationKind::Silu,
+        );
+        let inputs = map([
+            (
+                value_id("multiply-value"),
+                f32(
+                    &[1, 5],
+                    TensorLayout::TokensHidden,
+                    &[2.0, -2.0, 3.0, 3.0, 3.0],
+                ),
+            ),
+            (
+                value_id("multiply-gate"),
+                f32(
+                    &[1, 5],
+                    TensorLayout::TokensHidden,
+                    &[0.0, 1.0, -1.0, 100.0, -100.0],
+                ),
+            ),
+        ]);
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &traced.outputs[&value_id("multiply-output")],
+            &[0.0, -1.462_117_2, -0.806_824_3, 300.0, -1.135_05e-41],
+            2e-6,
+        );
+        let (_, _, values) = traced.outputs[&value_id("multiply-output")]
+            .f32_parts()
+            .unwrap();
+        assert!(values[4].is_finite());
+        assert!(values[4] < 0.0);
+        assert!((values[4] - (-1.135_05e-41)).abs() <= 2.0e-43);
+        assert_eq!(
+            traced.trace.completed_nodes[0].kind,
+            CpuReferenceNodeKind::GatedMultiply
+        );
+        let legacy = executor().execute(&graph, inputs, BTreeMap::new()).unwrap();
+        assert_eq!(legacy.outputs, traced.outputs);
+    }
+
+    #[test]
     fn gated_multiply_rejects_non_cpu_capabilities_and_nonfinite_input() {
         for graph in [
             gated_multiply_graph(&[1, 2], NumericalFormat::Fp16, TensorLayout::RowMajor),
@@ -8377,10 +8451,47 @@ mod tests {
         assert_eq!(error.reason_code, "nonfinite_input");
         assert_eq!(error.trace.completed_node_count, 0);
         assert!(error.failed_node.is_none());
+
+        let silu = gated_multiply_graph_with_activation(
+            &[1, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            ActivationKind::Silu,
+        );
+        let error = executor()
+            .execute_traced(
+                &silu,
+                map([
+                    (
+                        value_id("multiply-value"),
+                        f32(&[1, 1], TensorLayout::RowMajor, &[2.0]),
+                    ),
+                    (
+                        value_id("multiply-gate"),
+                        f32(&[1, 1], TensorLayout::RowMajor, &[f32::MAX]),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(error.reason_code, "runtime_numerical");
+        assert_eq!(
+            error.failed_node.as_ref().unwrap().kind,
+            CpuReferenceNodeKind::GatedMultiply
+        );
     }
 
     #[test]
     fn gated_multiply_preflight_rejects_element_and_work_budgets() {
+        assert_eq!(
+            gated_multiply_work_factor(&ActivationKind::Sigmoid).unwrap(),
+            24
+        );
+        assert_eq!(
+            gated_multiply_work_factor(&ActivationKind::Silu).unwrap(),
+            25
+        );
         let too_large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
         let resource = gated_multiply_graph(
             &[1, too_large],
@@ -9438,6 +9549,15 @@ mod tests {
         format: NumericalFormat,
         layout: TensorLayout,
     ) -> ModelGraph {
+        gated_multiply_graph_with_activation(shape, format, layout, ActivationKind::Sigmoid)
+    }
+
+    fn gated_multiply_graph_with_activation(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        activation: ActivationKind,
+    ) -> ModelGraph {
         ModelGraph {
             graph_id: "gated-multiply-reference".into(),
             inputs: vec![value_id("multiply-value"), value_id("multiply-gate")],
@@ -9454,9 +9574,7 @@ mod tests {
                 outputs: vec![value_id("multiply-output")],
                 weights: vec![],
                 states: vec![],
-                kind: GraphNodeKind::GatedMultiply {
-                    activation: ActivationKind::Sigmoid,
-                },
+                kind: GraphNodeKind::GatedMultiply { activation },
             }],
         }
     }

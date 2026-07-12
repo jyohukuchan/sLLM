@@ -732,9 +732,10 @@ pub enum GraphNodeKind {
     /// Multiplies values by an activated gate element by element.
     ///
     /// Inputs are ordered `[value, gate]`, and
-    /// `output = value * activation(gate)`. This semantic currently requires
-    /// [`ActivationKind::Sigmoid`]. All three tensors have identical shape,
-    /// numerical format, and layout. The node has no weights or state.
+    /// `output = value * activation(gate)`. The activation is either
+    /// [`ActivationKind::Sigmoid`] or [`ActivationKind::Silu`]. All three tensors
+    /// have identical shape, numerical format, and layout. The node has no weights
+    /// or state.
     GatedMultiply { activation: ActivationKind },
     /// Gated MLP.
     ///
@@ -888,8 +889,8 @@ impl GraphNodeKind {
             Self::Activation { kind } => kind.validate(),
             Self::GatedMultiply { activation } => {
                 activation.validate()?;
-                if activation != &ActivationKind::Sigmoid {
-                    return Err("gated multiply requires Sigmoid activation".into());
+                if !matches!(activation, ActivationKind::Sigmoid | ActivationKind::Silu) {
+                    return Err("gated multiply requires Sigmoid or Silu activation".into());
                 }
                 Ok(())
             }
@@ -3932,7 +3933,7 @@ mod tests {
     }
 
     #[test]
-    fn gated_multiply_accepts_sigmoid_and_rejects_mismatches_and_arity() {
+    fn gated_multiply_accepts_sigmoid_and_silu_and_rejects_mismatches_and_arity() {
         for (shape, format, layout) in [
             (&[2, 4][..], NumericalFormat::F32, TensorLayout::RowMajor),
             (
@@ -3946,7 +3947,15 @@ mod tests {
                 TensorLayout::TokensHidden,
             ),
         ] {
-            gated_multiply_graph(shape, format, layout, ActivationKind::Sigmoid)
+            gated_multiply_graph(
+                shape,
+                format.clone(),
+                layout.clone(),
+                ActivationKind::Sigmoid,
+            )
+            .validate()
+            .unwrap();
+            gated_multiply_graph(shape, format, layout, ActivationKind::Silu)
                 .validate()
                 .unwrap();
         }
@@ -3974,18 +3983,24 @@ mod tests {
                 .contains("format and layout")
         );
 
-        let unsupported_activation = gated_multiply_graph(
-            &[2, 4],
-            NumericalFormat::F32,
-            TensorLayout::RowMajor,
-            ActivationKind::Silu,
-        );
-        assert!(
-            unsupported_activation
-                .validate()
-                .unwrap_err()
-                .contains("requires Sigmoid")
-        );
+        for activation in [
+            ActivationKind::Relu,
+            ActivationKind::Gelu,
+            ActivationKind::Custom("swish-variant".into()),
+        ] {
+            let unsupported_activation = gated_multiply_graph(
+                &[2, 4],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+                activation,
+            );
+            assert!(
+                unsupported_activation
+                    .validate()
+                    .unwrap_err()
+                    .contains("requires Sigmoid or Silu")
+            );
+        }
 
         let mut arity = gated_multiply_graph(
             &[2, 4],
