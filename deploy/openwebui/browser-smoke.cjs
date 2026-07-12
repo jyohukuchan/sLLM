@@ -5,6 +5,11 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 
 const baseUrl = process.env.OPENWEBUI_URL || "http://192.168.0.66:3000";
+const modelId = process.env.ULLM_MODEL_ID || "ullm-qwen3-14b-sq8";
+const modelName = process.env.ULLM_MODEL_NAME || "uLLM Qwen3 14B SQ8";
+const expectedText = process.env.OPENWEBUI_EXPECTED_TEXT || "BROWSER_OK";
+const prompt =
+  process.env.OPENWEBUI_SMOKE_PROMPT || `Reply exactly ${expectedText}.`;
 const tokenFile = process.env.OPENWEBUI_TOKEN_FILE || "/run/secrets/openwebui-token";
 const screenshotPath =
   process.env.OPENWEBUI_SCREENSHOT || "/output/openwebui-browser-smoke.png";
@@ -26,8 +31,8 @@ async function runSmoke(browser) {
 
   const query = new URLSearchParams({
     "temporary-chat": "true",
-    models: "ullm-qwen3-14b-sq8",
-    q: "Reply exactly BROWSER_OK.",
+    models: modelId,
+    q: prompt,
     submit: "true",
   });
   await page.goto(`${baseUrl}/?${query}`, {
@@ -36,7 +41,7 @@ async function runSmoke(browser) {
   });
   try {
     await page
-      .locator(".chat-assistant", { hasText: "BROWSER_OK" })
+      .locator(".chat-assistant", { hasText: expectedText })
       .last()
       .waitFor({ state: "visible", timeout: 90_000 });
   } catch (error) {
@@ -69,8 +74,8 @@ async function runSmoke(browser) {
     { timeout: 10_000 },
   );
   const bodyText = await page.locator("body").innerText();
-  const modelVisible = bodyText.includes("uLLM Qwen3 14B SQ8");
-  const browserOk = assistantText.includes("BROWSER_OK");
+  const modelVisible = bodyText.includes(modelName);
+  const browserOk = assistantText.includes(expectedText);
   const metricsVisible = metricFields.every((field) => bodyText.includes(field));
   if (!browserOk || !modelVisible || !metricsVisible) {
     throw new Error(
@@ -84,6 +89,7 @@ async function runSmoke(browser) {
     JSON.stringify({
       assistantText,
       browserOk,
+      expectedText,
       metricFields,
       metricsVisible,
       modelVisible,
