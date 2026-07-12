@@ -9,8 +9,10 @@
 //!
 //! Host payloads are canonical contiguous last-axis-major arrays: weights and token
 //! indices must be [`TensorLayout::RowMajor`], and F32 values may be `RowMajor` or
-//! `TokensHidden`. `PackedRagged` and custom layouts carry no offset or stride metadata
-//! here, so they are rejected rather than interpreted incorrectly. `ActivationKind::Gelu`
+//! `TokensHidden`. RoPE additionally accepts `PackedRagged` because its explicit positions
+//! and token-independent math do not require ragged offsets. Other operations reject
+//! `PackedRagged` and custom layouts rather than interpreting missing offset or stride
+//! metadata incorrectly. `ActivationKind::Gelu`
 //! is also rejected because `ModelGraph` does not yet distinguish exact GELU from a tanh
 //! approximation. F32 host payloads must contain only finite values: this executor
 //! fail-closes NaN and infinity at execution admission, and checks generated F32 outputs
@@ -27,7 +29,7 @@ use std::fmt;
 use crate::model_graph::{
     ActivationKind, GraphNode, GraphNodeKind, MAX_GRAPH_DECLARATIONS, MAX_GRAPH_ENDPOINTS,
     ModelGraph, NormalizationAffine, NormalizationAxis, NormalizationKind, NumericalFormat,
-    TensorLayout, TensorSpec, ValueId, WeightId,
+    RotaryPairing, TensorLayout, TensorSpec, ValueId, WeightId,
 };
 
 /// Maximum elements allowed in one CPU reference tensor.
@@ -40,6 +42,8 @@ pub const MAX_CPU_REFERENCE_TOTAL_ELEMENTS: usize = 8_388_608;
 /// one work unit. This guard keeps the deterministic reference path from accidentally
 /// becoming a long-running production kernel.
 pub const MAX_CPU_REFERENCE_WORK_UNITS: u64 = 50_000_000;
+/// Largest unsigned token position that converts to F32 without rounding.
+pub const MAX_EXACT_F32_INTEGER: u64 = 16_777_216;
 /// Maximum completed node records retained in a typed CPU reference trace.
 pub const MAX_CPU_REFERENCE_TRACE_NODES: usize = 4_096;
 /// Maximum UTF-8 bytes retained in a typed CPU reference failure message.
@@ -48,9 +52,10 @@ pub const MAX_CPU_REFERENCE_FAILURE_MESSAGE_BYTES: usize = 1_024;
 /// Dense host tensor payloads for the CPU reference path.
 ///
 /// Payload bytes are canonical contiguous logical-element order. Execution accepts F32
-/// values only as `RowMajor` or `TokensHidden`, and accepts token/index tensors only as
-/// `RowMajor`; constructors preserve other validated graph layouts so that execution can
-/// reject them explicitly instead of silently reinterpreting the payload.
+/// values only as `RowMajor` or `TokensHidden` for ordinary operations, and accepts
+/// token/index tensors only as `RowMajor`; the RoPE operation additionally accepts
+/// `PackedRagged` values. Constructors preserve other validated graph layouts so that
+/// execution can reject them explicitly instead of silently reinterpreting the payload.
 /// Shape and layout validation do not imply numerical admission: CPU reference execution
 /// rejects every non-finite F32 payload rather than propagating NaN or infinity.
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +225,19 @@ impl TokenValues<'_> {
             Self::U64(values) => usize::try_from(values[index])
                 .map_err(|_| "U64 token index does not fit usize".to_string()),
         }
+    }
+
+    fn get_position_f32(&self, index: usize) -> Result<f32, String> {
+        let value = match self {
+            Self::U32(values) => u64::from(values[index]),
+            Self::U64(values) => values[index],
+        };
+        if value > MAX_EXACT_F32_INTEGER {
+            return Err(format!(
+                "rotary position at row {index} exceeds exact F32 integer limit {MAX_EXACT_F32_INTEGER}"
+            ));
+        }
+        Ok(value as f32)
     }
 }
 
@@ -595,6 +613,7 @@ impl CpuReferenceExecutor {
             .iter()
             .map(|input_id| (input_id.clone(), ()))
             .collect::<BTreeMap<_, _>>();
+        let resource_plan = preflight_graph(graph, &value_specs, &weight_specs)?;
         validate_exact_keys(&inputs, &graph_input_ids, "graph input").map_err(|message| {
             CpuReferenceFault::global(CpuReferenceFailureClass::InvalidInput, "input_map", message)
         })?;
@@ -605,7 +624,6 @@ impl CpuReferenceExecutor {
                 message,
             )
         })?;
-        let resource_plan = preflight_graph(graph, &value_specs, &weight_specs)?;
 
         for input_id in &graph.inputs {
             let tensor = inputs.get(input_id).ok_or_else(|| {
@@ -995,8 +1013,32 @@ impl CpuReferenceExecutor {
                 .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
-            GraphNodeKind::RotaryPosition { .. }
-            | GraphNodeKind::DenseAttention { .. }
+            GraphNodeKind::RotaryPosition {
+                heads,
+                head_dim,
+                rotary_dim,
+                base,
+                pairing,
+            } => {
+                let values_input = node_internal(node, node_input(node, values, 0))?;
+                let positions = node_internal(node, node_input(node, values, 1))?;
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = rotary_f32(
+                    values_input,
+                    positions,
+                    *heads,
+                    *head_dim,
+                    *rotary_dim,
+                    base.get(),
+                    *pairing,
+                    output_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![(node.outputs[0].clone(), output)])
+            }
+            GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
             | GraphNodeKind::Sampling { .. } => Err(CpuReferenceFault::node(
                 CpuReferenceFailureClass::Unsupported,
@@ -1015,6 +1057,7 @@ impl CpuReferenceExecutor {
 struct RuntimeExecutionContext {
     allocation_failed: bool,
     numerical_failed: bool,
+    unsupported_failure_reason: Option<&'static str>,
 }
 
 fn node_internal<T>(node: &GraphNode, result: Result<T, String>) -> Result<T, CpuReferenceFault> {
@@ -1045,6 +1088,13 @@ fn runtime_node_fault(
             CpuReferenceFailureClass::Numerical,
             node,
             "runtime_numerical",
+            message,
+        )
+    } else if let Some(reason_code) = runtime.unsupported_failure_reason {
+        CpuReferenceFault::node(
+            CpuReferenceFailureClass::Unsupported,
+            node,
+            reason_code,
             message,
         )
     } else {
@@ -1636,8 +1686,79 @@ fn preflight_graph(
                     plan_rms_norm(&mut plan, node, input, output, *affine),
                 )?;
             }
-            GraphNodeKind::RotaryPosition { .. }
-            | GraphNodeKind::DenseAttention { .. }
+            GraphNodeKind::RotaryPosition {
+                heads,
+                head_dim,
+                rotary_dim,
+                base,
+                ..
+            } => {
+                let values = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let positions = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 1),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "rotary_values",
+                    validate_cpu_rotary_value_spec(values, "rotary values input"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "rotary_output",
+                    validate_cpu_rotary_value_spec(output, "rotary output"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "rotary_positions",
+                    validate_cpu_rotary_positions_spec(positions),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "rotary_contract",
+                    validate_cpu_rotary_contract(
+                        values,
+                        positions,
+                        output,
+                        *heads,
+                        *head_dim,
+                        *rotary_dim,
+                        base.get(),
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    plan_rotary(
+                        &mut plan,
+                        node,
+                        values,
+                        output,
+                        *heads,
+                        *head_dim,
+                        *rotary_dim,
+                    ),
+                )?;
+            }
+            GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
             | GraphNodeKind::Sampling { .. } => {
                 return Err(CpuReferenceFault::node(
@@ -1696,7 +1817,14 @@ fn node_weight_spec<'a>(
 
 fn validate_cpu_input_layout(spec: &TensorSpec, label: &str) -> Result<(), String> {
     match spec.format {
-        NumericalFormat::F32 => validate_cpu_value_spec(spec, label),
+        NumericalFormat::F32 => match spec.layout {
+            TensorLayout::RowMajor | TensorLayout::TokensHidden | TensorLayout::PackedRagged => {
+                Ok(())
+            }
+            _ => Err(format!(
+                "{label} layout is unsupported without explicit stride or packed offsets"
+            )),
+        },
         NumericalFormat::U32 | NumericalFormat::U64 => validate_cpu_token_spec(spec),
         _ => Err(format!(
             "{label} format {} is unsupported",
@@ -1718,6 +1846,65 @@ fn validate_cpu_value_spec(spec: &TensorSpec, label: &str) -> Result<(), String>
             "{label} layout is unsupported without explicit stride or packed offsets"
         )),
     }
+}
+
+fn validate_cpu_rotary_value_spec(spec: &TensorSpec, label: &str) -> Result<(), String> {
+    if spec.format != NumericalFormat::F32 {
+        return Err(format!(
+            "{label} requires F32 for the CPU reference, got {}",
+            spec.format.as_str()
+        ));
+    }
+    match spec.layout {
+        TensorLayout::RowMajor | TensorLayout::TokensHidden | TensorLayout::PackedRagged => Ok(()),
+        _ => Err(format!(
+            "{label} layout is unsupported without explicit stride or packed offsets"
+        )),
+    }
+}
+
+fn validate_cpu_rotary_contract(
+    values: &TensorSpec,
+    positions: &TensorSpec,
+    output: &TensorSpec,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    base: f32,
+) -> Result<(), String> {
+    if values.shape.len() < 2 {
+        return Err("rotary values input must have rank at least 2".into());
+    }
+    let hidden = heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "rotary heads * head_dim overflows usize".to_string())?;
+    if values.shape.last().copied() != Some(hidden) {
+        return Err(format!(
+            "rotary values feature width must equal heads * head_dim {hidden}"
+        ));
+    }
+    if output.shape != values.shape
+        || output.format != values.format
+        || output.layout != values.layout
+    {
+        return Err("rotary output must match values shape, format, and layout".into());
+    }
+    if positions.shape.as_slice() != &values.shape[..values.shape.len() - 1] {
+        return Err(
+            "rotary positions shape must match values shape without the final feature axis".into(),
+        );
+    }
+    validate_cpu_rotary_positions_spec(positions)?;
+    if heads == 0 || head_dim == 0 || rotary_dim == 0 {
+        return Err("rotary heads, head_dim, and rotary_dim must be nonzero".into());
+    }
+    if rotary_dim % 2 != 0 || rotary_dim > head_dim {
+        return Err("rotary_dim must be even and no greater than head_dim".into());
+    }
+    if !base.is_finite() || base <= 0.0 {
+        return Err("rotary base must be finite and positive".into());
+    }
+    Ok(())
 }
 
 fn require_matching_value_layout(
@@ -1745,6 +1932,16 @@ fn validate_cpu_token_spec(spec: &TensorSpec) -> Result<(), String> {
     }
     if spec.layout != TensorLayout::RowMajor {
         return Err("embedding token input requires RowMajor layout".into());
+    }
+    Ok(())
+}
+
+fn validate_cpu_rotary_positions_spec(spec: &TensorSpec) -> Result<(), String> {
+    if !matches!(spec.format, NumericalFormat::U32 | NumericalFormat::U64) {
+        return Err("rotary positions input requires U32 or U64".into());
+    }
+    if spec.layout != TensorLayout::RowMajor {
+        return Err("rotary positions input requires RowMajor layout".into());
     }
     Ok(())
 }
@@ -2000,6 +2197,61 @@ fn plan_rms_norm(
     add_work_units(plan, node, work)
 }
 
+fn plan_rotary(
+    plan: &mut ResourcePlan,
+    node: &GraphNode,
+    values: &TensorSpec,
+    output: &TensorSpec,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<(), String> {
+    if heads == 0 || head_dim == 0 || rotary_dim == 0 || rotary_dim % 2 != 0 {
+        return Err(node_error(
+            node,
+            "rotary heads, head_dim, and rotary_dim must be nonzero with an even rotary_dim",
+        ));
+    }
+    if rotary_dim > head_dim {
+        return Err(node_error(node, "rotary_dim must not exceed head_dim"));
+    }
+    reserve_output_elements(plan, node, output)?;
+    let hidden = heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| node_error(node, "rotary heads * head_dim overflows usize"))?;
+    let value_elements =
+        spec_elements(values, "rotary values input").map_err(|error| node_error(node, &error))?;
+    let rows =
+        leading_rows(&values.shape, "rotary values").map_err(|error| node_error(node, &error))?;
+    if rows.checked_mul(hidden) != Some(value_elements) {
+        return Err(node_error(
+            node,
+            "rotary values element count is not divisible by head width",
+        ));
+    }
+    let pair_count = rows
+        .checked_mul(heads)
+        .and_then(|count| count.checked_mul(rotary_dim / 2))
+        .ok_or_else(|| node_error(node, "rotary pair count overflows usize"))?;
+    let suffix_count = rows
+        .checked_mul(heads)
+        .and_then(|count| count.checked_mul(head_dim - rotary_dim))
+        .ok_or_else(|| node_error(node, "rotary suffix element count overflows usize"))?;
+    let row_count =
+        u64::try_from(rows).map_err(|_| node_error(node, "rotary row count exceeds u64"))?;
+    let pair_work = u64::try_from(pair_count)
+        .map_err(|_| node_error(node, "rotary pair count exceeds u64"))?
+        .checked_mul(32)
+        .ok_or_else(|| node_error(node, "rotary pair work-unit count overflows u64"))?;
+    let suffix_work = u64::try_from(suffix_count)
+        .map_err(|_| node_error(node, "rotary suffix count exceeds u64"))?;
+    let work = pair_work
+        .checked_add(suffix_work)
+        .and_then(|units| units.checked_add(row_count))
+        .ok_or_else(|| node_error(node, "rotary work-unit count overflows u64"))?;
+    add_work_units(plan, node, work)
+}
+
 fn plan_gated_mlp(
     plan: &mut ResourcePlan,
     node: &GraphNode,
@@ -2236,6 +2488,149 @@ fn linear_f32(
         }
     }
     HostTensor::f32(output_shape, output_spec.layout.clone(), output)
+}
+
+fn rotary_f32(
+    values: &HostTensor,
+    positions: &HostTensor,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    base: f32,
+    pairing: RotaryPairing,
+    output_spec: &TensorSpec,
+    allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<HostTensor, String> {
+    let (values_shape, values_layout, values_data) = values.f32_parts()?;
+    if values_shape.len() < 2 {
+        return Err("rotary values input must have rank at least 2".into());
+    }
+    if !matches!(
+        values_layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden | TensorLayout::PackedRagged
+    ) {
+        return Err("rotary values input layout is unsupported".into());
+    }
+    let hidden = heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "rotary heads * head_dim overflows usize".to_string())?;
+    if hidden == 0 || values_shape.last().copied() != Some(hidden) {
+        return Err("rotary values feature width does not match heads * head_dim".into());
+    }
+    if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
+        return Err("rotary_dim must be even, nonzero, and no greater than head_dim".into());
+    }
+    if !base.is_finite() || base <= 0.0 {
+        runtime.numerical_failed = true;
+        return Err("rotary base must be finite and positive".into());
+    }
+    require_f32_output_spec(output_spec, values_shape, values_layout, "rotary")?;
+
+    let (positions_shape, positions_layout, position_values) = positions.token_parts()?;
+    if positions_layout != &TensorLayout::RowMajor {
+        return Err("rotary positions input requires RowMajor layout".into());
+    }
+    if positions_shape != &values_shape[..values_shape.len() - 1] {
+        return Err(
+            "rotary positions shape must match values shape without the final feature axis".into(),
+        );
+    }
+    let rows = leading_rows(values_shape, "rotary values")?;
+    if rows.checked_mul(hidden) != Some(values_data.len()) {
+        return Err("rotary values row count is invalid".into());
+    }
+    if position_values.len() != rows {
+        return Err("rotary positions payload length does not match values rows".into());
+    }
+    for row in 0..rows {
+        position_values.get_position_f32(row).map_err(|error| {
+            runtime.unsupported_failure_reason = Some("position_precision");
+            error
+        })?;
+    }
+    let mut output = allocate_f32(
+        values_data.len(),
+        allocated_elements,
+        runtime,
+        "rotary output",
+    )?;
+    let half = rotary_dim / 2;
+    for row in 0..rows {
+        let position = position_values.get_position_f32(row).map_err(|error| {
+            runtime.unsupported_failure_reason = Some("position_precision");
+            error
+        })?;
+        let row_start = row
+            .checked_mul(hidden)
+            .ok_or_else(|| "rotary row offset overflows usize".to_string())?;
+        for head in 0..heads {
+            let head_offset = head
+                .checked_mul(head_dim)
+                .and_then(|offset| row_start.checked_add(offset))
+                .ok_or_else(|| "rotary head offset overflows usize".to_string())?;
+            for index in 0..half {
+                let (a, b) = match pairing {
+                    RotaryPairing::SplitHalf => {
+                        let b = half
+                            .checked_add(index)
+                            .ok_or_else(|| "rotary split-half index overflows usize".to_string())?;
+                        (index, b)
+                    }
+                    RotaryPairing::Interleaved => {
+                        let a = index.checked_mul(2).ok_or_else(|| {
+                            "rotary interleaved index overflows usize".to_string()
+                        })?;
+                        let b = a.checked_add(1).ok_or_else(|| {
+                            "rotary interleaved index overflows usize".to_string()
+                        })?;
+                        (a, b)
+                    }
+                };
+                let exponent = (2.0_f32 * index as f32) / rotary_dim as f32;
+                let frequency = base.powf(exponent);
+                let theta = position / frequency;
+                if !exponent.is_finite()
+                    || !frequency.is_finite()
+                    || frequency <= 0.0
+                    || !theta.is_finite()
+                {
+                    runtime.numerical_failed = true;
+                    return Err("rotary angle intermediate is non-finite".into());
+                }
+                let (sin_theta, cos_theta) = theta.sin_cos();
+                if !sin_theta.is_finite() || !cos_theta.is_finite() {
+                    runtime.numerical_failed = true;
+                    return Err("rotary sine/cosine intermediate is non-finite".into());
+                }
+                let a_offset = head_offset
+                    .checked_add(a)
+                    .ok_or_else(|| "rotary first pair offset overflows usize".to_string())?;
+                let b_offset = head_offset
+                    .checked_add(b)
+                    .ok_or_else(|| "rotary second pair offset overflows usize".to_string())?;
+                let x_a = values_data[a_offset];
+                let x_b = values_data[b_offset];
+                let y_a = x_a * cos_theta - x_b * sin_theta;
+                let y_b = x_a * sin_theta + x_b * cos_theta;
+                if !y_a.is_finite() || !y_b.is_finite() {
+                    runtime.numerical_failed = true;
+                    return Err("rotary output is non-finite".into());
+                }
+                output[a_offset] = y_a;
+                output[b_offset] = y_b;
+            }
+            let suffix_start = head_offset
+                .checked_add(rotary_dim)
+                .ok_or_else(|| "rotary suffix offset overflows usize".to_string())?;
+            let suffix_end = head_offset
+                .checked_add(head_dim)
+                .ok_or_else(|| "rotary suffix end offset overflows usize".to_string())?;
+            output[suffix_start..suffix_end]
+                .copy_from_slice(&values_data[suffix_start..suffix_end]);
+        }
+    }
+    HostTensor::f32(values_shape.to_vec(), output_spec.layout.clone(), output)
 }
 
 fn rms_norm_f32(
@@ -2529,6 +2924,18 @@ fn output_feature_width(spec: &TensorSpec) -> Result<usize, String> {
         .last()
         .copied()
         .ok_or_else(|| "output spec has no feature axis".to_string())
+}
+
+fn leading_rows(shape: &[usize], label: &str) -> Result<usize, String> {
+    if shape.len() < 2 {
+        return Err(format!("{label} must have rank at least 2"));
+    }
+    shape[..shape.len() - 1]
+        .iter()
+        .try_fold(1_usize, |rows, dimension| {
+            rows.checked_mul(*dimension)
+                .ok_or_else(|| format!("{label} leading row count overflows usize"))
+        })
 }
 
 fn replaced_last_axis(shape: &[usize], value: usize) -> Result<Vec<usize>, String> {
@@ -2888,6 +3295,588 @@ mod tests {
         let legacy = executor().execute(&graph, inputs, weights).unwrap();
         assert_eq!(legacy.executed_node_ids, vec![node_id("linear")]);
         assert_eq!(legacy.outputs, traced.outputs);
+    }
+
+    #[test]
+    fn rotary_split_half_matches_oracle_and_position_zero_is_identity() {
+        let graph = rotary_graph(
+            &[2, 8],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::SplitHalf,
+        );
+        let input = vec![
+            1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0, 2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0,
+        ];
+        let inputs = map([
+            (
+                value_id("values"),
+                f32(&[2, 8], TensorLayout::TokensHidden, &input),
+            ),
+            (
+                value_id("positions"),
+                HostTensor::u32(vec![2], TensorLayout::RowMajor, vec![0, 1]).unwrap(),
+            ),
+        ]);
+        let run = executor()
+            .execute_traced(&graph, inputs.clone(), BTreeMap::new())
+            .unwrap();
+        let expected = rotary_oracle(&input, &[0, 1], 2, 4, 4, 10_000.0, RotaryPairing::SplitHalf);
+        assert_f32(&run.outputs[&value_id("out")], &expected, 1e-6);
+        let (_, _, output) = run.outputs[&value_id("out")].f32_parts().unwrap();
+        assert_eq!(&output[..8], &input[..8]);
+        assert_eq!(run.trace.completed_node_count, 1);
+        let legacy = executor().execute(&graph, inputs, BTreeMap::new()).unwrap();
+        assert_eq!(legacy.outputs, run.outputs);
+    }
+
+    #[test]
+    fn rotary_interleaved_matches_independent_oracle() {
+        let graph = rotary_graph(
+            &[1, 4],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            NumericalFormat::U64,
+            1,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::Interleaved,
+        );
+        let input = [1.0, 2.0, 3.0, 4.0];
+        let run = executor()
+            .execute(
+                &graph,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[1, 4], TensorLayout::RowMajor, &input),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u64(vec![1], TensorLayout::RowMajor, vec![1]).unwrap(),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let expected = rotary_oracle(&input, &[1], 1, 4, 4, 10_000.0, RotaryPairing::Interleaved);
+        assert_f32(&run.outputs[&value_id("out")], &expected, 1e-6);
+    }
+
+    #[test]
+    fn rotary_literal_goldens_fix_pairing_signs_and_head_frequency_reset() {
+        const COS_THETA: f32 = 0.5403023;
+        const SIN_THETA: f32 = 0.84147096;
+        let input = [1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0];
+        let positions = HostTensor::u32(vec![1], TensorLayout::RowMajor, vec![1]).unwrap();
+
+        let split = rotary_graph(
+            &[1, 8],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            2,
+            4,
+            4,
+            1.0,
+            RotaryPairing::SplitHalf,
+        );
+        let split_run = executor()
+            .execute(
+                &split,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[1, 8], TensorLayout::TokensHidden, &input),
+                    ),
+                    (value_id("positions"), positions.clone()),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &split_run.outputs[&value_id("out")],
+            &[
+                COS_THETA,
+                -SIN_THETA,
+                SIN_THETA,
+                COS_THETA,
+                2.0 * COS_THETA,
+                -2.0 * SIN_THETA,
+                2.0 * SIN_THETA,
+                2.0 * COS_THETA,
+            ],
+            1e-6,
+        );
+
+        let interleaved = rotary_graph(
+            &[1, 8],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            2,
+            4,
+            4,
+            1.0,
+            RotaryPairing::Interleaved,
+        );
+        let interleaved_run = executor()
+            .execute(
+                &interleaved,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[1, 8], TensorLayout::TokensHidden, &input),
+                    ),
+                    (value_id("positions"), positions),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_f32(
+            &interleaved_run.outputs[&value_id("out")],
+            &[
+                COS_THETA,
+                SIN_THETA,
+                -SIN_THETA,
+                COS_THETA,
+                2.0 * COS_THETA,
+                2.0 * SIN_THETA,
+                -2.0 * SIN_THETA,
+                2.0 * COS_THETA,
+            ],
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn rotary_partial_suffix_is_exact_and_rank3_positions_are_row_specific() {
+        let graph = rotary_graph(
+            &[1, 8],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            2,
+            4,
+            2,
+            10_000.0,
+            RotaryPairing::SplitHalf,
+        );
+        let input = [1.0, 2.0, 30.0, 40.0, 5.0, 6.0, 70.0, 80.0];
+        let run = executor()
+            .execute(
+                &graph,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[1, 8], TensorLayout::TokensHidden, &input),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u32(vec![1], TensorLayout::RowMajor, vec![1]).unwrap(),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let (_, _, output) = run.outputs[&value_id("out")].f32_parts().unwrap();
+        assert_eq!(&output[2..4], &input[2..4]);
+        assert_eq!(&output[6..8], &input[6..8]);
+
+        let rank3 = rotary_graph(
+            &[2, 2, 8],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U64,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::Interleaved,
+        );
+        let rank3_input = (1..=32).map(|value| value as f32).collect::<Vec<_>>();
+        let positions = vec![0, 1, 2, 3];
+        let rank3_run = executor()
+            .execute(
+                &rank3,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[2, 2, 8], TensorLayout::TokensHidden, &rank3_input),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u64(vec![2, 2], TensorLayout::RowMajor, positions.clone())
+                            .unwrap(),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let expected = rotary_oracle(
+            &rank3_input,
+            &positions,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::Interleaved,
+        );
+        assert_f32(&rank3_run.outputs[&value_id("out")], &expected, 1e-6);
+    }
+
+    #[test]
+    fn rotary_packed_ragged_succeeds_and_bf16_fails_preflight() {
+        let packed = rotary_graph(
+            &[2, 8],
+            NumericalFormat::F32,
+            TensorLayout::PackedRagged,
+            NumericalFormat::U32,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::SplitHalf,
+        );
+        let packed_run = executor()
+            .execute_traced(
+                &packed,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[2, 8], TensorLayout::PackedRagged, &[1.0; 16]),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u32(vec![2], TensorLayout::RowMajor, vec![0, 1]).unwrap(),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            packed_run.outputs[&value_id("out")].layout(),
+            &TensorLayout::PackedRagged
+        );
+
+        let bf16 = rotary_graph(
+            &[1, 8],
+            NumericalFormat::Bf16,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::SplitHalf,
+        );
+        let error = executor()
+            .execute_traced(&bf16, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(error.reason_code, "rotary_values");
+        assert_eq!(error.trace.completed_node_count, 0);
+
+        let fp16 = rotary_graph(
+            &[1, 8],
+            NumericalFormat::Fp16,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::SplitHalf,
+        );
+        let fp16_error = executor()
+            .execute_traced(&fp16, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(fp16_error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(fp16_error.reason_code, "rotary_values");
+        assert_eq!(fp16_error.trace.completed_node_count, 0);
+    }
+
+    #[test]
+    fn rotary_position_precision_fails_without_value_disclosure_and_preserves_prefix() {
+        let graph = rotary_graph(
+            &[1, 8],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U64,
+            2,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::SplitHalf,
+        );
+        let secret_position = MAX_EXACT_F32_INTEGER + 1;
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([
+                    (
+                        value_id("values"),
+                        f32(&[1, 8], TensorLayout::TokensHidden, &[1.0; 8]),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u64(vec![1], TensorLayout::RowMajor, vec![secret_position])
+                            .unwrap(),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(error.reason_code, "position_precision");
+        assert!(error.message.contains("row 0"));
+        assert!(error.message.contains(&MAX_EXACT_F32_INTEGER.to_string()));
+        assert!(!error.message.contains(&secret_position.to_string()));
+        assert_eq!(error.trace.completed_node_count, 0);
+
+        let mut prefixed = graph.clone();
+        prefixed.inputs[0] = value_id("input");
+        prefixed.values[0].id = value_id("input");
+        prefixed.values.insert(
+            1,
+            value(
+                "values",
+                &[1, 8],
+                NumericalFormat::F32,
+                TensorLayout::TokensHidden,
+            ),
+        );
+        let mut identity = vec![0.0_f32; 64];
+        for index in 0..8 {
+            identity[index * 8 + index] = 1.0;
+        }
+        prefixed.weights.push(weight("linear", &[8, 8]));
+        let rotary_node = prefixed.nodes.pop().unwrap();
+        prefixed.nodes.push(GraphNode {
+            id: node_id("linear"),
+            inputs: vec![value_id("input")],
+            outputs: vec![value_id("values")],
+            weights: vec![weight_id("linear")],
+            states: vec![],
+            kind: GraphNodeKind::Linear { has_bias: false },
+        });
+        prefixed.nodes.push(rotary_node);
+        let prefixed_error = executor()
+            .execute_traced(
+                &prefixed,
+                map([
+                    (
+                        value_id("input"),
+                        f32(&[1, 8], TensorLayout::TokensHidden, &[1.0; 8]),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u64(vec![1], TensorLayout::RowMajor, vec![secret_position])
+                            .unwrap(),
+                    ),
+                ]),
+                map([(
+                    weight_id("linear"),
+                    f32(&[8, 8], TensorLayout::RowMajor, &identity),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(prefixed_error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(prefixed_error.reason_code, "position_precision");
+        assert_eq!(prefixed_error.trace.completed_node_count, 1);
+        assert_eq!(
+            prefixed_error.trace.completed_nodes[0].id,
+            node_id("linear")
+        );
+    }
+
+    #[test]
+    fn rotary_position_u32_and_u64_boundaries_are_explicit() {
+        for format in [NumericalFormat::U32, NumericalFormat::U64] {
+            let graph = rotary_graph(
+                &[1, 4],
+                NumericalFormat::F32,
+                TensorLayout::TokensHidden,
+                format.clone(),
+                1,
+                4,
+                4,
+                1.0,
+                RotaryPairing::Interleaved,
+            );
+            let exact = MAX_EXACT_F32_INTEGER;
+            let exact_position = match &format {
+                NumericalFormat::U32 => {
+                    HostTensor::u32(vec![1], TensorLayout::RowMajor, vec![exact as u32]).unwrap()
+                }
+                NumericalFormat::U64 => {
+                    HostTensor::u64(vec![1], TensorLayout::RowMajor, vec![exact]).unwrap()
+                }
+                _ => unreachable!(),
+            };
+            executor()
+                .execute(
+                    &graph,
+                    map([
+                        (
+                            value_id("values"),
+                            f32(&[1, 4], TensorLayout::TokensHidden, &[1.0; 4]),
+                        ),
+                        (value_id("positions"), exact_position),
+                    ]),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+
+            let over = exact + 1;
+            let over_position = match &format {
+                NumericalFormat::U32 => {
+                    HostTensor::u32(vec![1], TensorLayout::RowMajor, vec![over as u32]).unwrap()
+                }
+                NumericalFormat::U64 => {
+                    HostTensor::u64(vec![1], TensorLayout::RowMajor, vec![over]).unwrap()
+                }
+                _ => unreachable!(),
+            };
+            let error = executor()
+                .execute_traced(
+                    &graph,
+                    map([
+                        (
+                            value_id("values"),
+                            f32(&[1, 4], TensorLayout::TokensHidden, &[1.0; 4]),
+                        ),
+                        (value_id("positions"), over_position),
+                    ]),
+                    BTreeMap::new(),
+                )
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+            assert_eq!(error.reason_code, "position_precision");
+            assert!(!error.message.contains(&over.to_string()));
+        }
+    }
+
+    #[test]
+    fn rotary_nonfinite_output_is_typed_numerical_failure() {
+        let graph = rotary_graph(
+            &[1, 4],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            NumericalFormat::U32,
+            1,
+            4,
+            4,
+            10_000.0,
+            RotaryPairing::Interleaved,
+        );
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([
+                    (
+                        value_id("values"),
+                        f32(
+                            &[1, 4],
+                            TensorLayout::TokensHidden,
+                            &[f32::MAX, f32::MAX, f32::MAX, f32::MAX],
+                        ),
+                    ),
+                    (
+                        value_id("positions"),
+                        HostTensor::u32(vec![1], TensorLayout::RowMajor, vec![1]).unwrap(),
+                    ),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(error.reason_code, "runtime_numerical");
+        assert!(error.message.contains("rotary"));
+        assert_eq!(error.trace.completed_node_count, 0);
+    }
+
+    #[test]
+    fn rotary_work_budget_fails_in_preflight_without_execution_allocation() {
+        const WIDTH: usize = 1_048_576;
+        const NODES: usize = 3;
+        let mut values = vec![value(
+            "input",
+            &[1, WIDTH],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+        )];
+        let mut inputs = vec![value_id("input")];
+        let mut nodes = Vec::new();
+        let mut previous = value_id("input");
+        for index in 0..NODES {
+            let position_id = ValueId::new(format!("position-{index}")).unwrap();
+            let output_id = ValueId::new(format!("out-{index}")).unwrap();
+            inputs.push(position_id.clone());
+            values.push(value(
+                position_id.as_str(),
+                &[1],
+                NumericalFormat::U32,
+                TensorLayout::RowMajor,
+            ));
+            values.push(value(
+                output_id.as_str(),
+                &[1, WIDTH],
+                NumericalFormat::F32,
+                TensorLayout::TokensHidden,
+            ));
+            nodes.push(GraphNode {
+                id: NodeId::new(format!("rotary-{index}")).unwrap(),
+                inputs: vec![previous.clone(), position_id],
+                outputs: vec![output_id.clone()],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::RotaryPosition {
+                    heads: 1,
+                    head_dim: WIDTH,
+                    rotary_dim: WIDTH,
+                    base: PositiveF32::new(10_000.0, "rotary base").unwrap(),
+                    pairing: RotaryPairing::SplitHalf,
+                },
+            });
+            previous = output_id;
+        }
+        let graph = ModelGraph {
+            graph_id: "rotary-work-budget".into(),
+            inputs,
+            outputs: vec![previous],
+            values,
+            weights: vec![],
+            nodes,
+        };
+        graph.validate().unwrap();
+        let value_specs = graph
+            .values
+            .iter()
+            .map(|value| (value.id.clone(), &value.tensor))
+            .collect();
+        let weight_specs = BTreeMap::new();
+        let error = preflight_graph(&graph, &value_specs, &weight_specs).unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "work_budget");
+        assert_eq!(error.failed_node.as_ref().unwrap().id, node_id("rotary-2"));
+
+        let execution_error = executor()
+            .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(execution_error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(execution_error.reason_code, "work_budget");
+        assert_eq!(
+            execution_error.failed_node.as_ref().unwrap().id,
+            node_id("rotary-2")
+        );
+        assert_eq!(execution_error.trace.completed_node_count, 0);
     }
 
     #[test]
@@ -4353,6 +5342,89 @@ mod tests {
                 kind: GraphNodeKind::Linear { has_bias: false },
             }],
         }
+    }
+
+    fn rotary_graph(
+        values_shape: &[usize],
+        values_format: NumericalFormat,
+        values_layout: TensorLayout,
+        positions_format: NumericalFormat,
+        heads: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        base: f32,
+        pairing: RotaryPairing,
+    ) -> ModelGraph {
+        let positions_shape = values_shape[..values_shape.len() - 1].to_vec();
+        ModelGraph {
+            graph_id: "rotary-reference".into(),
+            inputs: vec![value_id("values"), value_id("positions")],
+            outputs: vec![value_id("out")],
+            values: vec![
+                value(
+                    "values",
+                    values_shape,
+                    values_format.clone(),
+                    values_layout.clone(),
+                ),
+                value(
+                    "positions",
+                    &positions_shape,
+                    positions_format,
+                    TensorLayout::RowMajor,
+                ),
+                value("out", values_shape, values_format, values_layout),
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("rotary"),
+                inputs: vec![value_id("values"), value_id("positions")],
+                outputs: vec![value_id("out")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::RotaryPosition {
+                    heads,
+                    head_dim,
+                    rotary_dim,
+                    base: PositiveF32::new(base, "rotary base").unwrap(),
+                    pairing,
+                },
+            }],
+        }
+    }
+
+    fn rotary_oracle(
+        input: &[f32],
+        positions: &[u64],
+        heads: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        base: f32,
+        pairing: RotaryPairing,
+    ) -> Vec<f32> {
+        let hidden = heads * head_dim;
+        let half = rotary_dim / 2;
+        let mut expected = input.to_vec();
+        for (row, position) in positions.iter().enumerate() {
+            let row_start = row * hidden;
+            for head in 0..heads {
+                let head_start = row_start + head * head_dim;
+                for index in 0..half {
+                    let (a, b) = match pairing {
+                        RotaryPairing::SplitHalf => (index, half + index),
+                        RotaryPairing::Interleaved => (2 * index, 2 * index + 1),
+                    };
+                    let theta =
+                        *position as f32 / base.powf((2.0 * index as f32) / rotary_dim as f32);
+                    let (sin_theta, cos_theta) = theta.sin_cos();
+                    let x_a = input[head_start + a];
+                    let x_b = input[head_start + b];
+                    expected[head_start + a] = x_a * cos_theta - x_b * sin_theta;
+                    expected[head_start + b] = x_a * sin_theta + x_b * cos_theta;
+                }
+            }
+        }
+        expected
     }
 
     fn linear_then_embedding_graph() -> ModelGraph {

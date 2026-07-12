@@ -1,6 +1,6 @@
 # Generic production inference optimization plan v0.1
 
-Status: active; P0, P1-A, P1-B1, and P1-B2 CPU RMS normalization/typed trace plus RoPE graph contract completed; CPU RoPE, attention/state, and adapter fixtures next
+Status: active; P0, P1-A, P1-B1, and P1-B2 CPU RMS normalization/RoPE/typed trace completed; causal GQA, state transaction, and adapter fixtures next
 
 ## 前回の要点
 
@@ -19,7 +19,7 @@ Status: active; P0, P1-A, P1-B1, and P1-B2 CPU RMS normalization/typed trace plu
 
 ## 次の行動
 
-P1-B2でCPU RoPE、causal GQA core、state transaction契約とQwen3.5/Qwen3 adapterのgraph生成fixtureを段階的に追加する。AQ4 kernelの変更から先に始めない。
+P1-B2でcausal GQA core、state transaction契約とQwen3.5/Qwen3 adapterのgraph生成fixtureを段階的に追加する。AQ4 kernelの変更から先に始めない。
 
 ## 1. 目的
 
@@ -259,7 +259,7 @@ Gate:
 
 ### P1: typed graphとCPU reference executor
 
-Status: P1-A, P1-B1, and P1-B2 CPU RMS normalization/typed trace plus the RoPE graph contract completed; CPU RoPE, attention/state semantics, and adapter fixtures remain.
+Status: P1-A, P1-B1, and P1-B2 CPU RMS normalization/RoPE/typed trace completed; causal GQA, state transaction semantics, and adapter fixtures remain.
 
 実装:
 
