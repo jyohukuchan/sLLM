@@ -173,6 +173,10 @@ def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
         "device": "gfx1201",
         "execution_profile": "rdna4_aq4_resident",
     }
+    profile["worker"]["required_environment"] = [
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+    ]
     profile["product"]["artifact"] = None
     profile["promotion"] = {
         "receipt": os.fspath(root / "promotion.json"),
@@ -236,6 +240,10 @@ def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path)
 
     assert document["format"]["format_id"] == "AQ4_0"
     assert document["promotion"]["source_commit"] == "abc1234"
+    assert document["worker"]["required_environment"] == [
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+    ]
 
 
 @pytest.mark.parametrize(
