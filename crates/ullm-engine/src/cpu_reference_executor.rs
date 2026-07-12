@@ -26,7 +26,8 @@ use std::fmt;
 
 use crate::model_graph::{
     ActivationKind, GraphNode, GraphNodeKind, MAX_GRAPH_DECLARATIONS, MAX_GRAPH_ENDPOINTS,
-    ModelGraph, NumericalFormat, TensorLayout, TensorSpec, ValueId, WeightId,
+    ModelGraph, NormalizationAffine, NormalizationAxis, NormalizationKind, NumericalFormat,
+    TensorLayout, TensorSpec, ValueId, WeightId,
 };
 
 /// Maximum elements allowed in one CPU reference tensor.
@@ -950,13 +951,49 @@ impl CpuReferenceExecutor {
                 .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
-            GraphNodeKind::Norm { .. } | GraphNodeKind::FinalNorm { .. } => {
-                Err(CpuReferenceFault::node(
-                    CpuReferenceFailureClass::Unsupported,
-                    node,
-                    "unsupported_node",
-                    "unsupported CPU reference node: normalization semantic is not yet specified as RMSNorm or another contract",
-                ))
+            GraphNodeKind::Norm {
+                epsilon,
+                kind,
+                affine,
+                axis,
+            }
+            | GraphNodeKind::FinalNorm {
+                epsilon,
+                kind,
+                affine,
+                axis,
+            } => {
+                validate_cpu_rms_normalization(*kind, *axis).map_err(|message| {
+                    CpuReferenceFault::node(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "normalization_kind",
+                        message,
+                    )
+                })?;
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let scale = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let bias = if *affine == NormalizationAffine::ScaleAndBias {
+                    Some(node_internal(
+                        node,
+                        node_weight(node, weights, weight_specs, 1),
+                    )?)
+                } else {
+                    None
+                };
+                let output_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = rms_norm_f32(
+                    input,
+                    scale,
+                    bias,
+                    *affine,
+                    epsilon.get(),
+                    output_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![(node.outputs[0].clone(), output)])
             }
             GraphNodeKind::RotaryPosition { .. }
             | GraphNodeKind::DenseAttention { .. }
@@ -977,6 +1014,7 @@ impl CpuReferenceExecutor {
 #[derive(Debug, Default)]
 struct RuntimeExecutionContext {
     allocation_failed: bool,
+    numerical_failed: bool,
 }
 
 fn node_internal<T>(node: &GraphNode, result: Result<T, String>) -> Result<T, CpuReferenceFault> {
@@ -1000,6 +1038,13 @@ fn runtime_node_fault(
             CpuReferenceFailureClass::Resource,
             node,
             "allocation",
+            message,
+        )
+    } else if runtime.numerical_failed {
+        CpuReferenceFault::node(
+            CpuReferenceFailureClass::Numerical,
+            node,
+            "runtime_numerical",
             message,
         )
     } else {
@@ -1501,13 +1546,95 @@ fn preflight_graph(
                     plan_linear(&mut plan, node, input, output),
                 )?;
             }
-            GraphNodeKind::Norm { .. } | GraphNodeKind::FinalNorm { .. } => {
-                return Err(CpuReferenceFault::node(
+            GraphNodeKind::Norm {
+                kind, affine, axis, ..
+            }
+            | GraphNodeKind::FinalNorm {
+                kind, affine, axis, ..
+            } => {
+                preflight_result(
                     CpuReferenceFailureClass::Unsupported,
                     node,
-                    "unsupported_node",
-                    "unsupported CPU reference node: normalization semantic is not yet specified as RMSNorm or another contract",
-                ));
+                    "normalization_kind",
+                    validate_cpu_rms_normalization(*kind, *axis),
+                )?;
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                let scale = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 0),
+                )?;
+                let bias = if *affine == NormalizationAffine::ScaleAndBias {
+                    Some(preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_weight_spec(node, weight_specs, 1),
+                    )?)
+                } else {
+                    None
+                };
+                for (label, spec) in [
+                    ("RMS normalization input", input),
+                    ("RMS normalization output", output),
+                ] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, label),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "layout_mismatch",
+                    require_matching_value_layout(
+                        node,
+                        "RMS normalization input",
+                        input,
+                        "RMS normalization output",
+                        output,
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Unsupported,
+                    node,
+                    "weight_layout",
+                    validate_cpu_weight_layout(scale, "RMS normalization scale"),
+                )?;
+                if let Some(bias) = bias {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "weight_layout",
+                        validate_cpu_weight_layout(bias, "RMS normalization bias"),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    validate_cpu_rms_norm_contract(input, output, scale, bias, *affine, *axis),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    plan_rms_norm(&mut plan, node, input, output, *affine),
+                )?;
             }
             GraphNodeKind::RotaryPosition { .. }
             | GraphNodeKind::DenseAttention { .. }
@@ -1652,6 +1779,64 @@ fn validate_cpu_activation(kind: &ActivationKind) -> Result<(), String> {
     }
 }
 
+fn validate_cpu_rms_normalization(
+    kind: NormalizationKind,
+    axis: NormalizationAxis,
+) -> Result<(), String> {
+    match (kind, axis) {
+        (NormalizationKind::Rms, NormalizationAxis::Last) => Ok(()),
+        (NormalizationKind::Layer, NormalizationAxis::Last) => {
+            Err("Layer normalization is not in the P1-B2 CPU subset".into())
+        }
+    }
+}
+
+fn validate_cpu_rms_norm_contract(
+    input: &TensorSpec,
+    output: &TensorSpec,
+    scale: &TensorSpec,
+    bias: Option<&TensorSpec>,
+    affine: NormalizationAffine,
+    axis: NormalizationAxis,
+) -> Result<(), String> {
+    match axis {
+        NormalizationAxis::Last => {}
+    }
+    if input.shape != output.shape {
+        return Err("RMS normalization input and output shapes must match".into());
+    }
+    let width = output_feature_width(input)?;
+    if width == 0 {
+        return Err("RMS normalization final-axis width must be nonzero".into());
+    }
+    validate_cpu_rms_norm_weight_shape(scale, width, "scale")?;
+    match (affine, bias) {
+        (NormalizationAffine::ScaleAndBias, Some(bias)) => {
+            validate_cpu_rms_norm_weight_shape(bias, width, "bias")
+        }
+        (NormalizationAffine::ScaleAndBias, None) => {
+            Err("RMS normalization ScaleAndBias requires a bias weight".into())
+        }
+        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, None) => Ok(()),
+        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, Some(_)) => {
+            Err("RMS normalization affine contract has an unexpected bias weight".into())
+        }
+    }
+}
+
+fn validate_cpu_rms_norm_weight_shape(
+    weight: &TensorSpec,
+    width: usize,
+    label: &str,
+) -> Result<(), String> {
+    if weight.shape.len() != 1 || weight.shape[0] != width {
+        return Err(format!(
+            "RMS normalization {label} must have shape [{width}]"
+        ));
+    }
+    Ok(())
+}
+
 fn spec_elements(spec: &TensorSpec, label: &str) -> Result<usize, String> {
     let elements = spec.element_count()?;
     if elements > MAX_CPU_REFERENCE_TENSOR_ELEMENTS {
@@ -1747,6 +1932,72 @@ fn plan_linear(
         )
         .map_err(|_| node_error(node, "linear output element count exceeds u64"))?,
     )
+}
+
+fn plan_rms_norm(
+    plan: &mut ResourcePlan,
+    node: &GraphNode,
+    input: &TensorSpec,
+    output: &TensorSpec,
+    affine: NormalizationAffine,
+) -> Result<(), String> {
+    let input_elements = spec_elements(input, "RMS normalization input")
+        .map_err(|error| node_error(node, &error))?;
+    let output_elements = spec_elements(output, "RMS normalization output")
+        .map_err(|error| node_error(node, &error))?;
+    if input_elements != output_elements || input.shape != output.shape {
+        return Err(node_error(
+            node,
+            "RMS normalization input and output element counts must match",
+        ));
+    }
+    let width = output_feature_width(input).map_err(|error| node_error(node, &error))?;
+    if width == 0 {
+        return Err(node_error(
+            node,
+            "RMS normalization final-axis width must be nonzero",
+        ));
+    }
+    let rows = input_elements
+        .checked_div(width)
+        .ok_or_else(|| node_error(node, "RMS normalization row count overflows usize"))?;
+    if rows
+        .checked_mul(width)
+        .filter(|elements| *elements == input_elements)
+        .is_none()
+    {
+        return Err(node_error(
+            node,
+            "RMS normalization input element count is not divisible by its final-axis width",
+        ));
+    }
+    reserve_output_elements(plan, node, output)?;
+
+    // Account for the scalar square and reduction add, then the output normalization
+    // and affine scale. Divide, epsilon add, sqrt, and reciprocal occur once per row.
+    // UnitOffsetScale additionally charges the unit-offset add; ScaleAndBias charges
+    // the bias add.
+    let work_per_element = match affine {
+        NormalizationAffine::Scale => 4_u64,
+        NormalizationAffine::UnitOffsetScale | NormalizationAffine::ScaleAndBias => 5_u64,
+    };
+    let element_work = u64::try_from(output_elements)
+        .map_err(|_| node_error(node, "RMS normalization element count exceeds u64"))?
+        .checked_mul(work_per_element)
+        .ok_or_else(|| {
+            node_error(
+                node,
+                "RMS normalization element work-unit count overflows u64",
+            )
+        })?;
+    let row_work = u64::try_from(rows)
+        .map_err(|_| node_error(node, "RMS normalization row count exceeds u64"))?
+        .checked_mul(4)
+        .ok_or_else(|| node_error(node, "RMS normalization row work-unit count overflows u64"))?;
+    let work = element_work
+        .checked_add(row_work)
+        .ok_or_else(|| node_error(node, "RMS normalization work-unit count overflows u64"))?;
+    add_work_units(plan, node, work)
 }
 
 fn plan_gated_mlp(
@@ -1985,6 +2236,130 @@ fn linear_f32(
         }
     }
     HostTensor::f32(output_shape, output_spec.layout.clone(), output)
+}
+
+fn rms_norm_f32(
+    input: &HostTensor,
+    scale: &HostTensor,
+    bias: Option<&HostTensor>,
+    affine: NormalizationAffine,
+    epsilon: f32,
+    output_spec: &TensorSpec,
+    allocated_elements: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<HostTensor, String> {
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        runtime.numerical_failed = true;
+        return Err("RMS normalization epsilon must be finite and positive".into());
+    }
+    let (input_shape, input_layout, input_data) = input.f32_parts()?;
+    if !matches!(
+        input_layout,
+        TensorLayout::RowMajor | TensorLayout::TokensHidden
+    ) {
+        return Err("RMS normalization input layout is unsupported".into());
+    }
+    require_f32_output_spec(output_spec, input_shape, input_layout, "RMS normalization")?;
+    let width = *input_shape
+        .last()
+        .ok_or_else(|| "RMS normalization input has no final axis".to_string())?;
+    if width == 0 {
+        return Err("RMS normalization final-axis width must be nonzero".into());
+    }
+    let rows = input_data
+        .len()
+        .checked_div(width)
+        .ok_or_else(|| "RMS normalization row count overflows usize".to_string())?;
+    if rows
+        .checked_mul(width)
+        .filter(|elements| *elements == input_data.len())
+        .is_none()
+    {
+        return Err(
+            "RMS normalization input element count is not divisible by final-axis width".into(),
+        );
+    }
+
+    let (scale_shape, scale_layout, scale_data) = scale.f32_parts()?;
+    if scale_layout != &TensorLayout::RowMajor {
+        return Err("RMS normalization scale requires RowMajor layout".into());
+    }
+    if scale_shape.len() != 1 || scale_shape[0] != width {
+        return Err(format!("RMS normalization scale must have shape [{width}]"));
+    }
+    let bias_data = match (affine, bias) {
+        (NormalizationAffine::ScaleAndBias, Some(bias)) => {
+            let (bias_shape, bias_layout, bias_data) = bias.f32_parts()?;
+            if bias_layout != &TensorLayout::RowMajor {
+                return Err("RMS normalization bias requires RowMajor layout".into());
+            }
+            if bias_shape.len() != 1 || bias_shape[0] != width {
+                return Err(format!("RMS normalization bias must have shape [{width}]"));
+            }
+            Some(bias_data)
+        }
+        (NormalizationAffine::ScaleAndBias, None) => {
+            return Err("RMS normalization ScaleAndBias requires a bias weight".into());
+        }
+        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, None) => None,
+        (NormalizationAffine::Scale | NormalizationAffine::UnitOffsetScale, Some(_)) => {
+            return Err("RMS normalization affine contract has an unexpected bias weight".into());
+        }
+    };
+
+    let mut output = allocate_f32(
+        input_data.len(),
+        allocated_elements,
+        runtime,
+        "RMS normalization output",
+    )?;
+    let bias_data = bias_data.unwrap_or(&[]);
+    let width_as_f32 = width as f32;
+    for row in 0..rows {
+        let start = row
+            .checked_mul(width)
+            .ok_or_else(|| "RMS normalization row offset overflows usize".to_string())?;
+        let mut sum_of_squares = 0.0_f32;
+        for index in 0..width {
+            let value = input_data[start + index];
+            let square = value * value;
+            if !square.is_finite() {
+                runtime.numerical_failed = true;
+                return Err("RMS normalization square is non-finite".into());
+            }
+            sum_of_squares += square;
+            if !sum_of_squares.is_finite() {
+                runtime.numerical_failed = true;
+                return Err("RMS normalization sum of squares is non-finite".into());
+            }
+        }
+        let mean_plus_epsilon = sum_of_squares / width_as_f32 + epsilon;
+        if !mean_plus_epsilon.is_finite() || mean_plus_epsilon <= 0.0 {
+            runtime.numerical_failed = true;
+            return Err("RMS normalization mean plus epsilon is invalid".into());
+        }
+        let root_mean_square = mean_plus_epsilon.sqrt();
+        if !root_mean_square.is_finite() || root_mean_square <= 0.0 {
+            runtime.numerical_failed = true;
+            return Err("RMS normalization root mean square is invalid".into());
+        }
+        let inverse_rms = 1.0_f32 / root_mean_square;
+        if !inverse_rms.is_finite() || inverse_rms <= 0.0 {
+            runtime.numerical_failed = true;
+            return Err("RMS normalization inverse root mean square is invalid".into());
+        }
+        for index in 0..width {
+            let normalized = input_data[start + index] * inverse_rms;
+            output[start + index] = match affine {
+                NormalizationAffine::Scale => normalized * scale_data[index],
+                NormalizationAffine::UnitOffsetScale => normalized * (1.0_f32 + scale_data[index]),
+                NormalizationAffine::ScaleAndBias => {
+                    normalized * scale_data[index] + bias_data[index]
+                }
+            };
+        }
+    }
+    HostTensor::f32(input_shape.to_vec(), output_spec.layout.clone(), output)
 }
 
 fn activation_f32(
@@ -2428,7 +2803,8 @@ fn node_kind_name(kind: &GraphNodeKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::model_graph::{
-        ActivationKind, GraphNode, GraphNodeKind, NodeId, PositiveF32, StateId, WeightSpec,
+        ActivationKind, GraphNode, GraphNodeKind, NodeId, NormalizationAffine, NormalizationAxis,
+        NormalizationKind, PositiveF32, StateId, WeightSpec,
     };
 
     fn value_id(name: &str) -> ValueId {
@@ -3409,6 +3785,543 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("exceeds CPU reference limit"));
+    }
+
+    #[test]
+    fn rms_norm_scale_matches_hand_computation_and_legacy_wrapper() {
+        let graph = rms_norm_graph(
+            false,
+            NormalizationAffine::Scale,
+            TensorLayout::TokensHidden,
+            TensorLayout::TokensHidden,
+        );
+        let inputs = map([(
+            value_id("input"),
+            f32(
+                &[2, 3],
+                TensorLayout::TokensHidden,
+                &[3.0, 4.0, 0.0, 1.0, 2.0, 2.0],
+            ),
+        )]);
+        let weights = map([(
+            weight_id("scale"),
+            f32(&[3], TensorLayout::RowMajor, &[1.0, 2.0, 0.5]),
+        )]);
+
+        let traced = executor()
+            .execute_traced(&graph, inputs.clone(), weights.clone())
+            .unwrap();
+        assert_eq!(traced.trace.completed_node_count, 1);
+        assert_eq!(
+            traced.trace.completed_nodes[0].kind,
+            CpuReferenceNodeKind::Norm
+        );
+        // Hand-computed from inv=1/sqrt(sum(x*x)/3 + 1e-5), then multiplied by scale.
+        assert_f32(
+            &traced.outputs[&value_id("out")],
+            &[
+                1.039_229_9,
+                2.771_279_6,
+                0.0,
+                0.577_349_3,
+                2.309_397_2,
+                0.577_349_3,
+            ],
+            3e-5,
+        );
+
+        let legacy = executor().execute(&graph, inputs, weights).unwrap();
+        assert_eq!(legacy.executed_node_ids, vec![node_id("norm")]);
+        assert_eq!(legacy.outputs, traced.outputs);
+    }
+
+    #[test]
+    fn rms_norm_unit_offset_scale_with_zero_weight_is_not_zero() {
+        let graph = rms_norm_graph(
+            false,
+            NormalizationAffine::UnitOffsetScale,
+            TensorLayout::TokensHidden,
+            TensorLayout::TokensHidden,
+        );
+        let run = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    f32(
+                        &[2, 3],
+                        TensorLayout::TokensHidden,
+                        &[3.0, 4.0, 0.0, 1.0, 2.0, 2.0],
+                    ),
+                )]),
+                map([(
+                    weight_id("scale"),
+                    f32(&[3], TensorLayout::RowMajor, &[0.0, 0.0, 0.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(
+            &run.outputs[&value_id("out")],
+            &[
+                1.039_229_9,
+                1.385_639_8,
+                0.0,
+                0.577_349_3,
+                1.154_698_6,
+                1.154_698_6,
+            ],
+            3e-5,
+        );
+        let (_, _, values) = run.outputs[&value_id("out")].f32_parts().unwrap();
+        assert!(values.iter().any(|value| value.abs() > 0.5));
+    }
+
+    #[test]
+    fn rms_norm_scale_and_bias_final_norm_executes() {
+        let graph = rms_norm_graph(
+            true,
+            NormalizationAffine::ScaleAndBias,
+            TensorLayout::TokensHidden,
+            TensorLayout::TokensHidden,
+        );
+        let run = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    f32(
+                        &[2, 3],
+                        TensorLayout::TokensHidden,
+                        &[1.0, 2.0, 2.0, 3.0, 0.0, 4.0],
+                    ),
+                )]),
+                map([
+                    (
+                        weight_id("scale"),
+                        f32(&[3], TensorLayout::RowMajor, &[2.0, 0.5, -1.0]),
+                    ),
+                    (
+                        weight_id("bias"),
+                        f32(&[3], TensorLayout::RowMajor, &[0.5, -1.0, 2.0]),
+                    ),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            run.trace.completed_nodes,
+            vec![CpuReferenceNodeRef {
+                id: node_id("final-norm"),
+                kind: CpuReferenceNodeKind::FinalNorm,
+            }]
+        );
+        assert_f32(
+            &run.outputs[&value_id("out")],
+            &[
+                1.654_698_6,
+                -0.422_650_7,
+                0.845_301_4,
+                2.578_459_7,
+                -1.0,
+                0.614_360_2,
+            ],
+            3e-5,
+        );
+    }
+
+    #[test]
+    fn layer_normalization_is_typed_unsupported_before_execution() {
+        let mut graph = rms_norm_graph(
+            false,
+            NormalizationAffine::Scale,
+            TensorLayout::TokensHidden,
+            TensorLayout::TokensHidden,
+        );
+        if let GraphNodeKind::Norm { kind, .. } = &mut graph.nodes[0].kind {
+            *kind = NormalizationKind::Layer;
+        } else {
+            panic!("RMS normalization test graph must contain Norm");
+        }
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    f32(&[2, 3], TensorLayout::TokensHidden, &[1.0; 6]),
+                )]),
+                map([(
+                    weight_id("scale"),
+                    f32(&[3], TensorLayout::RowMajor, &[1.0; 3]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(error.reason_code, "normalization_kind");
+        assert_eq!(error.trace.completed_node_count, 0);
+        assert_eq!(
+            error.failed_node,
+            Some(CpuReferenceNodeRef {
+                id: node_id("norm"),
+                kind: CpuReferenceNodeKind::Norm,
+            })
+        );
+        assert!(
+            error
+                .message
+                .contains("Layer normalization is not in the P1-B2 CPU subset")
+        );
+    }
+
+    #[test]
+    fn rms_norm_shape_is_graph_invalid_and_layout_mismatch_is_preflight_unsupported() {
+        let mut shape_mismatch = rms_norm_graph(
+            false,
+            NormalizationAffine::Scale,
+            TensorLayout::TokensHidden,
+            TensorLayout::TokensHidden,
+        );
+        shape_mismatch.values[1].tensor.shape = vec![2, 2];
+        assert!(
+            shape_mismatch
+                .validate()
+                .unwrap_err()
+                .contains("normalization input and output")
+        );
+
+        let layout_mismatch = rms_norm_graph(
+            false,
+            NormalizationAffine::Scale,
+            TensorLayout::TokensHidden,
+            TensorLayout::RowMajor,
+        );
+        let error = executor()
+            .execute_traced(
+                &layout_mismatch,
+                map([(
+                    value_id("input"),
+                    f32(&[2, 3], TensorLayout::TokensHidden, &[1.0; 6]),
+                )]),
+                map([(
+                    weight_id("scale"),
+                    f32(&[3], TensorLayout::RowMajor, &[1.0; 3]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        assert_eq!(error.reason_code, "layout_mismatch");
+        assert_eq!(error.trace.completed_node_count, 0);
+        assert_eq!(
+            error.failed_node,
+            Some(CpuReferenceNodeRef {
+                id: node_id("norm"),
+                kind: CpuReferenceNodeKind::Norm,
+            })
+        );
+    }
+
+    #[test]
+    fn rms_norm_intermediate_overflow_is_numerical_and_keeps_the_completed_prefix() {
+        let graph = ModelGraph {
+            graph_id: "linear-then-rms-norm".into(),
+            inputs: vec![value_id("input")],
+            outputs: vec![value_id("out")],
+            values: vec![
+                value(
+                    "input",
+                    &[1, 3],
+                    NumericalFormat::F32,
+                    TensorLayout::TokensHidden,
+                ),
+                value(
+                    "hidden",
+                    &[1, 3],
+                    NumericalFormat::F32,
+                    TensorLayout::TokensHidden,
+                ),
+                value(
+                    "out",
+                    &[1, 3],
+                    NumericalFormat::F32,
+                    TensorLayout::TokensHidden,
+                ),
+            ],
+            weights: vec![weight("linear", &[3, 3]), weight("scale", &[3])],
+            nodes: vec![
+                GraphNode {
+                    id: node_id("linear"),
+                    inputs: vec![value_id("input")],
+                    outputs: vec![value_id("hidden")],
+                    weights: vec![weight_id("linear")],
+                    states: vec![],
+                    kind: GraphNodeKind::Linear { has_bias: false },
+                },
+                GraphNode {
+                    id: node_id("norm"),
+                    inputs: vec![value_id("hidden")],
+                    outputs: vec![value_id("out")],
+                    weights: vec![weight_id("scale")],
+                    states: vec![],
+                    kind: GraphNodeKind::Norm {
+                        epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                        kind: NormalizationKind::Rms,
+                        affine: NormalizationAffine::Scale,
+                        axis: NormalizationAxis::Last,
+                    },
+                },
+            ],
+        };
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([(
+                    value_id("input"),
+                    f32(&[1, 3], TensorLayout::TokensHidden, &[f32::MAX, 1.0, 1.0]),
+                )]),
+                map([
+                    (
+                        weight_id("linear"),
+                        f32(
+                            &[3, 3],
+                            TensorLayout::RowMajor,
+                            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                        ),
+                    ),
+                    (
+                        weight_id("scale"),
+                        f32(&[3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+                    ),
+                ]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        assert_eq!(error.reason_code, "runtime_numerical");
+        assert!(error.message.contains("square is non-finite"));
+        assert_eq!(error.trace.completed_node_count, 1);
+        assert_eq!(error.trace.completed_nodes[0].id, node_id("linear"));
+        assert_eq!(
+            error.failed_node,
+            Some(CpuReferenceNodeRef {
+                id: node_id("norm"),
+                kind: CpuReferenceNodeKind::Norm,
+            })
+        );
+    }
+
+    #[test]
+    fn rms_norm_preflight_charges_width_one_rows_above_the_old_scalar_only_budget() {
+        for (affine, expected_work, old_scalar_only_work) in [
+            (NormalizationAffine::Scale, 32_u64, 24_u64),
+            (NormalizationAffine::UnitOffsetScale, 36_u64, 28_u64),
+            (NormalizationAffine::ScaleAndBias, 36_u64, 28_u64),
+        ] {
+            let mut graph = rms_norm_graph(
+                false,
+                affine,
+                TensorLayout::RowMajor,
+                TensorLayout::RowMajor,
+            );
+            for value in &mut graph.values {
+                value.tensor.shape = vec![4, 1];
+            }
+            for weight in &mut graph.weights {
+                weight.tensor.shape = vec![1];
+            }
+            graph.validate().unwrap();
+            let value_specs = graph
+                .values
+                .iter()
+                .map(|value| (value.id.clone(), &value.tensor))
+                .collect();
+            let weight_specs = graph
+                .weights
+                .iter()
+                .map(|weight| (weight.id.clone(), &weight.tensor))
+                .collect();
+            let plan = preflight_graph(&graph, &value_specs, &weight_specs).unwrap();
+            assert_eq!(plan.execution_elements, 4);
+            assert_eq!(plan.work_units, expected_work);
+            assert!(plan.work_units > old_scalar_only_work);
+        }
+    }
+
+    #[test]
+    fn rms_norm_preflight_rejects_row_work_budget_without_executing_payloads() {
+        const ROWS: usize = 1_000_000;
+        const NODES: usize = 7;
+        let mut values = Vec::new();
+        values.push(value(
+            "value-0",
+            &[ROWS, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+        ));
+        for index in 1..=NODES {
+            values.push(value(
+                &format!("value-{index}"),
+                &[ROWS, 1],
+                NumericalFormat::F32,
+                TensorLayout::RowMajor,
+            ));
+        }
+        let nodes = (0..NODES)
+            .map(|index| GraphNode {
+                id: node_id(&format!("norm-{index}")),
+                inputs: vec![value_id(&format!("value-{index}"))],
+                outputs: vec![value_id(&format!("value-{}", index + 1))],
+                weights: vec![weight_id("scale")],
+                states: vec![],
+                kind: GraphNodeKind::Norm {
+                    epsilon: PositiveF32::new(1e-5, "epsilon").unwrap(),
+                    kind: NormalizationKind::Rms,
+                    affine: NormalizationAffine::Scale,
+                    axis: NormalizationAxis::Last,
+                },
+            })
+            .collect();
+        let graph = ModelGraph {
+            graph_id: "rms-work-budget".into(),
+            inputs: vec![value_id("value-0")],
+            outputs: vec![value_id(&format!("value-{NODES}"))],
+            values,
+            weights: vec![weight("scale", &[1])],
+            nodes,
+        };
+        graph.validate().unwrap();
+        let value_specs = graph
+            .values
+            .iter()
+            .map(|value| (value.id.clone(), &value.tensor))
+            .collect();
+        let weight_specs = graph
+            .weights
+            .iter()
+            .map(|weight| (weight.id.clone(), &weight.tensor))
+            .collect();
+        let error = preflight_graph(&graph, &value_specs, &weight_specs).unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "work_budget");
+        assert_eq!(error.failed_node.as_ref().unwrap().id, node_id("norm-6"));
+        assert!(error.message.contains("work-unit budget"));
+    }
+
+    #[test]
+    fn rms_norm_accepts_row_major_and_multidimensional_width_one() {
+        let row_major = rms_norm_graph(
+            false,
+            NormalizationAffine::Scale,
+            TensorLayout::RowMajor,
+            TensorLayout::RowMajor,
+        );
+        let row_major_run = executor()
+            .execute_traced(
+                &row_major,
+                map([(
+                    value_id("input"),
+                    f32(
+                        &[2, 3],
+                        TensorLayout::RowMajor,
+                        &[1.0, 2.0, 2.0, 3.0, 4.0, 0.0],
+                    ),
+                )]),
+                map([(
+                    weight_id("scale"),
+                    f32(&[3], TensorLayout::RowMajor, &[1.0, 1.0, 1.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(
+            &row_major_run.outputs[&value_id("out")],
+            &[
+                0.577_349_3,
+                1.154_698_6,
+                1.154_698_6,
+                1.039_229_9,
+                1.385_639_8,
+                0.0,
+            ],
+            3e-5,
+        );
+
+        let mut width_one = rms_norm_graph(
+            false,
+            NormalizationAffine::Scale,
+            TensorLayout::RowMajor,
+            TensorLayout::RowMajor,
+        );
+        for value in &mut width_one.values {
+            value.tensor.shape = vec![2, 2, 1];
+        }
+        width_one.weights[0].tensor.shape = vec![1];
+        width_one.validate().unwrap();
+        let width_one_run = executor()
+            .execute_traced(
+                &width_one,
+                map([(
+                    value_id("input"),
+                    f32(&[2, 2, 1], TensorLayout::RowMajor, &[1.0, 2.0, 3.0, 4.0]),
+                )]),
+                map([(
+                    weight_id("scale"),
+                    f32(&[1], TensorLayout::RowMajor, &[2.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(
+            &width_one_run.outputs[&value_id("out")],
+            &[1.999_99, 1.999_997_5, 1.999_998_9, 1.999_999_4],
+            3e-5,
+        );
+    }
+
+    fn rms_norm_graph(
+        final_norm: bool,
+        affine: NormalizationAffine,
+        input_layout: TensorLayout,
+        output_layout: TensorLayout,
+    ) -> ModelGraph {
+        let mut weights = vec![weight("scale", &[3])];
+        let mut node_weights = vec![weight_id("scale")];
+        if affine == NormalizationAffine::ScaleAndBias {
+            weights.push(weight("bias", &[3]));
+            node_weights.push(weight_id("bias"));
+        }
+        let epsilon = PositiveF32::new(1e-5, "epsilon").unwrap();
+        let kind = if final_norm {
+            GraphNodeKind::FinalNorm {
+                epsilon,
+                kind: NormalizationKind::Rms,
+                affine,
+                axis: NormalizationAxis::Last,
+            }
+        } else {
+            GraphNodeKind::Norm {
+                epsilon,
+                kind: NormalizationKind::Rms,
+                affine,
+                axis: NormalizationAxis::Last,
+            }
+        };
+        ModelGraph {
+            graph_id: if final_norm {
+                "final-rms-norm".into()
+            } else {
+                "rms-norm".into()
+            },
+            inputs: vec![value_id("input")],
+            outputs: vec![value_id("out")],
+            values: vec![
+                value("input", &[2, 3], NumericalFormat::F32, input_layout),
+                value("out", &[2, 3], NumericalFormat::F32, output_layout),
+            ],
+            weights,
+            nodes: vec![GraphNode {
+                id: node_id(if final_norm { "final-norm" } else { "norm" }),
+                inputs: vec![value_id("input")],
+                outputs: vec![value_id("out")],
+                weights: node_weights,
+                states: vec![],
+                kind,
+            }],
+        }
     }
 
     fn simple_linear_graph() -> ModelGraph {
