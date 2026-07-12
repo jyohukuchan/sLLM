@@ -1200,11 +1200,81 @@ impl CpuReferenceExecutor {
                 .map_err(|error| runtime_node_fault(node, runtime, error))?;
                 Ok(vec![(node.outputs[0].clone(), output)])
             }
+            GraphNodeKind::CausalDepthwiseConv1d {
+                channels,
+                kernel_size,
+            } => {
+                let input = node_internal(node, node_input(node, values, 0))?;
+                let kernel = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let output = causal_depthwise_conv1d_f32(
+                    input,
+                    kernel,
+                    *channels,
+                    *kernel_size,
+                    spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![(node.outputs[0].clone(), output)])
+            }
+            GraphNodeKind::GatedDecayParameters { channels } => {
+                let decay = node_internal(node, node_input(node, values, 0))?;
+                let update = node_internal(node, node_input(node, values, 1))?;
+                let log_rate = node_internal(node, node_weight(node, weights, weight_specs, 0))?;
+                let time_bias = node_internal(node, node_weight(node, weights, weight_specs, 1))?;
+                let log_spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let update_spec = node_internal(node, node_output_spec(node, value_specs, 1))?;
+                let (log_decay, update_rate) = gated_decay_parameters_f32(
+                    decay,
+                    update,
+                    log_rate,
+                    time_bias,
+                    *channels,
+                    log_spec,
+                    update_spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![
+                    (node.outputs[0].clone(), log_decay),
+                    (node.outputs[1].clone(), update_rate),
+                ])
+            }
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+            } => {
+                let query = node_internal(node, node_input(node, values, 0))?;
+                let key = node_internal(node, node_input(node, values, 1))?;
+                let value = node_internal(node, node_input(node, values, 2))?;
+                let decay = node_internal(node, node_input(node, values, 3))?;
+                let update = node_internal(node, node_input(node, values, 4))?;
+                let spec = node_internal(node, node_output_spec(node, value_specs, 0))?;
+                let (output, _) = gated_delta_rule_scan_f32(
+                    query,
+                    key,
+                    value,
+                    decay,
+                    update,
+                    *key_heads,
+                    *value_heads,
+                    *key_dim,
+                    *value_dim,
+                    None,
+                    spec,
+                    allocated_elements,
+                    runtime,
+                )
+                .map_err(|error| runtime_node_fault(node, runtime, error))?;
+                Ok(vec![(node.outputs[0].clone(), output)])
+            }
             GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
-            | GraphNodeKind::CausalDepthwiseConv1d { .. }
-            | GraphNodeKind::GatedDecayParameters { .. }
-            | GraphNodeKind::GatedDeltaRuleScan { .. }
             | GraphNodeKind::Sampling { .. } => Err(CpuReferenceFault::node(
                 CpuReferenceFailureClass::Unsupported,
                 node,
@@ -2336,22 +2406,305 @@ fn preflight_graph(
                     ),
                 )?;
             }
-            GraphNodeKind::CausalDepthwiseConv1d { .. }
-            | GraphNodeKind::GatedDeltaRuleScan { .. } => {
-                return Err(CpuReferenceFault::node(
+            GraphNodeKind::CausalDepthwiseConv1d {
+                channels,
+                kernel_size,
+            } => {
+                let input = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                let kernel = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 0),
+                )?;
+                for (label, spec) in [
+                    ("causal depthwise conv input", input),
+                    ("causal depthwise conv output", output),
+                ] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, label),
+                    )?;
+                }
+                preflight_result(
                     CpuReferenceFailureClass::Unsupported,
                     node,
-                    "stateful_operator",
-                    "CPU reference does not implement this state-capable operator",
-                ));
+                    "weight_layout",
+                    validate_cpu_weight_layout(kernel, "causal depthwise conv kernel"),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    validate_cpu_conv_contract(input, output, kernel, *channels, *kernel_size),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                let elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(output, "causal depthwise conv output"),
+                )?;
+                let work =
+                    checked_work_product(elements, *kernel_size, 2, "causal depthwise conv work")
+                        .map_err(|m| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "work_budget",
+                            m,
+                        )
+                    })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
+                )?;
             }
-            GraphNodeKind::GatedDecayParameters { .. } => {
-                return Err(CpuReferenceFault::node(
-                    CpuReferenceFailureClass::Unsupported,
+            GraphNodeKind::GatedDecayParameters { channels } => {
+                let decay = preflight_result(
+                    CpuReferenceFailureClass::Internal,
                     node,
-                    "operator",
-                    "CPU reference does not implement this operator",
-                ));
+                    "node_contract",
+                    node_input_spec(node, value_specs, 0),
+                )?;
+                let update = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_input_spec(node, value_specs, 1),
+                )?;
+                let log_output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                let update_output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 1),
+                )?;
+                let log_rate = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 0),
+                )?;
+                let time_bias = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_weight_spec(node, weight_specs, 1),
+                )?;
+                for (label, spec) in [
+                    ("gated decay control", decay),
+                    ("gated update control", update),
+                    ("gated log decay", log_output),
+                    ("gated update rate", update_output),
+                ] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, label),
+                    )?;
+                }
+                for (label, spec) in [("gated log rate", log_rate), ("gated time bias", time_bias)]
+                {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "weight_layout",
+                        validate_cpu_weight_layout(spec, label),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    validate_cpu_decay_contract(
+                        decay,
+                        update,
+                        log_output,
+                        update_output,
+                        log_rate,
+                        time_bias,
+                        *channels,
+                    ),
+                )?;
+                for output in [log_output, update_output] {
+                    preflight_result(
+                        CpuReferenceFailureClass::Resource,
+                        node,
+                        "element_budget",
+                        reserve_output_elements(&mut plan, node, output),
+                    )?;
+                }
+                let elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(log_output, "gated decay output"),
+                )?;
+                let work = u64::try_from(elements)
+                    .ok()
+                    .and_then(|v| v.checked_mul(48))
+                    .ok_or_else(|| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "work_budget",
+                            "gated decay work overflows u64",
+                        )
+                    })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
+                )?;
+            }
+            GraphNodeKind::GatedDeltaRuleScan {
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+            } => {
+                let specs = [
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_input_spec(node, value_specs, 0),
+                    )?,
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_input_spec(node, value_specs, 1),
+                    )?,
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_input_spec(node, value_specs, 2),
+                    )?,
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_input_spec(node, value_specs, 3),
+                    )?,
+                    preflight_result(
+                        CpuReferenceFailureClass::Internal,
+                        node,
+                        "node_contract",
+                        node_input_spec(node, value_specs, 4),
+                    )?,
+                ];
+                let output = preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    node_output_spec(node, value_specs, 0),
+                )?;
+                for spec in specs.iter().copied().chain(std::iter::once(output)) {
+                    preflight_result(
+                        CpuReferenceFailureClass::Unsupported,
+                        node,
+                        "value_layout",
+                        validate_cpu_value_spec(spec, "gated delta-rule tensor"),
+                    )?;
+                }
+                preflight_result(
+                    CpuReferenceFailureClass::Internal,
+                    node,
+                    "node_contract",
+                    validate_cpu_scan_contract(
+                        &specs,
+                        output,
+                        *key_heads,
+                        *value_heads,
+                        *key_dim,
+                        *value_dim,
+                    ),
+                )?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_output_elements(&mut plan, node, output),
+                )?;
+                let state_elements = value_heads
+                    .checked_mul(*key_dim)
+                    .and_then(|v| v.checked_mul(*value_dim))
+                    .ok_or_else(|| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "element_budget",
+                            "scan state size overflows usize",
+                        )
+                    })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    reserve_temporary_elements(&mut plan, node, state_elements),
+                )?;
+                let output_elements = preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "element_budget",
+                    spec_elements(output, "scan output"),
+                )?;
+                let per_value = key_dim
+                    .checked_mul(8)
+                    .and_then(|v| v.checked_add(40))
+                    .ok_or_else(|| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "work_budget",
+                            "scan work factor overflows usize",
+                        )
+                    })?;
+                let work = checked_work_product(output_elements, per_value, 1, "scan work")
+                    .map_err(|m| {
+                        CpuReferenceFault::node(
+                            CpuReferenceFailureClass::Resource,
+                            node,
+                            "work_budget",
+                            m,
+                        )
+                    })?;
+                preflight_result(
+                    CpuReferenceFailureClass::Resource,
+                    node,
+                    "work_budget",
+                    add_work_units(&mut plan, node, work),
+                )?;
             }
             GraphNodeKind::DenseAttention { .. }
             | GraphNodeKind::RecurrentAttention { .. }
@@ -2717,6 +3070,111 @@ fn validate_cpu_gated_multiply_contract(
 ) -> Result<(), String> {
     if value_input.shape != gate.shape || value_input.shape != output.shape {
         return Err("gated multiply value, gate, and output shapes must match".into());
+    }
+    Ok(())
+}
+
+fn checked_work_product(
+    elements: usize,
+    factor: usize,
+    multiplier: usize,
+    label: &str,
+) -> Result<u64, String> {
+    let work = elements
+        .checked_mul(factor)
+        .and_then(|v| v.checked_mul(multiplier))
+        .ok_or_else(|| format!("{label} overflows usize"))?;
+    u64::try_from(work).map_err(|_| format!("{label} exceeds u64"))
+}
+
+fn validate_cpu_conv_contract(
+    input: &TensorSpec,
+    output: &TensorSpec,
+    kernel: &TensorSpec,
+    channels: usize,
+    kernel_size: usize,
+) -> Result<(), String> {
+    if channels == 0 || kernel_size == 0 || input.shape.len() < 2 {
+        return Err("invalid causal depthwise conv geometry".into());
+    }
+    if input.shape != output.shape || input.layout != output.layout || input.format != output.format
+    {
+        return Err("causal depthwise conv input/output mismatch".into());
+    }
+    if input.shape.last().copied() != Some(channels)
+        || kernel.shape.as_slice() != [channels, 1, kernel_size]
+    {
+        return Err("causal depthwise conv shape mismatch".into());
+    }
+    Ok(())
+}
+
+fn validate_cpu_decay_contract(
+    decay: &TensorSpec,
+    update: &TensorSpec,
+    log_output: &TensorSpec,
+    update_output: &TensorSpec,
+    log_rate: &TensorSpec,
+    time_bias: &TensorSpec,
+    channels: usize,
+) -> Result<(), String> {
+    if channels == 0 || decay.shape.len() < 2 || decay.shape.last().copied() != Some(channels) {
+        return Err("invalid gated decay geometry".into());
+    }
+    for spec in [update, log_output, update_output] {
+        if spec.shape != decay.shape || spec.layout != decay.layout || spec.format != decay.format {
+            return Err("gated decay tensor metadata mismatch".into());
+        }
+    }
+    if log_rate.shape.as_slice() != [channels] || time_bias.shape.as_slice() != [channels] {
+        return Err("gated decay weight shape mismatch".into());
+    }
+    Ok(())
+}
+
+fn validate_cpu_scan_contract(
+    specs: &[&TensorSpec; 5],
+    output: &TensorSpec,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+) -> Result<(), String> {
+    if key_heads == 0
+        || value_heads == 0
+        || key_dim == 0
+        || value_dim == 0
+        || value_heads % key_heads != 0
+    {
+        return Err("invalid gated delta-rule geometry".into());
+    }
+    let rank = specs[0].shape.len();
+    if rank < 2 {
+        return Err("gated delta-rule tensors require rank at least 2".into());
+    }
+    for spec in specs.iter().copied().chain(std::iter::once(output)) {
+        if spec.shape.len() != rank
+            || spec.shape[..rank - 1] != specs[0].shape[..rank - 1]
+            || spec.layout != specs[0].layout
+            || spec.format != specs[0].format
+        {
+            return Err("gated delta-rule tensor metadata mismatch".into());
+        }
+    }
+    let kw = key_heads
+        .checked_mul(key_dim)
+        .ok_or_else(|| "scan key width overflow".to_string())?;
+    let vw = value_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "scan value width overflow".to_string())?;
+    if specs[0].shape[rank - 1] != kw
+        || specs[1].shape[rank - 1] != kw
+        || specs[2].shape[rank - 1] != vw
+        || output.shape[rank - 1] != vw
+        || specs[3].shape[rank - 1] != value_heads
+        || specs[4].shape[rank - 1] != value_heads
+    {
+        return Err("gated delta-rule feature width mismatch".into());
     }
     Ok(())
 }
@@ -3958,6 +4416,249 @@ fn rms_norm_f32(
         }
     }
     HostTensor::f32(input_shape.to_vec(), output_spec.layout.clone(), output)
+}
+
+fn causal_depthwise_conv1d_f32(
+    input: &HostTensor,
+    kernel: &HostTensor,
+    channels: usize,
+    kernel_size: usize,
+    output_spec: &TensorSpec,
+    allocated: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<HostTensor, String> {
+    let (shape, layout, data) = input.f32_parts()?;
+    let (kernel_shape, kernel_layout, weights) = kernel.f32_parts()?;
+    if !matches!(layout, TensorLayout::RowMajor | TensorLayout::TokensHidden)
+        || kernel_layout != &TensorLayout::RowMajor
+    {
+        return Err("causal depthwise conv layout unsupported".into());
+    }
+    if shape.len() < 2
+        || shape.last().copied() != Some(channels)
+        || kernel_shape != [channels, 1, kernel_size]
+    {
+        return Err("causal depthwise conv runtime shape mismatch".into());
+    }
+    require_f32_output_spec(output_spec, shape, layout, "causal depthwise conv")?;
+    let tokens = shape[shape.len() - 2];
+    let sequences = causal_sequence_count(shape)?;
+    let mut output = allocate_f32(
+        data.len(),
+        allocated,
+        runtime,
+        "causal depthwise conv output",
+    )?;
+    for sequence in 0..sequences {
+        let base = sequence
+            .checked_mul(tokens)
+            .and_then(|v| v.checked_mul(channels))
+            .ok_or_else(|| "conv sequence offset overflow".to_string())?;
+        for token in 0..tokens {
+            for channel in 0..channels {
+                let mut sum = 0.0_f32;
+                for j in 0..kernel_size {
+                    let lag = kernel_size - 1 - j;
+                    if token >= lag {
+                        let x = data[base + (token - lag) * channels + channel];
+                        let w = weights[channel * kernel_size + j];
+                        let product = x * w;
+                        if !product.is_finite() {
+                            runtime.numerical_failed = true;
+                            return Err("conv product non-finite".into());
+                        }
+                        sum += product;
+                        if !sum.is_finite() {
+                            runtime.numerical_failed = true;
+                            return Err("conv accumulation non-finite".into());
+                        }
+                    }
+                }
+                output[base + token * channels + channel] = sum;
+            }
+        }
+    }
+    HostTensor::f32(shape.to_vec(), output_spec.layout.clone(), output)
+}
+
+fn stable_softplus(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err("softplus input non-finite".into());
+    }
+    let result = if value > 0.0 {
+        value + (-value).exp().ln_1p()
+    } else {
+        value.exp().ln_1p()
+    };
+    if result.is_finite() {
+        Ok(result)
+    } else {
+        Err("softplus output non-finite".into())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gated_decay_parameters_f32(
+    decay: &HostTensor,
+    update: &HostTensor,
+    log_rate: &HostTensor,
+    time_bias: &HostTensor,
+    channels: usize,
+    log_spec: &TensorSpec,
+    update_spec: &TensorSpec,
+    allocated: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<(HostTensor, HostTensor), String> {
+    let (shape, layout, decay_data) = decay.f32_parts()?;
+    let (update_shape, update_layout, update_data) = update.f32_parts()?;
+    let (_, rate_layout, rates) = log_rate.f32_parts()?;
+    let (_, bias_layout, biases) = time_bias.f32_parts()?;
+    if shape != update_shape
+        || layout != update_layout
+        || shape.last().copied() != Some(channels)
+        || rate_layout != &TensorLayout::RowMajor
+        || bias_layout != &TensorLayout::RowMajor
+        || rates.len() != channels
+        || biases.len() != channels
+    {
+        return Err("gated decay runtime contract mismatch".into());
+    }
+    require_f32_output_spec(log_spec, shape, layout, "gated log decay")?;
+    require_f32_output_spec(update_spec, shape, layout, "gated update rate")?;
+    let mut logs = allocate_f32(decay_data.len(), allocated, runtime, "gated log decay")?;
+    let mut updates = allocate_f32(decay_data.len(), allocated, runtime, "gated update rate")?;
+    for index in 0..decay_data.len() {
+        let channel = index % channels;
+        let control = decay_data[index] + biases[channel];
+        let rate = rates[channel].exp();
+        let soft = stable_softplus(control).map_err(|e| {
+            runtime.numerical_failed = true;
+            e
+        })?;
+        let log = -rate * soft;
+        let beta = stable_sigmoid(update_data[index]).map_err(|e| {
+            runtime.numerical_failed = true;
+            e
+        })?;
+        if !control.is_finite() || !rate.is_finite() || !log.is_finite() || !beta.is_finite() {
+            runtime.numerical_failed = true;
+            return Err("gated decay intermediate non-finite".into());
+        }
+        logs[index] = log;
+        updates[index] = beta;
+    }
+    Ok((
+        HostTensor::f32(shape.to_vec(), log_spec.layout.clone(), logs)?,
+        HostTensor::f32(shape.to_vec(), update_spec.layout.clone(), updates)?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gated_delta_rule_scan_f32(
+    query: &HostTensor,
+    key: &HostTensor,
+    value: &HostTensor,
+    log_decay: &HostTensor,
+    update_rate: &HostTensor,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    initial_state: Option<&[f32]>,
+    output_spec: &TensorSpec,
+    allocated: &mut usize,
+    runtime: &mut RuntimeExecutionContext,
+) -> Result<(HostTensor, Vec<f32>), String> {
+    let (shape, layout, q) = query.f32_parts()?;
+    let (_, kl, k) = key.f32_parts()?;
+    let (_, vl, v) = value.f32_parts()?;
+    let (_, dl, d) = log_decay.f32_parts()?;
+    let (_, ul, beta) = update_rate.f32_parts()?;
+    if kl != layout || vl != layout || dl != layout || ul != layout {
+        return Err("scan layouts mismatch".into());
+    }
+    let tokens = shape[shape.len() - 2];
+    let sequences = causal_sequence_count(shape)?;
+    let kw = key_heads
+        .checked_mul(key_dim)
+        .ok_or_else(|| "scan key width overflow".to_string())?;
+    let vw = value_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "scan value width overflow".to_string())?;
+    let state_len = value_heads
+        .checked_mul(key_dim)
+        .and_then(|x| x.checked_mul(value_dim))
+        .ok_or_else(|| "scan state size overflow".to_string())?;
+    let mut state = allocate_f32(state_len, allocated, runtime, "gated delta-rule state")?;
+    if let Some(initial) = initial_state {
+        if initial.len() != state_len {
+            return Err("scan initial state size mismatch".into());
+        }
+        state.copy_from_slice(initial);
+    }
+    let mut output = allocate_f32(
+        sequences
+            .checked_mul(tokens)
+            .and_then(|x| x.checked_mul(vw))
+            .ok_or_else(|| "scan output size overflow".to_string())?,
+        allocated,
+        runtime,
+        "gated delta-rule output",
+    )?;
+    require_f32_output_spec(
+        output_spec,
+        &replaced_last_axis(shape, vw)?,
+        layout,
+        "gated delta-rule scan",
+    )?;
+    let group = value_heads / key_heads;
+    for seq in 0..sequences {
+        if seq > 0 {
+            state.fill(0.0);
+        }
+        let qbase = seq * tokens * kw;
+        let vbase = seq * tokens * vw;
+        let hbase = seq * tokens * value_heads;
+        for t in 0..tokens {
+            for hv in 0..value_heads {
+                let kh = hv / group;
+                let decay = d[hbase + t * value_heads + hv].exp();
+                let b = beta[hbase + t * value_heads + hv];
+                if !decay.is_finite() || !b.is_finite() {
+                    runtime.numerical_failed = true;
+                    return Err("scan control non-finite".into());
+                }
+                for vd in 0..value_dim {
+                    let mut pred = 0.0;
+                    for kd in 0..key_dim {
+                        let si = (hv * key_dim + kd) * value_dim + vd;
+                        state[si] *= decay;
+                        pred += state[si] * k[qbase + t * kw + kh * key_dim + kd];
+                    }
+                    let residual = (v[vbase + t * vw + hv * value_dim + vd] - pred) * b;
+                    let mut context = 0.0;
+                    for kd in 0..key_dim {
+                        let si = (hv * key_dim + kd) * value_dim + vd;
+                        state[si] += k[qbase + t * kw + kh * key_dim + kd] * residual;
+                        context += state[si] * q[qbase + t * kw + kh * key_dim + kd];
+                    }
+                    if !pred.is_finite() || !residual.is_finite() || !context.is_finite() {
+                        runtime.numerical_failed = true;
+                        return Err("scan intermediate non-finite".into());
+                    }
+                    output[vbase + t * vw + hv * value_dim + vd] = context;
+                }
+            }
+        }
+    }
+    Ok((
+        HostTensor::f32(
+            replaced_last_axis(shape, vw)?,
+            output_spec.layout.clone(),
+            output,
+        )?,
+        state,
+    ))
 }
 
 fn grouped_last_split_output_f32(
@@ -6580,7 +7281,7 @@ mod tests {
     }
 
     #[test]
-    fn new_scan_conv_and_decay_nodes_are_typed_unsupported_before_payload() {
+    fn new_scan_conv_and_decay_nodes_execute_state_free_and_reject_stateful() {
         let conv = ModelGraph {
             graph_id: "unsupported-causal-depthwise-conv".into(),
             inputs: vec![value_id("conv-input")],
@@ -6696,41 +7397,114 @@ mod tests {
         let mut stateful_scan = scan.clone();
         stateful_scan.nodes[0].states = vec![StateId::new("scan-bank").unwrap()];
 
-        for (graph, expected_id, expected_kind, reason) in [
+        let conv_run = executor()
+            .execute_traced(
+                &conv,
+                map([(
+                    value_id("conv-input"),
+                    f32(&[1, 2, 2], TensorLayout::RowMajor, &[1.0, 10.0, 2.0, 20.0]),
+                )]),
+                map([(
+                    weight_id("conv-kernel"),
+                    f32(
+                        &[2, 1, 3],
+                        TensorLayout::RowMajor,
+                        &[1.0, 2.0, 3.0, 1.0, 0.0, 1.0],
+                    ),
+                )]),
+            )
+            .unwrap();
+        assert_f32(
+            &conv_run.outputs[&value_id("conv-output")],
+            &[3.0, 10.0, 8.0, 20.0],
+            0.0,
+        );
+        assert_eq!(
+            conv_run.trace.completed_nodes[0].kind,
+            CpuReferenceNodeKind::CausalDepthwiseConv1d
+        );
+
+        let decay_run = executor()
+            .execute(
+                &decay,
+                map([
+                    (
+                        value_id("decay-control"),
+                        f32(&[1, 2, 2], TensorLayout::RowMajor, &[0.0, 0.0, 1.0, -1.0]),
+                    ),
+                    (
+                        value_id("update-control"),
+                        f32(
+                            &[1, 2, 2],
+                            TensorLayout::RowMajor,
+                            &[0.0, 100.0, -100.0, 0.0],
+                        ),
+                    ),
+                ]),
+                map([
+                    (
+                        weight_id("log-rate"),
+                        f32(&[2], TensorLayout::RowMajor, &[0.0, 0.0]),
+                    ),
+                    (
+                        weight_id("time-bias"),
+                        f32(&[2], TensorLayout::RowMajor, &[0.0, 0.0]),
+                    ),
+                ]),
+            )
+            .unwrap();
+        assert_f32(
+            &decay_run.outputs[&value_id("log-decay")],
+            &[-0.693_147_2, -0.693_147_2, -1.313_261_6, -0.313_261_7],
+            2e-6,
+        );
+        assert_f32(
+            &decay_run.outputs[&value_id("update-rate")],
+            &[0.5, 1.0, 0.0, 0.5],
+            1e-6,
+        );
+        let (_, _, update_values) = decay_run.outputs[&value_id("update-rate")]
+            .f32_parts()
+            .unwrap();
+        assert!(update_values[2] > 0.0 && update_values[2].is_finite());
+
+        let scan_inputs = map([
             (
-                conv,
-                node_id("conv"),
-                CpuReferenceNodeKind::CausalDepthwiseConv1d,
-                "stateful_operator",
+                value_id("query"),
+                f32(&[1, 2, 2], TensorLayout::RowMajor, &[1.0, 0.0, 0.0, 1.0]),
             ),
             (
-                decay,
-                node_id("decay"),
-                CpuReferenceNodeKind::GatedDecayParameters,
-                "operator",
+                value_id("key"),
+                f32(&[1, 2, 2], TensorLayout::RowMajor, &[1.0, 0.0, 0.0, 1.0]),
             ),
             (
-                scan,
-                node_id("scan"),
-                CpuReferenceNodeKind::GatedDeltaRuleScan,
-                "stateful_operator",
+                value_id("scan-value"),
+                f32(&[1, 2, 2], TensorLayout::RowMajor, &[2.0, 4.0, 3.0, 5.0]),
             ),
-        ] {
-            graph.validate().unwrap();
-            let error = executor()
-                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
-                .unwrap_err();
-            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
-            assert_eq!(error.reason_code, reason);
-            assert_eq!(error.trace.completed_node_count, 0);
-            assert_eq!(
-                error.failed_node,
-                Some(CpuReferenceNodeRef {
-                    id: expected_id,
-                    kind: expected_kind
-                })
-            );
-        }
+            (
+                value_id("scan-log-decay"),
+                f32(&[1, 2, 2], TensorLayout::RowMajor, &[0.0; 4]),
+            ),
+            (
+                value_id("scan-update-rate"),
+                f32(&[1, 2, 2], TensorLayout::RowMajor, &[1.0; 4]),
+            ),
+        ]);
+        let scan_traced = executor()
+            .execute_traced(&scan, scan_inputs.clone(), BTreeMap::new())
+            .unwrap();
+        assert_f32(
+            &scan_traced.outputs[&value_id("context")],
+            &[2.0, 4.0, 3.0, 5.0],
+            1e-6,
+        );
+        assert_eq!(
+            executor()
+                .execute(&scan, scan_inputs, BTreeMap::new())
+                .unwrap()
+                .outputs,
+            scan_traced.outputs
+        );
 
         for (graph, expected_id, expected_kind) in [
             (
@@ -6759,6 +7533,436 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn conv_state_free_k1_rank3_capabilities_and_failures() {
+        let k1 = conv_graph(
+            &[1, 2, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+        );
+        let run = executor()
+            .execute(
+                &k1,
+                map([(
+                    value_id("x"),
+                    f32(&[1, 2, 1], TensorLayout::RowMajor, &[2.0, 3.0]),
+                )]),
+                map([(
+                    weight_id("kernel"),
+                    f32(&[1, 1, 1], TensorLayout::RowMajor, &[4.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(&run.outputs[&value_id("y")], &[8.0, 12.0], 0.0);
+        let rank3 = conv_graph(
+            &[2, 2, 1],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            1,
+            2,
+        );
+        let run = executor()
+            .execute(
+                &rank3,
+                map([(
+                    value_id("x"),
+                    f32(
+                        &[2, 2, 1],
+                        TensorLayout::TokensHidden,
+                        &[1.0, 2.0, 10.0, 20.0],
+                    ),
+                )]),
+                map([(
+                    weight_id("kernel"),
+                    f32(&[1, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0]),
+                )]),
+            )
+            .unwrap();
+        assert_f32(&run.outputs[&value_id("y")], &[1.0, 3.0, 10.0, 30.0], 0.0);
+        for graph in [
+            conv_graph(
+                &[1, 1, 1],
+                NumericalFormat::Bf16,
+                TensorLayout::RowMajor,
+                1,
+                1,
+            ),
+            conv_graph(
+                &[1, 1, 1],
+                NumericalFormat::F32,
+                TensorLayout::PackedRagged,
+                1,
+                1,
+            ),
+        ] {
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        }
+        let numerical = conv_graph(
+            &[1, 1, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+        );
+        let error = executor()
+            .execute_traced(
+                &numerical,
+                map([(
+                    value_id("x"),
+                    f32(&[1, 1, 1], TensorLayout::RowMajor, &[f32::MAX]),
+                )]),
+                map([(
+                    weight_id("kernel"),
+                    f32(&[1, 1, 1], TensorLayout::RowMajor, &[2.0]),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        let large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
+        let resource = conv_graph(
+            &[1, large, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+        );
+        let error = executor()
+            .execute_traced(&resource, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.reason_code, "element_budget");
+        let work = conv_graph(
+            &[1, MAX_CPU_REFERENCE_TENSOR_ELEMENTS, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            26,
+        );
+        let error = executor()
+            .execute_traced(&work, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.reason_code, "work_budget");
+    }
+
+    #[test]
+    fn decay_state_free_capabilities_overflow_and_resource_preflight() {
+        let tokens_hidden = decay_graph(
+            &[1, 1, 1],
+            NumericalFormat::F32,
+            TensorLayout::TokensHidden,
+            1,
+        );
+        let run = executor()
+            .execute(
+                &tokens_hidden,
+                map([
+                    (
+                        value_id("dc"),
+                        f32(&[1, 1, 1], TensorLayout::TokensHidden, &[0.0]),
+                    ),
+                    (
+                        value_id("uc"),
+                        f32(&[1, 1, 1], TensorLayout::TokensHidden, &[0.0]),
+                    ),
+                ]),
+                map([
+                    (weight_id("lr"), f32(&[1], TensorLayout::RowMajor, &[0.0])),
+                    (weight_id("tb"), f32(&[1], TensorLayout::RowMajor, &[0.0])),
+                ]),
+            )
+            .unwrap();
+        assert_f32(
+            &run.outputs[&value_id("ld")],
+            &[-std::f32::consts::LN_2],
+            1e-6,
+        );
+        assert_f32(&run.outputs[&value_id("ur")], &[0.5], 1e-6);
+
+        for graph in [
+            decay_graph(&[1, 1, 1], NumericalFormat::Fp16, TensorLayout::RowMajor, 1),
+            decay_graph(
+                &[1, 1, 1],
+                NumericalFormat::F32,
+                TensorLayout::PackedRagged,
+                1,
+            ),
+        ] {
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        }
+        let graph = decay_graph(&[1, 1, 1], NumericalFormat::F32, TensorLayout::RowMajor, 1);
+        let error = executor()
+            .execute_traced(
+                &graph,
+                map([
+                    (
+                        value_id("dc"),
+                        f32(&[1, 1, 1], TensorLayout::RowMajor, &[0.0]),
+                    ),
+                    (
+                        value_id("uc"),
+                        f32(&[1, 1, 1], TensorLayout::RowMajor, &[0.0]),
+                    ),
+                ]),
+                map([
+                    (weight_id("lr"), f32(&[1], TensorLayout::RowMajor, &[100.0])),
+                    (weight_id("tb"), f32(&[1], TensorLayout::RowMajor, &[0.0])),
+                ]),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        let large = MAX_CPU_REFERENCE_TENSOR_ELEMENTS + 1;
+        let graph = decay_graph(
+            &[1, large, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+        );
+        let error = executor()
+            .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        let work = decay_graph(
+            &[1, MAX_CPU_REFERENCE_TENSOR_ELEMENTS, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+        );
+        let error = executor()
+            .execute_traced(&work, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.reason_code, "work_budget");
+    }
+
+    #[test]
+    fn scan_state_free_rank3_chunk_equivalence_capabilities_and_budgets() {
+        let rank3 = scan_graph(
+            &[2, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            2,
+            2,
+            1,
+        );
+        let inputs = map([
+            (
+                value_id("q"),
+                f32(&[2, 1, 2], TensorLayout::RowMajor, &[1.0, 1.0, 1.0, 1.0]),
+            ),
+            (
+                value_id("k"),
+                f32(&[2, 1, 2], TensorLayout::RowMajor, &[1.0, 0.5, 1.0, 0.5]),
+            ),
+            (
+                value_id("v"),
+                f32(&[2, 1, 2], TensorLayout::RowMajor, &[2.0, 4.0, 3.0, 5.0]),
+            ),
+            (
+                value_id("d"),
+                f32(&[2, 1, 2], TensorLayout::RowMajor, &[0.0; 4]),
+            ),
+            (
+                value_id("b"),
+                f32(&[2, 1, 2], TensorLayout::RowMajor, &[0.5; 4]),
+            ),
+        ]);
+        let run = executor().execute(&rank3, inputs, BTreeMap::new()).unwrap();
+        assert_f32(&run.outputs[&value_id("o")], &[1.5, 3.0, 2.25, 3.75], 1e-6);
+
+        let tensor = |data: &[f32]| f32(&[1, 2, 1], TensorLayout::RowMajor, data);
+        let q = tensor(&[1.0, 1.0]);
+        let k = tensor(&[1.0, 1.0]);
+        let v = tensor(&[2.0, 4.0]);
+        let d = tensor(&[0.0, 0.0]);
+        let b = tensor(&[1.0, 0.5]);
+        let full_spec = spec(&[1, 2, 1], NumericalFormat::F32, TensorLayout::RowMajor);
+        let mut allocated = 0;
+        let mut runtime = RuntimeExecutionContext::default();
+        let (full, full_state) = gated_delta_rule_scan_f32(
+            &q,
+            &k,
+            &v,
+            &d,
+            &b,
+            1,
+            1,
+            1,
+            1,
+            None,
+            &full_spec,
+            &mut allocated,
+            &mut runtime,
+        )
+        .unwrap();
+        let one = |x: f32| f32(&[1, 1, 1], TensorLayout::RowMajor, &[x]);
+        let one_spec = spec(&[1, 1, 1], NumericalFormat::F32, TensorLayout::RowMajor);
+        let mut a1 = 0;
+        let mut r1 = RuntimeExecutionContext::default();
+        let (first, s1) = gated_delta_rule_scan_f32(
+            &one(1.0),
+            &one(1.0),
+            &one(2.0),
+            &one(0.0),
+            &one(1.0),
+            1,
+            1,
+            1,
+            1,
+            None,
+            &one_spec,
+            &mut a1,
+            &mut r1,
+        )
+        .unwrap();
+        let mut a2 = 0;
+        let mut r2 = RuntimeExecutionContext::default();
+        let (second, s2) = gated_delta_rule_scan_f32(
+            &one(1.0),
+            &one(1.0),
+            &one(4.0),
+            &one(0.0),
+            &one(0.5),
+            1,
+            1,
+            1,
+            1,
+            Some(&s1),
+            &one_spec,
+            &mut a2,
+            &mut r2,
+        )
+        .unwrap();
+        let mut a_zero = 0;
+        let mut r_zero = RuntimeExecutionContext::default();
+        let (second_from_zero, zero_state) = gated_delta_rule_scan_f32(
+            &one(1.0),
+            &one(1.0),
+            &one(4.0),
+            &one(0.0),
+            &one(0.5),
+            1,
+            1,
+            1,
+            1,
+            None,
+            &one_spec,
+            &mut a_zero,
+            &mut r_zero,
+        )
+        .unwrap();
+        assert_f32(&full, &[2.0, 3.0], 1e-6);
+        assert_f32(&first, &[2.0], 1e-6);
+        assert_f32(&second, &[3.0], 1e-6);
+        assert_eq!(s2, vec![3.0]);
+        assert_f32(&second_from_zero, &[2.0], 1e-6);
+        assert_eq!(zero_state, vec![2.0]);
+        assert_ne!(second, second_from_zero);
+        assert_eq!(full_state, s2);
+
+        let golden_spec = spec(&[1, 1, 4], NumericalFormat::F32, TensorLayout::TokensHidden);
+        let mut golden_allocated = 0;
+        let mut golden_runtime = RuntimeExecutionContext::default();
+        let (golden_output, golden_state) = gated_delta_rule_scan_f32(
+            &f32(&[1, 1, 2], TensorLayout::TokensHidden, &[2.0, 3.0]),
+            &f32(&[1, 1, 2], TensorLayout::TokensHidden, &[4.0, 5.0]),
+            &f32(
+                &[1, 1, 4],
+                TensorLayout::TokensHidden,
+                &[10.0, 20.0, 30.0, 40.0],
+            ),
+            &f32(
+                &[1, 1, 4],
+                TensorLayout::TokensHidden,
+                &[-std::f32::consts::LN_2; 4],
+            ),
+            &f32(&[1, 1, 4], TensorLayout::TokensHidden, &[0.25; 4]),
+            2,
+            4,
+            1,
+            1,
+            Some(&[1.0, 2.0, 3.0, 4.0]),
+            &golden_spec,
+            &mut golden_allocated,
+            &mut golden_runtime,
+        )
+        .unwrap();
+        // Each lane decays, predicts, applies the beta-scaled residual, then reads the
+        // updated state. For hv0: 1/2 -> prediction 2 -> residual step 2 -> state
+        // 1/2 + 4 * 2 = 8.5 -> context 2 * 8.5 = 17; the other lanes follow likewise.
+        assert_f32(&golden_output, &[17.0, 34.0, 88.875, 118.5], 1e-6);
+        assert_eq!(golden_state, vec![8.5, 17.0, 29.625, 39.5]);
+
+        for graph in [
+            scan_graph(
+                &[1, 1],
+                NumericalFormat::Bf16,
+                TensorLayout::RowMajor,
+                1,
+                1,
+                1,
+                1,
+            ),
+            scan_graph(
+                &[1, 1],
+                NumericalFormat::F32,
+                TensorLayout::PackedRagged,
+                1,
+                1,
+                1,
+                1,
+            ),
+        ] {
+            let error = executor()
+                .execute_traced(&graph, BTreeMap::new(), BTreeMap::new())
+                .unwrap_err();
+            assert_eq!(error.class, CpuReferenceFailureClass::Unsupported);
+        }
+        let overflow = scan_graph(
+            &[1, 1],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+            1,
+            1,
+        );
+        let error = executor()
+            .execute_traced(
+                &overflow,
+                map([
+                    (value_id("q"), one(1.0)),
+                    (value_id("k"), one(1.0)),
+                    (value_id("v"), one(1.0)),
+                    (value_id("d"), one(100.0)),
+                    (value_id("b"), one(1.0)),
+                ]),
+                BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Numerical);
+        let work = scan_graph(
+            &[1, 100_000],
+            NumericalFormat::F32,
+            TensorLayout::RowMajor,
+            1,
+            1,
+            64,
+            1,
+        );
+        let error = executor()
+            .execute_traced(&work, BTreeMap::new(), BTreeMap::new())
+            .unwrap_err();
+        assert_eq!(error.class, CpuReferenceFailureClass::Resource);
+        assert_eq!(error.reason_code, "work_budget");
     }
 
     #[test]
@@ -8252,6 +9456,132 @@ mod tests {
                 states: vec![],
                 kind: GraphNodeKind::GatedMultiply {
                     activation: ActivationKind::Sigmoid,
+                },
+            }],
+        }
+    }
+
+    fn conv_graph(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        channels: usize,
+        kernel_size: usize,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "conv-reference".into(),
+            inputs: vec![value_id("x")],
+            outputs: vec![value_id("y")],
+            values: vec![
+                value("x", shape, format.clone(), layout.clone()),
+                value("y", shape, format.clone(), layout),
+            ],
+            weights: vec![WeightSpec {
+                id: weight_id("kernel"),
+                tensor: spec(&[channels, 1, kernel_size], format, TensorLayout::RowMajor),
+            }],
+            nodes: vec![GraphNode {
+                id: node_id("conv-ref"),
+                inputs: vec![value_id("x")],
+                outputs: vec![value_id("y")],
+                weights: vec![weight_id("kernel")],
+                states: vec![],
+                kind: GraphNodeKind::CausalDepthwiseConv1d {
+                    channels,
+                    kernel_size,
+                },
+            }],
+        }
+    }
+
+    fn decay_graph(
+        shape: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        channels: usize,
+    ) -> ModelGraph {
+        ModelGraph {
+            graph_id: "decay-reference".into(),
+            inputs: vec![value_id("dc"), value_id("uc")],
+            outputs: vec![value_id("ld"), value_id("ur")],
+            values: vec![
+                value("dc", shape, format.clone(), layout.clone()),
+                value("uc", shape, format.clone(), layout.clone()),
+                value("ld", shape, format.clone(), layout.clone()),
+                value("ur", shape, format.clone(), layout),
+            ],
+            weights: vec![
+                WeightSpec {
+                    id: weight_id("lr"),
+                    tensor: spec(&[channels], format.clone(), TensorLayout::RowMajor),
+                },
+                WeightSpec {
+                    id: weight_id("tb"),
+                    tensor: spec(&[channels], format, TensorLayout::RowMajor),
+                },
+            ],
+            nodes: vec![GraphNode {
+                id: node_id("decay-ref"),
+                inputs: vec![value_id("dc"), value_id("uc")],
+                outputs: vec![value_id("ld"), value_id("ur")],
+                weights: vec![weight_id("lr"), weight_id("tb")],
+                states: vec![],
+                kind: GraphNodeKind::GatedDecayParameters { channels },
+            }],
+        }
+    }
+
+    fn scan_graph(
+        shape_prefix: &[usize],
+        format: NumericalFormat,
+        layout: TensorLayout,
+        kh: usize,
+        vh: usize,
+        kd: usize,
+        vd: usize,
+    ) -> ModelGraph {
+        let mut key_shape = shape_prefix.to_vec();
+        key_shape.push(kh * kd);
+        let mut value_shape = shape_prefix.to_vec();
+        value_shape.push(vh * vd);
+        let mut head_shape = shape_prefix.to_vec();
+        head_shape.push(vh);
+        ModelGraph {
+            graph_id: "scan-reference".into(),
+            inputs: vec![
+                value_id("q"),
+                value_id("k"),
+                value_id("v"),
+                value_id("d"),
+                value_id("b"),
+            ],
+            outputs: vec![value_id("o")],
+            values: vec![
+                value("q", &key_shape, format.clone(), layout.clone()),
+                value("k", &key_shape, format.clone(), layout.clone()),
+                value("v", &value_shape, format.clone(), layout.clone()),
+                value("d", &head_shape, format.clone(), layout.clone()),
+                value("b", &head_shape, format.clone(), layout.clone()),
+                value("o", &value_shape, format, layout),
+            ],
+            weights: vec![],
+            nodes: vec![GraphNode {
+                id: node_id("scan-ref"),
+                inputs: vec![
+                    value_id("q"),
+                    value_id("k"),
+                    value_id("v"),
+                    value_id("d"),
+                    value_id("b"),
+                ],
+                outputs: vec![value_id("o")],
+                weights: vec![],
+                states: vec![],
+                kind: GraphNodeKind::GatedDeltaRuleScan {
+                    key_heads: kh,
+                    value_heads: vh,
+                    key_dim: kd,
+                    value_dim: vd,
                 },
             }],
         }
