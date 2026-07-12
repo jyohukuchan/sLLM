@@ -13,6 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools/generate-served-model.py"
+RECEIPT_TOOL_PATH = ROOT / "tools/write-aq4-resident-promotion-receipt.py"
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -25,6 +26,7 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 GENERATOR = load_module("test_generate_served_model_tool", TOOL_PATH)
+RECEIPT_TOOL = load_module("test_write_aq4_promotion_receipt_tool", RECEIPT_TOOL_PATH)
 
 
 def sha256(data: bytes) -> str:
@@ -158,3 +160,194 @@ def test_refuses_symlink_output(tmp_path: Path) -> None:
         GENERATOR.generate(profile, output)
 
     assert target.read_text(encoding="utf-8") == "unchanged"
+
+
+def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
+    profile_path = write_profile(root)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["format"] = {
+        "format_id": "AQ4_0",
+        "implementation_id": "qwen35_aq4_rdna4_v1",
+    }
+    profile["worker"]["identity"] = {
+        "device": "gfx1201",
+        "execution_profile": "rdna4_aq4_resident",
+    }
+    profile["product"]["artifact"] = None
+    profile["promotion"] = {
+        "receipt": os.fspath(root / "promotion.json"),
+        "source_commit_from_receipt": ["source_commit"],
+    }
+    (root / "promotion.json").write_text(
+        json.dumps({"source_commit": "abc1234"}), encoding="utf-8"
+    )
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    bound_manifest = GENERATOR.materialize(profile_path)
+
+    evidence: dict[str, object] = {
+        "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+        "source_commit": "abc1234",
+        "production_receipt_written": False,
+        "verified": True,
+        "worker_binary": bound_manifest["worker"]["binary"],
+        "worker_binary_sha256": bound_manifest["worker"]["binary_sha256"],
+        "ephemeral_bundle": {"manifest": bound_manifest},
+        "resident": {
+            "clean_shutdown": True,
+            "child_process_checks": [{"sibling_engine_count": 0}],
+        },
+        "legacy": {"clean_shutdown": True},
+        "comparisons": [{"id": "fixture", "tokens_exact_match": True}],
+    }
+    evidence_path = root / "resident-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    receipt = {
+        "schema_version": "ullm.aq4_resident_promotion.v1",
+        "source_commit": "abc1234",
+        "evidence": {
+            "path": evidence_path.name,
+            "sha256": sha256(evidence_path.read_bytes()),
+        },
+    }
+    (root / "promotion.json").write_text(json.dumps(receipt), encoding="utf-8")
+    profile["promotion"].update(
+        {
+            "required_schema_version": "ullm.aq4_resident_promotion.v1",
+            "evidence_from_receipt": ["evidence", "path"],
+            "evidence_sha256_from_receipt": ["evidence", "sha256"],
+        }
+    )
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    return profile_path, evidence_path, evidence
+
+
+def rewrite_aq4_evidence(root: Path, evidence_path: Path, evidence: dict[str, object]) -> None:
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    receipt_path = root / "promotion.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["evidence"]["sha256"] = sha256(evidence_path.read_bytes())
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path) -> None:
+    profile, _, _ = write_aq4_profile(tmp_path)
+
+    document = GENERATOR.materialize(profile)
+
+    assert document["format"]["format_id"] == "AQ4_0"
+    assert document["promotion"]["source_commit"] == "abc1234"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value.__setitem__("verified", False), "not verified"),
+        (
+            lambda value: value.__setitem__("production_receipt_written", True),
+            "before receipt publication",
+        ),
+        (lambda value: value.__setitem__("source_commit", "other"), "source commit"),
+        (
+            lambda value: value["comparisons"][0].__setitem__("tokens_exact_match", False),
+            "comparisons",
+        ),
+        (
+            lambda value: value["resident"].__setitem__("clean_shutdown", False),
+            "resident shutdown",
+        ),
+        (
+            lambda value: value["legacy"].__setitem__("clean_shutdown", False),
+            "legacy shutdown",
+        ),
+        (
+            lambda value: value["resident"]["child_process_checks"][0].__setitem__(
+                "sibling_engine_count", 1
+            ),
+            "child-process",
+        ),
+        (
+            lambda value: value["ephemeral_bundle"]["manifest"]["worker"][
+                "identity"
+            ].__setitem__("execution_profile", "legacy"),
+            "worker identity",
+        ),
+        (
+            lambda value: value["ephemeral_bundle"]["manifest"]["product"][
+                "package"
+            ].__setitem__("manifest_sha256", "0" * 64),
+            "package identity",
+        ),
+        (
+            lambda value: value["ephemeral_bundle"]["manifest"]["public"].__setitem__(
+                "revision", "other"
+            ),
+            "profile public",
+        ),
+    ],
+)
+def test_aq4_evidence_gate_fails_closed(
+    tmp_path: Path, mutation: object, message: str
+) -> None:
+    profile, evidence_path, evidence = write_aq4_profile(tmp_path)
+    mutation(evidence)  # type: ignore[operator]
+    rewrite_aq4_evidence(tmp_path, evidence_path, evidence)
+
+    with pytest.raises(GENERATOR.GenerationError, match=message):
+        GENERATOR.materialize(profile)
+
+
+def test_aq4_evidence_hash_and_safe_relative_path_are_required(tmp_path: Path) -> None:
+    profile, evidence_path, _ = write_aq4_profile(tmp_path)
+    receipt_path = tmp_path / "promotion.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["evidence"]["sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(GENERATOR.GenerationError, match="SHA-256 differs"):
+        GENERATOR.materialize(profile)
+
+    receipt["evidence"]["path"] = "../resident-evidence.json"
+    receipt["evidence"]["sha256"] = sha256(evidence_path.read_bytes())
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(GENERATOR.GenerationError, match="safe relative path"):
+        GENERATOR.materialize(profile)
+
+
+def test_aq4_evidence_symlink_is_rejected(tmp_path: Path) -> None:
+    profile, evidence_path, _ = write_aq4_profile(tmp_path)
+    link = tmp_path / "linked-evidence.json"
+    link.symlink_to(evidence_path)
+    receipt_path = tmp_path / "promotion.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["evidence"]["path"] = link.name
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="non-symlink"):
+        GENERATOR.materialize(profile)
+
+
+def test_receipt_tool_validates_then_atomically_publishes(tmp_path: Path) -> None:
+    profile, evidence_path, _ = write_aq4_profile(tmp_path)
+    receipt_path = tmp_path / "promotion.json"
+    receipt_path.unlink()
+
+    receipt = RECEIPT_TOOL.write_receipt(profile, evidence_path, receipt_path)
+
+    assert json.loads(receipt_path.read_text(encoding="ascii")) == receipt
+    assert receipt["schema_version"] == "ullm.aq4_resident_promotion.v1"
+    assert receipt["evidence"]["path"] == evidence_path.name
+    assert GENERATOR.materialize(profile)["promotion"]["source_commit"] == "abc1234"
+    with pytest.raises(RECEIPT_TOOL.ReceiptError, match="already exists"):
+        RECEIPT_TOOL.write_receipt(profile, evidence_path, receipt_path)
+
+
+def test_receipt_tool_does_not_publish_invalid_evidence(tmp_path: Path) -> None:
+    profile, evidence_path, evidence = write_aq4_profile(tmp_path)
+    receipt_path = tmp_path / "promotion.json"
+    receipt_path.unlink()
+    evidence["verified"] = False
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(RECEIPT_TOOL.ReceiptError, match="not verified"):
+        RECEIPT_TOOL.write_receipt(profile, evidence_path, receipt_path)
+
+    assert not receipt_path.exists()

@@ -19,6 +19,7 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 LOADER_PATH = ROOT / "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
 PROFILE_SCHEMA = "ullm.served_model.profile.v1"
+AQ4_EVIDENCE_SCHEMA = "ullm.aq4_resident_promotion_evidence.v1"
 _LOADER_MODULE_NAME = "_ullm_served_model_generator_validator"
 
 
@@ -59,6 +60,129 @@ def _receipt_value(receipt: dict[str, Any], path: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise GenerationError(f"{label} in the promotion receipt is invalid")
     return value
+
+
+def _resolve_receipt_file(receipt_path: Path, raw_path: str, label: str) -> Path:
+    relative = Path(raw_path)
+    if relative.is_absolute() or not relative.parts or any(
+        component in ("", ".", "..") for component in relative.parts
+    ):
+        raise GenerationError(f"{label} must be a safe relative path")
+    unresolved = receipt_path.parent / relative
+    if unresolved.is_symlink():
+        raise GenerationError(f"{label} must identify a regular non-symlink file")
+    resolved = unresolved.resolve()
+    try:
+        resolved.relative_to(receipt_path.parent.resolve())
+    except ValueError as error:
+        raise GenerationError(f"{label} escapes the promotion directory") from error
+    if resolved.is_symlink() or not resolved.is_file():
+        raise GenerationError(f"{label} must identify a regular non-symlink file")
+    return resolved
+
+
+def _validate_aq4_evidence(
+    *,
+    profile: dict[str, Any],
+    promotion_profile: dict[str, Any],
+    receipt: dict[str, Any],
+    receipt_path: Path,
+    source_commit: str,
+    worker_binary: Path,
+    worker_sha256: str,
+    product_root: Path,
+    package_manifest_path: str,
+    package_manifest_sha256: str,
+) -> None:
+    required_schema = promotion_profile.get("required_schema_version")
+    if required_schema is None:
+        return
+    if required_schema != "ullm.aq4_resident_promotion.v1":
+        raise GenerationError("profile promotion receipt schema is unsupported")
+    if receipt.get("schema_version") != required_schema:
+        raise GenerationError("promotion receipt schema differs")
+
+    evidence_path_value = _receipt_value(
+        receipt,
+        promotion_profile.get("evidence_from_receipt"),
+        "AQ4 promotion evidence path",
+    )
+    evidence_sha256 = _receipt_value(
+        receipt,
+        promotion_profile.get("evidence_sha256_from_receipt"),
+        "AQ4 promotion evidence SHA-256",
+    )
+    if len(evidence_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in evidence_sha256
+    ):
+        raise GenerationError("AQ4 promotion evidence SHA-256 is invalid")
+    evidence_path = _resolve_receipt_file(
+        receipt_path, evidence_path_value, "AQ4 promotion evidence path"
+    )
+    if _sha256_file(evidence_path) != evidence_sha256:
+        raise GenerationError("AQ4 promotion evidence SHA-256 differs")
+    evidence = _load_json(evidence_path, "AQ4 promotion evidence")
+    if evidence.get("schema_version") != AQ4_EVIDENCE_SCHEMA:
+        raise GenerationError("AQ4 promotion evidence schema differs")
+    if evidence.get("verified") is not True:
+        raise GenerationError("AQ4 promotion evidence is not verified")
+    if evidence.get("production_receipt_written") is not False:
+        raise GenerationError("AQ4 promotion evidence was not captured before receipt publication")
+    if evidence.get("source_commit") != source_commit:
+        raise GenerationError("AQ4 promotion evidence source commit differs")
+    if evidence.get("worker_binary") != os.fspath(worker_binary):
+        raise GenerationError("AQ4 promotion evidence worker path differs")
+    if evidence.get("worker_binary_sha256") != worker_sha256:
+        raise GenerationError("AQ4 promotion evidence worker SHA-256 differs")
+
+    comparisons = evidence.get("comparisons")
+    if not isinstance(comparisons, list) or not comparisons or any(
+        not isinstance(item, dict) or item.get("tokens_exact_match") is not True
+        for item in comparisons
+    ):
+        raise GenerationError("AQ4 promotion evidence comparisons are incomplete")
+    for mode in ("resident", "legacy"):
+        result = evidence.get(mode)
+        if not isinstance(result, dict) or result.get("clean_shutdown") is not True:
+            raise GenerationError(f"AQ4 promotion evidence {mode} shutdown is not clean")
+    child_checks = evidence["resident"].get("child_process_checks")
+    if not isinstance(child_checks, list) or not child_checks or any(
+        not isinstance(check, dict) or check.get("sibling_engine_count") != 0
+        for check in child_checks
+    ):
+        raise GenerationError("AQ4 resident child-process evidence is incomplete")
+
+    bundle = evidence.get("ephemeral_bundle")
+    manifest = bundle.get("manifest") if isinstance(bundle, dict) else None
+    if not isinstance(manifest, dict):
+        raise GenerationError("AQ4 promotion evidence has no bound manifest")
+    expected_worker = _required_object(profile, "worker")
+    observed_worker = manifest.get("worker")
+    if not isinstance(observed_worker, dict):
+        raise GenerationError("AQ4 promotion evidence worker identity is absent")
+    for name in ("protocol", "arguments", "required_environment", "identity"):
+        if observed_worker.get(name) != expected_worker.get(name):
+            raise GenerationError(f"AQ4 promotion evidence worker {name} differs")
+    if observed_worker.get("binary") != os.fspath(worker_binary) or observed_worker.get(
+        "binary_sha256"
+    ) != worker_sha256:
+        raise GenerationError("AQ4 promotion evidence worker binding differs")
+    for name in ("public", "generation", "format"):
+        if manifest.get(name) != _required_object(profile, name):
+            raise GenerationError(f"AQ4 promotion evidence profile {name} differs")
+    observed_product = manifest.get("product")
+    observed_package = (
+        observed_product.get("package") if isinstance(observed_product, dict) else None
+    )
+    if not isinstance(observed_package, dict) or observed_product.get("root") != os.fspath(
+        product_root
+    ):
+        raise GenerationError("AQ4 promotion evidence product identity differs")
+    if observed_package != {
+        "manifest_path": package_manifest_path,
+        "manifest_sha256": package_manifest_sha256,
+    }:
+        raise GenerationError("AQ4 promotion evidence package identity differs")
 
 
 def _load_validator() -> ModuleType:
@@ -109,9 +233,11 @@ def materialize(profile_path: Path) -> dict[str, Any]:
         tokenizer_files[item] = _sha256_file(tokenizer_root / item)
 
     worker_binary = Path(str(worker_profile.get("binary", ""))).resolve()
+    worker_sha256 = _sha256_file(worker_binary)
     product_root = Path(str(product_profile.get("root", ""))).resolve()
     package = _required_object(product_profile, "package")
     package_manifest_path = str(package.get("manifest_path", ""))
+    package_manifest_sha256 = _sha256_file(product_root / package_manifest_path)
 
     receipt_path = Path(str(promotion_profile.get("receipt", ""))).resolve()
     receipt = _load_json(receipt_path, "promotion receipt")
@@ -119,6 +245,18 @@ def materialize(profile_path: Path) -> dict[str, Any]:
         receipt,
         promotion_profile.get("source_commit_from_receipt"),
         "promotion source commit",
+    )
+    _validate_aq4_evidence(
+        profile=profile,
+        promotion_profile=promotion_profile,
+        receipt=receipt,
+        receipt_path=receipt_path,
+        source_commit=source_commit,
+        worker_binary=worker_binary,
+        worker_sha256=worker_sha256,
+        product_root=product_root,
+        package_manifest_path=package_manifest_path,
+        package_manifest_sha256=package_manifest_sha256,
     )
 
     artifact_profile = product_profile.get("artifact")
@@ -157,7 +295,7 @@ def materialize(profile_path: Path) -> dict[str, Any]:
         "worker": {
             "protocol": worker_profile.get("protocol"),
             "binary": os.fspath(worker_binary),
-            "binary_sha256": _sha256_file(worker_binary),
+            "binary_sha256": worker_sha256,
             "arguments": worker_profile.get("arguments"),
             "required_environment": worker_profile.get("required_environment"),
             "identity": worker_profile.get("identity"),
@@ -167,7 +305,7 @@ def materialize(profile_path: Path) -> dict[str, Any]:
             "artifact": artifact,
             "package": {
                 "manifest_path": package_manifest_path,
-                "manifest_sha256": _sha256_file(product_root / package_manifest_path),
+                "manifest_sha256": package_manifest_sha256,
             },
         },
         "promotion": {

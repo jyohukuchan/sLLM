@@ -130,6 +130,12 @@ def prepare_smoke_bundle(
     receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="ascii")
     promotion["receipt"] = os.fspath(receipt_path)
     promotion["source_commit_from_receipt"] = ["source_commit"]
+    # Evidence must be produced before the production receipt exists.  The
+    # ephemeral smoke manifest is therefore generated without the production
+    # receipt/evidence gate; the final generator rebinds and validates it.
+    promotion.pop("required_schema_version", None)
+    promotion.pop("evidence_from_receipt", None)
+    promotion.pop("evidence_sha256_from_receipt", None)
     worker["binary"] = os.fspath(worker_binary.resolve())
     profile_copy_path.write_text(
         json.dumps(profile, ensure_ascii=True, allow_nan=False, indent=2) + "\n",
