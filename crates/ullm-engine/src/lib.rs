@@ -46,6 +46,7 @@ pub mod sq_reference;
 pub mod sq_runtime;
 pub mod state_schema;
 pub mod state_transaction;
+pub mod verified_adapter_evidence;
 pub mod worker_driver;
 pub mod worker_protocol;
 pub mod worker_runtime;

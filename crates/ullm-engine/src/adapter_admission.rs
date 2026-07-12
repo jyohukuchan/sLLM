@@ -149,6 +149,16 @@ pub struct StructurallyAdmittedAdapter<'a> {
     spec: &'a AdapterAdmissionSpec,
 }
 
+/// Exact read-only weight occurrence resolved from one admitted input set.
+pub(crate) struct ResolvedAdmittedWeight<'a> {
+    pub(crate) graph: &'a ModelGraph,
+    pub(crate) spec: &'a AdapterAdmissionSpec,
+    pub(crate) node_id: &'a NodeId,
+    pub(crate) use_record: &'a CanonicalWeightUse,
+    pub(crate) weight: &'a crate::model_graph::WeightSpec,
+    pub(crate) binding: &'a crate::model_graph::WeightBinding,
+}
+
 impl fmt::Debug for StructurallyAdmittedAdapter<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -182,6 +192,42 @@ impl StructurallyAdmittedAdapter<'_> {
             && std::ptr::eq(self.bindings, bindings)
             && std::ptr::eq(self.states, states)
             && std::ptr::eq(self.spec, spec)
+    }
+
+    /// Resolves one exact, already-admitted logical weight occurrence.
+    pub(crate) fn resolve_weight_occurrence(
+        &self,
+        node_id: &NodeId,
+        weight_slot: usize,
+    ) -> Option<ResolvedAdmittedWeight<'_>> {
+        let node = self.graph.nodes.iter().find(|node| &node.id == node_id)?;
+        let logical_id = node.weights.get(weight_slot)?;
+        let use_record = self
+            .spec
+            .weight_uses
+            .iter()
+            .find(|record| &record.node_id == node_id && record.weight_slot == weight_slot)?;
+        if &use_record.logical_id != logical_id {
+            return None;
+        }
+        let weight = self
+            .graph
+            .weights
+            .iter()
+            .find(|weight| &weight.id == logical_id)?;
+        let binding = self
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| &binding.logical_id == logical_id)?;
+        Some(ResolvedAdmittedWeight {
+            graph: self.graph,
+            spec: self.spec,
+            node_id: &node.id,
+            use_record,
+            weight,
+            binding,
+        })
     }
 }
 

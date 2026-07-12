@@ -197,6 +197,361 @@ struct Codebook {
     file: Option<String>,
 }
 
+/// Bounded passthrough metadata parsed from manifest bytes whose hash was
+/// already verified by the caller. This bridge never reopens the manifest.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedPassthroughDescriptor {
+    pub(crate) name: String,
+    pub(crate) relative_path: String,
+    pub(crate) dtype: String,
+    pub(crate) shape: Vec<u64>,
+    pub(crate) payload_bytes: u64,
+    pub(crate) encoding: String,
+    pub(crate) payload_sha256: String,
+}
+
+/// Parses verified manifest bytes into exact passthrough descriptors.
+///
+/// An allocation-free lexical scan bounds nesting, tokens, containers, atom
+/// length, and string amplification before serde. Serde's internal allocations
+/// are therefore bounded but are not fully fallible allocations.
+pub(crate) fn parse_verified_passthrough_descriptors(
+    verified_manifest_bytes: &[u8],
+    descriptor_limit: usize,
+) -> Result<Vec<VerifiedPassthroughDescriptor>, String> {
+    if descriptor_limit == 0 || descriptor_limit > 4_096 {
+        return Err("resource: verified passthrough descriptor limit must be in 1..=4096".into());
+    }
+    if verified_manifest_bytes.is_empty() || verified_manifest_bytes.len() > 16 * 1024 * 1024 {
+        return Err("resource: verified manifest byte length is outside supported limit".into());
+    }
+    scan_verified_manifest_json(verified_manifest_bytes).map_err(|failure| match failure {
+        VerifiedJsonScanFailure::Invalid => "invalid: verified manifest lexical form is invalid",
+        VerifiedJsonScanFailure::Resource => {
+            "resource: verified manifest lexical complexity exceeds limit"
+        }
+    })?;
+    let manifest: Manifest = serde_json::from_slice(verified_manifest_bytes)
+        .map_err(|_| "verified manifest JSON is invalid".to_string())?;
+    if manifest.tensors.len() > 4_096
+        || manifest.passthrough_tensors.len() > descriptor_limit
+        || manifest.codebooks.len() > 4_096
+        || manifest
+            .row_scale_overrides
+            .as_ref()
+            .is_some_and(|overrides| overrides.entries.len() > 4_096)
+    {
+        return Err("resource: verified manifest declaration count exceeds limit".into());
+    }
+    let mut descriptors = Vec::new();
+    descriptors
+        .try_reserve_exact(manifest.passthrough_tensors.len())
+        .map_err(|_| "resource: verified descriptor allocation failed".to_string())?;
+    for tensor in manifest.passthrough_tensors {
+        let name = required_bounded_manifest_string(tensor.name, 256, "passthrough name")?;
+        let relative_path =
+            required_bounded_manifest_string(tensor.payload_file, 4_096, "passthrough path")?;
+        validate_verified_relative_path(&relative_path)?;
+        let dtype = required_bounded_manifest_string(tensor.dtype, 64, "passthrough dtype")?;
+        let encoding =
+            required_bounded_manifest_string(tensor.payload_encoding, 128, "passthrough encoding")?;
+        let payload_sha256 = required_bounded_manifest_string(
+            tensor.payload_sha256,
+            64,
+            "passthrough payload digest",
+        )?;
+        if !is_lowercase_sha256(&payload_sha256) {
+            return Err("verified passthrough payload digest is invalid".into());
+        }
+        if tensor.shape.is_empty() || tensor.shape.len() > crate::model_graph::MAX_TENSOR_RANK {
+            return Err("verified passthrough shape rank is invalid".into());
+        }
+        if tensor.shape.contains(&0) {
+            return Err("verified passthrough shape contains zero".into());
+        }
+        let elements = tensor.shape.iter().try_fold(1_u64, |product, dimension| {
+            product
+                .checked_mul(*dimension)
+                .ok_or_else(|| "resource: verified passthrough shape product overflows".to_string())
+        })?;
+        if elements > crate::model_graph::MAX_TENSOR_LOGICAL_ELEMENTS {
+            return Err(
+                "resource: verified passthrough shape exceeds logical element limit".into(),
+            );
+        }
+        let element_bytes = match dtype.as_str() {
+            "F32" => 4_u64,
+            "BF16" | "F16" => 2_u64,
+            _ => return Err("verified passthrough dtype is unsupported".into()),
+        };
+        let expected_bytes = elements.checked_mul(element_bytes).ok_or_else(|| {
+            "resource: verified passthrough payload byte count overflows".to_string()
+        })?;
+        if elements != tensor.elements
+            || tensor.payload_bytes == 0
+            || tensor.payload_bytes != expected_bytes
+            || encoding != "raw_safetensors_payload"
+        {
+            return Err(
+                "verified passthrough element or payload byte declaration is invalid".into(),
+            );
+        }
+        descriptors.push(VerifiedPassthroughDescriptor {
+            name,
+            relative_path,
+            dtype,
+            shape: tensor.shape,
+            payload_bytes: tensor.payload_bytes,
+            encoding,
+            payload_sha256,
+        });
+    }
+    descriptors.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    if descriptors
+        .windows(2)
+        .any(|window| window[0].name == window[1].name)
+    {
+        return Err("verified passthrough tensor name is duplicated".into());
+    }
+    Ok(descriptors)
+}
+
+const VERIFIED_JSON_MAX_DEPTH: usize = 64;
+const VERIFIED_JSON_MAX_TOKENS: usize = 131_072;
+const VERIFIED_JSON_MAX_CONTAINERS: usize = 16_384;
+const VERIFIED_JSON_MAX_STRING_BYTES: usize = 4_096;
+const VERIFIED_JSON_MAX_TOTAL_STRING_BYTES: usize = 16 * 1024 * 1024;
+const VERIFIED_JSON_MAX_ATOM_BYTES: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifiedJsonScanFailure {
+    Invalid,
+    Resource,
+}
+
+fn scan_verified_manifest_json(bytes: &[u8]) -> Result<(), VerifiedJsonScanFailure> {
+    let mut stack = [0_u8; VERIFIED_JSON_MAX_DEPTH];
+    let mut depth = 0_usize;
+    let mut tokens = 0_usize;
+    let mut containers = 0_usize;
+    let mut total_string_bytes = 0_usize;
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\n' | b'\r' | b'\t' | b',' | b':' => index += 1,
+            open @ (b'{' | b'[') => {
+                if depth == VERIFIED_JSON_MAX_DEPTH {
+                    return Err(VerifiedJsonScanFailure::Resource);
+                }
+                stack[depth] = open;
+                depth += 1;
+                containers = containers
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+                if containers > VERIFIED_JSON_MAX_CONTAINERS || tokens > VERIFIED_JSON_MAX_TOKENS {
+                    return Err(VerifiedJsonScanFailure::Resource);
+                }
+                index += 1;
+            }
+            close @ (b'}' | b']') => {
+                if depth == 0
+                    || (close == b'}' && stack[depth - 1] != b'{')
+                    || (close == b']' && stack[depth - 1] != b'[')
+                {
+                    return Err(VerifiedJsonScanFailure::Invalid);
+                }
+                depth -= 1;
+                index += 1;
+            }
+            b'"' => {
+                index += 1;
+                let mut string_bytes = 0_usize;
+                let mut closed = false;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'"' => {
+                            index += 1;
+                            closed = true;
+                            break;
+                        }
+                        0x00..=0x1f => return Err(VerifiedJsonScanFailure::Invalid),
+                        b'\\' => {
+                            index += 1;
+                            let escape =
+                                *bytes.get(index).ok_or(VerifiedJsonScanFailure::Invalid)?;
+                            match escape {
+                                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                                    string_bytes = string_bytes
+                                        .checked_add(1)
+                                        .ok_or(VerifiedJsonScanFailure::Resource)?;
+                                    index += 1;
+                                }
+                                b'u' => {
+                                    let end = index
+                                        .checked_add(5)
+                                        .ok_or(VerifiedJsonScanFailure::Resource)?;
+                                    let digits = bytes
+                                        .get(index + 1..end)
+                                        .ok_or(VerifiedJsonScanFailure::Invalid)?;
+                                    let unit = decode_json_hex_unit(digits)
+                                        .ok_or(VerifiedJsonScanFailure::Invalid)?;
+                                    let decoded_bytes = match unit {
+                                        0xd800..=0xdbff => {
+                                            let pair_end = end
+                                                .checked_add(6)
+                                                .ok_or(VerifiedJsonScanFailure::Resource)?;
+                                            if bytes.get(end..end + 2) != Some(b"\\u") {
+                                                return Err(VerifiedJsonScanFailure::Invalid);
+                                            }
+                                            let low = bytes
+                                                .get(end + 2..pair_end)
+                                                .and_then(decode_json_hex_unit)
+                                                .ok_or(VerifiedJsonScanFailure::Invalid)?;
+                                            if !(0xdc00..=0xdfff).contains(&low) {
+                                                return Err(VerifiedJsonScanFailure::Invalid);
+                                            }
+                                            index = pair_end;
+                                            4
+                                        }
+                                        0xdc00..=0xdfff => {
+                                            return Err(VerifiedJsonScanFailure::Invalid);
+                                        }
+                                        _ => {
+                                            index = end;
+                                            char::from_u32(u32::from(unit))
+                                                .ok_or(VerifiedJsonScanFailure::Invalid)?
+                                                .len_utf8()
+                                        }
+                                    };
+                                    string_bytes = string_bytes
+                                        .checked_add(decoded_bytes)
+                                        .ok_or(VerifiedJsonScanFailure::Resource)?;
+                                }
+                                _ => return Err(VerifiedJsonScanFailure::Invalid),
+                            }
+                        }
+                        _ => {
+                            string_bytes = string_bytes
+                                .checked_add(1)
+                                .ok_or(VerifiedJsonScanFailure::Resource)?;
+                            index += 1;
+                        }
+                    }
+                    if string_bytes > VERIFIED_JSON_MAX_STRING_BYTES {
+                        return Err(VerifiedJsonScanFailure::Resource);
+                    }
+                }
+                if !closed {
+                    return Err(VerifiedJsonScanFailure::Invalid);
+                }
+                total_string_bytes = total_string_bytes
+                    .checked_add(string_bytes)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+                if total_string_bytes > VERIFIED_JSON_MAX_TOTAL_STRING_BYTES
+                    || tokens > VERIFIED_JSON_MAX_TOKENS
+                {
+                    return Err(VerifiedJsonScanFailure::Resource);
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    index += 1;
+                }
+                if index - start > VERIFIED_JSON_MAX_ATOM_BYTES {
+                    return Err(VerifiedJsonScanFailure::Resource);
+                }
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+            }
+            b't' if bytes.get(index..index + 4) == Some(b"true") => {
+                index += 4;
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+            }
+            b'n' if bytes.get(index..index + 4) == Some(b"null") => {
+                index += 4;
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+            }
+            b'f' if bytes.get(index..index + 5) == Some(b"false") => {
+                index += 5;
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or(VerifiedJsonScanFailure::Resource)?;
+            }
+            _ => return Err(VerifiedJsonScanFailure::Invalid),
+        }
+        if tokens > VERIFIED_JSON_MAX_TOKENS {
+            return Err(VerifiedJsonScanFailure::Resource);
+        }
+    }
+    if depth != 0 {
+        return Err(VerifiedJsonScanFailure::Invalid);
+    }
+    Ok(())
+}
+
+fn decode_json_hex_unit(digits: &[u8]) -> Option<u16> {
+    if digits.len() != 4 {
+        return None;
+    }
+    let mut value = 0_u16;
+    for digit in digits {
+        value = value.checked_mul(16)?;
+        value = value.checked_add(match digit {
+            b'0'..=b'9' => u16::from(*digit - b'0'),
+            b'a'..=b'f' => u16::from(*digit - b'a' + 10),
+            b'A'..=b'F' => u16::from(*digit - b'A' + 10),
+            _ => return None,
+        })?;
+    }
+    Some(value)
+}
+
+fn validate_verified_relative_path(value: &str) -> Result<(), String> {
+    if value.starts_with('/')
+        || value.ends_with('/')
+        || value.split('/').any(|part| part.is_empty())
+        || !Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err("verified passthrough path is not normalized relative".into());
+    }
+    Ok(())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn required_bounded_manifest_string(
+    value: Option<String>,
+    maximum_bytes: usize,
+    label: &'static str,
+) -> Result<String, String> {
+    let value = value.ok_or_else(|| format!("verified {label} is missing"))?;
+    if value.is_empty() || value.len() > maximum_bytes {
+        return Err(format!("verified {label} length is invalid"));
+    }
+    Ok(value)
+}
+
 pub fn inspect_package(path: impl AsRef<Path>) -> Result<PackageSummary, String> {
     let package_dir = path.as_ref();
     let manifest = read_manifest(package_dir)?;
@@ -1500,5 +1855,135 @@ mod tests {
         assert!(err.contains("tensor-scale"));
 
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod verified_json_scan_tests {
+    use super::*;
+    use std::fmt::Write as _;
+
+    #[test]
+    fn scanner_bounds_depth_containers_strings_atoms_and_ignores_string_braces() {
+        let mut depth_ok = "[".repeat(VERIFIED_JSON_MAX_DEPTH);
+        depth_ok.push('0');
+        depth_ok.push_str(&"]".repeat(VERIFIED_JSON_MAX_DEPTH));
+        assert_eq!(scan_verified_manifest_json(depth_ok.as_bytes()), Ok(()));
+
+        let mut depth_bad = "[".repeat(VERIFIED_JSON_MAX_DEPTH + 1);
+        depth_bad.push('0');
+        depth_bad.push_str(&"]".repeat(VERIFIED_JSON_MAX_DEPTH + 1));
+        assert_eq!(
+            scan_verified_manifest_json(depth_bad.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+
+        let string_ok = format!("\"{}\"", "a".repeat(VERIFIED_JSON_MAX_STRING_BYTES));
+        assert_eq!(scan_verified_manifest_json(string_ok.as_bytes()), Ok(()));
+        let string_bad = format!("\"{}\"", "a".repeat(VERIFIED_JSON_MAX_STRING_BYTES + 1));
+        assert_eq!(
+            scan_verified_manifest_json(string_bad.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+        let escaped_bad = format!("\"{}\"", "\\n".repeat(VERIFIED_JSON_MAX_STRING_BYTES + 1));
+        assert_eq!(
+            scan_verified_manifest_json(escaped_bad.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+        let escaped_ascii = format!("\"{}\"", "\\u0061".repeat(1_025));
+        assert_eq!(
+            scan_verified_manifest_json(escaped_ascii.as_bytes()),
+            Ok(())
+        );
+
+        let exact_decoded = format!(
+            "\"{}\\u00e9\\u20ac\\ud83d\\ude00\"",
+            "\\u0061".repeat(4_087)
+        );
+        assert_eq!(
+            scan_verified_manifest_json(exact_decoded.as_bytes()),
+            Ok(())
+        );
+        let over_decoded = format!(
+            "\"{}\\u00e9\\u20ac\\ud83d\\ude00\"",
+            "\\u0061".repeat(4_088)
+        );
+        assert_eq!(
+            scan_verified_manifest_json(over_decoded.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+        for invalid_surrogate in [
+            br#""\ud800""#.as_slice(),
+            br#""\udc00""#.as_slice(),
+            br#""\udc00\ud800""#.as_slice(),
+            br#""\ud800\ud800""#.as_slice(),
+        ] {
+            assert_eq!(
+                scan_verified_manifest_json(invalid_surrogate),
+                Err(VerifiedJsonScanFailure::Invalid)
+            );
+        }
+        assert_eq!(scan_verified_manifest_json(br#"{"x":"[{}]"}"#), Ok(()));
+
+        let atom_bad = "1".repeat(VERIFIED_JSON_MAX_ATOM_BYTES + 1);
+        assert_eq!(
+            scan_verified_manifest_json(atom_bad.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+
+        let mut containers = String::from("[");
+        for index in 0..VERIFIED_JSON_MAX_CONTAINERS - 1 {
+            if index != 0 {
+                containers.push(',');
+            }
+            containers.push_str("{}");
+        }
+        containers.push(']');
+        assert_eq!(scan_verified_manifest_json(containers.as_bytes()), Ok(()));
+        containers.insert_str(containers.len() - 1, ",{}");
+        assert_eq!(
+            scan_verified_manifest_json(containers.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+
+        let mut token_heavy = String::from("[");
+        for index in 0..VERIFIED_JSON_MAX_TOKENS {
+            if index != 0 {
+                token_heavy.push(',');
+            }
+            token_heavy.push('0');
+        }
+        token_heavy.push(']');
+        assert_eq!(
+            scan_verified_manifest_json(token_heavy.as_bytes()),
+            Err(VerifiedJsonScanFailure::Resource)
+        );
+    }
+
+    #[test]
+    fn scanner_allows_4096_descriptor_scale_and_bridge_rejects_4097_as_resource() {
+        let digest = "0".repeat(64);
+        let mut manifest = String::from("{\"passthrough_tensors\":[");
+        for index in 0..4_097 {
+            if index != 0 {
+                manifest.push(',');
+            }
+            write!(
+                manifest,
+                "{{\"name\":\"w{index}\",\"dtype\":\"F32\",\"shape\":[1],\"elements\":1,\"payload_bytes\":4,\"payload_encoding\":\"raw_safetensors_payload\",\"payload_sha256\":\"{digest}\",\"payload_file\":\"w/{index}.raw\"}}"
+            )
+            .unwrap();
+        }
+        manifest.push_str("]}");
+        let last = manifest.rfind(",{\"name\":\"w4096\"").unwrap();
+        let mut boundary = manifest[..last].to_string();
+        boundary.push_str("]}");
+        // The lexical scanner comfortably admits descriptor-scale JSON; exact
+        // descriptor cardinality remains a post-parse resource limit.
+        assert_eq!(scan_verified_manifest_json(boundary.as_bytes()), Ok(()));
+        assert_eq!(scan_verified_manifest_json(manifest.as_bytes()), Ok(()));
+        assert!(boundary.len() <= 16 * 1024 * 1024);
+        let error = parse_verified_passthrough_descriptors(manifest.as_bytes(), 4_096).unwrap_err();
+        assert!(error.starts_with("resource:"));
     }
 }
