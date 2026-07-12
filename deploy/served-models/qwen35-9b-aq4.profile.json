@@ -1,0 +1,44 @@
+{
+  "schema_version": "ullm.served_model.profile.v1",
+  "public": {
+    "id": "ullm-qwen3.5-9b-aq4",
+    "name": "uLLM Qwen3.5 9B AQ4",
+    "description": "Qwen3.5 9B served locally by uLLM AQ4_0.",
+    "upstream_id": "Qwen/Qwen3.5-9B",
+    "revision": "aq4-cli-compat-v0.1",
+    "context_length": 4096
+  },
+  "generation": {
+    "max_completion_tokens": 512,
+    "vocab_size": 248320,
+    "eos_token_ids": [248044, 248046],
+    "sampling": {"top_k": 1, "temperature": false, "top_p": false}
+  },
+  "format": {
+    "format_id": "AQ4_0",
+    "implementation_id": "qwen35_aq4_rdna4_v1"
+  },
+  "tokenizer": {
+    "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "transformers_version": "5.12.1",
+    "class": "Qwen2Tokenizer",
+    "files": ["merges.txt", "tokenizer.json", "tokenizer_config.json", "vocab.json"],
+    "template_options": {"add_generation_prompt": true, "enable_thinking": false}
+  },
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
+    "arguments": ["--served-model-manifest", "{manifest}"],
+    "required_environment": [],
+    "identity": {"device": "gfx1201", "execution_profile": "rdna4_aq4_cli_compat"}
+  },
+  "product": {
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1",
+    "artifact": null,
+    "package": {"manifest_path": "package/manifest.json"}
+  },
+  "promotion": {
+    "receipt": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/promotion.json",
+    "source_commit_from_receipt": ["source_commit"]
+  }
+}

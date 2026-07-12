@@ -1,0 +1,58 @@
+{
+  "schema_version": "ullm.served_model.profile.v1",
+  "public": {
+    "id": "ullm-qwen3-14b-sq8",
+    "name": "uLLM Qwen3 14B SQ8",
+    "description": "Qwen3 14B served locally by uLLM SQ8_0.",
+    "upstream_id": "Qwen/Qwen3-14B-FP8",
+    "revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+    "context_length": 4096
+  },
+  "generation": {
+    "max_completion_tokens": 512,
+    "vocab_size": 151936,
+    "eos_token_ids": [151645, 151643],
+    "sampling": {"top_k": 20, "temperature": true, "top_p": true}
+  },
+  "format": {
+    "format_id": "SQ8_0",
+    "implementation_id": "qwen3_sq8_rdna4_v1"
+  },
+  "tokenizer": {
+    "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8",
+    "transformers_version": "5.12.1",
+    "class": "Qwen2Tokenizer",
+    "files": ["generation_config.json", "merges.txt", "tokenizer.json", "tokenizer_config.json", "vocab.json"],
+    "template_options": {"add_generation_prompt": true, "enable_thinking": false}
+  },
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-sq8-worker",
+    "arguments": ["--served-model-manifest", "{manifest}"],
+    "required_environment": [
+      "ULLM_REQUIRE_HIP_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+      "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL",
+      "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL"
+    ],
+    "identity": {"device": "gfx1201", "execution_profile": "rdna4_w8a8_block_ck"}
+  },
+  "product": {
+    "root": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1",
+    "artifact": {
+      "manifest_path": "artifact/sq_manifest.json",
+      "content_sha256_from_receipt": ["artifact", "content_sha256"]
+    },
+    "package": {"manifest_path": "package/manifest.json"}
+  },
+  "promotion": {
+    "receipt": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/promotion.json",
+    "source_commit_from_receipt": ["plan_commit"]
+  }
+}
