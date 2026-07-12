@@ -43,6 +43,24 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def release_timings(prompt_tokens: int, completion_tokens: int):
+    prompt_ms = float(prompt_tokens * 2)
+    predicted_ms = (
+        0.001 if completion_tokens == 1 else float((completion_tokens - 1) * 4)
+    )
+    return {
+        "cache_n": 0,
+        "prompt_n": prompt_tokens,
+        "prompt_ms": prompt_ms,
+        "prompt_per_token_ms": prompt_ms / prompt_tokens,
+        "prompt_per_second": 1_000.0 * prompt_tokens / prompt_ms,
+        "predicted_n": completion_tokens,
+        "predicted_ms": predicted_ms,
+        "predicted_per_token_ms": predicted_ms / completion_tokens,
+        "predicted_per_second": 1_000.0 * completion_tokens / predicted_ms,
+    }
+
+
 def proc_stat(pid=WORKER_PID, ppid=WORKER_PPID, starttime=WORKER_STARTTIME):
     fields_after_state = ["0"] * 51
     fields_after_state[0] = str(ppid)
@@ -355,6 +373,8 @@ class EvidenceBuilder:
         }
         if target:
             event["cancel_reason"] = "operator"
+        else:
+            event["timings"] = release_timings(prompt_tokens, completion)
         release_observed = self.worker_event(event)
         self.isolation_check(phase, index, request_id, release_observed)
         return {
@@ -559,6 +579,11 @@ def first_record(records, predicate):
     return next(record for record in records if predicate(record))
 
 
+def refresh_worker_event_raw(record):
+    record["raw_json"] = compact_json(record["event"])
+    record["raw_sha256"] = sha256_text(record["raw_json"])
+
+
 def shift_timestamps(value, cutoff, delta):
     if isinstance(value, dict):
         if "acquisition_started_monotonic_ns" in value:
@@ -631,6 +656,92 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
             self.assertEqual(result["cancellation"]["measured_samples"], 10)
             self.assertEqual(result["resources"]["worker_rss_theil_sen_bytes_per_request"], 0)
             self.assertGreater(len(records), 505)
+            normal_release = first_record(
+                records,
+                lambda record: record.get("record_type") == "worker_event"
+                and record.get("event", {}).get("outcome") == "length",
+            )
+            cancelled_release = first_record(
+                records,
+                lambda record: record.get("record_type") == "worker_event"
+                and record.get("event", {}).get("outcome") == "cancelled",
+            )
+            self.assertEqual(normal_release["event"]["timings"]["predicted_n"], 2)
+            self.assertNotIn("timings", cancelled_release["event"])
+
+    def test_historical_normal_releases_without_timings_remain_valid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = EvidenceBuilder().build()
+            removed = 0
+            for record in records:
+                event = record.get("event", {})
+                if (
+                    record.get("record_type") == "worker_event"
+                    and event.get("outcome") in {"stop", "length"}
+                ):
+                    event.pop("timings")
+                    refresh_worker_event_raw(record)
+                    removed += 1
+            self.assertGreater(removed, 0)
+            raw_path, _ = write_fixture(Path(temporary), records)
+            result = VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+            self.assertTrue(result["passed"])
+
+    def test_release_timings_are_strictly_validated(self):
+        mutations = (
+            (
+                "extra",
+                lambda timings: timings.__setitem__("unexpected", 1),
+                "field set differs",
+            ),
+            ("cache", lambda timings: timings.__setitem__("cache_n", 1), "cache_n"),
+            ("count", lambda timings: timings.__setitem__("predicted_n", 1), "counters differ"),
+            ("zero", lambda timings: timings.__setitem__("prompt_ms", 0), "finite positive"),
+            (
+                "minimum",
+                lambda timings: timings.__setitem__("predicted_ms", 0.000_999),
+                "below",
+            ),
+            (
+                "rate",
+                lambda timings: timings.__setitem__("predicted_per_second", 1),
+                "rates differ",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, mutate, message in mutations:
+                with self.subTest(name=name):
+                    directory = root / name
+                    directory.mkdir()
+                    records = EvidenceBuilder().build()
+                    released = first_record(
+                        records,
+                        lambda record: record.get("record_type") == "worker_event"
+                        and record.get("event", {}).get("outcome") == "length",
+                    )
+                    mutate(released["event"]["timings"])
+                    refresh_worker_event_raw(released)
+                    raw_path, _ = write_fixture(directory, records)
+                    with self.assertRaisesRegex(VALIDATOR.ValidationError, message):
+                        VALIDATOR.validate_evidence(
+                            raw_path, GIT_COMMIT, BINARY_SHA256
+                        )
+
+    def test_cancelled_release_forbids_timings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = EvidenceBuilder().build()
+            released = first_record(
+                records,
+                lambda record: record.get("record_type") == "worker_event"
+                and record.get("event", {}).get("outcome") == "cancelled"
+                and record.get("event", {}).get("completion_tokens") == 1,
+            )
+            released["event"]["timings"] = release_timings(8, 1)
+            refresh_worker_event_raw(released)
+            raw_path, _ = write_fixture(Path(temporary), records)
+            with self.assertRaisesRegex(VALIDATOR.ValidationError, "must not contain"):
+                VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
 
     def test_cli_writes_validation_json(self):
         with tempfile.TemporaryDirectory() as temporary:

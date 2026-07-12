@@ -71,6 +71,18 @@ THRESHOLDS = {
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+TIMING_FIELDS = {
+    "cache_n",
+    "prompt_n",
+    "prompt_ms",
+    "prompt_per_token_ms",
+    "prompt_per_second",
+    "predicted_n",
+    "predicted_ms",
+    "predicted_per_token_ms",
+    "predicted_per_second",
+}
+MIN_PREDICTED_MS = 0.001
 
 HEADER_FIELDS = {
     "schema_version",
@@ -296,6 +308,66 @@ def integer(
     if value < minimum or value > maximum:
         fail(f"{label} is outside {minimum}..={maximum}")
     return value
+
+
+def finite_positive_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        fail(f"{label} must be a finite positive number")
+    try:
+        parsed = float(value)
+    except OverflowError:
+        fail(f"{label} must be a finite positive number")
+    if not math.isfinite(parsed) or parsed <= 0:
+        fail(f"{label} must be a finite positive number")
+    return parsed
+
+
+def validate_release_timings(
+    value: Any,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    label: str,
+) -> None:
+    timings = exact_fields(value, TIMING_FIELDS, label)
+    cache_n = integer(timings["cache_n"], f"{label}.cache_n")
+    prompt_n = integer(timings["prompt_n"], f"{label}.prompt_n", minimum=1)
+    predicted_n = integer(
+        timings["predicted_n"], f"{label}.predicted_n", minimum=1
+    )
+    prompt_ms = finite_positive_number(timings["prompt_ms"], f"{label}.prompt_ms")
+    prompt_per_token_ms = finite_positive_number(
+        timings["prompt_per_token_ms"], f"{label}.prompt_per_token_ms"
+    )
+    prompt_per_second = finite_positive_number(
+        timings["prompt_per_second"], f"{label}.prompt_per_second"
+    )
+    predicted_ms = finite_positive_number(
+        timings["predicted_ms"], f"{label}.predicted_ms"
+    )
+    predicted_per_token_ms = finite_positive_number(
+        timings["predicted_per_token_ms"], f"{label}.predicted_per_token_ms"
+    )
+    predicted_per_second = finite_positive_number(
+        timings["predicted_per_second"], f"{label}.predicted_per_second"
+    )
+    if cache_n != 0:
+        fail(f"{label}.cache_n must be zero")
+    if prompt_n != prompt_tokens or predicted_n != completion_tokens:
+        fail(f"{label} counters differ from released counters")
+    if predicted_ms < MIN_PREDICTED_MS:
+        fail(f"{label}.predicted_ms is below the llama-server minimum")
+    expected_rates = (
+        (prompt_per_token_ms, prompt_ms / prompt_n),
+        (prompt_per_second, 1_000.0 * prompt_n / prompt_ms),
+        (predicted_per_token_ms, predicted_ms / predicted_n),
+        (predicted_per_second, 1_000.0 * predicted_n / predicted_ms),
+    )
+    if any(
+        not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9)
+        for actual, expected in expected_rates
+    ):
+        fail(f"{label} rates differ from timing counters")
 
 
 def timestamp(value: Any, label: str) -> int:
@@ -1481,7 +1553,13 @@ class AcceptanceValidator:
             "reset_complete",
         }
         if cancelled:
+            if "timings" in event:
+                fail(f"{label} cancelled release must not contain timings")
             fields.add("cancel_reason")
+        elif "timings" in event:
+            # Historical raw.v2 evidence predates worker timings. New evidence
+            # carries this field, while omission remains readable here only.
+            fields.add("timings")
         exact_fields(event, fields, f"{label}.event")
         if self.active.started_observed_ns is None or event["request_id"] != self.active.request_id:
             fail(f"{label} release lacks a matching started event")
@@ -1493,6 +1571,13 @@ class AcceptanceValidator:
             or event["reset_complete"] is not True
         ):
             fail(f"{label} release counters/reset do not match the observed request")
+        if not cancelled and "timings" in event:
+            validate_release_timings(
+                event["timings"],
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                label=f"{label}.event.timings",
+            )
         request_duration = observed - self.active.generate_started_ns
         if request_duration <= 0:
             fail(f"{label} release does not follow generate write start")

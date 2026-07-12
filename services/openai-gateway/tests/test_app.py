@@ -31,6 +31,7 @@ from ullm_openai_gateway.worker import (
     GenerationHandle,
     WorkerBusy,
     WorkerGenerationResult,
+    WorkerGenerationTimings,
     WorkerFatal,
     WorkerNotReady,
     WorkerStreamState,
@@ -39,6 +40,55 @@ from ullm_openai_gateway.worker import (
 
 API_KEY = b"test-secret"
 AUTH = {"Authorization": "Bearer test-secret"}
+
+
+def generation_timings(
+    prompt_tokens: int, completion_tokens: int
+) -> WorkerGenerationTimings:
+    prompt_ms = float(prompt_tokens * 2)
+    predicted_ms = (
+        0.001 if completion_tokens == 1 else float((completion_tokens - 1) * 4)
+    )
+    return WorkerGenerationTimings(
+        cache_n=0,
+        prompt_n=prompt_tokens,
+        prompt_ms=prompt_ms,
+        prompt_per_token_ms=prompt_ms / prompt_tokens,
+        prompt_per_second=1_000.0 * prompt_tokens / prompt_ms,
+        predicted_n=completion_tokens,
+        predicted_ms=predicted_ms,
+        predicted_per_token_ms=predicted_ms / completion_tokens,
+        predicted_per_second=1_000.0 * completion_tokens / predicted_ms,
+    )
+
+
+def public_timings(
+    prompt_tokens: int,
+    completion_tokens: int,
+    outcome: str,
+    *,
+    context_length: bool = False,
+) -> dict[str, Any]:
+    value = generation_timings(prompt_tokens, completion_tokens)
+    return {
+        "cache_n": value.cache_n,
+        "prompt_n": value.prompt_n,
+        "prompt_ms": value.prompt_ms,
+        "prompt_per_token_ms": value.prompt_per_token_ms,
+        "prompt_per_second": value.prompt_per_second,
+        "predicted_n": value.predicted_n,
+        "predicted_ms": value.predicted_ms,
+        "predicted_per_token_ms": value.predicted_per_token_ms,
+        "predicted_per_second": value.predicted_per_second,
+        "finish_reason": outcome,
+        "termination_reason": (
+            "eos_token"
+            if outcome == "stop"
+            else "context_length"
+            if context_length
+            else "max_tokens"
+        ),
+    }
 
 
 class FakeTokenizer:
@@ -108,6 +158,9 @@ class FakeWorker:
                 outcome=self.outcome,
                 prompt_tokens=len(request.prompt_token_ids),
                 token_ids=self.token_ids,
+                timings=generation_timings(
+                    len(request.prompt_token_ids), len(self.token_ids)
+                ),
             )
         )
         return GenerationHandle(
@@ -401,10 +454,33 @@ def test_nonstream_completion_has_exact_shape_and_usage(
         "completion_tokens": 2,
         "total_tokens": 5,
     }
+    assert value["timings"] == public_timings(3, 2, "stop")
     assert fake_worker.generate_count == 1
     assert fake_worker.requests[0].temperature == 0
     assert fake_worker.requests[0].seed == 7
     assert fake_worker.requests[0].completion_id == value["id"]
+
+
+def test_context_boundary_is_reported_without_changing_openai_finish_reason(
+    tmp_path: Path,
+) -> None:
+    fake_worker = FakeWorker(outcome="length", token_ids=(101, 102))
+    app = create_app(
+        settings(tmp_path),
+        tokenizer=FakeTokenizer(prompt_tokens=4_094),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+    with TestClient(app) as instance:
+        response = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(max_tokens=2),
+        )
+    assert response.status_code == 200
+    value = response.json()
+    assert value["choices"][0]["finish_reason"] == "length"
+    assert value["timings"] == public_timings(4_094, 2, "length", context_length=True)
 
 
 @pytest.mark.parametrize(
@@ -721,6 +797,8 @@ def test_stream_completion_has_exact_order_content_and_usage(
         "completion_tokens": 2,
         "total_tokens": 5,
     }
+    assert chunks[-1]["timings"] == public_timings(3, 2, "stop")
+    assert "timings" not in chunks[-2]
     assert fake_worker.fatal_response_ack_count == 0
 
 
@@ -736,6 +814,7 @@ def test_actual_openwebui_stream_fixture_is_accepted(client: TestClient) -> None
     assert records[-1] == "[DONE]"
     chunks = [json.loads(record) for record in records[:-1]]
     assert all("usage" not in chunk for chunk in chunks)
+    assert chunks[-1]["timings"] == public_timings(3, 2, "stop")
 
 
 @pytest.mark.parametrize(
@@ -778,6 +857,9 @@ def test_stream_length_and_eos_only_terminal_contract(
     assert content == expected_content
     assert chunks[-2]["choices"][0]["finish_reason"] == outcome
     assert chunks[-1]["usage"]["completion_tokens"] == expected_completion_tokens
+    assert chunks[-1]["timings"] == public_timings(
+        3, expected_completion_tokens, outcome
+    )
 
 
 def test_stream_failure_before_headers_returns_json_error(

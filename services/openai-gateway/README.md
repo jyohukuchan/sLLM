@@ -75,6 +75,13 @@ curl -N -sS http://127.0.0.1:8000/v1/chat/completions \
 
 The stream emits the assistant role, stable nonempty content deltas, a terminal
 finish-reason chunk, the optional usage chunk, and finally `data: [DONE]`.
+Every successful completion also emits top-level llama-server-compatible
+`timings`. With `include_usage=true`, `timings` shares the final usage chunk;
+otherwise it is attached to the finish chunk. `predicted_per_second` measures
+from the first sampled token through the final sampled token, includes EOS in
+the token count, and excludes time to first token and worker reset. The timing
+object also carries `finish_reason` and the finer `termination_reason` used by
+OpenWebUI's response-information tooltip.
 
 ## Verification
 

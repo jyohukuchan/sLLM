@@ -18,7 +18,7 @@ use crate::sq8_serving_runtime::{
     Sq8ServingPrefillMode, Sq8ServingRequest, Sq8ServingRuntimeStatus,
     load_qwen3_14b_sq8_serving_norms,
 };
-use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission};
+use crate::sq8_worker_protocol::{Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerTimings};
 use crate::sq8_worker_runtime::{Sq8InferenceBackend, Sq8RequestEventPublisher};
 use serde::Serialize;
 use std::io::Write;
@@ -256,6 +256,81 @@ enum DriverPublished {
     CancellationObserved,
 }
 
+const LLAMA_SERVER_MIN_TIMING_MS: f64 = 0.001;
+
+#[derive(Debug)]
+struct Sq8RequestTimingTracker {
+    prompt_started_at: Instant,
+    first_sample_at: Option<Instant>,
+    last_sample_at: Option<Instant>,
+    sampled_tokens: usize,
+}
+
+impl Sq8RequestTimingTracker {
+    fn new(prompt_started_at: Instant) -> Self {
+        Self {
+            prompt_started_at,
+            first_sample_at: None,
+            last_sample_at: None,
+            sampled_tokens: 0,
+        }
+    }
+
+    fn observe_sample(&mut self, sampled_at: Instant) -> Result<(), String> {
+        if sampled_at
+            .checked_duration_since(self.prompt_started_at)
+            .is_none()
+            || self
+                .last_sample_at
+                .is_some_and(|last_sample_at| sampled_at < last_sample_at)
+        {
+            return Err("SQ8 worker sample timing moved backwards".into());
+        }
+        if self.first_sample_at.is_none() {
+            self.first_sample_at = Some(sampled_at);
+        }
+        self.last_sample_at = Some(sampled_at);
+        self.sampled_tokens = self
+            .sampled_tokens
+            .checked_add(1)
+            .ok_or_else(|| "SQ8 worker sample timing count overflowed".to_string())?;
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) -> Result<Sq8WorkerTimings, String> {
+        if self.sampled_tokens != completion_tokens || completion_tokens == 0 {
+            return Err("SQ8 worker timing count does not match completion tokens".into());
+        }
+        let first_sample_at = self
+            .first_sample_at
+            .ok_or_else(|| "SQ8 worker timing has no first sample".to_string())?;
+        let last_sample_at = self
+            .last_sample_at
+            .ok_or_else(|| "SQ8 worker timing has no final sample".to_string())?;
+        let prompt_elapsed = first_sample_at
+            .checked_duration_since(self.prompt_started_at)
+            .ok_or_else(|| "SQ8 worker prompt timing moved backwards".to_string())?;
+        let predicted_elapsed = last_sample_at
+            .checked_duration_since(first_sample_at)
+            .ok_or_else(|| "SQ8 worker generation timing moved backwards".to_string())?;
+        Sq8WorkerTimings::from_elapsed_millis(
+            prompt_tokens,
+            positive_elapsed_millis(prompt_elapsed),
+            completion_tokens,
+            positive_elapsed_millis(predicted_elapsed),
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn positive_elapsed_millis(elapsed: std::time::Duration) -> f64 {
+    (elapsed.as_secs_f64() * 1e3).max(LLAMA_SERVER_MIN_TIMING_MS)
+}
+
 trait Sq8WorkerSessionDriver {
     type Prepared;
 
@@ -295,6 +370,12 @@ trait Sq8WorkerRequestPublications {
 
     fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String>;
 
+    fn publish_released_with_timings(
+        &mut self,
+        outcome: Sq8ReleaseOutcomeEvent,
+        timings: Sq8WorkerTimings,
+    ) -> Result<(), String>;
+
     fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
     where
         F: FnOnce() -> Result<T, String>;
@@ -329,6 +410,14 @@ impl Sq8WorkerRequestPublications for Sq8RequestEventPublisher<'_> {
 
     fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String> {
         Sq8RequestEventPublisher::publish_released(self, outcome)
+    }
+
+    fn publish_released_with_timings(
+        &mut self,
+        outcome: Sq8ReleaseOutcomeEvent,
+        timings: Sq8WorkerTimings,
+    ) -> Result<(), String> {
+        Sq8RequestEventPublisher::publish_released_with_timings(self, outcome, timings)
     }
 
     fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
@@ -495,9 +584,14 @@ fn drive_sq8_worker_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
     let expected_prompt_tokens = request.prompt_token_ids.len();
     driver.start_request(request, admission.cancel)?;
     publications.publish_started()?;
+    let mut timings = Sq8RequestTimingTracker::new(Instant::now());
 
     loop {
-        match driver.prepare_advance()? {
+        let advance = driver.prepare_advance()?;
+        if matches!(&advance, DriverAdvance::Token { .. }) {
+            timings.observe_sample(Instant::now())?;
+        }
+        match advance {
             DriverAdvance::PromptProgress {
                 prompt_tokens_processed,
                 cache_len,
@@ -557,11 +651,14 @@ fn drive_sq8_worker_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
                             );
                         }
                         if let Some(reason) = committed_terminal {
+                            let timings = timings
+                                .finish(expected_prompt_tokens, publications.completion_tokens())?;
                             return finish_completed_request(
                                 driver,
                                 &expected_request_id,
                                 expected_prompt_tokens,
                                 reason,
+                                timings,
                                 publications,
                             );
                         }
@@ -585,6 +682,7 @@ fn finish_completed_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
     request_id: &str,
     prompt_tokens: usize,
     reason: Sq8FinishReason,
+    timings: Sq8WorkerTimings,
     publications: &mut P,
 ) -> Result<Sq8ReleaseOutcomeEvent, String> {
     let summary = publications.run_terminal_cleanup(|| driver.finish_and_reset())?;
@@ -599,7 +697,7 @@ fn finish_completed_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
         publications.completion_tokens(),
         expected_outcome,
     )?;
-    publications.publish_released(event_outcome)?;
+    publications.publish_released_with_timings(event_outcome, timings)?;
     Ok(event_outcome)
 }
 
@@ -920,6 +1018,7 @@ mod tests {
         trace: Arc<Mutex<Vec<&'static str>>>,
         completion_tokens: usize,
         tokens: Vec<usize>,
+        timings: Option<Sq8WorkerTimings>,
     }
 
     impl TracingPublications {
@@ -960,6 +1059,18 @@ mod tests {
             Ok(())
         }
 
+        fn publish_released_with_timings(
+            &mut self,
+            _outcome: Sq8ReleaseOutcomeEvent,
+            timings: Sq8WorkerTimings,
+        ) -> Result<(), String> {
+            if self.timings.replace(timings).is_some() {
+                return Err("tracing publications received duplicate timings".into());
+            }
+            self.record("released");
+            Ok(())
+        }
+
         fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
         where
             F: FnOnce() -> Result<T, String>,
@@ -979,6 +1090,50 @@ mod tests {
             .unwrap();
         control.mark_ready_after_flush(acknowledgement).unwrap();
         control
+    }
+
+    fn assert_llama_server_timings(
+        timings: &Sq8WorkerTimings,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) {
+        assert_eq!(timings.cache_n, 0);
+        assert_eq!(timings.prompt_n, prompt_tokens);
+        assert_eq!(timings.predicted_n, completion_tokens);
+        assert!(timings.predicted_ms >= LLAMA_SERVER_MIN_TIMING_MS);
+        for value in [
+            timings.prompt_ms,
+            timings.prompt_per_token_ms,
+            timings.prompt_per_second,
+            timings.predicted_ms,
+            timings.predicted_per_token_ms,
+            timings.predicted_per_second,
+        ] {
+            assert!(value.is_finite() && value > 0.0, "invalid timing {value}");
+        }
+    }
+
+    fn assert_serialized_llama_server_timings(
+        event: &Value,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    ) {
+        let timings = event["timings"].as_object().expect("timings object");
+        assert_eq!(timings["cache_n"], 0);
+        assert_eq!(timings["prompt_n"], prompt_tokens);
+        assert_eq!(timings["predicted_n"], completion_tokens);
+        for field in [
+            "prompt_ms",
+            "prompt_per_token_ms",
+            "prompt_per_second",
+            "predicted_ms",
+            "predicted_per_token_ms",
+            "predicted_per_second",
+        ] {
+            let value = timings[field].as_f64().expect("finite timing number");
+            assert!(value.is_finite() && value > 0.0, "invalid {field}={value}");
+        }
+        assert!(timings["predicted_ms"].as_f64().unwrap() >= LLAMA_SERVER_MIN_TIMING_MS);
     }
 
     struct ScriptedBackend {
@@ -1046,6 +1201,25 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice(line).unwrap())
             .collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn timing_tracker_uses_first_to_last_sample_with_llama_server_counts() {
+        let prompt_started_at = Instant::now();
+        let mut tracker = Sq8RequestTimingTracker::new(prompt_started_at);
+        tracker
+            .observe_sample(prompt_started_at + Duration::from_millis(12))
+            .unwrap();
+        tracker
+            .observe_sample(prompt_started_at + Duration::from_millis(20))
+            .unwrap();
+        let timings = tracker.finish(3, 2).unwrap();
+
+        assert_eq!(timings.prompt_ms, 12.0);
+        assert_eq!(timings.predicted_ms, 8.0);
+        assert_eq!(timings.predicted_n, 2);
+        assert_eq!(timings.predicted_per_second, 250.0);
+        assert!(tracker.finish(3, 1).is_err());
     }
 
     #[test]
@@ -1126,6 +1300,7 @@ mod tests {
         assert_eq!(lines[3]["index"], 0);
         assert_eq!(lines[4]["index"], 1);
         assert_eq!(lines[5]["outcome"], "length");
+        assert_serialized_llama_server_timings(&lines[5], 3, 2);
     }
 
     #[test]
@@ -1196,6 +1371,7 @@ mod tests {
         );
         assert_eq!(lines[3]["outcome"], "cancelled");
         assert_eq!(lines[3]["cancel_reason"], "operator");
+        assert!(lines[3].get("timings").is_none());
         assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -1249,6 +1425,7 @@ mod tests {
             trace: Arc::clone(&trace),
             completion_tokens: 0,
             tokens: Vec::new(),
+            timings: None,
         };
 
         let outcome = drive_sq8_worker_request(
@@ -1261,6 +1438,7 @@ mod tests {
 
         assert_eq!(outcome, Sq8ReleaseOutcomeEvent::Length);
         assert_eq!(publications.tokens, [7, 8]);
+        assert_llama_server_timings(publications.timings.as_ref().unwrap(), 3, 2);
         assert_eq!(callback_calls.load(Ordering::SeqCst), 2);
         assert!(!driver.ops.cancel.as_ref().unwrap().is_cancelled());
         assert_eq!(
@@ -1321,6 +1499,7 @@ mod tests {
             trace: Arc::clone(&trace),
             completion_tokens: 0,
             tokens: Vec::new(),
+            timings: None,
         };
 
         let outcome = drive_sq8_worker_request(
@@ -1335,6 +1514,7 @@ mod tests {
         assert!(driver.ops.cancel.as_ref().unwrap().is_cancelled());
         assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
         assert!(publications.tokens.is_empty());
+        assert!(publications.timings.is_none());
         assert_eq!(
             *trace.lock().unwrap(),
             [
@@ -1395,6 +1575,7 @@ mod tests {
             trace: Arc::clone(&trace),
             completion_tokens: 0,
             tokens: Vec::new(),
+            timings: None,
         };
 
         let outcome = drive_sq8_worker_request(
@@ -1407,6 +1588,9 @@ mod tests {
 
         assert_eq!(outcome, Sq8ReleaseOutcomeEvent::Stop);
         assert_eq!(publications.completion_tokens(), 1);
+        let timings = publications.timings.as_ref().unwrap();
+        assert_llama_server_timings(timings, 3, 1);
+        assert_eq!(timings.predicted_ms, LLAMA_SERVER_MIN_TIMING_MS);
         assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             *trace.lock().unwrap(),
@@ -1465,6 +1649,7 @@ mod tests {
             trace: Arc::clone(&trace),
             completion_tokens: 0,
             tokens: Vec::new(),
+            timings: None,
         };
 
         let outcome = drive_sq8_worker_request(
@@ -1477,6 +1662,7 @@ mod tests {
 
         assert_eq!(outcome, Sq8ReleaseOutcomeEvent::Cancelled);
         assert_eq!(publications.completion_tokens(), 0);
+        assert!(publications.timings.is_none());
         assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             *trace.lock().unwrap(),

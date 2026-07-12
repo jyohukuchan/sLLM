@@ -78,12 +78,16 @@ docker run --rm --network open-webui-network \
 Stop OpenWebUI before editing its SQLite database. The configuration tool uses
 SQLite's backup API, retains every existing provider, adds or updates only the
 uLLM provider/model, records the 4096-token model context as metadata, and
-disables title, follow-up, and tag background generation. OpenWebUI v0.9.4
-does not enforce a context length for OpenAI-compatible providers. It sends the
-complete selected history, and the uLLM gateway remains the authoritative 4096
-token limit with a visible HTTP 400 on overflow. Do not add `num_ctx`: this
-OpenWebUI version forwards it to OpenAI-compatible providers as an unsupported
-field.
+enables terminal usage collection while disabling title, follow-up, and tag
+background generation. OpenWebUI then requests the final usage chunk and merges
+the gateway's llama-server-compatible `timings` into the response information
+shown below each assistant message. That information includes
+`predicted_per_second`, `finish_reason`, and `termination_reason`. OpenWebUI
+v0.9.4 does not enforce a context length for OpenAI-compatible providers. It
+sends the complete selected history, and the uLLM gateway remains the
+authoritative 4096-token limit with a visible HTTP 400 on overflow. Do not add
+`num_ctx`: this OpenWebUI version forwards it to OpenAI-compatible providers as
+an unsupported field.
 
 ```bash
 cd /home/homelab1/coding-local/ultimateLLM/uLLM-project

@@ -1368,6 +1368,102 @@ pub enum Sq8ReleaseOutcomeEvent {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Sq8WorkerTimings {
+    pub cache_n: usize,
+    pub prompt_n: usize,
+    pub prompt_ms: f64,
+    pub prompt_per_token_ms: f64,
+    pub prompt_per_second: f64,
+    pub predicted_n: usize,
+    pub predicted_ms: f64,
+    pub predicted_per_token_ms: f64,
+    pub predicted_per_second: f64,
+}
+
+impl Sq8WorkerTimings {
+    pub fn from_elapsed_millis(
+        prompt_n: usize,
+        prompt_ms: f64,
+        predicted_n: usize,
+        predicted_ms: f64,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
+        if !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(&prompt_n)
+            || !(1..=QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS).contains(&predicted_n)
+            || !prompt_ms.is_finite()
+            || prompt_ms <= 0.0
+            || !predicted_ms.is_finite()
+            || predicted_ms < 0.001
+        {
+            return Err(Sq8WorkerProtocolError::invalid_command(
+                "SQ8 worker timings are out of range",
+            ));
+        }
+        let value = Self {
+            cache_n: 0,
+            prompt_n,
+            prompt_ms,
+            prompt_per_token_ms: prompt_ms / prompt_n as f64,
+            prompt_per_second: 1e3 / prompt_ms * prompt_n as f64,
+            predicted_n,
+            predicted_ms,
+            predicted_per_token_ms: predicted_ms / predicted_n as f64,
+            predicted_per_second: 1e3 / predicted_ms * predicted_n as f64,
+        };
+        value
+            .validate_for_release(prompt_n, predicted_n)
+            .map_err(Sq8WorkerProtocolError::invalid_command)?;
+        Ok(value)
+    }
+
+    fn validate_for_release(
+        &self,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) -> Result<(), String> {
+        let positive_finite = [
+            self.prompt_ms,
+            self.prompt_per_token_ms,
+            self.prompt_per_second,
+            self.predicted_ms,
+            self.predicted_per_token_ms,
+            self.predicted_per_second,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0);
+        if self.cache_n != 0
+            || self.prompt_n != prompt_tokens
+            || self.predicted_n != completion_tokens
+            || self.predicted_ms < 0.001
+            || !positive_finite
+            || !timing_value_matches(
+                self.prompt_per_token_ms,
+                self.prompt_ms / self.prompt_n as f64,
+            )
+            || !timing_value_matches(
+                self.prompt_per_second,
+                1e3 / self.prompt_ms * self.prompt_n as f64,
+            )
+            || !timing_value_matches(
+                self.predicted_per_token_ms,
+                self.predicted_ms / self.predicted_n as f64,
+            )
+            || !timing_value_matches(
+                self.predicted_per_second,
+                1e3 / self.predicted_ms * self.predicted_n as f64,
+            )
+        {
+            return Err("SQ8 released timings violate the llama-server contract".into());
+        }
+        Ok(())
+    }
+}
+
+fn timing_value_matches(actual: f64, expected: f64) -> bool {
+    let tolerance = (expected.abs() * 1e-12).max(1e-12);
+    (actual - expected).abs() <= tolerance
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sq8WorkerErrorCode {
@@ -1435,6 +1531,8 @@ pub enum Sq8WorkerEvent {
         cancel_reason: Option<Sq8CancelReason>,
         prompt_tokens: usize,
         completion_tokens: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timings: Option<Sq8WorkerTimings>,
         reset_complete: bool,
     },
     #[serde(rename = "error")]
@@ -1495,10 +1593,56 @@ impl Sq8WorkerEvent {
         prompt_tokens: usize,
         completion_tokens: usize,
     ) -> Result<Self, Sq8WorkerProtocolError> {
+        Self::released_inner(
+            request_id,
+            outcome,
+            cancel_reason,
+            prompt_tokens,
+            completion_tokens,
+            None,
+        )
+    }
+
+    pub fn released_with_timings(
+        request_id: impl Into<String>,
+        outcome: Sq8ReleaseOutcomeEvent,
+        cancel_reason: Option<Sq8CancelReason>,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        timings: Sq8WorkerTimings,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
+        Self::released_inner(
+            request_id,
+            outcome,
+            cancel_reason,
+            prompt_tokens,
+            completion_tokens,
+            Some(timings),
+        )
+    }
+
+    fn released_inner(
+        request_id: impl Into<String>,
+        outcome: Sq8ReleaseOutcomeEvent,
+        cancel_reason: Option<Sq8CancelReason>,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        timings: Option<Sq8WorkerTimings>,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
         if matches!(outcome, Sq8ReleaseOutcomeEvent::Cancelled) != cancel_reason.is_some() {
             return Err(Sq8WorkerProtocolError::invalid_command(
                 "cancel_reason must exist only for a cancelled release",
             ));
+        }
+        if outcome == Sq8ReleaseOutcomeEvent::Cancelled && timings.is_some() {
+            return Err(Sq8WorkerProtocolError::invalid_command(
+                "timings are forbidden for a cancelled release",
+            ));
+        }
+        if let Some(timings) = timings {
+            timings
+                .validate_for_release(prompt_tokens, completion_tokens)
+                .map_err(Sq8WorkerProtocolError::invalid_command)?;
         }
         Ok(Self::Released {
             schema_version: SQ8_WORKER_SCHEMA_VERSION,
@@ -1507,6 +1651,7 @@ impl Sq8WorkerEvent {
             cancel_reason,
             prompt_tokens,
             completion_tokens,
+            timings,
             reset_complete: true,
         })
     }
@@ -1605,15 +1750,20 @@ impl Sq8WorkerEvent {
                 cancel_reason,
                 prompt_tokens,
                 completion_tokens,
+                timings,
                 reset_complete,
             } => {
                 validate_event_common(schema_version, request_id)?;
                 if matches!(outcome, Sq8ReleaseOutcomeEvent::Cancelled) != cancel_reason.is_some()
                     || !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(prompt_tokens)
                     || *completion_tokens > QWEN3_14B_SQ8_SERVING_MAX_NEW_TOKENS
+                    || (*outcome == Sq8ReleaseOutcomeEvent::Cancelled && timings.is_some())
                     || !reset_complete
                 {
                     return Err("SQ8 released event violates its terminal contract".into());
+                }
+                if let Some(timings) = timings {
+                    timings.validate_for_release(*prompt_tokens, *completion_tokens)?;
                 }
             }
             Self::Error {
@@ -2417,8 +2567,18 @@ mod tests {
 
     #[test]
     fn event_serialization_has_exact_release_field_sets() {
+        let timings = Sq8WorkerTimings::from_elapsed_millis(3, 12.0, 2, 8.0).unwrap();
         let normal =
             Sq8WorkerEvent::released("req-1", Sq8ReleaseOutcomeEvent::Length, None, 3, 2).unwrap();
+        let timed = Sq8WorkerEvent::released_with_timings(
+            "req-timed",
+            Sq8ReleaseOutcomeEvent::Length,
+            None,
+            3,
+            2,
+            timings,
+        )
+        .unwrap();
         let cancelled = Sq8WorkerEvent::released(
             "req-2",
             Sq8ReleaseOutcomeEvent::Cancelled,
@@ -2428,11 +2588,53 @@ mod tests {
         )
         .unwrap();
         let normal = serde_json::to_value(normal).unwrap();
+        let timed = serde_json::to_value(timed).unwrap();
         let cancelled = serde_json::to_value(cancelled).unwrap();
         assert!(normal.get("cancel_reason").is_none());
+        assert!(normal.get("timings").is_none());
         assert_eq!(cancelled["cancel_reason"], "slow_client");
+        assert!(cancelled.get("timings").is_none());
+        assert_eq!(timed["timings"]["cache_n"], 0);
+        assert_eq!(timed["timings"]["prompt_n"], 3);
+        assert_eq!(timed["timings"]["prompt_ms"], 12.0);
+        assert_eq!(timed["timings"]["prompt_per_token_ms"], 4.0);
+        assert_eq!(timed["timings"]["prompt_per_second"], 250.0);
+        assert_eq!(timed["timings"]["predicted_n"], 2);
+        assert_eq!(timed["timings"]["predicted_ms"], 8.0);
+        assert_eq!(timed["timings"]["predicted_per_token_ms"], 4.0);
+        assert_eq!(timed["timings"]["predicted_per_second"], 250.0);
         assert_eq!(normal["reset_complete"], true);
         assert_eq!(normal["schema_version"], SQ8_WORKER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn release_timings_reject_cancelled_mismatch_and_nonfinite_values() {
+        let timings = Sq8WorkerTimings::from_elapsed_millis(3, 12.0, 2, 0.001).unwrap();
+        assert!(
+            Sq8WorkerEvent::released_with_timings(
+                "req-cancelled",
+                Sq8ReleaseOutcomeEvent::Cancelled,
+                Some(Sq8CancelReason::Operator),
+                3,
+                2,
+                timings,
+            )
+            .is_err()
+        );
+        assert!(
+            Sq8WorkerEvent::released_with_timings(
+                "req-mismatch",
+                Sq8ReleaseOutcomeEvent::Length,
+                None,
+                3,
+                1,
+                timings,
+            )
+            .is_err()
+        );
+        assert!(Sq8WorkerTimings::from_elapsed_millis(3, f64::NAN, 2, 1.0).is_err());
+        assert!(Sq8WorkerTimings::from_elapsed_millis(3, 1.0, 2, f64::INFINITY).is_err());
+        assert!(Sq8WorkerTimings::from_elapsed_millis(3, 1.0, 2, 0.000_999).is_err());
     }
 
     #[derive(Default)]

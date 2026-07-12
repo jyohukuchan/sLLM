@@ -55,12 +55,26 @@ async function runSmoke(browser) {
 
   const assistants = page.locator(".chat-assistant");
   const assistantText = (await assistants.last().innerText()).trim();
+  const infoButton = page.locator('button[id^="info-"]').last();
+  await infoButton.waitFor({ state: "visible", timeout: 10_000 });
+  await infoButton.hover();
+  const metricFields = [
+    "predicted_per_second",
+    "finish_reason",
+    "termination_reason",
+  ];
+  await page.waitForFunction(
+    (fields) => fields.every((field) => document.body.innerText.includes(field)),
+    metricFields,
+    { timeout: 10_000 },
+  );
   const bodyText = await page.locator("body").innerText();
   const modelVisible = bodyText.includes("uLLM Qwen3 14B SQ8");
   const browserOk = assistantText.includes("BROWSER_OK");
-  if (!browserOk || !modelVisible) {
+  const metricsVisible = metricFields.every((field) => bodyText.includes(field));
+  if (!browserOk || !modelVisible || !metricsVisible) {
     throw new Error(
-      `browser smoke mismatch: browserOk=${browserOk} modelVisible=${modelVisible}`,
+      `browser smoke mismatch: browserOk=${browserOk} modelVisible=${modelVisible} metricsVisible=${metricsVisible}`,
     );
   }
 
@@ -70,6 +84,8 @@ async function runSmoke(browser) {
     JSON.stringify({
       assistantText,
       browserOk,
+      metricFields,
+      metricsVisible,
       modelVisible,
       pageErrors,
       screenshotPath,

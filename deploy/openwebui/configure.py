@@ -131,6 +131,7 @@ def model_values(connection: sqlite3.Connection) -> tuple[str, str, str]:
         "web_search",
     ):
         capabilities[capability] = False
+    capabilities["usage"] = True
     meta.update(
         {
             "profile_image_url": "/static/favicon.png",

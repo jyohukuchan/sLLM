@@ -333,27 +333,29 @@ async def _serve_claimed_chat_completion(
             "The generation failed.",
         ) from error
     completion_tokens = len(result.token_ids)
-    return JSONResponse(
-        {
-            "id": completion_id,
-            "object": "chat.completion",
-            "created": created,
-            "model": MODEL_ID,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "logprobs": None,
-                    "finish_reason": result.outcome,
-                }
-            ],
-            "usage": {
-                "prompt_tokens": result.prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": result.prompt_tokens + completion_tokens,
-            },
-        }
-    )
+    value = {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": MODEL_ID,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "logprobs": None,
+                "finish_reason": result.outcome,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": result.prompt_tokens + completion_tokens,
+        },
+    }
+    timings = _completion_timings(result)
+    if timings is not None:
+        value["timings"] = timings
+    return JSONResponse(value)
 
 
 def _worker_busy_error() -> ApiError:
@@ -823,9 +825,15 @@ async def _stream_completion(
         suffix = await _finish_stream_decode(request, decoder)
         if suffix:
             yield _sse_record(_content_chunk(completion_id, created, suffix))
-        yield _sse_record(_final_chunk(completion_id, created, result.outcome))
+        timings = _completion_timings(result)
+        final_chunk = _final_chunk(completion_id, created, result.outcome)
+        if timings is not None and not include_usage:
+            final_chunk["timings"] = timings
+        yield _sse_record(final_chunk)
         if include_usage:
-            yield _sse_record(_usage_chunk(completion_id, created, result))
+            yield _sse_record(
+                _usage_chunk(completion_id, created, result, timings=timings)
+            )
         yield b"data: [DONE]\n\n"
     except WorkerFatal:
         raise
@@ -968,6 +976,8 @@ def _usage_chunk(
     completion_id: str,
     created: int,
     result: WorkerGenerationResult,
+    *,
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     completion_tokens = len(result.token_ids)
     value = _chunk_base(completion_id, created)
@@ -977,7 +987,34 @@ def _usage_chunk(
         "completion_tokens": completion_tokens,
         "total_tokens": result.prompt_tokens + completion_tokens,
     }
+    if timings is not None:
+        value["timings"] = timings
     return value
+
+
+def _completion_timings(result: WorkerGenerationResult) -> dict[str, Any] | None:
+    timings = result.timings
+    if timings is None:
+        return None
+    if result.outcome == "stop":
+        termination_reason = "eos_token"
+    elif result.prompt_tokens + len(result.token_ids) == CONTEXT_LENGTH:
+        termination_reason = "context_length"
+    else:
+        termination_reason = "max_tokens"
+    return {
+        "cache_n": timings.cache_n,
+        "prompt_n": timings.prompt_n,
+        "prompt_ms": timings.prompt_ms,
+        "prompt_per_token_ms": timings.prompt_per_token_ms,
+        "prompt_per_second": timings.prompt_per_second,
+        "predicted_n": timings.predicted_n,
+        "predicted_ms": timings.predicted_ms,
+        "predicted_per_token_ms": timings.predicted_per_token_ms,
+        "predicted_per_second": timings.predicted_per_second,
+        "finish_reason": result.outcome,
+        "termination_reason": termination_reason,
+    }
 
 
 def _stream_error_record() -> bytes:

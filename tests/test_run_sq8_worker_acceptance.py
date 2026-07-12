@@ -58,6 +58,24 @@ def event(kind: str, request_id: str = "req-1", **fields):
     return value
 
 
+def release_timings(prompt_tokens: int, completion_tokens: int):
+    prompt_ms = float(prompt_tokens * 2)
+    predicted_ms = (
+        0.001 if completion_tokens == 1 else float((completion_tokens - 1) * 4)
+    )
+    return {
+        "cache_n": 0,
+        "prompt_n": prompt_tokens,
+        "prompt_ms": prompt_ms,
+        "prompt_per_token_ms": prompt_ms / prompt_tokens,
+        "prompt_per_second": 1_000.0 * prompt_tokens / prompt_ms,
+        "predicted_n": completion_tokens,
+        "predicted_ms": predicted_ms,
+        "predicted_per_token_ms": predicted_ms / completion_tokens,
+        "predicted_per_second": 1_000.0 * completion_tokens / predicted_ms,
+    }
+
+
 def proc_stat(pid: int, ppid: int, starttime: int, comm: str = "worker ) name") -> str:
     remaining = [str(field) for field in range(4, 53)]
     remaining[0] = str(ppid)
@@ -203,10 +221,59 @@ class StrictJsonAndPumpTests(unittest.TestCase):
             outcome="length",
             prompt_tokens=8,
             completion_tokens=2,
+            timings=release_timings(8, 2),
             reset_complete=1,
         )
         with self.assertRaisesRegex(TOOL.AcceptanceError, "must be true"):
             TOOL.validate_worker_event_shape(released)
+
+    def test_release_timings_are_exact_and_cancelled_timings_are_forbidden(self):
+        released = event(
+            "released",
+            outcome="length",
+            prompt_tokens=8,
+            completion_tokens=2,
+            timings=release_timings(8, 2),
+            reset_complete=True,
+        )
+        TOOL.validate_worker_event_shape(released)
+
+        missing = dict(released)
+        missing.pop("timings")
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "keys differ"):
+            TOOL.validate_worker_event_shape(missing)
+
+        extra = json.loads(json.dumps(released))
+        extra["timings"]["unexpected"] = 1
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "keys differ"):
+            TOOL.validate_worker_event_shape(extra)
+
+        bad_count = json.loads(json.dumps(released))
+        bad_count["timings"]["predicted_n"] = 1
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "counters differ"):
+            TOOL.validate_worker_event_shape(bad_count)
+
+        bad_rate = json.loads(json.dumps(released))
+        bad_rate["timings"]["predicted_per_second"] += 1
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "rates differ"):
+            TOOL.validate_worker_event_shape(bad_rate)
+
+        below_minimum = json.loads(json.dumps(released))
+        below_minimum["timings"]["predicted_ms"] = 0.000_999
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "below"):
+            TOOL.validate_worker_event_shape(below_minimum)
+
+        cancelled = event(
+            "released",
+            outcome="cancelled",
+            cancel_reason="operator",
+            prompt_tokens=8,
+            completion_tokens=1,
+            timings=release_timings(8, 1),
+            reset_complete=True,
+        )
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "must not contain"):
+            TOOL.validate_worker_event_shape(cancelled)
 
     def test_stdout_pump_decodes_before_timestamp_and_reports_eof(self):
         read_fd, write_fd = os.pipe()
@@ -289,6 +356,7 @@ class EventStateMachineTests(unittest.TestCase):
                     outcome="length",
                     prompt_tokens=8,
                     completion_tokens=2,
+                    timings=release_timings(8, 2),
                     reset_complete=True,
                 ),
             ]

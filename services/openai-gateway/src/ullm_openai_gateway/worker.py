@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import json
 import logging
+import math
 import os
 import signal
 import socket
@@ -39,6 +40,7 @@ FATAL_RESPONSE_ATTEMPT_SECONDS = 0.25
 KILL_WAIT_SECONDS = 2.0
 PREFILL_PROGRESS_TOKENS = 128
 STREAM_TOKEN_QUEUE_SIZE = 32
+LLAMA_SERVER_MIN_PREDICTED_MS = 0.001
 LIFECYCLE_LOG_SCHEMA = "ullm.gateway.lifecycle.v1"
 LIFECYCLE_OBSERVER_SOCKET = Path("/run/ullm/lifecycle-observer.sock")
 
@@ -120,11 +122,25 @@ class WorkerGenerationRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerGenerationTimings:
+    cache_n: int
+    prompt_n: int
+    prompt_ms: float
+    prompt_per_token_ms: float
+    prompt_per_second: float
+    predicted_n: int
+    predicted_ms: float
+    predicted_per_token_ms: float
+    predicted_per_second: float
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerGenerationResult:
     request_id: str
     outcome: str
     prompt_tokens: int
     token_ids: tuple[int, ...]
+    timings: WorkerGenerationTimings | None = None
 
 
 @dataclass(slots=True)
@@ -691,6 +707,8 @@ class WorkerSupervisor:
         }
         outcome = value.get("outcome")
         keys = base | ({"cancel_reason"} if outcome == "cancelled" else set())
+        if "timings" in value:
+            keys.add("timings")
         _require_exact_keys(value, keys)
         active = self._require_active_id(value.get("request_id"))
         prompt_tokens = _integer(value.get("prompt_tokens"))
@@ -718,11 +736,23 @@ class WorkerSupervisor:
                 raise WorkerProtocolError("cancel release reason differs")
         elif active.cancel_reason is not None:
             self._stale_cancel_request_id = active.request_id
+        timings = (
+            _parse_generation_timings(
+                value.get("timings"),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            if "timings" in value
+            else None
+        )
+        if outcome == "cancelled" and timings is not None:
+            raise WorkerProtocolError("cancelled release contains generation timings")
         result = WorkerGenerationResult(
             request_id=active.request_id,
             outcome=outcome,
             prompt_tokens=prompt_tokens,
             token_ids=tuple(active.token_ids),
+            timings=timings,
         )
         released_monotonic_ns = time.monotonic_ns()
         started_monotonic_ns = active.started_monotonic_ns
@@ -1053,6 +1083,84 @@ def _integer(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise WorkerProtocolError("worker event counter is invalid")
     return value
+
+
+def _finite_positive_number(value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise WorkerProtocolError("worker timing value is invalid")
+    return float(value)
+
+
+def _parse_generation_timings(
+    value: Any,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> WorkerGenerationTimings:
+    if not isinstance(value, dict):
+        raise WorkerProtocolError("worker timings must be an object")
+    _require_exact_keys(
+        value,
+        {
+            "cache_n",
+            "prompt_n",
+            "prompt_ms",
+            "prompt_per_token_ms",
+            "prompt_per_second",
+            "predicted_n",
+            "predicted_ms",
+            "predicted_per_token_ms",
+            "predicted_per_second",
+        },
+    )
+    cache_n = _integer(value.get("cache_n"))
+    prompt_n = _integer(value.get("prompt_n"))
+    predicted_n = _integer(value.get("predicted_n"))
+    prompt_ms = _finite_positive_number(value.get("prompt_ms"))
+    prompt_per_token_ms = _finite_positive_number(value.get("prompt_per_token_ms"))
+    prompt_per_second = _finite_positive_number(value.get("prompt_per_second"))
+    predicted_ms = _finite_positive_number(value.get("predicted_ms"))
+    predicted_per_token_ms = _finite_positive_number(
+        value.get("predicted_per_token_ms")
+    )
+    predicted_per_second = _finite_positive_number(value.get("predicted_per_second"))
+    if (
+        cache_n != 0
+        or prompt_n != prompt_tokens
+        or predicted_n != completion_tokens
+        or prompt_n == 0
+        or predicted_n == 0
+    ):
+        raise WorkerProtocolError("worker timing counters differ from release counters")
+    if predicted_ms < LLAMA_SERVER_MIN_PREDICTED_MS:
+        raise WorkerProtocolError("worker predicted timing is below the minimum")
+    expected = (
+        (prompt_per_token_ms, prompt_ms / prompt_n),
+        (prompt_per_second, 1_000.0 * prompt_n / prompt_ms),
+        (predicted_per_token_ms, predicted_ms / predicted_n),
+        (predicted_per_second, 1_000.0 * predicted_n / predicted_ms),
+    )
+    if any(
+        not math.isclose(actual, calculated, rel_tol=1e-9, abs_tol=1e-9)
+        for actual, calculated in expected
+    ):
+        raise WorkerProtocolError("worker timing rates differ from timing counters")
+    return WorkerGenerationTimings(
+        cache_n=cache_n,
+        prompt_n=prompt_n,
+        prompt_ms=prompt_ms,
+        prompt_per_token_ms=prompt_per_token_ms,
+        prompt_per_second=prompt_per_second,
+        predicted_n=predicted_n,
+        predicted_ms=predicted_ms,
+        predicted_per_token_ms=predicted_per_token_ms,
+        predicted_per_second=predicted_per_second,
+    )
 
 
 def _validate_error_event(value: dict[str, Any]) -> None:

@@ -103,6 +103,8 @@ for line in sys.stdin:
             }, separators=(",", ":")), flush=True)
             outcome = "length"
             completion_tokens = 2
+        prompt_ms = float(prompt_tokens * 2)
+        predicted_ms = 0.001 if completion_tokens == 1 else float((completion_tokens - 1) * 4)
         print(json.dumps({
             "schema_version": "ullm.worker.v1",
             "type": "released",
@@ -111,6 +113,17 @@ for line in sys.stdin:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "reset_complete": True,
+            "timings": {
+                "cache_n": 0,
+                "prompt_n": prompt_tokens,
+                "prompt_ms": prompt_ms,
+                "prompt_per_token_ms": prompt_ms / prompt_tokens,
+                "prompt_per_second": 1000.0 * prompt_tokens / prompt_ms,
+                "predicted_n": completion_tokens,
+                "predicted_ms": predicted_ms,
+                "predicted_per_token_ms": predicted_ms / completion_tokens,
+                "predicted_per_second": 1000.0 * completion_tokens / predicted_ms,
+            },
         }, separators=(",", ":")), flush=True)
         active = None
     elif kind == "cancel":
@@ -195,6 +208,11 @@ def test_worker_is_reused_and_busy_request_is_not_queued(tmp_path: Path) -> None
         first_result = await supervisor.wait(first)
         assert first_result.outcome == "stop"
         assert first_result.token_ids == (EOS_TOKEN_IDS[0],)
+        assert first_result.timings is not None
+        assert first_result.timings.prompt_n == 3
+        assert first_result.timings.predicted_n == 1
+        assert first_result.timings.predicted_ms == 0.001
+        assert first_result.timings.predicted_per_second == 1_000_000.0
         second = await supervisor.admit(generation(1))
         second_result = await supervisor.wait(second)
         assert second_result.outcome == "length"
@@ -203,6 +221,37 @@ def test_worker_is_reused_and_busy_request_is_not_queued(tmp_path: Path) -> None
         await supervisor.shutdown()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("cache_n", 1),
+        ("predicted_n", 1),
+        ("predicted_ms", 0.0),
+        ("predicted_ms", 0.000_999),
+        ("predicted_per_second", 1.0),
+    ],
+)
+def test_worker_generation_timings_fail_closed(field: str, value: object) -> None:
+    timings: dict[str, object] = {
+        "cache_n": 0,
+        "prompt_n": 3,
+        "prompt_ms": 6.0,
+        "prompt_per_token_ms": 2.0,
+        "prompt_per_second": 500.0,
+        "predicted_n": 2,
+        "predicted_ms": 4.0,
+        "predicted_per_token_ms": 2.0,
+        "predicted_per_second": 500.0,
+    }
+    timings[field] = value
+    with pytest.raises(worker_module.WorkerProtocolError):
+        worker_module._parse_generation_timings(
+            timings,
+            prompt_tokens=3,
+            completion_tokens=2,
+        )
 
 
 def test_release_log_is_structured_and_omits_content(

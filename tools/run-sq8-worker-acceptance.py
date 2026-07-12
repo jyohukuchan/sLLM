@@ -77,6 +77,18 @@ REQUIRED_HIP_GUARDS = (
 )
 SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 20, "seed": 0}
 EOS_TOKEN_IDS = [151_645, 151_643]
+TIMING_FIELDS = {
+    "cache_n",
+    "prompt_n",
+    "prompt_ms",
+    "prompt_per_token_ms",
+    "prompt_per_second",
+    "predicted_n",
+    "predicted_ms",
+    "predicted_per_token_ms",
+    "predicted_per_second",
+}
+MIN_PREDICTED_MS = 0.001
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 HEX40_RE = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -110,6 +122,66 @@ def integer(
     if value < minimum or (maximum is not None and value > maximum):
         fail(f"{label} is out of range")
     return value
+
+
+def finite_positive_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        fail(f"{label} must be a finite positive number")
+    try:
+        parsed = float(value)
+    except OverflowError:
+        fail(f"{label} must be a finite positive number")
+    if not math.isfinite(parsed) or parsed <= 0:
+        fail(f"{label} must be a finite positive number")
+    return parsed
+
+
+def validate_release_timings(
+    value: Any,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    label: str,
+) -> None:
+    if not isinstance(value, dict):
+        fail(f"{label} must be an object")
+    exact_keys(value, TIMING_FIELDS, label)
+    cache_n = integer(value["cache_n"], f"{label}.cache_n")
+    prompt_n = integer(value["prompt_n"], f"{label}.prompt_n", minimum=1)
+    predicted_n = integer(value["predicted_n"], f"{label}.predicted_n", minimum=1)
+    prompt_ms = finite_positive_number(value["prompt_ms"], f"{label}.prompt_ms")
+    prompt_per_token_ms = finite_positive_number(
+        value["prompt_per_token_ms"], f"{label}.prompt_per_token_ms"
+    )
+    prompt_per_second = finite_positive_number(
+        value["prompt_per_second"], f"{label}.prompt_per_second"
+    )
+    predicted_ms = finite_positive_number(
+        value["predicted_ms"], f"{label}.predicted_ms"
+    )
+    predicted_per_token_ms = finite_positive_number(
+        value["predicted_per_token_ms"], f"{label}.predicted_per_token_ms"
+    )
+    predicted_per_second = finite_positive_number(
+        value["predicted_per_second"], f"{label}.predicted_per_second"
+    )
+    if cache_n != 0:
+        fail(f"{label}.cache_n must be zero")
+    if prompt_n != prompt_tokens or predicted_n != completion_tokens:
+        fail(f"{label} counters differ from released counters")
+    if predicted_ms < MIN_PREDICTED_MS:
+        fail(f"{label}.predicted_ms is below the llama-server minimum")
+    expected_rates = (
+        (prompt_per_token_ms, prompt_ms / prompt_n),
+        (prompt_per_second, 1_000.0 * prompt_n / prompt_ms),
+        (predicted_per_token_ms, predicted_ms / predicted_n),
+        (predicted_per_second, 1_000.0 * predicted_n / predicted_ms),
+    )
+    if any(
+        not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9)
+        for actual, expected in expected_rates
+    ):
+        fail(f"{label} rates differ from timing counters")
 
 
 def nonempty_string(value: Any, label: str) -> str:
@@ -581,6 +653,9 @@ def validate_worker_event_shape(event: dict[str, Any]) -> None:
         integer(event["index"], "token.index", maximum=511)
         integer(event["token_id"], "token.token_id", maximum=151_935)
     elif event_type == "released":
+        outcome = event.get("outcome")
+        if outcome not in {"stop", "length", "cancelled"}:
+            fail("released outcome differs")
         expected = {
             "schema_version",
             "type",
@@ -590,14 +665,27 @@ def validate_worker_event_shape(event: dict[str, Any]) -> None:
             "completion_tokens",
             "reset_complete",
         }
-        if event.get("outcome") == "cancelled":
+        if outcome == "cancelled":
+            if "timings" in event:
+                fail("cancelled release must not contain timings")
             expected.add("cancel_reason")
+        else:
+            expected.add("timings")
         exact_keys(event, expected, "released event")
         validate_request_id(event["request_id"], "released.request_id")
-        if event["outcome"] not in {"stop", "length", "cancelled"}:
-            fail("released outcome differs")
-        integer(event["prompt_tokens"], "released.prompt_tokens", minimum=1, maximum=4096)
-        integer(event["completion_tokens"], "released.completion_tokens", maximum=512)
+        prompt_tokens = integer(
+            event["prompt_tokens"], "released.prompt_tokens", minimum=1, maximum=4096
+        )
+        completion_tokens = integer(
+            event["completion_tokens"], "released.completion_tokens", maximum=512
+        )
+        if outcome != "cancelled":
+            validate_release_timings(
+                event["timings"],
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                label="released.timings",
+            )
         if event["reset_complete"] is not True:
             fail("released reset_complete must be true")
     elif event_type == "error":

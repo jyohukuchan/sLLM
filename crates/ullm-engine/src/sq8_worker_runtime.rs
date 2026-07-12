@@ -11,7 +11,7 @@ use crate::sq8_worker_protocol::{
     Sq8ReadyFlushAck, Sq8ReleaseOutcomeEvent, Sq8WorkerAdmission, Sq8WorkerCommand,
     Sq8WorkerCommandKind, Sq8WorkerControl, Sq8WorkerControlErrorKind, Sq8WorkerErrorCode,
     Sq8WorkerEvent, Sq8WorkerLifecycle, Sq8WorkerProtocolErrorKind, Sq8WorkerShutdownDisposition,
-    inspect_sq8_worker_command,
+    Sq8WorkerTimings, inspect_sq8_worker_command,
 };
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -399,6 +399,22 @@ impl<'a> Sq8RequestEventPublisher<'a> {
     }
 
     pub fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String> {
+        self.publish_released_inner(outcome, None)
+    }
+
+    pub fn publish_released_with_timings(
+        &mut self,
+        outcome: Sq8ReleaseOutcomeEvent,
+        timings: Sq8WorkerTimings,
+    ) -> Result<(), String> {
+        self.publish_released_inner(outcome, Some(timings))
+    }
+
+    fn publish_released_inner(
+        &mut self,
+        outcome: Sq8ReleaseOutcomeEvent,
+        timings: Option<Sq8WorkerTimings>,
+    ) -> Result<(), String> {
         if !self.started || self.released {
             return Err("SQ8 released event is out of order".into());
         }
@@ -424,13 +440,23 @@ impl<'a> Sq8RequestEventPublisher<'a> {
         } else {
             None
         };
-        let event = Sq8WorkerEvent::released(
-            self.request_id.clone(),
-            outcome,
-            cancel_reason,
-            self.prompt_tokens,
-            self.completion_tokens,
-        )
+        let event = match timings {
+            Some(timings) => Sq8WorkerEvent::released_with_timings(
+                self.request_id.clone(),
+                outcome,
+                cancel_reason,
+                self.prompt_tokens,
+                self.completion_tokens,
+                timings,
+            ),
+            None => Sq8WorkerEvent::released(
+                self.request_id.clone(),
+                outcome,
+                cancel_reason,
+                self.prompt_tokens,
+                self.completion_tokens,
+            ),
+        }
         .map_err(|error| error.to_string())?;
         let permit = self
             .control

@@ -368,6 +368,19 @@ For `stream=false`, status is 200 and the response has this exact member shape:
     "prompt_tokens": 42,
     "completion_tokens": 17,
     "total_tokens": 59
+  },
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 42,
+    "prompt_ms": 420.0,
+    "prompt_per_token_ms": 10.0,
+    "prompt_per_second": 100.0,
+    "predicted_n": 17,
+    "predicted_ms": 800.0,
+    "predicted_per_token_ms": 47.05882352941177,
+    "predicted_per_second": 21.25,
+    "finish_reason": "stop",
+    "termination_reason": "eos_token"
   }
 }
 ```
@@ -382,11 +395,33 @@ Rules:
 - assistant `content` is the complete stable detokenized text and may be empty;
 - `logprobs` is always null;
 - no tool, refusal, reasoning, or system-fingerprint fields are emitted;
-- usage uses the accounting in section 4.3.
+- usage uses the accounting in section 4.3; and
+- `timings` uses the llama-server-compatible contract below.
 
 `finish_reason` is `stop` when a configured EOS ID ends generation and `length`
 when the effective completion limit is reached. A cancellation or worker failure
 does not produce a successful non-stream response.
+
+`predicted_n` includes the first generated token and a terminal EOS token.
+`predicted_ms` measures from the first sampled token through the final sampled
+token, with a lower bound of `0.001` ms. Therefore
+`predicted_per_second = 1000 * predicted_n / predicted_ms`. Time to first token,
+worker reset/release, gateway detokenization, and HTTP delivery are excluded.
+`prompt_n`, the prompt rates, and the remaining nine llama-server fields follow
+the private worker contract.
+
+The two additional string fields preserve termination information in OpenWebUI's
+generic usage-information tooltip:
+
+| `finish_reason` | `termination_reason` | Meaning |
+| --- | --- | --- |
+| `stop` | `eos_token` | a configured EOS token won termination |
+| `length` | `max_tokens` | the requested completion maximum was reached |
+| `length` | `context_length` | the final token filled the 4096-token context |
+
+EOS wins when EOS and a length boundary occur on the same token. A request whose
+prompt plus requested maximum exceeds the context is rejected before generation,
+so it has no successful response or timing object.
 
 ## 6. Successful Streaming Response
 
@@ -484,12 +519,27 @@ choice chunk is emitted:
       "logprobs": null,
       "finish_reason": "stop"
     }
-  ]
+  ],
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 42,
+    "prompt_ms": 420.0,
+    "prompt_per_token_ms": 10.0,
+    "prompt_per_second": 100.0,
+    "predicted_n": 17,
+    "predicted_ms": 800.0,
+    "predicted_per_token_ms": 47.05882352941177,
+    "predicted_per_second": 21.25,
+    "finish_reason": "stop",
+    "termination_reason": "eos_token"
+  }
 }
 ```
 
 The finish reason is `stop` or `length` under the same rules as non-streaming.
-It appears in no earlier chunk.
+It appears in no earlier chunk. The example is the
+`stream_options.include_usage=false` form, where the final choice chunk also
+contains `timings`.
 
 ### 6.4 Optional Usage Chunk
 
@@ -507,11 +557,28 @@ final choice chunk:
     "prompt_tokens": 42,
     "completion_tokens": 17,
     "total_tokens": 59
+  },
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 42,
+    "prompt_ms": 420.0,
+    "prompt_per_token_ms": 10.0,
+    "prompt_per_second": 100.0,
+    "predicted_n": 17,
+    "predicted_ms": 800.0,
+    "predicted_per_token_ms": 47.05882352941177,
+    "predicted_per_second": 21.25,
+    "finish_reason": "stop",
+    "termination_reason": "eos_token"
   }
 }
 ```
 
-When usage was not requested, no chunk contains a `usage` member.
+When usage was requested, this last usage chunk carries the top-level `timings`
+object and the preceding final choice chunk omits it. This placement matches
+llama-server and prevents a later usage update from replacing timing data in
+OpenWebUI. When usage was not requested, no chunk contains a `usage` member and
+the final choice chunk carries `timings` as shown in section 6.3.
 
 ### 6.5 Terminal Marker
 

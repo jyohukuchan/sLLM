@@ -94,8 +94,10 @@ request-ID history. The gateway normally generates a new ID for each public
 request.
 
 Token IDs and counters are non-negative JSON integers. Token IDs must be less than
-the loaded model vocabulary size. Timestamp fields are intentionally absent from
-v0.1; the gateway may timestamp records when it receives them.
+the loaded model vocabulary size. Absolute timestamp fields are intentionally
+absent from v0.1; the gateway may timestamp records when it receives them. The
+optional derived `timings` object on a successful `released` event contains only
+request-relative durations and rates.
 
 Field sets shown below are exact. Optional fields are explicitly marked; sending
 an omitted optional field as `null` is allowed only where the schema says
@@ -263,7 +265,7 @@ a successful flush is also fatal and produces no `released` event.
 `released` is the sole successful terminal and reuse-readiness event:
 
 ```json
-{"schema_version":"ullm.worker.v1","type":"released","request_id":"req-1","outcome":"stop","prompt_tokens":42,"completion_tokens":17,"reset_complete":true}
+{"schema_version":"ullm.worker.v1","type":"released","request_id":"req-1","outcome":"stop","prompt_tokens":42,"completion_tokens":17,"timings":{"cache_n":0,"prompt_n":42,"prompt_ms":420.0,"prompt_per_token_ms":10.0,"prompt_per_second":100.0,"predicted_n":17,"predicted_ms":800.0,"predicted_per_token_ms":47.05882352941177,"predicted_per_second":21.25},"reset_complete":true}
 ```
 
 Exact fields:
@@ -276,7 +278,33 @@ Exact fields:
 | `outcome` | string | `stop`, `length`, or `cancelled` |
 | `prompt_tokens` | integer | original prompt length |
 | `completion_tokens` | integer | number of published token events |
+| `timings` | object | optional compatibility extension for `stop`/`length`; forbidden for `cancelled` |
 | `reset_complete` | boolean | always `true` |
+
+The current resident worker MUST include `timings` for every `stop` and `length`
+release. The gateway accepts its omission only for compatibility with earlier
+`ullm.worker.v1` fixtures and workers. The object has the exact llama-server field
+set shown above:
+
+| Field | Meaning |
+| --- | --- |
+| `cache_n` | reused prompt tokens; always `0` because this worker has no prompt cache reuse |
+| `prompt_n` | processed prompt tokens; equals `prompt_tokens` |
+| `prompt_ms` | worker prompt start through first sampled token, in milliseconds |
+| `prompt_per_token_ms` | `prompt_ms / prompt_n` |
+| `prompt_per_second` | `1000 * prompt_n / prompt_ms` |
+| `predicted_n` | all published completion tokens, including the first token and EOS |
+| `predicted_ms` | first sampled token through final sampled token, in milliseconds |
+| `predicted_per_token_ms` | `predicted_ms / predicted_n` |
+| `predicted_per_second` | `1000 * predicted_n / predicted_ms` |
+
+The prompt timer starts after the `started` event is flushed and immediately
+before prompt execution. Each sample time is captured when the worker has
+synchronously selected its token ID. `predicted_ms` excludes time to first token,
+terminal cleanup, reset, the `released` write, gateway detokenization, and HTTP
+delivery. It is clamped to at least `0.001` ms, matching llama-server's one
+microsecond lower bound. Consequently, a successful one-token completion reports
+`predicted_ms=0.001` and `predicted_per_second=1000000`.
 
 For `outcome = cancelled`, the exact field set additionally contains required
 `cancel_reason` with the retained first cancel reason:
@@ -286,7 +314,8 @@ For `outcome = cancelled`, the exact field set additionally contains required
 ```
 
 For `stop` and `length`, `cancel_reason` MUST be omitted rather than sent as
-`null`.
+`null`. For `cancelled`, `timings` MUST also be omitted; cancellation does not
+fabricate successful generation performance data.
 
 The inference thread creates the release summary only after synchronized reset and
 all baseline checks. The writer flushes `released` before the reader clears the
