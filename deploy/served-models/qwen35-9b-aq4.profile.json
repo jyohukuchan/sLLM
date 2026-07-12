@@ -5,7 +5,7 @@
     "name": "uLLM Qwen3.5 9B AQ4",
     "description": "Qwen3.5 9B served locally by uLLM AQ4_0.",
     "upstream_id": "Qwen/Qwen3.5-9B",
-    "revision": "aq4-cli-compat-v0.1",
+    "revision": "aq4-resident-v0.1",
     "context_length": 4096
   },
   "generation": {
@@ -29,8 +29,29 @@
     "protocol": "ullm.worker.v1",
     "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
     "arguments": ["--served-model-manifest", "{manifest}"],
-    "required_environment": [],
-    "identity": {"device": "gfx1201", "execution_profile": "rdna4_aq4_cli_compat"}
+    "required_environment": [
+      "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+      "ULLM_REQUIRE_HIP_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+      "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+      "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+      "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+      "ULLM_REQUIRE_HIP_TOP1_KERNEL"
+    ],
+    "identity": {"device": "gfx1201", "execution_profile": "rdna4_aq4_resident"}
   },
   "product": {
     "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1",

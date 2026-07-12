@@ -778,4 +778,32 @@ mod tests {
             .push("ULLM_REQUIRE_HIP_UNKNOWN_KERNEL".into());
         assert!(validate_resident_model_contract(&model).is_err());
     }
+
+    #[test]
+    fn deployment_profile_matches_resident_worker_contract() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/served-models/qwen35-9b-aq4.profile.json");
+        let profile: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(profile["format"]["format_id"], "AQ4_0");
+        assert_eq!(
+            profile["format"]["implementation_id"],
+            "qwen35_aq4_rdna4_v1"
+        );
+        assert_eq!(profile["worker"]["identity"]["device"], "gfx1201");
+        assert_eq!(
+            profile["worker"]["identity"]["execution_profile"],
+            "rdna4_aq4_resident"
+        );
+        let mut actual = profile["worker"]["required_environment"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
 }
