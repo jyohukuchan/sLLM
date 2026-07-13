@@ -111,6 +111,13 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         "correct": 1,
         "accuracy": 1.0,
     }
+    assert report["resource_percentiles"]["budget-128"]["vram_delta_bytes"] == {
+        "count": 1,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "maximum": 0.0,
+    }
 
 
 @pytest.mark.parametrize(

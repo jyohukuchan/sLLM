@@ -37,6 +37,10 @@ percentile declarations are not trusted.
 The report also contains `quality_summary` grouped by mode with raw total,
 correct count, and recomputed accuracy.
 
+It contains `resource_percentiles` grouped by mode and resource field, with
+p50, p95, p99, maximum, and contributing sample count recomputed from raw
+RSS/VRAM/temperature/power observations.
+
 `identity` has exactly `manifest_sha256`, `worker_binary_sha256`,
 `tokenizer_sha256`, and `openwebui_image`. The first three values are lowercase
 SHA-256 strings. `openwebui_image` is a content-addressed image reference in
