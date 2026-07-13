@@ -28,6 +28,7 @@ DEFAULT_TOKENIZER = Path(
 DEFAULT_IMAGE = "ullm/open-webui:0.9.4-ullm.1"
 DEFAULT_NETWORK = "open-webui-network"
 DEFAULT_KEY_FILE = Path("/etc/ullm/openai-api-key")
+MAX_RESIDENT_EVIDENCE_BYTES = 16 * 1024 * 1024
 TARGETS = (18, 1024, 2048, 3072)
 
 
@@ -92,8 +93,8 @@ def _docker_curl(
         "config=$(mktemp); "
         "trap 'rm -f \"$config\"' EXIT; "
         "umask 077; "
-        "printf 'header = \"Authorization: Bearer %s\"\\n' \"$key\" > \"$config\"; "
-        "exec curl --config \"$config\" --silent --show-error --no-buffer "
+        'printf \'header = "Authorization: Bearer %s"\\n\' "$key" > "$config"; '
+        'exec curl --config "$config" --silent --show-error --no-buffer '
         "-H 'Content-Type: application/json' "
         + ("-H 'Accept: text/event-stream' " if stream else "")
         + "-w '%{http_code}' --data-binary @- "
@@ -224,7 +225,9 @@ def _atomic_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
-        descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent
+        )
         temporary = Path(raw_path)
         with os.fdopen(descriptor, "w", encoding="ascii") as destination:
             json.dump(value, destination, ensure_ascii=True, allow_nan=False, indent=2)
@@ -243,6 +246,76 @@ def _atomic_write(path: Path, value: dict[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _load_resident_token_evidence(
+    path: Path, *, source_commit: str, worker_binary_sha256: str
+) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise BaselineError("resident evidence must be a regular non-symlink file")
+    raw = path.read_bytes()
+    if not raw or len(raw) > MAX_RESIDENT_EVIDENCE_BYTES:
+        raise BaselineError("resident evidence exceeds its size bound")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BaselineError("resident evidence is not valid JSON") from error
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != "ullm.aq4_resident_promotion_evidence.v1"
+        or value.get("verified") is not True
+        or value.get("production_receipt_written") is not False
+        or value.get("source_commit") != source_commit
+        or value.get("worker_binary_sha256") != worker_binary_sha256
+    ):
+        raise BaselineError("resident evidence identity is not aligned")
+    resident = value.get("resident")
+    raw_cases = resident.get("cases") if isinstance(resident, dict) else None
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise BaselineError("resident evidence has no cases")
+    cases: list[dict[str, Any]] = []
+    for raw_case in raw_cases:
+        if not isinstance(raw_case, dict):
+            raise BaselineError("resident evidence case is invalid")
+        prompt_token_ids = raw_case.get("prompt_token_ids")
+        generated_token_ids = raw_case.get("tokens")
+        progress = raw_case.get("prompt_progress")
+        if (
+            not isinstance(raw_case.get("id"), str)
+            or not isinstance(prompt_token_ids, list)
+            or not prompt_token_ids
+            or not all(type(token) is int and token >= 0 for token in prompt_token_ids)
+            or not isinstance(generated_token_ids, list)
+            or not generated_token_ids
+            or not all(
+                type(token) is int and token >= 0 for token in generated_token_ids
+            )
+            or raw_case.get("reset_complete") is not True
+            or not isinstance(progress, list)
+            or progress[-1:] != [len(prompt_token_ids)]
+        ):
+            raise BaselineError("resident evidence token accounting is invalid")
+        sanitized: dict[str, Any] = {
+            "id": raw_case["id"],
+            "prompt_token_ids": prompt_token_ids,
+            "generated_token_ids": generated_token_ids,
+            "outcome": raw_case.get("outcome"),
+            "prompt_progress": progress,
+            "reset_complete": True,
+        }
+        reasoning_usage = raw_case.get("reasoning_usage")
+        if reasoning_usage is not None:
+            if not isinstance(reasoning_usage, dict):
+                raise BaselineError("resident reasoning usage is invalid")
+            sanitized["reasoning_usage"] = reasoning_usage
+        cases.append(sanitized)
+    return {
+        "schema_version": value["schema_version"],
+        "source_commit": source_commit,
+        "worker_binary_sha256": worker_binary_sha256,
+        "evidence_sha256": _sha256(raw),
+        "cases": cases,
+    }
+
+
 def capture(
     output: Path,
     *,
@@ -253,6 +326,7 @@ def capture(
     network: str,
     endpoint: str,
     timeout_seconds: float,
+    resident_evidence: Path | None = None,
 ) -> dict[str, Any]:
     if not manifest.is_file() or manifest.is_symlink():
         raise BaselineError("active manifest must be a regular non-symlink file")
@@ -275,9 +349,9 @@ def capture(
             "temperature": 0,
             "stream": False,
         }
-        request_body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        request_body = json.dumps(
+            request, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
         status, response = _docker_curl(
             request_body,
             endpoint=endpoint,
@@ -289,7 +363,9 @@ def capture(
         )
         nonstream = _nonstream_metadata(status, response)
         if status != 200 or nonstream["prompt_tokens"] != prompt_tokens:
-            raise BaselineError(f"non-stream baseline case {target} did not match its contract")
+            raise BaselineError(
+                f"non-stream baseline case {target} did not match its contract"
+            )
         cases.append(
             {
                 "id": f"phase0-v1-target-{target}",
@@ -311,7 +387,9 @@ def capture(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    request_body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request_body = json.dumps(
+        request, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
     status, response = _docker_curl(
         request_body,
         endpoint=endpoint,
@@ -338,6 +416,22 @@ def capture(
         text=True,
     ).stdout.strip()
     promotion = active.get("promotion", {})
+    worker_binary = active.get("worker", {}).get("binary")
+    worker_binary_path = Path(worker_binary) if isinstance(worker_binary, str) else None
+    worker_binary_sha256 = (
+        _sha256_file(worker_binary_path)
+        if worker_binary_path is not None and worker_binary_path.is_file()
+        else None
+    )
+    worker_generated_token_evidence = None
+    if resident_evidence is not None:
+        if worker_binary_sha256 is None:
+            raise BaselineError("active worker binary is unavailable")
+        worker_generated_token_evidence = _load_resident_token_evidence(
+            resident_evidence,
+            source_commit=source_commit,
+            worker_binary_sha256=worker_binary_sha256,
+        )
     document = {
         "schema_version": "ullm.generic_reasoning_phase0_http_baseline.v1",
         "status": "partial",
@@ -354,22 +448,27 @@ def capture(
         "worker": {
             "protocol": active.get("worker", {}).get("protocol"),
             "binary": active.get("worker", {}).get("binary"),
-            "binary_sha256": (
-                _sha256_file(Path(active["worker"]["binary"]))
-                if isinstance(active.get("worker", {}).get("binary"), str)
-                and Path(active["worker"]["binary"]).is_file()
-                else None
-            ),
+            "binary_sha256": worker_binary_sha256,
         },
         "endpoint": endpoint,
         "image": image,
         "cases": cases,
         "raw_bodies_stored": False,
+        "worker_generated_token_evidence": worker_generated_token_evidence,
         "missing": [
-            "same-HEAD AQ4 source/token alignment",
-            "AQ4 generated token IDs",
+            *(
+                []
+                if source_commit == promotion.get("source_commit")
+                else ["same-HEAD AQ4 source/token alignment"]
+            ),
+            *(
+                []
+                if worker_generated_token_evidence is not None
+                else ["AQ4 generated token IDs"]
+            ),
         ],
     }
+    document["status"] = "complete" if not document["missing"] else "partial"
     _atomic_write(output, document)
     return document
 
@@ -382,8 +481,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--key-file", type=Path, default=DEFAULT_KEY_FILE)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--network", default=DEFAULT_NETWORK)
-    parser.add_argument("--endpoint", default="http://172.20.0.1:8000/v1/chat/completions")
+    parser.add_argument(
+        "--endpoint", default="http://172.20.0.1:8000/v1/chat/completions"
+    )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
+    parser.add_argument("--resident-evidence", type=Path)
     return parser.parse_args(argv)
 
 
@@ -399,6 +501,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             network=args.network,
             endpoint=args.endpoint,
             timeout_seconds=args.timeout_seconds,
+            resident_evidence=args.resident_evidence,
         )
     except Exception as error:
         print(f"Phase 0 HTTP baseline failed: {error}", file=sys.stderr)

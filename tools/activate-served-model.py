@@ -88,7 +88,9 @@ def load_bundle_validator() -> ModuleType:
     return module
 
 
-def _reject_symlink_components(path: Path, label: str, *, leaf_may_absent: bool) -> None:
+def _reject_symlink_components(
+    path: Path, label: str, *, leaf_may_absent: bool
+) -> None:
     absolute = path.absolute()
     current = Path(absolute.anchor)
     for index, part in enumerate(absolute.parts[1:]):
@@ -261,9 +263,9 @@ def _validate_release_bundle(
     ):
         raise ActivationError("release bundle worker identity differs")
     promotion = candidate_document.get("promotion")
-    if not isinstance(promotion, dict) or promotion.get("source_commit") != bundle_document.get(
+    if not isinstance(promotion, dict) or promotion.get(
         "source_commit"
-    ):
+    ) != bundle_document.get("source_commit"):
         raise ActivationError("release bundle promotion identity differs")
     rollback = bundle_document.get("rollback_target")
     if not isinstance(rollback, dict):
@@ -349,9 +351,7 @@ def _write_bootstrap_backup(path: Path, raw: bytes) -> None:
         raise ActivationError("bootstrap backup directory is unsafe")
     if path.exists() or path.is_symlink():
         raise ActivationError("bootstrap backup already exists or is a symlink")
-    descriptor, temporary_raw = tempfile.mkstemp(
-        prefix=f".{path.name}.", dir=parent
-    )
+    descriptor, temporary_raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
     temporary = Path(temporary_raw)
     try:
         os.fchmod(descriptor, 0o644)
@@ -380,7 +380,14 @@ def _require_inactive_services(services: Sequence[str]) -> None:
             raise ActivationError("inactive service name is invalid")
         try:
             result = subprocess.run(
-                ["systemctl", "show", service, "--property=LoadState", "--property=ActiveState", "--value"],
+                [
+                    "systemctl",
+                    "show",
+                    service,
+                    "--property=LoadState",
+                    "--property=ActiveState",
+                    "--value",
+                ],
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -402,7 +409,9 @@ def _parse_command(raw: str) -> tuple[str, ...]:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise argparse.ArgumentTypeError("command must be a JSON string array") from error
+        raise argparse.ArgumentTypeError(
+            "command must be a JSON string array"
+        ) from error
     if (
         not isinstance(value, list)
         or not value
@@ -493,10 +502,7 @@ def activate(
     except OSError as error:
         raise ActivationError("activation lock is unavailable") from error
     lock_metadata = os.fstat(lock_descriptor)
-    if (
-        not stat.S_ISREG(lock_metadata.st_mode)
-        or lock_metadata.st_mode & stat.S_IWOTH
-    ):
+    if not stat.S_ISREG(lock_metadata.st_mode) or lock_metadata.st_mode & stat.S_IWOTH:
         os.close(lock_descriptor)
         raise ActivationError("activation lock is unsafe")
     staged: Path | None = None
@@ -531,23 +537,58 @@ def activate(
                 if not bootstrap_v2:
                     raise ActivationError("v2 activation requires a release bundle")
                 if bootstrap_backup is None:
-                    raise ActivationError("v2 bootstrap requires an active-manifest backup path")
+                    raise ActivationError(
+                        "v2 bootstrap requires an active-manifest backup path"
+                    )
                 if systemd_unit is None or environment_file is None:
                     raise ActivationError(
                         "v2 bootstrap requires systemd unit and environment rollback inputs"
                     )
                 if active_raw is None:
-                    raise ActivationError("v2 bootstrap requires an existing v1 active manifest")
+                    raise ActivationError(
+                        "v2 bootstrap requires an existing v1 active manifest"
+                    )
                 try:
                     old_document = json.loads(active_raw)
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise ActivationError("existing active manifest is not valid JSON") from error
-                if not isinstance(old_document, dict) or old_document.get("schema_version") != "ullm.served_model.v1":
-                    raise ActivationError("v2 bootstrap requires an existing v1 active manifest")
+                    raise ActivationError(
+                        "existing active manifest is not valid JSON"
+                    ) from error
+                if not isinstance(old_document, dict) or old_document.get(
+                    "schema_version"
+                ) not in {"ullm.served_model.v1", "ullm.served_model.v2"}:
+                    raise ActivationError(
+                        "v2 bootstrap requires an existing v1 or v2 active manifest"
+                    )
                 promotion = candidate_document.get("promotion")
-                source_commit = promotion.get("source_commit") if isinstance(promotion, dict) else None
+                source_commit = (
+                    promotion.get("source_commit")
+                    if isinstance(promotion, dict)
+                    else None
+                )
                 if _COMMIT_RE.fullmatch(source_commit or "") is None:
-                    raise ActivationError("v2 bootstrap candidate promotion identity is invalid")
+                    raise ActivationError(
+                        "v2 bootstrap candidate promotion identity is invalid"
+                    )
+                if old_document.get("schema_version") == "ullm.served_model.v2":
+                    try:
+                        old_summary = load_validator().validation_summary(
+                            normalized_active
+                        )
+                    except Exception as error:
+                        raise ActivationError(
+                            "v2 bootstrap existing active manifest failed validation"
+                        ) from error
+                    if old_summary.get("model_id") != summary.get("model_id"):
+                        raise ActivationError(
+                            "v2 bootstrap candidate model differs from active model"
+                        )
+                    if old_summary.get("worker", {}).get(
+                        "binary_sha256"
+                    ) != summary.get("worker", {}).get("binary_sha256"):
+                        raise ActivationError(
+                            "v2 bootstrap candidate worker differs from active worker"
+                        )
                 _hash_safe_file(systemd_unit, "bootstrap systemd unit")
                 _hash_safe_file(environment_file, "bootstrap environment file")
                 _require_inactive_services(require_inactive_services)
@@ -555,7 +596,9 @@ def activate(
                 bootstrap_backup_written = True
             else:
                 if bootstrap_v2:
-                    raise ActivationError("v2 bootstrap cannot be combined with a release bundle")
+                    raise ActivationError(
+                        "v2 bootstrap cannot be combined with a release bundle"
+                    )
                 _validate_release_bundle(
                     release_bundle,
                     candidate_raw=raw,
@@ -609,7 +652,9 @@ def activate(
                     stage="rollback",
                 )
             except BaseException as rollback_error:
-                raise ActivationError("activation and rollback failed") from rollback_error
+                raise ActivationError(
+                    "activation and rollback failed"
+                ) from rollback_error
         if bootstrap_backup_written and not switched and bootstrap_backup is not None:
             try:
                 bootstrap_backup.unlink(missing_ok=True)
@@ -650,7 +695,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--bootstrap-v2",
         action="store_true",
-        help="allow an explicitly temporary v1-to-v2 candidate switch before the complete release bundle exists",
+        help="allow an explicitly temporary v1/v2-to-v2 candidate switch before the complete release bundle exists",
     )
     parser.add_argument("--bootstrap-backup", type=Path)
     parser.add_argument("--require-inactive-service", action="append", default=[])

@@ -149,6 +149,45 @@ def test_v2_bootstrap_requires_explicit_inactive_services_and_backup(
     assert backup.read_bytes() == (FIXTURE / "served-model.json").read_bytes()
 
 
+def test_v2_bootstrap_can_temporarily_switch_between_same_worker_v2_manifests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, candidate = v2_activation_directory(tmp_path)
+    active = root / "active.json"
+    old = json.loads(candidate.read_text(encoding="ascii"))
+    old["promotion"]["source_commit"] = "2" * 40
+    active.write_text(json.dumps(old), encoding="ascii")
+    new = json.loads(candidate.read_text(encoding="ascii"))
+    new["promotion"]["source_commit"] = "3" * 40
+    candidate.write_text(json.dumps(new), encoding="ascii")
+    unit = root / "ullm-openai.service"
+    environment = root / "ullm-openai.env"
+    unit.write_bytes(b"[Service]\nExecStart=/usr/bin/ullm\n")
+    environment.write_bytes(b"ULLM_TEST=1\n")
+    backup = root / "previous-active.json"
+
+    monkeypatch.setattr(ACTIVATOR, "_require_inactive_services", lambda _services: None)
+    result = ACTIVATOR.activate(
+        candidate,
+        active,
+        bootstrap_v2=True,
+        bootstrap_backup=backup,
+        systemd_unit=unit,
+        environment_file=environment,
+        require_inactive_services=("ullm-openai.service",),
+    )
+
+    assert result.manifest_sha256 == hashlib.sha256(candidate.read_bytes()).hexdigest()
+    assert (
+        json.loads(active.read_text(encoding="ascii"))["promotion"]["source_commit"]
+        == "3" * 40
+    )
+    assert (
+        json.loads(backup.read_text(encoding="ascii"))["promotion"]["source_commit"]
+        == "2" * 40
+    )
+
+
 def test_v2_activation_binds_bundle_and_rollback_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,8 +222,12 @@ def test_v2_activation_binds_bundle_and_rollback_identity(
                 },
                 "rollback_target": {
                     "manifest_sha256": hashlib.sha256(old).hexdigest(),
-                    "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
-                    "environment_sha256": hashlib.sha256(environment.read_bytes()).hexdigest(),
+                    "systemd_unit_sha256": hashlib.sha256(
+                        unit.read_bytes()
+                    ).hexdigest(),
+                    "environment_sha256": hashlib.sha256(
+                        environment.read_bytes()
+                    ).hexdigest(),
                 },
             }
         ),
@@ -234,8 +277,12 @@ def test_v2_activation_rejects_rollback_identity_mismatch(
                 },
                 "rollback_target": {
                     "manifest_sha256": "f" * 64,
-                    "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
-                    "environment_sha256": hashlib.sha256(environment.read_bytes()).hexdigest(),
+                    "systemd_unit_sha256": hashlib.sha256(
+                        unit.read_bytes()
+                    ).hexdigest(),
+                    "environment_sha256": hashlib.sha256(
+                        environment.read_bytes()
+                    ).hexdigest(),
                 },
             }
         ),
@@ -337,9 +384,7 @@ def test_command_failure_restores_old_active_manifest(
             active,
             check_commands=[fail if failed_stage == "check" else succeed],
             reconcile_commands=[fail if failed_stage == "reconcile" else succeed],
-            final_check_commands=[
-                fail if failed_stage == "final-check" else succeed
-            ],
+            final_check_commands=[fail if failed_stage == "final-check" else succeed],
         )
 
     assert active.read_bytes() == old
@@ -407,7 +452,12 @@ def test_preflight_failure_does_not_switch_or_run_commands(tmp_path: Path) -> No
         ACTIVATOR.activate(
             candidate,
             active,
-            check_commands=[command("from pathlib import Path; import sys; Path(sys.argv[1]).touch()", marker)],
+            check_commands=[
+                command(
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).touch()",
+                    marker,
+                )
+            ],
         )
 
     assert active.read_bytes() == old

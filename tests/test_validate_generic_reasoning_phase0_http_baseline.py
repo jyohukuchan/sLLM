@@ -85,6 +85,39 @@ def test_validator_accepts_structure_but_keeps_gate_incomplete(tmp_path: Path) -
     assert report["case_count"] == 4
 
 
+def test_validator_closes_gate_with_aligned_worker_token_evidence(
+    tmp_path: Path,
+) -> None:
+    value = baseline()
+    value["active_promotion_source_commit"] = value["source_commit"]
+    value["source_commit_aligned"] = True
+    value["worker"]["binary_sha256"] = "b" * 64
+    value["worker_generated_token_evidence"] = {
+        "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+        "source_commit": "head",
+        "worker_binary_sha256": "b" * 64,
+        "evidence_sha256": "c" * 64,
+        "cases": [
+            {
+                "id": "raw-p0001-g0004",
+                "prompt_token_ids": [1],
+                "generated_token_ids": [2, 3],
+                "outcome": "length",
+                "prompt_progress": [1],
+                "reset_complete": True,
+            }
+        ],
+    }
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    report = TOOL.validate(path)
+
+    assert report["structurally_valid"] is True
+    assert report["gate_eligible"] is True
+    assert report["reasons"] == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -94,7 +127,9 @@ def test_validator_accepts_structure_but_keeps_gate_incomplete(tmp_path: Path) -
         lambda value: value["cases"].pop(),
     ],
 )
-def test_validator_rejects_inconsistent_or_unsafe_records(tmp_path: Path, mutation) -> None:
+def test_validator_rejects_inconsistent_or_unsafe_records(
+    tmp_path: Path, mutation
+) -> None:
     value = baseline()
     mutation(value)
     path = tmp_path / "baseline.json"
@@ -104,7 +139,9 @@ def test_validator_rejects_inconsistent_or_unsafe_records(tmp_path: Path, mutati
         TOOL.validate(path)
 
 
-def test_require_complete_returns_distinct_exit_code_for_partial_gate(tmp_path: Path) -> None:
+def test_require_complete_returns_distinct_exit_code_for_partial_gate(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "baseline.json"
     path.write_text(json.dumps(baseline()), encoding="ascii")
 
