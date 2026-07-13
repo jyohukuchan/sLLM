@@ -72,6 +72,9 @@ The release evidence schema is defined in
 The browser-side Phase 5 smoke is
 `deploy/openwebui/browser-reasoning-smoke.cjs`; it records only hashes, counts,
 and boolean state, and must be run only after a v2 candidate is configured.
+Its output is independently checked by
+`tools/validate-openwebui-reasoning-browser-smoke.py` before it can enter the
+release evidence bundle.
 It validates the hash-only record shape, recomputes token accounting and usage
 cross-checks, rejects budget overshoot and forbidden body or credential fields,
 and reports structural validity separately from production-gate eligibility.
