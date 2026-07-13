@@ -110,6 +110,7 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         lambda value: value["cases"][0].__setitem__("response", "secret"),
         lambda value: value["identity"].__setitem__("openwebui_image", "latest"),
         lambda value: value.__setitem__("source_commit", "head"),
+        lambda value: value.__setitem__("source_commit_aligned", True),
     ],
 )
 def test_validator_rejects_invalid_release_records(tmp_path: Path, mutation) -> None:

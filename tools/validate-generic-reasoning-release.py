@@ -242,6 +242,11 @@ def validate(path: Path) -> dict[str, Any]:
     )
     if type(document["source_commit_aligned"]) is not bool:
         raise ValidationError("source alignment is invalid")
+    computed_source_alignment = (
+        document["source_commit"] == document["active_promotion_source_commit"]
+    )
+    if document["source_commit_aligned"] != computed_source_alignment:
+        raise ValidationError("source alignment declaration differs from commit identity")
     _validate_identity(document["identity"])
     cases = document["cases"]
     if not isinstance(cases, list) or not cases:
@@ -255,7 +260,7 @@ def validate(path: Path) -> dict[str, Any]:
         ids.add(case["id"])
         modes.add(mode)
     reasons: list[str] = []
-    if not document["source_commit_aligned"]:
+    if not computed_source_alignment:
         reasons.append("source commit is not aligned with the active promotion source")
     missing_modes = sorted(REQUIRED_MODES - modes)
     if missing_modes:

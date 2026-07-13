@@ -22,6 +22,9 @@ identity: object
 cases: nonempty array
 ```
 
+The validator recomputes `source_commit_aligned` by comparing the two commit
+values and rejects a declaration that differs from that comparison.
+
 `identity` has exactly `manifest_sha256`, `worker_binary_sha256`,
 `tokenizer_sha256`, and `openwebui_image`. The first three values are lowercase
 SHA-256 strings. `openwebui_image` is a content-addressed image reference in
