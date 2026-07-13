@@ -99,15 +99,18 @@ def _docker_curl(
         + "-w '%{http_code}' --data-binary @- "
         + endpoint
     )
+    key_path = key_file.resolve(strict=True)
     command = [
         "docker",
         "run",
         "--rm",
         "-i",
+        "--group-add",
+        str(key_path.stat().st_gid),
         "--network",
         network,
         "-v",
-        f"{key_file}:/run/secrets/ullm-api-key:ro",
+        f"{key_path}:/run/secrets/ullm-api-key:ro",
         "--entrypoint",
         "sh",
         image,

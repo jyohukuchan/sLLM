@@ -79,6 +79,12 @@ def _exclusive_gpu_preflight() -> dict[str, Any]:
         raise EvidenceError("ROCm GPU exclusivity preflight failed") from error
     if result.returncode != 0:
         raise EvidenceError("ROCm GPU exclusivity preflight returned nonzero")
+    if not result.stdout.strip():
+        return {
+            "tool": "rocm-smi --showpids --json",
+            "gpu_index": PROMOTION_GPU_INDEX,
+            "positive_vram_processes": [],
+        }
     try:
         document = json.loads(result.stdout)
     except (UnicodeError, json.JSONDecodeError) as error:

@@ -40,6 +40,7 @@ MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
 IMAGE_RE = re.compile(
     r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*@)?sha256:[0-9a-f]{64}\Z"
 )
+CONTAINER_USER_RE = re.compile(r"[0-9]{1,5}:[0-9]{1,5}\Z")
 _VALIDATOR_MODULE_NAME = "_ullm_openwebui_reasoning_browser_validator"
 _SERVED_MODEL_MODULE_NAME = "_ullm_reasoning_browser_served_model_validator"
 TARGET_GPU_INDEX = "1"
@@ -75,6 +76,16 @@ def _validate_image(value: str) -> str:
     if IMAGE_RE.fullmatch(value) is None:
         raise SmokeError("browser image must be an immutable Docker SHA-256 identity")
     return value
+
+
+def _validate_container_user(value: str) -> tuple[int, int]:
+    if CONTAINER_USER_RE.fullmatch(value) is None:
+        raise SmokeError("browser container user must be UID:GID")
+    uid_text, gid_text = value.split(":")
+    uid, gid = int(uid_text), int(gid_text)
+    if uid > 65535 or gid > 65535:
+        raise SmokeError("browser container UID/GID is out of range")
+    return uid, gid
 
 
 def _validate_url(value: str) -> str:
@@ -319,6 +330,8 @@ def _target_gpu_processes(rocm_smi: str) -> list[dict[str, Any]]:
         raise SmokeError("GPU ownership preflight failed") from error
     if result.returncode != 0:
         raise SmokeError("GPU ownership preflight failed")
+    if not result.stdout.strip():
+        return []
     value = _strict_json(result.stdout.encode("utf-8"))
     system = value.get("system")
     if not isinstance(system, dict):
@@ -340,6 +353,57 @@ def _target_gpu_processes(rocm_smi: str) -> list[dict[str, Any]]:
     return processes
 
 
+def _wait_for_tcp_port(
+    docker: str,
+    host: str,
+    port: int,
+    timeout_seconds: float = 120.0,
+    readiness_path: str = "/readyz",
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    consecutive_successes = 0
+    while True:
+        try:
+            result = subprocess.run(
+                [
+                    docker,
+                    "exec",
+                    "open-webui",
+                    "python",
+                    "-c",
+                    (
+                        "import urllib.error, urllib.request; "
+                        f"url='http://{host}:{port}{readiness_path}'; "
+                        "\ntry: "
+                        " response=urllib.request.urlopen(url, timeout=2.0); "
+                        " raise SystemExit(0 if response.status == 200 else 1)"
+                        "\nexcept (urllib.error.HTTPError, urllib.error.URLError): "
+                        " raise SystemExit(1)"
+                    ),
+                ],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0,
+            )
+            if result.returncode == 0:
+                consecutive_successes += 1
+                if consecutive_successes >= 3:
+                    return
+                time.sleep(0.5)
+                continue
+            consecutive_successes = 0
+            if time.monotonic() >= deadline:
+                raise SmokeError("service HTTP port did not become ready")
+            time.sleep(0.25)
+        except (OSError, subprocess.TimeoutExpired):
+            consecutive_successes = 0
+            if time.monotonic() >= deadline:
+                raise SmokeError("service HTTP port did not become ready")
+            time.sleep(0.25)
+
+
 def _wait_for_gpu_owner(rocm_smi: str, expected: set[str], timeout_seconds: float = 60.0) -> None:
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -352,11 +416,23 @@ def _wait_for_gpu_owner(rocm_smi: str, expected: set[str], timeout_seconds: floa
 
 
 class _AlternatingServiceCoordinator:
-    def __init__(self, systemctl: str, rocm_smi: str, ullm_service: str, llama_service: str) -> None:
+    def __init__(
+        self,
+        systemctl: str,
+        rocm_smi: str,
+        ullm_service: str,
+        llama_service: str,
+        docker: str = "docker",
+        ullm_port: int = 8000,
+        llama_port: int = 8001,
+    ) -> None:
         self.systemctl = systemctl
         self.rocm_smi = rocm_smi
         self.ullm_service = ullm_service
         self.llama_service = llama_service
+        self.docker = docker
+        self.ullm_port = ullm_port
+        self.llama_port = llama_port
         self.owner = "ullm"
 
     def preflight(self, worker_binary_sha256: str) -> None:
@@ -383,6 +459,12 @@ class _AlternatingServiceCoordinator:
             _wait_for_gpu_owner(self.rocm_smi, set())
             _service_command(self.systemctl, "start", self.llama_service)
             _wait_for_gpu_owner(self.rocm_smi, {"llama-server"})
+            _wait_for_tcp_port(
+                self.docker,
+                "172.20.0.1",
+                self.llama_port,
+                readiness_path="/health",
+            )
             self.owner = "llama"
             return
         if phase == "before-return":
@@ -391,6 +473,12 @@ class _AlternatingServiceCoordinator:
             _wait_for_gpu_owner(self.rocm_smi, set())
             _service_command(self.systemctl, "start", self.ullm_service)
             _wait_for_gpu_owner(self.rocm_smi, {"ullm-aq4-worker"})
+            _wait_for_tcp_port(
+                self.docker,
+                "172.20.0.1",
+                self.ullm_port,
+                readiness_path="/readyz",
+            )
             self.owner = "ullm"
             return
         raise SmokeError("unknown browser service transition phase")
@@ -452,6 +540,7 @@ def execute(
     llama_service: str = "llama-qwen35-udq4.service",
     systemctl: str = "systemctl",
     rocm_smi: str = "rocm-smi",
+    browser_user: str | None = None,
 ) -> dict[str, Any]:
     if output.exists() or output.is_symlink():
         raise SmokeError("browser evidence output already exists or is a symlink")
@@ -468,10 +557,14 @@ def execute(
     switch_model_name = _validate_public_text(switch_model_name, "switch model name")
     if model_id == switch_model_id:
         raise SmokeError("switch model ID must differ from the candidate model ID")
+    container_user = browser_user or f"{os.geteuid()}:{os.getegid()}"
+    container_uid, container_gid = _validate_container_user(container_user)
     del token, script
 
     coordinator = (
-        _AlternatingServiceCoordinator(systemctl, rocm_smi, ullm_service, llama_service)
+        _AlternatingServiceCoordinator(
+            systemctl, rocm_smi, ullm_service, llama_service, docker=docker
+        )
         if alternate_r9700_services
         else None
     )
@@ -484,6 +577,9 @@ def execute(
         control_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         control_server.bind(os.fspath(control_path))
         os.chmod(control_path, 0o600)
+        if os.geteuid() == 0:
+            os.chown(control_directory.name, container_uid, container_gid)
+            os.chown(control_path, container_uid, container_gid)
         control_server.listen(1)
 
     container_name = f"ullm-reasoning-browser-{uuid.uuid4().hex[:16]}"
@@ -495,17 +591,19 @@ def execute(
         "--rm",
         "--network=host",
         f"--name={container_name}",
-        f"--user={os.geteuid()}:{os.getegid()}",
+        f"--user={container_user}",
         "--pids-limit=256",
         "--security-opt=no-new-privileges",
         "--mount",
-        f"type=bind,src={script_path},dst=/run/ullm/browser-reasoning-smoke.cjs,readonly",
+        f"type=bind,src={script_path},dst=/run/ullm-browser-reasoning-smoke.cjs,readonly",
         "--mount",
         f"type=bind,src={token_path},dst=/run/secrets/openwebui-token,readonly",
         "--env",
         f"OPENWEBUI_URL={url}",
         "--env",
         "OPENWEBUI_TOKEN_FILE=/run/secrets/openwebui-token",
+        "--env",
+        "NODE_PATH=/usr/src/app/node_modules",
         "--env",
         f"ULLM_MODEL_ID={model_id}",
         "--env",
@@ -519,9 +617,9 @@ def execute(
         command.extend(
             [
                 "--mount",
-                f"type=bind,src={control_directory.name},dst=/run/ullm,readonly",
+                f"type=bind,src={control_directory.name},dst=/run/ullm-transition,readonly",
                 "--env",
-                "OPENWEBUI_TRANSITION_SOCKET=/run/ullm/browser-transition.sock",
+                "OPENWEBUI_TRANSITION_SOCKET=/run/ullm-transition/transition.sock",
             ]
         )
     command.extend(
@@ -529,7 +627,7 @@ def execute(
         "--entrypoint",
         "node",
         image,
-        "/run/ullm/browser-reasoning-smoke.cjs",
+        "/run/ullm-browser-reasoning-smoke.cjs",
         ]
     )
     deadline = time.monotonic() + timeout_seconds
@@ -539,7 +637,7 @@ def execute(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
             try:
@@ -563,7 +661,14 @@ def execute(
                 _stop_container(docker, container_name)
                 raise
             if return_code != 0:
-                raise SmokeError("browser smoke container failed")
+                error_output = process.stderr.read(4097) if process.stderr is not None else b""
+                detail = error_output.decode("utf-8", errors="replace").strip()
+                if len(detail) > 4096:
+                    detail = detail[:4096]
+                raise SmokeError(
+                    "browser smoke container failed"
+                    + (f": {detail}" if detail else "")
+                )
             stdout.seek(0)
             raw = stdout.read(MAX_EVIDENCE_BYTES + 1)
     except Exception:
@@ -622,6 +727,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--llama-service", default="llama-qwen35-udq4.service")
     parser.add_argument("--systemctl", default="systemctl")
     parser.add_argument("--rocm-smi", default="rocm-smi")
+    parser.add_argument("--browser-user")
     return parser.parse_args(argv)
 
 
@@ -646,6 +752,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             llama_service=args.llama_service,
             systemctl=args.systemctl,
             rocm_smi=args.rocm_smi,
+            browser_user=args.browser_user,
         )
     except Exception as error:
         print(f"OpenWebUI reasoning browser smoke failed: {error}", file=sys.stderr)

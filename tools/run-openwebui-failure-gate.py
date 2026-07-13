@@ -42,6 +42,7 @@ MAX_JSON_LINE_BYTES = 1024 * 1024
 MAX_JOURNAL_LINES = 4096
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 MAX_BROWSER_LINES = 4
+MAX_BROWSER_SOCKET_EVENTS = 2048
 MAX_STDERR_BYTES = 4 * 1024 * 1024
 COPY_CHUNK_BYTES = 64 * 1024
 PROCESS_GRACE_SECONDS = 2.0
@@ -284,8 +285,12 @@ class SecretGuard:
         return SecretGuard([*self.values, *(value.encode("utf-8") for value in values)])
 
     def reject(self, raw: bytes, label: str) -> None:
-        if any(value in raw for value in self.values):
-            fail(f"{label} contains forbidden cleartext")
+        for value in self.values:
+            if value in raw:
+                fail(
+                    f"{label} contains forbidden cleartext "
+                    f"(value_sha256={hashlib.sha256(value).hexdigest()})"
+                )
 
     def scan_file(self, path: Path, label: str) -> None:
         overlap = max((len(value) for value in self.values), default=1) - 1
@@ -1350,24 +1355,6 @@ def spawn_browser(command: list[str]) -> subprocess.Popen[bytes]:
         fail("failed to start the transient browser container")
 
 
-READY_PROBE_PROGRAM = """\
-import json,sys,time,urllib.error,urllib.request
-url=sys.argv[1]
-deadline=time.monotonic()+int(sys.argv[2])
-while time.monotonic()<deadline:
- try:
-  with urllib.request.urlopen(url,timeout=2) as response:
-   body=response.read(4097)
-   if response.status==200 and body==b'{"status":"ready"}':
-    print(json.dumps({"ready":True,"status":200},separators=(",",":"),sort_keys=True),flush=True)
-    raise SystemExit(0)
- except (OSError,urllib.error.URLError,TimeoutError):
-  pass
- time.sleep(0.25)
-raise SystemExit(1)
-"""
-
-
 def build_ready_probe_command(
     *,
     docker: str,
@@ -1404,12 +1391,23 @@ def build_ready_probe_command(
     command.extend(
         (
             image,
-            "python3",
-            "-I",
-            "-c",
-            READY_PROBE_PROGRAM,
-            ready_url,
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            '{"ready":true,"status":%{http_code}}\\n',
+            "--retry",
+            "999999",
+            "--retry-delay",
+            "1",
+            "--retry-all-errors",
+            "--retry-max-time",
             str(timeout_seconds),
+            "--max-time",
+            "3",
+            ready_url,
         )
     )
     return command
@@ -1672,7 +1670,11 @@ def validate_socket_events(
     allow_recovery: bool,
     require_failure: bool,
 ) -> dict[str, int]:
-    if not isinstance(events, list) or not events or len(events) > 512:
+    if (
+        not isinstance(events, list)
+        or not events
+        or len(events) > MAX_BROWSER_SOCKET_EVENTS
+    ):
         fail("browser socket event evidence is empty or outside its bound")
     fields = {
         "sequence",
@@ -2848,7 +2850,6 @@ def execute(args: argparse.Namespace) -> None:
                 FAILURE_PROMPT.encode("utf-8"),
                 RECOVERY_PROMPT.encode("utf-8"),
                 RECOVERY_MARKER.encode("utf-8"),
-                MODEL_ID.encode("utf-8"),
             ]
         )
 
@@ -3244,7 +3245,7 @@ def execute(args: argparse.Namespace) -> None:
             output.stage / "readiness-evidence.json",
             output.stage / "summary.json",
         ):
-            guard.scan_file(path, "failure gate text artifact")
+            guard.scan_file(path, f"failure gate text artifact {path.name}")
         fsync_bundle_tree(output.stage)
         output.publish()
     finally:

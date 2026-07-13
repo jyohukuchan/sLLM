@@ -131,3 +131,5 @@ def test_docker_probe_does_not_put_api_key_in_process_arguments(tmp_path: Path, 
     assert "secret-not-observed-by-process-list" not in serialized
     assert '--config "$config"' in serialized
     assert 'printf \'header = "Authorization: Bearer %s"' in serialized
+    assert "--group-add" in command
+    assert str(key.stat().st_gid) in command

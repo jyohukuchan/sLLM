@@ -218,6 +218,12 @@ def _read_gpu_processes(rocm_smi: str = "rocm-smi") -> dict[str, Any]:
         raise CampaignError("ROCm GPU preflight failed") from error
     if result.returncode != 0:
         raise CampaignError("ROCm GPU preflight returned nonzero")
+    if not result.stdout.strip():
+        return {
+            "tool": f"{rocm_smi} --showpids --json",
+            "gpu_index": TARGET_GPU_INDEX,
+            "positive_vram_processes": [],
+        }
     value = _strict_json(result.stdout.encode("utf-8"), "ROCm GPU preflight")
     processes = value.get("system") if isinstance(value, dict) else None
     if not isinstance(processes, dict):
@@ -424,6 +430,8 @@ def _request_body(model_id: str, mode: str, fixture: Fixture, stream: bool = Tru
 def _docker_command(
     *, docker: str, image: str, key_file: Path, endpoint: str, network: str, stream: bool
 ) -> list[str]:
+    key_path = key_file.resolve(strict=True)
+    key_group = str(key_path.stat().st_gid)
     accept_header = "-H 'Accept: text/event-stream' " if stream else ""
     script = (
         "set -eu; key=$(cat /run/secrets/ullm-api-key); config=$(mktemp); "
@@ -441,8 +449,10 @@ def _docker_command(
         "-i",
         "--network",
         network,
+        "--group-add",
+        key_group,
         "-v",
-        f"{key_file.resolve(strict=True)}:/run/secrets/ullm-api-key:ro",
+        f"{key_path}:/run/secrets/ullm-api-key:ro",
         "--entrypoint",
         "sh",
         image,

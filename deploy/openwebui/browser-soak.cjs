@@ -40,7 +40,9 @@ const RESPONSE_TIMEOUT_MS = 90_000;
 const READY_TIMEOUT_MS = 15_000;
 const SOCKET_POLL_MS = 20;
 const POST_DONE_STABLE_MS = 100;
-const MAX_SOCKET_EVENTS_PER_CASE = 128;
+// Reasoning responses can emit one completion event per hidden token; keep the
+// stream bounded without rejecting the v2 256-token reasoning budget.
+const MAX_SOCKET_EVENTS_PER_CASE = 1024;
 
 const monotonicNs = () => process.hrtime.bigint();
 const nsString = (value = monotonicNs()) => value.toString();
@@ -227,6 +229,16 @@ function exactBrowserResult({ visible = null, enabled = null, text = null } = {}
       ? { text_utf8_bytes: null, text_sha256: null }
       : textEvidence(text)),
   };
+}
+
+async function visibleAnswerText(assistant) {
+  return assistant.evaluate((element) => {
+    const fullText = element.innerText || "";
+    const toggle = element.querySelector("div.w-fit.text-gray-500");
+    const reasoningBlock = toggle?.closest(".w-full.space-y-1");
+    const reasoningText = reasoningBlock?.innerText || "";
+    return fullText.replace(reasoningText, "").trim();
+  });
 }
 
 function addBrowserAction(actions, browserCaseId, fields) {
@@ -497,7 +509,7 @@ async function runCase(context, config, spec, tracker) {
       "the correlated Socket.IO content event",
     );
     targetForFinalCheck = target;
-    const visibleText = (await assistant.innerText()).trim();
+    const visibleText = await visibleAnswerText(assistant);
     if (visibleText !== marker) {
       throw new Error("OpenWebUI visible response differs from its marker");
     }
@@ -531,7 +543,7 @@ async function runCase(context, config, spec, tracker) {
     if (!(await input.isEnabled())) {
       throw new Error("OpenWebUI input is disabled after completion");
     }
-    const finalText = (await assistant.innerText()).trim();
+    const finalText = await visibleAnswerText(assistant);
     if (finalText !== marker) {
       throw new Error("OpenWebUI completed response differs from its marker");
     }

@@ -232,6 +232,20 @@ def test_exclusive_gpu_preflight_accepts_empty_target_gpu(monkeypatch: pytest.Mo
     }
 
 
+def test_exclusive_gpu_preflight_accepts_rocm_no_process_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        TOOL.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
+        ),
+    )
+
+    assert TOOL._exclusive_gpu_preflight()["positive_vram_processes"] == []
+
+
 def test_exclusive_gpu_preflight_rejects_positive_target_vram(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

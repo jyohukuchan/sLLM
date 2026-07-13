@@ -59,6 +59,16 @@ const identityEvidence = (value, prefix) => ({
   [`${prefix}_sha256`]: sha256(value),
 });
 
+async function visibleAnswerText(assistant) {
+  return assistant.evaluate((element) => {
+    const fullText = element.innerText || "";
+    const toggle = element.querySelector("div.w-fit.text-gray-500");
+    const reasoningBlock = toggle?.closest(".w-full.space-y-1");
+    const reasoningText = reasoningBlock?.innerText || "";
+    return fullText.replace(reasoningText, "").trim();
+  });
+}
+
 function boundedInteger(name, fallback, minimum, maximum) {
   const raw = process.env[name] ?? String(fallback);
   if (!/^[0-9]+$/.test(raw)) {
@@ -828,7 +838,7 @@ async function run(browser, config) {
     RECOVERY_TIMEOUT_MS,
     "the recovery Socket.IO content event",
   );
-  const recoveryText = (await recoveryAssistant.innerText()).trim();
+  const recoveryText = await visibleAnswerText(recoveryAssistant);
   if (recoveryText !== RECOVERY_MARKER) {
     throw new Error("OpenWebUI recovery response differs from its marker");
   }
@@ -872,7 +882,7 @@ async function run(browser, config) {
   if (recoveryCancelEvents.length !== 0 || recoveryErrorEvents.length !== 0) {
     throw new Error("recovery chat was cancelled or failed");
   }
-  if ((await recoveryAssistant.innerText()).trim() !== recoveryText) {
+  if ((await visibleAnswerText(recoveryAssistant)) !== recoveryText) {
     throw new Error("recovery assistant content changed after done");
   }
   const recoveryReadyCompleted = monotonicNs();

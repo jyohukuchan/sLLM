@@ -35,7 +35,7 @@ const SWITCH_BACK_PROMPT =
   `Reply exactly ${SWITCH_BACK_MARKER} and nothing else.`;
 const INPUT_SELECTOR = "#chat-input";
 const ASSISTANT_SELECTOR = ".chat-assistant";
-const TOGGLE_SELECTOR = 'button[aria-label="Toggle details"]';
+const TOGGLE_SELECTOR = "div.w-fit.text-gray-500";
 const RESPONSE_TIMEOUT_MS = 120_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
 const MAX_POST_DATA_BYTES = 2 * 1024 * 1024;
@@ -88,10 +88,16 @@ function hasKey(value, wanted) {
 }
 
 function assistantHasReasoningContent(value) {
-  if (!value || typeof value !== "object" || !Array.isArray(value.messages)) {
-    throw new Error("OpenWebUI provider request has no messages array");
+  if (!value || typeof value !== "object") {
+    throw new Error("OpenWebUI request is not an object");
   }
-  return value.messages.some(
+  const messages = Array.isArray(value.messages)
+    ? value.messages
+    : value.user_message && typeof value.user_message === "object"
+      ? [value.user_message]
+      : null;
+  if (messages === null) throw new Error("OpenWebUI request has no message payload");
+  return messages.some(
     (message) =>
       message &&
       typeof message === "object" &&
@@ -146,6 +152,33 @@ async function waitForAnswer(page, marker) {
   return assistant;
 }
 
+async function visibleAnswerText(assistant) {
+  const result = await assistant.evaluate((element) => {
+    const fullText = element.innerText || "";
+    const toggle = element.querySelector("div.w-fit.text-gray-500");
+    const reasoningBlock = toggle?.closest(".w-full.space-y-1");
+    const reasoningText = reasoningBlock?.innerText || "";
+    return fullText.replace(reasoningText, "").trim();
+  });
+  return result;
+}
+
+function rememberChatId(page, chatIds) {
+  const match = new URL(page.url()).pathname.match(/^\/c\/([0-9a-f-]{36})$/u);
+  if (match) chatIds.add(match[1]);
+}
+
+async function deleteChat(page, token, chatId) {
+  const status = await page.evaluate(async ({ token: authToken, chatId: id }) => {
+    const response = await fetch(`/api/v1/chats/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    return response.status;
+  }, { token, chatId });
+  if (status !== 200) throw new Error(`OpenWebUI chat cleanup failed: HTTP ${status}`);
+}
+
 async function submit(page, prompt) {
   const input = page.locator(INPUT_SELECTOR);
   await input.waitFor({ state: "visible", timeout: NAVIGATION_TIMEOUT_MS });
@@ -189,8 +222,10 @@ async function run(browser) {
     window.localStorage.setItem("token", value);
   }, token);
   const page = await context.newPage();
+  const chatIds = new Set();
   const pageErrors = [];
   const requestBodies = [];
+  const requestBodyErrors = [];
   let requestBodyError = false;
   page.on("pageerror", (error) => {
     const message = String(error?.message ?? error);
@@ -209,13 +244,13 @@ async function run(browser) {
     }
     try {
       requestBodies.push(summarizeRequestBody(raw));
-    } catch {
+    } catch (error) {
       requestBodyError = true;
+      requestBodyErrors.push(String(error?.message ?? error));
     }
   });
 
   const navigationUrl = new URL("/", baseUrl);
-  navigationUrl.searchParams.set("temporary-chat", "true");
   navigationUrl.searchParams.set("models", MODEL_ID);
   await page.goto(navigationUrl.toString(), {
     waitUntil: "domcontentloaded",
@@ -229,18 +264,16 @@ async function run(browser) {
 
   await submit(page, FIRST_PROMPT);
   const firstAssistant = await waitForAnswer(page, FIRST_MARKER);
-  const firstText = (await firstAssistant.innerText()).trim();
+  rememberChatId(page, chatIds);
+  const toggle = firstAssistant.locator(TOGGLE_SELECTOR).last();
+  await toggle.waitFor({ state: "visible", timeout: RESPONSE_TIMEOUT_MS });
+  const firstText = await visibleAnswerText(firstAssistant);
   if (firstText !== FIRST_MARKER) {
     throw new Error("first answer is not separated from reasoning details");
   }
-  const toggle = firstAssistant.locator(TOGGLE_SELECTOR).last();
-  await toggle.waitFor({ state: "visible", timeout: RESPONSE_TIMEOUT_MS });
   await toggle.click();
-  await page.waitForFunction(
-    (selector) => document.querySelector(selector)?.getAttribute("aria-expanded") === "true",
-    TOGGLE_SELECTOR,
-    { timeout: NAVIGATION_TIMEOUT_MS },
-  );
+  const reasoningDetails = firstAssistant.locator("div.mb-1\\.5").last();
+  await reasoningDetails.waitFor({ state: "visible", timeout: NAVIGATION_TIMEOUT_MS });
   const expandedText = (await firstAssistant.innerText()).trim();
   const toggleText = (await toggle.innerText()).trim();
   if (expandedText.length <= firstText.length + toggleText.length) {
@@ -251,11 +284,15 @@ async function run(browser) {
   await waitForAnswer(page, FIRST_MARKER);
   await submit(page, SECOND_PROMPT);
   const secondAssistant = await waitForAnswer(page, SECOND_MARKER);
-  const secondText = (await secondAssistant.innerText()).trim();
+  const secondText = await visibleAnswerText(secondAssistant);
   if (secondText !== SECOND_MARKER) {
     throw new Error("second answer is not separated from reasoning details");
   }
-  if (requestBodies.length < 2) throw new Error("two provider requests were not observed");
+  if (requestBodies.length < 2) {
+    throw new Error(
+      `two provider requests were not observed (count=${requestBodies.length}, errors=${requestBodyErrors.join("|")})`,
+    );
+  }
   const secondRequest = requestBodies[requestBodies.length - 1];
   if (secondRequest.assistant_has_reasoning_content) {
     throw new Error("hidden reasoning was reinserted into the next turn");
@@ -263,7 +300,6 @@ async function run(browser) {
 
   await waitForHostTransition("before-switch");
   const switchUrl = new URL("/", baseUrl);
-  switchUrl.searchParams.set("temporary-chat", "true");
   switchUrl.searchParams.set("models", SWITCH_MODEL_ID);
   await page.goto(switchUrl.toString(), {
     waitUntil: "domcontentloaded",
@@ -276,7 +312,8 @@ async function run(browser) {
   );
   await submit(page, SWITCH_PROMPT);
   const switchedAssistant = await waitForAnswer(page, SWITCH_MARKER);
-  const switchedText = (await switchedAssistant.innerText()).trim();
+  rememberChatId(page, chatIds);
+  const switchedText = await visibleAnswerText(switchedAssistant);
   if (switchedText !== SWITCH_MARKER) {
     throw new Error("provider switch answer is not separated from reasoning details");
   }
@@ -288,7 +325,6 @@ async function run(browser) {
 
   await waitForHostTransition("before-return");
   const switchBackUrl = new URL("/", baseUrl);
-  switchBackUrl.searchParams.set("temporary-chat", "true");
   switchBackUrl.searchParams.set("models", MODEL_ID);
   await page.goto(switchBackUrl.toString(), {
     waitUntil: "domcontentloaded",
@@ -301,7 +337,8 @@ async function run(browser) {
   );
   await submit(page, SWITCH_BACK_PROMPT);
   const switchedBackAssistant = await waitForAnswer(page, SWITCH_BACK_MARKER);
-  const switchedBackText = (await switchedBackAssistant.innerText()).trim();
+  rememberChatId(page, chatIds);
+  const switchedBackText = await visibleAnswerText(switchedBackAssistant);
   if (switchedBackText !== SWITCH_BACK_MARKER) {
     throw new Error("provider return answer is not separated from reasoning details");
   }
@@ -316,6 +353,7 @@ async function run(browser) {
     throw new Error("unexpected provider request count");
   }
   if (pageErrors.length > 0) throw new Error("OpenWebUI page errors were observed");
+  for (const chatId of chatIds) await deleteChat(page, token, chatId);
   await context.close();
   return {
     schema_version: SUMMARY_SCHEMA,
@@ -350,7 +388,8 @@ async function main() {
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error("OpenWebUI reasoning browser smoke failed");
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`OpenWebUI reasoning browser smoke failed: ${message}`);
     process.exitCode = 1;
   });
 }

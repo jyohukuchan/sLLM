@@ -765,6 +765,10 @@ class IdentityCommandAndAtomicTests(unittest.TestCase):
         )
         self.assertIn("--read-only", probe)
         self.assertIn("--memory=128m", probe)
+        self.assertIn("--retry-all-errors", probe)
+        self.assertIn("--retry-max-time", probe)
+        self.assertNotIn("python3", probe)
+        self.assertEqual(TOOL.MAX_BROWSER_SOCKET_EVENTS, 2048)
 
     def test_service_network_and_process_identity_parsers(self):
         account = pwd.getpwuid(os.geteuid())

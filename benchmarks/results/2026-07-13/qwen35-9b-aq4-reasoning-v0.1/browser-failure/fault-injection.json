@@ -1,0 +1,1 @@
+{"command":"signal.pidfd_send_signal","completed_monotonic_ns":1201630960884465,"injection":"post_header_worker_kill","record_type":"fault_injection","schema_version":"ullm.openwebui.failure_gate.v1","signal":"SIGKILL","started_monotonic_ns":1201630960872574,"target_parent_pid":1539987,"target_pid":1540400,"target_starttime_ticks":120156005}

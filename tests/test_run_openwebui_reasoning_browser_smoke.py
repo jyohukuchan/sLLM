@@ -124,6 +124,7 @@ def test_runner_publishes_valid_hash_only_evidence_and_binds_command(
     )
     assert commands
     assert "--network=host" in commands[0]
+    assert "NODE_PATH=/usr/src/app/node_modules" in commands[0]
     assert f"ULLM_MODEL_ID={model_id}" in commands[0]
     assert f"OPENWEBUI_SWITCH_MODEL_ID={switch_model_id}" in commands[0]
 
@@ -164,10 +165,11 @@ def test_runner_rejects_external_model_binding_mismatch(
     assert not output.exists()
 
 
-def test_runner_rejects_the_current_v1_active_manifest() -> None:
-    manifest = Path("/etc/ullm/served-models/active.json")
-    if not manifest.is_file():
-        pytest.skip("WRX80 active manifest is unavailable")
+def test_runner_rejects_a_v1_active_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "active-v1.json"
+    manifest.write_text(
+        json.dumps({"schema_version": "ullm.served_model.v1"}), encoding="ascii"
+    )
     with pytest.raises(TOOL.SmokeError, match="not v2"):
         TOOL._validate_manifest_identity(manifest, "ullm-qwen3.5-9b-aq4")
 
@@ -176,6 +178,12 @@ def test_runner_rejects_the_current_v1_active_manifest() -> None:
 def test_runner_requires_immutable_browser_image(value: str) -> None:
     with pytest.raises(TOOL.SmokeError, match="immutable Docker"):
         TOOL._validate_image(value)
+
+
+def test_runner_validates_explicit_browser_container_user() -> None:
+    assert TOOL._validate_container_user("1000:1000") == (1000, 1000)
+    with pytest.raises(TOOL.SmokeError, match="UID:GID"):
+        TOOL._validate_container_user("root")
 
 
 def test_alternating_r9700_coordinator_serializes_provider_ownership(
@@ -192,6 +200,7 @@ def test_alternating_r9700_coordinator_serializes_provider_ownership(
 
     monkeypatch.setattr(TOOL, "_service_command", service)
     monkeypatch.setattr(TOOL, "_wait_for_gpu_owner", wait)
+    monkeypatch.setattr(TOOL, "_wait_for_tcp_port", lambda *_args, **_kwargs: None)
     coordinator = TOOL._AlternatingServiceCoordinator(
         "systemctl", "rocm-smi", "ullm-openai.service", "llama-qwen35-udq4.service"
     )
@@ -210,3 +219,15 @@ def test_alternating_r9700_coordinator_serializes_provider_ownership(
         ("start", "ullm-openai.service"),
         ("gpu", "ullm-aq4-worker"),
     ]
+
+
+def test_gpu_owner_probe_accepts_rocm_no_process_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        TOOL.subprocess,
+        "run",
+        lambda *args, **kwargs: TOOL.subprocess.CompletedProcess(
+            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
+        ),
+    )
+
+    assert TOOL._target_gpu_processes("rocm-smi") == []

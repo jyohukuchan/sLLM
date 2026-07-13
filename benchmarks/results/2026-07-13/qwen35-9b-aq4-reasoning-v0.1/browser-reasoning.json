@@ -1,0 +1,63 @@
+{
+  "schema_version": "ullm.openwebui.reasoning_browser_smoke.v2",
+  "model_id_sha256": "ade566baeb49c4a2f2217223e119ac7d4ca5e247fd2741ace6dafa9d491a7d52",
+  "first_answer": {
+    "utf8_bytes": 20,
+    "sha256": "b2985632e4f1edd436383f804eb0da010b5f3027fc690452372ecfaa7091ace1"
+  },
+  "expanded_view": {
+    "utf8_bytes": 596,
+    "sha256": "368ff1d765bfc29aab98df05d2ed071d85f4a03897aae232ed6b3faffa0f9996"
+  },
+  "second_answer": {
+    "utf8_bytes": 20,
+    "sha256": "64f270b29a1a161a2792144f81cd301086ec2999963afc918ad67aeb0b87eeeb"
+  },
+  "provider_switch_performed": true,
+  "provider_switch_model_id_sha256": "f5e378d3783a85d5df8f27f3a3431bde351b46d8dc64f14c9417dac1dc78ab04",
+  "provider_switch_answer": {
+    "utf8_bytes": 18,
+    "sha256": "957da0332a192d6da737c193e37f513807f825925cc7e890a82f8aeca15b40e9"
+  },
+  "provider_return_performed": true,
+  "provider_return_model_id_sha256": "ade566baeb49c4a2f2217223e119ac7d4ca5e247fd2741ace6dafa9d491a7d52",
+  "provider_return_answer": {
+    "utf8_bytes": 18,
+    "sha256": "a96f254f623ac861deff30ae34acd682b0c53b6e50aebc191362ff0a29c6d67c"
+  },
+  "reasoning_details_expanded": true,
+  "provider_request_count": 4,
+  "provider_requests": [
+    {
+      "sha256": "16912941577be30d4c02e943ad96f5853859d02b9778c21b248b484f8f0181fc",
+      "utf8_bytes": 1985,
+      "model_id_sha256": "ade566baeb49c4a2f2217223e119ac7d4ca5e247fd2741ace6dafa9d491a7d52",
+      "has_reasoning_content_key": false,
+      "assistant_has_reasoning_content": false
+    },
+    {
+      "sha256": "b5d9f7606e5ccf530a845d90f9eb0fdb03357b9b6962e3b5ae900042ecb7d055",
+      "utf8_bytes": 2055,
+      "model_id_sha256": "ade566baeb49c4a2f2217223e119ac7d4ca5e247fd2741ace6dafa9d491a7d52",
+      "has_reasoning_content_key": false,
+      "assistant_has_reasoning_content": false
+    },
+    {
+      "sha256": "df4f06047e6e8ee5dfc943cdb46b3d19b7e8092bf0a9418e2b842f6c9903e60b",
+      "utf8_bytes": 2360,
+      "model_id_sha256": "f5e378d3783a85d5df8f27f3a3431bde351b46d8dc64f14c9417dac1dc78ab04",
+      "has_reasoning_content_key": false,
+      "assistant_has_reasoning_content": false
+    },
+    {
+      "sha256": "57d714ecc4333d6b715c0da32b627472320aaf2d53248872ba5e821fba8ae639",
+      "utf8_bytes": 1983,
+      "model_id_sha256": "ade566baeb49c4a2f2217223e119ac7d4ca5e247fd2741ace6dafa9d491a7d52",
+      "has_reasoning_content_key": false,
+      "assistant_has_reasoning_content": false
+    }
+  ],
+  "hidden_reasoning_reinserted": false,
+  "page_error_count": 0,
+  "page_error_digests": []
+}

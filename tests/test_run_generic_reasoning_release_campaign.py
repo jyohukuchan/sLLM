@@ -267,6 +267,18 @@ def test_gpu_process_identity_is_bound_to_manifest_binary(monkeypatch: pytest.Mo
         TOOL._bind_gpu_processes(preflight, "a" * 64)
 
 
+def test_gpu_preflight_accepts_rocm_no_process_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        TOOL.subprocess,
+        "run",
+        lambda *args, **kwargs: TOOL.subprocess.CompletedProcess(
+            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
+        ),
+    )
+
+    assert TOOL._read_gpu_processes()["positive_vram_processes"] == []
+
+
 def test_lifecycle_observer_correlates_release_and_removes_socket(tmp_path: Path) -> None:
     path = tmp_path / "observer.sock"
     observer = TOOL.LifecycleObserver(path)
