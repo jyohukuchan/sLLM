@@ -50,6 +50,9 @@
 
 ### 次の行動
 
-関連Python回帰71件、Ruff、Node構文、`git diff --check`を再確認した。次は既存のrelease
-evidenceを最終source commitへ更新し、active manifest・promotion receipt・campaign・browser
-証跡のidentityを揃えてrelease validatorを通す。
+関連Python回帰71件、Ruff、Node構文、`git diff --check`を再確認した。最終HEADに対応する
+resident promotion evidence/receipt、candidate manifest、HTTP/SSE 10ケースを追加した。
+candidate用release evidenceは構造検証済みだが、producer statusはincompleteである。
+交互provider browser runnerは切替後のservice transitionで失敗し、uLLM復帰は確認できたが、
+candidate manifestに結び付く新browser evidenceは未取得である。active manifestは旧identityの
+まま保持し、サービスを`active/running`、ready=200、R9700=uLLM workerへ戻している。
