@@ -19,6 +19,7 @@ from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "tools/validate-generic-reasoning-release.py"
+SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
 MAX_CASES_BYTES = 16 * 1024 * 1024
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -161,7 +162,25 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], str]:
     files = tokenizer.get("files")
     if not isinstance(files, dict) or not files:
         raise EvidenceError("served-model manifest has no tokenizer file map")
-    return value, tokenizer["root"]
+    root = Path(tokenizer["root"])
+    if not root.is_absolute():
+        root = path.parent / root
+    return value, os.fspath(root)
+
+
+def _validate_served_model_manifest(path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "_ullm_generic_reasoning_served_model_validator",
+        SERVED_MODEL_VALIDATOR_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise EvidenceError("served-model validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        module.validation_summary(path)
+    except Exception as error:
+        raise EvidenceError("served-model manifest failed validation") from error
 
 
 def _tokenizer_identity(manifest: dict[str, Any], root: Path) -> str:
@@ -243,6 +262,7 @@ def prepare(
         raise EvidenceError("measured cases must be a nonempty array")
     if len(cases) > 4096:
         raise EvidenceError("measured cases exceed their bound")
+    _validate_served_model_manifest(manifest_path)
     manifest, tokenizer_root = _load_manifest(manifest_path)
     source_commit = _git_commit()
     status_raw = _git_status()

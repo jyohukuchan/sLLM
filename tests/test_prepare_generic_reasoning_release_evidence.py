@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -77,26 +78,11 @@ def cases() -> list[dict]:
 
 
 def write_inputs(root: Path) -> tuple[Path, Path, Path]:
-    tokenizer = root / "tokenizer"
-    tokenizer.mkdir()
-    tokenizer_file = tokenizer / "tokenizer.json"
-    tokenizer_file.write_text('{"fixture":true}\n', encoding="ascii")
-    tokenizer_hash = hashlib.sha256(tokenizer_file.read_bytes()).hexdigest()
-    manifest = root / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": "ullm.served_model.v2",
-                "tokenizer": {
-                    "root": str(tokenizer),
-                    "files": {"tokenizer.json": tokenizer_hash},
-                },
-            }
-        ),
-        encoding="ascii",
-    )
-    worker = root / "worker"
-    worker.write_bytes(b"worker-fixture")
+    fixture = ROOT / "services/openai-gateway/tests/fixtures/served-model/aq4"
+    candidate = root / "served-model"
+    shutil.copytree(fixture, candidate)
+    manifest = candidate / "served-model.json"
+    worker = candidate / "worker"
     cases_path = root / "cases.json"
     cases_path.write_text(json.dumps(cases()), encoding="ascii")
     return cases_path, manifest, worker
@@ -181,6 +167,25 @@ def test_prepare_rejects_cleartext_case_fields(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(TOOL, "_git_status", lambda: b"")
 
     with pytest.raises(TOOL.EvidenceError, match="forbidden field"):
+        TOOL.prepare(
+            cases_path,
+            manifest,
+            worker,
+            "ullm/open-webui@sha256:" + "b" * 64,
+            "1" * 40,
+            tmp_path / "release.json",
+        )
+
+
+def test_prepare_rejects_invalid_served_model_manifest(tmp_path: Path, monkeypatch) -> None:
+    cases_path, manifest, worker = write_inputs(tmp_path)
+    document = json.loads(manifest.read_text(encoding="ascii"))
+    document["worker"]["protocol"] = "ullm.worker.v2"
+    manifest.write_text(json.dumps(document), encoding="ascii")
+    monkeypatch.setattr(TOOL, "_git_commit", lambda: "1" * 40)
+    monkeypatch.setattr(TOOL, "_git_status", lambda: b"")
+
+    with pytest.raises(TOOL.EvidenceError, match="served-model manifest failed validation"):
         TOOL.prepare(
             cases_path,
             manifest,

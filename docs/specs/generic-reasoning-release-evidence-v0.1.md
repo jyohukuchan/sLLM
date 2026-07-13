@@ -39,9 +39,11 @@ is not production-gate eligible.
 
 `tools/prepare-generic-reasoning-release-evidence.py` assembles this root from
 a pre-sanitized measured-case array and hashes the manifest, worker, and the
-tokenizer files named by the manifest. It rejects forbidden cleartext fields
-and runs the independent validator before publishing. `--status complete`
-additionally requires the recomputed production gate to be eligible.
+tokenizer files named by the manifest. Before hashing, it re-runs the existing
+served-model contract validator, so an evidence artifact cannot bind to a
+manifest that the gateway would reject. It rejects forbidden cleartext fields
+and runs the independent release validator before publishing. `--status
+complete` additionally requires the recomputed production gate to be eligible.
 
 The validator report also contains `timing_percentiles` grouped by mode and
 timing field. It recomputes p50, p95, and p99 with linear interpolation over
