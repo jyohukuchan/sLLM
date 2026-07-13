@@ -105,5 +105,6 @@ UI patch is allowed.
 The repository has v2 schema, Gateway, worker, and AQ4 session contract tests,
 including synthetic multi-token reasoning. The current production service is
 still v1. The dated Phase 0 inventory remains incomplete because same-HEAD AQ4
-token IDs, long-prompt baseline, and full browser/release evidence have not yet
-been collected.
+token IDs, identity-aligned HTTP/SSE evidence, and full browser/release
+evidence have not yet been collected. A hash-only long-prompt probe exists, but
+its active promotion source does not match the current source commit.

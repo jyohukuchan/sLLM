@@ -41,11 +41,9 @@
     }
   ],
   "missing_for_phase0_gate": [
-    "same-HEAD AQ4 reasoning-disabled HTTP request and response bodies",
-    "same-HEAD AQ4 reasoning-disabled SSE event sequence",
+    "same-HEAD AQ4 source, manifest, worker, and tokenizer identity alignment",
     "same-HEAD AQ4 generated token IDs for short and long chat prompts",
-    "same-HEAD AQ4 prompt token baselines and generated token IDs",
-    "same-HEAD HTTP/SSE evidence with raw committed-token cross-check"
+    "same-HEAD HTTP/SSE hash-only evidence with raw committed-token cross-check"
   ],
   "gate": {
     "machine_readable_baseline_available": false,

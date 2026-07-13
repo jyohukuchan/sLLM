@@ -219,7 +219,7 @@ tokenizer adapterへ限定する。量子化方式やGPU kernelはreasoning phas
 
 ### Phase 0: 基準証跡と仕様固定、1日
 
-- 現行AQ4でreasoning未指定時のprompt token列、生成token列、HTTP body、SSE列を保存する。
+- 現行AQ4でreasoning未指定時のprompt token列、生成token列、HTTPのhash-only metadata、SSE列を保存する。
 - 短文、長文、1,024/2,048/3,072-token promptのprefill/decode基準を保存する。
 - budgetの計数、予約token、EOS、history方針、usageの定義を仕様へ固定する。
 - AQ4 sessionの生成token計数と`publish_prepared`周辺を監査する。
@@ -788,7 +788,7 @@ gateをAQ4 reasoning用に明示的に分ける。既存SQ8 evidenceを名前だ
 7. `HIP_VISIBLE_DEVICES`、`gfx1201`、worker process、GPU使用量、必須kernel guardを確認する。
 8. root権限でrepository、`/etc`、live nftablesの8000/8001 ruleを照合する。
 9. OpenWebUI DBを変更する前にbackupを作る。DB内容を標準出力やjournalへdumpしない。
-10. reasoning未指定のAPI/SSE/token/performance baselineをmachine-readable evidenceとして取得する。
+10. reasoning未指定のAPI/SSE/token/performance baselineを、本文を保存しないmachine-readable evidenceとして取得する。
 11. v0.2仕様とfixtureを先に固定し、production serviceを変更する前にunit testを通す。
 12. 実装中は小さい意味単位でcommitし、各commitの検証結果をjournalへ記録する。
 
