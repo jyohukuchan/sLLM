@@ -322,6 +322,11 @@ def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
         "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
         "source_commit": "abc1234",
         "production_receipt_written": False,
+        "gpu_exclusive_preflight": {
+            "tool": "rocm-smi --showpids --json",
+            "gpu_index": "1",
+            "positive_vram_processes": [],
+        },
         "verified": True,
         "worker_binary": bound_manifest["worker"]["binary"],
         "worker_binary_sha256": bound_manifest["worker"]["binary_sha256"],
@@ -389,6 +394,16 @@ def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path)
         (
             lambda value: value.__setitem__("production_receipt_written", True),
             "before receipt publication",
+        ),
+        (
+            lambda value: value.pop("gpu_exclusive_preflight"),
+            "GPU exclusivity preflight",
+        ),
+        (
+            lambda value: value["gpu_exclusive_preflight"].__setitem__(
+                "positive_vram_processes", [{"pid": "42"}]
+            ),
+            "GPU exclusivity preflight",
         ),
         (lambda value: value.__setitem__("source_commit", "other"), "source commit"),
         (

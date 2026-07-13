@@ -127,6 +127,19 @@ def _validate_aq4_evidence(
         raise GenerationError("AQ4 promotion evidence is not verified")
     if evidence.get("production_receipt_written") is not False:
         raise GenerationError("AQ4 promotion evidence was not captured before receipt publication")
+    gpu_preflight = evidence.get("gpu_exclusive_preflight")
+    if not isinstance(gpu_preflight, dict) or set(gpu_preflight) != {
+        "tool",
+        "gpu_index",
+        "positive_vram_processes",
+    }:
+        raise GenerationError("AQ4 promotion evidence GPU exclusivity preflight is missing")
+    if (
+        gpu_preflight.get("tool") != "rocm-smi --showpids --json"
+        or gpu_preflight.get("gpu_index") != "1"
+        or gpu_preflight.get("positive_vram_processes") != []
+    ):
+        raise GenerationError("AQ4 promotion evidence GPU exclusivity preflight failed")
     if evidence.get("source_commit") != source_commit:
         raise GenerationError("AQ4 promotion evidence source commit differs")
     if evidence.get("worker_binary") != os.fspath(worker_binary):

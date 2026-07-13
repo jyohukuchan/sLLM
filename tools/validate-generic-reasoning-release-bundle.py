@@ -192,6 +192,19 @@ def _validate_promotion(
         raise ValidationError("promotion evidence source commit differs")
     if evidence.get("worker_binary_sha256") != worker_hash:
         raise ValidationError("promotion worker hash differs")
+    gpu_preflight = evidence.get("gpu_exclusive_preflight")
+    if not isinstance(gpu_preflight, dict) or set(gpu_preflight) != {
+        "tool",
+        "gpu_index",
+        "positive_vram_processes",
+    }:
+        raise ValidationError("promotion GPU exclusivity preflight is missing")
+    if (
+        gpu_preflight.get("tool") != "rocm-smi --showpids --json"
+        or gpu_preflight.get("gpu_index") != "1"
+        or gpu_preflight.get("positive_vram_processes") != []
+    ):
+        raise ValidationError("promotion GPU exclusivity preflight failed")
     bundle = evidence.get("ephemeral_bundle")
     if not isinstance(bundle, dict) or bundle.get("manifest_sha256") != manifest_hash:
         raise ValidationError("promotion manifest hash differs")

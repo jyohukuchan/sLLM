@@ -66,6 +66,11 @@ def make_bundle(root: Path) -> Path:
             "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
             "source_commit": source,
             "production_receipt_written": False,
+            "gpu_exclusive_preflight": {
+                "tool": "rocm-smi --showpids --json",
+                "gpu_index": "1",
+                "positive_vram_processes": [],
+            },
             "verified": True,
             "worker_binary_sha256": identity["worker_binary_sha256"],
             "ephemeral_bundle": {"manifest_sha256": identity["manifest_sha256"]},
@@ -133,6 +138,20 @@ def test_bundle_rejects_forged_validator_report(tmp_path: Path) -> None:
     write_json(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="validator report differs"):
+        BUNDLE.validate(bundle)
+
+
+def test_bundle_rejects_missing_gpu_exclusivity_preflight(tmp_path: Path) -> None:
+    bundle = make_bundle(tmp_path)
+    value = json.loads(bundle.read_text(encoding="ascii"))
+    promotion_path = tmp_path / value["artifacts"]["promotion_evidence"]["path"]
+    promotion = json.loads(promotion_path.read_text(encoding="ascii"))
+    promotion.pop("gpu_exclusive_preflight")
+    write_json(promotion_path, promotion)
+    value["artifacts"]["promotion_evidence"]["sha256"] = digest(promotion_path)
+    write_json(bundle, value)
+
+    with pytest.raises(BUNDLE.ValidationError, match="GPU exclusivity preflight"):
         BUNDLE.validate(bundle)
 
 

@@ -562,7 +562,6 @@ def run_evidence(
     ready_timeout_seconds: float,
     request_timeout_seconds: float,
     source_commit: str | None = None,
-    require_exclusive_gpu: bool = True,
 ) -> dict[str, Any]:
     worker_binary = worker_binary.resolve()
     legacy_engine = legacy_engine.resolve()
@@ -570,7 +569,7 @@ def run_evidence(
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise EvidenceError(f"{label} is not executable: {executable}")
     commit = source_commit or _git_commit()
-    gpu_preflight = _exclusive_gpu_preflight() if require_exclusive_gpu else None
+    gpu_preflight = _exclusive_gpu_preflight()
 
     with tempfile.TemporaryDirectory(prefix="ullm-aq4-promotion-evidence-") as raw_temporary:
         temporary = Path(raw_temporary)

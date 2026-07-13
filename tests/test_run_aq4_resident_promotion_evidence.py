@@ -104,6 +104,18 @@ for line in sys.stdin:
 '''
 
 
+def patch_exclusive_gpu_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        TOOL,
+        "_exclusive_gpu_preflight",
+        lambda: {
+            "tool": "rocm-smi --showpids --json",
+            "gpu_index": "1",
+            "positive_vram_processes": [],
+        },
+    )
+
+
 def write_fixture_profile(root: Path, worker: Path) -> tuple[Path, Path]:
     tokenizer = root / "tokenizer"
     tokenizer.mkdir()
@@ -163,7 +175,10 @@ def write_fixture_profile(root: Path, worker: Path) -> tuple[Path, Path]:
     return path, production_receipt
 
 
-def test_evidence_uses_ephemeral_bundle_and_sequential_processes(tmp_path: Path) -> None:
+def test_evidence_uses_ephemeral_bundle_and_sequential_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_exclusive_gpu_preflight(monkeypatch)
     worker = tmp_path / "fake-worker"
     worker.write_text(FAKE_WORKER, encoding="utf-8")
     worker.chmod(0o755)
@@ -178,7 +193,6 @@ def test_evidence_uses_ephemeral_bundle_and_sequential_processes(tmp_path: Path)
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
         source_commit="fixture-commit",
-        require_exclusive_gpu=False,
     )
 
     assert output.is_file()
@@ -262,7 +276,10 @@ def test_atomic_output_refuses_symlink(tmp_path: Path) -> None:
     assert target.read_text(encoding="ascii") == "unchanged"
 
 
-def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> None:
+def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_exclusive_gpu_preflight(monkeypatch)
     worker = tmp_path / "fake-worker-v2"
     worker.write_text(FAKE_WORKER, encoding="utf-8")
     worker.chmod(0o755)
@@ -293,7 +310,6 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> Non
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
         source_commit="fixture-v2-commit",
-        require_exclusive_gpu=False,
     )
 
     assert document["ephemeral_bundle"]["manifest"]["worker"]["protocol"] == "ullm.worker.v2"
@@ -317,7 +333,10 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> Non
     ]
 
 
-def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(tmp_path: Path) -> None:
+def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_exclusive_gpu_preflight(monkeypatch)
     worker = tmp_path / "fake-worker-v2-pipeline"
     worker.write_text(FAKE_WORKER, encoding="utf-8")
     worker.chmod(0o755)
@@ -358,7 +377,6 @@ def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(tmp_path: Path) -> N
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
         source_commit="fixture-v2-pipeline",
-        require_exclusive_gpu=False,
     )
     assert evidence["verified"] is True
     receipt = RECEIPT.write_receipt(profile, evidence_path, receipt_path)
