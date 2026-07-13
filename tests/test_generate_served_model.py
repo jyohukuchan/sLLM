@@ -155,6 +155,44 @@ def test_generate_hashes_live_files_and_passes_strict_loader(tmp_path: Path) -> 
     assert output.stat().st_mode & 0o777 == 0o644
 
 
+def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
+    profile = json.loads(write_profile(tmp_path).read_text(encoding="utf-8"))
+    profile["worker"]["protocol"] = "ullm.worker.v2"
+    profile["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.multi-token.v1",
+        "start_token_ids": [10, 11],
+        "end_token_ids": [20, 21],
+        "forced_end_token_ids": [20, 21],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
+        "max_budget_tokens": 8,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    output = tmp_path / "served-model-v2.json"
+
+    GENERATOR.generate(profile_path, output)
+    document = json.loads(output.read_text(encoding="utf-8"))
+
+    assert document["schema_version"] == "ullm.served_model.v2"
+    assert document["worker"]["protocol"] == "ullm.worker.v2"
+    assert document["reasoning"]["dialect_id"] == "synthetic.multi-token.v1"
+
+
+def test_v2_generator_profile_requires_reasoning(tmp_path: Path) -> None:
+    profile = json.loads(write_profile(tmp_path).read_text(encoding="utf-8"))
+    profile["worker"]["protocol"] = "ullm.worker.v2"
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="requires reasoning"):
+        GENERATOR.materialize(profile_path)
+
+
 def test_missing_promotion_receipt_fails_without_output(tmp_path: Path) -> None:
     profile = write_profile(tmp_path, receipt_exists=False)
     output = tmp_path / "served-model.json"

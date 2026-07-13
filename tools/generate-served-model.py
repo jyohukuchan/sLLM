@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 LOADER_PATH = ROOT / "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
 PROFILE_SCHEMA = "ullm.served_model.profile.v1"
 AQ4_EVIDENCE_SCHEMA = "ullm.aq4_resident_promotion_evidence.v1"
-_LOADER_MODULE_NAME = "_ullm_served_model_generator_validator"
 
 
 class GenerationError(RuntimeError):
@@ -186,15 +185,28 @@ def _validate_aq4_evidence(
 
 
 def _load_validator() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(_LOADER_MODULE_NAME, LOADER_PATH)
+    package_root = LOADER_PATH.parents[1]
+    if os.fspath(package_root) not in sys.path:
+        sys.path.insert(0, os.fspath(package_root))
+    package_name = "ullm_openai_gateway"
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [os.fspath(package_root / package_name)]  # type: ignore[attr-defined]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
+    module_name = "ullm_openai_gateway.served_model"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(module_name, LOADER_PATH)
     if spec is None or spec.loader is None:
         raise GenerationError("served-model validator is unavailable")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[_LOADER_MODULE_NAME] = module
+    sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        sys.modules.pop(_LOADER_MODULE_NAME, None)
+        sys.modules.pop(module_name, None)
         raise
     return module
 
@@ -215,6 +227,14 @@ def materialize(profile_path: Path) -> dict[str, Any]:
     worker_profile = _required_object(profile, "worker")
     product_profile = _required_object(profile, "product")
     promotion_profile = _required_object(profile, "promotion")
+    reasoning_profile = profile.get("reasoning")
+    if reasoning_profile is not None:
+        if not isinstance(reasoning_profile, dict):
+            raise GenerationError("profile.reasoning must be an object")
+        if worker_profile.get("protocol") != "ullm.worker.v2":
+            raise GenerationError("profile.reasoning requires ullm.worker.v2")
+    elif worker_profile.get("protocol") == "ullm.worker.v2":
+        raise GenerationError("ullm.worker.v2 profile requires reasoning")
 
     tokenizer_root = Path(str(tokenizer_profile.get("root", ""))).resolve()
     tokenizer_config = _load_json(
@@ -277,8 +297,12 @@ def materialize(profile_path: Path) -> dict[str, Any]:
     else:
         raise GenerationError("profile.product.artifact must be an object or null")
 
-    return {
-        "schema_version": "ullm.served_model.v1",
+    document = {
+        "schema_version": (
+            "ullm.served_model.v2"
+            if reasoning_profile is not None
+            else "ullm.served_model.v1"
+        ),
         "public": _required_object(profile, "public"),
         "generation": _required_object(profile, "generation"),
         "format": _required_object(profile, "format"),
@@ -314,6 +338,9 @@ def materialize(profile_path: Path) -> dict[str, Any]:
             "receipt_sha256": _sha256_file(receipt_path),
         },
     }
+    if reasoning_profile is not None:
+        document["reasoning"] = reasoning_profile
+    return document
 
 
 def generate(profile_path: Path, output_path: Path) -> str:

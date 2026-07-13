@@ -16,24 +16,33 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 LOADER_PATH = ROOT / "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
 SUMMARY_SCHEMA = "ullm.served_model.validation.v1"
-_LOADER_MODULE_NAME = "_ullm_gateway_served_model_validator"
 
 
 def load_gateway_validator() -> ModuleType:
     """Load the reviewed gateway validator without importing gateway startup code."""
 
-    existing = sys.modules.get(_LOADER_MODULE_NAME)
+    package_root = LOADER_PATH.parents[1]
+    if os.fspath(package_root) not in sys.path:
+        sys.path.insert(0, os.fspath(package_root))
+    package_name = "ullm_openai_gateway"
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [os.fspath(package_root / package_name)]  # type: ignore[attr-defined]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
+    module_name = "ullm_openai_gateway.served_model"
+    existing = sys.modules.get(module_name)
     if existing is not None:
         return existing
-    spec = importlib.util.spec_from_file_location(_LOADER_MODULE_NAME, LOADER_PATH)
+    spec = importlib.util.spec_from_file_location(module_name, LOADER_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError("served-model validator is unavailable")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[_LOADER_MODULE_NAME] = module
+    sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        sys.modules.pop(_LOADER_MODULE_NAME, None)
+        sys.modules.pop(module_name, None)
         raise
     return module
 
