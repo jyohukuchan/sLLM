@@ -840,6 +840,43 @@ unsafe extern "C" {
         output: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_decode_attn_split_f32(
+        q: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        source_tile: usize,
+        workspace: *mut RawRuntimeBuffer,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_paged_decode_attn_split_sigmoid_gate_f32(
+        q: *const RawRuntimeBuffer,
+        gate: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        source_tile: usize,
+        workspace: *mut RawRuntimeBuffer,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_kv_write_f32(
         k: *const RawRuntimeBuffer,
         v: *const RawRuntimeBuffer,
@@ -5597,6 +5634,145 @@ pub fn paged_decode_attn_sigmoid_gate_f32(
             head_dim,
             value_dim,
             softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn paged_decode_attn_split_workspace_bytes(
+    q_heads: usize,
+    value_dim: usize,
+    cache_len: usize,
+    source_tile: usize,
+) -> Result<usize, String> {
+    if q_heads == 0 {
+        return Err(
+            "f32 paged decode split attention q_heads must be greater than zero".to_string(),
+        );
+    }
+    if value_dim == 0 {
+        return Err(
+            "f32 paged decode split attention value_dim must be greater than zero".to_string(),
+        );
+    }
+    if cache_len == 0 {
+        return Err(
+            "f32 paged decode split attention cache_len must be greater than zero".to_string(),
+        );
+    }
+    if source_tile == 0 {
+        return Err(
+            "f32 paged decode split attention source_tile must be greater than zero".to_string(),
+        );
+    }
+    let split_count = (cache_len - 1)
+        .checked_div(source_tile)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| "f32 paged decode split attention split count overflows".to_string())?;
+    let stride = value_dim.checked_add(2).ok_or_else(|| {
+        "f32 paged decode split attention workspace stride overflows".to_string()
+    })?;
+    q_heads
+        .checked_mul(split_count)
+        .and_then(|value| value.checked_mul(stride))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "f32 paged decode split attention workspace byte size overflows".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paged_decode_attn_split_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    source_tile: usize,
+    workspace: &mut RuntimeBuffer,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    let workspace_bytes =
+        paged_decode_attn_split_workspace_bytes(q_heads, value_dim, cache_len, source_tile)?;
+    check_copy_range(0, workspace_bytes, workspace.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_decode_attn_split_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            source_tile,
+            workspace.raw.as_ptr(),
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paged_decode_attn_split_sigmoid_gate_f32(
+    q: &RuntimeBuffer,
+    gate: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    source_tile: usize,
+    workspace: &mut RuntimeBuffer,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    let workspace_bytes =
+        paged_decode_attn_split_workspace_bytes(q_heads, value_dim, cache_len, source_tile)?;
+    check_copy_range(0, workspace_bytes, workspace.size()?)?;
+    let gate_bytes = q_heads
+        .checked_mul(value_dim)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            "f32 paged decode split attention sigmoid gate byte size overflows".to_string()
+        })?;
+    check_copy_range(0, gate_bytes, gate.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_decode_attn_split_sigmoid_gate_f32(
+            q.raw.as_ptr(),
+            gate.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            source_tile,
+            workspace.raw.as_ptr(),
             output.raw.as_ptr(),
             stream,
         )

@@ -5351,6 +5351,160 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
         output[index] = decoded;
     }
 }
+
+extern "C" __global__ void ullm_paged_decode_attn_split_partial_f32_kernel(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    const unsigned int *block_table,
+    unsigned long long cache_len,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    unsigned long long source_tile,
+    unsigned long long split_count,
+    float *workspace) {
+    __shared__ float partial[256];
+    if (blockDim.x != 256u || head_dim > 256ull || value_dim > 256ull) {
+        return;
+    }
+
+    const unsigned long long partial_index = blockIdx.x;
+    const unsigned long long q_head = partial_index / split_count;
+    const unsigned long long split_id = partial_index - q_head * split_count;
+    if (q_head >= q_heads) {
+        return;
+    }
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long stride = value_dim + 2ull;
+    const unsigned long long workspace_base = partial_index * stride;
+    const unsigned long long source_start = split_id * source_tile;
+    const unsigned long long source_remaining =
+        source_start < cache_len ? cache_len - source_start : 0ull;
+    const unsigned long long source_count =
+        source_tile < source_remaining ? source_tile : source_remaining;
+    const unsigned long long source_end = source_start + source_count;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_base = q_head * head_dim;
+
+    float max_score = -3.4028234663852886e38f;
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+    for (unsigned long long source_timestep = source_start;
+         source_timestep < source_end;
+         ++source_timestep) {
+        const unsigned long long block_index = source_timestep / block_size;
+        const unsigned long long block_offset = source_timestep - block_index * block_size;
+        const unsigned long long block_id =
+            static_cast<unsigned long long>(block_table[block_index]);
+        if (block_id >= cache_blocks) {
+            if (tid == 0u) {
+                workspace[workspace_base] = 0.0f;
+                workspace[workspace_base + 1ull] = -1.0f;
+            }
+            if (tid < value_dim) {
+                workspace[workspace_base + 2ull + tid] = 0.0f;
+            }
+            return;
+        }
+        const unsigned long long physical_timestep = block_id * block_size + block_offset;
+        const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
+        const float local =
+            tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+        const float score =
+            ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+        if (tid < value_dim) {
+            const unsigned long long v_index =
+                (physical_timestep * kv_heads + kv_head) * value_dim + tid;
+            const float v = v_cache[v_index];
+            if (score > max_score) {
+                const float scale = expf(max_score - score);
+                weighted = weighted * scale + v;
+                denominator = denominator * scale + 1.0f;
+                max_score = score;
+            } else {
+                const float weight = expf(score - max_score);
+                weighted += weight * v;
+                denominator += weight;
+            }
+        }
+    }
+    if (tid == 0u) {
+        workspace[workspace_base] = max_score;
+        workspace[workspace_base + 1ull] = denominator;
+    }
+    if (tid < value_dim) {
+        workspace[workspace_base + 2ull + tid] = weighted;
+    }
+}
+
+extern "C" __global__ void ullm_paged_decode_attn_split_merge_f32_kernel(
+    const float *gate,
+    unsigned long long q_heads,
+    unsigned long long value_dim,
+    unsigned long long split_count,
+    const float *workspace,
+    float *output) {
+    if (blockDim.x != 256u || value_dim > 256ull) {
+        return;
+    }
+    const unsigned long long q_head = blockIdx.x;
+    if (q_head >= q_heads) {
+        return;
+    }
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long stride = value_dim + 2ull;
+    float merged_max = -3.4028234663852886e38f;
+    float merged_denominator = 0.0f;
+    float merged_numerator = 0.0f;
+    bool invalid = false;
+    for (unsigned long long split_id = 0ull; split_id < split_count; ++split_id) {
+        const unsigned long long partial_base =
+            (q_head * split_count + split_id) * stride;
+        const float partial_max = workspace[partial_base];
+        const float partial_denominator = workspace[partial_base + 1ull];
+        if (partial_denominator < 0.0f) {
+            invalid = true;
+            break;
+        }
+        const float partial_numerator =
+            tid < value_dim ? workspace[partial_base + 2ull + tid] : 0.0f;
+        if (split_id == 0ull) {
+            merged_max = partial_max;
+            merged_denominator = partial_denominator;
+            merged_numerator = partial_numerator;
+        } else {
+            const float new_max = partial_max > merged_max ? partial_max : merged_max;
+            const float alpha = expf(merged_max - new_max);
+            const float beta = expf(partial_max - new_max);
+            merged_denominator =
+                merged_denominator * alpha + partial_denominator * beta;
+            merged_numerator = merged_numerator * alpha + partial_numerator * beta;
+            merged_max = new_max;
+        }
+    }
+
+    if (tid < value_dim) {
+        const unsigned long long output_index = q_head * value_dim + tid;
+        if (invalid) {
+            output[output_index] = 0.0f;
+            return;
+        }
+        const float decoded = merged_numerator / merged_denominator;
+        if (gate != nullptr) {
+            const float gate_value = gate[output_index];
+            const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
+            output[output_index] = sigmoid * decoded;
+        } else {
+            output[output_index] = decoded;
+        }
+    }
+}
 )";
     }
 

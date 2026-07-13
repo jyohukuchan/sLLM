@@ -3587,17 +3587,32 @@ ullm_status cached_prefix_attn_fp8_e4m3_hip_staging(
 
 class HipPagedDecodeAttnKernelCache {
 public:
+    struct Functions {
+        void *legacy = nullptr;
+        void *split_partial = nullptr;
+        void *split_merge = nullptr;
+    };
+
     void *function_for_device(int device_id, std::string *error) {
+        Functions functions;
+        if (!functions_for_device(device_id, &functions, error)) {
+            return nullptr;
+        }
+        return functions.legacy;
+    }
+
+    bool functions_for_device(int device_id, Functions *functions, std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto found = modules_.find(device_id);
         if (found != modules_.end()) {
-            return found->second->function;
+            assign_functions(*found->second, functions);
+            return true;
         }
 
         const std::vector<std::string> candidates = hip_arch_candidates(device_id);
         if (candidates.empty()) {
             append_error(error, "unable to infer HIP offload architecture for device");
-            return nullptr;
+            return false;
         }
 
         std::string compile_errors;
@@ -3614,9 +3629,9 @@ public:
                 append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
                 continue;
             }
-            void *function = nullptr;
+            void *legacy_function = nullptr;
             if (!hip_runtime().module_get_function(
-                    &function,
+                    &legacy_function,
                     module,
                     "ullm_paged_decode_attn_f32_kernel",
                     device_id)) {
@@ -3624,27 +3639,64 @@ public:
                 append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
                 continue;
             }
+            void *split_partial_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &split_partial_function,
+                    module,
+                    "ullm_paged_decode_attn_split_partial_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(
+                    &compile_errors,
+                    "hipModuleGetFunction split partial failed for " + arch);
+                continue;
+            }
+            void *split_merge_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &split_merge_function,
+                    module,
+                    "ullm_paged_decode_attn_split_merge_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(
+                    &compile_errors,
+                    "hipModuleGetFunction split merge failed for " + arch);
+                continue;
+            }
 
             auto loaded = std::make_unique<LoadedModule>();
             loaded->module = module;
-            loaded->function = function;
+            loaded->legacy_function = legacy_function;
+            loaded->split_partial_function = split_partial_function;
+            loaded->split_merge_function = split_merge_function;
             loaded->arch = arch;
-            void *result = loaded->function;
+            assign_functions(*loaded, functions);
             modules_.emplace(device_id, std::move(loaded));
-            return result;
+            return true;
         }
         append_error(
             error,
             compile_errors.empty() ? "failed to build paged decode attention HIP kernel" : compile_errors);
-        return nullptr;
+        return false;
     }
 
 private:
     struct LoadedModule {
         void *module = nullptr;
-        void *function = nullptr;
+        void *legacy_function = nullptr;
+        void *split_partial_function = nullptr;
+        void *split_merge_function = nullptr;
         std::string arch;
     };
+
+    static void assign_functions(const LoadedModule &loaded, Functions *functions) {
+        if (functions == nullptr) {
+            return;
+        }
+        functions->legacy = loaded.legacy_function;
+        functions->split_partial = loaded.split_partial_function;
+        functions->split_merge = loaded.split_merge_function;
+    }
 
     static void append_error(std::string *error, const std::string &message) {
         if (error == nullptr || message.empty()) {
@@ -3741,6 +3793,127 @@ bool paged_decode_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged decode attention";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool paged_decode_attn_split_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    size_t split_count,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    HipPagedDecodeAttnKernelCache::Functions functions;
+    if (!hip_paged_decode_attn_kernel_cache().functions_for_device(
+            device_id,
+            &functions,
+            error)) {
+        return false;
+    }
+    if (functions.split_partial == nullptr || functions.split_merge == nullptr) {
+        if (error != nullptr) {
+            *error = "paged decode split attention HIP functions are unavailable";
+        }
+        return false;
+    }
+
+    constexpr unsigned int launch_block_size = 256;
+    if (split_count != 0 && q_heads > std::numeric_limits<size_t>::max() / split_count) {
+        if (error != nullptr) {
+            *error = "paged decode split attention partial grid overflows";
+        }
+        return false;
+    }
+    const size_t partial_grid_size = q_heads * split_count;
+    if (partial_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        q_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "paged decode split attention launch grid exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_cache_len = static_cast<unsigned long long>(cache_len);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_source_tile = static_cast<unsigned long long>(source_tile);
+    unsigned long long kernel_split_count = static_cast<unsigned long long>(split_count);
+    void *q_ptr = q_buffer->ptr;
+    void *gate_ptr = gate_buffer == nullptr ? nullptr : gate_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *workspace_ptr = workspace_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *partial_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &block_table_ptr,
+        &kernel_cache_len,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &kernel_source_tile,
+        &kernel_split_count,
+        &workspace_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            functions.split_partial,
+            static_cast<unsigned int>(partial_grid_size),
+            launch_block_size,
+            partial_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 paged decode split partial attention";
+        }
+        return false;
+    }
+
+    void *merge_params[] = {
+        &gate_ptr,
+        &kernel_q_heads,
+        &kernel_value_dim,
+        &kernel_split_count,
+        &workspace_ptr,
+        &output_ptr,
+    };
+    if (!hip_runtime().module_launch_kernel(
+            functions.split_merge,
+            static_cast<unsigned int>(q_heads),
+            launch_block_size,
+            merge_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 paged decode split merge attention";
         }
         return false;
     }

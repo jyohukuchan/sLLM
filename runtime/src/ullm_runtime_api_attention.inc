@@ -2080,6 +2080,316 @@ ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
         stream);
 }
 
+ullm_status paged_decode_attn_split_f32_impl(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || workspace_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 paged decode split attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (cache_len == 0 || block_size == 0 || cache_blocks == 0 || q_heads == 0 ||
+        kv_heads == 0 || head_dim == 0 || value_dim == 0 || source_tile == 0) {
+        set_error("f32 paged decode split attention dimensions and source_tile must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (head_dim > 256 || value_dim > 256) {
+        set_error("f32 paged decode split attention head_dim/value_dim must not exceed 256");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 paged decode split attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error(
+            "f32 paged decode split attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((gate_buffer != nullptr && !buffers_share_backend(q_buffer, gate_buffer)) ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_buffer, workspace_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error(
+            "f32 paged decode split attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 paged decode split attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    const size_t block_table_entries = ((cache_len - 1) / block_size) + 1;
+    const size_t split_count = ((cache_len - 1) / source_tile) + 1;
+    if (value_dim > max_size - 2) {
+        set_error("f32 paged decode split attention workspace stride overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t workspace_stride = value_dim + 2;
+    if (split_count > max_size / q_heads) {
+        set_error("f32 paged decode split attention partial count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t partial_count = q_heads * split_count;
+    if (workspace_stride > max_size / partial_count) {
+        set_error("f32 paged decode split attention workspace element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t workspace_elements = partial_count * workspace_stride;
+    if (workspace_elements > max_size / sizeof(float)) {
+        set_error("f32 paged decode split attention workspace byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t workspace_bytes = workspace_elements * sizeof(float);
+    if (partial_count > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        q_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        set_error("f32 paged decode split attention launch grid exceeds HIP grid limit");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (cache_blocks > max_size / block_size) {
+        set_error("f32 paged decode split attention physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (block_table_entries > cache_blocks || cache_len > physical_tokens) {
+        set_error("f32 paged decode split attention cache_len exceeds physical cache block capacity");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (head_dim > max_size / q_heads) {
+        set_error("f32 paged decode split attention q element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_heads * head_dim;
+    if (kv_heads > max_size / physical_tokens) {
+        set_error("f32 paged decode split attention kv head-cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_cache = physical_tokens * kv_heads;
+    if (head_dim > max_size / kv_head_cache || value_dim > max_size / kv_head_cache) {
+        set_error("f32 paged decode split attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_head_cache * head_dim;
+    const size_t v_elements = kv_head_cache * value_dim;
+    if (value_dim > max_size / q_heads) {
+        set_error("f32 paged decode split attention output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_elements = q_heads * value_dim;
+    if (q_elements > max_size / sizeof(float) || k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) || output_elements > max_size / sizeof(float) ||
+        block_table_entries > max_size / sizeof(std::uint32_t)) {
+        set_error("f32 paged decode split attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t gate_bytes = gate_buffer == nullptr ? 0 : output_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    const size_t block_table_bytes = block_table_entries * sizeof(std::uint32_t);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < k_bytes ||
+        v_cache_buffer->bytes < v_bytes || block_table_buffer->bytes < block_table_bytes ||
+        workspace_buffer->bytes < workspace_bytes || output_buffer->bytes < output_bytes ||
+        (gate_buffer != nullptr && gate_buffer->bytes < gate_bytes)) {
+        set_error("f32 paged decode split attention buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *gate =
+            gate_buffer == nullptr ? nullptr : static_cast<const float *>(gate_buffer->ptr);
+        const auto *k_cache = static_cast<const float *>(k_cache_buffer->ptr);
+        const auto *v_cache = static_cast<const float *>(v_cache_buffer->ptr);
+        const auto *block_table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        for (size_t entry = 0; entry < block_table_entries; ++entry) {
+            if (static_cast<size_t>(block_table[entry]) >= cache_blocks) {
+                set_error(
+                    "f32 paged decode split attention block table contains an out-of-range block id");
+                return ULLM_STATUS_INVALID_ARGUMENT;
+            }
+        }
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        paged_decode_attn_f32_host(
+            q,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output);
+        if (gate != nullptr) {
+            for (size_t i = 0; i < output_elements; ++i) {
+                const float gate_value = gate[i];
+                const float sigmoid = 1.0f / (1.0f + std::exp(-gate_value));
+                output[i] *= sigmoid;
+            }
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (paged_decode_attn_split_f32_hip_kernel(
+            q_buffer,
+            gate_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            block_table_buffer,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            source_tile,
+            split_count,
+            workspace_buffer,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ?
+                "f32 paged decode split attention HIP kernel is unavailable" :
+                hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return paged_decode_attn_f32_hip_staging(
+        q_buffer,
+        gate_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_bytes,
+        gate_bytes,
+        k_bytes,
+        v_bytes,
+        block_table_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_paged_decode_attn_split_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return paged_decode_attn_split_f32_impl(
+        q_buffer,
+        nullptr,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        source_tile,
+        workspace_buffer,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_paged_decode_attn_split_sigmoid_gate_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (gate_buffer == nullptr) {
+        set_error("f32 paged decode split attention sigmoid gate received a null gate buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    return paged_decode_attn_split_f32_impl(
+        q_buffer,
+        gate_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        source_tile,
+        workspace_buffer,
+        output_buffer,
+        stream);
+}
+
 ullm_status ullm_runtime_paged_kv_write_f32(
     const ullm_runtime_buffer *k_buffer,
     const ullm_runtime_buffer *v_buffer,

@@ -3236,6 +3236,116 @@
     }
 
     #[test]
+    fn paged_decode_attn_split_workspace_bytes_checks_boundaries_and_overflow() {
+        assert_eq!(paged_decode_attn_split_workspace_bytes(1, 1, 1, 1).unwrap(), 12);
+        assert_eq!(
+            paged_decode_attn_split_workspace_bytes(4, 256, 513, 256).unwrap(),
+            4 * 3 * 258 * std::mem::size_of::<f32>()
+        );
+        for args in [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0)] {
+            assert!(paged_decode_attn_split_workspace_bytes(args.0, args.1, args.2, args.3)
+                .is_err());
+        }
+        assert!(paged_decode_attn_split_workspace_bytes(usize::MAX, 1, 2, 1).is_err());
+        assert!(paged_decode_attn_split_workspace_bytes(1, usize::MAX, 1, 1).is_err());
+    }
+
+    #[test]
+    fn cpu_paged_decode_attn_split_f32_plain_and_gated_match_expected() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_len = 5_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let source_tile = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let gate_values = (0..q_heads * value_dim)
+            .map(|index| ((index * 7) as f32 - 5.0) / 9.0)
+            .collect::<Vec<_>>();
+        let k_cache_values = (0..cache_blocks * block_size * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_cache_values = (0..cache_blocks * block_size * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let block_table_values = vec![2_u32, 0_u32, 3_u32];
+        let expected_plain = expected_paged_decode_attn(
+            &q_values,
+            &k_cache_values,
+            &v_cache_values,
+            &block_table_values,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let expected_gated = expected_sigmoid_mul(&gate_values, &expected_plain);
+        let workspace_bytes = paged_decode_attn_split_workspace_bytes(
+            q_heads,
+            value_dim,
+            cache_len,
+            source_tile,
+        )
+        .unwrap();
+
+        let mut q = context.alloc_buffer(q_values.len() * 4).unwrap();
+        let mut gate = context.alloc_buffer(gate_values.len() * 4).unwrap();
+        let mut k_cache = context.alloc_buffer(k_cache_values.len() * 4).unwrap();
+        let mut v_cache = context.alloc_buffer(v_cache_values.len() * 4).unwrap();
+        let mut block_table = context.alloc_buffer(block_table_values.len() * 4).unwrap();
+        let mut workspace = context.alloc_buffer(workspace_bytes).unwrap();
+        let mut plain_output = context.alloc_buffer(expected_plain.len() * 4).unwrap();
+        let mut gated_output = context.alloc_buffer(expected_gated.len() * 4).unwrap();
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream)).unwrap();
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream)).unwrap();
+        k_cache.copy_from_host(0, &f32s_to_le_bytes(&k_cache_values), Some(&mut stream)).unwrap();
+        v_cache.copy_from_host(0, &f32s_to_le_bytes(&v_cache_values), Some(&mut stream)).unwrap();
+        block_table.copy_from_host(0, &u32s_to_le_bytes(&block_table_values), Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        paged_decode_attn_split_f32(&q, &k_cache, &v_cache, &block_table, cache_len, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, softmax_scale, source_tile, &mut workspace, &mut plain_output, Some(&mut stream)).unwrap();
+        paged_decode_attn_split_sigmoid_gate_f32(&q, &gate, &k_cache, &v_cache, &block_table, cache_len, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim, softmax_scale, source_tile, &mut workspace, &mut gated_output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut plain_bytes = vec![0_u8; expected_plain.len() * 4];
+        let mut gated_bytes = vec![0_u8; expected_gated.len() * 4];
+        plain_output.copy_to_host(0, &mut plain_bytes, Some(&mut stream)).unwrap();
+        gated_output.copy_to_host(0, &mut gated_bytes, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&plain_bytes), &expected_plain, 1e-5);
+        assert_f32s_close(&le_bytes_to_f32s(&gated_bytes), &expected_gated, 1e-5);
+    }
+
+    #[test]
+    fn cpu_paged_decode_attn_split_f32_rejects_invalid_workspace_and_source_tile() {
+        let mut cpu = RuntimeContext::create(0).unwrap();
+        let q = cpu.alloc_buffer(4).unwrap();
+        let k_cache = cpu.alloc_buffer(4).unwrap();
+        let v_cache = cpu.alloc_buffer(4).unwrap();
+        let mut block_table = cpu.alloc_buffer(4).unwrap();
+        let mut short_workspace = cpu.alloc_buffer(11).unwrap();
+        let mut output = cpu.alloc_buffer(4).unwrap();
+        let error = paged_decode_attn_split_f32(&q, &k_cache, &v_cache, &block_table, 1, 1, 1, 1, 1, 1, 1, 1.0, 1, &mut short_workspace, &mut output, None).unwrap_err();
+        assert!(error.contains("out of bounds") || error.contains("workspace"), "{error}");
+        let mut workspace = cpu.alloc_buffer(12).unwrap();
+        let error = paged_decode_attn_split_f32(&q, &k_cache, &v_cache, &block_table, 1, 1, 1, 1, 1, 1, 1, 1.0, 0, &mut workspace, &mut output, None).unwrap_err();
+        assert!(error.contains("source_tile"), "{error}");
+        block_table.copy_from_host(0, &u32s_to_le_bytes(&[u32::MAX]), None).unwrap();
+        let error = paged_decode_attn_split_f32(&q, &k_cache, &v_cache, &block_table, 1, 1, 1, 1, 1, 1, 1, 1.0, 1, &mut workspace, &mut output, None).unwrap_err();
+        assert!(error.contains("block table"), "{error}");
+    }
+
+    #[test]
     fn cpu_paged_decode_attn_sigmoid_gate_f32_computes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();

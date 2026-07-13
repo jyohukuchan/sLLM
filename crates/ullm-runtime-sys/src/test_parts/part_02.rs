@@ -272,6 +272,145 @@
     }
 
     #[test]
+    fn hip_paged_decode_attn_split_f32_context_matrix_matches_cpu_when_available() {
+        let hip_devices: Vec<u32> = (1..device_count().unwrap())
+            .filter(|&device_index| {
+                device_info(device_index)
+                    .map(|info| info.backend == "hip")
+                    .unwrap_or(false)
+            })
+            .collect();
+        for device_index in hip_devices {
+            let mut context = RuntimeContext::create(device_index).unwrap();
+            for cache_len in [1_usize, 255, 256, 257, 513, 1339] {
+                for source_tile in [128_usize, 256] {
+                    assert_paged_decode_split_matches_expected(
+                        &mut context,
+                        cache_len,
+                        source_tile,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_hip_paged_decode_attn_split_f32_invalid_table_zeros_output_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let head_dim = 4_usize;
+        let value_dim = 4_usize;
+        let workspace_bytes =
+            paged_decode_attn_split_workspace_bytes(q_heads, value_dim, 1, 1).unwrap();
+        let mut q = context.alloc_buffer(q_heads * head_dim * 4).unwrap();
+        let mut k_cache = context.alloc_buffer(kv_heads * head_dim * 4).unwrap();
+        let mut v_cache = context.alloc_buffer(kv_heads * value_dim * 4).unwrap();
+        let mut block_table = context.alloc_buffer(4).unwrap();
+        let mut workspace = context.alloc_buffer(workspace_bytes).unwrap();
+        let mut output = context.alloc_buffer(q_heads * value_dim * 4).unwrap();
+        q.copy_from_host(
+            0,
+            &f32s_to_le_bytes(&vec![0.25; q_heads * head_dim]),
+            Some(&mut stream),
+        )
+        .unwrap();
+        k_cache
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![0.5; kv_heads * head_dim]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        v_cache
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![0.75; kv_heads * value_dim]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        block_table
+            .copy_from_host(0, &u32s_to_le_bytes(&[u32::MAX]), Some(&mut stream))
+            .unwrap();
+        output
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![42.0; q_heads * value_dim]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+        paged_decode_attn_split_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            1,
+            1,
+            1,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            0.5,
+            1,
+            &mut workspace,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+        let mut output_bytes = vec![0_u8; q_heads * value_dim * 4];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            le_bytes_to_f32s(&output_bytes),
+            vec![0.0; q_heads * value_dim]
+        );
+    }
+
+    #[test]
+    fn first_hip_paged_decode_attn_split_f32_rejects_cpu_workspace_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut hip = RuntimeContext::create(1).unwrap();
+        let mut cpu = RuntimeContext::create(0).unwrap();
+        let q = hip.alloc_buffer(4).unwrap();
+        let k_cache = hip.alloc_buffer(4).unwrap();
+        let v_cache = hip.alloc_buffer(4).unwrap();
+        let block_table = hip.alloc_buffer(4).unwrap();
+        let mut workspace = cpu.alloc_buffer(12).unwrap();
+        let mut output = hip.alloc_buffer(4).unwrap();
+        let error = paged_decode_attn_split_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1.0,
+            1,
+            &mut workspace,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("different backends") || error.contains("devices"), "{error}");
+    }
+
+    #[test]
     fn first_hip_paged_kv_write_f32_writes_expected_physical_slot_when_available() {
         if device_count().unwrap() < 2 {
             return;
