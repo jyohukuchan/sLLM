@@ -1,0 +1,38 @@
+{
+  "schema_version": "ullm.generic_reasoning_phase0_baseline_inventory.v1",
+  "status": "incomplete",
+  "source_commit_at_inventory": "cbe6d01",
+  "production_activation_performed": false,
+  "available_evidence": [
+    {
+      "path": "benchmarks/results/2026-07-13/qwen35-9b-aq4-native-prefill-smoke/resident-evidence.json",
+      "backend": "aq4",
+      "contains": ["prompt_token_ids", "generated_token_ids", "worker_events", "release_timings"],
+      "prompt_token_counts": [1, 8, 127, 128, 129, 255, 256],
+      "source_commit_aligned": false
+    },
+    {
+      "path": "benchmarks/results/2026-07-12/qwen35-9b-aq4-resident-openwebui-v0.1/summary.json",
+      "backend": "aq4",
+      "contains": ["http_smoke_summary", "streaming_eos", "max_tokens_termination", "cancel", "openwebui_browser"],
+      "source_commit_aligned": false
+    },
+    {
+      "path": "benchmarks/results/2026-07-12/sq8-openwebui-product-20260712-v0.1/raw-session-results.jsonl",
+      "backend": "sq8",
+      "contains": ["http_request_body", "http_response_body", "sse_and_browser_records"],
+      "source_commit_aligned": false
+    }
+  ],
+  "missing_for_phase0_gate": [
+    "same-HEAD AQ4 reasoning-disabled HTTP request and response bodies",
+    "same-HEAD AQ4 reasoning-disabled SSE event sequence",
+    "same-HEAD AQ4 generated token IDs for short and long chat prompts",
+    "AQ4 prompt token baselines at 1024, 2048, and 3072 tokens",
+    "machine-readable usage and token-count cross-check for the AQ4 HTTP/SSE run"
+  ],
+  "gate": {
+    "machine_readable_baseline_available": false,
+    "ambiguous_budget_definitions_remaining": false
+  }
+}
