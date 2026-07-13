@@ -120,6 +120,7 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         lambda value: value["cases"][2]["raw"].__setitem__("usage_completion_tokens", 1),
         lambda value: value["cases"][0].__setitem__("response", "secret"),
         lambda value: value["identity"].__setitem__("openwebui_image", "latest"),
+        lambda value: value["identity"].__setitem__("openwebui_image", "@sha256:" + "e" * 64),
         lambda value: value.__setitem__("source_commit", "head"),
         lambda value: value.__setitem__("source_commit_aligned", True),
         lambda value: value["cases"][0].__setitem__("sse_chunk_count", 0),
@@ -197,6 +198,14 @@ def test_validator_rejects_oversized_evidence_and_sse_count(tmp_path: Path) -> N
     path = tmp_path / "chunks.json"
     path.write_text(json.dumps(value), encoding="ascii")
     with pytest.raises(TOOL.ValidationError, match="chunk count"):
+        TOOL.validate(path)
+
+
+def test_validator_rejects_duplicate_json_fields(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate.json"
+    path.write_text('{"schema_version":"x","schema_version":"y"}', encoding="ascii")
+
+    with pytest.raises(TOOL.ValidationError, match="duplicate"):
         TOOL.validate(path)
 
 

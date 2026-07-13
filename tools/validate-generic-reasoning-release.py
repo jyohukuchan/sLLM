@@ -18,7 +18,7 @@ VALIDATOR_SCHEMA_VERSION = "ullm.generic_reasoning_release_validator.v1"
 REQUIRED_MODES = {"disabled", "budget-32", "budget-128", "budget-256", "unbounded"}
 HASH_FIELDS = {"manifest_sha256", "worker_binary_sha256", "tokenizer_sha256", "prompt_sha256"}
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
-IMAGE_DIGEST_RE = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*)?@sha256:[0-9a-f]{64}\Z")
+IMAGE_DIGEST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}\Z")
 FORBIDDEN_KEYS = {
     "prompt",
     "response",
@@ -46,12 +46,29 @@ def _load(path: Path) -> dict[str, Any]:
             raw = source.read(MAX_EVIDENCE_BYTES + 1)
         if len(raw) > MAX_EVIDENCE_BYTES:
             raise ValidationError("release evidence exceeds its size bound")
-        value = json.loads(raw.decode("utf-8"))
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValidationError("release evidence is not valid JSON") from error
     if not isinstance(value, dict):
         raise ValidationError("release evidence root must be an object")
     return value
+
+
+def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValidationError("release evidence contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value: str) -> None:
+    raise ValidationError("release evidence contains a non-finite number")
 
 
 def _scan_forbidden(value: Any) -> None:
