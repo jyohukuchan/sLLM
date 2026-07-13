@@ -1558,7 +1558,7 @@ pub struct OperationExecutionAudit {
     pub prefill_tokens_committed: u64,
     /// Index is the execution width. Index zero is reserved and must remain zero.
     pub prefill_width_histogram: Vec<u64>,
-    pub implementation_counts: [OperationExecutionCount; 10],
+    pub implementation_counts: [OperationExecutionCount; 14],
     #[serde(serialize_with = "serialize_sha256_hex")]
     pub deterministic_digest_sha256: [u8; 32],
     pub coverage_complete: bool,
