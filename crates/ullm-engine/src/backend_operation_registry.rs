@@ -107,13 +107,93 @@ struct Aq4ProbeBinding {
 const fn aq4_probe_binding(batch_count: usize) -> Aq4ProbeBinding {
     Aq4ProbeBinding {
         scale_count: 2,
-        group_size: 2,
+        group_size: 16,
         tensor_scale_bits: 1.0_f32.to_bits(),
         row_scale_count: 0,
-        rows: 2,
-        cols: 3,
+        rows: 32,
+        cols: 128,
         batch_count,
     }
+}
+
+impl Aq4ProbeBinding {
+    fn matrix_elements(self) -> Result<usize, String> {
+        self.rows
+            .checked_mul(self.cols)
+            .ok_or_else(|| "AQ4 probe matrix element count overflows".to_string())
+    }
+
+    fn packed_index_bytes(self) -> Result<usize, String> {
+        self.matrix_elements()?
+            .checked_add(1)
+            .map(|elements| elements / 2)
+            .ok_or_else(|| "AQ4 probe packed index byte count overflows".to_string())
+    }
+
+    fn scale_index_bytes(self) -> Result<usize, String> {
+        if self.group_size == 0 {
+            return Err("AQ4 probe group size must be greater than zero".to_string());
+        }
+        self.matrix_elements()?
+            .checked_add(self.group_size - 1)
+            .map(|elements| elements / self.group_size)
+            .ok_or_else(|| "AQ4 probe scale index byte count overflows".to_string())
+    }
+
+    fn input_elements(self) -> Result<usize, String> {
+        self.batch_count
+            .checked_mul(self.cols)
+            .ok_or_else(|| "AQ4 probe input element count overflows".to_string())
+    }
+
+    fn output_elements(self) -> Result<usize, String> {
+        self.batch_count
+            .checked_mul(self.rows)
+            .ok_or_else(|| "AQ4 probe output element count overflows".to_string())
+    }
+}
+
+fn aq4_probe_packed_indices(binding: Aq4ProbeBinding) -> Result<Vec<u8>, String> {
+    let bytes = binding.packed_index_bytes()?;
+    (0..bytes)
+        .map(|byte_index| {
+            let high_index = byte_index
+                .checked_add(1)
+                .ok_or_else(|| "AQ4 probe packed index pattern overflows".to_string())?
+                % 16;
+            let low_index = byte_index % 16;
+            let high_index = u8::try_from(high_index)
+                .map_err(|_| "AQ4 probe packed high index exceeds u8".to_string())?;
+            let low_index = u8::try_from(low_index)
+                .map_err(|_| "AQ4 probe packed low index exceeds u8".to_string())?;
+            Ok(low_index | (high_index << 4))
+        })
+        .collect()
+}
+
+fn aq4_probe_scale_indices(binding: Aq4ProbeBinding) -> Result<Vec<u8>, String> {
+    if binding.scale_count == 0 {
+        return Err("AQ4 probe scale table is empty".to_string());
+    }
+    (0..binding.scale_index_bytes()?)
+        .map(|group| {
+            u8::try_from(group % binding.scale_count)
+                .map_err(|_| "AQ4 probe scale index exceeds u8".to_string())
+        })
+        .collect()
+}
+
+fn aq4_probe_codebook_bytes() -> Vec<u8> {
+    (0..16_u32)
+        .flat_map(|value| (value as f32).to_le_bytes())
+        .collect()
+}
+
+fn aq4_probe_scale_value_bytes() -> Vec<u8> {
+    [0.5_f32, 2.0_f32]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect()
 }
 
 /// A hard bound that prevents a package or plugin from growing registry memory without limit.
@@ -643,23 +723,20 @@ impl DeviceCapabilities {
         }
         if policy.contains(RuntimeFeature::HipAq4MatvecBatch) {
             let binding = aq4_probe_binding(128);
-            let mut index = context.alloc_buffer(3)?;
-            index.copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(stream))?;
-            let mut scale = context.alloc_buffer(3)?;
-            scale.copy_from_host(0, &[0_u8, 1, 0], Some(stream))?;
-            let mut codebook = context.alloc_buffer(16 * 4)?;
-            let codebook_bytes = (0..16_u32)
-                .flat_map(|value| (value as f32).to_le_bytes())
-                .collect::<Vec<_>>();
+            let packed_indices = aq4_probe_packed_indices(binding)?;
+            let scale_indices = aq4_probe_scale_indices(binding)?;
+            let codebook_bytes = aq4_probe_codebook_bytes();
+            let scale_value_bytes = aq4_probe_scale_value_bytes();
+            let mut index = context.alloc_buffer(packed_indices.len())?;
+            index.copy_from_host(0, &packed_indices, Some(stream))?;
+            let mut scale = context.alloc_buffer(scale_indices.len())?;
+            scale.copy_from_host(0, &scale_indices, Some(stream))?;
+            let mut codebook = context.alloc_buffer(codebook_bytes.len())?;
             codebook.copy_from_host(0, &codebook_bytes, Some(stream))?;
-            let mut scale_values = context.alloc_buffer(2 * 4)?;
-            let scale_value_bytes = [0.5_f32, 2.0_f32]
-                .into_iter()
-                .flat_map(f32::to_le_bytes)
-                .collect::<Vec<_>>();
+            let mut scale_values = context.alloc_buffer(scale_value_bytes.len())?;
             scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
-            let input = zeros(context, stream, binding.batch_count * binding.cols)?;
-            let mut output = zeros(context, stream, binding.batch_count * binding.rows)?;
+            let input = zeros(context, stream, binding.input_elements()?)?;
+            let mut output = zeros(context, stream, binding.output_elements()?)?;
             ullm_runtime_sys::aq4_matvec_batch_f32(
                 &index,
                 &scale,
@@ -4761,21 +4838,80 @@ mod tests {
     }
 
     #[test]
-    fn aq4_m128_probe_binding_keeps_scale_count_distinct_from_batch_count() {
+    fn aq4_m128_probe_binding_matches_register_geometry_and_packed_layout() {
         let binding = aq4_probe_binding(128);
         assert_eq!(binding.scale_count, 2);
-        assert_eq!(binding.group_size, 2);
+        assert_eq!(binding.group_size, 16);
         assert_eq!(binding.tensor_scale_bits, 1.0_f32.to_bits());
         assert_eq!(binding.row_scale_count, 0);
-        assert_eq!(binding.rows, 2);
-        assert_eq!(binding.cols, 3);
+        assert_eq!(binding.rows, 32);
+        assert_eq!(binding.cols, 128);
         assert_eq!(binding.batch_count, 128);
         assert_ne!(binding.scale_count, binding.batch_count);
+        assert_eq!(binding.matrix_elements().unwrap(), 4_096);
+        assert_eq!(binding.packed_index_bytes().unwrap(), 2_048);
+        assert_eq!(binding.scale_index_bytes().unwrap(), 256);
+        assert_eq!(binding.input_elements().unwrap(), 16_384);
+        assert_eq!(binding.output_elements().unwrap(), 4_096);
+        assert_eq!(
+            binding
+                .input_elements()
+                .unwrap()
+                .checked_mul(std::mem::size_of::<f32>()),
+            Some(65_536)
+        );
+        assert_eq!(
+            binding
+                .output_elements()
+                .unwrap()
+                .checked_mul(std::mem::size_of::<f32>()),
+            Some(16_384)
+        );
+
+        let packed_indices = aq4_probe_packed_indices(binding).unwrap();
+        assert_eq!(packed_indices.len(), 2_048);
+        for (byte_index, packed) in packed_indices.into_iter().enumerate() {
+            assert_eq!(packed & 0x0f, (byte_index % 16) as u8);
+            assert_eq!(packed >> 4, ((byte_index + 1) % 16) as u8);
+        }
+        let scale_indices = aq4_probe_scale_indices(binding).unwrap();
+        assert_eq!(scale_indices.len(), 256);
+        assert!(
+            scale_indices
+                .iter()
+                .all(|&index| usize::from(index) < binding.scale_count)
+        );
+        assert_eq!(aq4_probe_codebook_bytes().len(), 16 * 4);
+        assert_eq!(aq4_probe_scale_value_bytes().len(), binding.scale_count * 4);
 
         force_probe_failure(ProbeFaultStage::Aq4MatvecBatch);
         let error = probe_fault_checkpoint(9, "aq4-matvec-batch").unwrap_err();
         assert!(error.contains("aq4-matvec-batch"));
         probe_fault_checkpoint(9, "aq4-matvec-batch").unwrap();
+    }
+
+    #[test]
+    fn aq4_m128_probe_binding_selects_register_bm8_when_classifier_is_callable() {
+        if std::env::var("ULLM_EXPERIMENTAL_HIP_AQ4_REGISTER_BM").as_deref() != Ok("8") {
+            return;
+        }
+        let Some(device_index) = (1..ullm_runtime_sys::device_count().unwrap()).find(|&index| {
+            ullm_runtime_sys::device_info(index)
+                .is_ok_and(|info| info.backend == "hip" && info.gcn_arch_name == "gfx1201")
+        }) else {
+            return;
+        };
+        let binding = aq4_probe_binding(128);
+        assert_eq!(
+            ullm_runtime_sys::aq4_matvec_batch_dispatch_kind_for_shape(
+                device_index,
+                binding.group_size,
+                binding.rows,
+                binding.cols,
+                binding.batch_count,
+            ),
+            ullm_runtime_sys::Aq4MatvecBatchDispatchKind::RegisterBm8
+        );
     }
 
     #[test]
