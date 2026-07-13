@@ -1,19 +1,28 @@
 # Generic reasoning and thinking budget production plan v0.1
 
-Status: in progress; offline implementation and contract tests are advanced; production gates remain pending
+Status: in progress; current-source evidence is refreshed; the 100-chat UI soak and identity-matched p95 comparison remain pending
 
 Date: 2026-07-13
 
-Last handoff audit: 2026-07-13
+Last handoff audit: 2026-07-14
 
-Current implementation status: Phase 0 evidence is incomplete, while the v2
-schema/manifest contract, Gateway path, synthetic reasoning state machine, AQ4
-forced-close path, release accounting, and offline regression tests are in
-place. The active production service remains the v1 path; OpenWebUI E2E,
-same-HEAD GPU baseline, soak, benchmark, promotion evidence, activation, and
-rollback are not complete. The v2 evidence bootstrap and an R9700-exclusive
-alternating OpenWebUI provider-switch runner are implemented, but neither has
-been exercised against the production services.
+Current implementation status: the v2 schema/manifest contract, Gateway path,
+synthetic reasoning state machine, AQ4 forced-close path, release accounting,
+promotion evidence, release evidence, atomic activation, and rollback path are
+in place. The forced-end accounting path at the completion-length boundary was
+fixed and covered for both stream and non-stream responses. The current service
+is active/running with `NRestarts=0` and a temporary same-worker v2-to-v2
+evidence candidate: manifest SHA
+`feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44`, source
+commit `ae8b2bb7c2735f4dc761773957bf45f470dd5a8c`. Phase 0 is now complete and
+gate-eligible because resident promotion evidence supplies sanitized worker-side
+generated-token evidence without prompt or response text. The current-source
+HTTP/SSE campaign covers 60 cases with 60/60 correctness, zero overshoot, zero
+empty answers, and 60/60 lifecycle resets. The p50 disabled regression remains
+within threshold, while a formal p95 decision is still open because the prior
+comparison has only two disabled samples. The normal 100-chat OpenWebUI soak
+still stops at `/api/v1/auths/` with HTTP 401 before the first browser case;
+therefore the final complete production bundle has not been declared.
 
 ## 前回の要点
 
@@ -41,8 +50,11 @@ been exercised against the production services.
 
 ## 次の行動
 
-実装指示を受けたら、現行AQ4のAPI・token列・性能基準を保存し、Phase 0の仕様固定から
-開始する。Gatewayだけの表示試作やQwen専用の強制終了処理を先行してproductionへ入れない。
+現行ソースの60-case HTTP/SSE集計とPhase 0 complete証跡を基準として保持する。次は、旧v2と
+同一fixture数のdisabled baselineを取得してp95判定を閉じる。OpenWebUIの100-chat gateは、
+`/api/v1/auths/`の認証状態を安全な運用手順で修復できた後に再実行する。browser証跡が現行
+sourceへ結合できるまでは、v2-to-v2 bootstrap candidateを正式なProduction昇格完了として
+扱わない。
 
 ## 1. 目的
 

@@ -1,10 +1,12 @@
 # AQ4 reasoning and OpenWebUI release contract v0.1
 
-Status: proposed; runtime activation is not complete
+Status: current-source evidence candidate active; final production bundle, formal p95 comparison, and 100-chat stability gate remain open
 
 This document defines the release boundary for Qwen3.5 9B AQ4 reasoning on the
-R9700 resident worker. It does not change the OpenWebUI image and does not
-authorize activation of a v2 manifest.
+R9700 resident worker. It does not change the OpenWebUI image. The current v2
+candidate is active through an explicit same-worker v2-to-v2 bootstrap evidence
+path. This document does not declare the final complete production bundle or
+the remaining formal performance and stability gates passed.
 
 ## 1. Bound identity
 
@@ -19,8 +21,10 @@ An activation candidate MUST bind all of the following through the generated
   EOS policy, history policy, and answer reservation;
 - package and promotion-evidence hashes.
 
-The manifest schema and worker protocol versions MUST be aligned. The active
-v1 manifest and v1 worker remain the rollback target.
+The manifest schema and worker protocol versions MUST be aligned. The prior
+active v2 manifest, systemd unit, and environment file are retained in the
+activation bundle as the rollback target; the older v1 profile remains an
+operational fallback where required.
 
 ## 2. OpenAI and OpenWebUI behavior
 
@@ -169,8 +173,17 @@ UI patch is allowed.
 ## 6. Current state
 
 The repository has v2 schema, Gateway, worker, and AQ4 session contract tests,
-including synthetic multi-token reasoning. The current production service is
-still v1. The dated Phase 0 inventory remains incomplete because same-HEAD AQ4
-token IDs, identity-aligned HTTP/SSE evidence, and full browser/release
-evidence have not yet been collected. A hash-only long-prompt probe exists, but
-its active promotion source does not match the current source commit.
+including synthetic multi-token reasoning. The current service is active/running
+with `NRestarts=0`, using a temporary same-worker v2-to-v2 evidence candidate
+manifest SHA `feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44`
+from source commit `ae8b2bb7c2735f4dc761773957bf45f470dd5a8c`. The current-source
+HTTP/SSE evidence covers 60 cases with 60/60 correctness, zero budget
+overshoot, zero empty answers, and 60/60 lifecycle resets. The Phase 0 HTTP
+artifact is now complete and gate-eligible: resident promotion evidence binds
+the sanitized worker-generated token evidence to the same source, manifest, and
+worker identity. The 10-case current-source release evidence independently
+validates, but it is not yet a final complete production bundle because
+source-bound browser evidence is missing. The normal 100-chat OpenWebUI gate
+still receives HTTP 401 from `/api/v1/auths/` before the first chat case starts.
+The previous active manifest is retained at
+`previous-active-reasoning-v2-v0.1-ae8b2bb.json` for rollback.

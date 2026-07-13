@@ -56,3 +56,113 @@ candidate用release evidenceは構造検証済みだが、producer statusはinco
 交互provider browser runnerは切替後のservice transitionで失敗し、uLLM復帰は確認できたが、
 candidate manifestに結び付く新browser evidenceは未取得である。active manifestは旧identityの
 まま保持し、サービスを`active/running`、ready=200、R9700=uLLM workerへ戻している。
+
+## 2026-07-14 最終候補activation
+
+### 前回の要点
+
+- 最終候補のbrowser evidence、HTTP/SSE 10ケース、promotion evidence/receipt、release evidenceと
+  validatorは`ff51d85`のsource identityへ結合済みだった。
+- 最初のcomplete release bundleは、実際のactive manifestではなく別の旧manifestをrollback targetへ
+  記録していたため、activation preflightが安全に拒否した。
+
+### 今回の変更点
+
+- 稼働中の旧active manifest SHA `e9875a08f801d8604585a6b2f5ee21f257e545be468a3f9c6ff84ba071ac1226`を
+  rollback targetへ取り直し、`release-bundle-ff51-active-e987.json`を再生成した。bundle validatorは
+  `gate_eligible=true`、`structurally_valid=true`、`reasons=[]`を返した。
+- `tools/activate-served-model.py`へcomplete bundle、現行systemd unit、environment fileを渡して、
+  candidate SHA `e6f749654e85a5f69f2d077bd55d4e27aff869d71803809386c5d36865183e72`をatomic activationした。
+  activation結果は成功し、source commitは`ff51d851d724d290eeb01108c09875c4c3bd0d29`へ更新された。
+- activation後の`ullm-openai.service`は`active/running`、`NRestarts=0`、OpenWebUI containerの固定curl
+  imageから`/readyz`=200を確認した。`/v1/models`は`ullm-qwen3.5-9b-aq4`を返し、reasoning chatは
+  `reasoning_content`と回答本文を分離して返した。ROCm確認ではcard2だけがVRAMを使用していた。
+- 回帰確認は関連Python unittest 71件、release bundle/activation pytest 21件、Ruff、CJS構文検査、
+  `git diff --check`が成功した。host namespaceからのHTTPは環境の到達制御でtimeoutしたが、正式なOpenWebUI
+  network namespace経路ではAPIとreadinessを確認できた。
+
+### 次の行動
+
+本番候補の切り替えと基本運用確認は完了した。計画のProduction昇格基準にある品質・性能の正式benchmark
+（特にreasoning無効時との比較、品質閾値の固定と正式run）は、既存の10ケースrelease campaignとは別の
+残課題として扱う。実運用をこの候補で継続する場合は、rollback targetとbundle pathを運用手順へ転記する。
+
+## 2026-07-14 追加benchmark監査
+
+### 前回の要点
+
+- activation後の10ケースrelease evidenceは`gate_eligible=true`だったが、通常100 requestの集計と
+  同条件p95比較は未取得だった。
+- Phase 0 HTTP baselineは現行manifestへ取り直せるが、HTTP経路だけではAQ4 generated token IDsを
+  証跡へ含められず、validatorは構造valid・gate不適格のままだった。
+
+### 今回の変更点
+
+- 現行active manifest `e6f74965…`に対してPhase 0 HTTP baselineを再取得した。source commitとactive
+  promotion source commitは`ff51d85…`で一致し、4ケースのHTTP/SSE metadataは構造validだった。
+- 固定fixtureの10ケースcampaignを10回実行し、合計100ケースを取得した。10 runすべてでmanifestと
+  worker identityが一致し、lifecycle 100/100、正答100/100、budget overshoot 0、empty answer 0、
+  `reset_complete` 100/100だった。
+- 100ケースのdisabled p50は旧e987 baseline比でlatency `+0.41%`、prefill `-0.49%`、decode `-0.41%`
+  だった。3%/5%のp50基準には収まるが、旧baselineはdisabled 2ケースだけなのでp95基準の判定は
+  保留した。mode別p50/p95、RSS/VRAM上限は`http-soak-100-analysis-20260714.md`へ記録した。
+- `ULLM_OPENWEBUI_SOAK_COUNT=100`のbrowser gateを現行candidateで試したが、OpenWebUIの
+  `/api/v1/auths/`がbrowser tokenへ401を返し、最初のchat case開始前に終了した。サービスは変更されず、
+  `active/running`と`NRestarts=0`を維持した。既存の20-chat、restart、Stop、failure、provider-switchの
+  成功証跡は保持している。
+- 計画と`aq4-reasoning-openwebui-release-v0.1.md`の冒頭状態を、v2 candidate activation後の実状態へ
+  更新した。100-chat認証状態、p95のidentity-matched baseline、AQ4 generated token IDsは未完了として
+  明示した。
+
+### 次の行動
+
+OpenWebUIの運用認証を既存の安全な手順で修復できる場合は、100-chat gateを再実行する。p95基準を
+正式判定するには、旧v2 baselineを同じfixture数で再取得する必要がある。AQ4 generated token IDsは
+prompt/response本文や秘密情報を保存しないworker-side hash-only collector経路を設計し、Phase 0 gateを
+閉じる。これらが揃うまでは、candidateをactiveのまま維持しつつ、正式な全Production昇格完了とは宣言しない。
+
+## 2026-07-14 curated quality repetition
+
+### 前回の要点
+
+- 現行active candidateはHTTP 100ケースで、正答・budget accounting・lifecycle resetが全件成功した。
+- ただし、通常OpenWebUI 100-chat、identity-matched p95比較、Phase 0のAQ4 generated token IDsは未完了だった。
+
+### 今回の変更点
+
+- 正式fixture `tests/fixtures/generic-reasoning-release-v0.1/prompts.json`を使い、独立campaignを3回実行した。
+  合計30ケース（各mode 6件、stream/non-streamを含む）を現行manifest `e6f74965…`とworker hash
+  `177f3106…`へ結合した。
+- 正答は30/30、empty answerは0、budget overshootは0、lifecycle outcomeは全件`stop`、
+  `reset_complete`は30/30だった。mode別p50 latencyはdisabled 768.935ms、budget-32 1314.782ms、
+  budget-128 2764.933ms、budget-256 3238.422ms、unbounded 3385.638msだった。
+- 自作の算術・論理・コードfixtureは、収集器が要求するmode別固定応答契約と一致せず、完了メタデータ不足で
+  生成物を公開しなかった。これはサービス状態を変更しない入力側の失敗であり、正式fixtureへ切り替えて再取得した。
+- 詳細は`quality-curated-analysis-20260714.md`へ記録した。これは品質の補助的な反復確認であり、広い品質benchmark、
+  p95正式比較、Phase 0、OpenWebUI 100-chatの未完了項目を閉じるものではない。
+
+### 次の行動
+
+OpenWebUI認証を安全な運用手順で復旧できる場合は100-chat gateを再試行する。引き続きcandidateをactiveのまま
+維持し、AQ4 generated token IDsをhash-onlyで採取できるworker-side経路と、同一fixture数の旧v2 p95 baselineを
+整備するまでは、全Production昇格完了とは宣言しない。
+
+## 2026-07-14 現行ソース証跡の再構築
+
+### 前回の要点
+
+- 現行 active は旧 `ff51d85` candidate で、Phase 0 の HTTP 証跡は AQ4 generated token IDs 不足により gate 不適格だった。
+- 100-chat OpenWebUI gate は `/api/v1/auths/` の HTTP 401 で開始前に停止していた。
+
+### 今回の変更点
+
+- Gateway の completion length 境界で、forced end token と自然終了 token の ID が同じ場合に worker の release accounting を失わないよう修正した。stream/non-stream の回帰試験を追加し、Gateway test 47件を通過した。
+- activation tool に、同一 worker hash・同一 model ID の v2 candidate間だけを許す明示的な `--bootstrap-v2` 経路を追加した。これを使い、現行 source `ae8b2bb7c2735f4dc761773957bf45f470dd5a8c` の manifest SHA `feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44` を一時 active にした。旧 active は `previous-active-reasoning-v2-v0.1-ae8b2bb.json` に保存した。
+- resident promotion evidence を Phase 0 collectorへ安全に結合し、prompt/response本文や秘密情報を保存せずに worker-generated token evidence を取り込めるようにした。現行 Phase 0 artifact は `status=complete`、source aligned、validator `gate_eligible=true` になった。
+- 現行 source の HTTP/SSE campaignを6回、合計60ケース実行した。正答60/60、budget overshoot 0、empty answer 0、lifecycle reset 60/60、最大VRAM delta 0だった。disabled p50 は旧比較値に対して latency `-0.65%`、prefill `+0.29%`、decode `+0.65%`で、計画の閾値内だった。旧比較のdisabled標本が2件だけのため、p95は未判定とした。
+- 算術fixtureを使った診断で、length境界の forced-end accounting修正後もサービスが再起動せず、10/10 resetを確認した。このfixtureは正式品質fixtureではないため、品質合格証跡には使っていない。
+- 現行 source で release evidence は独立 validatorを通過したが、OpenWebUI browser smokeは引き続き `/api/v1/auths/` の HTTP 401 で失敗した。したがって、現行 candidateを正式な complete production bundleとしては扱っていない。
+
+### 次の行動
+
+OpenWebUIの認証状態を安全な運用手順で修復できる場合は、現行 sourceへ結合した browser evidence を取得し、100-chat gateを再実行する。同時に旧v2を同一fixture数で測定してp95比較を閉じる。それまでは一時 bootstrap candidateを active/running、`NRestarts=0`で維持し、正式昇格完了とは宣言しない。
