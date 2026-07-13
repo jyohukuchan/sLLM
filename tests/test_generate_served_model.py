@@ -193,6 +193,52 @@ def test_v2_generator_profile_requires_reasoning(tmp_path: Path) -> None:
         GENERATOR.materialize(profile_path)
 
 
+def test_v2_promotion_validator_recomputes_budget_zero_case() -> None:
+    manifest = {
+        "worker": {"protocol": "ullm.worker.v2"},
+        "reasoning": {
+            "dialect_id": "synthetic.multi-token.v1",
+            "end_token_ids": [20, 21],
+            "forced_end_token_ids": [20, 21],
+            "reserved_answer_tokens": 1,
+        },
+    }
+    evidence = {
+        "resident": {
+            "ready": {"schema_version": "ullm.worker.v2"},
+            "cases": [
+                {"id": "raw-p0001-g0004", "tokens": [30]},
+                {
+                    "id": "reasoning-budget-zero",
+                    "reasoning": {
+                        "enabled": True,
+                        "budget_tokens": 0,
+                        "dialect_id": "synthetic.multi-token.v1",
+                        "end_token_ids": [20, 21],
+                        "forced_end_token_ids": [20, 21],
+                        "reserved_answer_tokens": 1,
+                    },
+                    "reasoning_usage": {
+                        "reasoning_tokens": 0,
+                        "forced_end_tokens": 2,
+                    },
+                    "tokens": [20, 21, 30],
+                },
+            ],
+        },
+        "legacy": {
+            "ready": {"schema_version": "ullm.worker.v1"},
+            "cases": [{"id": "raw-p0001-g0004", "tokens": [30]}],
+        },
+    }
+
+    GENERATOR._validate_v2_reasoning_evidence(evidence, manifest)
+
+    evidence["resident"]["cases"][1]["tokens"] = [30, 20, 21]
+    with pytest.raises(GENERATOR.GenerationError, match="accounting"):
+        GENERATOR._validate_v2_reasoning_evidence(evidence, manifest)
+
+
 def test_missing_promotion_receipt_fails_without_output(tmp_path: Path) -> None:
     profile = write_profile(tmp_path, receipt_exists=False)
     output = tmp_path / "served-model.json"
@@ -257,9 +303,10 @@ def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
         "ephemeral_bundle": {"manifest": bound_manifest},
         "resident": {
             "clean_shutdown": True,
+            "cases": [{"id": "fixture", "tokens": [1, 2]}],
             "child_process_checks": [{"sibling_engine_count": 0}],
         },
-        "legacy": {"clean_shutdown": True},
+        "legacy": {"clean_shutdown": True, "cases": [{"id": "fixture", "tokens": [1, 2]}]},
         "comparisons": [{"id": "fixture", "tokens_exact_match": True}],
     }
     evidence_path = root / "resident-evidence.json"
@@ -322,6 +369,10 @@ def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path)
         (
             lambda value: value["comparisons"][0].__setitem__("tokens_exact_match", False),
             "comparisons",
+        ),
+        (
+            lambda value: value["resident"]["cases"][0].__setitem__("tokens", [99]),
+            "token comparisons",
         ),
         (
             lambda value: value["resident"].__setitem__("clean_shutdown", False),

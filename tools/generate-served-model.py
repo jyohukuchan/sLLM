@@ -134,12 +134,7 @@ def _validate_aq4_evidence(
     if evidence.get("worker_binary_sha256") != worker_sha256:
         raise GenerationError("AQ4 promotion evidence worker SHA-256 differs")
 
-    comparisons = evidence.get("comparisons")
-    if not isinstance(comparisons, list) or not comparisons or any(
-        not isinstance(item, dict) or item.get("tokens_exact_match") is not True
-        for item in comparisons
-    ):
-        raise GenerationError("AQ4 promotion evidence comparisons are incomplete")
+    _validate_aq4_token_comparisons(evidence)
     for mode in ("resident", "legacy"):
         result = evidence.get(mode)
         if not isinstance(result, dict) or result.get("clean_shutdown") is not True:
@@ -182,6 +177,135 @@ def _validate_aq4_evidence(
         "manifest_sha256": package_manifest_sha256,
     }:
         raise GenerationError("AQ4 promotion evidence package identity differs")
+    if profile.get("worker", {}).get("protocol") == "ullm.worker.v2":
+        _validate_v2_reasoning_evidence(evidence, manifest)
+
+
+def _validate_aq4_token_comparisons(evidence: dict[str, Any]) -> None:
+    comparisons = evidence.get("comparisons")
+    resident = evidence.get("resident")
+    legacy = evidence.get("legacy")
+    resident_cases = resident.get("cases") if isinstance(resident, dict) else None
+    legacy_cases = legacy.get("cases") if isinstance(legacy, dict) else None
+    if (
+        not isinstance(comparisons, list)
+        or not comparisons
+        or not isinstance(resident_cases, list)
+        or not isinstance(legacy_cases, list)
+    ):
+        raise GenerationError("AQ4 promotion evidence comparisons are incomplete")
+
+    def comparable_cases(cases: list[Any]) -> dict[str, list[int]]:
+        result: dict[str, list[int]] = {}
+        for case in cases:
+            if not isinstance(case, dict) or case.get("id") == "reasoning-budget-zero":
+                continue
+            case_id = case.get("id")
+            tokens = case.get("tokens")
+            if (
+                not isinstance(case_id, str)
+                or not case_id
+                or case_id in result
+                or not isinstance(tokens, list)
+                or not all(isinstance(token, int) and token >= 0 for token in tokens)
+            ):
+                raise GenerationError("AQ4 promotion evidence token cases are invalid")
+            result[case_id] = tokens
+        return result
+
+    resident_by_id = comparable_cases(resident_cases)
+    legacy_by_id = comparable_cases(legacy_cases)
+    if resident_by_id.keys() != legacy_by_id.keys():
+        raise GenerationError("AQ4 promotion evidence comparable case IDs differ")
+    comparison_ids: set[str] = set()
+    for item in comparisons:
+        if not isinstance(item, dict):
+            raise GenerationError("AQ4 promotion evidence comparisons are incomplete")
+        case_id = item.get("id")
+        if (
+            not isinstance(case_id, str)
+            or case_id in comparison_ids
+            or item.get("tokens_exact_match") is not True
+            or case_id not in resident_by_id
+            or resident_by_id[case_id] != legacy_by_id[case_id]
+        ):
+            raise GenerationError("AQ4 promotion evidence token comparisons differ")
+        comparison_ids.add(case_id)
+    if comparison_ids != resident_by_id.keys():
+        raise GenerationError("AQ4 promotion evidence comparisons are incomplete")
+
+
+def _validate_v2_reasoning_evidence(
+    evidence: dict[str, Any], manifest: dict[str, Any]
+) -> None:
+    """Recompute the deterministic v2 promotion case from raw token records."""
+
+    reasoning = manifest.get("reasoning")
+    worker = manifest.get("worker")
+    if not isinstance(reasoning, dict) or not isinstance(worker, dict):
+        raise GenerationError("AQ4 v2 promotion evidence lacks reasoning binding")
+    resident = evidence.get("resident")
+    legacy = evidence.get("legacy")
+    if not isinstance(resident, dict) or not isinstance(legacy, dict):
+        raise GenerationError("AQ4 v2 promotion evidence lacks worker results")
+    resident_ready = resident.get("ready")
+    legacy_ready = legacy.get("ready")
+    if (
+        not isinstance(resident_ready, dict)
+        or not isinstance(legacy_ready, dict)
+        or resident_ready.get("schema_version") != "ullm.worker.v2"
+    ):
+        raise GenerationError("AQ4 v2 resident ready schema differs")
+    if legacy_ready.get("schema_version") != "ullm.worker.v1":
+        raise GenerationError("AQ4 v2 legacy ready schema differs")
+
+    resident_cases = resident.get("cases")
+    legacy_cases = legacy.get("cases")
+    if not isinstance(resident_cases, list) or not isinstance(legacy_cases, list):
+        raise GenerationError("AQ4 v2 promotion evidence cases are incomplete")
+    reasoning_cases = [
+        case
+        for case in resident_cases
+        if isinstance(case, dict) and case.get("id") == "reasoning-budget-zero"
+    ]
+    if len(reasoning_cases) != 1:
+        raise GenerationError("AQ4 v2 promotion evidence reasoning case is missing")
+    raw_cases = [
+        case
+        for case in resident_cases
+        if isinstance(case, dict) and case.get("id") != "reasoning-budget-zero"
+    ]
+    if len(raw_cases) != len(legacy_cases):
+        raise GenerationError("AQ4 v2 promotion evidence raw case counts differ")
+    reasoning_case = reasoning_cases[0]
+    request = reasoning_case.get("reasoning")
+    if not isinstance(request, dict):
+        raise GenerationError("AQ4 v2 promotion reasoning request is absent")
+    if (
+        request.get("enabled") is not True
+        or request.get("budget_tokens") != 0
+        or request.get("dialect_id") != reasoning.get("dialect_id")
+        or request.get("end_token_ids") != reasoning.get("end_token_ids")
+        or request.get("forced_end_token_ids") != reasoning.get("forced_end_token_ids")
+        or request.get("reserved_answer_tokens") != reasoning.get("reserved_answer_tokens")
+    ):
+        raise GenerationError("AQ4 v2 promotion reasoning request differs")
+    usage = reasoning_case.get("reasoning_usage")
+    forced_end = reasoning.get("forced_end_token_ids")
+    reserved_answer = reasoning.get("reserved_answer_tokens")
+    tokens = reasoning_case.get("tokens")
+    if (
+        not isinstance(usage, dict)
+        or usage.get("reasoning_tokens") != 0
+        or not isinstance(forced_end, list)
+        or not isinstance(reserved_answer, int)
+        or reserved_answer < 1
+        or usage.get("forced_end_tokens") != len(forced_end)
+        or not isinstance(tokens, list)
+        or len(tokens) < len(forced_end) + reserved_answer
+        or tokens[: len(forced_end)] != forced_end
+    ):
+        raise GenerationError("AQ4 v2 promotion reasoning accounting is incomplete")
 
 
 def _load_validator() -> ModuleType:

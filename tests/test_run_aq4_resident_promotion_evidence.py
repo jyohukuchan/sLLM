@@ -24,6 +24,10 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 TOOL = load_module("test_run_aq4_resident_promotion_evidence_tool", TOOL_PATH)
+GENERATOR = load_module(
+    "test_run_aq4_resident_promotion_evidence_generator",
+    ROOT / "tools/generate-served-model.py",
+)
 
 
 FAKE_WORKER = r'''#!/usr/bin/env python3
@@ -248,6 +252,9 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> Non
         "reasoning_tokens": 0,
         "forced_end_tokens": 2,
     }
+    GENERATOR._validate_v2_reasoning_evidence(
+        document, document["ephemeral_bundle"]["manifest"]
+    )
     assert [case["id"] for case in document["legacy"]["cases"]] == [
         "raw-p0001-g0004",
         "raw-p0008-g0004",
