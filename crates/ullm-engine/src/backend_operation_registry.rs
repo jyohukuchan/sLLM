@@ -31,6 +31,7 @@ enum ProbeFaultStage {
     PagedKvWriteChunk = 13,
     PagedCausalGqaChunk = 14,
     Aq4RegisterBm8 = 15,
+    PagedDecodeSplit = 16,
 }
 
 #[cfg(test)]
@@ -57,8 +58,8 @@ fn probe_cache_key(capabilities: &DeviceCapabilities) -> ProbeCacheKey {
 }
 
 #[cfg(test)]
-static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 16] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 16];
+static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 17] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 17];
 
 #[cfg(test)]
 std::thread_local! {
@@ -320,6 +321,8 @@ pub enum RuntimeFeature {
     HipQkNormRopeBatch = 10,
     /// Direct gfx1201/group16 register BM8 AQ4 GEMM ABI capability.
     HipAq4RegisterBm8 = 11,
+    /// Generic source-tiled paged decode attention ABI capability.
+    HipPagedDecodeAttentionSplit = 12,
 }
 
 /// Canonical production guard for a probed runtime feature.
@@ -345,6 +348,9 @@ pub const fn runtime_feature_environment(feature: RuntimeFeature) -> &'static st
         RuntimeFeature::HipPagedCausalGqaChunk => "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
         RuntimeFeature::HipQkNormRopeBatch => "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
         RuntimeFeature::HipAq4RegisterBm8 => "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+        RuntimeFeature::HipPagedDecodeAttentionSplit => {
+            "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+        }
     }
 }
 
@@ -381,6 +387,7 @@ impl DeviceCapabilities {
                 RuntimeFeature::HipPagedCausalGqaChunk,
                 RuntimeFeature::HipQkNormRopeBatch,
                 RuntimeFeature::HipAq4RegisterBm8,
+                RuntimeFeature::HipPagedDecodeAttentionSplit,
             ] {
                 if std::env::var_os(runtime_feature_environment(feature)).as_deref()
                     == Some(std::ffi::OsStr::new("1"))
@@ -525,7 +532,8 @@ impl DeviceCapabilities {
             || policy.contains(RuntimeFeature::HipPagedKvWrite)
             || policy.contains(RuntimeFeature::HipFusedQkNormRopePagedKvWrite)
             || policy.contains(RuntimeFeature::HipPagedKvWriteChunk)
-            || policy.contains(RuntimeFeature::HipPagedCausalGqaChunk);
+            || policy.contains(RuntimeFeature::HipPagedCausalGqaChunk)
+            || policy.contains(RuntimeFeature::HipPagedDecodeAttentionSplit);
         if paged_cache_probe_needed {
             let mut k_cache = zeros(context, stream, 16 * 256 * 4 * 256)?;
             let mut v_cache = zeros(context, stream, 16 * 256 * 4 * 256)?;
@@ -573,6 +581,60 @@ impl DeviceCapabilities {
                 )?;
                 probe_fault_checkpoint(5, "paged-gated")?;
                 proven = proven.with(RuntimeFeature::HipPagedDecodeAttention);
+            }
+            if policy.contains(RuntimeFeature::HipPagedDecodeAttentionSplit) {
+                const SPLIT_CACHE_LEN: usize = 257;
+                const SPLIT_SOURCE_TILE: usize = 256;
+                let workspace_bytes = ullm_runtime_sys::paged_decode_attn_split_workspace_bytes(
+                    16,
+                    256,
+                    SPLIT_CACHE_LEN,
+                    SPLIT_SOURCE_TILE,
+                )?;
+                let mut workspace = context.alloc_buffer(workspace_bytes)?;
+                let q = zeros(context, stream, 16 * 256)?;
+                let gate = zeros(context, stream, 16 * 256)?;
+                let mut plain_output = zeros(context, stream, 16 * 256)?;
+                let mut gated_output = zeros(context, stream, 16 * 256)?;
+                ullm_runtime_sys::paged_decode_attn_split_f32(
+                    &q,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    SPLIT_CACHE_LEN,
+                    256,
+                    16,
+                    16,
+                    4,
+                    256,
+                    256,
+                    1.0 / 256.0_f32.sqrt(),
+                    SPLIT_SOURCE_TILE,
+                    &mut workspace,
+                    &mut plain_output,
+                    Some(stream),
+                )?;
+                ullm_runtime_sys::paged_decode_attn_split_sigmoid_gate_f32(
+                    &q,
+                    &gate,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    SPLIT_CACHE_LEN,
+                    256,
+                    16,
+                    16,
+                    4,
+                    256,
+                    256,
+                    1.0 / 256.0_f32.sqrt(),
+                    SPLIT_SOURCE_TILE,
+                    &mut workspace,
+                    &mut gated_output,
+                    Some(stream),
+                )?;
+                probe_fault_checkpoint(16, "paged-decode-split")?;
+                proven = proven.with(RuntimeFeature::HipPagedDecodeAttentionSplit);
             }
             if policy.contains(RuntimeFeature::HipPagedKvWrite) {
                 let k = zeros(context, stream, 4 * 256)?;
@@ -1060,6 +1122,25 @@ pub enum PromotionStatus {
     Production,
 }
 
+/// Statically supported source-tile widths for split paged decode attention.
+///
+/// Keeping this as a closed enum prevents an unvalidated tile width from crossing the ABI
+/// boundary. The runtime still receives the numeric value through [`Self::as_usize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagedDecodeSourceTile {
+    Tokens128,
+    Tokens256,
+}
+
+impl PagedDecodeSourceTile {
+    pub const fn as_usize(self) -> usize {
+        match self {
+            Self::Tokens128 => 128,
+            Self::Tokens256 => 256,
+        }
+    }
+}
+
 /// Typed runnable entry. The variant is checked again at the ABI call boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutableOperation {
@@ -1074,6 +1155,8 @@ pub enum ExecutableOperation {
     HipAq4GemmRegisterBm8F32,
     HipPagedDecodeAttentionF32,
     HipPagedDecodeAttentionSigmoidGateF32,
+    HipPagedDecodeAttentionSplitF32(PagedDecodeSourceTile),
+    HipPagedDecodeAttentionSplitSigmoidGateF32(PagedDecodeSourceTile),
     HipPagedCausalGqaChunkF32,
     HipPagedCausalGqaChunkSigmoidGateF32,
 }
@@ -2314,6 +2397,92 @@ impl StartedOperationPlan<'_> {
         .map_err(|error| error.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_paged_decode_attention_split_f32(
+        self,
+        q: &ullm_runtime_sys::RuntimeBuffer,
+        k_cache: &ullm_runtime_sys::RuntimeBuffer,
+        v_cache: &ullm_runtime_sys::RuntimeBuffer,
+        block_table: &ullm_runtime_sys::RuntimeBuffer,
+        cache_len: usize,
+        source_tile: PagedDecodeSourceTile,
+        workspace: &mut ullm_runtime_sys::RuntimeBuffer,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let (q_heads, kv_heads, head_dim, value_dim, block_size, cache_blocks) =
+            self.paged_split_geometry(false, source_tile)?;
+        let cache_capacity = block_size
+            .checked_mul(cache_blocks)
+            .ok_or_else(|| "resolved split paged decode cache capacity overflows".to_string())?;
+        if cache_len == 0 || cache_len > cache_capacity {
+            return Err("resolved split paged decode has an incompatible cache length".into());
+        }
+        ullm_runtime_sys::paged_decode_attn_split_f32(
+            q,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            1.0_f32 / (head_dim as f32).sqrt(),
+            source_tile.as_usize(),
+            workspace,
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_paged_decode_attention_split_sigmoid_gate_f32(
+        self,
+        q: &ullm_runtime_sys::RuntimeBuffer,
+        gate: &ullm_runtime_sys::RuntimeBuffer,
+        k_cache: &ullm_runtime_sys::RuntimeBuffer,
+        v_cache: &ullm_runtime_sys::RuntimeBuffer,
+        block_table: &ullm_runtime_sys::RuntimeBuffer,
+        cache_len: usize,
+        source_tile: PagedDecodeSourceTile,
+        workspace: &mut ullm_runtime_sys::RuntimeBuffer,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let (q_heads, kv_heads, head_dim, value_dim, block_size, cache_blocks) =
+            self.paged_split_geometry(true, source_tile)?;
+        let cache_capacity = block_size
+            .checked_mul(cache_blocks)
+            .ok_or_else(|| "resolved split paged decode cache capacity overflows".to_string())?;
+        if cache_len == 0 || cache_len > cache_capacity {
+            return Err("resolved split paged decode has an incompatible cache length".into());
+        }
+        ullm_runtime_sys::paged_decode_attn_split_sigmoid_gate_f32(
+            q,
+            gate,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            1.0_f32 / (head_dim as f32).sqrt(),
+            source_tile.as_usize(),
+            workspace,
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     pub fn execute_paged_causal_gqa_chunk_f32(
         self,
         q: &ullm_runtime_sys::RuntimeBuffer,
@@ -2427,6 +2596,52 @@ impl StartedOperationPlan<'_> {
         {
             return Err(format!(
                 "resolved backend operation {} has an incompatible paged GQA binding",
+                plan.implementation_id
+            ));
+        }
+        Ok((
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+        ))
+    }
+
+    fn paged_split_geometry(
+        &self,
+        expected_gate: bool,
+        expected_tile: PagedDecodeSourceTile,
+    ) -> Result<(usize, usize, usize, usize, usize, usize), String> {
+        let plan = self.plan();
+        let OperationGeometry::PagedCausalGqaRead {
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+            sigmoid_gate,
+        } = plan.geometry
+        else {
+            return Err("resolved split paged GQA operation has incompatible geometry".into());
+        };
+        let executable_matches = match (expected_gate, plan.executable) {
+            (false, ExecutableOperation::HipPagedDecodeAttentionSplitF32(tile))
+            | (true, ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(tile)) => {
+                tile == expected_tile
+            }
+            _ => false,
+        };
+        if plan.kind != OperationKind::PagedCausalGqaRead
+            || !executable_matches
+            || sigmoid_gate != expected_gate
+            || plan.batch_width != 1
+            || plan.chunk_width != 1
+        {
+            return Err(format!(
+                "resolved backend operation {} has an incompatible split paged GQA binding",
                 plan.implementation_id
             ));
         }
@@ -2584,6 +2799,21 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
                 sigmoid_gate: true, ..
             },
             ExecutableOperation::HipPagedDecodeAttentionSigmoidGateF32,
+        ) => true,
+        (
+            OperationKind::PagedCausalGqaRead,
+            OperationGeometry::PagedCausalGqaRead {
+                sigmoid_gate: false,
+                ..
+            },
+            ExecutableOperation::HipPagedDecodeAttentionSplitF32(_),
+        ) => true,
+        (
+            OperationKind::PagedCausalGqaRead,
+            OperationGeometry::PagedCausalGqaRead {
+                sigmoid_gate: true, ..
+            },
+            ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(_),
         ) => true,
         (
             OperationKind::PagedCausalGqaRead,
@@ -3216,6 +3446,262 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
     ])
 }
 
+fn validate_generic_paged_decode_geometry(
+    geometry: OperationGeometry,
+) -> Result<(usize, usize, usize, usize, usize, usize, bool), String> {
+    let OperationGeometry::PagedCausalGqaRead {
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        block_size,
+        cache_blocks,
+        sigmoid_gate,
+    } = geometry
+    else {
+        return Err("paged decode registry requires paged causal GQA geometry".into());
+    };
+    if [
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        block_size,
+        cache_blocks,
+    ]
+    .into_iter()
+    .any(|value| value == 0)
+    {
+        return Err("paged decode registry geometry contains zero dimensions".into());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err("paged decode registry q_heads must be a multiple of kv_heads".into());
+    }
+    if head_dim > 256 || value_dim > 256 {
+        return Err("paged decode registry head_dim and value_dim must be <= 256".into());
+    }
+    let _ = block_size
+        .checked_mul(cache_blocks)
+        .ok_or_else(|| "paged decode registry cache capacity overflows".to_string())?;
+    Ok((
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        block_size,
+        cache_blocks,
+        sigmoid_gate,
+    ))
+}
+
+fn paged_decode_split_workspace_bytes_for_capacity(
+    q_heads: usize,
+    value_dim: usize,
+    cache_capacity: usize,
+    source_tile: PagedDecodeSourceTile,
+) -> Result<u64, String> {
+    let tile = source_tile.as_usize();
+    let split_count = cache_capacity
+        .checked_add(tile - 1)
+        .and_then(|value| value.checked_div(tile))
+        .ok_or_else(|| "paged decode split workspace split count overflows".to_string())?;
+    let bytes = q_heads
+        .checked_mul(split_count)
+        .and_then(|value| value.checked_mul(value_dim.checked_add(2)?))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "paged decode split workspace bytes overflow".to_string())?;
+    u64::try_from(bytes).map_err(|_| "paged decode split workspace exceeds u64".to_string())
+}
+
+fn generic_paged_decode_descriptor(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+    source_tile: Option<PagedDecodeSourceTile>,
+) -> Result<ImplementationDescriptor, String> {
+    let (q_heads, _kv_heads, head_dim, value_dim, block_size, cache_blocks, sigmoid_gate) =
+        validate_generic_paged_decode_geometry(geometry)?;
+    let persistent_cache =
+        paged_cache_bytes(block_size, cache_blocks, _kv_heads, head_dim, value_dim)?;
+    let (required_features, id, executable, fixed_persistent_bytes, fixed_temporary_bytes) =
+        if let Some(source_tile) = source_tile {
+            let split_workspace = paged_decode_split_workspace_bytes_for_capacity(
+                q_heads,
+                value_dim,
+                block_size
+                    .checked_mul(cache_blocks)
+                    .ok_or_else(|| "paged decode split cache capacity overflows".to_string())?,
+                source_tile,
+            )?;
+            (
+                match device.backend {
+                    OperationBackend::Host => RuntimeFeatureSet::EMPTY,
+                    OperationBackend::Hip => RuntimeFeatureSet::from_feature(
+                        RuntimeFeature::HipPagedDecodeAttentionSplit,
+                    ),
+                },
+                if device.backend == OperationBackend::Host {
+                    if sigmoid_gate {
+                        match source_tile {
+                            PagedDecodeSourceTile::Tokens128 => {
+                                "host.paged-decode-attention-split-sigmoid-gate-f32.tile128"
+                            }
+                            PagedDecodeSourceTile::Tokens256 => {
+                                "host.paged-decode-attention-split-sigmoid-gate-f32.tile256"
+                            }
+                        }
+                    } else {
+                        match source_tile {
+                            PagedDecodeSourceTile::Tokens128 => {
+                                "host.paged-decode-attention-split-f32.tile128"
+                            }
+                            PagedDecodeSourceTile::Tokens256 => {
+                                "host.paged-decode-attention-split-f32.tile256"
+                            }
+                        }
+                    }
+                } else if sigmoid_gate {
+                    match source_tile {
+                        PagedDecodeSourceTile::Tokens128 => {
+                            "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128"
+                        }
+                        PagedDecodeSourceTile::Tokens256 => {
+                            "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256"
+                        }
+                    }
+                } else {
+                    match source_tile {
+                        PagedDecodeSourceTile::Tokens128 => {
+                            "hip.paged-decode-attention-split-f32.tile128"
+                        }
+                        PagedDecodeSourceTile::Tokens256 => {
+                            "hip.paged-decode-attention-split-f32.tile256"
+                        }
+                    }
+                },
+                if sigmoid_gate {
+                    ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(source_tile)
+                } else {
+                    ExecutableOperation::HipPagedDecodeAttentionSplitF32(source_tile)
+                },
+                persistent_cache
+                    .checked_add(split_workspace)
+                    .ok_or_else(|| {
+                        "paged decode split persistent workspace overflows".to_string()
+                    })?,
+                0,
+            )
+        } else {
+            let output_elements = q_heads
+                .checked_mul(head_dim.max(value_dim))
+                .ok_or_else(|| "paged decode output elements overflow".to_string())?;
+            let output_bytes = output_elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "paged decode output bytes overflow".to_string())?;
+            let temporary = output_bytes
+                .checked_mul(if sigmoid_gate { 3 } else { 2 })
+                .ok_or_else(|| "paged decode workspace temporary bytes overflow".to_string())?;
+            (
+                match device.backend {
+                    OperationBackend::Host => RuntimeFeatureSet::EMPTY,
+                    OperationBackend::Hip => {
+                        RuntimeFeatureSet::from_feature(RuntimeFeature::HipPagedDecodeAttention)
+                    }
+                },
+                if device.backend == OperationBackend::Host {
+                    if sigmoid_gate {
+                        "host.paged-decode-attention-sigmoid-gate-f32"
+                    } else {
+                        "host.paged-decode-attention-f32"
+                    }
+                } else if sigmoid_gate {
+                    "hip.paged-decode-attention-sigmoid-gate-f32"
+                } else {
+                    "hip.paged-decode-attention-f32"
+                },
+                if sigmoid_gate {
+                    ExecutableOperation::HipPagedDecodeAttentionSigmoidGateF32
+                } else {
+                    ExecutableOperation::HipPagedDecodeAttentionF32
+                },
+                persistent_cache,
+                u64::try_from(temporary)
+                    .map_err(|_| "paged decode temporary bytes exceed u64".to_string())?,
+            )
+        };
+    let maximum_total_bytes = fixed_persistent_bytes
+        .checked_add(fixed_temporary_bytes)
+        .ok_or_else(|| "paged decode workspace total overflows".to_string())?;
+    let paged_kv = StateResourceSet::from_resource(StateResource::PagedKvCache);
+    Ok(ImplementationDescriptor {
+        id,
+        semantic_version: "1.0.0",
+        kind: OperationKind::PagedCausalGqaRead,
+        phases: PhaseSet::ALL_CURRENT,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout: OperationStateLayout::PagedKvBlocks,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
+        state_format: NumericalFormat::F32,
+        geometry,
+        minimum_batch_width: 1,
+        maximum_batch_width: 1,
+        minimum_chunk_width: 1,
+        maximum_chunk_width: 1,
+        backend: device.backend,
+        architecture: None,
+        device_name: None,
+        minimum_abi_version: 1,
+        required_features,
+        workspace: WorkspaceFormula {
+            fixed_persistent_bytes,
+            fixed_temporary_bytes,
+            temporary_bytes_per_batch_item: 0,
+            temporary_bytes_per_chunk_token: 0,
+            maximum_total_bytes,
+        },
+        state_effect: StateEffect {
+            reads: paged_kv,
+            writes: StateResourceSet::EMPTY,
+            prepares: StateResourceSet::EMPTY,
+            commits: StateResourceSet::EMPTY,
+            update_mode: StateUpdateMode::ReadOnly,
+            externally_visible_before_commit: false,
+        },
+        promotion: PromotionStatus::Production,
+        priority: 100,
+        fallback_id: None,
+        deterministic: true,
+        executable,
+        runtime_build: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Builds a generic single-source paged decode registry for one validated GQA geometry.
+pub fn paged_decode_single_production_registry(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<BackendOperationRegistry, String> {
+    BackendOperationRegistry::new(vec![generic_paged_decode_descriptor(
+        geometry, device, None,
+    )?])
+}
+
+/// Builds a generic source-tiled paged decode registry for one validated GQA geometry.
+pub fn paged_decode_split_production_registry(
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+    source_tile: PagedDecodeSourceTile,
+) -> Result<BackendOperationRegistry, String> {
+    BackendOperationRegistry::new(vec![generic_paged_decode_descriptor(
+        geometry,
+        device,
+        Some(source_tile),
+    )?])
+}
+
 fn paged_chunk_backend_binding(
     device: &DeviceCapabilities,
     feature: RuntimeFeature,
@@ -3540,6 +4026,32 @@ pub fn qwen35_m1_operation_request(
         value_format: NumericalFormat::F32,
         weight_format: (kind == OperationKind::FusedQkNormRopePagedKvWrite)
             .then_some(NumericalFormat::F32),
+        state_format: NumericalFormat::F32,
+        geometry,
+        batch_width: 1,
+        chunk_width: 1,
+        device,
+        workspace_budget_bytes,
+        minimum_promotion: PromotionStatus::Production,
+    }
+}
+
+fn paged_decode_operation_request(
+    phase: ExecutionPhase,
+    geometry: OperationGeometry,
+    device: DeviceCapabilities,
+    workspace_budget_bytes: u64,
+) -> OperationRequest {
+    OperationRequest {
+        kind: OperationKind::PagedCausalGqaRead,
+        phase,
+        input_layout: TensorLayout::TokensHidden,
+        output_layout: TensorLayout::TokensHidden,
+        weight_layout: None,
+        state_layout: OperationStateLayout::PagedKvBlocks,
+        activation_format: NumericalFormat::F32,
+        value_format: NumericalFormat::F32,
+        weight_format: None,
         state_format: NumericalFormat::F32,
         geometry,
         batch_width: 1,
@@ -3903,6 +4415,29 @@ pub struct ResolvedPhasePlans {
 }
 
 impl ResolvedPhasePlans {
+    pub fn resolve_paged_decode(
+        registry: &BackendOperationRegistry,
+        geometry: OperationGeometry,
+        device: &DeviceCapabilities,
+        workspace_budget_bytes: u64,
+    ) -> Result<Self, String> {
+        let resolve = |phase| {
+            registry
+                .admit(paged_decode_operation_request(
+                    phase,
+                    geometry,
+                    device.clone(),
+                    workspace_budget_bytes,
+                ))
+                .map(PrestartAttempt::into_plan)
+        };
+        Ok(Self {
+            cold_prefill: resolve(ExecutionPhase::ColdPrefill)?,
+            cached_prefix_prefill: resolve(ExecutionPhase::CachedPrefixPrefill)?,
+            decode: resolve(ExecutionPhase::Decode)?,
+        })
+    }
+
     pub fn resolve_m1(
         registry: &BackendOperationRegistry,
         kind: OperationKind,
@@ -4015,6 +4550,110 @@ impl ResolvedPhasePlans {
     }
 }
 
+/// Threshold that selects the source-tiled split implementation after load-time resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PagedDecodeSplitConfig {
+    pub source_tile: PagedDecodeSourceTile,
+    pub min_cache_len: usize,
+}
+
+/// Single and optional split plans resolved once for all execution phases.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PagedDecodeDispatchPlans {
+    pub single: ResolvedPhasePlans,
+    pub split: Option<ResolvedPhasePlans>,
+    pub config: Option<PagedDecodeSplitConfig>,
+}
+
+impl PagedDecodeDispatchPlans {
+    pub fn new(
+        single: ResolvedPhasePlans,
+        split: Option<ResolvedPhasePlans>,
+        config: Option<PagedDecodeSplitConfig>,
+    ) -> Result<Self, String> {
+        if config.is_some_and(|config| config.min_cache_len == 0) {
+            return Err("paged decode split min_cache_len must be greater than zero".into());
+        }
+        if split.is_none() && config.is_some() {
+            return Err("paged decode split config requires resolved split plans".into());
+        }
+        Ok(Self {
+            single,
+            split,
+            config,
+        })
+    }
+
+    pub fn single_only(single: ResolvedPhasePlans) -> Self {
+        Self {
+            single,
+            split: None,
+            config: None,
+        }
+    }
+
+    pub fn resolve(
+        geometry: OperationGeometry,
+        device: &DeviceCapabilities,
+        source_tile: PagedDecodeSourceTile,
+        min_cache_len: usize,
+        workspace_budget_bytes: u64,
+    ) -> Result<Self, String> {
+        if min_cache_len == 0 {
+            return Err("paged decode split min_cache_len must be greater than zero".into());
+        }
+        let single_registry = paged_decode_single_production_registry(geometry, device)?;
+        let single = ResolvedPhasePlans::resolve_paged_decode(
+            &single_registry,
+            geometry,
+            device,
+            workspace_budget_bytes,
+        )?;
+        let split_enabled = device.backend == OperationBackend::Host
+            || device
+                .runtime_features
+                .contains(RuntimeFeature::HipPagedDecodeAttentionSplit);
+        if !split_enabled {
+            return Ok(Self::single_only(single));
+        }
+        let split_registry =
+            match paged_decode_split_production_registry(geometry, device, source_tile) {
+                Ok(registry) => registry,
+                Err(_) => return Ok(Self::single_only(single)),
+            };
+        let split = match ResolvedPhasePlans::resolve_paged_decode(
+            &split_registry,
+            geometry,
+            device,
+            workspace_budget_bytes,
+        ) {
+            Ok(plans) => plans,
+            Err(_) => return Ok(Self::single_only(single)),
+        };
+        Self::new(
+            single,
+            Some(split),
+            Some(PagedDecodeSplitConfig {
+                source_tile,
+                min_cache_len,
+            }),
+        )
+    }
+
+    pub const fn for_cache_len(
+        &self,
+        phase: ExecutionPhase,
+        cache_len: usize,
+    ) -> &ResolvedOperationPlan {
+        if let (Some(split), Some(config)) = (&self.split, self.config) {
+            if cache_len >= config.min_cache_len {
+                return split.for_phase(phase);
+            }
+        }
+        self.single.for_phase(phase)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4038,7 +4677,8 @@ mod tests {
                 .with(RuntimeFeature::HipPagedKvWriteChunk)
                 .with(RuntimeFeature::HipPagedCausalGqaChunk)
                 .with(RuntimeFeature::HipQkNormRopeBatch)
-                .with(RuntimeFeature::HipAq4RegisterBm8),
+                .with(RuntimeFeature::HipAq4RegisterBm8)
+                .with(RuntimeFeature::HipPagedDecodeAttentionSplit),
             workspace_capacity_bytes: u64::MAX,
         }
     }
@@ -4162,6 +4802,417 @@ mod tests {
             cache_blocks: 1,
             sigmoid_gate,
         }
+    }
+
+    fn generic_split_geometry(sigmoid_gate: bool) -> OperationGeometry {
+        OperationGeometry::PagedCausalGqaRead {
+            q_heads: 6,
+            kv_heads: 2,
+            head_dim: 64,
+            value_dim: 32,
+            block_size: 16,
+            cache_blocks: 20,
+            sigmoid_gate,
+        }
+    }
+
+    #[test]
+    fn generic_split_registry_admits_non_qwen_shapes_and_accounts_for_tiles() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let capacity = 16 * 20;
+        let cache_bytes = (capacity * 2 * (64 + 32) * 4) as u64;
+        for sigmoid_gate in [false, true] {
+            let geometry = generic_split_geometry(sigmoid_gate);
+            for (tile, suffix, split_count) in [
+                (PagedDecodeSourceTile::Tokens128, "tile128", 3_usize),
+                (PagedDecodeSourceTile::Tokens256, "tile256", 2_usize),
+            ] {
+                let single = paged_decode_single_production_registry(geometry, &host).unwrap();
+                let split = paged_decode_split_production_registry(geometry, &host, tile).unwrap();
+                for (registry, executable) in [
+                    (
+                        &single,
+                        if sigmoid_gate {
+                            ExecutableOperation::HipPagedDecodeAttentionSigmoidGateF32
+                        } else {
+                            ExecutableOperation::HipPagedDecodeAttentionF32
+                        },
+                    ),
+                    (
+                        &split,
+                        if sigmoid_gate {
+                            ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(tile)
+                        } else {
+                            ExecutableOperation::HipPagedDecodeAttentionSplitF32(tile)
+                        },
+                    ),
+                ] {
+                    let descriptor = &registry.implementations()[0];
+                    assert_eq!(descriptor.kind, OperationKind::PagedCausalGqaRead);
+                    assert_eq!(descriptor.geometry, geometry);
+                    assert_eq!(descriptor.executable, executable);
+                    assert_eq!(
+                        descriptor.state_effect.update_mode,
+                        StateUpdateMode::ReadOnly
+                    );
+                    assert!(
+                        descriptor
+                            .state_effect
+                            .reads
+                            .contains(StateResource::PagedKvCache)
+                    );
+                    assert!(descriptor.state_effect.writes.is_empty());
+                    assert!(descriptor.state_effect.prepares.is_empty());
+                    assert!(descriptor.state_effect.commits.is_empty());
+                    assert!(!descriptor.state_effect.externally_visible_before_commit);
+                }
+                let split_descriptor = &split.implementations()[0];
+                let split_workspace = (4 * 6 * split_count * (32 + 2)) as u64;
+                assert_eq!(
+                    split_descriptor.workspace.fixed_persistent_bytes,
+                    cache_bytes + split_workspace
+                );
+                assert!(split_descriptor.id.ends_with(suffix));
+            }
+        }
+    }
+
+    #[test]
+    fn generic_split_registry_rejects_invalid_geometry_and_overflow() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let invalid = [
+            OperationGeometry::PagedCausalGqaRead {
+                q_heads: 0,
+                kv_heads: 1,
+                head_dim: 64,
+                value_dim: 32,
+                block_size: 16,
+                cache_blocks: 8,
+                sigmoid_gate: false,
+            },
+            OperationGeometry::PagedCausalGqaRead {
+                q_heads: 3,
+                kv_heads: 2,
+                head_dim: 64,
+                value_dim: 32,
+                block_size: 16,
+                cache_blocks: 8,
+                sigmoid_gate: false,
+            },
+            OperationGeometry::PagedCausalGqaRead {
+                q_heads: 6,
+                kv_heads: 2,
+                head_dim: 257,
+                value_dim: 32,
+                block_size: 16,
+                cache_blocks: 8,
+                sigmoid_gate: false,
+            },
+            OperationGeometry::PagedCausalGqaRead {
+                q_heads: 6,
+                kv_heads: 2,
+                head_dim: 64,
+                value_dim: 257,
+                block_size: 16,
+                cache_blocks: 8,
+                sigmoid_gate: false,
+            },
+            OperationGeometry::PagedCausalGqaRead {
+                q_heads: usize::MAX,
+                kv_heads: 1,
+                head_dim: 256,
+                value_dim: 256,
+                block_size: usize::MAX,
+                cache_blocks: 2,
+                sigmoid_gate: false,
+            },
+        ];
+        for geometry in invalid {
+            assert!(paged_decode_single_production_registry(geometry, &host).is_err());
+            assert!(
+                paged_decode_split_production_registry(
+                    geometry,
+                    &host,
+                    PagedDecodeSourceTile::Tokens128
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn split_dispatch_falls_back_without_feature_or_workspace_and_selects_threshold() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let geometry = OperationGeometry::PagedCausalGqaRead {
+            q_heads: 6,
+            kv_heads: 2,
+            head_dim: 64,
+            value_dim: 32,
+            block_size: 16,
+            cache_blocks: 256,
+            sigmoid_gate: false,
+        };
+        let single_registry = paged_decode_single_production_registry(geometry, &host).unwrap();
+        let single_budget = single_registry.implementations()[0]
+            .workspace
+            .maximum_total_bytes;
+        let fallback = PagedDecodeDispatchPlans::resolve(
+            geometry,
+            &host,
+            PagedDecodeSourceTile::Tokens128,
+            16,
+            single_budget,
+        )
+        .unwrap();
+        assert!(fallback.split.is_none());
+        assert!(fallback.config.is_none());
+
+        let resolved = PagedDecodeDispatchPlans::resolve(
+            geometry,
+            &host,
+            PagedDecodeSourceTile::Tokens256,
+            16,
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(resolved.split.is_some());
+        for phase in [
+            ExecutionPhase::ColdPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::Decode,
+        ] {
+            assert_eq!(
+                resolved.for_cache_len(phase, 15).trace().executable,
+                ExecutableOperation::HipPagedDecodeAttentionF32
+            );
+            assert_eq!(
+                resolved.for_cache_len(phase, 16).trace().executable,
+                ExecutableOperation::HipPagedDecodeAttentionSplitF32(
+                    PagedDecodeSourceTile::Tokens256
+                )
+            );
+        }
+        assert!(
+            PagedDecodeDispatchPlans::resolve(
+                geometry,
+                &host,
+                PagedDecodeSourceTile::Tokens128,
+                0,
+                u64::MAX,
+            )
+            .is_err()
+        );
+        let single_plans = ResolvedPhasePlans::resolve_paged_decode(
+            &single_registry,
+            geometry,
+            &host,
+            single_budget,
+        )
+        .unwrap();
+        assert!(
+            PagedDecodeDispatchPlans::new(
+                single_plans,
+                None,
+                Some(PagedDecodeSplitConfig {
+                    source_tile: PagedDecodeSourceTile::Tokens128,
+                    min_cache_len: 16,
+                }),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn split_dispatch_missing_hip_feature_stays_single_only() {
+        let mut hip = test_hip_capabilities();
+        hip.runtime_features =
+            RuntimeFeatureSet::from_feature(RuntimeFeature::HipPagedDecodeAttention);
+        let dispatch = PagedDecodeDispatchPlans::resolve(
+            generic_split_geometry(false),
+            &hip,
+            PagedDecodeSourceTile::Tokens128,
+            16,
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(dispatch.split.is_none());
+        assert!(dispatch.config.is_none());
+    }
+
+    #[test]
+    fn split_plan_cpu_abi_matches_direct_and_rejects_tile_mismatch() {
+        fn zeros(
+            context: &mut ullm_runtime_sys::RuntimeContext,
+            elements: usize,
+        ) -> ullm_runtime_sys::RuntimeBuffer {
+            context.alloc_buffer(elements * 4).unwrap()
+        }
+        fn read(
+            buffer: &ullm_runtime_sys::RuntimeBuffer,
+            stream: &mut ullm_runtime_sys::RuntimeStream,
+        ) -> Vec<u8> {
+            let mut bytes = vec![0; buffer.size().unwrap()];
+            buffer.copy_to_host(0, &mut bytes, Some(stream)).unwrap();
+            stream.synchronize().unwrap();
+            bytes
+        }
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let geometry = OperationGeometry::PagedCausalGqaRead {
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 4,
+            value_dim: 4,
+            block_size: 4,
+            cache_blocks: 2,
+            sigmoid_gate: false,
+        };
+        let q = zeros(&mut context, 8);
+        let gate = zeros(&mut context, 8);
+        let k_cache = zeros(&mut context, 32);
+        let v_cache = zeros(&mut context, 32);
+        let mut table = context.alloc_buffer(8).unwrap();
+        table
+            .copy_from_host(0, &[0, 0, 0, 0, 1, 0, 0, 0], Some(&mut stream))
+            .unwrap();
+        let mut direct_plain = zeros(&mut context, 8);
+        let mut direct_gated = zeros(&mut context, 8);
+        let workspace_bytes =
+            ullm_runtime_sys::paged_decode_attn_split_workspace_bytes(2, 4, 5, 128).unwrap();
+        let mut direct_workspace = context.alloc_buffer(workspace_bytes).unwrap();
+        ullm_runtime_sys::paged_decode_attn_split_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &table,
+            5,
+            4,
+            2,
+            2,
+            1,
+            4,
+            4,
+            0.5,
+            128,
+            &mut direct_workspace,
+            &mut direct_plain,
+            Some(&mut stream),
+        )
+        .unwrap();
+        ullm_runtime_sys::paged_decode_attn_split_sigmoid_gate_f32(
+            &q,
+            &gate,
+            &k_cache,
+            &v_cache,
+            &table,
+            5,
+            4,
+            2,
+            2,
+            1,
+            4,
+            4,
+            0.5,
+            128,
+            &mut direct_workspace,
+            &mut direct_gated,
+            Some(&mut stream),
+        )
+        .unwrap();
+        let expected_plain = read(&direct_plain, &mut stream);
+        let expected_gated = read(&direct_gated, &mut stream);
+        for sigmoid_gate in [false, true] {
+            let geometry = OperationGeometry::PagedCausalGqaRead {
+                q_heads: 2,
+                kv_heads: 1,
+                head_dim: 4,
+                value_dim: 4,
+                block_size: 4,
+                cache_blocks: 2,
+                sigmoid_gate,
+            };
+            let registry = paged_decode_split_production_registry(
+                geometry,
+                &DeviceCapabilities::from_runtime_context(&context).unwrap(),
+                PagedDecodeSourceTile::Tokens128,
+            )
+            .unwrap();
+            let plan = registry
+                .admit(paged_decode_operation_request(
+                    ExecutionPhase::Decode,
+                    geometry,
+                    DeviceCapabilities::from_runtime_context(&context).unwrap(),
+                    u64::MAX,
+                ))
+                .unwrap()
+                .start();
+            let mut workspace = context.alloc_buffer(workspace_bytes).unwrap();
+            let mut output = zeros(&mut context, 8);
+            if sigmoid_gate {
+                plan.execute_paged_decode_attention_split_sigmoid_gate_f32(
+                    &q,
+                    &gate,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    5,
+                    PagedDecodeSourceTile::Tokens128,
+                    &mut workspace,
+                    &mut output,
+                    &mut stream,
+                )
+                .unwrap();
+                assert_eq!(read(&output, &mut stream), expected_gated);
+            } else {
+                plan.execute_paged_decode_attention_split_f32(
+                    &q,
+                    &k_cache,
+                    &v_cache,
+                    &table,
+                    5,
+                    PagedDecodeSourceTile::Tokens128,
+                    &mut workspace,
+                    &mut output,
+                    &mut stream,
+                )
+                .unwrap();
+                assert_eq!(read(&output, &mut stream), expected_plain);
+            }
+        }
+        let registry = paged_decode_split_production_registry(
+            geometry,
+            &DeviceCapabilities::from_runtime_context(&context).unwrap(),
+            PagedDecodeSourceTile::Tokens128,
+        )
+        .unwrap();
+        let plan = registry
+            .admit(paged_decode_operation_request(
+                ExecutionPhase::Decode,
+                geometry,
+                DeviceCapabilities::from_runtime_context(&context).unwrap(),
+                u64::MAX,
+            ))
+            .unwrap()
+            .start();
+        let mut workspace = context.alloc_buffer(workspace_bytes).unwrap();
+        let mut output = zeros(&mut context, 8);
+        assert!(
+            plan.execute_paged_decode_attention_split_f32(
+                &q,
+                &k_cache,
+                &v_cache,
+                &table,
+                5,
+                PagedDecodeSourceTile::Tokens256,
+                &mut workspace,
+                &mut output,
+                &mut stream,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -5148,6 +6199,7 @@ mod tests {
                 14,
                 "paged-causal-gqa-chunk",
             ),
+            (ProbeFaultStage::PagedDecodeSplit, 16, "paged-decode-split"),
             (ProbeFaultStage::Synchronize, 8, "synchronize"),
         ] {
             force_probe_failure(stage);
@@ -5155,6 +6207,22 @@ mod tests {
             assert!(error.contains(label));
             probe_fault_checkpoint(checkpoint, label).unwrap();
         }
+    }
+
+    #[test]
+    fn split_feature_environment_and_fault_checkpoint_are_exact() {
+        assert_eq!(
+            runtime_feature_environment(RuntimeFeature::HipPagedDecodeAttentionSplit),
+            "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+        );
+        let before = M1_PROBE_CHECKPOINT_COUNTS[16].load(std::sync::atomic::Ordering::Acquire);
+        force_probe_failure(ProbeFaultStage::PagedDecodeSplit);
+        assert!(probe_fault_checkpoint(16, "paged-decode-split").is_err());
+        assert_eq!(
+            M1_PROBE_CHECKPOINT_COUNTS[16].load(std::sync::atomic::Ordering::Acquire),
+            before + 1
+        );
+        probe_fault_checkpoint(16, "paged-decode-split").unwrap();
     }
 
     #[test]
@@ -5283,6 +6351,7 @@ mod tests {
             "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
             "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
             "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+            "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
         ] {
             assert_eq!(std::env::var(environment).as_deref(), Ok("1"));
         }
@@ -5299,6 +6368,7 @@ mod tests {
             ProbeFaultStage::QkvPrepareBatch,
             ProbeFaultStage::RecurrentSequence,
             ProbeFaultStage::Synchronize,
+            ProbeFaultStage::PagedDecodeSplit,
         ] {
             M1_PROBE_CACHE
                 .get_or_init(Default::default)
