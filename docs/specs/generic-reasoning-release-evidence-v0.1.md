@@ -51,13 +51,17 @@ eligible.
 
 `tools/run-generic-reasoning-release-campaign.py` is the production collector
 for the measured-case input. It requires an immutable HTTP probe image, a v2
-served-model manifest, and the five fixture IDs. Before any request it checks
+served-model manifest, and the five fixture IDs. It collects each fixture in
+both stream and non-stream form. Before any request it checks
 that gfx1201 has a resident `ullm-aq4-worker` and no `llama-server` or other
-positive-VRAM process. Each streamed request is correlated with one matching
+positive-VRAM process. Each request is correlated with one matching
 `request_released` event through a temporary Unix datagram observer. The
 collector publishes only `cases.json`, sanitized `lifecycle.json`, bounded
 resource samples, and a summary; prompt and response text remain in memory for
-the quality check and are never written.
+the quality check and are never written. Before publishing each fixture pair,
+it compares stream and non-stream status, finish reason, usage counts,
+reasoning text, and answer text in memory; a mismatch aborts atomic
+publication.
 
 The validator report also contains `timing_percentiles` grouped by mode and
 timing field. It recomputes p50, p95, and p99 with linear interpolation over

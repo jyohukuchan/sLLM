@@ -103,8 +103,8 @@ export OUT=benchmarks/results/2026-07-13/qwen35-9b-aq4-reasoning-v0.1
 mkdir -p "$OUT"
 ```
 
-Collect the five hash-only HTTP/SSE release cases after the v2 manifest is
-active. The collector validates the manifest first, then requires an exclusive
+Collect ten hash-only HTTP/SSE release cases after the v2 manifest is active:
+five modes in both stream and non-stream form. The collector validates the manifest first, then requires an exclusive
 gfx1201/R9700 worker and rejects resident `llama-server` or other GPU owners.
 It observes only sanitized `request_released` lifecycle events and never
 publishes prompts, responses, request bodies, or credentials. The output is

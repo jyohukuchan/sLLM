@@ -830,8 +830,8 @@ gateをAQ4 reasoning用に明示的に分ける。既存SQ8 evidenceを名前だ
 9. OpenWebUI DBを変更する前にbackupを作る。DB内容を標準出力やjournalへdumpしない。
 10. reasoning未指定のAPI/SSE/token/performance baselineを、本文を保存しないmachine-readable evidenceとして取得する。
 11. v2 manifestがactiveになった後、`tools/run-generic-reasoning-release-campaign.py`でdisabled、budget
-    32/128/256、unboundedのHTTP/SSE、lifecycle、resourceを一括取得する。収集器はv2 manifest検証後に
-    gfx1201/R9700の排他性を確認し、llama.cppが常駐していれば停止する。
+    32/128/256、unboundedをstream/non-streamの両方で実行し、HTTP/SSE、lifecycle、resourceを一括取得する。
+    収集器はv2 manifest検証後にgfx1201/R9700の排他性を確認し、llama.cppが常駐していれば停止する。
 12. v0.2仕様とfixture、Gateway/worker/AQ4のoffline契約は固定済みである。production serviceを
     変更する前に、candidate identityを実機evidenceへ結合し、unit testと全production gateを通す。
 13. 実装中は小さい意味単位でcommitし、各commitの検証結果をjournalへ記録する。

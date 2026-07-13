@@ -91,6 +91,7 @@ class StreamResult:
     first_reasoning_ms: float | None
     first_answer_ms: float | None
     latency_ms: float
+    stream: bool = True
 
 
 def _sha256(value: bytes) -> str:
@@ -421,15 +422,16 @@ def _request_body(model_id: str, mode: str, fixture: Fixture, stream: bool = Tru
 
 
 def _docker_command(
-    *, docker: str, image: str, key_file: Path, endpoint: str, network: str
+    *, docker: str, image: str, key_file: Path, endpoint: str, network: str, stream: bool
 ) -> list[str]:
+    accept_header = "-H 'Accept: text/event-stream' " if stream else ""
     script = (
         "set -eu; key=$(cat /run/secrets/ullm-api-key); config=$(mktemp); "
         "trap 'rm -f \"$config\"' EXIT; umask 077; "
         "printf 'header = \"Authorization: Bearer %s\"\\n' \"$key\" > \"$config\"; "
         "exec curl --config \"$config\" --silent --show-error --no-buffer "
-        "-H 'Content-Type: application/json' -H 'Accept: text/event-stream' "
-        "-w '\\n__ULLM_HTTP_STATUS__%{http_code}\\n' --data-binary @- "
+        "-H 'Content-Type: application/json' " + accept_header
+        + "-w '\\n__ULLM_HTTP_STATUS__%{http_code}\\n' --data-binary @- "
         + endpoint
     )
     return [
@@ -576,7 +578,134 @@ def _stream_request(
             (first_answer_ns - started_ns) / 1_000_000 if first_answer_ns is not None else None
         ),
         latency_ms=(ended_ns - started_ns) / 1_000_000,
+        stream=True,
     )
+
+
+def _nonstream_request(
+    body: bytes,
+    *,
+    command: list[str],
+    timeout_seconds: float,
+) -> StreamResult:
+    started_ns = time.monotonic_ns()
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise CampaignError("Docker HTTP probe could not start") from error
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        process.stdin.write(body)
+        process.stdin.close()
+        chunks: list[bytes] = []
+        total_bytes = 0
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CampaignError("Docker HTTP probe timed out")
+            readable, _, _ = select.select([process.stdout], [], [], min(remaining, 1.0))
+            if not readable:
+                continue
+            chunk = process.stdout.read1(64 * 1024)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > MAX_RESPONSE_BYTES:
+                raise CampaignError("HTTP response exceeds its size bound")
+            chunks.append(chunk)
+        return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except CampaignError:
+        process.kill()
+        process.wait(timeout=15.0)
+        raise
+    except (BrokenPipeError, OSError, subprocess.TimeoutExpired) as error:
+        process.kill()
+        process.wait(timeout=15.0)
+        raise CampaignError("Docker HTTP probe failed") from error
+    if return_code != 0:
+        raise CampaignError("Docker HTTP probe returned nonzero")
+    raw = b"".join(chunks)
+    marker = b"\n__ULLM_HTTP_STATUS__"
+    marker_position = raw.rfind(marker)
+    if marker_position < 0:
+        raise CampaignError("Docker HTTP probe returned no HTTP status")
+    try:
+        status = int(raw[marker_position + len(marker) :].strip())
+        value = _strict_json(raw[:marker_position].rstrip(), "non-stream response")
+    except (ValueError, CampaignError) as error:
+        raise CampaignError("non-stream response is invalid") from error
+    if not isinstance(value, dict):
+        raise CampaignError("non-stream response is not an object")
+    choices = value.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise CampaignError("non-stream response choices are invalid")
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise CampaignError("non-stream response message is invalid")
+    usage = value.get("usage")
+    if not isinstance(usage, dict):
+        raise CampaignError("non-stream response has no usage object")
+    details = usage.get("completion_tokens_details", {})
+    if not isinstance(details, dict):
+        raise CampaignError("non-stream usage details are invalid")
+    try:
+        prompt_tokens = int(usage["prompt_tokens"])
+        completion_tokens = int(usage["completion_tokens"])
+        reasoning_tokens = int(details.get("reasoning_tokens", 0))
+    except (KeyError, TypeError, ValueError) as error:
+        raise CampaignError("non-stream usage accounting is invalid") from error
+    completion_id = value.get("id")
+    finish_reason = choice.get("finish_reason")
+    if not isinstance(completion_id, str) or not isinstance(finish_reason, str):
+        raise CampaignError("non-stream completion metadata is invalid")
+    answer_text = message.get("content")
+    reasoning_text = message.get("reasoning_content", "")
+    if not isinstance(answer_text, str) or not isinstance(reasoning_text, str):
+        raise CampaignError("non-stream message content is invalid")
+    timings = value.get("timings", {})
+    if not isinstance(timings, dict):
+        timings = {}
+    ended_ns = time.monotonic_ns()
+    return StreamResult(
+        status=status,
+        completion_id=completion_id,
+        finish_reason=finish_reason,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        usage_timings=timings,
+        answer_text=answer_text,
+        reasoning_text=reasoning_text,
+        sse_chunk_count=0,
+        first_reasoning_ms=(
+            (ended_ns - started_ns) / 1_000_000 if reasoning_text else None
+        ),
+        first_answer_ms=(ended_ns - started_ns) / 1_000_000 if answer_text else None,
+        latency_ms=(ended_ns - started_ns) / 1_000_000,
+        stream=False,
+    )
+
+
+def _assert_transport_match(mode: str, stream: StreamResult, nonstream: StreamResult) -> None:
+    for field in (
+        "status",
+        "finish_reason",
+        "prompt_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+        "answer_text",
+        "reasoning_text",
+    ):
+        if getattr(stream, field) != getattr(nonstream, field):
+            raise CampaignError(f"release case {mode} stream/non-stream contract differs")
 
 
 def _timing(result: StreamResult, forced_end_tokens: int) -> dict[str, float | None]:
@@ -599,6 +728,10 @@ def _timing(result: StreamResult, forced_end_tokens: int) -> dict[str, float | N
         duration = (result.latency_ms - result.first_answer_ms) / 1000
         if duration > 0:
             answer_rate = answer_tokens / duration
+    if not result.stream and answer_rate is None:
+        predicted_rate = result.usage_timings.get("predicted_per_second")
+        if isinstance(predicted_rate, (int, float)) and predicted_rate > 0:
+            answer_rate = float(predicted_rate)
     decode_rate = result.completion_tokens / (result.latency_ms / 1000) if result.latency_ms > 0 else None
     return {
         "prefill_tokens_per_second": float(prompt_rate) if prompt_rate is not None else None,
@@ -633,13 +766,14 @@ def _case_and_lifecycle(
         raise CampaignError(f"release case {mode} has no answer tokens")
     budget = MODE_BUDGETS[mode]
     overshoot = max(0, reasoning - budget) if budget is not None and mode != "disabled" else 0
-    case_id = f"generic-reasoning-{mode}"
+    transport = "stream" if result.stream else "nonstream"
+    case_id = f"generic-reasoning-{mode}-{transport}"
     case = {
         "id": case_id,
         "mode": mode,
         "prompt_fixture_id": fixture.identifier,
         "prompt_sha256": _sha256(fixture.prompt.encode("utf-8")),
-        "stream": True,
+        "stream": result.stream,
         "http_status": result.status,
         "sse_chunk_count": result.sse_chunk_count,
         "finish_reason": result.finish_reason,
@@ -667,7 +801,7 @@ def _case_and_lifecycle(
     }
     lifecycle = {
         "case_id": case_id,
-        "stream": True,
+        "stream": result.stream,
         "outcome": result.finish_reason,
         "prompt_tokens": result.prompt_tokens,
         "completion_tokens": result.completion_tokens,
@@ -717,7 +851,22 @@ def execute(
         raise CampaignError("fixture suite lacks modes: " + ",".join(missing))
     gpu_preflight = _read_gpu_processes(rocm_smi)
     _bind_gpu_processes(gpu_preflight, manifest_summary["worker"]["binary_sha256"])
-    command = _docker_command(docker=docker, image=http_image, key_file=token_file, endpoint=endpoint, network=network)
+    stream_command = _docker_command(
+        docker=docker,
+        image=http_image,
+        key_file=token_file,
+        endpoint=endpoint,
+        network=network,
+        stream=True,
+    )
+    nonstream_command = _docker_command(
+        docker=docker,
+        image=http_image,
+        key_file=token_file,
+        endpoint=endpoint,
+        network=network,
+        stream=False,
+    )
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     stage = output_dir.parent / f".{output_dir.name}.incomplete-{uuid.uuid4().hex}"
     stage.mkdir(mode=0o700, parents=True)
@@ -730,15 +879,30 @@ def execute(
         for mode in MODES:
             fixture = fixtures[f"generic-reasoning-{mode}"]
             before = _resource_sample(service, rocm_smi, systemctl)
-            result = _stream_request(
+            stream_result = _stream_request(
                 _request_body(manifest_summary["model_id"], mode, fixture),
-                command=command,
+                command=stream_command,
                 timeout_seconds=timeout_seconds,
             )
-            release = observer.wait_release(result.completion_id, timeout_seconds)
+            release = observer.wait_release(stream_result.completion_id, timeout_seconds)
             after = _resource_sample(service, rocm_smi, systemctl)
             case, event, sample = _case_and_lifecycle(
-                mode=mode, fixture=fixture, result=result, release=release, before=before, after=after
+                mode=mode, fixture=fixture, result=stream_result, release=release, before=before, after=after
+            )
+            cases.append(case)
+            lifecycle.append(event)
+            samples.append(sample)
+            before = _resource_sample(service, rocm_smi, systemctl)
+            nonstream_result = _nonstream_request(
+                _request_body(manifest_summary["model_id"], mode, fixture, stream=False),
+                command=nonstream_command,
+                timeout_seconds=timeout_seconds,
+            )
+            _assert_transport_match(mode, stream_result, nonstream_result)
+            release = observer.wait_release(nonstream_result.completion_id, timeout_seconds)
+            after = _resource_sample(service, rocm_smi, systemctl)
+            case, event, sample = _case_and_lifecycle(
+                mode=mode, fixture=fixture, result=nonstream_result, release=release, before=before, after=after
             )
             cases.append(case)
             lifecycle.append(event)
@@ -755,6 +919,8 @@ def execute(
             "status": "incomplete",
             "raw_bodies_stored": False,
             "case_count": len(cases),
+            "stream_case_count": sum(1 for case in cases if case["stream"]),
+            "nonstream_case_count": sum(1 for case in cases if not case["stream"]),
             "modes": list(MODES),
             "manifest_sha256": manifest_summary["manifest_sha256"],
             "model_id": manifest_summary["model_id"],

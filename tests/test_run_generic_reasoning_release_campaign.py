@@ -13,6 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools/run-generic-reasoning-release-campaign.py"
+VALIDATOR_PATH = ROOT / "tools/validate-generic-reasoning-release.py"
 
 
 def load_tool() -> ModuleType:
@@ -25,6 +26,18 @@ def load_tool() -> ModuleType:
 
 
 TOOL = load_tool()
+
+
+def load_validator() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("generic_reasoning_release_validator_for_campaign", VALIDATOR_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+VALIDATOR = load_validator()
 
 
 def test_modes_and_request_body_are_explicit_and_bounded() -> None:
@@ -46,6 +59,90 @@ def test_modes_and_request_body_are_explicit_and_bounded() -> None:
 
     with pytest.raises(TOOL.CampaignError, match="unknown release mode"):
         TOOL._mode_fields("invalid")
+
+
+def test_nonstream_response_is_bounded_and_matches_release_case_contract() -> None:
+    payload = {
+        "id": "completion-nonstream",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+        },
+        "timings": {"prompt_per_second": 100.0, "predicted_per_second": 80.0},
+    }
+    output = json.dumps(payload, separators=(",", ":")).encode("ascii")
+    marker = b"\n__ULLM_HTTP_STATUS__200\n"
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(" + repr(output + marker) + ")",
+    ]
+    result = TOOL._nonstream_request(b"request", command=command, timeout_seconds=2.0)
+
+    assert result.stream is False
+    assert result.status == 200
+    assert result.completion_id == "completion-nonstream"
+    assert result.sse_chunk_count == 0
+    assert result.answer_text == "ok"
+    assert result.reasoning_tokens == 0
+
+    fixture = TOOL.Fixture("fixture", "hello", "ok")
+    release = {
+        "completion_id": result.completion_id,
+        "outcome": "stop",
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "reset_complete": True,
+        "admit_to_start_ns": 1,
+        "start_to_release_ns": 2,
+        "admit_to_release_ns": 3,
+    }
+    sample = TOOL.ResourceSample(100, 200, 50.0, 100.0)
+    case, lifecycle, _ = TOOL._case_and_lifecycle(
+        mode="disabled", fixture=fixture, result=result, release=release,
+        before=sample, after=sample,
+    )
+    assert case["id"] == "generic-reasoning-disabled-nonstream"
+    assert case["stream"] is False
+    assert case["sse_chunk_count"] == 0
+    assert case["timing"]["answer_decode_tokens_per_second"] == 80.0
+    assert VALIDATOR._validate_case(case) == "disabled"
+    assert VALIDATOR._validate_lifecycle({
+        "schema_version": VALIDATOR.LIFECYCLE_SCHEMA_VERSION,
+        "events": [lifecycle],
+    }, {case["id"]: case})["case_ids"] == {case["id"]}
+
+
+def test_stream_and_nonstream_semantics_are_compared_without_persisting_text() -> None:
+    fields = {
+        "status": 200,
+        "completion_id": "different-id",
+        "finish_reason": "stop",
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "reasoning_tokens": 1,
+        "usage_timings": {},
+        "answer_text": "ok",
+        "reasoning_text": "step",
+        "sse_chunk_count": 3,
+        "first_reasoning_ms": 1.0,
+        "first_answer_ms": 2.0,
+        "latency_ms": 3.0,
+    }
+    stream = TOOL.StreamResult(**fields, stream=True)
+    nonstream = TOOL.StreamResult(**fields, stream=False)
+
+    TOOL._assert_transport_match("budget-32", stream, nonstream)
+    nonstream_mismatch = TOOL.StreamResult(**{**fields, "answer_text": "different"}, stream=False)
+    with pytest.raises(TOOL.CampaignError, match="stream/non-stream contract differs"):
+        TOOL._assert_transport_match("budget-32", stream, nonstream_mismatch)
 
 
 def test_manifest_preflight_rejects_v1_before_external_validation(tmp_path: Path) -> None:
