@@ -654,6 +654,29 @@ mod tests {
         }
     }
 
+    fn scripted_reasoning_dialect() -> ullm_engine::reasoning::ReasoningDialect {
+        ullm_engine::reasoning::ReasoningDialect {
+            identity: "synthetic.worker-v2.v1".into(),
+            start_sequence: vec![10, 11],
+            end_sequence: vec![20, 21],
+            forced_end_sequence: vec![20, 21],
+            max_budget_tokens: 2,
+            reserved_answer_tokens: 1,
+            enabled_by_default: false,
+            effort_budgets: vec![("low".into(), 1), ("medium".into(), 1), ("high".into(), 2)],
+            history_reasoning_policy: ullm_engine::reasoning::HistoryReasoningPolicy::Omit,
+            initial_phase: ullm_engine::reasoning::InitialReasoningPhase::Reasoning,
+            eos_policy: ullm_engine::reasoning::ReasoningEosPolicy::Close,
+        }
+    }
+
+    fn scripted_reasoning_profile() -> Sq8WorkerProfile {
+        let mut profile = scripted_profile();
+        profile.worker_schema = "ullm.worker.v2".into();
+        profile.reasoning = Some(scripted_reasoning_dialect());
+        profile
+    }
+
     fn dummy_resident_config() -> ResidentWorkerConfig {
         ResidentWorkerConfig {
             model: Qwen35Aq4ModelLoadConfig {
@@ -670,6 +693,12 @@ mod tests {
             session: Qwen35Aq4SessionConfig::greedy(4, vec![2]),
             expected_vocab_size: 32,
         }
+    }
+
+    fn dummy_resident_reasoning_config() -> ResidentWorkerConfig {
+        let mut config = dummy_resident_config();
+        config.session.reasoning_dialect = Some(scripted_reasoning_dialect());
+        config
     }
 
     #[test]
@@ -769,6 +798,114 @@ mod tests {
         assert_eq!(types, ["ready", "started", "progress", "token", "released"]);
         assert_eq!(lines[3]["token_id"], 2);
         assert_eq!(lines[4]["outcome"], "stop");
+    }
+
+    #[test]
+    fn resident_v2_reasoning_jsonl_route_forces_close_and_preserves_schema() {
+        let (mut input_writer, input_reader) = UnixStream::pair().unwrap();
+        let output = SharedOutput::default();
+        let captured = output.clone();
+        let process = thread::spawn(move || {
+            run_loaded_worker(
+                LoadedWorker::Resident {
+                    config: dummy_resident_reasoning_config(),
+                    profile: scripted_reasoning_profile(),
+                },
+                BufReader::new(input_reader),
+                output,
+                move |_| {
+                    let session = Qwen35Aq4InferenceSession::from_model(
+                        ScriptedModel::default(),
+                        Qwen35Aq4SessionConfig::greedy(4, vec![2]),
+                    )?;
+                    Ok(SessionInferenceBackend::new(session))
+                },
+                move |config| {
+                    let session = Qwen35Aq4InferenceSession::from_model(
+                        ScriptedModel {
+                            tokens: VecDeque::from([7, 2]),
+                            resets: 0,
+                        },
+                        config.session,
+                    )?;
+                    Ok(SessionInferenceBackend::new(session))
+                },
+            )
+        });
+
+        writeln!(
+            input_writer,
+            "{}",
+            serde_json::json!({
+                "schema_version": "ullm.worker.v2",
+                "type": "generate",
+                "request_id": "resident-v2-reasoning",
+                "prompt_token_ids": [4],
+                "max_new_tokens": 4,
+                "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
+                "eos_token_ids": [2],
+                "reasoning": {
+                    "enabled": true,
+                    "budget_tokens": 1,
+                    "dialect_id": "synthetic.worker-v2.v1",
+                    "end_token_ids": [20, 21],
+                    "forced_end_token_ids": [20, 21],
+                    "reserved_answer_tokens": 1
+                }
+            })
+        )
+        .unwrap();
+        input_writer.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let bytes = captured.0.lock().unwrap().clone();
+            if String::from_utf8_lossy(&bytes).contains("\"type\":\"released\"") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "resident v2 release event timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        writeln!(
+            input_writer,
+            "{}",
+            serde_json::json!({"schema_version": "ullm.worker.v2", "type": "shutdown"})
+        )
+        .unwrap();
+        input_writer.flush().unwrap();
+        drop(input_writer);
+        assert_eq!(
+            process.join().unwrap().unwrap(),
+            ullm_engine::worker_runtime::CommandReaderExit::IdleShutdown
+        );
+
+        let lines = captured
+            .0
+            .lock()
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            lines
+                .iter()
+                .all(|line| line["schema_version"] == "ullm.worker.v2")
+        );
+        let token_ids = lines
+            .iter()
+            .filter(|line| line["type"] == "token")
+            .map(|line| line["token_id"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(token_ids, [7, 20, 21, 2]);
+        let released = lines
+            .iter()
+            .find(|line| line["type"] == "released")
+            .unwrap();
+        assert_eq!(released["outcome"], "stop");
+        assert_eq!(released["completion_tokens"], 4);
     }
 
     #[test]
