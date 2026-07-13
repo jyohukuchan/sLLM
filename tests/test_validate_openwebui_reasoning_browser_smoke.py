@@ -132,6 +132,17 @@ def test_validator_rejects_initial_model_mismatch(tmp_path: Path) -> None:
         TOOL.validate(path)
 
 
+def test_validator_rejects_non_switching_provider(tmp_path: Path) -> None:
+    value = evidence()
+    value["provider_switch_model_id_sha256"] = value["model_id_sha256"]
+    value["provider_requests"][-2]["model_id_sha256"] = value["model_id_sha256"]
+    path = tmp_path / "browser.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    with pytest.raises(TOOL.ValidationError, match="provider switch model is not distinct"):
+        TOOL.validate(path)
+
+
 def test_validator_reads_v1_hash_only_record(tmp_path: Path) -> None:
     value = evidence()
     value["schema_version"] = TOOL.SCHEMA_VERSION_V1

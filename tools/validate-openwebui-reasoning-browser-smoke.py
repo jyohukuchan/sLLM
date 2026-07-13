@@ -180,6 +180,8 @@ def validate(path: Path) -> dict[str, Any]:
             "provider_switch_model_id_sha256",
         )
         _text_evidence(document["provider_switch_answer"], "provider_switch_answer")
+        if document["provider_switch_model_id_sha256"] == document["model_id_sha256"]:
+            raise ValidationError("provider switch model is not distinct")
         if document["provider_return_performed"] is not True:
             raise ValidationError("provider return was not performed")
         _hash(

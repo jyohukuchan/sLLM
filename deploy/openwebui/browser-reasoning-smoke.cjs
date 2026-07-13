@@ -155,6 +155,9 @@ async function submit(page, prompt) {
 async function run(browser) {
   const baseUrl = normalizedBaseUrl(BASE_URL);
   const token = strictToken(fs.readFileSync(TOKEN_FILE));
+  if (SWITCH_MODEL_ID === MODEL_ID) {
+    throw new Error("provider switch model must differ from the uLLM model");
+  }
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await context.addInitScript((value) => {
     window.localStorage.setItem("token", value);
