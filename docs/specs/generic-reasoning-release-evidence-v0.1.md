@@ -49,6 +49,16 @@ case ID; a complete artifact must contain one matching event for every case.
 `--status complete` additionally requires the recomputed production gate to be
 eligible.
 
+`tools/run-generic-reasoning-release-campaign.py` is the production collector
+for the measured-case input. It requires an immutable HTTP probe image, a v2
+served-model manifest, and the five fixture IDs. Before any request it checks
+that gfx1201 has a resident `ullm-aq4-worker` and no `llama-server` or other
+positive-VRAM process. Each streamed request is correlated with one matching
+`request_released` event through a temporary Unix datagram observer. The
+collector publishes only `cases.json`, sanitized `lifecycle.json`, bounded
+resource samples, and a summary; prompt and response text remain in memory for
+the quality check and are never written.
+
 The validator report also contains `timing_percentiles` grouped by mode and
 timing field. It recomputes p50, p95, and p99 with linear interpolation over
 the raw case values and includes the contributing sample count; producer-side

@@ -95,11 +95,45 @@ export ULLM_MODEL_NAME='uLLM Qwen3.5 9B AQ4'
 export TOKEN_FILE=/etc/ullm/openai-api-key
 export BROWSER_IMAGE=sha256:dbd552f6c831816050a1381a54cdb8d37df56df7f6559c82aba451d2ea93e0aa
 export PROBE_IMAGE=sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54
+export OPENWEBUI_IMAGE=ullm/open-webui@sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409
 export OPENWEBUI_URL=http://192.168.0.66:3000/
 export SERVICE=ullm-openai.service
 export OUT=benchmarks/results/2026-07-13/qwen35-9b-aq4-reasoning-v0.1
+# Set PROMOTION_SOURCE_COMMIT to the 40-character commit in the v2 receipt.
 mkdir -p "$OUT"
 ```
+
+Collect the five hash-only HTTP/SSE release cases after the v2 manifest is
+active. The collector validates the manifest first, then requires an exclusive
+gfx1201/R9700 worker and rejects resident `llama-server` or other GPU owners.
+It observes only sanitized `request_released` lifecycle events and never
+publishes prompts, responses, request bodies, or credentials. The output is
+atomic and contains `cases.json`, `lifecycle.json`, `resource-samples.jsonl`,
+and a bounded `summary.json`.
+
+```bash
+uv run --project services/openai-gateway python \
+  tools/run-generic-reasoning-release-campaign.py \
+  --output-dir "$OUT/http-sse-campaign" \
+  --manifest /etc/ullm/served-models/active.json \
+  --fixture-suite tests/fixtures/generic-reasoning-release-v0.1/prompts.json \
+  --token-file "$TOKEN_FILE" --http-image "$PROBE_IMAGE" \
+  --service "$SERVICE"
+
+uv run --project services/openai-gateway python \
+  tools/prepare-generic-reasoning-release-evidence.py \
+  --cases "$OUT/http-sse-campaign/cases.json" \
+  --lifecycle "$OUT/http-sse-campaign/lifecycle.json" \
+  --manifest /etc/ullm/served-models/active.json \
+  --worker-binary target/reasoning-v2/release/ullm-aq4-worker \
+  --openwebui-image "$OPENWEBUI_IMAGE" \
+  --active-promotion-source-commit "$PROMOTION_SOURCE_COMMIT" \
+  --output "$OUT/release-evidence.json" --status incomplete
+```
+
+The campaign must be rerun if the active manifest, worker binary, promotion
+receipt, tokenizer, or source identity changes. Do not run it while the
+legacy llama.cpp comparison service owns the target R9700.
 
 The image identities above are the current local content identities; they MUST
 be refreshed with `docker image inspect` before a later run. Run the normal

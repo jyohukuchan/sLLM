@@ -1,0 +1,29 @@
+{
+  "fixtures": [
+    {
+      "id": "generic-reasoning-disabled",
+      "prompt": "Reply exactly GENERIC_REASONING_DISABLED_OK and nothing else.",
+      "expected_answer": "GENERIC_REASONING_DISABLED_OK"
+    },
+    {
+      "id": "generic-reasoning-budget-32",
+      "prompt": "Reply exactly GENERIC_REASONING_BUDGET32_OK and nothing else.",
+      "expected_answer": "GENERIC_REASONING_BUDGET32_OK"
+    },
+    {
+      "id": "generic-reasoning-budget-128",
+      "prompt": "Reply exactly GENERIC_REASONING_BUDGET128_OK and nothing else.",
+      "expected_answer": "GENERIC_REASONING_BUDGET128_OK"
+    },
+    {
+      "id": "generic-reasoning-budget-256",
+      "prompt": "Reply exactly GENERIC_REASONING_BUDGET256_OK and nothing else.",
+      "expected_answer": "GENERIC_REASONING_BUDGET256_OK"
+    },
+    {
+      "id": "generic-reasoning-unbounded",
+      "prompt": "Reply exactly GENERIC_REASONING_UNBOUNDED_OK and nothing else.",
+      "expected_answer": "GENERIC_REASONING_UNBOUNDED_OK"
+    }
+  ]
+}
