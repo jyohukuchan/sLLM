@@ -993,7 +993,7 @@
     }
 
     #[test]
-    fn first_hip_aq4_tiled_batch_matches_cpu_for_production_shapes_when_available() {
+    fn first_hip_aq4_register_batch_matches_cpu_for_production_shapes_when_available() {
         let selected_device = (1..device_count().unwrap()).find(|&device_index| {
             device_info(device_index)
                 .map(|info| info.gcn_arch_name == "gfx1201")
@@ -1002,38 +1002,42 @@
         let Some(device_index) = selected_device else {
             return;
         };
-        let _experimental = Aq4TiledExperimentalEnvGuard::new(Some("1"));
+        let _lock = AQ4_EXPERIMENTAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let mut seed = 0x9e37_79b9_u32;
         let mut next_unit = || {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (seed as f32) / (u32::MAX as f32)
         };
-        for &(batch_count, rows, cols) in &[
-            (8_usize, 32_usize, 128_usize),
-            (8, 32, 256),
-            (8, 64, 128),
-            (8, 64, 256),
-            (16, 32, 128),
-            (16, 32, 256),
-            (16, 64, 128),
-            (16, 64, 256),
-            (127, 32, 128),
-            (127, 32, 256),
-            (127, 64, 128),
-            (127, 64, 256),
-            (128, 32, 128),
-            (128, 32, 256),
-            (128, 64, 128),
-            (128, 64, 256),
-        ] {
-            assert!(aq4_matvec_batch_dispatch_tiled_for_shape(
-                device_index,
-                16,
-                rows,
-                cols,
-                batch_count
-            ));
+        for register_bm in [4_usize, 8_usize] {
+            let register_value = if register_bm == 4 { "4" } else { "8" };
+            let _lds = ExperimentalEnvGuard::new("ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM", None);
+            let _register = ExperimentalEnvGuard::new(
+                "ULLM_EXPERIMENTAL_HIP_AQ4_REGISTER_BM",
+                Some(register_value),
+            );
+            for &batch_count in &[4_usize, 8, 16, 32, 64, 127, 128] {
+                for &rows in &[32_usize, 64] {
+                    for &cols in &[128_usize, 256] {
+                        let expected_dispatch = if batch_count < register_bm {
+                            Aq4MatvecBatchDispatchKind::Legacy
+                        } else if register_bm == 4 {
+                            Aq4MatvecBatchDispatchKind::RegisterBm4
+                        } else {
+                            Aq4MatvecBatchDispatchKind::RegisterBm8
+                        };
+                        assert_eq!(
+                            aq4_matvec_batch_dispatch_kind_for_shape(
+                                device_index,
+                                16,
+                                rows,
+                                cols,
+                                batch_count
+                            ),
+                            expected_dispatch
+                        );
             let elements = rows * cols;
             let index_bytes = (elements + 1) / 2;
             let groups = elements / 16;
@@ -1198,6 +1202,9 @@
                 &expected,
                 1e-4,
             );
+                    }
+                }
+            }
         }
     }
 

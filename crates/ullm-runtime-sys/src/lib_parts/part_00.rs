@@ -1553,11 +1553,41 @@ pub fn aq4_matvec_batch_f32(
     })
 }
 
-/// Returns the runtime's shape-only AQ4 batch dispatch decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Aq4MatvecBatchDispatchKind {
+    Legacy,
+    TiledLdsBm8,
+    RegisterBm4,
+    RegisterBm8,
+}
+
+/// Returns the runtime's active AQ4 batch dispatch decision for a shape and environment.
 ///
 /// `device_index` uses the public runtime indexing convention (CPU is 0, HIP starts at 1).
-/// A value of `true` means the gfx1201 tiled GEMM candidate is selected; `false` is the exact
-/// legacy/fallback path.
+pub fn aq4_matvec_batch_dispatch_kind_for_shape(
+    device_index: u32,
+    group_size: usize,
+    rows: usize,
+    cols: usize,
+    batch_count: usize,
+) -> Aq4MatvecBatchDispatchKind {
+    match unsafe {
+        ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
+            device_index,
+            group_size,
+            rows,
+            cols,
+            batch_count,
+        )
+    } {
+        1 => Aq4MatvecBatchDispatchKind::TiledLdsBm8,
+        2 => Aq4MatvecBatchDispatchKind::RegisterBm4,
+        3 => Aq4MatvecBatchDispatchKind::RegisterBm8,
+        _ => Aq4MatvecBatchDispatchKind::Legacy,
+    }
+}
+
+/// Compatibility helper for the original LDS tiled experiment.
 pub fn aq4_matvec_batch_dispatch_tiled_for_shape(
     device_index: u32,
     group_size: usize,
@@ -1565,15 +1595,13 @@ pub fn aq4_matvec_batch_dispatch_tiled_for_shape(
     cols: usize,
     batch_count: usize,
 ) -> bool {
-    unsafe {
-        ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
-            device_index,
-            group_size,
-            rows,
-            cols,
-            batch_count,
-        ) == 1
-    }
+    aq4_matvec_batch_dispatch_kind_for_shape(
+        device_index,
+        group_size,
+        rows,
+        cols,
+        batch_count,
+    ) == Aq4MatvecBatchDispatchKind::TiledLdsBm8
 }
 
 pub fn aq4_matvec_top1_partial_count(rows: usize) -> Result<usize, String> {

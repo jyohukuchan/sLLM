@@ -1,28 +1,29 @@
-    struct Aq4TiledExperimentalEnvGuard {
+    static AQ4_EXPERIMENTAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ExperimentalEnvGuard {
+        name: &'static str,
         previous: Option<String>,
     }
 
-    impl Aq4TiledExperimentalEnvGuard {
-        fn new(value: Option<&str>) -> Self {
-            const NAME: &str = "ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM";
-            let previous = std::env::var(NAME).ok();
+    impl ExperimentalEnvGuard {
+        fn new(name: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(name).ok();
             unsafe {
                 match value {
-                    Some(value) => std::env::set_var(NAME, value),
-                    None => std::env::remove_var(NAME),
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
                 }
             }
-            Self { previous }
+            Self { name, previous }
         }
     }
 
-    impl Drop for Aq4TiledExperimentalEnvGuard {
+    impl Drop for ExperimentalEnvGuard {
         fn drop(&mut self) {
-            const NAME: &str = "ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM";
             unsafe {
                 match self.previous.as_deref() {
-                    Some(value) => std::env::set_var(NAME, value),
-                    None => std::env::remove_var(NAME),
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
                 }
             }
         }
@@ -43,25 +44,43 @@
 
     #[test]
     fn aq4_batch_dispatch_classifier_is_conservative_on_cpu_and_ragged_shapes() {
-        let disabled = Aq4TiledExperimentalEnvGuard::new(None);
-        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(0, 16, 32, 128, 8));
-        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 8, 32, 128, 8));
-        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 16, 31, 128, 8));
-        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 16, 32, 127, 8));
-        assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(1, 16, 32, 128, 7));
-        for device_index in 1..device_count().unwrap() {
-            if device_info(device_index)
-                .map(|info| info.gcn_arch_name == "gfx1201")
-                .unwrap_or(false)
-            {
-                assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(
-                    device_index,
-                    16,
-                    32,
-                    128,
-                    7
-                ));
-                assert!(!aq4_matvec_batch_dispatch_tiled_for_shape(
+        const LDS_ENV: &str = "ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM";
+        const REGISTER_ENV: &str = "ULLM_EXPERIMENTAL_HIP_AQ4_REGISTER_BM";
+        let _lock = AQ4_EXPERIMENTAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let gfx1201_devices: Vec<u32> = (1..device_count().unwrap())
+            .filter(|&device_index| {
+                device_info(device_index)
+                    .map(|info| info.gcn_arch_name == "gfx1201")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        {
+            let _lds = ExperimentalEnvGuard::new(LDS_ENV, None);
+            let _register = ExperimentalEnvGuard::new(REGISTER_ENV, None);
+            assert_eq!(
+                aq4_matvec_batch_dispatch_kind_for_shape(0, 16, 32, 128, 8),
+                Aq4MatvecBatchDispatchKind::Legacy
+            );
+            for &device_index in &gfx1201_devices {
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 8),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
+            }
+        }
+
+        {
+            let _lds = ExperimentalEnvGuard::new(LDS_ENV, Some("1"));
+            let _register = ExperimentalEnvGuard::new(REGISTER_ENV, None);
+            for &device_index in &gfx1201_devices {
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 8),
+                    Aq4MatvecBatchDispatchKind::TiledLdsBm8
+                );
+                assert!(aq4_matvec_batch_dispatch_tiled_for_shape(
                     device_index,
                     16,
                     32,
@@ -70,20 +89,57 @@
                 ));
             }
         }
-        drop(disabled);
-        let _enabled = Aq4TiledExperimentalEnvGuard::new(Some("1"));
-        for device_index in 1..device_count().unwrap() {
-            if device_info(device_index)
-                .map(|info| info.gcn_arch_name == "gfx1201")
-                .unwrap_or(false)
-            {
-                assert!(aq4_matvec_batch_dispatch_tiled_for_shape(
-                    device_index,
-                    16,
-                    32,
-                    128,
-                    8
-                ));
+
+        for (value, expected) in [
+            ("4", Aq4MatvecBatchDispatchKind::RegisterBm4),
+            ("8", Aq4MatvecBatchDispatchKind::RegisterBm8),
+        ] {
+            let _lds = ExperimentalEnvGuard::new(LDS_ENV, Some("1"));
+            let _register = ExperimentalEnvGuard::new(REGISTER_ENV, Some(value));
+            for &device_index in &gfx1201_devices {
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 8),
+                    expected
+                );
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 2),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 3),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 4),
+                    if value == "4" {
+                        Aq4MatvecBatchDispatchKind::RegisterBm4
+                    } else {
+                        Aq4MatvecBatchDispatchKind::Legacy
+                    }
+                );
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 8, 32, 128, 8),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 31, 128, 8),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 127, 8),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
+            }
+        }
+
+        {
+            let _lds = ExperimentalEnvGuard::new(LDS_ENV, Some("1"));
+            let _register = ExperimentalEnvGuard::new(REGISTER_ENV, Some("invalid"));
+            for &device_index in &gfx1201_devices {
+                assert_eq!(
+                    aq4_matvec_batch_dispatch_kind_for_shape(device_index, 16, 32, 128, 8),
+                    Aq4MatvecBatchDispatchKind::Legacy
+                );
             }
         }
     }

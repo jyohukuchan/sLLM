@@ -710,7 +710,34 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
             rows,
             cols,
             batch_count);
-    if (dispatch_kind == Aq4MatvecBatchDispatchKind::Tiled &&
+    const unsigned int register_batch_tile =
+        dispatch_kind == Aq4MatvecBatchDispatchKind::RegisterBm4 ? kAq4RegisterBm4 :
+        dispatch_kind == Aq4MatvecBatchDispatchKind::RegisterBm8 ? kAq4RegisterBm8 : 0u;
+    if (register_batch_tile != 0u && aq4_matvec_batch_f32_register_hip_kernel(
+            index_buffer,
+            scale_buffer,
+            codebook_buffer,
+            scale_values_buffer,
+            input_buffer,
+            row_scale_buffer,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
+            register_batch_tile,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    if (register_batch_tile != 0u && !hip_kernel_error.empty()) {
+        hip_kernel_error.append("\n");
+    }
+    if (dispatch_kind == Aq4MatvecBatchDispatchKind::TiledLds &&
         aq4_matvec_batch_f32_tiled_hip_kernel(
             index_buffer,
             scale_buffer,
@@ -731,7 +758,7 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
         set_error("");
         return ULLM_STATUS_OK;
     }
-    if (dispatch_kind == Aq4MatvecBatchDispatchKind::Tiled && !hip_kernel_error.empty()) {
+    if (dispatch_kind == Aq4MatvecBatchDispatchKind::TiledLds && !hip_kernel_error.empty()) {
         hip_kernel_error.append("\n");
     }
     if (aq4_matvec_batch_f32_hip_kernel(
@@ -799,9 +826,17 @@ ullm_aq4_matvec_batch_dispatch_kind ullm_runtime_aq4_matvec_batch_dispatch_kind_
         rows,
         cols,
         batch_count);
-    return kind == Aq4MatvecBatchDispatchKind::Tiled ?
-        ULLM_AQ4_MATVEC_BATCH_DISPATCH_TILED :
-        ULLM_AQ4_MATVEC_BATCH_DISPATCH_LEGACY;
+    switch (kind) {
+    case Aq4MatvecBatchDispatchKind::TiledLds:
+        return ULLM_AQ4_MATVEC_BATCH_DISPATCH_TILED_LDS_BM8;
+    case Aq4MatvecBatchDispatchKind::RegisterBm4:
+        return ULLM_AQ4_MATVEC_BATCH_DISPATCH_REGISTER_BM4;
+    case Aq4MatvecBatchDispatchKind::RegisterBm8:
+        return ULLM_AQ4_MATVEC_BATCH_DISPATCH_REGISTER_BM8;
+    case Aq4MatvecBatchDispatchKind::Legacy:
+    default:
+        return ULLM_AQ4_MATVEC_BATCH_DISPATCH_LEGACY;
+    }
 }
 
 ullm_status ullm_runtime_aq4_matvec_top1_f32(

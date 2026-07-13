@@ -554,6 +554,11 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
         return aq4_matvec_tiled_kernel_source();
     }
 
+    static std::string aq4_matvec_register_kernel_source_for_arch(const std::string &arch) {
+        (void)arch;
+        return aq4_matvec_register_kernel_source();
+    }
+
     static std::string aq4_matvec_top1_kernel_source_for_arch(const std::string &arch) {
         std::string preamble =
             aq4_rows_per_block_preamble_for_rows(aq4_matvec_top1_rows_per_block_from_env());
@@ -933,6 +938,160 @@ extern "C" __global__ void ullm_aq4_gemm_tiled_f32_kernel(
         }
         output[batch * rows + row] = sum;
     }
+}
+)";
+    }
+
+    static const char *aq4_matvec_register_kernel_source() {
+        return R"(
+#define ULLM_AQ4_REGISTER_ROWS_PER_BLOCK 32u
+#define ULLM_AQ4_REGISTER_LANES_PER_ROW 8u
+#define ULLM_AQ4_REGISTER_THREADS 256u
+static_assert(
+    ULLM_AQ4_REGISTER_ROWS_PER_BLOCK * ULLM_AQ4_REGISTER_LANES_PER_ROW ==
+        ULLM_AQ4_REGISTER_THREADS,
+    "AQ4 register kernel requires eight lanes per output row");
+
+template <unsigned int BM>
+__device__ __forceinline__ void ullm_aq4_gemm_register_f32_impl(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    const float *row_scales,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row_scale_count,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    static_assert(BM == 4u || BM == 8u, "AQ4 register kernel supports BM4 or BM8");
+    constexpr unsigned int rows_per_block = ULLM_AQ4_REGISTER_ROWS_PER_BLOCK;
+    constexpr unsigned int lanes_per_row = ULLM_AQ4_REGISTER_LANES_PER_ROW;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int row_in_block = tid / lanes_per_row;
+    const unsigned int lane = tid & (lanes_per_row - 1u);
+    // gfx1201 uses wave32, so each wave contains four independent width-8 row subgroups.
+    const unsigned long long row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned long long batch_base = static_cast<unsigned long long>(blockIdx.y) * BM;
+    float acc[BM] = {};
+
+    if (row < rows && group_size == 16ull && (cols % 16ull) == 0ull) {
+        const unsigned long long groups_per_row = cols / 16ull;
+        const unsigned long long row_offset = row * cols;
+        for (unsigned long long group_in_row = lane; group_in_row < groups_per_row;
+             group_in_row += lanes_per_row) {
+            const unsigned long long group = row * groups_per_row + group_in_row;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index >= scale_count) {
+                continue;
+            }
+            const float group_scale = scale_values[scale_index] * tensor_scale;
+            const unsigned long long col_start = group_in_row * 16ull;
+#pragma unroll
+            for (unsigned int packed_offset = 0; packed_offset < 8u; ++packed_offset) {
+                const unsigned long long col = col_start + packed_offset * 2u;
+                const unsigned char packed = indices[(row_offset + col) >> 1];
+                const float weight0 = codebook[packed & 0x0f] * group_scale;
+                const float weight1 = codebook[(packed >> 4) & 0x0f] * group_scale;
+#pragma unroll
+                for (unsigned int batch_offset = 0; batch_offset < BM; ++batch_offset) {
+                    const unsigned long long batch = batch_base + batch_offset;
+                    if (batch < batch_count) {
+                        const float *batch_input = input + batch * cols;
+                        acc[batch_offset] +=
+                            weight0 * batch_input[col] + weight1 * batch_input[col + 1ull];
+                    }
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for (unsigned int batch_offset = 0; batch_offset < BM; ++batch_offset) {
+        acc[batch_offset] += __shfl_down(acc[batch_offset], 4u, lanes_per_row);
+        acc[batch_offset] += __shfl_down(acc[batch_offset], 2u, lanes_per_row);
+        acc[batch_offset] += __shfl_down(acc[batch_offset], 1u, lanes_per_row);
+    }
+    if (lane == 0u && row < rows) {
+        const float row_scale =
+            row_scales != nullptr && row < row_scale_count ? row_scales[row] : 1.0f;
+#pragma unroll
+        for (unsigned int batch_offset = 0; batch_offset < BM; ++batch_offset) {
+            const unsigned long long batch = batch_base + batch_offset;
+            if (batch < batch_count) {
+                output[batch * rows + row] = acc[batch_offset] * row_scale;
+            }
+        }
+    }
+}
+
+extern "C" __global__ void ullm_aq4_gemm_register_bm4_f32_kernel(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    const float *row_scales,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row_scale_count,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    ullm_aq4_gemm_register_f32_impl<4u>(
+        indices,
+        scale_indices,
+        codebook,
+        scale_values,
+        input,
+        row_scales,
+        scale_count,
+        group_size,
+        tensor_scale,
+        row_scale_count,
+        rows,
+        cols,
+        batch_count,
+        output);
+}
+
+extern "C" __global__ void ullm_aq4_gemm_register_bm8_f32_kernel(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    const float *row_scales,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row_scale_count,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    ullm_aq4_gemm_register_f32_impl<8u>(
+        indices,
+        scale_indices,
+        codebook,
+        scale_values,
+        input,
+        row_scales,
+        scale_count,
+        group_size,
+        tensor_scale,
+        row_scale_count,
+        rows,
+        cols,
+        batch_count,
+        output);
 }
 )";
     }
