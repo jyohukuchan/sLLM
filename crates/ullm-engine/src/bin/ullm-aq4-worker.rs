@@ -70,7 +70,7 @@ fn main() -> ExitCode {
                 "Usage: ullm-aq4-worker [--engine PATH] --package PATH [--device-index N] [--layers all|CSV]\n\
                  Gateway form: --artifact AQ4_PACKAGE --package COMPAT_PATH [extra options]\n\
                  Manifest mode: ullm-aq4-worker --served-model-manifest PATH\n\
-                 Reads ullm.worker.v1 commands from stdin and writes events to stdout.\n\
+                 Reads ullm.worker.v1/v2 commands from stdin and writes matching events to stdout.\n\
                  Compatibility mode invokes the AQ4 engine CLI once per request.\n\
                  Manifest mode loads one resident AQ4 model and never invokes a sibling engine."
             );

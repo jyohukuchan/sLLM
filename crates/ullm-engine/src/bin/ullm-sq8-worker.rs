@@ -38,7 +38,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "Usage: ullm-sq8-worker --artifact PATH --package PATH\n\
                  Manifest mode: ullm-sq8-worker --served-model-manifest PATH\n\
-                 Reads ullm.worker.v1 commands from stdin and writes events to stdout."
+                 Reads ullm.worker.v1/v2 commands from stdin and writes matching events to stdout."
             );
             ExitCode::SUCCESS
         }
