@@ -11,7 +11,9 @@ schema/manifest contract, Gateway path, synthetic reasoning state machine, AQ4
 forced-close path, release accounting, and offline regression tests are in
 place. The active production service remains the v1 path; OpenWebUI E2E,
 same-HEAD GPU baseline, soak, benchmark, promotion evidence, activation, and
-rollback are not complete.
+rollback are not complete. The v2 evidence bootstrap and an R9700-exclusive
+alternating OpenWebUI provider-switch runner are implemented, but neither has
+been exercised against the production services.
 
 ## 前回の要点
 
