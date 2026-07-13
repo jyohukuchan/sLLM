@@ -1,10 +1,17 @@
 # Generic reasoning and thinking budget production plan v0.1
 
-Status: proposed; implementation not started; handoff context recorded
+Status: in progress; offline implementation and contract tests are advanced; production gates remain pending
 
 Date: 2026-07-13
 
 Last handoff audit: 2026-07-13
+
+Current implementation status: Phase 0 evidence is incomplete, while the v2
+schema/manifest contract, Gateway path, synthetic reasoning state machine, AQ4
+forced-close path, release accounting, and offline regression tests are in
+place. The active production service remains the v1 path; OpenWebUI E2E,
+same-HEAD GPU baseline, soak, benchmark, promotion evidence, activation, and
+rollback are not complete.
 
 ## 前回の要点
 
