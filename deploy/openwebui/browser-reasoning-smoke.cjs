@@ -187,6 +187,11 @@ async function run(browser) {
     TOGGLE_SELECTOR,
     { timeout: NAVIGATION_TIMEOUT_MS },
   );
+  const expandedText = (await firstAssistant.innerText()).trim();
+  const toggleText = (await toggle.innerText()).trim();
+  if (expandedText.length <= firstText.length + toggleText.length) {
+    throw new Error("reasoning details are empty after expansion");
+  }
 
   await page.reload({ waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS });
   await waitForAnswer(page, FIRST_MARKER);
@@ -209,6 +214,7 @@ async function run(browser) {
     schema_version: SUMMARY_SCHEMA,
     model_id_sha256: sha256(MODEL_ID),
     first_answer: textEvidence(firstText),
+    expanded_view: textEvidence(expandedText),
     second_answer: textEvidence(secondText),
     reasoning_details_expanded: true,
     provider_request_count: requestBodies.length,

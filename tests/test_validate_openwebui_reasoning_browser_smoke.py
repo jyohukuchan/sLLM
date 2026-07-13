@@ -36,6 +36,7 @@ def evidence() -> dict:
         "schema_version": TOOL.SCHEMA_VERSION,
         "model_id_sha256": "b" * 64,
         "first_answer": {"utf8_bytes": 20, "sha256": "c" * 64},
+        "expanded_view": {"utf8_bytes": 40, "sha256": "f" * 64},
         "second_answer": {"utf8_bytes": 21, "sha256": "d" * 64},
         "reasoning_details_expanded": True,
         "provider_request_count": 2,

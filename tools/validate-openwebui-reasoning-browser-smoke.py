@@ -121,6 +121,7 @@ def validate(path: Path) -> dict[str, Any]:
         "schema_version",
         "model_id_sha256",
         "first_answer",
+        "expanded_view",
         "second_answer",
         "reasoning_details_expanded",
         "provider_request_count",
@@ -133,6 +134,7 @@ def validate(path: Path) -> dict[str, Any]:
         raise ValidationError("browser evidence root fields differ")
     _hash(document["model_id_sha256"], "model_id_sha256")
     _text_evidence(document["first_answer"], "first_answer")
+    _text_evidence(document["expanded_view"], "expanded_view")
     _text_evidence(document["second_answer"], "second_answer")
     if document["reasoning_details_expanded"] is not True:
         raise ValidationError("reasoning details were not expanded")
