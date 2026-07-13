@@ -115,8 +115,8 @@ contains token IDs or decoded content.
 The resident promotion runner also sends a budget-zero reasoning request for
 v2 candidates and verifies the complete forced-end sequence plus one reserved
 answer token; the legacy v1 comparison remains limited to the raw no-reasoning
-cases. Before starting either process, it requires a `rocm-smi
---showpids --json` preflight proving that the target R9700 has no positive-VRAM
+cases. Before starting either process, it requires a
+`rocm-smi --showpids --json` preflight proving that the target R9700 has no positive-VRAM
 KFD process. It records the empty positive-process result and fails closed when
 the active worker or llama.cpp still owns the GPU.
 
