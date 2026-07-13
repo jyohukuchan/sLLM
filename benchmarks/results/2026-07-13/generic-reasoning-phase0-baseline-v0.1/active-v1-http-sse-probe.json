@@ -1,0 +1,58 @@
+{
+  "schema_version": "ullm.generic_reasoning_phase0_active_v1_probe.v1",
+  "status": "partial",
+  "captured_at": "2026-07-13",
+  "production_activation_performed": false,
+  "source_commit": "a4b9152",
+  "active_manifest": {
+    "schema_version": "ullm.served_model.v1",
+    "sha256": "7589b9db7734d176bef21130b31e1ba679d1e0599e9a3c0d8af6699f86eded80"
+  },
+  "active_promotion_source_commit": "4be10d007c48db444f6b18fe6ac22e09dc17f168",
+  "source_commit_aligned": false,
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary_sha256": "e31cd887ddc92e1f7c9ceecc28b2dfd70f2eabcfc96179ddc1c007b9009e3a7f",
+    "device": "gfx1201",
+    "execution_profile": "rdna4_aq4_resident"
+  },
+  "fixture": {
+    "id": "generic-reasoning-phase0-short-one-word-v1",
+    "prompt_sha256": "not-recorded",
+    "prompt_token_count": 18,
+    "request_max_tokens": 2,
+    "temperature": 0,
+    "reasoning_controls": "omitted"
+  },
+  "nonstream": {
+    "http_status": 200,
+    "request_body_sha256": "7762e49edb925b9747e83f5fbf80b004b787c34a4968c90987c731fd44d1c678",
+    "response_body_sha256": "2c63da461debe17ebd725ccb9a29b28d156b0d29b6fa3d2a12c245c76c70297a",
+    "response_bytes": 619,
+    "finish_reason": "stop",
+    "prompt_tokens": 18,
+    "completion_tokens": 2,
+    "total_tokens": 20
+  },
+  "stream": {
+    "http_status": 200,
+    "request_body_sha256": "40d31941985206ce30f525f1234ae7a1a9974b6a80f31076df3609b2cd10c9da",
+    "response_body_sha256": "37ec17cd71a225df9512f49e8f31b3892b6f2c0f34725adc3a842edaa0690c50",
+    "response_bytes": 1260,
+    "chunks": 4,
+    "event_sequence": ["role", "token", "stop", "usage", "done"],
+    "delta_keys": [["content", "role"], ["content"], []],
+    "usage": {
+      "prompt_tokens": 18,
+      "completion_tokens": 2,
+      "total_tokens": 20
+    },
+    "invalid_data_lines": 0
+  },
+  "raw_bodies_stored": false,
+  "missing": [
+    "same-HEAD AQ4 source/token alignment",
+    "AQ4 generated token IDs",
+    "1024, 2048, and 3072-token prompt cases"
+  ]
+}

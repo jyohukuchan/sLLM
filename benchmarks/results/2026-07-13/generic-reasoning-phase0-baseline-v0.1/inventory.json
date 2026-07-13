@@ -1,7 +1,7 @@
 {
   "schema_version": "ullm.generic_reasoning_phase0_baseline_inventory.v1",
   "status": "incomplete",
-  "source_commit_at_inventory": "cbe6d01",
+  "source_commit_at_inventory": "a4b9152",
   "production_activation_performed": false,
   "available_evidence": [
     {
@@ -22,6 +22,14 @@
       "backend": "sq8",
       "contains": ["http_request_body", "http_response_body", "sse_and_browser_records"],
       "source_commit_aligned": false
+    },
+    {
+      "path": "benchmarks/results/2026-07-13/generic-reasoning-phase0-baseline-v0.1/active-v1-http-sse-probe.json",
+      "backend": "aq4",
+      "contains": ["redacted_http_metadata", "redacted_sse_metadata", "usage_cross_check"],
+      "prompt_token_counts": [18],
+      "source_commit_aligned": false,
+      "raw_bodies_stored": false
     }
   ],
   "missing_for_phase0_gate": [
