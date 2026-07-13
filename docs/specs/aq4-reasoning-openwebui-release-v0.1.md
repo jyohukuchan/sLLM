@@ -82,6 +82,9 @@ renamed only after validation.
 The release evidence schema is defined in
 `docs/specs/generic-reasoning-release-evidence-v0.1.md`, and its validator is
 `tools/validate-generic-reasoning-release.py`.
+Its `lifecycle` section binds sanitized `request_released` accounting and
+reset timing to each measured case; a complete release artifact cannot omit
+that correlation.
 The browser-side Phase 5 smoke is
 `deploy/openwebui/browser-reasoning-smoke.cjs`; it records only hashes, counts,
 and boolean state, and must be run only after a v2 candidate is configured.

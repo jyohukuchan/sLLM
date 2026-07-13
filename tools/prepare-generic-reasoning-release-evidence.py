@@ -249,6 +249,7 @@ def prepare(
     active_promotion_source_commit: str,
     output_path: Path,
     *,
+    lifecycle_path: Path | None = None,
     status: str = "incomplete",
 ) -> dict[str, Any]:
     if status not in {"incomplete", "complete"}:
@@ -262,6 +263,15 @@ def prepare(
         raise EvidenceError("measured cases must be a nonempty array")
     if len(cases) > 4096:
         raise EvidenceError("measured cases exceed their bound")
+    lifecycle = (
+        _read_json(lifecycle_path)
+        if lifecycle_path is not None
+        else {
+            "schema_version": "ullm.generic_reasoning_lifecycle_evidence.v1",
+            "events": [],
+        }
+    )
+    _scan_forbidden(lifecycle)
     _validate_served_model_manifest(manifest_path)
     manifest, tokenizer_root = _load_manifest(manifest_path)
     source_commit = _git_commit()
@@ -286,6 +296,7 @@ def prepare(
         "git_worktree_status_sha256": hashlib.sha256(status_raw).hexdigest(),
         "identity": identity,
         "cases": cases,
+        "lifecycle": lifecycle,
     }
     validator = _load_validator()
     temporary = output_path.parent / f".{output_path.name}.validate"
@@ -311,6 +322,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--openwebui-image", required=True)
     parser.add_argument("--active-promotion-source-commit", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--lifecycle", type=Path)
     parser.add_argument("--status", choices=("incomplete", "complete"), default="incomplete")
     return parser.parse_args(argv)
 
@@ -325,6 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.openwebui_image,
             args.active_promotion_source_commit,
             args.output,
+            lifecycle_path=args.lifecycle,
             status=args.status,
         )
     except Exception as error:
@@ -336,6 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "schema_version": document["schema_version"],
                 "output": os.fspath(args.output.resolve()),
                 "case_count": len(document["cases"]),
+                "lifecycle_event_count": len(document["lifecycle"]["events"]),
                 "git_worktree_clean": document["git_worktree_clean"],
             },
             separators=(",", ":"),

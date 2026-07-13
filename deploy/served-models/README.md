@@ -88,6 +88,8 @@ Measured case records can be assembled with
 Git/worktree and artifact identities and runs the release validator before
 publishing. Use `--status incomplete` during collection and reserve
 `--status complete` for the final aligned, clean, gate-eligible run.
+Pass `--lifecycle` with sanitized `request_released` records when assembling a
+complete artifact; the validator matches those records to every measured case.
 
 `tools/prepare-generic-reasoning-release-bundle.py` hashes the staged artifacts
 and the previous active manifest, systemd unit, and environment file. It writes

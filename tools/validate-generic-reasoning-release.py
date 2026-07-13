@@ -32,6 +32,8 @@ FORBIDDEN_KEYS = {
 MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
 MAX_CASES = 4096
 MAX_SSE_CHUNKS = 1_000_000
+MAX_LIFECYCLE_EVENTS = 4096
+LIFECYCLE_SCHEMA_VERSION = "ullm.generic_reasoning_lifecycle_evidence.v1"
 
 
 class ValidationError(ValueError):
@@ -260,6 +262,73 @@ def _validate_case(case: Any) -> str:
     return mode
 
 
+def _validate_lifecycle(value: Any, cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "events"}:
+        raise ValidationError("release evidence lifecycle fields differ")
+    if value["schema_version"] != LIFECYCLE_SCHEMA_VERSION:
+        raise ValidationError("release evidence lifecycle schema differs")
+    events = value["events"]
+    if not isinstance(events, list) or len(events) > MAX_LIFECYCLE_EVENTS:
+        raise ValidationError("release evidence lifecycle events are invalid")
+    seen: set[str] = set()
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {
+            "case_id",
+            "stream",
+            "outcome",
+            "prompt_tokens",
+            "completion_tokens",
+            "reset_complete",
+            "reasoning_tokens",
+            "forced_end_tokens",
+            "admit_to_start_ns",
+            "start_to_release_ns",
+            "admit_to_release_ns",
+        }:
+            raise ValidationError("release evidence lifecycle event fields differ")
+        _text(event["case_id"], "lifecycle.case_id")
+        case_id = event["case_id"]
+        if case_id in seen:
+            raise ValidationError("release evidence lifecycle case IDs are duplicated")
+        seen.add(case_id)
+        case = cases.get(case_id)
+        if case is None:
+            raise ValidationError("release evidence lifecycle case is unknown")
+        if type(event["stream"]) is not bool or event["stream"] != case["stream"]:
+            raise ValidationError("release evidence lifecycle stream differs")
+        if event["outcome"] != case["finish_reason"]:
+            raise ValidationError("release evidence lifecycle outcome differs")
+        for field, case_value in (
+            ("prompt_tokens", case["raw"]["prompt_tokens"]),
+            ("completion_tokens", case["raw"]["completion_tokens"]),
+        ):
+            _integer(event[field], f"lifecycle.{field}")
+            if event[field] != case_value:
+                raise ValidationError(f"release evidence lifecycle {field} differs")
+        if event["reset_complete"] is not True:
+            raise ValidationError("release evidence lifecycle reset is incomplete")
+        for field in ("reasoning_tokens", "forced_end_tokens"):
+            accounting = event[field]
+            if accounting is not None:
+                _integer(accounting, f"lifecycle.{field}")
+        if case["mode"] == "disabled":
+            if event["reasoning_tokens"] is not None or event["forced_end_tokens"] is not None:
+                raise ValidationError("disabled lifecycle event contains reasoning accounting")
+        else:
+            if (
+                event["reasoning_tokens"] != case["raw"]["reasoning_tokens"]
+                or event["forced_end_tokens"] != case["raw"]["forced_end_tokens"]
+            ):
+                raise ValidationError("release evidence lifecycle accounting differs")
+        for field in (
+            "admit_to_start_ns",
+            "start_to_release_ns",
+            "admit_to_release_ns",
+        ):
+            _integer(event[field], f"lifecycle.{field}")
+    return {"event_count": len(events), "case_ids": seen}
+
+
 def validate(path: Path) -> dict[str, Any]:
     document = _load(path)
     _scan_forbidden(document)
@@ -274,6 +343,7 @@ def validate(path: Path) -> dict[str, Any]:
         "git_worktree_status_sha256",
         "identity",
         "cases",
+        "lifecycle",
     }
     if set(document) != expected or document["schema_version"] != SCHEMA_VERSION:
         raise ValidationError("release evidence root fields differ")
@@ -302,12 +372,15 @@ def validate(path: Path) -> dict[str, Any]:
         raise ValidationError("release evidence cases are missing")
     modes: set[str] = set()
     ids: set[str] = set()
+    cases_by_id: dict[str, dict[str, Any]] = {}
     for case in cases:
         mode = _validate_case(case)
         if case["id"] in ids:
             raise ValidationError("release evidence case IDs are duplicated")
         ids.add(case["id"])
+        cases_by_id[case["id"]] = case
         modes.add(mode)
+    lifecycle = _validate_lifecycle(document["lifecycle"], cases_by_id)
     reasons: list[str] = []
     timing_fields = (
         "prefill_tokens_per_second",
@@ -346,6 +419,8 @@ def validate(path: Path) -> dict[str, Any]:
         reasons.append("required benchmark modes are missing: " + ", ".join(missing_modes))
     if document["status"] != "complete":
         reasons.append("producer status is incomplete")
+    if lifecycle["case_ids"] != ids:
+        reasons.append("lifecycle evidence does not cover every release case")
     required_timing_fields = {
         "prefill_tokens_per_second",
         "first_answer_token_ms",
@@ -371,6 +446,7 @@ def validate(path: Path) -> dict[str, Any]:
         "structurally_valid": True,
         "gate_eligible": not reasons,
         "case_count": len(cases),
+        "lifecycle_event_count": lifecycle["event_count"],
         "git_worktree_clean": document["git_worktree_clean"],
         "observed_modes": sorted(modes),
         "timing_percentiles": {

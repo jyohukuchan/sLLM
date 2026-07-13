@@ -77,19 +77,53 @@ def cases() -> list[dict]:
     ]
 
 
-def write_inputs(root: Path) -> tuple[Path, Path, Path]:
+def lifecycle_events(measured: list[dict]) -> list[dict]:
+    events = []
+    for item in measured:
+        raw = item["raw"]
+        enabled = item["mode"] != "disabled"
+        events.append(
+            {
+                "case_id": item["id"],
+                "stream": item["stream"],
+                "outcome": item["finish_reason"],
+                "prompt_tokens": raw["prompt_tokens"],
+                "completion_tokens": raw["completion_tokens"],
+                "reset_complete": True,
+                "reasoning_tokens": raw["reasoning_tokens"] if enabled else None,
+                "forced_end_tokens": raw["forced_end_tokens"] if enabled else None,
+                "admit_to_start_ns": 1,
+                "start_to_release_ns": 2,
+                "admit_to_release_ns": 3,
+            }
+        )
+    return events
+
+
+def write_inputs(root: Path) -> tuple[Path, Path, Path, Path]:
     fixture = ROOT / "services/openai-gateway/tests/fixtures/served-model/aq4"
     candidate = root / "served-model"
     shutil.copytree(fixture, candidate)
     manifest = candidate / "served-model.json"
     worker = candidate / "worker"
     cases_path = root / "cases.json"
-    cases_path.write_text(json.dumps(cases()), encoding="ascii")
-    return cases_path, manifest, worker
+    measured = cases()
+    cases_path.write_text(json.dumps(measured), encoding="ascii")
+    lifecycle_path = root / "lifecycle.json"
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "ullm.generic_reasoning_lifecycle_evidence.v1",
+                "events": lifecycle_events(measured),
+            }
+        ),
+        encoding="ascii",
+    )
+    return cases_path, manifest, worker, lifecycle_path
 
 
 def test_prepare_writes_valid_complete_hash_only_evidence(tmp_path: Path, monkeypatch) -> None:
-    cases_path, manifest, worker = write_inputs(tmp_path)
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
     commit = "1" * 40
     monkeypatch.setattr(TOOL, "_git_commit", lambda: commit)
     monkeypatch.setattr(TOOL, "_git_status", lambda: b"")
@@ -102,6 +136,7 @@ def test_prepare_writes_valid_complete_hash_only_evidence(tmp_path: Path, monkey
         "ullm/open-webui@sha256:" + "b" * 64,
         commit,
         output,
+        lifecycle_path=lifecycle_path,
         status="complete",
     )
 
@@ -112,7 +147,7 @@ def test_prepare_writes_valid_complete_hash_only_evidence(tmp_path: Path, monkey
 
 
 def test_prepare_keeps_dirty_incomplete_evidence_but_rejects_complete(tmp_path: Path, monkeypatch) -> None:
-    cases_path, manifest, worker = write_inputs(tmp_path)
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
     commit = "1" * 40
     monkeypatch.setattr(TOOL, "_git_commit", lambda: commit)
     monkeypatch.setattr(TOOL, "_git_status", lambda: b" M source.py\n")
@@ -125,6 +160,7 @@ def test_prepare_keeps_dirty_incomplete_evidence_but_rejects_complete(tmp_path: 
         "ullm/open-webui@sha256:" + "b" * 64,
         commit,
         incomplete,
+        lifecycle_path=lifecycle_path,
     )
     assert document["git_worktree_clean"] is False
     assert TOOL._load_validator().validate(incomplete)["gate_eligible"] is False
@@ -137,12 +173,13 @@ def test_prepare_keeps_dirty_incomplete_evidence_but_rejects_complete(tmp_path: 
             "ullm/open-webui@sha256:" + "b" * 64,
             commit,
             tmp_path / "complete.json",
+            lifecycle_path=lifecycle_path,
             status="complete",
         )
 
 
 def test_prepare_complete_rejects_unaligned_active_promotion(tmp_path: Path, monkeypatch) -> None:
-    cases_path, manifest, worker = write_inputs(tmp_path)
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
     monkeypatch.setattr(TOOL, "_git_commit", lambda: "1" * 40)
     monkeypatch.setattr(TOOL, "_git_status", lambda: b"")
 
@@ -154,12 +191,13 @@ def test_prepare_complete_rejects_unaligned_active_promotion(tmp_path: Path, mon
             "ullm/open-webui@sha256:" + "b" * 64,
             "2" * 40,
             tmp_path / "unaligned.json",
+            lifecycle_path=lifecycle_path,
             status="complete",
         )
 
 
 def test_prepare_rejects_cleartext_case_fields(tmp_path: Path, monkeypatch) -> None:
-    cases_path, manifest, worker = write_inputs(tmp_path)
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
     value = json.loads(cases_path.read_text(encoding="ascii"))
     value[0]["response"] = "secret"
     cases_path.write_text(json.dumps(value), encoding="ascii")
@@ -174,11 +212,12 @@ def test_prepare_rejects_cleartext_case_fields(tmp_path: Path, monkeypatch) -> N
             "ullm/open-webui@sha256:" + "b" * 64,
             "1" * 40,
             tmp_path / "release.json",
+            lifecycle_path=lifecycle_path,
         )
 
 
 def test_prepare_rejects_invalid_served_model_manifest(tmp_path: Path, monkeypatch) -> None:
-    cases_path, manifest, worker = write_inputs(tmp_path)
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
     document = json.loads(manifest.read_text(encoding="ascii"))
     document["worker"]["protocol"] = "ullm.worker.v2"
     manifest.write_text(json.dumps(document), encoding="ascii")
@@ -193,4 +232,5 @@ def test_prepare_rejects_invalid_served_model_manifest(tmp_path: Path, monkeypat
             "ullm/open-webui@sha256:" + "b" * 64,
             "1" * 40,
             tmp_path / "release.json",
+            lifecycle_path=lifecycle_path,
         )

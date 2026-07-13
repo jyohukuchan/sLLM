@@ -65,6 +65,32 @@ def case(case_id: str, mode: str, *, reasoning: int = 0, forced: int = 0) -> dic
     }
 
 
+def lifecycle(cases: list[dict]) -> dict:
+    events = []
+    for item in cases:
+        raw = item["raw"]
+        enabled = item["mode"] != "disabled"
+        events.append(
+            {
+                "case_id": item["id"],
+                "stream": item["stream"],
+                "outcome": item["finish_reason"],
+                "prompt_tokens": raw["prompt_tokens"],
+                "completion_tokens": raw["completion_tokens"],
+                "reset_complete": True,
+                "reasoning_tokens": raw["reasoning_tokens"] if enabled else None,
+                "forced_end_tokens": raw["forced_end_tokens"] if enabled else None,
+                "admit_to_start_ns": 1,
+                "start_to_release_ns": 2,
+                "admit_to_release_ns": 3,
+            }
+        )
+    return {
+        "schema_version": TOOL.LIFECYCLE_SCHEMA_VERSION,
+        "events": events,
+    }
+
+
 def evidence() -> dict:
     cases = [
         case("disabled", "disabled"),
@@ -89,6 +115,7 @@ def evidence() -> dict:
             "openwebui_image": "ullm/open-webui@sha256:" + "e" * 64,
         },
         "cases": cases,
+        "lifecycle": lifecycle(cases),
     }
 
 
@@ -149,6 +176,7 @@ def test_validator_rejects_invalid_release_records(tmp_path: Path, mutation) -> 
 def test_validator_reports_missing_required_mode_as_incomplete_gate(tmp_path: Path) -> None:
     value = evidence()
     value["cases"].pop()
+    value["lifecycle"]["events"].pop()
     path = tmp_path / "release.json"
     path.write_text(json.dumps(value), encoding="ascii")
 
@@ -175,6 +203,22 @@ def test_validator_reports_quality_and_timing_gate_failures(tmp_path: Path) -> N
     assert report["gate_eligible"] is False
     assert "case quality is incorrect: budget-32" in report["reasons"]
     assert any("case timing is incomplete: budget-128" in reason for reason in report["reasons"])
+
+
+def test_validator_requires_lifecycle_for_complete_gate(tmp_path: Path) -> None:
+    value = evidence()
+    value["status"] = "complete"
+    value["source_commit"] = value["active_promotion_source_commit"]
+    value["source_commit_aligned"] = True
+    value["lifecycle"]["events"] = []
+    path = tmp_path / "missing-lifecycle.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    report = TOOL.validate(path)
+
+    assert report["structurally_valid"] is True
+    assert report["gate_eligible"] is False
+    assert "lifecycle evidence does not cover every release case" in report["reasons"]
 
 
 def test_validator_reports_dirty_git_worktree_as_gate_failure(tmp_path: Path) -> None:
@@ -229,6 +273,16 @@ def test_validator_rejects_duplicate_json_fields(tmp_path: Path) -> None:
     path.write_text('{"schema_version":"x","schema_version":"y"}', encoding="ascii")
 
     with pytest.raises(TOOL.ValidationError, match="duplicate"):
+        TOOL.validate(path)
+
+
+def test_validator_rejects_lifecycle_accounting_mismatch(tmp_path: Path) -> None:
+    value = evidence()
+    value["lifecycle"]["events"][1]["forced_end_tokens"] = 0
+    path = tmp_path / "lifecycle-mismatch.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    with pytest.raises(TOOL.ValidationError, match="lifecycle accounting"):
         TOOL.validate(path)
 
 

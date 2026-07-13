@@ -26,6 +26,7 @@ git_worktree_clean: boolean
 git_worktree_status_sha256: lowercase SHA-256 of bounded Git status text
 identity: object
 cases: nonempty array
+lifecycle: object
 ```
 
 The validator recomputes `source_commit_aligned` by comparing the two commit
@@ -42,8 +43,11 @@ a pre-sanitized measured-case array and hashes the manifest, worker, and the
 tokenizer files named by the manifest. Before hashing, it re-runs the existing
 served-model contract validator, so an evidence artifact cannot bind to a
 manifest that the gateway would reject. It rejects forbidden cleartext fields
-and runs the independent release validator before publishing. `--status
-complete` additionally requires the recomputed production gate to be eligible.
+and runs the independent release validator before publishing. The optional
+`--lifecycle` input contains sanitized `request_released` records correlated by
+case ID; a complete artifact must contain one matching event for every case.
+`--status complete` additionally requires the recomputed production gate to be
+eligible.
 
 The validator report also contains `timing_percentiles` grouped by mode and
 timing field. It recomputes p50, p95, and p99 with linear interpolation over
@@ -56,6 +60,21 @@ correct count, and recomputed accuracy.
 It contains `resource_percentiles` grouped by mode and resource field, with
 p50, p95, p99, maximum, and contributing sample count recomputed from raw
 RSS/VRAM/temperature/power observations.
+
+`lifecycle` has the following shape:
+
+```text
+schema_version: "ullm.generic_reasoning_lifecycle_evidence.v1"
+events: array
+```
+
+Each event contains only bounded accounting and timing metadata: `case_id`,
+stream/outcome, prompt and completion token counts, reset completion,
+reasoning/forced-end counts (or `null` for disabled requests), and the three
+nonnegative lifecycle durations. The validator matches every event to its
+case, recomputes the accounting comparison, and rejects unknown or duplicate
+case IDs. Request IDs, prompt text, response text, and credentials are not
+stored.
 
 `identity` has exactly `manifest_sha256`, `worker_binary_sha256`,
 `tokenizer_sha256`, and `openwebui_image`. The first three values are lowercase
