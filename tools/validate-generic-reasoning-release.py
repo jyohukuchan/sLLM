@@ -28,6 +28,9 @@ FORBIDDEN_KEYS = {
     "token",
     "conversation",
 }
+MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
+MAX_CASES = 4096
+MAX_SSE_CHUNKS = 1_000_000
 
 
 class ValidationError(ValueError):
@@ -38,7 +41,11 @@ def _load(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ValidationError("release evidence must be a regular non-symlink file")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as source:
+            raw = source.read(MAX_EVIDENCE_BYTES + 1)
+        if len(raw) > MAX_EVIDENCE_BYTES:
+            raise ValidationError("release evidence exceeds its size bound")
+        value = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValidationError("release evidence is not valid JSON") from error
     if not isinstance(value, dict):
@@ -134,6 +141,8 @@ def _validate_case(case: Any) -> str:
     if type(case["stream"]) is not bool or case["http_status"] != 200:
         raise ValidationError("release evidence HTTP contract failed")
     _integer(case["sse_chunk_count"], "case.sse_chunk_count")
+    if case["sse_chunk_count"] > MAX_SSE_CHUNKS:
+        raise ValidationError("case SSE chunk count exceeds its bound")
     if case["stream"] and case["sse_chunk_count"] < 1:
         raise ValidationError("stream case has no SSE chunks")
     if not case["stream"] and case["sse_chunk_count"] != 0:
@@ -253,7 +262,7 @@ def validate(path: Path) -> dict[str, Any]:
         raise ValidationError("source alignment declaration differs from commit identity")
     _validate_identity(document["identity"])
     cases = document["cases"]
-    if not isinstance(cases, list) or not cases:
+    if not isinstance(cases, list) or not cases or len(cases) > MAX_CASES:
         raise ValidationError("release evidence cases are missing")
     modes: set[str] = set()
     ids: set[str] = set()

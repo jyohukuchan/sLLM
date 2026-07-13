@@ -7,6 +7,10 @@ This document defines the hash-only release evidence consumed by
 artifact; it does not activate a served model and must not contain user
 conversation text or credentials.
 
+The validator reads at most 16 MiB, accepts at most 4,096 cases, and bounds
+each case at 1,000,000 SSE chunks. Producers should keep evidence well below
+these limits by recording hashes and aggregate metadata rather than bodies.
+
 ## Root object
 
 The root object has exactly these fields:

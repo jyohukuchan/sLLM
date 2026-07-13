@@ -155,6 +155,20 @@ def test_validator_reports_quality_and_timing_gate_failures(tmp_path: Path) -> N
     assert any("case timing is incomplete: budget-128" in reason for reason in report["reasons"])
 
 
+def test_validator_rejects_oversized_evidence_and_sse_count(tmp_path: Path) -> None:
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"{" + b" " * TOOL.MAX_EVIDENCE_BYTES + b"}")
+    with pytest.raises(TOOL.ValidationError, match="size bound"):
+        TOOL.validate(oversized)
+
+    value = evidence()
+    value["cases"][0]["sse_chunk_count"] = TOOL.MAX_SSE_CHUNKS + 1
+    path = tmp_path / "chunks.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+    with pytest.raises(TOOL.ValidationError, match="chunk count"):
+        TOOL.validate(path)
+
+
 def test_require_complete_returns_distinct_exit_code(tmp_path: Path) -> None:
     path = tmp_path / "release.json"
     path.write_text(json.dumps(evidence()), encoding="ascii")
