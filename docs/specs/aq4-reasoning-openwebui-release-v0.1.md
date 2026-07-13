@@ -147,6 +147,13 @@ the previous active manifest and service configuration. Before activation, the
 candidate is validated using the real worker binary and real package paths;
 generation alone is insufficient.
 
+For a v2 candidate, the activation invocation MUST also provide the complete
+generic release bundle, the current systemd unit, and the current environment
+file. The activation tool recomputes the bundle gate, candidate manifest and
+worker identity, and all three rollback hashes before switching the active
+manifest. A v2 candidate without this binding is rejected before the atomic
+replace.
+
 Rollback restores the previous v1 manifest/profile, restarts the Gateway only
 through the normal service procedure, and reruns a reasoning-disabled baseline
 smoke. OpenWebUI has no reasoning-specific image rollback because no permanent

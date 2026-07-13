@@ -392,6 +392,13 @@ bridge-only readiness endpoint, reconciles OpenWebUI from the same active
 manifest, and verifies the UI health endpoint. `curl` retry behavior is inside
 the fixed container command; no shell wrapper is involved.
 
+For a `ullm.served_model.v2` candidate, activation also requires a
+production-gate-eligible generic release bundle. Pass
+`--release-bundle`, `--systemd-unit`, and `--environment-file`; the tool then
+checks the candidate manifest/worker identity and verifies that the bundle's
+rollback hashes still match the current active deployment before replacing it.
+The v1 activation command below remains valid for the existing rollback path.
+
 ```bash
 sudo python3 tools/activate-served-model.py \
   --candidate /etc/ullm/served-models/candidates/qwen35-9b-aq4.json \

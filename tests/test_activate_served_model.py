@@ -40,6 +40,29 @@ def activation_directory(tmp_path: Path) -> tuple[Path, Path]:
     return root, candidate
 
 
+def v2_activation_directory(tmp_path: Path) -> tuple[Path, Path]:
+    root, candidate = activation_directory(tmp_path)
+    document = json.loads(candidate.read_text(encoding="ascii"))
+    document["schema_version"] = "ullm.served_model.v2"
+    document["worker"]["protocol"] = "ullm.worker.v2"
+    document["promotion"]["source_commit"] = "1" * 40
+    document["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.multi-token.v1",
+        "start_token_ids": [10, 11],
+        "end_token_ids": [20, 21],
+        "forced_end_token_ids": [20, 21],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
+        "max_budget_tokens": 8,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    candidate.write_text(json.dumps(document), encoding="ascii")
+    return root, candidate
+
+
 def command(script: str, *arguments: Path | str) -> tuple[str, ...]:
     return (sys.executable, "-c", script, *(os.fspath(value) for value in arguments))
 
@@ -69,6 +92,122 @@ def test_activation_is_atomic_and_runs_commands_in_stage_order(tmp_path: Path) -
     ]
     assert not list(root.glob(".served-model.candidate.*"))
     assert not list(root.glob(".served-model.rollback.*"))
+
+
+def test_v2_activation_requires_a_release_bundle(tmp_path: Path) -> None:
+    root, candidate = v2_activation_directory(tmp_path)
+    active = root / "active.json"
+    active.write_bytes(b"known-old-active")
+
+    with pytest.raises(ACTIVATOR.ActivationError, match="release bundle"):
+        ACTIVATOR.activate(candidate, active)
+
+    assert active.read_bytes() == b"known-old-active"
+
+
+def test_v2_activation_binds_bundle_and_rollback_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, candidate = v2_activation_directory(tmp_path)
+    active = root / "active.json"
+    old = b"known-old-active"
+    active.write_bytes(old)
+    unit = root / "ullm-openai.service"
+    environment = root / "ullm-openai.env"
+    unit.write_bytes(b"[Service]\nExecStart=/usr/bin/ullm\n")
+    environment.write_bytes(b"ULLM_TEST=1\n")
+    bundle = root / "release-bundle.json"
+    bundle.write_text("{}", encoding="ascii")
+
+    summary = ACTIVATOR.load_validator().validation_summary(candidate)
+    monkeypatch.setattr(
+        ACTIVATOR,
+        "load_bundle_validator",
+        lambda: type(
+            "BundleValidator",
+            (),
+            {"validate": lambda _self, _path: {"gate_eligible": True}},
+        )(),
+    )
+    bundle.write_text(
+        json.dumps(
+            {
+                "source_commit": "1" * 40,
+                "identity": {
+                    "manifest_sha256": summary["manifest_sha256"],
+                    "worker_binary_sha256": summary["worker"]["binary_sha256"],
+                },
+                "rollback_target": {
+                    "manifest_sha256": hashlib.sha256(old).hexdigest(),
+                    "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
+                    "environment_sha256": hashlib.sha256(environment.read_bytes()).hexdigest(),
+                },
+            }
+        ),
+        encoding="ascii",
+    )
+
+    result = ACTIVATOR.activate(
+        candidate,
+        active,
+        release_bundle=bundle,
+        systemd_unit=unit,
+        environment_file=environment,
+    )
+
+    assert result.manifest_sha256 == hashlib.sha256(candidate.read_bytes()).hexdigest()
+    assert active.read_bytes() == candidate.read_bytes()
+
+
+def test_v2_activation_rejects_rollback_identity_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, candidate = v2_activation_directory(tmp_path)
+    active = root / "active.json"
+    active.write_bytes(b"known-old-active")
+    unit = root / "ullm-openai.service"
+    environment = root / "ullm-openai.env"
+    unit.write_bytes(b"unit")
+    environment.write_bytes(b"environment")
+    bundle = root / "release-bundle.json"
+    summary = ACTIVATOR.load_validator().validation_summary(candidate)
+    monkeypatch.setattr(
+        ACTIVATOR,
+        "load_bundle_validator",
+        lambda: type(
+            "BundleValidator",
+            (),
+            {"validate": lambda _self, _path: {"gate_eligible": True}},
+        )(),
+    )
+    bundle.write_text(
+        json.dumps(
+            {
+                "source_commit": "1" * 40,
+                "identity": {
+                    "manifest_sha256": summary["manifest_sha256"],
+                    "worker_binary_sha256": summary["worker"]["binary_sha256"],
+                },
+                "rollback_target": {
+                    "manifest_sha256": "f" * 64,
+                    "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
+                    "environment_sha256": hashlib.sha256(environment.read_bytes()).hexdigest(),
+                },
+            }
+        ),
+        encoding="ascii",
+    )
+
+    with pytest.raises(ACTIVATOR.ActivationError, match="previous active manifest"):
+        ACTIVATOR.activate(
+            candidate,
+            active,
+            release_bundle=bundle,
+            systemd_unit=unit,
+            environment_file=environment,
+        )
+
+    assert active.read_bytes() == b"known-old-active"
 
 
 @pytest.mark.parametrize("failed_stage", ["check", "reconcile", "final-check"])

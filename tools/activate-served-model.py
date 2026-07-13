@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -21,12 +22,15 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
+BUNDLE_VALIDATOR_PATH = ROOT / "tools/validate-generic-reasoning-release-bundle.py"
 MAX_MANIFEST_BYTES = 1_048_576
+MAX_BUNDLE_FILE_BYTES = 16 * 1024 * 1024
 MAX_COMMAND_ARGUMENTS = 128
 MAX_COMMAND_ARGUMENT_BYTES = 65_536
 MAX_COMMANDS_PER_STAGE = 128
 RESULT_SCHEMA = "ullm.served_model.activation.v1"
 _VALIDATOR_MODULE_NAME = "_ullm_served_model_activation_validator"
+_BUNDLE_VALIDATOR_MODULE_NAME = "_ullm_release_bundle_activation_validator"
 
 
 class ActivationError(RuntimeError):
@@ -57,6 +61,27 @@ def load_validator() -> ModuleType:
         spec.loader.exec_module(module)
     except BaseException:
         sys.modules.pop(_VALIDATOR_MODULE_NAME, None)
+        raise
+    return module
+
+
+def load_bundle_validator() -> ModuleType:
+    """Load the release bundle validator without importing deployment code."""
+
+    existing = sys.modules.get(_BUNDLE_VALIDATOR_MODULE_NAME)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        _BUNDLE_VALIDATOR_MODULE_NAME, BUNDLE_VALIDATOR_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise ActivationError("release bundle validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_BUNDLE_VALIDATOR_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(_BUNDLE_VALIDATOR_MODULE_NAME, None)
         raise
     return module
 
@@ -146,6 +171,113 @@ def _read_safe_manifest(path: Path, label: str) -> bytes:
         return raw
     finally:
         os.close(descriptor)
+
+
+def _hash_safe_file(path: Path, label: str) -> str:
+    """Hash one bounded, stable, non-symlink regular file."""
+
+    _reject_symlink_components(path, label, leaf_may_absent=False)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ActivationError(f"{label} is unavailable") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_mode & stat.S_IWOTH
+            or before.st_size <= 0
+            or before.st_size > MAX_BUNDLE_FILE_BYTES
+        ):
+            raise ActivationError(f"{label} is unsafe")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65_536, MAX_BUNDLE_FILE_BYTES - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_BUNDLE_FILE_BYTES:
+                raise ActivationError(f"{label} exceeds its size bound")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or total != before.st_size:
+            raise ActivationError(f"{label} changed while being read")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _validate_release_bundle(
+    bundle: Path,
+    *,
+    candidate_raw: bytes,
+    candidate_summary: dict[str, Any],
+    active_raw: bytes | None,
+    systemd_unit: Path | None,
+    environment_file: Path | None,
+) -> None:
+    if systemd_unit is None or environment_file is None:
+        raise ActivationError(
+            "v2 activation requires systemd unit and environment rollback inputs"
+        )
+    try:
+        report = load_bundle_validator().validate(bundle)
+    except Exception as error:
+        raise ActivationError("release bundle preflight failed") from error
+    if report.get("gate_eligible") is not True:
+        raise ActivationError("release bundle is not production-gate eligible")
+    try:
+        bundle_document = json.loads(bundle.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ActivationError("release bundle cannot be read") from error
+    identity = bundle_document.get("identity")
+    if not isinstance(identity, dict):
+        raise ActivationError("release bundle identity is missing")
+    candidate_document = json.loads(candidate_raw)
+    if candidate_document.get("schema_version") != "ullm.served_model.v2":
+        raise ActivationError("release bundle binding requires a v2 candidate")
+    if candidate_summary.get("manifest_sha256") != identity.get("manifest_sha256"):
+        raise ActivationError("release bundle manifest identity differs")
+    if candidate_summary.get("worker", {}).get("binary_sha256") != identity.get(
+        "worker_binary_sha256"
+    ):
+        raise ActivationError("release bundle worker identity differs")
+    promotion = candidate_document.get("promotion")
+    if not isinstance(promotion, dict) or promotion.get("source_commit") != bundle_document.get(
+        "source_commit"
+    ):
+        raise ActivationError("release bundle promotion identity differs")
+    rollback = bundle_document.get("rollback_target")
+    if not isinstance(rollback, dict):
+        raise ActivationError("release bundle rollback identity is missing")
+    if active_raw is None or hashlib.sha256(active_raw).hexdigest() != rollback.get(
+        "manifest_sha256"
+    ):
+        raise ActivationError("release bundle previous active manifest differs")
+    if _hash_safe_file(systemd_unit, "rollback systemd unit") != rollback.get(
+        "systemd_unit_sha256"
+    ):
+        raise ActivationError("release bundle systemd identity differs")
+    if _hash_safe_file(environment_file, "rollback environment file") != rollback.get(
+        "environment_sha256"
+    ):
+        raise ActivationError("release bundle environment identity differs")
 
 
 def _write_manifest_copy(directory: Path, raw: bytes, *, prefix: str) -> Path:
@@ -257,6 +389,9 @@ def activate(
     candidate: Path,
     active: Path,
     *,
+    release_bundle: Path | None = None,
+    systemd_unit: Path | None = None,
+    environment_file: Path | None = None,
     check_commands: Sequence[Sequence[str]] = (),
     reconcile_commands: Sequence[Sequence[str]] = (),
     final_check_commands: Sequence[Sequence[str]] = (),
@@ -314,6 +449,24 @@ def activate(
             summary = load_validator().validation_summary(staged)
         except Exception as error:
             raise ActivationError("candidate preflight failed") from error
+
+        candidate_document = json.loads(raw)
+        if candidate_document.get("schema_version") == "ullm.served_model.v2":
+            if release_bundle is None:
+                raise ActivationError("v2 activation requires a release bundle")
+            active_raw = (
+                _read_safe_manifest(normalized_active, "existing active manifest")
+                if _safe_existing_active(normalized_active)
+                else None
+            )
+            _validate_release_bundle(
+                release_bundle,
+                candidate_raw=raw,
+                candidate_summary=summary,
+                active_raw=active_raw,
+                systemd_unit=systemd_unit,
+                environment_file=environment_file,
+            )
 
         backup = _snapshot_active(normalized_active, directory)
         # Mark the transaction rollback-capable before the replace so even an
@@ -387,6 +540,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--active-manifest", required=True, type=Path)
+    parser.add_argument("--release-bundle", type=Path)
+    parser.add_argument("--systemd-unit", type=Path)
+    parser.add_argument("--environment-file", type=Path)
     parser.add_argument(
         "--check-command-json", action="append", default=[], type=_parse_command
     )
@@ -409,6 +565,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = activate(
             args.candidate,
             args.active_manifest,
+            release_bundle=args.release_bundle,
+            systemd_unit=args.systemd_unit,
+            environment_file=args.environment_file,
             check_commands=args.check_command_json,
             reconcile_commands=args.reconcile_command_json,
             final_check_commands=args.final_check_command_json,

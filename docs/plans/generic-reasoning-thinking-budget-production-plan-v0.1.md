@@ -492,6 +492,10 @@ activation前のactive manifestとsystemd設定を保持する。rollbackは旧m
 serviceを再起動し、reasoning未指定のbaseline smokeを再実行する。OpenWebUIへ恒久patchを入れないため、
 UI imageの特別なrollbackは不要である。
 
+v2 candidateのactivationは、`tools/activate-served-model.py`へcomplete release bundleと
+current systemd/environment fileを渡し、candidate identityとrollback hashの一致を確認してから
+atomic replaceする。v1 active pathは従来どおり維持する。
+
 ## 11. 見積もりとmilestone
 
 - OpenWebUIへreasoningを分離表示する試作: 2〜4人日
