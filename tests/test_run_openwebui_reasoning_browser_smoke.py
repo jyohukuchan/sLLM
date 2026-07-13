@@ -176,3 +176,37 @@ def test_runner_rejects_the_current_v1_active_manifest() -> None:
 def test_runner_requires_immutable_browser_image(value: str) -> None:
     with pytest.raises(TOOL.SmokeError, match="immutable Docker"):
         TOOL._validate_image(value)
+
+
+def test_alternating_r9700_coordinator_serializes_provider_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actions: list[tuple[str, str]] = []
+
+    def service(_systemctl: str, action: str, name: str) -> None:
+        actions.append((action, name))
+
+    def wait(_rocm: str, expected: set[str], timeout_seconds: float = 60.0) -> None:
+        del timeout_seconds
+        actions.append(("gpu", ",".join(sorted(expected))))
+
+    monkeypatch.setattr(TOOL, "_service_command", service)
+    monkeypatch.setattr(TOOL, "_wait_for_gpu_owner", wait)
+    coordinator = TOOL._AlternatingServiceCoordinator(
+        "systemctl", "rocm-smi", "ullm-openai.service", "llama-qwen35-udq4.service"
+    )
+
+    coordinator.transition("before-switch")
+    assert coordinator.owner == "llama"
+    coordinator.transition("before-return")
+    assert coordinator.owner == "ullm"
+    assert actions == [
+        ("stop", "ullm-openai.service"),
+        ("gpu", ""),
+        ("start", "llama-qwen35-udq4.service"),
+        ("gpu", "llama-server"),
+        ("stop", "llama-qwen35-udq4.service"),
+        ("gpu", ""),
+        ("start", "ullm-openai.service"),
+        ("gpu", "ullm-aq4-worker"),
+    ]

@@ -215,13 +215,18 @@ uv run --project services/openai-gateway python \
   --browser-image "$BROWSER_IMAGE" --openwebui-url "$OPENWEBUI_URL" \
   --model-id "$ULLM_MODEL_ID" --model-name "$ULLM_MODEL_NAME" \
   --switch-model-id llama-qwen3.5-9b-ud-q4 \
-  --switch-model-name 'llama.cpp Qwen3.5 9B UD-Q4_K_XL'
+  --switch-model-name 'llama.cpp Qwen3.5 9B UD-Q4_K_XL' \
+  --alternate-r9700-services --ullm-service "$SERVICE" \
+  --llama-service llama-qwen35-udq4.service
 
 uv run --project services/openai-gateway python \
   tools/validate-openwebui-reasoning-browser-smoke.py \
   "$OUT/browser-reasoning.json" --require-pass > "$OUT/browser-reasoning-validator.json"
 ```
 
+The alternating option stops uLLM before starting llama.cpp for the provider
+switch, then reverses the transition before the return request. It verifies
+R9700 ownership at each boundary and restores uLLM if the browser process fails.
 Never run these gates against the active v1 service and label their output as
 v2 evidence.
 

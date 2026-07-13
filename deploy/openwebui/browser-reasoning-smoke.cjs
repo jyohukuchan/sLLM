@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const net = require("node:net");
 
 const SUMMARY_SCHEMA = "ullm.openwebui.reasoning_browser_smoke.v2";
 const BASE_URL = process.env.OPENWEBUI_URL || "http://192.168.0.66:3000";
@@ -38,6 +39,7 @@ const TOGGLE_SELECTOR = 'button[aria-label="Toggle details"]';
 const RESPONSE_TIMEOUT_MS = 120_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
 const MAX_POST_DATA_BYTES = 2 * 1024 * 1024;
+const TRANSITION_SOCKET = process.env.OPENWEBUI_TRANSITION_SOCKET || "";
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -152,6 +154,30 @@ async function submit(page, prompt) {
   await input.press("Enter", { timeout: NAVIGATION_TIMEOUT_MS });
 }
 
+async function waitForHostTransition(phase) {
+  if (!TRANSITION_SOCKET) return;
+  await new Promise((resolve, reject) => {
+    const client = net.createConnection(TRANSITION_SOCKET);
+    let buffer = "";
+    client.setEncoding("utf8");
+    client.on("connect", () => client.write(`${phase}\n`));
+    client.on("data", (chunk) => {
+      buffer += chunk;
+      if (buffer.includes("continue\n")) {
+        client.end();
+        resolve();
+      } else if (buffer.includes("abort\n")) {
+        client.destroy();
+        reject(new Error(`host rejected browser phase: ${phase}`));
+      }
+    });
+    client.on("error", (error) => reject(error));
+    client.on("end", () => {
+      if (!buffer.includes("continue\n")) reject(new Error(`host closed browser phase: ${phase}`));
+    });
+  });
+}
+
 async function run(browser) {
   const baseUrl = normalizedBaseUrl(BASE_URL);
   const token = strictToken(fs.readFileSync(TOKEN_FILE));
@@ -235,6 +261,7 @@ async function run(browser) {
     throw new Error("hidden reasoning was reinserted into the next turn");
   }
 
+  await waitForHostTransition("before-switch");
   const switchUrl = new URL("/", baseUrl);
   switchUrl.searchParams.set("temporary-chat", "true");
   switchUrl.searchParams.set("models", SWITCH_MODEL_ID);
@@ -259,6 +286,7 @@ async function run(browser) {
     throw new Error("provider switch request used the wrong model");
   }
 
+  await waitForHostTransition("before-return");
   const switchBackUrl = new URL("/", baseUrl);
   switchBackUrl.searchParams.set("temporary-chat", "true");
   switchBackUrl.searchParams.set("models", MODEL_ID);

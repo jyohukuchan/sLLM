@@ -16,12 +16,14 @@ import importlib.util
 import json
 import os
 import re
+import select
 import stat
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+import socket
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
@@ -40,6 +42,7 @@ IMAGE_RE = re.compile(
 )
 _VALIDATOR_MODULE_NAME = "_ullm_openwebui_reasoning_browser_validator"
 _SERVED_MODEL_MODULE_NAME = "_ullm_reasoning_browser_served_model_validator"
+TARGET_GPU_INDEX = "1"
 
 
 class SmokeError(RuntimeError):
@@ -266,6 +269,170 @@ def _stop_container(docker: str, name: str) -> None:
         pass
 
 
+def _service_state(service: str, systemctl: str) -> tuple[str, str]:
+    try:
+        result = subprocess.run(
+            [systemctl, "show", service, "--property=LoadState", "--property=ActiveState", "--value"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SmokeError("service state lookup failed") from error
+    states = result.stdout.splitlines()
+    if result.returncode != 0 or len(states) != 2:
+        raise SmokeError("service state lookup failed")
+    return states[0], states[1]
+
+
+def _service_command(systemctl: str, action: str, service: str) -> None:
+    try:
+        result = subprocess.run(
+            [systemctl, action, service],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SmokeError("service transition failed") from error
+    if result.returncode != 0:
+        raise SmokeError("service transition failed")
+
+
+def _target_gpu_processes(rocm_smi: str) -> list[dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            [rocm_smi, "--showpids", "--json"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SmokeError("GPU ownership preflight failed") from error
+    if result.returncode != 0:
+        raise SmokeError("GPU ownership preflight failed")
+    value = _strict_json(result.stdout.encode("utf-8"))
+    system = value.get("system")
+    if not isinstance(system, dict):
+        raise SmokeError("GPU ownership data is missing")
+    processes: list[dict[str, Any]] = []
+    for pid, description in system.items():
+        if not isinstance(pid, str) or not pid.startswith("PID") or not isinstance(description, str):
+            raise SmokeError("GPU process identity is malformed")
+        fields = [field.strip() for field in description.split(",")]
+        if len(fields) < 3:
+            raise SmokeError("GPU process description is incomplete")
+        try:
+            vram = int(fields[2])
+        except ValueError as error:
+            raise SmokeError("GPU process VRAM is invalid") from error
+        visible = {item.strip() for item in fields[1].split(",") if item.strip()}
+        if TARGET_GPU_INDEX in visible and vram > 0:
+            processes.append({"pid": pid[3:], "process": fields[0], "vram_bytes": vram})
+    return processes
+
+
+def _wait_for_gpu_owner(rocm_smi: str, expected: set[str], timeout_seconds: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        processes = _target_gpu_processes(rocm_smi)
+        if {process["process"] for process in processes} == expected:
+            return
+        if time.monotonic() >= deadline:
+            raise SmokeError("target R9700 ownership did not reach the expected state")
+        time.sleep(0.25)
+
+
+class _AlternatingServiceCoordinator:
+    def __init__(self, systemctl: str, rocm_smi: str, ullm_service: str, llama_service: str) -> None:
+        self.systemctl = systemctl
+        self.rocm_smi = rocm_smi
+        self.ullm_service = ullm_service
+        self.llama_service = llama_service
+        self.owner = "ullm"
+
+    def preflight(self, worker_binary_sha256: str) -> None:
+        if _service_state(self.ullm_service, self.systemctl)[1] != "active":
+            raise SmokeError("uLLM service must be active before alternating browser smoke")
+        if _service_state(self.llama_service, self.systemctl)[1] not in {"inactive", "failed"}:
+            raise SmokeError("llama.cpp service must be inactive before alternating browser smoke")
+        processes = _target_gpu_processes(self.rocm_smi)
+        if {process["process"] for process in processes} != {"ullm-aq4-worker"}:
+            raise SmokeError("target R9700 is not exclusively owned by uLLM")
+        for process in processes:
+            try:
+                target = Path(os.readlink(f"/proc/{process['pid']}/exe"))
+                digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            except OSError as error:
+                raise SmokeError("uLLM worker executable cannot be inspected") from error
+            if digest != worker_binary_sha256:
+                raise SmokeError("uLLM worker executable differs from the v2 manifest")
+
+    def transition(self, phase: str) -> None:
+        if phase == "before-switch":
+            self.owner = "transition"
+            _service_command(self.systemctl, "stop", self.ullm_service)
+            _wait_for_gpu_owner(self.rocm_smi, set())
+            _service_command(self.systemctl, "start", self.llama_service)
+            _wait_for_gpu_owner(self.rocm_smi, {"llama-server"})
+            self.owner = "llama"
+            return
+        if phase == "before-return":
+            self.owner = "transition"
+            _service_command(self.systemctl, "stop", self.llama_service)
+            _wait_for_gpu_owner(self.rocm_smi, set())
+            _service_command(self.systemctl, "start", self.ullm_service)
+            _wait_for_gpu_owner(self.rocm_smi, {"ullm-aq4-worker"})
+            self.owner = "ullm"
+            return
+        raise SmokeError("unknown browser service transition phase")
+
+    def recover(self) -> None:
+        if self.owner in {"llama", "transition"}:
+            try:
+                _service_command(self.systemctl, "stop", self.llama_service)
+                _wait_for_gpu_owner(self.rocm_smi, set(), timeout_seconds=30.0)
+                _service_command(self.systemctl, "start", self.ullm_service)
+            except SmokeError:
+                pass
+            self.owner = "ullm"
+
+
+def _wait_for_browser_with_transitions(
+    process: subprocess.Popen[bytes],
+    server: socket.socket,
+    coordinator: _AlternatingServiceCoordinator,
+    deadline: float,
+) -> int:
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, 0)
+        readable, _, _ = select.select([server], [], [], min(remaining, 0.5))
+        if not readable:
+            continue
+        connection, _ = server.accept()
+        try:
+            phase = connection.recv(128).decode("ascii").strip()
+            try:
+                coordinator.transition(phase)
+            except SmokeError:
+                connection.sendall(b"abort\n")
+                raise
+            connection.sendall(b"continue\n")
+        finally:
+            connection.close()
+    return process.wait(timeout=max(0.1, deadline - time.monotonic()))
+
+
 def execute(
     *,
     output: Path,
@@ -280,6 +447,11 @@ def execute(
     browser_script: Path = DEFAULT_SCRIPT,
     docker: str = "docker",
     timeout_seconds: float = 900.0,
+    alternate_r9700_services: bool = False,
+    ullm_service: str = "ullm-openai.service",
+    llama_service: str = "llama-qwen35-udq4.service",
+    systemctl: str = "systemctl",
+    rocm_smi: str = "rocm-smi",
 ) -> dict[str, Any]:
     if output.exists() or output.is_symlink():
         raise SmokeError("browser evidence output already exists or is a symlink")
@@ -297,6 +469,22 @@ def execute(
     if model_id == switch_model_id:
         raise SmokeError("switch model ID must differ from the candidate model ID")
     del token, script
+
+    coordinator = (
+        _AlternatingServiceCoordinator(systemctl, rocm_smi, ullm_service, llama_service)
+        if alternate_r9700_services
+        else None
+    )
+    control_directory: tempfile.TemporaryDirectory[str] | None = None
+    control_server: socket.socket | None = None
+    if coordinator is not None:
+        coordinator.preflight(manifest_summary["worker"]["binary_sha256"])
+        control_directory = tempfile.TemporaryDirectory(prefix="ullm-browser-transition-")
+        control_path = Path(control_directory.name) / "transition.sock"
+        control_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        control_server.bind(os.fspath(control_path))
+        os.chmod(control_path, 0o600)
+        control_server.listen(1)
 
     container_name = f"ullm-reasoning-browser-{uuid.uuid4().hex[:16]}"
     script_path = browser_script.resolve(strict=True)
@@ -326,32 +514,67 @@ def execute(
         f"OPENWEBUI_SWITCH_MODEL_ID={switch_model_id}",
         "--env",
         f"OPENWEBUI_SWITCH_MODEL_NAME={switch_model_name}",
+    ]
+    if control_server is not None:
+        command.extend(
+            [
+                "--mount",
+                f"type=bind,src={control_directory.name},dst=/run/ullm,readonly",
+                "--env",
+                "OPENWEBUI_TRANSITION_SOCKET=/run/ullm/browser-transition.sock",
+            ]
+        )
+    command.extend(
+        [
         "--entrypoint",
         "node",
         image,
         "/run/ullm/browser-reasoning-smoke.cjs",
-    ]
+        ]
+    )
     deadline = time.monotonic() + timeout_seconds
-    with tempfile.TemporaryFile() as stdout:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        try:
-            remaining = max(0.1, deadline - time.monotonic())
-            return_code = process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired as error:
-            process.kill()
-            process.wait(timeout=15.0)
-            _stop_container(docker, container_name)
-            raise SmokeError("browser smoke timed out") from error
-        if return_code != 0:
-            raise SmokeError("browser smoke container failed")
-        stdout.seek(0)
-        raw = stdout.read(MAX_EVIDENCE_BYTES + 1)
+    try:
+        with tempfile.TemporaryFile() as stdout:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                if control_server is None:
+                    return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+                else:
+                    return_code = _wait_for_browser_with_transitions(
+                        process,
+                        control_server,
+                        coordinator,
+                        deadline,
+                    )
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                process.wait(timeout=15.0)
+                _stop_container(docker, container_name)
+                raise SmokeError("browser smoke timed out") from error
+            except BaseException:
+                process.kill()
+                process.wait(timeout=15.0)
+                _stop_container(docker, container_name)
+                raise
+            if return_code != 0:
+                raise SmokeError("browser smoke container failed")
+            stdout.seek(0)
+            raw = stdout.read(MAX_EVIDENCE_BYTES + 1)
+    except Exception:
+        if coordinator is not None:
+            coordinator.recover()
+        raise
+    finally:
+        if control_server is not None:
+            control_server.close()
+        if control_directory is not None:
+            control_directory.cleanup()
     if not raw or len(raw) > MAX_EVIDENCE_BYTES:
         raise SmokeError("browser smoke output exceeds its size bound")
     document = _strict_json(raw.strip())
@@ -394,6 +617,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--browser-script", type=Path, default=DEFAULT_SCRIPT)
     parser.add_argument("--docker", default="docker")
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
+    parser.add_argument("--alternate-r9700-services", action="store_true")
+    parser.add_argument("--ullm-service", default="ullm-openai.service")
+    parser.add_argument("--llama-service", default="llama-qwen35-udq4.service")
+    parser.add_argument("--systemctl", default="systemctl")
+    parser.add_argument("--rocm-smi", default="rocm-smi")
     return parser.parse_args(argv)
 
 
@@ -413,6 +641,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             browser_script=args.browser_script,
             docker=args.docker,
             timeout_seconds=args.timeout_seconds,
+            alternate_r9700_services=args.alternate_r9700_services,
+            ullm_service=args.ullm_service,
+            llama_service=args.llama_service,
+            systemctl=args.systemctl,
+            rocm_smi=args.rocm_smi,
         )
     except Exception as error:
         print(f"OpenWebUI reasoning browser smoke failed: {error}", file=sys.stderr)
