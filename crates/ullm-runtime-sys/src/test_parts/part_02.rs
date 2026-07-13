@@ -96,6 +96,181 @@
         stream.synchronize().unwrap();
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
     }
+
+    #[test]
+    fn hip_paged_decode_attn_f32_wave_softmax_long_context_matches_cpu_when_available() {
+        let hip_devices: Vec<u32> = (1..device_count().unwrap())
+            .filter(|&device_index| {
+                device_info(device_index)
+                    .map(|info| info.backend == "hip")
+                    .unwrap_or(false)
+            })
+            .collect();
+        if hip_devices.is_empty() {
+            return;
+        }
+
+        let cache_len = 513_usize;
+        let block_size = 7_usize;
+        let cache_blocks = 80_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 128_usize;
+        let value_dim = 256_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let physical_tokens = cache_blocks * block_size;
+        let block_table_entries = (cache_len - 1) / block_size + 1;
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| {
+                if index % 97 == 0 {
+                    8.0_f32
+                } else if index % 89 == 0 {
+                    -8.0_f32
+                } else {
+                    ((index % 29) as f32 - 14.0) * 0.03125
+                }
+            })
+            .collect::<Vec<_>>();
+        let k_cache_values = (0..physical_tokens * kv_heads * head_dim)
+            .map(|index| {
+                if index % 7919 == 0 {
+                    6.0_f32
+                } else if index % 7919 == 1 {
+                    -6.0_f32
+                } else {
+                    ((index % 37) as f32 - 18.0) * 0.015625
+                }
+            })
+            .collect::<Vec<_>>();
+        let v_cache_values = (0..physical_tokens * kv_heads * value_dim)
+            .map(|index| {
+                if index % 12289 == 0 {
+                    64.0_f32
+                } else if index % 12289 == 1 {
+                    -64.0_f32
+                } else {
+                    ((index % 41) as f32 - 20.0) * 0.0625
+                }
+            })
+            .collect::<Vec<_>>();
+        let gate_values = (0..q_heads * value_dim)
+            .map(|index| {
+                if index % 127 == 0 {
+                    80.0_f32
+                } else if index % 131 == 0 {
+                    -80.0_f32
+                } else {
+                    ((index % 17) as f32 - 8.0) * 0.25
+                }
+            })
+            .collect::<Vec<_>>();
+        let block_table_values = (0..block_table_entries)
+            .map(|index| ((index * 37 + 11) % cache_blocks) as u32)
+            .collect::<Vec<_>>();
+        let expected_plain = expected_paged_decode_attn(
+            &q_values,
+            &k_cache_values,
+            &v_cache_values,
+            &block_table_values,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let expected_gated = expected_sigmoid_mul(&gate_values, &expected_plain);
+        let q_bytes = f32s_to_le_bytes(&q_values);
+        let k_cache_bytes = f32s_to_le_bytes(&k_cache_values);
+        let v_cache_bytes = f32s_to_le_bytes(&v_cache_values);
+        let gate_bytes = f32s_to_le_bytes(&gate_values);
+        let block_table_bytes = u32s_to_le_bytes(&block_table_values);
+
+        for device_index in hip_devices {
+            let mut context = RuntimeContext::create(device_index).unwrap();
+            let mut stream = context.create_stream().unwrap();
+            let mut q = context.alloc_buffer(q_bytes.len()).unwrap();
+            let mut gate = context.alloc_buffer(gate_bytes.len()).unwrap();
+            let mut k_cache = context.alloc_buffer(k_cache_bytes.len()).unwrap();
+            let mut v_cache = context.alloc_buffer(v_cache_bytes.len()).unwrap();
+            let mut block_table = context.alloc_buffer(block_table_bytes.len()).unwrap();
+            let mut plain_output = context
+                .alloc_buffer(expected_plain.len() * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut gated_output = context
+                .alloc_buffer(expected_gated.len() * std::mem::size_of::<f32>())
+                .unwrap();
+
+            q.copy_from_host(0, &q_bytes, Some(&mut stream)).unwrap();
+            gate.copy_from_host(0, &gate_bytes, Some(&mut stream)).unwrap();
+            k_cache
+                .copy_from_host(0, &k_cache_bytes, Some(&mut stream))
+                .unwrap();
+            v_cache
+                .copy_from_host(0, &v_cache_bytes, Some(&mut stream))
+                .unwrap();
+            block_table
+                .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+                .unwrap();
+            stream.synchronize().unwrap();
+
+            paged_decode_attn_f32(
+                &q,
+                &k_cache,
+                &v_cache,
+                &block_table,
+                cache_len,
+                block_size,
+                cache_blocks,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                &mut plain_output,
+                Some(&mut stream),
+            )
+            .unwrap();
+            paged_decode_attn_sigmoid_gate_f32(
+                &q,
+                &gate,
+                &k_cache,
+                &v_cache,
+                &block_table,
+                cache_len,
+                block_size,
+                cache_blocks,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                &mut gated_output,
+                Some(&mut stream),
+            )
+            .unwrap();
+            stream.synchronize().unwrap();
+
+            let mut plain_bytes = vec![0_u8; expected_plain.len() * std::mem::size_of::<f32>()];
+            let mut gated_bytes = vec![0_u8; expected_gated.len() * std::mem::size_of::<f32>()];
+            plain_output
+                .copy_to_host(0, &mut plain_bytes, Some(&mut stream))
+                .unwrap();
+            gated_output
+                .copy_to_host(0, &mut gated_bytes, Some(&mut stream))
+                .unwrap();
+            stream.synchronize().unwrap();
+
+            let plain = le_bytes_to_f32s(&plain_bytes);
+            let gated = le_bytes_to_f32s(&gated_bytes);
+            assert!(plain.iter().all(|value| value.is_finite()));
+            assert!(gated.iter().all(|value| value.is_finite()));
+            assert_f32s_close(&plain, &expected_plain, 1e-3);
+            assert_f32s_close(&gated, &expected_gated, 1e-3);
+        }
+    }
+
     #[test]
     fn first_hip_paged_kv_write_f32_writes_expected_physical_slot_when_available() {
         if device_count().unwrap() < 2 {

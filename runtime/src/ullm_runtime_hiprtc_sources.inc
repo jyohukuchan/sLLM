@@ -5257,20 +5257,25 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
                 tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
             const float score =
                 ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+            const unsigned int lane = tid % warpSize;
+            float new_max = max_score;
+            float rescale = 1.0f;
+            float weight = 0.0f;
+            float updated_denominator = denominator;
+            if (lane == 0u) {
+                new_max = score > max_score ? score : max_score;
+                rescale = expf(max_score - new_max);
+                weight = expf(score - new_max);
+                updated_denominator = denominator * rescale + weight;
+            }
+            max_score = __shfl(new_max, 0, warpSize);
+            rescale = __shfl(rescale, 0, warpSize);
+            weight = __shfl(weight, 0, warpSize);
+            denominator = __shfl(updated_denominator, 0, warpSize);
             if (tid < value_dim) {
                 const unsigned long long v_index =
                     (physical_timestep * kv_heads + kv_head) * value_dim + tid;
-                const float v = v_cache[v_index];
-                if (score > max_score) {
-                    const float scale = expf(max_score - score);
-                    weighted = weighted * scale + v;
-                    denominator = denominator * scale + 1.0f;
-                    max_score = score;
-                } else {
-                    const float weight = expf(score - max_score);
-                    weighted += weight * v;
-                    denominator += weight;
-                }
+                weighted = weighted * rescale + weight * v_cache[v_index];
             }
             ++physical_timestep;
         }
