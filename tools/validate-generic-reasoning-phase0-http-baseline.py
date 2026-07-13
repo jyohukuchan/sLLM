@@ -15,6 +15,7 @@ TARGETS = (18, 1024, 2048, 3072)
 SCHEMA_VERSION = "ullm.generic_reasoning_phase0_http_baseline.v1"
 VALIDATOR_SCHEMA_VERSION = "ullm.generic_reasoning_phase0_http_baseline_validator.v1"
 HASH_FIELDS = ("prompt_sha256", "request_body_sha256", "response_body_sha256")
+MAX_BASELINE_BYTES = 16 * 1024 * 1024
 FORBIDDEN_KEYS = {
     "prompt",
     "response",
@@ -23,6 +24,7 @@ FORBIDDEN_KEYS = {
     "authorization",
     "api_key",
     "api_key_value",
+    "token",
     "messages",
 }
 
@@ -43,12 +45,32 @@ def _read_object(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ValidationError("baseline must be a regular non-symlink file")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        if not raw or len(raw) > MAX_BASELINE_BYTES:
+            raise ValidationError("baseline exceeds its size bound")
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValidationError("baseline is not valid JSON") from error
     if not isinstance(value, dict):
         raise ValidationError("baseline root must be an object")
     return value
+
+
+def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValidationError("baseline contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value: str) -> None:
+    raise ValidationError("baseline contains a non-finite number")
 
 
 def _scan_keys(value: Any) -> None:

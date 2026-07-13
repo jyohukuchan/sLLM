@@ -110,3 +110,26 @@ def test_require_complete_returns_distinct_exit_code_for_partial_gate(tmp_path: 
 
     assert TOOL.main([str(path)]) == 0
     assert TOOL.main([str(path), "--require-complete"]) == 2
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"schema_version":"first","schema_version":"second"}',
+        '{"schema_version":NaN}',
+    ],
+)
+def test_validator_rejects_non_strict_json(tmp_path: Path, raw: str) -> None:
+    path = tmp_path / "baseline.json"
+    path.write_text(raw, encoding="ascii")
+
+    with pytest.raises(TOOL.ValidationError):
+        TOOL.validate(path)
+
+
+def test_validator_rejects_oversized_baseline(tmp_path: Path) -> None:
+    path = tmp_path / "baseline.json"
+    path.write_bytes(b"{" + b" " * TOOL.MAX_BASELINE_BYTES + b"}")
+
+    with pytest.raises(TOOL.ValidationError, match="size bound"):
+        TOOL.validate(path)
