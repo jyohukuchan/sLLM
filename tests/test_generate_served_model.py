@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools/generate-served-model.py"
 RECEIPT_TOOL_PATH = ROOT / "tools/write-aq4-resident-promotion-receipt.py"
+AQ4_DEPLOYMENT_PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4.profile.json"
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -31,6 +32,21 @@ RECEIPT_TOOL = load_module("test_write_aq4_promotion_receipt_tool", RECEIPT_TOOL
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_aq4_split_profile_uses_versioned_receipt_and_production_guard() -> None:
+    profile = json.loads(AQ4_DEPLOYMENT_PROFILE.read_text(encoding="utf-8"))
+    product_root = Path(profile["product"]["root"])
+    receipt = Path(profile["promotion"]["receipt"])
+    required_environment = profile["worker"]["required_environment"]
+
+    assert receipt == product_root / "promotion-paged-decode-split-v1.json"
+    assert receipt != product_root / "promotion.json"
+    assert required_environment.count("ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL") == 1
+    assert not any(
+        name.startswith("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_")
+        for name in required_environment
+    )
 
 
 def write_profile(root: Path, *, receipt_exists: bool = True) -> Path:
