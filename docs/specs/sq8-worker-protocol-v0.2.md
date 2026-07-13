@@ -51,6 +51,12 @@ The worker MUST expose enough release accounting for the gateway to verify:
 - final outcome; and
 - reset completion.
 
+For a reasoning request, the `released` event MUST include the integer fields
+`reasoning_tokens` and `forced_end_tokens` alongside `completion_tokens`. Both
+fields are required together, their sum MUST NOT exceed `completion_tokens`, and
+they count only tokens committed before the terminal release. A v1 release
+keeps the frozen event shape and does not include these fields.
+
 ## 3. Compatibility
 
 v1 commands remain v1-only and do not acquire hidden reasoning defaults. A v1
