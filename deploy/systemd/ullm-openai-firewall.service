@@ -3,7 +3,7 @@ Description=Firewall for the uLLM OpenWebUI bridge endpoint
 Documentation=file:///home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/README.md
 Requires=docker.service
 After=docker.service
-Before=ullm-openai.service
+Before=ullm-openai.service llama-qwen35-udq4.service
 
 [Service]
 Type=oneshot

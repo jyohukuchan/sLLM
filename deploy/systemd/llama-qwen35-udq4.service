@@ -1,0 +1,56 @@
+[Unit]
+Description=llama.cpp Qwen3.5 9B UD-Q4_K_XL OpenAI server
+Documentation=file:///home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/README.md
+Wants=network-online.target
+After=network-online.target docker.service ullm-openai-firewall.service
+Requires=docker.service ullm-openai-firewall.service
+RequiresMountsFor=/home/homelab1/datapool
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=homelab1
+Group=homelab1
+SupplementaryGroups=video render
+WorkingDirectory=/home/homelab1/llama.cpp-src
+EnvironmentFile=/etc/ullm/llama-qwen35-udq4.env
+Environment=HOME=/var/cache/llama-qwen35-udq4
+Environment=XDG_CACHE_HOME=/var/cache/llama-qwen35-udq4
+RuntimeDirectory=llama-qwen35-udq4
+RuntimeDirectoryMode=0750
+CacheDirectory=llama-qwen35-udq4
+CacheDirectoryMode=0750
+ExecStartPre=/usr/bin/test -x ${LLAMA_SERVER_BINARY}
+ExecStartPre=/usr/bin/test -r ${LLAMA_MODEL}
+ExecStartPre=/usr/bin/test -s ${LLAMA_API_KEY_FILE}
+ExecStart=/home/homelab1/llama.cpp-src/build-rdna4/bin/llama-server --model ${LLAMA_MODEL} --device ${LLAMA_DEVICE} --host ${LLAMA_HOST} --port ${LLAMA_PORT} --alias ${LLAMA_ALIAS} --ctx-size ${LLAMA_CTX_SIZE} --api-key-file ${LLAMA_API_KEY_FILE} --gpu-layers 999 --fit off --parallel 1 --no-mmproj --no-ui --cache-ram 0 --threads 32 --threads-batch 64 --no-warmup
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=650s
+TimeoutStopSec=60s
+KillMode=control-group
+SendSIGKILL=yes
+OOMPolicy=stop
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/llama-qwen35-udq4 /var/cache/llama-qwen35-udq4
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-qwen35-udq4
+
+[Install]
+WantedBy=multi-user.target
