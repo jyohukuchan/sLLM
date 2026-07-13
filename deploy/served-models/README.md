@@ -82,6 +82,12 @@ validator report, the OpenWebUI browser evidence and report, and the promotion
 evidence and receipt beside a `ullm.generic_reasoning_release_bundle.v1`
 document. Validate that document with:
 
+Measured case records can be assembled with
+`tools/prepare-generic-reasoning-release-evidence.py`; it computes the current
+Git/worktree and artifact identities and runs the release validator before
+publishing. Use `--status incomplete` during collection and reserve
+`--status complete` for the final aligned, clean, gate-eligible run.
+
 ```bash
 uv run --project services/openai-gateway python \
   tools/validate-generic-reasoning-release-bundle.py \

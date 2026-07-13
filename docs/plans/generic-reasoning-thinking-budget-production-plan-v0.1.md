@@ -779,6 +779,7 @@ OpenWebUI/release tool:
 - `tools/run-generic-reasoning-phase0-http-baseline.py`
 - `tools/validate-generic-reasoning-phase0-http-baseline.py`
 - `tools/validate-generic-reasoning-release.py`
+- `tools/prepare-generic-reasoning-release-evidence.py`
 - `tools/validate-openwebui-reasoning-browser-smoke.py`
 - `tools/write-aq4-resident-promotion-receipt.py`
 - `deploy/openwebui/browser-reasoning-smoke.cjs`

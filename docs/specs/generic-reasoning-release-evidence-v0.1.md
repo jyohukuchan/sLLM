@@ -37,6 +37,12 @@ release's worktree scope. A production candidate must set
 `git_worktree_clean=true`; a dirty declaration remains structurally valid but
 is not production-gate eligible.
 
+`tools/prepare-generic-reasoning-release-evidence.py` assembles this root from
+a pre-sanitized measured-case array and hashes the manifest, worker, and the
+tokenizer files named by the manifest. It rejects forbidden cleartext fields
+and runs the independent validator before publishing. `--status complete`
+additionally requires the recomputed production gate to be eligible.
+
 The validator report also contains `timing_percentiles` grouped by mode and
 timing field. It recomputes p50, p95, and p99 with linear interpolation over
 the raw case values and includes the contributing sample count; producer-side
