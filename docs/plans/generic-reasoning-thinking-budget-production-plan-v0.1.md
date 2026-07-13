@@ -769,6 +769,8 @@ OpenWebUI/release tool:
 - `tools/collect-sq8-openwebui-release.py`
 - `tools/activate-served-model.py`
 - `tools/run-aq4-resident-promotion-evidence.py`
+- `tools/run-generic-reasoning-phase0-http-baseline.py`
+- `tools/validate-generic-reasoning-phase0-http-baseline.py`
 - `tools/write-aq4-resident-promotion-receipt.py`
 
 SQ8用toolをAQ4 reasoningへ流用する場合は、schema名、model identity、worker identity、prompt suite、

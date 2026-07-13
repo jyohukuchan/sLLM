@@ -62,6 +62,10 @@ the gates from the raw records and reject incomplete or identity-mismatched
 evidence. Temporary evidence uses an `.incomplete` name and is atomically
 renamed only after validation.
 
+The Phase 0 HTTP collector and its validator use request/response hashes and
+bounded protocol metadata only. A structurally valid record may still be
+gate-ineligible when source identity or generated token IDs are missing.
+
 For a v2 reasoning request, the worker `released` event carries
 `reasoning_tokens` and `forced_end_tokens` in addition to
 `completion_tokens`. The Gateway requires both fields, checks that their sum
