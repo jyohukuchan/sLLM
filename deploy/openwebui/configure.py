@@ -21,8 +21,9 @@ CONTEXT_LENGTH = 4_096
 MODEL_DESCRIPTION = "Qwen3 14B served locally by uLLM SQ8_0."
 MAX_KEY_BYTES = 65_536
 MAX_MANIFEST_BYTES = 1_048_576
-SERVED_MODEL_SCHEMA = "ullm.served_model.v1"
-SERVED_MODEL_KEYS = {
+SERVED_MODEL_SCHEMA_V1 = "ullm.served_model.v1"
+SERVED_MODEL_SCHEMA_V2 = "ullm.served_model.v2"
+SERVED_MODEL_KEYS_V1 = {
     "schema_version",
     "public",
     "generation",
@@ -31,6 +32,20 @@ SERVED_MODEL_KEYS = {
     "worker",
     "product",
     "promotion",
+}
+SERVED_MODEL_KEYS_V2 = SERVED_MODEL_KEYS_V1 | {"reasoning"}
+REASONING_KEYS = {
+    "enabled_by_default",
+    "dialect_id",
+    "start_token_ids",
+    "end_token_ids",
+    "forced_end_token_ids",
+    "initial_phase",
+    "eos_policy",
+    "effort_budgets",
+    "max_budget_tokens",
+    "reserved_answer_tokens",
+    "history_reasoning_policy",
 }
 PUBLIC_MODEL_KEYS = {
     "id",
@@ -88,8 +103,13 @@ def read_served_model_manifest(path: Path) -> tuple[str, str, int, str, str]:
     except (UnicodeDecodeError, json.JSONDecodeError, DuplicateKeyError) as error:
         raise ConfigurationError("served-model manifest is not valid JSON") from error
     document = require_mapping(document, "served-model manifest")
-    require_exact_keys(document, SERVED_MODEL_KEYS, "served-model manifest")
-    if document.get("schema_version") != SERVED_MODEL_SCHEMA:
+    schema_version = document.get("schema_version")
+    if schema_version == SERVED_MODEL_SCHEMA_V1:
+        require_exact_keys(document, SERVED_MODEL_KEYS_V1, "served-model manifest")
+    elif schema_version == SERVED_MODEL_SCHEMA_V2:
+        require_exact_keys(document, SERVED_MODEL_KEYS_V2, "served-model manifest")
+        validate_reasoning_manifest(document.get("reasoning"))
+    else:
         raise ConfigurationError("served-model manifest schema differs")
     public = require_mapping(document.get("public"), "served-model manifest public")
     require_exact_keys(public, PUBLIC_MODEL_KEYS, "served-model manifest public")
@@ -109,6 +129,42 @@ def read_served_model_manifest(path: Path) -> tuple[str, str, int, str, str]:
         description,
         hashlib.sha256(raw).hexdigest(),
     )
+
+
+def validate_reasoning_manifest(value: Any) -> None:
+    reasoning = require_mapping(value, "served-model manifest reasoning")
+    require_exact_keys(reasoning, REASONING_KEYS, "served-model manifest reasoning")
+    dialect_id = reasoning.get("dialect_id")
+    if not isinstance(dialect_id, str) or not dialect_id.strip():
+        raise ConfigurationError("reasoning dialect id must be nonempty text")
+    for name in ("start_token_ids", "end_token_ids", "forced_end_token_ids"):
+        values = reasoning.get(name)
+        if not isinstance(values, list) or not values or any(
+            type(token) is not int or token < 0 for token in values
+        ):
+            raise ConfigurationError(f"reasoning {name} must be a nonempty integer list")
+    effort_budgets = require_mapping(
+        reasoning.get("effort_budgets"), "reasoning effort budgets"
+    )
+    require_exact_keys(
+        effort_budgets, {"low", "medium", "high"}, "reasoning effort budgets"
+    )
+    if any(
+        type(budget) is not int or budget < 1 for budget in effort_budgets.values()
+    ):
+        raise ConfigurationError("reasoning effort budgets must be positive integers")
+    for name in ("max_budget_tokens", "reserved_answer_tokens"):
+        value = reasoning.get(name)
+        if type(value) is not int or value < 1:
+            raise ConfigurationError(f"reasoning {name} must be a positive integer")
+    if reasoning.get("enabled_by_default") not in (True, False):
+        raise ConfigurationError("reasoning enabled_by_default must be boolean")
+    if reasoning.get("initial_phase") not in {"reasoning", "answer"}:
+        raise ConfigurationError("reasoning initial_phase is invalid")
+    if reasoning.get("eos_policy") not in {"close", "finish", "continue"}:
+        raise ConfigurationError("reasoning eos_policy is invalid")
+    if reasoning.get("history_reasoning_policy") not in {"omit", "preserve"}:
+        raise ConfigurationError("reasoning history policy is invalid")
 
 
 def parse_model_id_list(raw: str, label: str) -> list[str]:

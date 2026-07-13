@@ -773,6 +773,9 @@ OpenWebUI/release tool:
 - `tools/validate-generic-reasoning-phase0-http-baseline.py`
 - `tools/write-aq4-resident-promotion-receipt.py`
 
+`deploy/openwebui/configure.py`もserved-model v1/v2をstrictに読み分ける。v2ではreasoning
+dialectの宣言を検証するが、OpenWebUIのDBへreasoning履歴や会話本文を保存しない。
+
 SQ8用toolをAQ4 reasoningへ流用する場合は、schema名、model identity、worker identity、prompt suite、
 gateをAQ4 reasoning用に明示的に分ける。既存SQ8 evidenceを名前だけ変えて再利用しない。
 

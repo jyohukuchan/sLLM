@@ -754,3 +754,68 @@ def test_manifest_mode_rejects_invalid_or_non_regular_manifest(tmp_path: Path) -
     writable.chmod(0o666)
     with pytest.raises(CONFIGURE.ConfigurationError, match="world-writable"):
         CONFIGURE.read_served_model_manifest(writable)
+
+
+def test_manifest_mode_accepts_v2_reasoning_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "v2-manifest.json"
+    _write_manifest(manifest)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["schema_version"] = "ullm.served_model.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.multi-token.v1",
+        "start_token_ids": [10, 11],
+        "end_token_ids": [20, 21],
+        "forced_end_token_ids": [20, 21],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
+        "max_budget_tokens": 8,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    manifest.write_bytes(raw)
+
+    assert CONFIGURE.read_served_model_manifest(manifest) == (
+        "ullm-qwen3.5-9b-aq4",
+        "uLLM Qwen3.5 9B AQ4",
+        32_768,
+        "Qwen3.5 9B served locally by uLLM AQ4_0.",
+        hashlib.sha256(raw).hexdigest(),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value["reasoning"].pop("forced_end_token_ids"),
+        lambda value: value["reasoning"]["effort_budgets"].__setitem__("low", 0),
+        lambda value: value["reasoning"].__setitem__("history_reasoning_policy", "inject"),
+    ],
+)
+def test_manifest_mode_rejects_invalid_v2_reasoning_manifest(
+    tmp_path: Path, mutation
+) -> None:
+    manifest = tmp_path / "invalid-v2-manifest.json"
+    _write_manifest(manifest)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["schema_version"] = "ullm.served_model.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.multi-token.v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 1, "medium": 2, "high": 3},
+        "max_budget_tokens": 3,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    mutation(value)
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(CONFIGURE.ConfigurationError):
+        CONFIGURE.read_served_model_manifest(manifest)
