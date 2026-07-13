@@ -103,7 +103,11 @@ For a v2 reasoning request, the worker `released` event carries
 `reasoning_tokens` and `forced_end_tokens` in addition to
 `completion_tokens`. The Gateway requires both fields, checks that their sum
 does not exceed the committed completion count, and keeps the raw token split
-as the response-side cross-check. v1 releases keep the original event shape.
+as the response-side cross-check. The corresponding `request_released`
+lifecycle record mirrors these two fields for reasoning requests so that
+systemd-journal evidence can reproduce the raw accounting; v1 releases keep
+the original event shape. The lifecycle record remains hash-only and never
+contains token IDs or decoded content.
 The resident promotion runner also sends a budget-zero reasoning request for
 v2 candidates and verifies the complete forced-end sequence plus one reserved
 answer token; the legacy v1 comparison remains limited to the raw no-reasoning

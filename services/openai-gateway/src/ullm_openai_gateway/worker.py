@@ -871,21 +871,32 @@ class WorkerSupervisor:
         if started_monotonic_ns is None:
             raise WorkerProtocolError("worker release lacks a start timestamp")
         await self._finish_active(active, result)
-        _log_lifecycle(
-            "request_released",
-            observed_monotonic_ns=released_monotonic_ns,
-            request_id=active.request_id,
-            completion_id=active.request.completion_id,
-            stream=active.request.stream,
-            outcome=outcome,
-            cancel_reason=active.cancel_reason,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            reset_complete=True,
-            admit_to_start_ns=(started_monotonic_ns - active.admitted_monotonic_ns),
-            start_to_release_ns=released_monotonic_ns - started_monotonic_ns,
-            admit_to_release_ns=(released_monotonic_ns - active.admitted_monotonic_ns),
-        )
+        release_lifecycle_fields: dict[str, Any] = {
+            "observed_monotonic_ns": released_monotonic_ns,
+            "request_id": active.request_id,
+            "completion_id": active.request.completion_id,
+            "stream": active.request.stream,
+            "outcome": outcome,
+            "cancel_reason": active.cancel_reason,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "reset_complete": True,
+            "admit_to_start_ns": (
+                started_monotonic_ns - active.admitted_monotonic_ns
+            ),
+            "start_to_release_ns": released_monotonic_ns - started_monotonic_ns,
+            "admit_to_release_ns": (
+                released_monotonic_ns - active.admitted_monotonic_ns
+            ),
+        }
+        if active.request.reasoning is not None:
+            assert reasoning_tokens is not None
+            assert forced_end_tokens is not None
+            release_lifecycle_fields.update(
+                reasoning_tokens=reasoning_tokens,
+                forced_end_tokens=forced_end_tokens,
+            )
+        _log_lifecycle("request_released", **release_lifecycle_fields)
 
     async def _finish_active(
         self, active: _ActiveRequest, result: WorkerGenerationResult

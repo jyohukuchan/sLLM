@@ -249,7 +249,9 @@ def test_worker_is_reused_and_busy_request_is_not_queued(tmp_path: Path) -> None
     asyncio.run(scenario())
 
 
-def test_v2_reasoning_release_records_worker_accounting(tmp_path: Path) -> None:
+def test_v2_reasoning_release_records_worker_accounting(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     async def scenario() -> None:
         reasoning_config = replace(
             config(tmp_path, mode="reasoning_v2"),
@@ -288,7 +290,17 @@ def test_v2_reasoning_release_records_worker_accounting(tmp_path: Path) -> None:
         assert result.forced_end_tokens == 2
         await supervisor.shutdown()
 
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
     asyncio.run(scenario())
+    released = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith("{")
+        and json.loads(record.getMessage()).get("event") == "request_released"
+    ]
+    assert len(released) == 1
+    assert released[0]["reasoning_tokens"] == 1
+    assert released[0]["forced_end_tokens"] == 2
 
 
 @pytest.mark.parametrize(
