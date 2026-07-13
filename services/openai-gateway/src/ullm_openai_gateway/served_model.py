@@ -12,8 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .reasoning import ReasoningDialect
+
 
 SCHEMA_VERSION = "ullm.served_model.v1"
+SCHEMA_VERSION_V2 = "ullm.served_model.v2"
 MAX_MANIFEST_BYTES = 1_048_576
 MAX_JSON_DEPTH = 16
 MAX_JSON_NODES = 16_384
@@ -136,6 +139,7 @@ class ServedModel:
     worker: WorkerContract
     product: ProductContract
     promotion: PromotionContract
+    reasoning_dialect: ReasoningDialect | None = None
 
 
 def load_served_model(path: Path) -> ServedModel:
@@ -144,9 +148,9 @@ def load_served_model(path: Path) -> ServedModel:
     manifest_path = _safe_regular_file(path, "served-model manifest")
     raw = _bounded_read(manifest_path, MAX_MANIFEST_BYTES, "served-model manifest")
     document = _decode_document(raw)
-    _exact_keys(
-        document,
-        {
+    schema_version = document.get("schema_version")
+    if schema_version == SCHEMA_VERSION:
+        expected_keys = {
             "schema_version",
             "public",
             "generation",
@@ -155,11 +159,22 @@ def load_served_model(path: Path) -> ServedModel:
             "worker",
             "product",
             "promotion",
-        },
-        "manifest",
-    )
-    if document["schema_version"] != SCHEMA_VERSION:
+        }
+    elif schema_version == SCHEMA_VERSION_V2:
+        expected_keys = {
+            "schema_version",
+            "public",
+            "generation",
+            "format",
+            "tokenizer",
+            "worker",
+            "product",
+            "promotion",
+            "reasoning",
+        }
+    else:
         raise ServedModelError("manifest schema_version is unsupported")
+    _exact_keys(document, expected_keys, "manifest")
 
     public = _parse_public(document["public"])
     generation = _parse_generation(document["generation"], public)
@@ -168,6 +183,11 @@ def load_served_model(path: Path) -> ServedModel:
     worker = _parse_worker(document["worker"], manifest_path.parent)
     product = _parse_product(document["product"], manifest_path.parent)
     promotion = _parse_promotion(document["promotion"], manifest_path.parent)
+    reasoning_dialect = (
+        _parse_reasoning(document["reasoning"], generation.vocab_size)
+        if schema_version == SCHEMA_VERSION_V2
+        else None
+    )
 
     return ServedModel(
         manifest_path=manifest_path,
@@ -179,7 +199,84 @@ def load_served_model(path: Path) -> ServedModel:
         worker=worker,
         product=product,
         promotion=promotion,
+        reasoning_dialect=reasoning_dialect,
     )
+
+
+def _parse_reasoning(value: Any, vocab_size: int) -> ReasoningDialect:
+    item = _mapping(value, "reasoning")
+    _exact_keys(
+        item,
+        {
+            "enabled_by_default",
+            "dialect_id",
+            "start_token_ids",
+            "end_token_ids",
+            "forced_end_token_ids",
+            "initial_phase",
+            "eos_policy",
+            "effort_budgets",
+            "max_budget_tokens",
+            "reserved_answer_tokens",
+            "history_reasoning_policy",
+        },
+        "reasoning",
+    )
+    raw_effort = _mapping(item["effort_budgets"], "reasoning.effort_budgets")
+    _exact_keys(raw_effort, {"low", "medium", "high"}, "reasoning.effort_budgets")
+    effort_budgets = tuple(
+        (name, _positive_integer(raw_effort[name], f"reasoning.effort_budgets.{name}"))
+        for name in ("low", "medium", "high")
+    )
+    def token_sequence(name: str) -> tuple[int, ...]:
+        raw = item[name]
+        if not isinstance(raw, list) or not raw:
+            raise ServedModelError(f"reasoning.{name} must be a nonempty array")
+        values = tuple(
+            _nonnegative_integer(token, f"reasoning.{name}[{index}]")
+            for index, token in enumerate(raw)
+        )
+        if len(values) != len(set(values)):
+            raise ServedModelError(f"reasoning.{name} contains duplicates")
+        if any(token >= vocab_size for token in values):
+            raise ServedModelError(f"reasoning.{name} exceeds vocabulary")
+        return values
+
+    start = token_sequence("start_token_ids")
+    end = token_sequence("end_token_ids")
+    forced = token_sequence("forced_end_token_ids")
+    dialect = ReasoningDialect(
+        identity=_text(item["dialect_id"], "reasoning.dialect_id", maximum=256),
+        start_sequence=start,
+        end_sequence=end,
+        forced_end_sequence=forced,
+        max_budget_tokens=_positive_integer(
+            item["max_budget_tokens"], "reasoning.max_budget_tokens"
+        ),
+        reserved_answer_tokens=_positive_integer(
+            item["reserved_answer_tokens"], "reasoning.reserved_answer_tokens"
+        ),
+        enabled_by_default=_boolean(
+            item["enabled_by_default"], "reasoning.enabled_by_default"
+        ),
+        effort_budgets=effort_budgets,
+        history_reasoning_policy=_text(
+            item["history_reasoning_policy"],
+            "reasoning.history_reasoning_policy",
+            maximum=32,
+        ),
+        initial_phase=_text(item["initial_phase"], "reasoning.initial_phase", maximum=32),
+        eos_policy=_text(item["eos_policy"], "reasoning.eos_policy", maximum=32),
+    )
+    if dialect.end_sequence != dialect.forced_end_sequence:
+        raise ServedModelError("reasoning end sequences must match")
+    try:
+        dialect.validate(vocab_size=vocab_size)
+    except ValueError as error:
+        raise ServedModelError("reasoning dialect is invalid") from error
+    if any(budget > dialect.max_budget_tokens for _, budget in effort_budgets):
+        raise ServedModelError("reasoning effort budget exceeds max_budget_tokens")
+    return dialect
 
 
 def _parse_public(value: Any) -> PublicModel:

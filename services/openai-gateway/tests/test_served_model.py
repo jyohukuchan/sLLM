@@ -94,6 +94,40 @@ def test_virtual_format_changes_only_public_and_format_contracts() -> None:
         assert virtual[section] == existing[section]
 
 
+def test_v2_manifest_loads_reasoning_dialect_without_changing_v1_loader() -> None:
+    path = FIXTURES / "aq4/served-model.json"
+    value = _document(path)
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.multi-token.v1",
+        "start_token_ids": [248068, 12],
+        "end_token_ids": [248069, 13],
+        "forced_end_token_ids": [248069, 13],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    # Exercise the parser directly with a temporary copy so resource roots and
+    # hashes remain exactly the same as the fixture.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / "aq4"
+        shutil.copytree(path.parent, root)
+        copied = root / "served-model.json"
+        _write(copied, value)
+        loaded = load_served_model(copied)
+
+    assert loaded.reasoning_dialect is not None
+    assert loaded.reasoning_dialect.identity == "synthetic.multi-token.v1"
+    assert loaded.reasoning_dialect.effort_budgets[-1] == ("high", 128)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

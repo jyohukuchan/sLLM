@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .served_model import ServedModel, ServedModelError, load_served_model
+from .reasoning import ReasoningDialect
 
 
 DEFAULT_PRODUCT_ROOT = Path(
@@ -92,6 +93,7 @@ class GatewaySettings:
     worker_extra_args: tuple[str, ...] = ()
     tokenizer_profile: str = "qwen3-14b"
     served_model: ServedModel | None = None
+    reasoning_dialect: ReasoningDialect | None = None
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -152,6 +154,7 @@ class GatewaySettings:
                 hip_guards=served_model.worker.required_environment,
                 tokenizer_profile="manifest",
                 served_model=served_model,
+                reasoning_dialect=served_model.reasoning_dialect,
             )
         product_root = Path(os.environ.get("ULLM_PRODUCT_ROOT", DEFAULT_PRODUCT_ROOT))
         return cls(

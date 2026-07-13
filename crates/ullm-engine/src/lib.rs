@@ -26,6 +26,7 @@ pub mod qwen35_aq4_session;
 pub mod qwen35_package_contract;
 pub mod qwen3_loader;
 pub mod qwen3_names;
+pub mod reasoning;
 pub mod scheduler;
 pub mod served_model;
 pub mod session_worker_backend;

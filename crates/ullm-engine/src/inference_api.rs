@@ -56,6 +56,7 @@ pub struct InferenceRequest {
     pub max_new_tokens: usize,
     pub eos_token_ids: Vec<usize>,
     pub sampling: SamplingParams,
+    pub reasoning: Option<crate::reasoning::ReasoningExecution>,
     test_only_ignore_eos: bool,
 }
 
@@ -73,6 +74,7 @@ impl InferenceRequest {
             max_new_tokens,
             eos_token_ids,
             sampling,
+            reasoning: None,
             test_only_ignore_eos: false,
         }
     }
@@ -138,7 +140,37 @@ impl InferenceRequest {
                 eos_token_ids, self.eos_token_ids
             )));
         }
-        self.sampling.validate_with_top_k(top_k)
+        self.sampling
+            .validate_with_top_k(top_k)
+            .and_then(|()| self.validate_reasoning_reservation())
+    }
+
+    fn validate_reasoning_reservation(&self) -> Result<(), InferenceError> {
+        let Some(reasoning) = self.reasoning.as_ref().filter(|value| value.enabled) else {
+            return Ok(());
+        };
+        if reasoning.dialect_id.is_empty()
+            || reasoning.end_sequence.is_empty()
+            || reasoning.forced_end_sequence.is_empty()
+            || reasoning.end_sequence != reasoning.forced_end_sequence
+            || reasoning.reserved_answer_tokens == 0
+        {
+            return Err(InferenceError::invalid_request(
+                "reasoning execution contract is invalid",
+            ));
+        }
+        let reserved = reasoning
+            .budget_tokens
+            .unwrap_or(0)
+            .checked_add(reasoning.forced_end_sequence.len())
+            .and_then(|value| value.checked_add(reasoning.reserved_answer_tokens))
+            .ok_or_else(|| InferenceError::invalid_request("reasoning reservation overflows"))?;
+        if reserved > self.max_new_tokens {
+            return Err(InferenceError::invalid_request(
+                "reasoning reservation exceeds max_new_tokens",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -417,5 +449,36 @@ mod tests {
         assert_eq!(timings.predicted_per_second, 300.0);
         assert!(timings.validates_release(4, 3));
         assert!(!timings.validates_release(4, 2));
+    }
+
+    #[test]
+    fn reasoning_reservation_is_checked_before_worker_execution() {
+        let sampling = SamplingParams::greedy_with_top_k(7, 1);
+        let mut request = InferenceRequest::new_with_eos(
+            "reasoning-request",
+            vec![248_000],
+            6,
+            vec![248_044, 248_046],
+            sampling,
+        );
+        request.reasoning = Some(crate::reasoning::ReasoningExecution {
+            enabled: true,
+            budget_tokens: Some(4),
+            dialect_id: "synthetic.multi-token.v1".into(),
+            end_sequence: vec![248_068, 248_069],
+            forced_end_sequence: vec![248_068, 248_069],
+            reserved_answer_tokens: 1,
+        });
+        assert!(
+            request
+                .validate_for_worker(4096, 512, 248_320, &[248_044, 248_046], 1)
+                .is_err()
+        );
+        request.max_new_tokens = 7;
+        assert!(
+            request
+                .validate_for_worker(4096, 512, 248_320, &[248_044, 248_046], 1)
+                .is_ok()
+        );
     }
 }

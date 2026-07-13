@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import invalid_request, model_not_found, unsupported_parameter
+from .reasoning import ReasoningDialect, ReasoningError, ReasoningRequest
 
 
 MODEL_ID = "ullm-qwen3-14b-sq8"
@@ -49,6 +50,7 @@ ROOT_FIELDS = frozenset(
         "modalities",
         "audio",
         "reasoning_effort",
+        "thinking_budget_tokens",
         "store",
         "metadata",
         "service_tier",
@@ -66,7 +68,6 @@ ALWAYS_UNSUPPORTED = frozenset(
         "response_format",
         "modalities",
         "audio",
-        "reasoning_effort",
         "store",
         "metadata",
         "service_tier",
@@ -84,8 +85,13 @@ class NormalizedMessage:
     role: str
     content: str
 
-    def as_template_value(self) -> dict[str, str]:
-        return {"role": self.role, "content": self.content}
+    reasoning_content: str | None = None
+
+    def as_template_value(self, *, include_reasoning_content: bool = False) -> dict[str, str]:
+        value = {"role": self.role, "content": self.content}
+        if include_reasoning_content and self.reasoning_content is not None:
+            value["reasoning_content"] = self.reasoning_content
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +104,7 @@ class NormalizedChatRequest:
     temperature: float
     top_p: float
     seed: int
+    reasoning: ReasoningRequest | None = None
 
 
 def decode_json_object(raw: bytes) -> dict[str, Any]:
@@ -149,6 +156,7 @@ def normalize_chat_request(
     max_completion_tokens: int = MAX_COMPLETION_TOKENS,
     temperature_supported: bool = True,
     top_p_supported: bool = True,
+    reasoning_dialect: ReasoningDialect | None = None,
 ) -> NormalizedChatRequest:
     model = _required(value, "model")
     if not isinstance(model, str):
@@ -190,6 +198,7 @@ def normalize_chat_request(
         raise unsupported_parameter("top_p")
     seed = _normalize_seed(value.get("seed"))
     _normalize_neutral_fields(value)
+    reasoning = _normalize_reasoning(value, reasoning_dialect, maximum)
     if value.get("user") is not None and not isinstance(value["user"], str):
         raise invalid_request("user must be a string.", "user")
     return NormalizedChatRequest(
@@ -201,6 +210,69 @@ def normalize_chat_request(
         temperature=temperature,
         top_p=top_p,
         seed=seed,
+        reasoning=reasoning,
+    )
+
+
+def _normalize_reasoning(
+    value: dict[str, Any],
+    dialect: ReasoningDialect | None,
+    max_completion_tokens: int,
+) -> ReasoningRequest | None:
+    effort = value.get("reasoning_effort")
+    raw_budget = value.get("thinking_budget_tokens")
+    if effort is None and raw_budget is None:
+        if dialect is None:
+            return None
+        enabled = dialect.enabled_by_default
+        budget = None
+        if enabled:
+            budget = dialect.max_budget_tokens
+        return _build_reasoning_request(dialect, enabled, budget, max_completion_tokens)
+    if dialect is None:
+        field = "reasoning_effort" if effort is not None else "thinking_budget_tokens"
+        raise unsupported_parameter(field)
+    if effort is not None and raw_budget is not None:
+        raise unsupported_parameter("thinking_budget_tokens")
+    if effort is not None:
+        if not isinstance(effort, str) or effort not in {"none", "low", "medium", "high"}:
+            raise invalid_request(
+                "reasoning_effort must be one of none, low, medium, or high.",
+                "reasoning_effort",
+            )
+        if effort == "none":
+            return _build_reasoning_request(dialect, False, None, max_completion_tokens)
+        try:
+            budget = dialect.budget_for_effort(effort)
+        except ReasoningError as error:
+            raise invalid_request("reasoning_effort is not supported by this model.", "reasoning_effort") from error
+        return _build_reasoning_request(dialect, True, budget, max_completion_tokens)
+    if isinstance(raw_budget, bool) or not isinstance(raw_budget, int):
+        raise invalid_request("thinking_budget_tokens must be an integer.", "thinking_budget_tokens")
+    if raw_budget < -1 or raw_budget > dialect.max_budget_tokens:
+        raise invalid_request("thinking_budget_tokens is outside the model budget.", "thinking_budget_tokens")
+    budget = None if raw_budget == -1 else raw_budget
+    return _build_reasoning_request(dialect, True, budget, max_completion_tokens)
+
+
+def _build_reasoning_request(
+    dialect: ReasoningDialect,
+    enabled: bool,
+    budget: int | None,
+    max_completion_tokens: int,
+) -> ReasoningRequest:
+    if enabled and budget is not None:
+        reserved = len(dialect.forced_end_sequence) + dialect.reserved_answer_tokens
+        if budget + reserved > max_completion_tokens:
+            raise invalid_request(
+                "thinking budget and reserved answer tokens exceed max_completion_tokens.",
+                "thinking_budget_tokens",
+            )
+    return ReasoningRequest(
+        enabled=enabled,
+        budget_tokens=budget,
+        history_reasoning_policy=dialect.history_reasoning_policy,
+        dialect_id=dialect.identity,
     )
 
 
@@ -225,7 +297,10 @@ def _normalize_messages(raw_messages: list[Any]) -> tuple[NormalizedMessage, ...
         path = f"messages[{index}]"
         if not isinstance(item, dict):
             raise invalid_request("Each message must be an object.", path)
-        _validate_unknown_fields(item, frozenset({"role", "content"}), path)
+        allowed = {"role", "content"}
+        if item.get("role") == "assistant":
+            allowed.add("reasoning_content")
+        _validate_unknown_fields(item, frozenset(allowed), path)
         if "role" not in item or item["role"] is None:
             raise invalid_request("role is required.", f"{path}.role")
         if "content" not in item or item["content"] is None:
@@ -234,8 +309,20 @@ def _normalize_messages(raw_messages: list[Any]) -> tuple[NormalizedMessage, ...
         content = item["content"]
         if not isinstance(role, str) or role not in {"system", "user", "assistant"}:
             raise invalid_request("Message role is invalid.", f"{path}.role")
+        reasoning_content = item.get("reasoning_content")
+        if reasoning_content is not None:
+            if role != "assistant" or not isinstance(reasoning_content, str):
+                raise invalid_request(
+                    "reasoning_content is only a string on assistant messages.",
+                    f"{path}.reasoning_content",
+                )
+            _require_scalar_text(reasoning_content, f"{path}.reasoning_content")
         result.append(
-            NormalizedMessage(role=role, content=_normalize_content(content, path))
+            NormalizedMessage(
+                role=role,
+                content=_normalize_content(content, path),
+                reasoning_content=reasoning_content,
+            )
         )
     _validate_role_order(result)
     return tuple(result)

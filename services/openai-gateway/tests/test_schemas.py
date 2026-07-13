@@ -5,6 +5,7 @@ import json
 import pytest
 
 from ullm_openai_gateway.errors import ApiError
+from ullm_openai_gateway.reasoning import ReasoningDialect
 from ullm_openai_gateway.schemas import (
     MODEL_ID,
     decode_json_object,
@@ -19,6 +20,18 @@ def request(**updates: object) -> dict[str, object]:
     }
     value.update(updates)
     return value
+
+
+def reasoning_dialect() -> ReasoningDialect:
+    return ReasoningDialect(
+        identity="synthetic.multi-token.v1",
+        start_sequence=(10, 11),
+        end_sequence=(20, 21, 22),
+        forced_end_sequence=(20, 21, 22),
+        max_budget_tokens=128,
+        reserved_answer_tokens=1,
+        effort_budgets=(("low", 32), ("medium", 64), ("high", 128)),
+    )
 
 
 def assert_error(
@@ -142,6 +155,52 @@ def test_unknown_null_is_ignored_but_nonnull_is_unsupported_at_each_level() -> N
 )
 def test_parameter_contract(updates: dict[str, object], code: str, param: str) -> None:
     assert_error(request(**updates), code, param)
+
+
+def test_reasoning_fields_require_a_v2_dialect() -> None:
+    assert_error(
+        request(reasoning_effort="low"),
+        "unsupported_parameter",
+        "reasoning_effort",
+    )
+    assert_error(
+        request(thinking_budget_tokens=8),
+        "unsupported_parameter",
+        "thinking_budget_tokens",
+    )
+
+
+def test_reasoning_effort_and_exact_budget_normalize_with_reservation() -> None:
+    dialect = reasoning_dialect()
+    effort = normalize_chat_request(
+        request(reasoning_effort="medium", max_tokens=128),
+        reasoning_dialect=dialect,
+    )
+    assert effort.reasoning is not None
+    assert effort.reasoning.enabled is True
+    assert effort.reasoning.budget_tokens == 64
+    exact = normalize_chat_request(
+        request(thinking_budget_tokens=0, max_tokens=8),
+        reasoning_dialect=dialect,
+    )
+    assert exact.reasoning is not None
+    assert exact.reasoning.budget_tokens == 0
+    none = normalize_chat_request(
+        request(reasoning_effort="none"),
+        reasoning_dialect=dialect,
+    )
+    assert none.reasoning is not None
+    assert none.reasoning.enabled is False
+
+
+def test_reasoning_budget_reservation_is_not_silently_clamped() -> None:
+    with pytest.raises(ApiError) as captured:
+        normalize_chat_request(
+            request(thinking_budget_tokens=8, max_tokens=11),
+            reasoning_dialect=reasoning_dialect(),
+        )
+    assert captured.value.code == "invalid_request_error"
+    assert captured.value.param == "thinking_budget_tokens"
 
 
 def test_neutral_parameters_and_null_optionals_are_accepted() -> None:

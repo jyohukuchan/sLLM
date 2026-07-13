@@ -23,6 +23,14 @@ from .errors import (
     context_length_exceeded,
     invalid_request,
 )
+from .reasoning import (
+    EmissionKind,
+    ReasoningError,
+    ReasoningPhase,
+    ReasoningRequest,
+    ReasoningState,
+    split_reasoning_completion,
+)
 from .schemas import (
     CONTEXT_LENGTH,
     MODEL_ID,
@@ -161,6 +169,9 @@ def create_app(
         app.state.worker = loaded_worker
         app.state.model_id = configured.model_id
         app.state.context_length = configured.context_length
+        app.state.vocab_size = configured.vocab_size
+        app.state.eos_token_ids = configured.eos_token_ids
+        app.state.reasoning_dialect = configured.reasoning_dialect
         app.state.request_gate = _RequestGate()
         await loaded_worker.launch()
         try:
@@ -242,6 +253,7 @@ def create_app(
                 sampling.temperature if sampling is not None else True
             ),
             top_p_supported=sampling.top_p if sampling is not None else True,
+            reasoning_dialect=configured.reasoning_dialect,
         )
         return await _serve_chat_completion(request, normalized)
 
@@ -253,7 +265,19 @@ async def _serve_chat_completion(
     normalized: NormalizedChatRequest,
 ) -> Response:
     try:
-        prompt = await _render_prompt(request, normalized.messages)
+        prompt = await _render_prompt(
+            request,
+            normalized.messages,
+            enable_thinking=(
+                normalized.reasoning.enabled
+                if normalized.reasoning is not None
+                else None
+            ),
+            include_reasoning_content=(
+                normalized.reasoning is not None
+                and normalized.reasoning.history_reasoning_policy == "preserve"
+            ),
+        )
     except TokenizerError as error:
         raise ApiError(
             500,
@@ -302,6 +326,7 @@ async def _serve_claimed_chat_completion(
         seed=normalized.seed,
         stream=normalized.stream,
         completion_id=completion_id,
+        reasoning=normalized.reasoning,
     )
     try:
         handle = await request.app.state.worker.admit(worker_request)
@@ -327,6 +352,7 @@ async def _serve_claimed_chat_completion(
                 completion_id,
                 created,
                 normalized.include_usage,
+                normalized.reasoning,
             ),
             worker=worker,
             handle=handle,
@@ -351,8 +377,35 @@ async def _serve_claimed_chat_completion(
             "internal_error",
             "The generation failed.",
         )
+    reasoning_content: str | None = None
+    reasoning_tokens: int | None = None
     try:
-        content = await _decode_completion_while_healthy(request, result.token_ids)
+        output_tokens = result.token_ids
+        if normalized.reasoning is not None and normalized.reasoning.enabled:
+            dialect = getattr(request.app.state, "reasoning_dialect", None)
+            if dialect is None:
+                raise ReasoningError("reasoning request has no served-model dialect")
+            split = split_reasoning_completion(
+                result.token_ids,
+                dialect=dialect,
+                enabled=True,
+                budget_tokens=normalized.reasoning.budget_tokens,
+                eos_token_ids=getattr(request.app.state, "eos_token_ids", ()),
+                vocab_size=getattr(request.app.state, "vocab_size", 0x1_0000_0000),
+            )
+            output_tokens = split.answer_token_ids
+            reasoning_tokens = split.reasoning_tokens
+            reasoning_content = await _decode_completion_while_healthy(
+                request, split.reasoning_token_ids
+            )
+        content = await _decode_completion_while_healthy(request, output_tokens)
+    except ReasoningError as error:
+        raise ApiError(
+            500,
+            "server_error",
+            "internal_error",
+            "The generation failed.",
+        ) from error
     except WorkerFatal:
         return _fatal_worker_response(request)
     except TokenizerError as error:
@@ -371,7 +424,15 @@ async def _serve_claimed_chat_completion(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    **(
+                        {"reasoning_content": reasoning_content}
+                        if reasoning_content is not None
+                        else {}
+                    ),
+                },
                 "logprobs": None,
                 "finish_reason": result.outcome,
             }
@@ -382,6 +443,10 @@ async def _serve_claimed_chat_completion(
             "total_tokens": result.prompt_tokens + completion_tokens,
         },
     }
+    if reasoning_tokens is not None:
+        value["usage"]["completion_tokens_details"] = {
+            "reasoning_tokens": reasoning_tokens
+        }
     timings = _completion_timings(
         result,
         context_length=getattr(request.app.state, "context_length", CONTEXT_LENGTH),
@@ -480,18 +545,29 @@ async def _read_json_body(request: Request) -> bytes:
 
 
 async def _render_prompt(
-    request: Request, messages: tuple[NormalizedMessage, ...]
+    request: Request,
+    messages: tuple[NormalizedMessage, ...],
+    *,
+    enable_thinking: bool | None = None,
+    include_reasoning_content: bool = False,
 ) -> TokenizedPrompt:
     lock = cast(asyncio.Lock, request.app.state.tokenizer_lock)
     executor = cast(ThreadPoolExecutor, request.app.state.tokenizer_executor)
     tokenizer = request.app.state.tokenizer
     async with lock:
-        return cast(
-            TokenizedPrompt,
-            await asyncio.get_running_loop().run_in_executor(
-                executor, tokenizer.render, messages
-            ),
-        )
+        loop = asyncio.get_running_loop()
+        if enable_thinking is None:
+            rendered = await loop.run_in_executor(executor, tokenizer.render, messages)
+        else:
+            rendered = await loop.run_in_executor(
+                executor,
+                lambda: tokenizer.render(
+                    messages,
+                    enable_thinking=enable_thinking,
+                    include_reasoning_content=include_reasoning_content,
+                ),
+            )
+        return cast(TokenizedPrompt, rendered)
 
 
 async def _decode_completion(request: Request, token_ids: tuple[int, ...]) -> str:
@@ -797,6 +873,7 @@ async def _stream_completion(
     completion_id: str,
     created: int,
     include_usage: bool,
+    reasoning: ReasoningRequest | None = None,
 ) -> AsyncIterator[bytes]:
     worker = cast(WorkerSupervisor, request.app.state.worker)
     stream = handle.stream_state
@@ -804,6 +881,20 @@ async def _stream_completion(
         raise RuntimeError("streaming request has no worker stream state")
     tokenizer = request.app.state.stream_tokenizer
     decoder = StableIncrementalDecoder(tokenizer)
+    reasoning_enabled = reasoning is not None and reasoning.enabled
+    reasoning_decoder = StableIncrementalDecoder(tokenizer) if reasoning_enabled else None
+    reasoning_state = None
+    if reasoning_enabled:
+        dialect = getattr(request.app.state, "reasoning_dialect", None)
+        if dialect is None:
+            raise ReasoningError("reasoning stream has no served-model dialect")
+        reasoning_state = ReasoningState(
+            dialect,
+            enabled=True,
+            budget_tokens=reasoning.budget_tokens,
+            vocab_size=getattr(request.app.state, "vocab_size", 0x1_0000_0000),
+        )
+    reasoning_token_count = 0
     result_task: asyncio.Task[WorkerGenerationResult] = asyncio.create_task(
         worker.wait(handle)
     )
@@ -811,6 +902,57 @@ async def _stream_completion(
     try:
         model_id = getattr(request.app.state, "model_id", MODEL_ID)
         yield _sse_record(_role_chunk(completion_id, created, model_id=model_id))
+
+        async def emit_token(token_id: int) -> list[bytes]:
+            nonlocal reasoning_token_count
+            if not reasoning_enabled:
+                suffix = await _decode_stream_token(request, decoder, token_id)
+                return (
+                    [_sse_record(_content_chunk(completion_id, created, suffix, model_id=model_id))]
+                    if suffix
+                    else []
+                )
+            assert reasoning_state is not None and reasoning_decoder is not None
+            eos = getattr(request.app.state, "eos_token_ids", ())
+            if token_id in eos:
+                step = reasoning_state.on_eos()
+            elif reasoning_state.phase == ReasoningPhase.FORCING_END_SEQUENCE:
+                step = reasoning_state.accept_forced(token_id)
+            else:
+                step = reasoning_state.accept_sampled(token_id)
+            records: list[bytes] = []
+            for emission in step.emissions:
+                if emission.kind == EmissionKind.REASONING:
+                    reasoning_token_count += 1
+                    suffix = await _decode_stream_token(
+                        request, reasoning_decoder, emission.token_id
+                    )
+                    if suffix:
+                        records.append(
+                            _sse_record(
+                                _reasoning_chunk(
+                                    completion_id,
+                                    created,
+                                    suffix,
+                                    model_id=model_id,
+                                )
+                            )
+                        )
+                else:
+                    suffix = await _decode_stream_token(request, decoder, emission.token_id)
+                    if suffix:
+                        records.append(
+                            _sse_record(
+                                _content_chunk(
+                                    completion_id,
+                                    created,
+                                    suffix,
+                                    model_id=model_id,
+                                )
+                            )
+                        )
+            return records
+
         while True:
             if stream.aborted_reason is not None:
                 try:
@@ -839,13 +981,10 @@ async def _stream_completion(
                     queue_task = None
                     break
 
-            suffix = await _decode_stream_token(request, decoder, token_id)
             if stream.aborted_reason is not None:
                 continue
-            if suffix:
-                yield _sse_record(
-                    _content_chunk(completion_id, created, suffix, model_id=model_id)
-                )
+            for record in await emit_token(token_id):
+                yield record
 
         result = result_task.result()
         if stream.aborted_reason is not None or result.outcome == "cancelled":
@@ -855,16 +994,22 @@ async def _stream_completion(
                 token_id = stream.token_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            suffix = await _decode_stream_token(request, decoder, token_id)
+            for record in await emit_token(token_id):
+                yield record
+        if reasoning_enabled:
+            assert reasoning_state is not None and reasoning_decoder is not None
+            if reasoning_state.phase == ReasoningPhase.FORCING_END_SEQUENCE:
+                raise ReasoningError("stream ended before forced end sequence")
+            if reasoning_state.phase == ReasoningPhase.ANSWER:
+                reasoning_state.finish()
+            suffix = await _finish_stream_decode(request, reasoning_decoder)
             if suffix:
                 yield _sse_record(
-                    _content_chunk(completion_id, created, suffix, model_id=model_id)
+                    _reasoning_chunk(completion_id, created, suffix, model_id=model_id)
                 )
         suffix = await _finish_stream_decode(request, decoder)
         if suffix:
-            yield _sse_record(
-                _content_chunk(completion_id, created, suffix, model_id=model_id)
-            )
+            yield _sse_record(_content_chunk(completion_id, created, suffix, model_id=model_id))
         timings = _completion_timings(
             result,
             context_length=getattr(request.app.state, "context_length", CONTEXT_LENGTH),
@@ -882,6 +1027,7 @@ async def _stream_completion(
                     created,
                     result,
                     timings=timings,
+                    reasoning_tokens=(reasoning_token_count if reasoning_enabled else None),
                     model_id=model_id,
                 )
             )
@@ -1018,6 +1164,27 @@ def _content_chunk(
     return value
 
 
+def _reasoning_chunk(
+    completion_id: str,
+    created: int,
+    content: str,
+    *,
+    model_id: str = MODEL_ID,
+) -> dict[str, Any]:
+    if not content:
+        raise ValueError("SSE reasoning chunk must be nonempty")
+    value = _chunk_base(completion_id, created, model_id=model_id)
+    value["choices"] = [
+        {
+            "index": 0,
+            "delta": {"reasoning_content": content},
+            "logprobs": None,
+            "finish_reason": None,
+        }
+    ]
+    return value
+
+
 def _final_chunk(
     completion_id: str,
     created: int,
@@ -1043,6 +1210,7 @@ def _usage_chunk(
     result: WorkerGenerationResult,
     *,
     timings: dict[str, Any] | None = None,
+    reasoning_tokens: int | None = None,
     model_id: str = MODEL_ID,
 ) -> dict[str, Any]:
     completion_tokens = len(result.token_ids)
@@ -1055,6 +1223,10 @@ def _usage_chunk(
     }
     if timings is not None:
         value["timings"] = timings
+    if reasoning_tokens is not None:
+        value["usage"]["completion_tokens_details"] = {
+            "reasoning_tokens": reasoning_tokens
+        }
     return value
 
 

@@ -1,7 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded, fail-closed loader for `ullm.served_model.v1`.
+//! Bounded, fail-closed loader for `ullm.served_model.v1` and `.v2`.
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -17,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 pub const SERVED_MODEL_SCHEMA_VERSION: &str = "ullm.served_model.v1";
+pub const SERVED_MODEL_SCHEMA_VERSION_V2: &str = "ullm.served_model.v2";
 pub const MAX_MANIFEST_BYTES: usize = 1_048_576;
 const MAX_JSON_DEPTH: usize = 16;
 const MAX_JSON_NODES: usize = 16_384;
@@ -188,6 +189,7 @@ pub struct ServedModel {
     pub worker: WorkerContract,
     pub product: ProductContract,
     pub promotion: PromotionContract,
+    pub reasoning: Option<crate::reasoning::ReasoningDialect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +244,7 @@ impl ServedModel {
                 mixed.join(",")
             )));
         }
-        if self.worker.protocol != "ullm.worker.v1" {
+        if self.worker.protocol != "ullm.worker.v1" && self.worker.protocol != "ullm.worker.v2" {
             return Err(ServedModelError("worker protocol is unsupported".into()));
         }
         let current_exe = safe_regular_file(current_exe, "current worker binary")?;
@@ -300,7 +302,9 @@ pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
     validate_exact_shape(&value)?;
     let raw_manifest: RawManifest = serde_json::from_value(value)
         .map_err(|_| ServedModelError("manifest typed schema is invalid".into()))?;
-    if raw_manifest.schema_version != SERVED_MODEL_SCHEMA_VERSION {
+    if raw_manifest.schema_version != SERVED_MODEL_SCHEMA_VERSION
+        && raw_manifest.schema_version != SERVED_MODEL_SCHEMA_VERSION_V2
+    {
         return Err(ServedModelError(
             "manifest schema_version is unsupported".into(),
         ));
@@ -310,6 +314,10 @@ pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
         .ok_or_else(|| ServedModelError("manifest path has no parent".into()))?;
     let public = parse_public(raw_manifest.public)?;
     let generation = parse_generation(raw_manifest.generation, &public)?;
+    let reasoning = raw_manifest
+        .reasoning
+        .map(|raw| parse_reasoning(raw, generation.vocab_size))
+        .transpose()?;
     let format = FormatContract {
         format_id: bounded_text(raw_manifest.format.format_id, "format.format_id", 128)?,
         implementation_id: bounded_text(
@@ -332,6 +340,7 @@ pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
         worker,
         product,
         promotion,
+        reasoning,
     })
 }
 
@@ -346,6 +355,23 @@ struct RawManifest {
     worker: RawWorker,
     product: RawProduct,
     promotion: RawPromotion,
+    reasoning: Option<RawReasoning>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReasoning {
+    enabled_by_default: bool,
+    dialect_id: String,
+    start_token_ids: Vec<usize>,
+    end_token_ids: Vec<usize>,
+    forced_end_token_ids: Vec<usize>,
+    initial_phase: String,
+    eos_policy: String,
+    effort_budgets: BTreeMap<String, usize>,
+    max_budget_tokens: usize,
+    reserved_answer_tokens: usize,
+    history_reasoning_policy: String,
 }
 
 #[derive(Deserialize)]
@@ -504,6 +530,61 @@ fn parse_generation(raw: RawGeneration, public: &PublicModel) -> Result<Generati
     })
 }
 
+fn parse_reasoning(
+    raw: RawReasoning,
+    vocab_size: usize,
+) -> Result<crate::reasoning::ReasoningDialect> {
+    let dialect = crate::reasoning::ReasoningDialect {
+        identity: bounded_text(raw.dialect_id, "reasoning.dialect_id", 256)?,
+        start_sequence: raw.start_token_ids,
+        end_sequence: raw.end_token_ids,
+        forced_end_sequence: raw.forced_end_token_ids,
+        max_budget_tokens: raw.max_budget_tokens,
+        reserved_answer_tokens: raw.reserved_answer_tokens,
+        enabled_by_default: raw.enabled_by_default,
+        effort_budgets: ["low", "medium", "high"]
+            .into_iter()
+            .map(|name| {
+                raw.effort_budgets
+                    .get(name)
+                    .copied()
+                    .map(|budget| (name.to_string(), budget))
+                    .ok_or_else(|| {
+                        ServedModelError("reasoning effort budgets are incomplete".into())
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        history_reasoning_policy: match raw.history_reasoning_policy.as_str() {
+            "omit" => crate::reasoning::HistoryReasoningPolicy::Omit,
+            "preserve" => crate::reasoning::HistoryReasoningPolicy::Preserve,
+            _ => {
+                return Err(ServedModelError(
+                    "reasoning history policy is invalid".into(),
+                ));
+            }
+        },
+        initial_phase: match raw.initial_phase.as_str() {
+            "reasoning" => crate::reasoning::InitialReasoningPhase::Reasoning,
+            "answer" => crate::reasoning::InitialReasoningPhase::Answer,
+            _ => {
+                return Err(ServedModelError(
+                    "reasoning initial phase is invalid".into(),
+                ));
+            }
+        },
+        eos_policy: match raw.eos_policy.as_str() {
+            "close" => crate::reasoning::ReasoningEosPolicy::Close,
+            "finish" => crate::reasoning::ReasoningEosPolicy::Finish,
+            "continue" => crate::reasoning::ReasoningEosPolicy::Continue,
+            _ => return Err(ServedModelError("reasoning EOS policy is invalid".into())),
+        },
+    };
+    dialect
+        .validate(vocab_size)
+        .map_err(|_| ServedModelError("reasoning dialect is invalid".into()))?;
+    Ok(dialect)
+}
+
 fn parse_tokenizer(raw: RawTokenizer, base: &Path) -> Result<TokenizerContract> {
     let root = safe_directory(
         &resolve_root(base, &raw.root, "tokenizer.root")?,
@@ -647,20 +728,29 @@ fn parse_promotion(raw: RawPromotion, base: &Path) -> Result<PromotionContract> 
 }
 
 fn validate_exact_shape(value: &Value) -> Result<()> {
-    exact_keys(
-        value,
-        &[
-            "schema_version",
-            "public",
-            "generation",
-            "format",
-            "tokenizer",
-            "worker",
-            "product",
-            "promotion",
-        ],
-        "manifest",
-    )?;
+    let schema = value
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ServedModelError("manifest schema_version is invalid".into()))?;
+    let mut manifest_keys = vec![
+        "schema_version",
+        "public",
+        "generation",
+        "format",
+        "tokenizer",
+        "worker",
+        "product",
+        "promotion",
+    ];
+    if schema == SERVED_MODEL_SCHEMA_VERSION_V2 {
+        manifest_keys.push("reasoning");
+    }
+    exact_keys(value, &manifest_keys, "manifest")?;
+    if schema != SERVED_MODEL_SCHEMA_VERSION && schema != SERVED_MODEL_SCHEMA_VERSION_V2 {
+        return Err(ServedModelError(
+            "manifest schema_version is unsupported".into(),
+        ));
+    }
     exact_keys(
         &value["public"],
         &[
@@ -748,7 +838,32 @@ fn validate_exact_shape(value: &Value) -> Result<()> {
         &value["promotion"],
         &["source_commit", "receipt", "receipt_sha256"],
         "promotion",
-    )
+    )?;
+    if schema == SERVED_MODEL_SCHEMA_VERSION_V2 {
+        exact_keys(
+            &value["reasoning"],
+            &[
+                "enabled_by_default",
+                "dialect_id",
+                "start_token_ids",
+                "end_token_ids",
+                "forced_end_token_ids",
+                "initial_phase",
+                "eos_policy",
+                "effort_budgets",
+                "max_budget_tokens",
+                "reserved_answer_tokens",
+                "history_reasoning_policy",
+            ],
+            "reasoning",
+        )?;
+        exact_keys(
+            &value["reasoning"]["effort_budgets"],
+            &["low", "medium", "high"],
+            "reasoning.effort_budgets",
+        )?;
+    }
+    Ok(())
 }
 
 fn exact_keys(value: &Value, expected: &[&str], label: &str) -> Result<()> {

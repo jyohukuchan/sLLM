@@ -153,18 +153,32 @@ class FrozenQwen3Tokenizer:
             enable_thinking=enable_thinking,
         )
 
-    def render(self, messages: Iterable[NormalizedMessage]) -> TokenizedPrompt:
-        normalized = [message.as_template_value() for message in messages]
+    def render(
+        self,
+        messages: Iterable[NormalizedMessage],
+        *,
+        enable_thinking: bool | None = None,
+        include_reasoning_content: bool = False,
+    ) -> TokenizedPrompt:
+        normalized = [
+            message.as_template_value(
+                include_reasoning_content=include_reasoning_content
+            )
+            for message in messages
+        ]
+        template_options = dict(self._template_options)
+        if enable_thinking is not None:
+            template_options["enable_thinking"] = enable_thinking
         try:
             rendered = self._tokenizer.apply_chat_template(
                 normalized,
                 tokenize=False,
-                **self._template_options,
+                **template_options,
             )
             token_ids = self._tokenizer.apply_chat_template(
                 normalized,
                 tokenize=True,
-                **self._template_options,
+                **template_options,
             )
         except Exception as error:
             raise TokenizerError("chat template application failed") from error

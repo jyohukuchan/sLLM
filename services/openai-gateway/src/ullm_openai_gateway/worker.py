@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .schemas import EOS_TOKEN_IDS, MODEL_ID, TOP_K
+from .reasoning import ReasoningDialect, ReasoningRequest
 from .settings import GatewaySettings
 
 
@@ -102,6 +103,7 @@ class WorkerConfig:
     eos_token_ids: tuple[int, ...] = EOS_TOKEN_IDS
     top_k: int = TOP_K
     worker_schema: str = WORKER_SCHEMA
+    reasoning_dialect: ReasoningDialect | None = None
 
     @classmethod
     def from_settings(cls, settings: GatewaySettings) -> "WorkerConfig":
@@ -155,6 +157,7 @@ class WorkerConfig:
             eos_token_ids=settings.eos_token_ids,
             top_k=settings.top_k,
             worker_schema=worker_schema,
+            reasoning_dialect=settings.reasoning_dialect,
         )
 
 
@@ -167,6 +170,7 @@ class WorkerGenerationRequest:
     seed: int
     stream: bool = False
     completion_id: str | None = None
+    reasoning: ReasoningRequest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +314,12 @@ class WorkerSupervisor:
 
     async def admit(self, request: WorkerGenerationRequest) -> GenerationHandle:
         _validate_generation_request(request, self._config)
+        if request.reasoning is not None and self._config.worker_schema != "ullm.worker.v2":
+            raise WorkerProtocolError("reasoning requests require the v2 worker protocol")
+        if request.reasoning is not None:
+            dialect = self._config.reasoning_dialect
+            if dialect is None or dialect.identity != request.reasoning.dialect_id:
+                raise WorkerProtocolError("reasoning dialect is not bound to the worker")
         loop = asyncio.get_running_loop()
         async with self._state_lock:
             if not self.ready:
@@ -355,6 +365,17 @@ class WorkerSupervisor:
             },
             "eos_token_ids": list(self._config.eos_token_ids),
         }
+        if request.reasoning is not None:
+            command["reasoning"] = {
+                "enabled": request.reasoning.enabled,
+                "budget_tokens": request.reasoning.budget_tokens,
+                "dialect_id": request.reasoning.dialect_id,
+                "end_token_ids": list(self._config.reasoning_dialect.end_sequence),
+                "forced_end_token_ids": list(
+                    self._config.reasoning_dialect.forced_end_sequence
+                ),
+                "reserved_answer_tokens": self._config.reasoning_dialect.reserved_answer_tokens,
+            }
         _log_lifecycle(
             "request_admitted",
             request_id=active.request_id,
