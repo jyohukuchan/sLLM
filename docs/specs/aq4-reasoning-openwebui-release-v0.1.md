@@ -67,6 +67,10 @@ For a v2 reasoning request, the worker `released` event carries
 `completion_tokens`. The Gateway requires both fields, checks that their sum
 does not exceed the committed completion count, and keeps the raw token split
 as the response-side cross-check. v1 releases keep the original event shape.
+The resident promotion runner also sends a budget-zero reasoning request for
+v2 candidates and verifies the complete forced-end sequence plus one reserved
+answer token; the legacy v1 comparison remains limited to the raw no-reasoning
+cases.
 
 ## 4. Release gates
 

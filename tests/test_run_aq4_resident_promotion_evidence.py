@@ -60,7 +60,11 @@ for line in sys.stdin:
             "request_id": request_id, "phase": "prompt",
             "processed_prompt_tokens": processed,
         }), flush=True)
-    tokens = [prompt[-1] + offset for offset in range(1, command["max_new_tokens"] + 1)]
+    reasoning = command.get("reasoning")
+    if reasoning is not None:
+        tokens = reasoning["forced_end_token_ids"] + [prompt[-1] + 1]
+    else:
+        tokens = [prompt[-1] + offset for offset in range(1, command["max_new_tokens"] + 1)]
     for index, token in enumerate(tokens):
         print(json.dumps({
             "schema_version": schema, "type": "token",
@@ -79,6 +83,14 @@ for line in sys.stdin:
             "predicted_per_second": 2000.0,
         },
         "reset_complete": True,
+        **(
+            {
+                "reasoning_tokens": 0,
+                "forced_end_tokens": len(reasoning["forced_end_token_ids"]),
+            }
+            if reasoning is not None
+            else {}
+        ),
     }), flush=True)
 '''
 
@@ -227,3 +239,16 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> Non
     assert document["ephemeral_bundle"]["manifest"]["worker"]["protocol"] == "ullm.worker.v2"
     assert document["resident"]["ready"]["schema_version"] == "ullm.worker.v2"
     assert document["legacy"]["ready"]["schema_version"] == "ullm.worker.v1"
+    reasoning_cases = [
+        case
+        for case in document["resident"]["cases"]
+        if case["id"] == TOOL.REASONING_CASE_ID
+    ]
+    assert reasoning_cases[0]["reasoning_usage"] == {
+        "reasoning_tokens": 0,
+        "forced_end_tokens": 2,
+    }
+    assert [case["id"] for case in document["legacy"]["cases"]] == [
+        "raw-p0001-g0004",
+        "raw-p0008-g0004",
+    ]

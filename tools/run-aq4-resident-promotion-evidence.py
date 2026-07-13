@@ -54,6 +54,7 @@ RAW_TOKEN_CASES = (
         "max_new_tokens": 4,
     },
 )
+REASONING_CASE_ID = "reasoning-budget-zero"
 
 
 class EvidenceError(RuntimeError):
@@ -293,8 +294,32 @@ def _run_cases_in_process(
             if mode == "resident":
                 child_checks.append(_inspect_resident_children(process, "ready"))
 
+            cases_to_run = list(RAW_TOKEN_CASES)
+            if mode == "resident" and protocol == "ullm.worker.v2":
+                dialect = manifest.get("reasoning")
+                if not isinstance(dialect, dict):
+                    raise EvidenceError("v2 resident manifest has no reasoning dialect")
+                cases_to_run.append(
+                    {
+                        "id": REASONING_CASE_ID,
+                        "prompt_token_ids": [1],
+                        "max_new_tokens": (
+                            len(dialect["forced_end_token_ids"])
+                            + int(dialect["reserved_answer_tokens"])
+                        ),
+                        "reasoning": {
+                            "enabled": True,
+                            "budget_tokens": 0,
+                            "dialect_id": dialect["dialect_id"],
+                            "end_token_ids": dialect["end_token_ids"],
+                            "forced_end_token_ids": dialect["forced_end_token_ids"],
+                            "reserved_answer_tokens": dialect["reserved_answer_tokens"],
+                        },
+                    }
+                )
+
             results: list[dict[str, Any]] = []
-            for case in RAW_TOKEN_CASES:
+            for case in cases_to_run:
                 request_id = str(case["id"])
                 command_record = {
                     "schema_version": protocol,
@@ -305,6 +330,8 @@ def _run_cases_in_process(
                     "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
                     "eos_token_ids": manifest["generation"]["eos_token_ids"],
                 }
+                if "reasoning" in case:
+                    command_record["reasoning"] = case["reasoning"]
                 assert process.stdin is not None
                 process.stdin.write(
                     json.dumps(command_record, separators=(",", ":")).encode("ascii") + b"\n"
@@ -357,6 +384,33 @@ def _run_cases_in_process(
                     raise EvidenceError(f"{mode} case {request_id} lacks timing evidence")
                 if released.get("completion_tokens") != len(tokens):
                     raise EvidenceError(f"{mode} case {request_id} completion count differs")
+                reasoning_usage = None
+                if "reasoning" in case:
+                    reasoning_tokens = released.get("reasoning_tokens")
+                    forced_end_tokens = released.get("forced_end_tokens")
+                    if not isinstance(reasoning_tokens, int) or not isinstance(
+                        forced_end_tokens, int
+                    ):
+                        raise EvidenceError(
+                            f"{mode} case {request_id} lacks v2 reasoning usage"
+                        )
+                    if reasoning_tokens != 0:
+                        raise EvidenceError(
+                            f"{mode} case {request_id} budget-zero reasoning emitted tokens"
+                        )
+                    expected_forced = len(case["reasoning"]["forced_end_token_ids"])
+                    if forced_end_tokens != expected_forced:
+                        raise EvidenceError(
+                            f"{mode} case {request_id} forced-end usage differs"
+                        )
+                    if reasoning_tokens + forced_end_tokens > len(tokens):
+                        raise EvidenceError(
+                            f"{mode} case {request_id} reasoning usage exceeds completion"
+                        )
+                    reasoning_usage = {
+                        "reasoning_tokens": reasoning_tokens,
+                        "forced_end_tokens": forced_end_tokens,
+                    }
                 if (
                     not progress
                     or progress[-1] != len(case["prompt_token_ids"])
@@ -371,6 +425,7 @@ def _run_cases_in_process(
                         "prompt_progress": progress,
                         "reset_complete": True,
                         "timings": released["timings"],
+                        **({"reasoning_usage": reasoning_usage} if reasoning_usage else {}),
                     }
                 )
                 if mode == "resident":
@@ -486,7 +541,10 @@ def run_evidence(
         )
 
         comparisons = []
-        for resident_case, legacy_case in zip(resident["cases"], legacy["cases"], strict=True):
+        resident_raw_cases = [
+            case for case in resident["cases"] if case["id"] != REASONING_CASE_ID
+        ]
+        for resident_case, legacy_case in zip(resident_raw_cases, legacy["cases"], strict=True):
             matches = resident_case["tokens"] == legacy_case["tokens"]
             comparisons.append({"id": resident_case["id"], "tokens_exact_match": matches})
             if not matches:
