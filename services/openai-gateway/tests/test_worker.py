@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from ullm_openai_gateway import worker as worker_module
 from ullm_openai_gateway.app import _cancel_stream_and_drain
 from ullm_openai_gateway.schemas import EOS_TOKEN_IDS
+from ullm_openai_gateway.reasoning import ReasoningDialect, ReasoningRequest
 from ullm_openai_gateway.worker import (
     WorkerBusy,
     WorkerConfig,
@@ -30,10 +32,11 @@ import sys
 import time
 
 mode = os.environ.get("FAKE_WORKER_MODE", "normal")
+schema = "ullm.worker.v2" if mode == "reasoning_v2" else "ullm.worker.v1"
 if mode == "no_ready":
     time.sleep(10)
 ready = {
-    "schema_version": "ullm.worker.v1",
+    "schema_version": schema,
     "type": "ready",
     "model": "ullm-qwen3-14b-sq8",
     "model_revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
@@ -59,7 +62,7 @@ for line in sys.stdin:
         request_id = command["request_id"]
         prompt_tokens = len(command["prompt_token_ids"])
         print(json.dumps({
-            "schema_version": "ullm.worker.v1",
+            "schema_version": schema,
             "type": "started",
             "request_id": request_id,
             "prompt_tokens": prompt_tokens,
@@ -72,12 +75,35 @@ for line in sys.stdin:
             progress_values.append(prompt_tokens)
         for processed in progress_values:
             print(json.dumps({
-                "schema_version": "ullm.worker.v1",
+                "schema_version": schema,
                 "type": "progress",
                 "request_id": request_id,
                 "phase": "prefill",
                 "processed_prompt_tokens": processed,
             }, separators=(",", ":")), flush=True)
+        if mode == "reasoning_v2":
+            token_ids = [7, 20, 21, 151645]
+            for index, token_id in enumerate(token_ids):
+                print(json.dumps({
+                    "schema_version": schema,
+                    "type": "token",
+                    "request_id": request_id,
+                    "index": index,
+                    "token_id": token_id,
+                }, separators=(",", ":")), flush=True)
+            print(json.dumps({
+                "schema_version": schema,
+                "type": "released",
+                "request_id": request_id,
+                "outcome": "stop",
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": len(token_ids),
+                "reasoning_tokens": 1,
+                "forced_end_tokens": 2,
+                "reset_complete": True,
+            }, separators=(",", ":")), flush=True)
+            active = None
+            continue
         if mode in {"wait_cancel", "cancel_hang"}:
             continue
         time.sleep(float(os.environ.get("FAKE_WORKER_DELAY", "0")))
@@ -86,7 +112,7 @@ for line in sys.stdin:
         token_id = 151645 if mode == "length_eos" else (42 if outcome == "length" else 151645)
         token_index = 1 if mode == "token_gap" else 0
         print(json.dumps({
-            "schema_version": "ullm.worker.v1",
+            "schema_version": schema,
             "type": "token",
             "request_id": request_id,
             "index": token_index,
@@ -95,7 +121,7 @@ for line in sys.stdin:
         completion_tokens = 1
         if mode == "token_after_eos":
             print(json.dumps({
-                "schema_version": "ullm.worker.v1",
+                "schema_version": schema,
                 "type": "token",
                 "request_id": request_id,
                 "index": 1,
@@ -218,6 +244,48 @@ def test_worker_is_reused_and_busy_request_is_not_queued(tmp_path: Path) -> None
         assert second_result.outcome == "length"
         assert second_result.token_ids == (42,)
         assert supervisor.process_id == process_id
+        await supervisor.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_v2_reasoning_release_records_worker_accounting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        reasoning_config = replace(
+            config(tmp_path, mode="reasoning_v2"),
+            worker_schema="ullm.worker.v2",
+            reasoning_dialect=ReasoningDialect(
+                identity="synthetic.worker-v2.v1",
+                start_sequence=(10,),
+                end_sequence=(20, 21),
+                forced_end_sequence=(20, 21),
+                max_budget_tokens=8,
+                reserved_answer_tokens=1,
+                effort_budgets=(("low", 1), ("medium", 2), ("high", 4)),
+            ),
+        )
+        supervisor = WorkerSupervisor(
+            reasoning_config, fatal_exit=lambda _: None
+        )
+        await supervisor.launch()
+        await supervisor.wait_ready()
+        request = WorkerGenerationRequest(
+            prompt_token_ids=(0, 1, 2),
+            max_new_tokens=4,
+            temperature=0.0,
+            top_p=1.0,
+            seed=0,
+            reasoning=ReasoningRequest(
+                enabled=True,
+                budget_tokens=1,
+                history_reasoning_policy="omit",
+                dialect_id="synthetic.worker-v2.v1",
+            ),
+        )
+        result = await supervisor.wait(await supervisor.admit(request))
+        assert result.token_ids == (7, 20, 21, 151645)
+        assert result.reasoning_tokens == 1
+        assert result.forced_end_tokens == 2
         await supervisor.shutdown()
 
     asyncio.run(scenario())

@@ -4,7 +4,7 @@
 //! Quantization-independent adapter from an inference session to the JSONL worker runtime.
 
 use crate::backend_operation_registry::OperationExecutionAudit;
-use crate::inference_api::{GenerationTimings, InferenceRequest, ReleaseOutcome};
+use crate::inference_api::{GenerationTimings, InferenceRequest, ReasoningUsage, ReleaseOutcome};
 use crate::worker_driver::{InferenceSession, RequestPublications, drive_worker_request};
 use crate::worker_protocol::{ReleaseOutcomeEvent, WorkerAdmission};
 use crate::worker_runtime::{InferenceBackend, RequestEventPublisher};
@@ -134,6 +134,10 @@ impl RequestPublications for RequestEventPublisher<'_> {
             Some(timings) => self.publish_released_with_timings(event_outcome, timings),
             None => RequestEventPublisher::publish_released(self, event_outcome),
         }
+    }
+
+    fn set_reasoning_usage(&mut self, usage: Option<ReasoningUsage>) {
+        RequestEventPublisher::set_reasoning_usage(self, usage)
     }
 
     fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>

@@ -3,7 +3,7 @@
 
 //! CPU-side thread and channel topology for the resident SQ8 worker.
 
-use crate::inference_api::InferenceRequest as Sq8ServingRequest;
+use crate::inference_api::{InferenceRequest as Sq8ServingRequest, ReasoningUsage};
 #[cfg(test)]
 use crate::sq8_model_head_runtime::QWEN3_14B_VOCAB_SIZE;
 use crate::sq8_worker_protocol::{
@@ -323,6 +323,8 @@ pub struct Sq8RequestEventPublisher<'a> {
     progress: Sq8PromptProgressTracker,
     started: bool,
     completion_tokens: usize,
+    reasoning_required: bool,
+    reasoning_usage: Option<ReasoningUsage>,
     last_token_was_eos: bool,
     released: bool,
     profile: Sq8WorkerProfile,
@@ -377,6 +379,8 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             progress: Sq8PromptProgressTracker::new_with_profile(prompt_tokens, profile)?,
             started: false,
             completion_tokens: 0,
+            reasoning_required: request.reasoning.is_some(),
+            reasoning_usage: None,
             last_token_was_eos: false,
             released: false,
             profile: profile.clone(),
@@ -468,6 +472,9 @@ impl<'a> Sq8RequestEventPublisher<'a> {
         if !self.started || self.released {
             return Err("SQ8 released event is out of order".into());
         }
+        if self.reasoning_required != self.reasoning_usage.is_some() {
+            return Err("SQ8 reasoning release accounting is missing or unexpected".into());
+        }
         match outcome {
             Sq8ReleaseOutcomeEvent::Stop
                 if self.progress.transition_emitted()
@@ -491,7 +498,7 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             None
         };
         let event = match timings {
-            Some(timings) => Sq8WorkerEvent::released_with_timings_schema(
+            Some(timings) => Sq8WorkerEvent::released_with_timings_schema_and_reasoning(
                 &self.profile.worker_schema,
                 self.request_id.clone(),
                 outcome,
@@ -499,14 +506,16 @@ impl<'a> Sq8RequestEventPublisher<'a> {
                 self.prompt_tokens,
                 self.completion_tokens,
                 timings,
+                self.reasoning_usage.clone(),
             ),
-            None => Sq8WorkerEvent::released_with_schema(
+            None => Sq8WorkerEvent::released_with_schema_and_reasoning(
                 &self.profile.worker_schema,
                 self.request_id.clone(),
                 outcome,
                 cancel_reason,
                 self.prompt_tokens,
                 self.completion_tokens,
+                self.reasoning_usage.clone(),
             ),
         }
         .map_err(|error| error.to_string())?;
@@ -622,6 +631,10 @@ impl<'a> Sq8RequestEventPublisher<'a> {
 
     pub fn completion_tokens(&self) -> usize {
         self.completion_tokens
+    }
+
+    pub fn set_reasoning_usage(&mut self, usage: Option<ReasoningUsage>) {
+        self.reasoning_usage = usage;
     }
 
     fn require_prefill_event(&self, event: &str) -> Result<(), String> {

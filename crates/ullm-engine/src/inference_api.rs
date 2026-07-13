@@ -245,11 +245,18 @@ pub enum ReleaseOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningUsage {
+    pub reasoning_tokens: usize,
+    pub forced_end_tokens: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseSummary {
     pub request_id: String,
     pub outcome: ReleaseOutcome,
     pub prompt_tokens: usize,
     pub generated_tokens: usize,
+    pub reasoning_usage: Option<ReasoningUsage>,
     pub reset_complete: bool,
 }
 

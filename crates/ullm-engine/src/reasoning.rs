@@ -153,6 +153,7 @@ pub struct ReasoningState {
     budget_tokens: Option<usize>,
     pub reasoning_tokens: usize,
     pub answer_tokens: usize,
+    pub forced_end_tokens: usize,
     pending: VecDeque<usize>,
     forced_index: usize,
     pub phase: ReasoningPhase,
@@ -183,6 +184,7 @@ impl ReasoningState {
             budget_tokens,
             reasoning_tokens: 0,
             answer_tokens: 0,
+            forced_end_tokens: 0,
             pending: VecDeque::new(),
             forced_index: 0,
             phase,
@@ -263,6 +265,7 @@ impl ReasoningState {
             return Err(ReasoningError::ForcedTokenMismatch);
         }
         self.forced_index += 1;
+        self.forced_end_tokens = self.forced_end_tokens.saturating_add(1);
         if self.forced_index == self.dialect.forced_end_sequence.len() {
             self.phase = ReasoningPhase::Answer;
         }

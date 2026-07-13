@@ -13,7 +13,8 @@ use crate::backend_operation_registry::{
 };
 use crate::execution_batch::ExecutionPhase;
 use crate::inference_api::{
-    CancellationToken, FinishReason, InferenceRequest, ReleaseOutcome, ReleaseSummary,
+    CancellationToken, FinishReason, InferenceRequest, ReasoningUsage, ReleaseOutcome,
+    ReleaseSummary,
 };
 use crate::qwen35_aq4_model_runtime::{Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime};
 use crate::reasoning::{ReasoningPhase, ReasoningState};
@@ -1357,11 +1358,16 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             .active
             .as_ref()
             .ok_or_else(|| "Qwen3.5 AQ4 reset has no active request".to_string())?;
+        let reasoning_usage = active.reasoning.as_ref().map(|reasoning| ReasoningUsage {
+            reasoning_tokens: reasoning.reasoning_tokens,
+            forced_end_tokens: reasoning.forced_end_tokens,
+        });
         let summary = ReleaseSummary {
             request_id: active.request_id.clone(),
             outcome,
             prompt_tokens: active.prompt_token_ids.len(),
             generated_tokens: active.generated_tokens,
+            reasoning_usage,
             reset_complete: true,
         };
         let audit_layers = self.execution_contract.as_ref().map_or(0, Vec::len);
@@ -2784,6 +2790,7 @@ mod tests {
                 outcome: ReleaseOutcome::Stop,
                 prompt_tokens: 1,
                 generated_tokens: 1,
+                reasoning_usage: None,
                 reset_complete: true,
             }
         );

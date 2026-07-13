@@ -6,7 +6,7 @@
 pub use crate::inference_api::GenerationTimings as Sq8WorkerTimings;
 use crate::inference_api::{
     CancellationToken as Sq8CancellationToken, InferenceRequest as Sq8ServingRequest,
-    SamplingParams as Sq8SamplingParams,
+    ReasoningUsage, SamplingParams as Sq8SamplingParams,
 };
 use crate::sq8_model_head_runtime::QWEN3_14B_VOCAB_SIZE;
 use crate::sq8_serving_runtime::{
@@ -1809,6 +1809,10 @@ pub enum Sq8WorkerEvent {
         prompt_tokens: usize,
         completion_tokens: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        forced_end_tokens: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         timings: Option<Sq8WorkerTimings>,
         reset_complete: bool,
     },
@@ -1922,6 +1926,26 @@ impl Sq8WorkerEvent {
         prompt_tokens: usize,
         completion_tokens: usize,
     ) -> Result<Self, Sq8WorkerProtocolError> {
+        Self::released_with_schema_and_reasoning(
+            schema_version,
+            request_id,
+            outcome,
+            cancel_reason,
+            prompt_tokens,
+            completion_tokens,
+            None,
+        )
+    }
+
+    pub fn released_with_schema_and_reasoning(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        outcome: Sq8ReleaseOutcomeEvent,
+        cancel_reason: Option<Sq8CancelReason>,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        reasoning_usage: Option<ReasoningUsage>,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
         Self::released_inner(
             schema_version,
             request_id,
@@ -1929,6 +1953,7 @@ impl Sq8WorkerEvent {
             cancel_reason,
             prompt_tokens,
             completion_tokens,
+            reasoning_usage,
             None,
         )
     }
@@ -1961,6 +1986,28 @@ impl Sq8WorkerEvent {
         completion_tokens: usize,
         timings: Sq8WorkerTimings,
     ) -> Result<Self, Sq8WorkerProtocolError> {
+        Self::released_with_timings_schema_and_reasoning(
+            schema_version,
+            request_id,
+            outcome,
+            cancel_reason,
+            prompt_tokens,
+            completion_tokens,
+            timings,
+            None,
+        )
+    }
+
+    pub fn released_with_timings_schema_and_reasoning(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        outcome: Sq8ReleaseOutcomeEvent,
+        cancel_reason: Option<Sq8CancelReason>,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        timings: Sq8WorkerTimings,
+        reasoning_usage: Option<ReasoningUsage>,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
         Self::released_inner(
             schema_version,
             request_id,
@@ -1968,6 +2015,7 @@ impl Sq8WorkerEvent {
             cancel_reason,
             prompt_tokens,
             completion_tokens,
+            reasoning_usage,
             Some(timings),
         )
     }
@@ -1979,11 +2027,27 @@ impl Sq8WorkerEvent {
         cancel_reason: Option<Sq8CancelReason>,
         prompt_tokens: usize,
         completion_tokens: usize,
+        reasoning_usage: Option<ReasoningUsage>,
         timings: Option<Sq8WorkerTimings>,
     ) -> Result<Self, Sq8WorkerProtocolError> {
         if matches!(outcome, Sq8ReleaseOutcomeEvent::Cancelled) != cancel_reason.is_some() {
             return Err(Sq8WorkerProtocolError::invalid_command(
                 "cancel_reason must exist only for a cancelled release",
+            ));
+        }
+        if reasoning_usage.is_some() && schema_version != SQ8_WORKER_SCHEMA_VERSION_V2 {
+            return Err(Sq8WorkerProtocolError::invalid_command(
+                "reasoning release accounting requires ullm.worker.v2",
+            ));
+        }
+        if let Some(usage) = reasoning_usage.as_ref()
+            && usage
+                .reasoning_tokens
+                .saturating_add(usage.forced_end_tokens)
+                > completion_tokens
+        {
+            return Err(Sq8WorkerProtocolError::invalid_command(
+                "reasoning release accounting exceeds completion tokens",
             ));
         }
         if outcome == Sq8ReleaseOutcomeEvent::Cancelled && timings.is_some() {
@@ -2003,6 +2067,8 @@ impl Sq8WorkerEvent {
             cancel_reason,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens: reasoning_usage.as_ref().map(|usage| usage.reasoning_tokens),
+            forced_end_tokens: reasoning_usage.map(|usage| usage.forced_end_tokens),
             timings,
             reset_complete: true,
         })
@@ -2120,6 +2186,8 @@ impl Sq8WorkerEvent {
                 cancel_reason,
                 prompt_tokens,
                 completion_tokens,
+                reasoning_tokens,
+                forced_end_tokens,
                 timings,
                 reset_complete,
             } => {
@@ -2131,6 +2199,15 @@ impl Sq8WorkerEvent {
                     || !reset_complete
                 {
                     return Err("SQ8 released event violates its terminal contract".into());
+                }
+                if reasoning_tokens.is_some() != forced_end_tokens.is_some()
+                    || (schema_version != &SQ8_WORKER_SCHEMA_VERSION_V2
+                        && (reasoning_tokens.is_some() || forced_end_tokens.is_some()))
+                    || reasoning_tokens.zip(*forced_end_tokens).is_some_and(
+                        |(reasoning, forced)| reasoning.saturating_add(forced) > *completion_tokens,
+                    )
+                {
+                    return Err("SQ8 released reasoning accounting is invalid".into());
                 }
                 if let Some(timings) = timings {
                     timings.validate_for_release(*prompt_tokens, *completion_tokens)?;

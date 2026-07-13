@@ -5,8 +5,8 @@
 
 use crate::backend_operation_registry::OperationExecutionAudit;
 use crate::inference_api::{
-    CancellationToken, FinishReason, GenerationTimings, InferenceRequest, ReleaseOutcome,
-    ReleaseSummary,
+    CancellationToken, FinishReason, GenerationTimings, InferenceRequest, ReasoningUsage,
+    ReleaseOutcome, ReleaseSummary,
 };
 use std::time::Instant;
 
@@ -92,6 +92,8 @@ pub trait RequestPublications {
         outcome: ReleaseOutcome,
         timings: Option<GenerationTimings>,
     ) -> Result<(), String>;
+
+    fn set_reasoning_usage(&mut self, _usage: Option<ReasoningUsage>) {}
 
     fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
     where
@@ -300,6 +302,7 @@ fn finish_completed_request<S: InferenceSession, P: RequestPublications>(
         publications.completion_tokens(),
         outcome,
     )?;
+    publications.set_reasoning_usage(summary.reasoning_usage.clone());
     publications.publish_released(outcome, Some(timings))?;
     Ok(outcome)
 }
@@ -318,6 +321,7 @@ fn finish_cancelled_request<S: InferenceSession, P: RequestPublications>(
         publications.completion_tokens(),
         ReleaseOutcome::Cancelled,
     )?;
+    publications.set_reasoning_usage(summary.reasoning_usage.clone());
     publications.publish_released(ReleaseOutcome::Cancelled, None)?;
     Ok(ReleaseOutcome::Cancelled)
 }
@@ -552,6 +556,7 @@ mod tests {
                 outcome: ReleaseOutcome::Length,
                 prompt_tokens: 3,
                 generated_tokens: 2,
+                reasoning_usage: None,
                 reset_complete: true,
             }),
             abort: None,
@@ -614,6 +619,7 @@ mod tests {
                 outcome: ReleaseOutcome::Cancelled,
                 prompt_tokens: 3,
                 generated_tokens: 0,
+                reasoning_usage: None,
                 reset_complete: true,
             }),
             cancel: None,

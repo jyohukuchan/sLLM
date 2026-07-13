@@ -1719,6 +1719,7 @@ impl Qwen3Sq8ServingSession {
             outcome,
             prompt_tokens,
             generated_tokens,
+            reasoning_usage: None,
             reset_complete: true,
         })
     }

@@ -199,6 +199,8 @@ class WorkerGenerationResult:
     prompt_tokens: int
     token_ids: tuple[int, ...]
     timings: WorkerGenerationTimings | None = None
+    reasoning_tokens: int | None = None
+    forced_end_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -787,18 +789,39 @@ class WorkerSupervisor:
         keys = base | ({"cancel_reason"} if outcome == "cancelled" else set())
         if "timings" in value:
             keys.add("timings")
-        _require_exact_keys(value, keys)
         active = self._require_active_id(value.get("request_id"))
+        if active.request.reasoning is not None:
+            keys |= {"reasoning_tokens", "forced_end_tokens"}
+        _require_exact_keys(value, keys)
         prompt_tokens = _integer(value.get("prompt_tokens"))
         completion_tokens = _integer(value.get("completion_tokens"))
+        reasoning_tokens = (
+            _integer(value.get("reasoning_tokens"))
+            if active.request.reasoning is not None
+            else None
+        )
+        forced_end_tokens = (
+            _integer(value.get("forced_end_tokens"))
+            if active.request.reasoning is not None
+            else None
+        )
         if (
             not active.started
             or outcome not in {"stop", "length", "cancelled"}
             or value.get("reset_complete") is not True
             or prompt_tokens != len(active.request.prompt_token_ids)
             or completion_tokens != len(active.token_ids)
+            or (
+                reasoning_tokens is not None
+                and forced_end_tokens is not None
+                and reasoning_tokens + forced_end_tokens > completion_tokens
+            )
         ):
             raise WorkerProtocolError("worker release event violates counters")
+        if active.request.reasoning is not None:
+            dialect = self._config.reasoning_dialect
+            if dialect is None or forced_end_tokens > len(dialect.forced_end_sequence):
+                raise WorkerProtocolError("worker release reasoning accounting is invalid")
         if outcome in {"stop", "length"} and active.terminal_outcome != outcome:
             raise WorkerProtocolError(
                 "worker release outcome differs from terminal token"
@@ -831,6 +854,8 @@ class WorkerSupervisor:
             prompt_tokens=prompt_tokens,
             token_ids=tuple(active.token_ids),
             timings=timings,
+            reasoning_tokens=reasoning_tokens,
+            forced_end_tokens=forced_end_tokens,
         )
         released_monotonic_ns = time.monotonic_ns()
         started_monotonic_ns = active.started_monotonic_ns

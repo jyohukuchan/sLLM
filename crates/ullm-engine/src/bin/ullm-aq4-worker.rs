@@ -906,6 +906,8 @@ mod tests {
             .unwrap();
         assert_eq!(released["outcome"], "stop");
         assert_eq!(released["completion_tokens"], 4);
+        assert_eq!(released["reasoning_tokens"], 1);
+        assert_eq!(released["forced_end_tokens"], 2);
     }
 
     #[test]

@@ -25,6 +25,11 @@ to verified resident-vs-legacy evidence. Generate that evidence with
 `tools/write-aq4-resident-promotion-receipt.py`. Do not invent a receipt or
 placeholder hash.
 
+`qwen35-9b-aq4-reasoning.profile.json` is an unactivated v2 candidate. It
+declares the Qwen3.5 reasoning dialect, but the current v1 promotion receipt
+and binary are intentionally incompatible with it; generation must fail until
+a v2 worker build and matching resident evidence exist.
+
 Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release
 gates. Generation proves file and contract identity; it does not prove runtime

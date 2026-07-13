@@ -1,0 +1,91 @@
+{
+  "schema_version": "ullm.served_model.profile.v1",
+  "public": {
+    "id": "ullm-qwen3.5-9b-aq4",
+    "name": "uLLM Qwen3.5 9B AQ4 reasoning",
+    "description": "Unactivated Qwen3.5 9B AQ4 reasoning candidate.",
+    "upstream_id": "Qwen/Qwen3.5-9B",
+    "revision": "aq4-reasoning-v0.1-candidate",
+    "context_length": 4096
+  },
+  "generation": {
+    "max_completion_tokens": 512,
+    "vocab_size": 248320,
+    "eos_token_ids": [248044, 248046],
+    "sampling": {"top_k": 1, "temperature": false, "top_p": false}
+  },
+  "format": {
+    "format_id": "AQ4_0",
+    "implementation_id": "qwen35_aq4_rdna4_v1"
+  },
+  "tokenizer": {
+    "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "transformers_version": "5.12.1",
+    "class": "Qwen2Tokenizer",
+    "files": ["merges.txt", "tokenizer.json", "tokenizer_config.json", "vocab.json"],
+    "template_options": {"add_generation_prompt": true, "enable_thinking": false}
+  },
+  "worker": {
+    "protocol": "ullm.worker.v2",
+    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
+    "arguments": ["--served-model-manifest", "{manifest}"],
+    "required_environment": [
+      "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+      "ULLM_REQUIRE_HIP_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+      "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+      "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+      "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+      "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+      "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+      "ULLM_REQUIRE_HIP_TOP1_KERNEL"
+    ],
+    "identity": {"device": "gfx1201", "execution_profile": "rdna4_aq4_resident"}
+  },
+  "reasoning": {
+    "enabled_by_default": false,
+    "dialect_id": "qwen3.5-thinking-v1",
+    "start_token_ids": [248068],
+    "end_token_ids": [248069],
+    "forced_end_token_ids": [248069],
+    "initial_phase": "reasoning",
+    "eos_policy": "close",
+    "effort_budgets": {"low": 32, "medium": 128, "high": 256},
+    "max_budget_tokens": 256,
+    "reserved_answer_tokens": 1,
+    "history_reasoning_policy": "omit"
+  },
+  "product": {
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1",
+    "artifact": null,
+    "package": {"manifest_path": "package/manifest.json"}
+  },
+  "promotion": {
+    "receipt": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/promotion-paged-decode-split-v1.json",
+    "source_commit_from_receipt": ["source_commit"],
+    "required_schema_version": "ullm.aq4_resident_promotion.v1",
+    "evidence_from_receipt": ["evidence", "path"],
+    "evidence_sha256_from_receipt": ["evidence", "sha256"]
+  }
+}
