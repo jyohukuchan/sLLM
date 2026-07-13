@@ -93,7 +93,7 @@ fresh identities with `docker image inspect` before a later run.
 export ULLM_MODEL_ID=ullm-qwen3.5-9b-aq4
 export ULLM_MODEL_NAME='uLLM Qwen3.5 9B AQ4'
 export TOKEN_FILE=/etc/ullm/openai-api-key
-export BROWSER_IMAGE=sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409
+export BROWSER_IMAGE=sha256:dbd552f6c831816050a1381a54cdb8d37df56df7f6559c82aba451d2ea93e0aa
 export PROBE_IMAGE=sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54
 export OPENWEBUI_URL=http://192.168.0.66:3000/
 export SERVICE=ullm-openai.service
