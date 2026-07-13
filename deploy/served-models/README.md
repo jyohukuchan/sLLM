@@ -69,3 +69,19 @@ Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release
 gates. Generation proves file and contract identity; it does not prove runtime
 correctness by itself.
+
+For the final hash-only handoff, keep the generic release evidence, its
+validator report, the OpenWebUI browser evidence and report, and the promotion
+evidence and receipt beside a `ullm.generic_reasoning_release_bundle.v1`
+document. Validate that document with:
+
+```bash
+uv run --project services/openai-gateway python \
+  tools/validate-generic-reasoning-release-bundle.py \
+  /path/to/generic-reasoning-release-bundle.json \
+  --require-complete
+```
+
+The bundle validator re-hashes every referenced artifact, recomputes both
+independent validator reports, and checks the v2 promotion receipt binding. It
+does not accept prompts, responses, tokens, or credentials in the bundle.
