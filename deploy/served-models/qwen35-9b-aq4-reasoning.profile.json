@@ -27,7 +27,7 @@
   },
   "worker": {
     "protocol": "ullm.worker.v2",
-    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
+    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
     "arguments": ["--served-model-manifest", "{manifest}"],
     "required_environment": [
       "ULLM_REQUIRE_HIP_AQ4_KERNEL",
