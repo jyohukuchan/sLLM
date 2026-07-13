@@ -181,6 +181,13 @@ def load_served_model(path: Path) -> ServedModel:
     format_contract = _parse_format(document["format"])
     tokenizer = _parse_tokenizer(document["tokenizer"], manifest_path.parent)
     worker = _parse_worker(document["worker"], manifest_path.parent)
+    expected_worker_schema = (
+        "ullm.worker.v2" if schema_version == SCHEMA_VERSION_V2 else "ullm.worker.v1"
+    )
+    if worker.protocol != expected_worker_schema:
+        raise ServedModelError(
+            "manifest schema_version and worker.protocol must be version aligned"
+        )
     product = _parse_product(document["product"], manifest_path.parent)
     promotion = _parse_promotion(document["promotion"], manifest_path.parent)
     reasoning_dialect = (
@@ -188,6 +195,16 @@ def load_served_model(path: Path) -> ServedModel:
         if schema_version == SCHEMA_VERSION_V2
         else None
     )
+    if reasoning_dialect is not None:
+        reserved_for_max_budget = (
+            reasoning_dialect.max_budget_tokens
+            + len(reasoning_dialect.forced_end_sequence)
+            + reasoning_dialect.reserved_answer_tokens
+        )
+        if reserved_for_max_budget > generation.max_completion_tokens:
+            raise ServedModelError(
+                "reasoning maximum budget exceeds the generation reservation"
+            )
 
     return ServedModel(
         manifest_path=manifest_path,

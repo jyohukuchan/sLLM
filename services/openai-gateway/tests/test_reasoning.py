@@ -114,3 +114,29 @@ def test_dialect_rejects_empty_or_oversized_configuration() -> None:
     )
     with pytest.raises(ReasoningError):
         ReasoningState(dialect, enabled=True, budget_tokens=1, vocab_size=10)
+
+
+def test_dialect_rejects_duplicate_tokens_and_prefix_collision() -> None:
+    duplicate = ReasoningDialect(
+        identity="duplicate",
+        start_sequence=(10, 10),
+        end_sequence=(20,),
+        forced_end_sequence=(20,),
+        max_budget_tokens=1,
+        reserved_answer_tokens=1,
+        effort_budgets=(("low", 1), ("medium", 1), ("high", 1)),
+    )
+    with pytest.raises(ReasoningError):
+        ReasoningState(duplicate, enabled=True, budget_tokens=1, vocab_size=30)
+
+    collision = ReasoningDialect(
+        identity="collision",
+        start_sequence=(20,),
+        end_sequence=(20, 21),
+        forced_end_sequence=(20, 21),
+        max_budget_tokens=2,
+        reserved_answer_tokens=1,
+        effort_budgets=(("low", 1), ("medium", 1), ("high", 2)),
+    )
+    with pytest.raises(ReasoningError):
+        ReasoningState(collision, enabled=True, budget_tokens=1, vocab_size=30)

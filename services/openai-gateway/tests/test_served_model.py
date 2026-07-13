@@ -128,6 +128,35 @@ def test_v2_manifest_loads_reasoning_dialect_without_changing_v1_loader() -> Non
     assert loaded.reasoning_dialect.effort_budgets[-1] == ("high", 128)
 
 
+@pytest.mark.parametrize("schema,worker_protocol", [("ullm.served_model.v1", "ullm.worker.v2"), ("ullm.served_model.v2", "ullm.worker.v1")])
+def test_manifest_schema_and_worker_protocol_must_be_version_aligned(
+    tmp_path: Path, schema: str, worker_protocol: str
+) -> None:
+    root = tmp_path / "aq4"
+    shutil.copytree(FIXTURES / "aq4", root)
+    path = root / "served-model.json"
+    value = _document(path)
+    value["schema_version"] = schema
+    value["worker"]["protocol"] = worker_protocol
+    if schema == "ullm.served_model.v2":
+        value["reasoning"] = {
+            "enabled_by_default": False,
+            "dialect_id": "synthetic.multi-token.v1",
+            "start_token_ids": [248068, 12],
+            "end_token_ids": [248069, 13],
+            "forced_end_token_ids": [248069, 13],
+            "initial_phase": "reasoning",
+            "eos_policy": "close",
+            "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+            "max_budget_tokens": 128,
+            "reserved_answer_tokens": 1,
+            "history_reasoning_policy": "omit",
+        }
+    _write(path, value)
+    with pytest.raises(ServedModelError, match="version aligned"):
+        load_served_model(path)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

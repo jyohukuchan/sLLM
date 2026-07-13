@@ -86,6 +86,10 @@ impl ReasoningDialect {
             if sequence.is_empty() {
                 return Err(ReasoningError::InvalidDialect(name));
             }
+            let mut seen = HashSet::new();
+            if sequence.iter().any(|token| !seen.insert(*token)) {
+                return Err(ReasoningError::InvalidDialect(name));
+            }
             if sequence.iter().any(|token| *token >= vocab_size) {
                 return Err(ReasoningError::InvalidDialect(name));
             }
@@ -93,6 +97,15 @@ impl ReasoningDialect {
         if self.end_sequence != self.forced_end_sequence {
             return Err(ReasoningError::InvalidDialect(
                 "natural and forced end sequences must match",
+            ));
+        }
+        if (self.start_sequence.len() <= self.end_sequence.len()
+            && self.end_sequence.starts_with(&self.start_sequence))
+            || (self.end_sequence.len() <= self.start_sequence.len()
+                && self.start_sequence.starts_with(&self.end_sequence))
+        {
+            return Err(ReasoningError::InvalidDialect(
+                "start and end sequences must not have a prefix collision",
             ));
         }
         if self.reserved_answer_tokens == 0 {

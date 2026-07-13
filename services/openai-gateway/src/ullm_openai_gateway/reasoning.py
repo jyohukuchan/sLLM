@@ -52,12 +52,16 @@ class ReasoningDialect:
         ):
             if not sequence:
                 raise ReasoningError(f"{name} must not be empty")
+            if len(sequence) != len(set(sequence)):
+                raise ReasoningError(f"{name} contains duplicate tokens")
             if any(token < 0 or token >= vocab_size for token in sequence):
                 raise ReasoningError(f"{name} contains a token outside the vocabulary")
         if self.end_sequence != self.forced_end_sequence:
             raise ReasoningError(
                 "natural and forced end sequences must match until divergent policies exist"
             )
+        if _has_prefix_collision(self.start_sequence, self.end_sequence):
+            raise ReasoningError("start and end sequences must not have a prefix collision")
         if self.max_budget_tokens < 0:
             raise ReasoningError("max_budget_tokens must be nonnegative")
         if self.reserved_answer_tokens < 1:
@@ -269,3 +273,13 @@ class ReasoningState:
 def _is_prefix(candidate: Iterable[int], sequence: tuple[int, ...]) -> bool:
     value = tuple(candidate)
     return len(value) < len(sequence) and sequence[: len(value)] == value
+
+
+def _has_prefix_collision(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
+    return (
+        len(left) <= len(right)
+        and right[: len(left)] == left
+    ) or (
+        len(right) <= len(left)
+        and left[: len(right)] == right
+    )

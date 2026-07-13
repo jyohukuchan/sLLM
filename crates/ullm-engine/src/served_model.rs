@@ -326,6 +326,18 @@ pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
         .reasoning
         .map(|raw| parse_reasoning(raw, generation.vocab_size))
         .transpose()?;
+    if let Some(dialect) = reasoning.as_ref() {
+        let reserved_for_max_budget = dialect
+            .max_budget_tokens
+            .checked_add(dialect.forced_end_sequence.len())
+            .and_then(|value| value.checked_add(dialect.reserved_answer_tokens))
+            .ok_or_else(|| ServedModelError("reasoning maximum reservation overflows".into()))?;
+        if reserved_for_max_budget > generation.max_completion_tokens {
+            return Err(ServedModelError(
+                "reasoning maximum budget exceeds the generation reservation".into(),
+            ));
+        }
+    }
     let format = FormatContract {
         format_id: bounded_text(raw_manifest.format.format_id, "format.format_id", 128)?,
         implementation_id: bounded_text(
@@ -336,6 +348,16 @@ pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
     };
     let tokenizer = parse_tokenizer(raw_manifest.tokenizer, base)?;
     let worker = parse_worker(raw_manifest.worker, base)?;
+    let expected_worker_schema = if raw_manifest.schema_version == SERVED_MODEL_SCHEMA_VERSION_V2 {
+        "ullm.worker.v2"
+    } else {
+        "ullm.worker.v1"
+    };
+    if worker.protocol != expected_worker_schema {
+        return Err(ServedModelError(
+            "manifest schema_version and worker.protocol must be version aligned".into(),
+        ));
+    }
     let product = parse_product(raw_manifest.product, base)?;
     let promotion = parse_promotion(raw_manifest.promotion, base)?;
     Ok(ServedModel {
