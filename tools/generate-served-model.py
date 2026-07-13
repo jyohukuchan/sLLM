@@ -296,12 +296,15 @@ def _validate_v2_reasoning_evidence(
     tokens = reasoning_case.get("tokens")
     if (
         not isinstance(usage, dict)
+        or type(usage.get("reasoning_tokens")) is not int
         or usage.get("reasoning_tokens") != 0
         or not isinstance(forced_end, list)
-        or not isinstance(reserved_answer, int)
+        or type(reserved_answer) is not int
         or reserved_answer < 1
+        or type(usage.get("forced_end_tokens")) is not int
         or usage.get("forced_end_tokens") != len(forced_end)
         or not isinstance(tokens, list)
+        or not all(type(token) is int and token >= 0 for token in tokens)
         or len(tokens) < len(forced_end) + reserved_answer
         or tokens[: len(forced_end)] != forced_end
     ):
