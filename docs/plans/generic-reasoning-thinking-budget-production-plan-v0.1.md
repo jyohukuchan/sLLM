@@ -778,6 +778,7 @@ OpenWebUI/release tool:
 - `tools/validate-generic-reasoning-phase0-http-baseline.py`
 - `tools/validate-generic-reasoning-release.py`
 - `tools/write-aq4-resident-promotion-receipt.py`
+- `deploy/openwebui/browser-reasoning-smoke.cjs`
 
 `deploy/openwebui/configure.py`もserved-model v1/v2をstrictに読み分ける。v2ではreasoning
 dialectの宣言を検証するが、OpenWebUIのDBへreasoning履歴や会話本文を保存しない。
