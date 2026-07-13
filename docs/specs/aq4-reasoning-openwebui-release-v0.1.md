@@ -32,6 +32,10 @@ not appear in either field.
 OpenWebUI MUST be tested against the existing image without a uLLM-specific UI
 patch. The following behavior is required:
 
+- exact budgets are supplied through the existing model `custom_params`
+  mechanism as `thinking_budget_tokens`; the deployment configurator preserves
+  that model parameter and the OpenWebUI OpenAI payload adapter forwards it as
+  an integer field;
 - the reasoning panel starts and completes when the first answer content arrives;
 - the hidden reasoning is not reinserted into the next turn when the dialect
   policy is `omit`;
