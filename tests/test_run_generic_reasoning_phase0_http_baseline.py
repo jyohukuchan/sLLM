@@ -101,3 +101,33 @@ def test_capture_publishes_hashes_and_usage_without_bodies(tmp_path: Path, monke
     serialized = output.read_text(encoding="ascii")
     assert "secret-not-observed-by-test" not in serialized
     assert '"content"' not in serialized
+
+
+def test_docker_probe_does_not_put_api_key_in_process_arguments(tmp_path: Path, monkeypatch) -> None:
+    key = tmp_path / "key"
+    key.write_text("secret-not-observed-by-process-list", encoding="ascii")
+    observed: dict[str, object] = {}
+
+    def fake_run(command, **_kwargs):
+        observed["command"] = command
+        return type("Completed", (), {"returncode": 0, "stdout": b"{}200"})()
+
+    monkeypatch.setattr(TOOL.subprocess, "run", fake_run)
+    status, response = TOOL._docker_curl(
+        b"{}",
+        endpoint="http://fixture/v1/chat/completions",
+        key_file=key,
+        image="fixture-image",
+        network="fixture-network",
+        timeout_seconds=1.0,
+        stream=False,
+    )
+
+    assert status == 200
+    assert response == b"{}"
+    command = observed["command"]
+    assert isinstance(command, list)
+    serialized = " ".join(str(part) for part in command)
+    assert "secret-not-observed-by-process-list" not in serialized
+    assert '--config "$config"' in serialized
+    assert 'printf \'header = "Authorization: Bearer %s"' in serialized

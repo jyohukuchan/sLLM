@@ -89,8 +89,11 @@ def _docker_curl(
     curl_script = (
         "set -eu; "
         "key=$(cat /run/secrets/ullm-api-key); "
-        "exec curl --silent --show-error --no-buffer "
-        "-H \"Authorization: Bearer ${key}\" "
+        "config=$(mktemp); "
+        "trap 'rm -f \"$config\"' EXIT; "
+        "umask 077; "
+        "printf 'header = \"Authorization: Bearer %s\"\\n' \"$key\" > \"$config\"; "
+        "exec curl --config \"$config\" --silent --show-error --no-buffer "
         "-H 'Content-Type: application/json' "
         + ("-H 'Accept: text/event-stream' " if stream else "")
         + "-w '%{http_code}' --data-binary @- "
