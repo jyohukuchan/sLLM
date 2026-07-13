@@ -119,6 +119,119 @@ docker run --rm --network open-webui-network \
   -c 'curl --fail --silent --show-error -H "Authorization: Bearer $(cat /run/secrets/ullm-api-key)" http://172.20.0.1:8000/v1/models'
 ```
 
+## Add the llama.cpp UD-Q4_K_XL provider
+
+The existing Qwen3.5 9B UD-Q4_K_XL GGUF and the existing RDNA4
+`llama-server` binary are used as-is; this step does not convert or rewrite
+the model. This is the text-only model path. Do not mount or pass an
+`mmproj` file: the Qwen3.5 9B text model does not need one. The resident
+runtime is fixed to `HIP_VISIBLE_DEVICES=1`, which makes the physical R9700
+appear as `ROCm0` to this process. Exposing all three GPUs made
+`libamdhip64` fault with a GPF, so a three-GPU-visible launch is prohibited.
+Use `--ctx-size 4096`, `--parallel 1`, `--fit off`, and `--no-mmproj` exactly
+as in the unit. Keep the llama.cpp and uLLM workers resident together, but
+send comparison requests alternately: concurrent requests compete for the
+same R9700. The llama.cpp service must not use or share uLLM's
+`/run/ullm/r9700.lock`.
+
+The profile points at these existing files:
+
+```text
+LLAMA_SERVER_BINARY=/home/homelab1/llama.cpp-src/build-rdna4/bin/llama-server
+LLAMA_MODEL=/home/homelab1/datapool/ai_models/gguf/unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-UD-Q4_K_XL.gguf
+```
+
+Install the separately keyed environment, unit, and firewall assets without
+overwriting an existing API key. The key is readable by `homelab1` through
+the root-owned group file, and is never put into an environment file:
+
+```bash
+sudo install -d -m 0750 -o root -g homelab1 /etc/ullm
+sudo install -m 0640 -o root -g homelab1 \
+  deploy/systemd/llama-qwen35-udq4.env.example \
+  /etc/ullm/llama-qwen35-udq4.env
+sudo chown root:homelab1 /etc/ullm/llama-qwen35-udq4.env
+sudo chmod 0640 /etc/ullm/llama-qwen35-udq4.env
+if ! sudo test -e /etc/ullm/llama-qwen35-udq4-api-key; then
+  sudo install -m 0640 -o root -g homelab1 /dev/null \
+    /etc/ullm/llama-qwen35-udq4-api-key
+  openssl rand -hex 32 | sudo tee /etc/ullm/llama-qwen35-udq4-api-key >/dev/null
+fi
+sudo chown root:homelab1 /etc/ullm/llama-qwen35-udq4-api-key
+sudo chmod 0640 /etc/ullm/llama-qwen35-udq4-api-key
+sudo install -m 0644 deploy/systemd/llama-qwen35-udq4.service \
+  /etc/systemd/system/llama-qwen35-udq4.service
+sudo install -m 0644 deploy/systemd/ullm-openai-firewall.service \
+  /etc/systemd/system/ullm-openai-firewall.service
+sudo install -m 0644 deploy/nftables/ullm-openai.nft /etc/ullm/ullm-openai.nft
+sudo install -m 0755 deploy/nftables/ullm-openai-firewall \
+  /usr/local/libexec/ullm-openai-firewall
+sudo systemd-analyze verify \
+  /etc/systemd/system/ullm-openai-firewall.service \
+  /etc/systemd/system/ullm-openai.service \
+  /etc/systemd/system/llama-qwen35-udq4.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ullm-openai-firewall.service
+sudo /usr/local/libexec/ullm-openai-firewall install
+sudo systemctl enable --now ullm-openai.service llama-qwen35-udq4.service
+```
+
+The firewall table applies to both bridge-only ports. Check each authenticated
+`/v1/models` endpoint from the Docker network; host loopback and LAN access
+are intentionally rejected:
+
+```bash
+docker run --rm --network open-webui-network \
+  -v /etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro \
+  --entrypoint sh \
+  ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff \
+  -c 'curl --fail --silent --show-error -H "Authorization: Bearer $(cat /run/secrets/ullm-api-key)" http://172.20.0.1:8000/v1/models'
+docker run --rm --network open-webui-network \
+  -v /etc/ullm/llama-qwen35-udq4-api-key:/run/secrets/llama-api-key:ro \
+  --entrypoint sh \
+  ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff \
+  -c 'curl --fail --silent --show-error -H "Authorization: Bearer $(cat /run/secrets/llama-api-key)" http://172.20.0.1:8001/v1/models'
+```
+
+Stop OpenWebUI before changing its SQLite database. Mount the external
+`open-webui:/data` volume, mount the new key read-only, and mount
+`configure.py` read-only. The legacy arguments add provider index 2 while
+leaving the existing external index 0, uLLM index 1, and uLLM model row intact;
+do not pass any `previous-managed` argument:
+
+```bash
+docker stop open-webui 2>/dev/null || true
+docker run --rm \
+  -v open-webui:/data \
+  -v /etc/ullm/llama-qwen35-udq4-api-key:/run/secrets/ullm-api-key:ro \
+  -v "$PWD/deploy/openwebui/configure.py:/configure.py:ro" \
+  --entrypoint python \
+  ullm/open-webui:0.9.4-ullm.1 \
+  /configure.py \
+  --base-url http://172.20.0.1:8001/v1 \
+  --model-id llama-qwen3.5-9b-ud-q4 \
+  --model-name 'llama.cpp Qwen3.5 9B UD-Q4_K_XL' \
+  --context-length 4096 \
+  --description 'Qwen3.5 9B text-only UD-Q4_K_XL served by llama.cpp.'
+docker compose -f deploy/openwebui/compose.yaml up -d --no-build
+curl --fail --silent http://127.0.0.1:3000/health
+docker inspect --format '{{.State.Health.Status}}' open-webui
+```
+
+Confirm both model identities with their separate credentials from inside the
+Docker network. The first response must contain the existing uLLM model ID
+(`public.id` in the active uLLM profile or manifest), and the second must
+contain `llama-qwen3.5-9b-ud-q4`:
+
+```bash
+docker run --rm --network open-webui-network \
+  -v /etc/ullm/openai-api-key:/run/secrets/ullm-api-key:ro \
+  -v /etc/ullm/llama-qwen35-udq4-api-key:/run/secrets/llama-api-key:ro \
+  --entrypoint sh \
+  ghcr.io/open-webui/open-webui@sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff \
+  -c 'set -eu; curl --fail --silent -H "Authorization: Bearer $(cat /run/secrets/ullm-api-key)" http://172.20.0.1:8000/v1/models; echo; curl --fail --silent -H "Authorization: Bearer $(cat /run/secrets/llama-api-key)" http://172.20.0.1:8001/v1/models; echo'
+```
+
 ## Configure and start OpenWebUI
 
 Stop OpenWebUI before editing its SQLite database. The configuration tool uses

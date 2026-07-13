@@ -149,6 +149,38 @@ def _create_database(path: Path) -> tuple[dict, dict, dict]:
     return existing_config, existing_meta, existing_params
 
 
+def _create_dual_provider_database(path: Path) -> None:
+    """Create the existing external and uLLM providers used by the llama test."""
+    existing_config, existing_meta, _ = _create_database(path)
+    ullm_base_url = "http://172.20.0.1:8000/v1"
+    existing_meta["ullm"] = {
+        "managed": True,
+        "base_url": ullm_base_url,
+        "served_model_manifest_sha256": None,
+    }
+    existing_config["openai"]["enable"] = True
+    existing_config["openai"]["api_base_urls"].append(ullm_base_url)
+    existing_config["openai"]["api_keys"].append("existing-ullm-key")
+    existing_config["openai"]["api_configs"]["1"] = {
+        "enable": True,
+        "connection_type": "local",
+        "auth_type": "bearer",
+        "model_ids": [],
+        "prefix_id": "",
+        "tags": [],
+    }
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE config SET data = ? WHERE id = 1",
+            (json.dumps(existing_config),),
+        )
+        connection.execute(
+            "UPDATE model SET meta = ?, is_active = 1 WHERE id = ?",
+            (json.dumps(existing_meta), CONFIGURE.MODEL_ID),
+        )
+
+
 def test_configure_enables_usage_and_preserves_existing_state(tmp_path: Path) -> None:
     database = tmp_path / "webui.db"
     key_file = tmp_path / "api-key"
@@ -270,6 +302,92 @@ def test_configure_adds_custom_model_without_replacing_sq8(tmp_path: Path) -> No
     assert meta["ullm"] == {
         "managed": True,
         "base_url": base_url,
+        "served_model_manifest_sha256": None,
+    }
+    assert "num_ctx" not in params
+    assert "max_tokens" not in params
+
+
+def test_configure_adds_llama_provider_without_mutating_existing_providers(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "webui.db"
+    key_file = tmp_path / "llama-api-key"
+    backup_dir = tmp_path / "backups"
+    _create_dual_provider_database(database)
+    key_file.write_text("llama-api-key\n", encoding="ascii")
+
+    llama_args = {
+        "model_id": "llama-qwen3.5-9b-ud-q4",
+        "model_name": "llama.cpp Qwen3.5 9B UD-Q4_K_XL",
+        "context_length": 4096,
+        "base_url": "http://172.20.0.1:8001/v1",
+    }
+    with sqlite3.connect(database) as connection:
+        before_config = json.loads(
+            connection.execute("SELECT data FROM config WHERE id = 1").fetchone()[0]
+        )
+        before_existing_model = connection.execute(
+            "SELECT id, user_id, base_model_id, name, meta, params, created_at, "
+            "updated_at, is_active FROM model WHERE id = ?",
+            (CONFIGURE.MODEL_ID,),
+        ).fetchone()
+
+    for _ in range(2):
+        provider_index, _ = CONFIGURE.configure(
+            database, key_file, backup_dir, **llama_args
+        )
+        assert provider_index == 2
+
+    with sqlite3.connect(database) as connection:
+        config = json.loads(
+            connection.execute("SELECT data FROM config WHERE id = 1").fetchone()[0]
+        )
+        after_existing_model = connection.execute(
+            "SELECT id, user_id, base_model_id, name, meta, params, created_at, "
+            "updated_at, is_active FROM model WHERE id = ?",
+            (CONFIGURE.MODEL_ID,),
+        ).fetchone()
+        llama_rows = connection.execute(
+            "SELECT id, name, meta, params, is_active FROM model "
+            "WHERE id = ?",
+            (llama_args["model_id"],),
+        ).fetchall()
+
+    assert config["openai"]["api_base_urls"] == [
+        "https://existing.example/v1",
+        "http://172.20.0.1:8000/v1",
+        "http://172.20.0.1:8001/v1",
+    ]
+    assert config["openai"]["api_keys"] == [
+        "existing-key",
+        "existing-ullm-key",
+        "llama-api-key",
+    ]
+    assert config["openai"]["api_configs"]["0"] == before_config[
+        "openai"
+    ]["api_configs"]["0"]
+    assert config["openai"]["api_configs"]["1"] == before_config[
+        "openai"
+    ]["api_configs"]["1"]
+    assert after_existing_model == before_existing_model
+    assert len(config["openai"]["api_base_urls"]) == 3
+    assert len(config["openai"]["api_keys"]) == 3
+    assert len(llama_rows) == 1
+
+    model_id, name, meta_raw, params_raw, is_active = llama_rows[0]
+    meta = json.loads(meta_raw)
+    params = json.loads(params_raw)
+    assert (model_id, name, is_active) == (
+        llama_args["model_id"],
+        llama_args["model_name"],
+        1,
+    )
+    assert meta["context_length"] == 4096
+    assert meta["n_ctx_train"] == 4096
+    assert meta["ullm"] == {
+        "managed": True,
+        "base_url": llama_args["base_url"],
         "served_model_manifest_sha256": None,
     }
     assert "num_ctx" not in params
