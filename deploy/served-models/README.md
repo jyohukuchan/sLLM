@@ -26,9 +26,10 @@ to verified resident-vs-legacy evidence. Generate that evidence with
 placeholder hash.
 
 `qwen35-9b-aq4-reasoning.profile.json` is an unactivated v2 candidate. It
-declares the Qwen3.5 reasoning dialect, but the current v1 promotion receipt
-and binary are intentionally incompatible with it; generation must fail until
-a v2 worker build and matching resident evidence exist.
+declares the Qwen3.5 reasoning dialect and points to a separately built v2
+worker under `target/reasoning-v2/`, but the current v1 promotion receipt is
+still incompatible with it; generation must fail until matching v2 resident
+evidence and a new receipt exist.
 
 Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release
