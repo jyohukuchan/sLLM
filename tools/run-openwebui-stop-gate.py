@@ -31,6 +31,7 @@ CONTROL_SCHEMA = "ullm.openwebui.stop_gateway_release_control.v1"
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 BROWSER_CASE = "openwebui_stop_after_visible_content"
 MODEL_ID = os.environ.get("ULLM_MODEL_ID", "ullm-qwen3-14b-sq8")
+MODEL_LABEL = os.environ.get("ULLM_MODEL_NAME", "uLLM Qwen3 14B SQ8")
 OBSERVER_SOCKET = Path("/run/ullm/lifecycle-observer.sock")
 CONTROL_CONTAINER_PATH = "/run/control/gateway-released"
 BROWSER_SCRIPT_CONTAINER_PATH = "/usr/src/app/ullm-browser-stop-smoke.cjs"
@@ -1256,6 +1257,10 @@ def build_browser_command(
             f"OPENWEBUI_URL={openwebui_url}",
             "--env",
             "OPENWEBUI_TOKEN_FILE=/run/secrets/openwebui-token",
+            "--env",
+            f"ULLM_MODEL_ID={MODEL_ID}",
+            "--env",
+            f"ULLM_MODEL_NAME={MODEL_LABEL}",
             "--env",
             "OPENWEBUI_STOP_SCREENSHOT=/output/openwebui-stop-before.png",
             "--env",

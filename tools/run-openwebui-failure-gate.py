@@ -31,6 +31,7 @@ CONTROL_SCHEMA = "ullm.openwebui.failure_control.v1"
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 BROWSER_CASE = "post_header_worker_failure"
 MODEL_ID = os.environ.get("ULLM_MODEL_ID", "ullm-qwen3-14b-sq8")
+MODEL_LABEL = os.environ.get("ULLM_MODEL_NAME", "uLLM Qwen3 14B SQ8")
 BROWSER_SCRIPT_CONTAINER_PATH = "/usr/src/app/ullm-browser-failure-smoke.cjs"
 BROWSER_CONTAINER_OUTPUT_DIR_NAME = "browser-output"
 KILL_CONTROL_CONTAINER_PATH = "/run/control/worker-killed"
@@ -1293,6 +1294,10 @@ def build_browser_command(
             f"OPENWEBUI_URL={openwebui_url}",
             "--env",
             "OPENWEBUI_TOKEN_FILE=/run/secrets/openwebui-token",
+            "--env",
+            f"ULLM_MODEL_ID={MODEL_ID}",
+            "--env",
+            f"ULLM_MODEL_NAME={MODEL_LABEL}",
             "--env",
             "OPENWEBUI_FAILURE_SCREENSHOT=/output/post-header-failure.png",
             "--env",

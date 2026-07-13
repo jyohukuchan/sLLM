@@ -48,6 +48,9 @@ their SQ8 defaults but accept `ULLM_MODEL_ID` and `ULLM_MODEL_NAME` overrides.
 The v2 candidate gates MUST set these to
 `ullm-qwen3.5-9b-aq4` and `uLLM Qwen3.5 9B AQ4`; this keeps the gate logic
 shared without silently measuring the SQ8 model.
+For the stability gate, the normal run MUST set
+`ULLM_OPENWEBUI_SOAK_COUNT=100`; the restart-recovery run MUST set it to
+`20`. The default remains `20` for compatibility with the existing SQ8 gate.
 
 ## 3. Evidence layout
 

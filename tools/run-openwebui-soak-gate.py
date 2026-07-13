@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the exact 20-chat soak, optionally after one fixed OpenWebUI smoke."""
+"""Run the bounded OpenWebUI soak, optionally after one fixed smoke."""
 
 from __future__ import annotations
 
@@ -116,7 +116,13 @@ COMBINED_MODE = "smoke_then_soak20"
 CASE_PREFIX = "openwebui_soak_chat_"
 SMOKE_CASE = "openwebui_smoke"
 SMOKE_MARKER = "OPENWEBUI_SMOKE_OK"
-CHAT_COUNT = 20
+_SOAK_COUNT_TEXT = os.environ.get("ULLM_OPENWEBUI_SOAK_COUNT", "20")
+if _SOAK_COUNT_TEXT not in {"20", "100"}:
+    raise RuntimeError("ULLM_OPENWEBUI_SOAK_COUNT must be 20 or 100")
+CHAT_COUNT = int(_SOAK_COUNT_TEXT)
+RUN_CASE = f"openwebui_{CHAT_COUNT}_chat_soak"
+COMBINED_RUN_CASE = f"openwebui_smoke_and_{CHAT_COUNT}_chat_soak"
+COMBINED_MODE = f"smoke_then_soak{CHAT_COUNT}"
 MODEL_ID = os.environ.get("ULLM_MODEL_ID", "ullm-qwen3-14b-sq8")
 MODEL_LABEL = os.environ.get("ULLM_MODEL_NAME", "uLLM Qwen3 14B SQ8")
 OBSERVER_SOCKET = SUPPORT.OBSERVER_SOCKET
@@ -642,6 +648,12 @@ def build_browser_command(
             f"OPENWEBUI_URL={openwebui_url}",
             "--env",
             "OPENWEBUI_TOKEN_FILE=/run/secrets/openwebui-token",
+            "--env",
+            f"ULLM_MODEL_ID={MODEL_ID}",
+            "--env",
+            f"ULLM_MODEL_NAME={MODEL_LABEL}",
+            "--env",
+            f"ULLM_OPENWEBUI_SOAK_COUNT={CHAT_COUNT}",
             "--env",
             "OPENWEBUI_SOAK_SUMMARY=/output/openwebui-soak-summary.json",
         )
@@ -1647,7 +1659,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--include-smoke",
         action="store_true",
-        help="run one fixed OpenWebUI smoke before the exact 20-chat soak",
+        help="run one fixed OpenWebUI smoke before the configured soak",
     )
     parser.add_argument(
         "--timeout-seconds",

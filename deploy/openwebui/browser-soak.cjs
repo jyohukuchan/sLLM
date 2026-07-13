@@ -12,7 +12,15 @@ const COMBINED_MODE = "smoke_then_soak20";
 const CASE_PREFIX = "openwebui_soak_chat_";
 const SMOKE_CASE = "openwebui_smoke";
 const SMOKE_MARKER = "OPENWEBUI_SMOKE_OK";
-const SOAK_CHAT_COUNT = 20;
+const SOAK_COUNT_TEXT = process.env.ULLM_OPENWEBUI_SOAK_COUNT || "20";
+if (SOAK_COUNT_TEXT !== "20" && SOAK_COUNT_TEXT !== "100") {
+  throw new Error("ULLM_OPENWEBUI_SOAK_COUNT must be 20 or 100");
+}
+const SOAK_CHAT_COUNT = Number.parseInt(SOAK_COUNT_TEXT, 10);
+const RUN_CASE_FOR_COUNT = `openwebui_${SOAK_CHAT_COUNT}_chat_soak`;
+const COMBINED_RUN_CASE_FOR_COUNT =
+  `openwebui_smoke_and_${SOAK_CHAT_COUNT}_chat_soak`;
+const COMBINED_MODE_FOR_COUNT = `smoke_then_soak${SOAK_CHAT_COUNT}`;
 const MODEL_ID = process.env.ULLM_MODEL_ID || "ullm-qwen3-14b-sq8";
 const MODEL_LABEL = process.env.ULLM_MODEL_NAME || "uLLM Qwen3 14B SQ8";
 const ASSISTANT_SELECTOR = ".chat-assistant";
@@ -63,8 +71,8 @@ function caseSchedule(mode) {
       recordType: "openwebui_soak_chat",
     });
   }
-  if (mode === "soak20") return soak;
-  if (mode !== COMBINED_MODE) {
+  if (mode === `soak${SOAK_CHAT_COUNT}`) return soak;
+  if (mode !== COMBINED_MODE_FOR_COUNT) {
     throw new Error("browser soak mode is unsupported");
   }
   return [
@@ -145,8 +153,9 @@ function loadConfig() {
     process.env.OPENWEBUI_TOKEN_FILE || "/run/secrets/openwebui-token";
   const summaryFile =
     process.env.OPENWEBUI_SOAK_SUMMARY || "/output/openwebui-soak-summary.json";
-  const mode = process.env.OPENWEBUI_SOAK_MODE || "soak20";
-  if (mode !== "soak20" && mode !== COMBINED_MODE) {
+  const mode =
+    process.env.OPENWEBUI_SOAK_MODE || `soak${SOAK_CHAT_COUNT}`;
+  if (mode !== `soak${SOAK_CHAT_COUNT}` && mode !== COMBINED_MODE_FOR_COUNT) {
     throw new Error("OPENWEBUI_SOAK_MODE is unsupported");
   }
   const tokenStat = fs.lstatSync(tokenFile, { bigint: true });
@@ -691,12 +700,17 @@ async function run(browser, config) {
   }
   const summary = {
     schema_version:
-      config.mode === COMBINED_MODE ? COMBINED_SUMMARY_SCHEMA : SUMMARY_SCHEMA,
+      config.mode === COMBINED_MODE_FOR_COUNT
+        ? COMBINED_SUMMARY_SCHEMA
+        : SUMMARY_SCHEMA,
     record_type:
-      config.mode === COMBINED_MODE
+      config.mode === COMBINED_MODE_FOR_COUNT
         ? "openwebui_smoke_soak_summary"
         : "openwebui_soak_summary",
-    browser_case: config.mode === COMBINED_MODE ? COMBINED_RUN_CASE : RUN_CASE,
+    browser_case:
+      config.mode === COMBINED_MODE_FOR_COUNT
+        ? COMBINED_RUN_CASE_FOR_COUNT
+        : RUN_CASE_FOR_COUNT,
     observed_monotonic_ns: nsString(),
     chat_count: schedule.length,
     action_count: actionCount,
@@ -712,8 +726,8 @@ async function run(browser, config) {
     provider_error_count: 0,
     case_record_sha256: caseRecordSha256,
   };
-  if (config.mode === COMBINED_MODE) {
-    summary.mode = COMBINED_MODE;
+  if (config.mode === COMBINED_MODE_FOR_COUNT) {
+    summary.mode = COMBINED_MODE_FOR_COUNT;
     summary.schedule = scheduleEvidence(schedule);
   }
   const serialized = assertNoSensitiveSummary(summary, [
@@ -752,7 +766,7 @@ function safeFailure(error) {
   const message = String(error?.message ?? error);
   return {
     schema_version:
-      process.env.OPENWEBUI_SOAK_MODE === COMBINED_MODE
+      process.env.OPENWEBUI_SOAK_MODE === COMBINED_MODE_FOR_COUNT
         ? COMBINED_SUMMARY_SCHEMA
         : SUMMARY_SCHEMA,
     record_type: "openwebui_soak_failure",
@@ -767,12 +781,15 @@ function safeFailure(error) {
 module.exports = {
   CASE_PREFIX,
   COMBINED_MODE,
+  COMBINED_MODE_FOR_COUNT,
   COMBINED_RUN_CASE,
+  COMBINED_RUN_CASE_FOR_COUNT,
   COMBINED_SUMMARY_SCHEMA,
   EXPECTED_ACTION_SEQUENCE,
   MODEL_ID,
   MODEL_LABEL,
   RUN_CASE,
+  RUN_CASE_FOR_COUNT,
   SMOKE_CASE,
   SMOKE_MARKER,
   SOAK_CHAT_COUNT,
