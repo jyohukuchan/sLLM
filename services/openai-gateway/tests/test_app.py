@@ -137,6 +137,8 @@ class FakeWorker:
         *,
         outcome: str = "stop",
         token_ids: tuple[int, ...] = (101, EOS_TOKEN_IDS[0]),
+        reasoning_tokens: int | None = None,
+        forced_end_tokens: int | None = None,
     ) -> None:
         self.ready = True
         self.busy = False
@@ -148,6 +150,8 @@ class FakeWorker:
         self.fatal_response_ack_count = 0
         self.outcome = outcome
         self.token_ids = token_ids
+        self.reasoning_tokens = reasoning_tokens
+        self.forced_end_tokens = forced_end_tokens
 
     async def launch(self) -> None:
         return None
@@ -182,6 +186,8 @@ class FakeWorker:
                 timings=generation_timings(
                     len(request.prompt_token_ids), len(self.token_ids)
                 ),
+                reasoning_tokens=self.reasoning_tokens,
+                forced_end_tokens=self.forced_end_tokens,
             )
         )
         return GenerationHandle(
@@ -620,7 +626,11 @@ def test_nonstream_completion_has_exact_shape_and_usage(
 
 
 def test_nonstream_reasoning_is_separated_and_usage_is_detailed(tmp_path: Path) -> None:
-    fake_worker = FakeWorker(token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]))
+    fake_worker = FakeWorker(
+        token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]),
+        reasoning_tokens=2,
+        forced_end_tokens=2,
+    )
     app = create_app(
         reasoning_settings(tmp_path),
         tokenizer=ReasoningFakeTokenizer(),
@@ -646,7 +656,11 @@ def test_nonstream_reasoning_is_separated_and_usage_is_detailed(tmp_path: Path) 
 
 
 def test_stream_reasoning_fields_reassemble_to_nonstream_fields(tmp_path: Path) -> None:
-    fake_worker = FakeWorker(token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]))
+    fake_worker = FakeWorker(
+        token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]),
+        reasoning_tokens=2,
+        forced_end_tokens=2,
+    )
     app = create_app(
         reasoning_settings(tmp_path),
         tokenizer=ReasoningFakeTokenizer(),
@@ -686,6 +700,29 @@ def test_stream_reasoning_fields_reassemble_to_nonstream_fields(tmp_path: Path) 
     assert chunks[-1]["usage"]["completion_tokens_details"] == {
         "reasoning_tokens": 2
     }
+
+
+def test_nonstream_reasoning_usage_mismatch_fails_closed(tmp_path: Path) -> None:
+    fake_worker = FakeWorker(
+        token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]),
+        reasoning_tokens=1,
+        forced_end_tokens=2,
+    )
+    app = create_app(
+        reasoning_settings(tmp_path),
+        tokenizer=ReasoningFakeTokenizer(),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+    with TestClient(app) as instance:
+        response = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(reasoning_effort="low"),
+        )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
 
 
 def test_context_boundary_is_reported_without_changing_openai_finish_reason(

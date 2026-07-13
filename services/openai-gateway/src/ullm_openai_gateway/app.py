@@ -379,6 +379,7 @@ async def _serve_claimed_chat_completion(
         )
     reasoning_content: str | None = None
     reasoning_tokens: int | None = None
+    forced_end_tokens: int | None = None
     try:
         output_tokens = result.token_ids
         if normalized.reasoning is not None and normalized.reasoning.enabled:
@@ -395,6 +396,15 @@ async def _serve_claimed_chat_completion(
             )
             output_tokens = split.answer_token_ids
             reasoning_tokens = split.reasoning_tokens
+            forced_end_tokens = split.forced_end_tokens
+            if (
+                result.reasoning_tokens is not None
+                and result.reasoning_tokens != reasoning_tokens
+            ) or (
+                result.forced_end_tokens is not None
+                and result.forced_end_tokens != forced_end_tokens
+            ):
+                raise ReasoningError("worker reasoning usage differs from token split")
             reasoning_content = await _decode_completion_while_healthy(
                 request, split.reasoning_token_ids
             )
@@ -895,6 +905,7 @@ async def _stream_completion(
             vocab_size=getattr(request.app.state, "vocab_size", 0x1_0000_0000),
         )
     reasoning_token_count = 0
+    forced_end_token_count = 0
     result_task: asyncio.Task[WorkerGenerationResult] = asyncio.create_task(
         worker.wait(handle)
     )
@@ -904,7 +915,7 @@ async def _stream_completion(
         yield _sse_record(_role_chunk(completion_id, created, model_id=model_id))
 
         async def emit_token(token_id: int) -> list[bytes]:
-            nonlocal reasoning_token_count
+            nonlocal forced_end_token_count, reasoning_token_count
             if not reasoning_enabled:
                 suffix = await _decode_stream_token(request, decoder, token_id)
                 return (
@@ -917,6 +928,7 @@ async def _stream_completion(
             if token_id in eos:
                 step = reasoning_state.on_eos()
             elif reasoning_state.phase == ReasoningPhase.FORCING_END_SEQUENCE:
+                forced_end_token_count += 1
                 step = reasoning_state.accept_forced(token_id)
             else:
                 step = reasoning_state.accept_sampled(token_id)
@@ -996,6 +1008,14 @@ async def _stream_completion(
                 break
             for record in await emit_token(token_id):
                 yield record
+        if (
+            result.reasoning_tokens is not None
+            and result.reasoning_tokens != reasoning_token_count
+        ) or (
+            result.forced_end_tokens is not None
+            and result.forced_end_tokens != forced_end_token_count
+        ):
+            raise ReasoningError("worker reasoning usage differs from streamed token split")
         if reasoning_enabled:
             assert reasoning_state is not None and reasoning_decoder is not None
             if reasoning_state.phase == ReasoningPhase.FORCING_END_SEQUENCE:
