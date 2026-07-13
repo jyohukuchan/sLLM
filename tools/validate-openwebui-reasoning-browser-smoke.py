@@ -135,6 +135,8 @@ def validate(path: Path) -> dict[str, Any]:
     _hash(document["model_id_sha256"], "model_id_sha256")
     _text_evidence(document["first_answer"], "first_answer")
     _text_evidence(document["expanded_view"], "expanded_view")
+    if document["expanded_view"]["utf8_bytes"] <= document["first_answer"]["utf8_bytes"]:
+        raise ValidationError("expanded view has no additional visible details")
     _text_evidence(document["second_answer"], "second_answer")
     if document["reasoning_details_expanded"] is not True:
         raise ValidationError("reasoning details were not expanded")
