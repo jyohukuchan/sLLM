@@ -50,6 +50,10 @@ const noReasoning = tool.summarizeRequestBody(JSON.stringify({
 }));
 assert.equal(noReasoning.assistant_has_reasoning_content, false);
 assert.equal(noReasoning.has_reasoning_content_key, false);
+assert.throws(
+  () => tool.summarizeRequestBody(JSON.stringify({messages: []})),
+  /no model ID/,
+);
 console.log(JSON.stringify({schema: tool.SUMMARY_SCHEMA, ok: true}));
 '''
     completed = node(program)

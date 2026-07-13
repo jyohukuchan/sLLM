@@ -168,14 +168,20 @@ async function run(browser) {
     pageErrors.push(textEvidence(message));
   });
   page.on("request", (request) => {
-    if (!requestIsChatCompletion(request) || requestBodies.length >= 4) return;
+    if (!requestIsChatCompletion(request)) return;
+    if (requestBodies.length >= 4) {
+      requestBodyError = true;
+      return;
+    }
     const raw = request.postData();
-    if (raw !== null) {
-      try {
-        requestBodies.push(summarizeRequestBody(raw));
-      } catch {
-        requestBodyError = true;
-      }
+    if (raw === null) {
+      requestBodyError = true;
+      return;
+    }
+    try {
+      requestBodies.push(summarizeRequestBody(raw));
+    } catch {
+      requestBodyError = true;
     }
   });
 
@@ -275,6 +281,9 @@ async function run(browser) {
   }
 
   if (requestBodyError) throw new Error("provider request body validation failed");
+  if (requestBodies.length !== 4) {
+    throw new Error("unexpected provider request count");
+  }
   if (pageErrors.length > 0) throw new Error("OpenWebUI page errors were observed");
   await context.close();
   return {
