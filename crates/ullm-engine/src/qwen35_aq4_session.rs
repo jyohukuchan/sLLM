@@ -306,6 +306,8 @@ pub struct Qwen35Aq4PreparedToken {
     pub generated_index: usize,
     pub cache_len: usize,
     pub terminal_reason: Option<FinishReason>,
+    reasoning_tokens_before: usize,
+    forced_end_tokens_before: usize,
     nonce: u64,
 }
 
@@ -1304,6 +1306,12 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
                 return self.fail("Qwen3.5 AQ4 token preparation has no active request");
             }
         };
+        let (reasoning_tokens_before, forced_end_tokens_before) = self
+            .active
+            .as_ref()
+            .and_then(|active| active.reasoning.as_ref())
+            .map(|reasoning| (reasoning.reasoning_tokens, reasoning.forced_end_tokens))
+            .unwrap_or((0, 0));
         let terminal_reason = if let Some(active) = self.active.as_mut() {
             if let Some(reasoning) = active.reasoning.as_mut() {
                 if forced_token.is_some() {
@@ -1339,6 +1347,8 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             generated_index,
             cache_len,
             terminal_reason,
+            reasoning_tokens_before,
+            forced_end_tokens_before,
             nonce: self.next_nonce,
         };
         self.next_nonce = next_nonce;
@@ -1634,6 +1644,14 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         };
         let publication = cancel.publication_guard()?;
         if cancel.is_cancelled() {
+            if let Some(reasoning) = self
+                .active
+                .as_mut()
+                .and_then(|active| active.reasoning.as_mut())
+            {
+                reasoning.reasoning_tokens = prepared.reasoning_tokens_before;
+                reasoning.forced_end_tokens = prepared.forced_end_tokens_before;
+            }
             drop(publication);
             self.pending = None;
             let active = self.active.as_mut().expect("active request checked above");
@@ -1642,6 +1660,14 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             return Ok(PublishedAdvance::CancellationObserved);
         }
         if let Err(error) = publish(prepared.token_id) {
+            if let Some(reasoning) = self
+                .active
+                .as_mut()
+                .and_then(|active| active.reasoning.as_mut())
+            {
+                reasoning.reasoning_tokens = prepared.reasoning_tokens_before;
+                reasoning.forced_end_tokens = prepared.forced_end_tokens_before;
+            }
             drop(publication);
             self.pending = None;
             // A publisher failure does not poison resident model state. The caller must abort it.
@@ -2521,7 +2547,15 @@ mod tests {
                 .unwrap(),
             PublishedAdvance::CancellationObserved
         );
-        assert_eq!(session.abort_and_reset().unwrap().generated_tokens, 1);
+        let cancelled = session.abort_and_reset().unwrap();
+        assert_eq!(cancelled.generated_tokens, 1);
+        assert_eq!(
+            cancelled.reasoning_usage,
+            Some(ReasoningUsage {
+                reasoning_tokens: 1,
+                forced_end_tokens: 0,
+            })
+        );
         assert_eq!(session.status(), Qwen35Aq4SessionStatus::Ready);
 
         session
