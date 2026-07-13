@@ -83,6 +83,7 @@ def _create_database(path: Path) -> tuple[dict, dict, dict]:
     }
     existing_params = {
         "temperature": 0.25,
+        "custom_params": {"thinking_budget_tokens": "32"},
         "retained_params": {"value": 9},
         "num_ctx": 8_192,
         "max_tokens": 128,
@@ -233,6 +234,7 @@ def test_configure_enables_usage_and_preserves_existing_state(tmp_path: Path) ->
         "served_model_manifest_sha256": None,
     }
     assert params["temperature"] == existing_params["temperature"]
+    assert params["custom_params"] == existing_params["custom_params"]
     assert params["retained_params"] == existing_params["retained_params"]
     assert "num_ctx" not in params
     assert "max_tokens" not in params
