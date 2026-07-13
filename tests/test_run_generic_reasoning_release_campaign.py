@@ -145,6 +145,92 @@ def test_stream_and_nonstream_semantics_are_compared_without_persisting_text() -
         TOOL._assert_transport_match("budget-32", stream, nonstream_mismatch)
 
 
+def test_paired_campaign_cases_form_a_validator_compatible_hash_only_artifact(tmp_path: Path) -> None:
+    budgets = {
+        "disabled": 0,
+        "budget-32": 8,
+        "budget-128": 20,
+        "budget-256": 24,
+        "unbounded": 30,
+    }
+    cases: list[dict] = []
+    events: list[dict] = []
+    fixtures: dict[str, TOOL.Fixture] = {}
+    for mode, reasoning in budgets.items():
+        fixture = TOOL.Fixture(f"fixture-{mode}", f"prompt-{mode}", f"answer-{mode}")
+        fixtures[mode] = fixture
+        forced = 0 if mode == "disabled" else 1
+        for stream_enabled in (True, False):
+            completion_tokens = reasoning + forced + 2
+            result = TOOL.StreamResult(
+                status=200,
+                completion_id=f"id-{mode}-{stream_enabled}",
+                finish_reason="stop",
+                prompt_tokens=16,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning,
+                usage_timings={"prompt_per_second": 100.0, "predicted_per_second": 80.0},
+                answer_text=fixture.expected_answer,
+                reasoning_text="" if mode == "disabled" else "internal",
+                sse_chunk_count=3 if stream_enabled else 0,
+                first_reasoning_ms=2.0 if reasoning else None,
+                first_answer_ms=4.0,
+                latency_ms=10.0,
+                stream=stream_enabled,
+            )
+            release = {
+                "completion_id": result.completion_id,
+                "outcome": "stop",
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "reset_complete": True,
+                "admit_to_start_ns": 1,
+                "start_to_release_ns": 2,
+                "admit_to_release_ns": 3,
+            }
+            if mode != "disabled":
+                release.update({"reasoning_tokens": reasoning, "forced_end_tokens": forced})
+            sample = TOOL.ResourceSample(100, 200, 50.0, 100.0)
+            case, event, _ = TOOL._case_and_lifecycle(
+                mode=mode, fixture=fixture, result=result, release=release,
+                before=sample, after=sample,
+            )
+            cases.append(case)
+            events.append(event)
+
+    document = {
+        "schema_version": VALIDATOR.SCHEMA_VERSION,
+        "status": "incomplete",
+        "production_activation_performed": False,
+        "source_commit": "1" * 40,
+        "active_promotion_source_commit": "2" * 40,
+        "source_commit_aligned": False,
+        "git_worktree_clean": True,
+        "git_worktree_status_sha256": "f" * 64,
+        "identity": {
+            "manifest_sha256": "b" * 64,
+            "worker_binary_sha256": "c" * 64,
+            "tokenizer_sha256": "d" * 64,
+            "openwebui_image": "ullm/open-webui@sha256:" + "e" * 64,
+        },
+        "cases": cases,
+        "lifecycle": {
+            "schema_version": VALIDATOR.LIFECYCLE_SCHEMA_VERSION,
+            "events": events,
+        },
+    }
+    path = tmp_path / "paired-release.json"
+    raw = json.dumps(document, ensure_ascii=True)
+    path.write_text(raw, encoding="ascii")
+    report = VALIDATOR.validate(path)
+
+    assert report["structurally_valid"] is True
+    assert report["case_count"] == 10
+    assert report["lifecycle_event_count"] == 10
+    assert report["gate_eligible"] is False
+    assert all(fixture.expected_answer not in raw for fixture in fixtures.values())
+
+
 def test_manifest_preflight_rejects_v1_before_external_validation(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"schema_version": "ullm.served_model.v1"}), encoding="ascii")
