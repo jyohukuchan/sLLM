@@ -111,6 +111,7 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         lambda value: value["identity"].__setitem__("openwebui_image", "latest"),
         lambda value: value.__setitem__("source_commit", "head"),
         lambda value: value.__setitem__("source_commit_aligned", True),
+        lambda value: value["cases"][0].__setitem__("sse_chunk_count", 0),
     ],
 )
 def test_validator_rejects_invalid_release_records(tmp_path: Path, mutation) -> None:
@@ -134,6 +135,24 @@ def test_validator_reports_missing_required_mode_as_incomplete_gate(tmp_path: Pa
     assert report["structurally_valid"] is True
     assert report["gate_eligible"] is False
     assert "required benchmark modes are missing: unbounded" in report["reasons"]
+
+
+def test_validator_reports_quality_and_timing_gate_failures(tmp_path: Path) -> None:
+    value = evidence()
+    value["status"] = "complete"
+    value["source_commit"] = value["active_promotion_source_commit"]
+    value["source_commit_aligned"] = True
+    value["cases"][1]["quality"]["correct"] = False
+    value["cases"][2]["timing"]["latency_ms"] = None
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    report = TOOL.validate(path)
+
+    assert report["structurally_valid"] is True
+    assert report["gate_eligible"] is False
+    assert "case quality is incorrect: budget-32" in report["reasons"]
+    assert any("case timing is incomplete: budget-128" in reason for reason in report["reasons"])
 
 
 def test_require_complete_returns_distinct_exit_code(tmp_path: Path) -> None:

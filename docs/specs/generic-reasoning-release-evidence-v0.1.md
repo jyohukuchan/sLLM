@@ -81,7 +81,11 @@ are used instead.
 
 Structural validity means that every object and value follows this contract.
 Production-gate eligibility additionally requires all five modes, aligned
-source identity, and `status=complete`. A structurally valid but incomplete
-artifact is expected during a measurement run and must produce
-`gate_eligible=false`. `--require-complete` exits with status `2` for that
-condition and with status `1` for structural or security violations.
+source identity, `status=complete`, `quality.correct=true` for every case, and
+the common timing values (`prefill_tokens_per_second`,
+`first_answer_token_ms`, `answer_decode_tokens_per_second`,
+`decode_tokens_per_second`, and `latency_ms`) present for every case. A
+structurally valid but incomplete artifact is expected during a measurement run
+and must produce `gate_eligible=false`. `--require-complete` exits with status
+`2` for that condition and with status `1` for structural or security
+violations.

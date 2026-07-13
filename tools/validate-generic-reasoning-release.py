@@ -134,6 +134,10 @@ def _validate_case(case: Any) -> str:
     if type(case["stream"]) is not bool or case["http_status"] != 200:
         raise ValidationError("release evidence HTTP contract failed")
     _integer(case["sse_chunk_count"], "case.sse_chunk_count")
+    if case["stream"] and case["sse_chunk_count"] < 1:
+        raise ValidationError("stream case has no SSE chunks")
+    if not case["stream"] and case["sse_chunk_count"] != 0:
+        raise ValidationError("non-stream case has SSE chunks")
     if case["finish_reason"] not in {"stop", "length"}:
         raise ValidationError("release evidence finish reason is invalid")
 
@@ -267,6 +271,25 @@ def validate(path: Path) -> dict[str, Any]:
         reasons.append("required benchmark modes are missing: " + ", ".join(missing_modes))
     if document["status"] != "complete":
         reasons.append("producer status is incomplete")
+    required_timing_fields = {
+        "prefill_tokens_per_second",
+        "first_answer_token_ms",
+        "answer_decode_tokens_per_second",
+        "decode_tokens_per_second",
+        "latency_ms",
+    }
+    for case in cases:
+        if case["quality"]["correct"] is not True:
+            reasons.append(f"case quality is incorrect: {case['id']}")
+        missing_timing = sorted(
+            field
+            for field in required_timing_fields
+            if case["timing"][field] is None
+        )
+        if missing_timing:
+            reasons.append(
+                f"case timing is incomplete: {case['id']} ({', '.join(missing_timing)})"
+            )
     return {
         "schema_version": VALIDATOR_SCHEMA_VERSION,
         "input_schema_version": SCHEMA_VERSION,
