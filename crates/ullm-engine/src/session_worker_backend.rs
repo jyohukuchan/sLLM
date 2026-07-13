@@ -219,6 +219,38 @@ mod tests {
 
     #[test]
     fn structured_backend_log_contains_counts_but_no_prompt_or_token_content() {
+        const IMPLEMENTATION_COUNT_FIXTURE: [(&str, &str, u64); 14] = [
+            ("kind", "a", 0),
+            ("kind", "b", 1),
+            ("kind", "c", 2),
+            ("kind", "d", 3),
+            ("kind", "e", 4),
+            ("kind", "f", 5),
+            ("kind", "g", 6),
+            ("kind", "h", 7),
+            ("kind", "i", 8),
+            ("kind", "j", 9),
+            (
+                "paged_causal_gqa_read",
+                "hip.paged-decode-attention-split-f32.tile128",
+                10,
+            ),
+            (
+                "paged_causal_gqa_read",
+                "hip.paged-decode-attention-split-f32.tile256",
+                11,
+            ),
+            (
+                "paged_causal_gqa_read",
+                "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128",
+                12,
+            ),
+            (
+                "paged_causal_gqa_read",
+                "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256",
+                13,
+            ),
+        ];
         let audit = OperationExecutionAudit {
             schema_version: "ullm.backend_operation.request.v2",
             outcome: "stop",
@@ -239,13 +271,15 @@ mod tests {
                 histogram[3] = 1;
                 histogram
             },
-            implementation_counts: std::array::from_fn(|index| {
-                crate::backend_operation_registry::OperationExecutionCount {
-                    kind: "kind",
-                    implementation_id: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"][index],
-                    count: index as u64,
-                }
-            }),
+            implementation_counts: IMPLEMENTATION_COUNT_FIXTURE.map(
+                |(kind, implementation_id, count)| {
+                    crate::backend_operation_registry::OperationExecutionCount {
+                        kind,
+                        implementation_id,
+                        count,
+                    }
+                },
+            ),
             deterministic_digest_sha256: [0xab; 32],
             coverage_complete: true,
             failed_phase: None,
@@ -298,7 +332,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            10
+            14
         );
         assert_eq!(
             value["operation_execution_audit"]["coverage_complete"],
