@@ -2238,12 +2238,12 @@ impl PackageSelfAttnResidentStepLayer {
     }
 
     pub fn operation_resolution_traces(&self) -> Vec<OperationResolutionTrace> {
-        let mut traces = Vec::with_capacity(9);
+        // The session audit contract is intentionally fixed at writer + canonical single reader
+        // per phase. Split plans are typed alternates used only at execution time and are not
+        // additional contract entries.
+        let mut traces = Vec::with_capacity(6);
         traces.extend(self.weights.writer_operation_plans.traces());
         traces.extend(self.weights.paged_decode_dispatch_plans.single.traces());
-        if let Some(split) = &self.weights.paged_decode_dispatch_plans.split {
-            traces.extend(split.traces());
-        }
         traces
     }
 

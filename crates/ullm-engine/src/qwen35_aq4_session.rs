@@ -305,7 +305,33 @@ pub struct Qwen35Aq4PreparedToken {
     nonce: u64,
 }
 
-const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 10] = [
+/// Compares one runtime implementation with the canonical load-time contract entry.
+///
+/// Split paged-decode readers are typed alternates of their matching single-reader family. No
+/// writer, chunk reader, linear-attention operation, unknown id, or plain/gated cross-family
+/// substitution is accepted.
+fn operation_implementation_matches_contract(expected: &str, actual: &str) -> bool {
+    if expected == actual {
+        return EXECUTION_IMPLEMENTATIONS
+            .iter()
+            .any(|(_, implementation_id)| *implementation_id == expected);
+    }
+    match expected {
+        "hip.paged-decode-attention-f32.m1-gqa" => matches!(
+            actual,
+            "hip.paged-decode-attention-split-f32.tile128"
+                | "hip.paged-decode-attention-split-f32.tile256"
+        ),
+        "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa" => matches!(
+            actual,
+            "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128"
+                | "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256"
+        ),
+        _ => false,
+    }
+}
+
+const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 14] = [
     (
         "linear_attention_qkv_prepare",
         "hip.linear-attention-qkv-prepare-f32.m1",
@@ -340,6 +366,22 @@ const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 10] = [
         "paged_causal_gqa_read",
         "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128",
     ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-f32.tile128",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-f32.tile256",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256",
+    ),
 ];
 
 type LayerExecutionContract = [[&'static str; 2]; 3];
@@ -355,7 +397,7 @@ struct OperationAuditAccumulator {
     prefill_tokens_executed: u64,
     prefill_tokens_committed: u64,
     prefill_width_histogram: Vec<u64>,
-    implementation_counts: [u64; 10],
+    implementation_counts: [u64; 14],
     digest: Sha256,
 }
 
@@ -372,7 +414,7 @@ impl OperationAuditAccumulator {
             prefill_tokens_executed: 0,
             prefill_tokens_committed: 0,
             prefill_width_histogram: vec![0; QWEN35_AQ4_MAX_PREFILL_CHUNK + 1],
-            implementation_counts: [0; 10],
+            implementation_counts: [0; 14],
             digest: Sha256::new(),
         }
     }
@@ -396,7 +438,10 @@ impl OperationAuditAccumulator {
                 let expected = contract[layer_index][phase_index][record_index];
                 if record.phase != phase
                     || record.status != OperationExecutionStatus::Succeeded
-                    || record.implementation_id != expected
+                    || !operation_implementation_matches_contract(
+                        expected,
+                        record.implementation_id,
+                    )
                 {
                     return Err(format!(
                         "operation execution trace mismatch at layer={layer_index} record={record_index}"
@@ -500,7 +545,10 @@ impl OperationAuditAccumulator {
                 );
                 if record.phase != invocation.phase
                     || record.status != OperationExecutionStatus::Succeeded
-                    || record.implementation_id != expected
+                    || !operation_implementation_matches_contract(
+                        expected,
+                        record.implementation_id,
+                    )
                 {
                     return Err(format!(
                         "prefill operation execution trace mismatch at invocation={invocation_index} layer={} operation={operation_index}",
@@ -684,8 +732,10 @@ impl OperationAuditAccumulator {
             for (operation_index, record) in layer.iter().enumerate() {
                 let Some(record) = record else { continue };
                 if record.phase != phase
-                    || record.implementation_id
-                        != contract[layer_index][phase_index][operation_index]
+                    || !operation_implementation_matches_contract(
+                        contract[layer_index][phase_index][operation_index],
+                        record.implementation_id,
+                    )
                 {
                     return Err("failed operation trace does not match resolved contract".into());
                 }
@@ -762,7 +812,12 @@ impl OperationAuditAccumulator {
                     contract[invocation.layer_index][phase_index][operation_index],
                     invocation.execution_width,
                 );
-                if record.phase != invocation.phase || record.implementation_id != expected {
+                if record.phase != invocation.phase
+                    || !operation_implementation_matches_contract(
+                        expected,
+                        record.implementation_id,
+                    )
+                {
                     return Err(format!(
                         "failed prefill invocation {invocation_index} does not match resolved contract"
                     ));
@@ -1686,6 +1741,97 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn operation_implementation_contract_accepts_only_matching_split_reader_family() {
+        assert!(operation_implementation_matches_contract(
+            "hip.paged-decode-attention-f32.m1-gqa",
+            "hip.paged-decode-attention-f32.m1-gqa"
+        ));
+        assert!(operation_implementation_matches_contract(
+            "hip.paged-decode-attention-f32.m1-gqa",
+            "hip.paged-decode-attention-split-f32.tile128"
+        ));
+        assert!(operation_implementation_matches_contract(
+            "hip.paged-decode-attention-f32.m1-gqa",
+            "hip.paged-decode-attention-split-f32.tile256"
+        ));
+        assert!(!operation_implementation_matches_contract(
+            "hip.paged-decode-attention-f32.m1-gqa",
+            "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128"
+        ));
+        assert!(operation_implementation_matches_contract(
+            "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+            "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256"
+        ));
+        assert!(!operation_implementation_matches_contract(
+            "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+            "hip.paged-decode-attention-split-f32.tile256"
+        ));
+        for actual in [
+            "hip.paged-kv-write-f32.m1",
+            "hip.linear-attention-recurrent-f32.m1",
+            "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128",
+            "unknown",
+        ] {
+            assert!(!operation_implementation_matches_contract(
+                "hip.paged-decode-attention-f32.m1-gqa",
+                actual
+            ));
+        }
+        assert!(!operation_implementation_matches_contract(
+            "unknown",
+            "hip.paged-decode-attention-split-f32.tile128"
+        ));
+        assert!(!operation_implementation_matches_contract(
+            "unknown", "unknown"
+        ));
+    }
+
+    #[test]
+    fn operation_audit_accepts_split_reader_actual_and_counts_actual_id() {
+        let contract = audited_contract();
+        let mut records = audited_records(&contract, ExecutionPhase::Decode);
+        records[3][1].implementation_id =
+            "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128";
+
+        let mut audit = OperationAuditAccumulator::new();
+        audit
+            .observe(ExecutionPhase::Decode, &contract, &records)
+            .unwrap();
+        assert_eq!(audit.implementation_counts[12], 1);
+        assert_eq!(audit.implementation_counts[5], 7);
+
+        let mut second_records = audited_records(&contract, ExecutionPhase::Decode);
+        audit
+            .observe(ExecutionPhase::Decode, &contract, &second_records)
+            .unwrap();
+        assert_eq!(audit.implementation_counts[5], 15);
+        assert_eq!(audit.implementation_counts[12], 1);
+        second_records[3][1].implementation_id = "hip.paged-decode-attention-split-f32.tile128";
+        assert!(
+            audit
+                .observe(ExecutionPhase::Decode, &contract, &second_records)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_split_reader_record_matches_contract_and_retains_failure_location() {
+        let contract = audited_contract();
+        let mut records = audited_failed_records(ExecutionPhase::Decode, 3, 1);
+        records[3][1] = Some(OperationExecutionRecord {
+            implementation_id: "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256",
+            phase: ExecutionPhase::Decode,
+            status: OperationExecutionStatus::Failed,
+        });
+        assert_eq!(
+            OperationAuditAccumulator::new()
+                .observe_failed_step(ExecutionPhase::Decode, &contract, &records)
+                .unwrap(),
+            (Some(3), Some(1), Some(1))
+        );
     }
 
     fn fallback_prefill_invocations(
