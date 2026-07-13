@@ -397,14 +397,14 @@ async def _serve_claimed_chat_completion(
             output_tokens = split.answer_token_ids
             reasoning_tokens = split.reasoning_tokens
             forced_end_tokens = split.forced_end_tokens
-            if (
-                result.reasoning_tokens is not None
-                and result.reasoning_tokens != reasoning_tokens
-            ) or (
-                result.forced_end_tokens is not None
-                and result.forced_end_tokens != forced_end_tokens
-            ):
-                raise ReasoningError("worker reasoning usage differs from token split")
+            reasoning_tokens, forced_end_tokens = _reconcile_reasoning_usage(
+                outcome=result.outcome,
+                completion_tokens=len(result.token_ids),
+                worker_reasoning_tokens=result.reasoning_tokens,
+                worker_forced_end_tokens=result.forced_end_tokens,
+                observed_reasoning_tokens=reasoning_tokens,
+                observed_forced_end_tokens=forced_end_tokens,
+            )
             reasoning_content = await _decode_completion_while_healthy(
                 request, split.reasoning_token_ids
             )
@@ -892,7 +892,9 @@ async def _stream_completion(
     tokenizer = request.app.state.stream_tokenizer
     decoder = StableIncrementalDecoder(tokenizer)
     reasoning_enabled = reasoning is not None and reasoning.enabled
-    reasoning_decoder = StableIncrementalDecoder(tokenizer) if reasoning_enabled else None
+    reasoning_decoder = (
+        StableIncrementalDecoder(tokenizer) if reasoning_enabled else None
+    )
     reasoning_state = None
     if reasoning_enabled:
         dialect = getattr(request.app.state, "reasoning_dialect", None)
@@ -919,7 +921,13 @@ async def _stream_completion(
             if not reasoning_enabled:
                 suffix = await _decode_stream_token(request, decoder, token_id)
                 return (
-                    [_sse_record(_content_chunk(completion_id, created, suffix, model_id=model_id))]
+                    [
+                        _sse_record(
+                            _content_chunk(
+                                completion_id, created, suffix, model_id=model_id
+                            )
+                        )
+                    ]
                     if suffix
                     else []
                 )
@@ -951,7 +959,9 @@ async def _stream_completion(
                             )
                         )
                 else:
-                    suffix = await _decode_stream_token(request, decoder, emission.token_id)
+                    suffix = await _decode_stream_token(
+                        request, decoder, emission.token_id
+                    )
                     if suffix:
                         records.append(
                             _sse_record(
@@ -1008,14 +1018,14 @@ async def _stream_completion(
                 break
             for record in await emit_token(token_id):
                 yield record
-        if (
-            result.reasoning_tokens is not None
-            and result.reasoning_tokens != reasoning_token_count
-        ) or (
-            result.forced_end_tokens is not None
-            and result.forced_end_tokens != forced_end_token_count
-        ):
-            raise ReasoningError("worker reasoning usage differs from streamed token split")
+        reasoning_token_count, forced_end_token_count = _reconcile_reasoning_usage(
+            outcome=result.outcome,
+            completion_tokens=len(result.token_ids),
+            worker_reasoning_tokens=result.reasoning_tokens,
+            worker_forced_end_tokens=result.forced_end_tokens,
+            observed_reasoning_tokens=reasoning_token_count,
+            observed_forced_end_tokens=forced_end_token_count,
+        )
         if reasoning_enabled:
             assert reasoning_state is not None and reasoning_decoder is not None
             if reasoning_state.phase == ReasoningPhase.FORCING_END_SEQUENCE:
@@ -1029,7 +1039,9 @@ async def _stream_completion(
                 )
         suffix = await _finish_stream_decode(request, decoder)
         if suffix:
-            yield _sse_record(_content_chunk(completion_id, created, suffix, model_id=model_id))
+            yield _sse_record(
+                _content_chunk(completion_id, created, suffix, model_id=model_id)
+            )
         timings = _completion_timings(
             result,
             context_length=getattr(request.app.state, "context_length", CONTEXT_LENGTH),
@@ -1047,7 +1059,9 @@ async def _stream_completion(
                     created,
                     result,
                     timings=timings,
-                    reasoning_tokens=(reasoning_token_count if reasoning_enabled else None),
+                    reasoning_tokens=(
+                        reasoning_token_count if reasoning_enabled else None
+                    ),
                     model_id=model_id,
                 )
             )
@@ -1075,6 +1089,42 @@ async def _stream_completion(
             if not result_task.done():
                 result_task.cancel()
             await asyncio.gather(result_task, return_exceptions=True)
+
+
+def _reconcile_reasoning_usage(
+    *,
+    outcome: str,
+    completion_tokens: int,
+    worker_reasoning_tokens: int | None,
+    worker_forced_end_tokens: int | None,
+    observed_reasoning_tokens: int,
+    observed_forced_end_tokens: int,
+) -> tuple[int, int]:
+    """Reconcile raw worker counts with the gateway's visible token split.
+
+    A forced close deliberately emits the dialect end token.  When that token
+    is also the natural end token, the gateway cannot distinguish the two from
+    the token ID alone.  For a length-terminated response, the worker release
+    accounting is authoritative for that hidden token, provided the reasoning
+    count still matches and at least one answer token remains.
+    """
+
+    if worker_reasoning_tokens is None and worker_forced_end_tokens is None:
+        return observed_reasoning_tokens, observed_forced_end_tokens
+    if worker_reasoning_tokens != observed_reasoning_tokens:
+        raise ReasoningError("worker reasoning usage differs from token split")
+    if worker_forced_end_tokens == observed_forced_end_tokens:
+        return observed_reasoning_tokens, observed_forced_end_tokens
+    if (
+        outcome == "length"
+        and isinstance(worker_forced_end_tokens, int)
+        and worker_forced_end_tokens > observed_forced_end_tokens
+        and worker_forced_end_tokens >= 0
+        and worker_reasoning_tokens + worker_forced_end_tokens <= completion_tokens
+        and completion_tokens - worker_reasoning_tokens - worker_forced_end_tokens >= 1
+    ):
+        return observed_reasoning_tokens, worker_forced_end_tokens
+    raise ReasoningError("worker reasoning usage differs from token split")
 
 
 async def _cancel_stream_and_drain(

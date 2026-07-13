@@ -697,9 +697,61 @@ def test_stream_reasoning_fields_reassemble_to_nonstream_fields(tmp_path: Path) 
     assert reasoning == "思考"
     assert content == "答"
     assert chunks[-2]["choices"][0]["finish_reason"] == "stop"
-    assert chunks[-1]["usage"]["completion_tokens_details"] == {
-        "reasoning_tokens": 2
-    }
+    assert chunks[-1]["usage"]["completion_tokens_details"] == {"reasoning_tokens": 2}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_length_reasoning_forced_end_token_is_reconciled(
+    tmp_path: Path, stream: bool
+) -> None:
+    configured = reasoning_settings(tmp_path)
+    assert configured.reasoning_dialect is not None
+    configured = dataclasses.replace(
+        configured,
+        reasoning_dialect=dataclasses.replace(
+            configured.reasoning_dialect,
+            end_sequence=(20,),
+            forced_end_sequence=(20,),
+        ),
+    )
+    token_ids = (201,) * 10 + (20, 101)
+    fake_worker = FakeWorker(
+        outcome="length",
+        token_ids=token_ids,
+        reasoning_tokens=10,
+        forced_end_tokens=1,
+    )
+    app = create_app(
+        configured,
+        tokenizer=ReasoningFakeTokenizer(),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+    payload = body(
+        max_tokens=16,
+        thinking_budget_tokens=-1,
+        **(
+            {"stream": True, "stream_options": {"include_usage": True}}
+            if stream
+            else {}
+        ),
+    )
+    with TestClient(app) as instance:
+        response = instance.post("/v1/chat/completions", headers=AUTH, json=payload)
+
+    assert response.status_code == 200
+    if stream:
+        records = parse_sse(response.text)
+        assert records[-1] == "[DONE]"
+        chunks = [json.loads(record) for record in records[:-1]]
+        assert chunks[-2]["choices"][0]["finish_reason"] == "length"
+        assert chunks[-1]["usage"]["completion_tokens_details"] == {
+            "reasoning_tokens": 10
+        }
+    else:
+        value = response.json()
+        assert value["choices"][0]["finish_reason"] == "length"
+        assert value["usage"]["completion_tokens_details"] == {"reasoning_tokens": 10}
 
 
 def test_nonstream_reasoning_usage_mismatch_fails_closed(tmp_path: Path) -> None:
