@@ -1230,6 +1230,35 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         &mut self,
         label: &str,
     ) -> Result<SessionAdvance<Qwen35Aq4PreparedToken>, String> {
+        let force_for_length = self
+            .active
+            .as_ref()
+            .zip(self.config.reasoning_dialect.as_ref())
+            .and_then(|(active, dialect)| {
+                active.reasoning.as_ref().map(|reasoning| {
+                    reasoning.phase == ReasoningPhase::Reasoning
+                        && active
+                            .max_new_tokens
+                            .saturating_sub(active.generated_tokens)
+                            <= dialect
+                                .forced_end_sequence
+                                .len()
+                                .saturating_add(dialect.reserved_answer_tokens)
+                })
+            })
+            .unwrap_or(false);
+        if force_for_length {
+            let reasoning = self
+                .active
+                .as_mut()
+                .and_then(|active| active.reasoning.as_mut())
+                .ok_or_else(|| {
+                    format!("{label} reasoning state disappeared before length guard")
+                })?;
+            reasoning
+                .force_close()
+                .map_err(|error| format!("{label} reasoning length guard failed: {error:?}"))?;
+        }
         let forced_token = self
             .active
             .as_ref()
@@ -2421,6 +2450,39 @@ mod tests {
         let eos = next_prepared(&mut session);
         assert_eq!(eos.token_id, 2);
         assert_eq!(eos.terminal_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn unbounded_reasoning_keeps_a_minimum_answer_reservation_at_length() {
+        let dialect = reasoning_dialect();
+        let mut config = Qwen35Aq4SessionConfig::greedy(8, vec![2]);
+        config.reasoning_dialect = Some(dialect.clone());
+        let mut session = Qwen35Aq4InferenceSession::from_model(model(&[7, 2]), config).unwrap();
+        let mut request = request("unbounded-reasoning", &[4], 4);
+        request.reasoning = Some(crate::reasoning::ReasoningExecution {
+            enabled: true,
+            budget_tokens: None,
+            dialect_id: dialect.identity.clone(),
+            end_sequence: dialect.end_sequence.clone(),
+            forced_end_sequence: dialect.forced_end_sequence.clone(),
+            reserved_answer_tokens: dialect.reserved_answer_tokens,
+        });
+        session
+            .start_request(request, CancellationToken::new())
+            .unwrap();
+
+        let body = next_prepared(&mut session);
+        assert_eq!(body.token_id, 7);
+        session.publish_prepared(body, |_| Ok(())).unwrap();
+        let forced_first = next_prepared(&mut session);
+        assert_eq!(forced_first.token_id, 20);
+        session.publish_prepared(forced_first, |_| Ok(())).unwrap();
+        let forced_second = next_prepared(&mut session);
+        assert_eq!(forced_second.token_id, 21);
+        session.publish_prepared(forced_second, |_| Ok(())).unwrap();
+        let answer_eos = next_prepared(&mut session);
+        assert_eq!(answer_eos.token_id, 2);
+        assert_eq!(answer_eos.terminal_reason, Some(FinishReason::Stop));
     }
 
     #[test]

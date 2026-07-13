@@ -271,6 +271,15 @@ impl ReasoningState {
             .flatten()
     }
 
+    pub fn force_close(&mut self) -> Result<(), ReasoningError> {
+        if self.phase != ReasoningPhase::Reasoning {
+            return Err(ReasoningError::InvalidPhase(self.phase));
+        }
+        self.pending.clear();
+        self.phase = ReasoningPhase::ForcingEndSequence;
+        Ok(())
+    }
+
     pub fn on_eos(&mut self) -> ReasoningStep {
         if self.phase == ReasoningPhase::Reasoning
             && self.dialect.eos_policy == ReasoningEosPolicy::Close
