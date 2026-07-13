@@ -82,7 +82,7 @@
     "package": {"manifest_path": "package/manifest.json"}
   },
   "promotion": {
-    "receipt": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/promotion-paged-decode-split-v1.json",
+    "receipt": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/promotion-reasoning-v2-v0.1.json",
     "source_commit_from_receipt": ["source_commit"],
     "required_schema_version": "ullm.aq4_resident_promotion.v1",
     "evidence_from_receipt": ["evidence", "path"],

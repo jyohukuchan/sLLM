@@ -52,6 +52,10 @@ For the stability gate, the normal run MUST set
 `ULLM_OPENWEBUI_SOAK_COUNT=100`; the restart-recovery run MUST set it to
 `20`. The default remains `20` for compatibility with the existing SQ8 gate.
 
+The candidate profile uses the dedicated
+`promotion-reasoning-v2-v0.1.json` receipt path. The existing v1 receipt MUST
+not be copied or renamed for the v2 candidate.
+
 ## 3. Evidence layout
 
 Evidence is written under a dated directory as streaming JSONL or bounded JSON.

@@ -28,8 +28,8 @@ placeholder hash.
 `qwen35-9b-aq4-reasoning.profile.json` is an unactivated v2 candidate. It
 declares the Qwen3.5 reasoning dialect and points to a separately built v2
 worker under `target/reasoning-v2/`, but the current v1 promotion receipt is
-still incompatible with it; generation must fail until matching v2 resident
-evidence and a new receipt exist.
+not reused and the v2 receipt path is not yet published; generation must fail
+until matching v2 resident evidence and a new receipt exist.
 
 Rebuild that isolated candidate worker from the current checkout with:
 

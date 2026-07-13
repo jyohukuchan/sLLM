@@ -64,6 +64,14 @@ def test_aq4_reasoning_candidate_binds_v2_worker_separately_from_active_v1() -> 
         ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
     )
     assert Path(worker["binary"]) != ROOT / "target/release/ullm-aq4-worker"
+    assert Path(profile["promotion"]["receipt"]) == Path(
+        "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/"
+        "promotion-reasoning-v2-v0.1.json"
+    )
+    assert Path(profile["promotion"]["receipt"]) != Path(
+        "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/"
+        "promotion-paged-decode-split-v1.json"
+    )
 
 
 def write_profile(root: Path, *, receipt_exists: bool = True) -> Path:
