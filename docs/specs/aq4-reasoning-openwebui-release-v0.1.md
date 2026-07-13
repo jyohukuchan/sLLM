@@ -62,6 +62,11 @@ the gates from the raw records and reject incomplete or identity-mismatched
 evidence. Temporary evidence uses an `.incomplete` name and is atomically
 renamed only after validation.
 
+The release evidence validator is `tools/validate-generic-reasoning-release.py`.
+It validates the hash-only record shape, recomputes token accounting and usage
+cross-checks, rejects budget overshoot and forbidden body or credential fields,
+and reports structural validity separately from production-gate eligibility.
+
 The Phase 0 HTTP collector and its validator use request/response hashes and
 bounded protocol metadata only. A structurally valid record may still be
 gate-ineligible when source identity or generated token IDs are missing.
