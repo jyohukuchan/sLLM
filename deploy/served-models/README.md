@@ -139,7 +139,9 @@ schema, and atomically publishes only gate-eligible hash-only evidence:
 ```bash
 uv run --project services/openai-gateway python \
   tools/run-openwebui-reasoning-browser-smoke.py \
-  --output "$OUT/browser-reasoning.json" --token-file "$TOKEN_FILE" \
+  --output "$OUT/browser-reasoning.json" \
+  --manifest /etc/ullm/served-models/active.json \
+  --token-file "$TOKEN_FILE" \
   --browser-image "$BROWSER_IMAGE" --openwebui-url "$OPENWEBUI_URL" \
   --model-id "$ULLM_MODEL_ID" --model-name "$ULLM_MODEL_NAME" \
   --switch-model-id llama-qwen3.5-9b-ud-q4 \

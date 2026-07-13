@@ -100,8 +100,14 @@ def test_runner_publishes_valid_hash_only_evidence_and_binds_command(
         return FakeProcess(stdout, payload)
 
     monkeypatch.setattr(TOOL.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        TOOL,
+        "_validate_manifest_identity",
+        lambda _path, _model: {"manifest_sha256": "m" * 64},
+    )
     result = TOOL.execute(
         output=output,
+        manifest=tmp_path / "manifest.json",
         token_file=token,
         browser_image="sha256:" + "a" * 64,
         openwebui_url="http://127.0.0.1:3000/",
@@ -137,9 +143,15 @@ def test_runner_rejects_external_model_binding_mismatch(
         return FakeProcess(stdout, payload)
 
     monkeypatch.setattr(TOOL.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        TOOL,
+        "_validate_manifest_identity",
+        lambda _path, _model: {"manifest_sha256": "m" * 64},
+    )
     with pytest.raises(TOOL.SmokeError, match="primary model identity"):
         TOOL.execute(
             output=output,
+            manifest=tmp_path / "manifest.json",
             token_file=token,
             browser_image="sha256:" + "a" * 64,
             openwebui_url="http://127.0.0.1:3000",
@@ -150,6 +162,14 @@ def test_runner_rejects_external_model_binding_mismatch(
             browser_script=script,
         )
     assert not output.exists()
+
+
+def test_runner_rejects_the_current_v1_active_manifest() -> None:
+    manifest = Path("/etc/ullm/served-models/active.json")
+    if not manifest.is_file():
+        pytest.skip("WRX80 active manifest is unavailable")
+    with pytest.raises(TOOL.SmokeError, match="not v2"):
+        TOOL._validate_manifest_identity(manifest, "ullm-qwen3.5-9b-aq4")
 
 
 @pytest.mark.parametrize("value", ["browser:latest", "sha256:ABC" + "a" * 61])

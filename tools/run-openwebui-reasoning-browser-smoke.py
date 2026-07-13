@@ -31,6 +31,7 @@ from urllib.parse import urlsplit, urlunsplit
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCRIPT = ROOT / "deploy/openwebui/browser-reasoning-smoke.cjs"
 VALIDATOR_PATH = ROOT / "tools/validate-openwebui-reasoning-browser-smoke.py"
+SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
 MAX_TOKEN_FILE_BYTES = 65_536
 MAX_SCRIPT_BYTES = 1 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
@@ -38,6 +39,7 @@ IMAGE_RE = re.compile(
     r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*@)?sha256:[0-9a-f]{64}\Z"
 )
 _VALIDATOR_MODULE_NAME = "_ullm_openwebui_reasoning_browser_validator"
+_SERVED_MODEL_MODULE_NAME = "_ullm_reasoning_browser_served_model_validator"
 
 
 class SmokeError(RuntimeError):
@@ -117,6 +119,25 @@ def _load_validator() -> ModuleType:
     return module
 
 
+def _load_served_model_validator() -> ModuleType:
+    existing = sys.modules.get(_SERVED_MODEL_MODULE_NAME)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        _SERVED_MODEL_MODULE_NAME, SERVED_MODEL_VALIDATOR_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise SmokeError("served-model validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_SERVED_MODEL_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(_SERVED_MODEL_MODULE_NAME, None)
+        raise
+    return module
+
+
 def _strict_json(raw: bytes) -> dict[str, Any]:
     def without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -147,6 +168,30 @@ def _provider_hashes(document: dict[str, Any]) -> list[str]:
             raise SmokeError(f"provider request {index} has no model identity")
         hashes.append(request["model_id_sha256"])
     return hashes
+
+
+def _validate_manifest_identity(manifest: Path, model_id: str) -> dict[str, Any]:
+    raw = _read_regular(manifest, "served-model manifest", 1_048_576)
+    document = _strict_json(raw)
+    if document.get("schema_version") != "ullm.served_model.v2":
+        raise SmokeError("served-model manifest is not v2")
+    public = document.get("public")
+    worker = document.get("worker")
+    if not isinstance(public, dict) or public.get("id") != model_id:
+        raise SmokeError("served-model manifest model ID differs")
+    if not isinstance(worker, dict) or worker.get("protocol") != "ullm.worker.v2":
+        raise SmokeError("served-model manifest worker protocol is not v2")
+    if "reasoning" not in document:
+        raise SmokeError("served-model manifest has no reasoning dialect")
+    try:
+        summary = _load_served_model_validator().validation_summary(manifest)
+    except Exception as error:
+        raise SmokeError("served-model manifest failed validation") from error
+    if summary.get("model_id") != model_id or summary.get("worker", {}).get(
+        "protocol"
+    ) != "ullm.worker.v2":
+        raise SmokeError("served-model validator identity differs")
+    return summary
 
 
 def _bind_model_identity(
@@ -224,6 +269,7 @@ def _stop_container(docker: str, name: str) -> None:
 def execute(
     *,
     output: Path,
+    manifest: Path,
     token_file: Path,
     browser_image: str,
     openwebui_url: str,
@@ -237,6 +283,7 @@ def execute(
 ) -> dict[str, Any]:
     if output.exists() or output.is_symlink():
         raise SmokeError("browser evidence output already exists or is a symlink")
+    manifest_summary = _validate_manifest_identity(manifest, model_id)
     token = _read_regular(token_file, "OpenWebUI token file", MAX_TOKEN_FILE_BYTES)
     script = _read_regular(browser_script, "browser smoke script", MAX_SCRIPT_BYTES)
     if not token:
@@ -329,12 +376,14 @@ def execute(
         "output": os.fspath(output.resolve()),
         "model_id_sha256": document["model_id_sha256"],
         "provider_request_count": document["provider_request_count"],
+        "manifest_sha256": manifest_summary["manifest_sha256"],
     }
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--browser-image", required=True)
     parser.add_argument("--openwebui-url", required=True)
@@ -353,6 +402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = execute(
             output=args.output,
+            manifest=args.manifest,
             token_file=args.token_file,
             browser_image=args.browser_image,
             openwebui_url=args.openwebui_url,
