@@ -56,10 +56,70 @@ RAW_TOKEN_CASES = (
 )
 REASONING_CASE_ID = "reasoning-budget-zero"
 PROMOTION_HIP_VISIBLE_DEVICES = "1"
+PROMOTION_GPU_INDEX = "1"
 
 
 class EvidenceError(RuntimeError):
     """Raised when promotion evidence is incomplete or inconsistent."""
+
+
+def _exclusive_gpu_preflight() -> dict[str, Any]:
+    """Prove that the deployed R9700 has no positive-VRAM KFD process."""
+
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showpids", "--json"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceError("ROCm GPU exclusivity preflight failed") from error
+    if result.returncode != 0:
+        raise EvidenceError("ROCm GPU exclusivity preflight returned nonzero")
+    try:
+        document = json.loads(result.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise EvidenceError("ROCm GPU exclusivity preflight returned invalid JSON") from error
+    processes = document.get("system") if isinstance(document, dict) else None
+    if not isinstance(processes, dict):
+        raise EvidenceError("ROCm GPU exclusivity preflight lacks process data")
+
+    positive_vram: list[dict[str, Any]] = []
+    for pid, description in processes.items():
+        if not isinstance(pid, str) or not pid.startswith("PID"):
+            raise EvidenceError("ROCm GPU process identity is malformed")
+        if not isinstance(description, str):
+            raise EvidenceError("ROCm GPU process description is malformed")
+        fields = [field.strip() for field in description.split(",")]
+        if len(fields) < 3:
+            raise EvidenceError("ROCm GPU process description is incomplete")
+        try:
+            vram_bytes = int(fields[2])
+        except ValueError as error:
+            raise EvidenceError("ROCm GPU process VRAM is not an integer") from error
+        gpu_ids = {item.strip() for item in fields[1].split(",") if item.strip()}
+        if PROMOTION_GPU_INDEX in gpu_ids and vram_bytes > 0:
+            positive_vram.append(
+                {
+                    "pid": pid[3:],
+                    "process": fields[0],
+                    "gpu_index": PROMOTION_GPU_INDEX,
+                    "vram_bytes": vram_bytes,
+                }
+            )
+    if positive_vram:
+        raise EvidenceError(
+            "R9700 is not exclusive; positive-VRAM processes: "
+            + json.dumps(positive_vram, sort_keys=True)
+        )
+    return {
+        "tool": "rocm-smi --showpids --json",
+        "gpu_index": PROMOTION_GPU_INDEX,
+        "positive_vram_processes": [],
+    }
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -502,6 +562,7 @@ def run_evidence(
     ready_timeout_seconds: float,
     request_timeout_seconds: float,
     source_commit: str | None = None,
+    require_exclusive_gpu: bool = True,
 ) -> dict[str, Any]:
     worker_binary = worker_binary.resolve()
     legacy_engine = legacy_engine.resolve()
@@ -509,6 +570,7 @@ def run_evidence(
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise EvidenceError(f"{label} is not executable: {executable}")
     commit = source_commit or _git_commit()
+    gpu_preflight = _exclusive_gpu_preflight() if require_exclusive_gpu else None
 
     with tempfile.TemporaryDirectory(prefix="ullm-aq4-promotion-evidence-") as raw_temporary:
         temporary = Path(raw_temporary)
@@ -559,6 +621,7 @@ def run_evidence(
             "source_commit": commit,
             "created_at_unix_ns": time.time_ns(),
             "production_receipt_written": False,
+            "gpu_exclusive_preflight": gpu_preflight,
             "ephemeral_bundle": {
                 "receipt": receipt,
                 "profile_sha256": hashlib.sha256(

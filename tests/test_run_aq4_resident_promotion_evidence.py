@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -177,6 +178,7 @@ def test_evidence_uses_ephemeral_bundle_and_sequential_processes(tmp_path: Path)
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
         source_commit="fixture-commit",
+        require_exclusive_gpu=False,
     )
 
     assert output.is_file()
@@ -197,6 +199,39 @@ def test_evidence_uses_ephemeral_bundle_and_sequential_processes(tmp_path: Path)
         check["sibling_engine_count"] == 0
         for check in document["resident"]["child_process_checks"]
     )
+
+
+def test_exclusive_gpu_preflight_accepts_empty_target_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    output = json.dumps({"system": {}})
+    monkeypatch.setattr(
+        TOOL.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=output, stderr=""
+        ),
+    )
+
+    assert TOOL._exclusive_gpu_preflight() == {
+        "tool": "rocm-smi --showpids --json",
+        "gpu_index": "1",
+        "positive_vram_processes": [],
+    }
+
+
+def test_exclusive_gpu_preflight_rejects_positive_target_vram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = json.dumps({"system": {"PID42": "llama-server, 1, 1234, 0, unknown"}})
+    monkeypatch.setattr(
+        TOOL.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=output, stderr=""
+        ),
+    )
+
+    with pytest.raises(TOOL.EvidenceError, match="not exclusive"):
+        TOOL._exclusive_gpu_preflight()
 
 
 def test_worker_environment_pins_deployed_hip_visibility() -> None:
@@ -258,6 +293,7 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> Non
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
         source_commit="fixture-v2-commit",
+        require_exclusive_gpu=False,
     )
 
     assert document["ephemeral_bundle"]["manifest"]["worker"]["protocol"] == "ullm.worker.v2"
@@ -322,6 +358,7 @@ def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(tmp_path: Path) -> N
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
         source_commit="fixture-v2-pipeline",
+        require_exclusive_gpu=False,
     )
     assert evidence["verified"] is True
     receipt = RECEIPT.write_receipt(profile, evidence_path, receipt_path)
