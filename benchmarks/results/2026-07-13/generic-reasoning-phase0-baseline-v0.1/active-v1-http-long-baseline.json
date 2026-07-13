@@ -1,0 +1,131 @@
+{
+  "schema_version": "ullm.generic_reasoning_phase0_http_baseline.v1",
+  "status": "partial",
+  "captured_at_unix_ns": 1783932920345760213,
+  "production_activation_performed": false,
+  "source_commit": "cb06ae7b3438b94d023b6d0bb68e958efd5640d3",
+  "active_manifest": {
+    "path": "/etc/ullm/served-models/active.json",
+    "sha256": "7589b9db7734d176bef21130b31e1ba679d1e0599e9a3c0d8af6699f86eded80",
+    "schema_version": "ullm.served_model.v1"
+  },
+  "active_promotion_source_commit": "4be10d007c48db444f6b18fe6ac22e09dc17f168",
+  "source_commit_aligned": false,
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-worker",
+    "binary_sha256": "e31cd887ddc92e1f7c9ceecc28b2dfd70f2eabcfc96179ddc1c007b9009e3a7f"
+  },
+  "endpoint": "http://172.20.0.1:8000/v1/chat/completions",
+  "image": "ullm/open-webui:0.9.4-ullm.1",
+  "cases": [
+    {
+      "id": "phase0-v1-target-18",
+      "target_prompt_tokens": 18,
+      "prompt_sha256": "4afde19d2a631196d5bdb4a210ef95f11ffb2417241add9983e184f5c17268ad",
+      "prompt_tokens": 18,
+      "request_body_sha256": "6b4cd764c0261925f3cb5b696cfc65ccebb05dd3cf22015e83b19e11dd07d8f4",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "7a00b2a252687a00de9601361d7af38567d83b082872a6ed688e743ce9c98704",
+        "response_bytes": 647,
+        "finish_reason": "length",
+        "prompt_tokens": 18,
+        "completion_tokens": 2,
+        "total_tokens": 20
+      },
+      "stream": {
+        "http_status": 200,
+        "response_body_sha256": "ff57fd2bdc498f1439b82b5e5e6874be1bb76ea6bdb9d5ae2c8f6b91f0a322e7",
+        "response_bytes": 1477,
+        "chunks": 5,
+        "event_sequence": [
+          "role",
+          "token",
+          "token",
+          "token",
+          "stop",
+          "usage",
+          "done"
+        ],
+        "delta_keys": [
+          [
+            "content",
+            "role"
+          ],
+          [
+            "content"
+          ],
+          [
+            "content"
+          ],
+          []
+        ],
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 2,
+          "total_tokens": 20
+        },
+        "invalid_data_lines": 0,
+        "request_body_sha256": "ecbe17a74395fdf24fb1cbe13d7a0cc4bd312f4531301a45cf7966ee6d5e2c0c"
+      }
+    },
+    {
+      "id": "phase0-v1-target-1024",
+      "target_prompt_tokens": 1024,
+      "prompt_sha256": "f9476d07e05388c33b088d6f6f34993ec1a03eb31882ca01836254448a078647",
+      "prompt_tokens": 1024,
+      "request_body_sha256": "630239a5f555307b6381f1418d13b25cc19b4cb33b90d14711dce1d2ae7c4b23",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "b079f79d085dc6f3a2d6e4b7d4f6f85ea039d92d9801bdeec0816e9bcb17468f",
+        "response_bytes": 641,
+        "finish_reason": "length",
+        "prompt_tokens": 1024,
+        "completion_tokens": 2,
+        "total_tokens": 1026
+      }
+    },
+    {
+      "id": "phase0-v1-target-2048",
+      "target_prompt_tokens": 2048,
+      "prompt_sha256": "1cc6cf201486155dfb9a6127c486b5f33d5f949f782bf3049f39f21004466834",
+      "prompt_tokens": 2048,
+      "request_body_sha256": "57871905e7b194ba7d6b69d93b92c3cc05c27f562e4547cf33498bca5316a80e",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "2f1852cb3fb5c53f31f35d6166ace58f7c2c96e76acd56eb0c88cce03d6cde23",
+        "response_bytes": 644,
+        "finish_reason": "length",
+        "prompt_tokens": 2048,
+        "completion_tokens": 2,
+        "total_tokens": 2050
+      }
+    },
+    {
+      "id": "phase0-v1-target-3072",
+      "target_prompt_tokens": 3072,
+      "prompt_sha256": "5398eba76f885c064b774f724f703c6c1aed5452befd22a6f5a684a8bc78ef89",
+      "prompt_tokens": 3072,
+      "request_body_sha256": "58adfd0f1252d26ad6c61f2ca7f44c6c9fa65bb1796dde0ce40f3b4db072ded5",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "c2ec1d66dc4e9d7b95cd3d23d1a66632f85139ee19c3653f79bd2a7f9839c45e",
+        "response_bytes": 641,
+        "finish_reason": "length",
+        "prompt_tokens": 3072,
+        "completion_tokens": 2,
+        "total_tokens": 3074
+      }
+    }
+  ],
+  "raw_bodies_stored": false,
+  "missing": [
+    "same-HEAD AQ4 source/token alignment",
+    "AQ4 generated token IDs"
+  ]
+}

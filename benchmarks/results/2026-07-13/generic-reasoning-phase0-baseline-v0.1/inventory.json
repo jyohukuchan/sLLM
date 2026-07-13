@@ -30,14 +30,22 @@
       "prompt_token_counts": [18],
       "source_commit_aligned": false,
       "raw_bodies_stored": false
+    },
+    {
+      "path": "benchmarks/results/2026-07-13/generic-reasoning-phase0-baseline-v0.1/active-v1-http-long-baseline.json",
+      "backend": "aq4",
+      "contains": ["hash_only_http_metadata", "usage_cross_check", "long_prompt_grid"],
+      "prompt_token_counts": [18, 1024, 2048, 3072],
+      "source_commit_aligned": false,
+      "raw_bodies_stored": false
     }
   ],
   "missing_for_phase0_gate": [
     "same-HEAD AQ4 reasoning-disabled HTTP request and response bodies",
     "same-HEAD AQ4 reasoning-disabled SSE event sequence",
     "same-HEAD AQ4 generated token IDs for short and long chat prompts",
-    "AQ4 prompt token baselines at 1024, 2048, and 3072 tokens",
-    "machine-readable usage and token-count cross-check for the AQ4 HTTP/SSE run"
+    "same-HEAD AQ4 prompt token baselines and generated token IDs",
+    "same-HEAD HTTP/SSE evidence with raw committed-token cross-check"
   ],
   "gate": {
     "machine_readable_baseline_available": false,
