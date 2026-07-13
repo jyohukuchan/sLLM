@@ -203,6 +203,22 @@ def test_reasoning_budget_reservation_is_not_silently_clamped() -> None:
     assert captured.value.param == "thinking_budget_tokens"
 
 
+def test_unbounded_reasoning_still_reserves_forced_end_and_answer() -> None:
+    normalized = normalize_chat_request(
+        request(thinking_budget_tokens=-1, max_tokens=4),
+        reasoning_dialect=reasoning_dialect(),
+    )
+    assert normalized.reasoning is not None
+    assert normalized.reasoning.budget_tokens is None
+    with pytest.raises(ApiError) as captured:
+        normalize_chat_request(
+            request(thinking_budget_tokens=-1, max_tokens=3),
+            reasoning_dialect=reasoning_dialect(),
+        )
+    assert captured.value.code == "invalid_request_error"
+    assert captured.value.param == "thinking_budget_tokens"
+
+
 def test_neutral_parameters_and_null_optionals_are_accepted() -> None:
     normalized = normalize_chat_request(
         request(

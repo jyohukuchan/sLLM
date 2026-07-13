@@ -268,6 +268,13 @@ def _build_reasoning_request(
                 "thinking budget and reserved answer tokens exceed max_completion_tokens.",
                 "thinking_budget_tokens",
             )
+    elif enabled:
+        reserved = len(dialect.forced_end_sequence) + dialect.reserved_answer_tokens
+        if reserved > max_completion_tokens:
+            raise invalid_request(
+                "reasoning end sequence and reserved answer tokens exceed max_completion_tokens.",
+                "thinking_budget_tokens",
+            )
     return ReasoningRequest(
         enabled=enabled,
         budget_tokens=budget,

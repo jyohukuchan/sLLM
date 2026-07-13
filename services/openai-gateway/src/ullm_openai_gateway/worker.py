@@ -23,6 +23,8 @@ from .settings import GatewaySettings
 
 
 WORKER_SCHEMA = "ullm.worker.v1"
+WORKER_SCHEMA_V2 = "ullm.worker.v2"
+SUPPORTED_WORKER_SCHEMAS = frozenset({WORKER_SCHEMA, WORKER_SCHEMA_V2})
 MODEL_REVISION = "9a283b4a5efbc09ce247e0ae5b02b744739e525a"
 ARTIFACT_CONTENT_SHA256 = (
     "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147"
@@ -115,7 +117,7 @@ class WorkerConfig:
                 if name.startswith("ULLM_REQUIRE_HIP_"):
                     environment.pop(name)
             contract = settings.served_model.worker
-            if contract.protocol != WORKER_SCHEMA:
+            if contract.protocol not in SUPPORTED_WORKER_SCHEMAS:
                 raise WorkerProtocolError("served-model worker protocol is unsupported")
             command = (
                 str(contract.binary),
@@ -127,6 +129,10 @@ class WorkerConfig:
                 ),
             )
             worker_schema = contract.protocol
+            if worker_schema == WORKER_SCHEMA_V2 and settings.reasoning_dialect is None:
+                raise WorkerProtocolError(
+                    "ullm.worker.v2 served-model requires a reasoning dialect"
+                )
         else:
             for name in HIP_GUARDS:
                 environment.pop(name, None)

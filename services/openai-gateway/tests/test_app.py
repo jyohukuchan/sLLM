@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import threading
 import time
@@ -20,6 +21,7 @@ from ullm_openai_gateway.app import (
     _wait_for_stream_start,
     create_app,
 )
+from ullm_openai_gateway.reasoning import ReasoningDialect
 from ullm_openai_gateway.schemas import EOS_TOKEN_IDS, MODEL_ID, NormalizedMessage
 from ullm_openai_gateway.settings import GatewaySettings, LEGACY_MODEL_ENVIRONMENT
 from ullm_openai_gateway.tokenizer import (
@@ -109,6 +111,24 @@ class FakeTokenizer:
             return "日本語の長い応答"
         assert values == (101, EOS_TOKEN_IDS[0])
         return "日本語の応答"
+
+
+class ReasoningFakeTokenizer(FakeTokenizer):
+    def render(
+        self,
+        _: Any,
+        *,
+        enable_thinking: bool | None = None,
+        include_reasoning_content: bool = False,
+    ) -> TokenizedPrompt:
+        assert enable_thinking is True
+        assert include_reasoning_content is False
+        return TokenizedPrompt("rendered-thinking", tuple(range(self.prompt_tokens)))
+
+    def decode(self, token_ids: Any) -> str:
+        values = tuple(token_ids)
+        mapping = {201: "思", 202: "考", 101: "答"}
+        return "".join(mapping.get(token_id, "") for token_id in values)
 
 
 class FakeWorker:
@@ -359,6 +379,19 @@ def settings(tmp_path: Path) -> GatewaySettings:
     )
 
 
+def reasoning_settings(tmp_path: Path) -> GatewaySettings:
+    dialect = ReasoningDialect(
+        identity="synthetic.multi-token.v1",
+        start_sequence=(10, 11),
+        end_sequence=(20, 21),
+        forced_end_sequence=(20, 21),
+        max_budget_tokens=4,
+        reserved_answer_tokens=1,
+        effort_budgets=(("low", 2), ("medium", 3), ("high", 4)),
+    )
+    return dataclasses.replace(settings(tmp_path), reasoning_dialect=dialect)
+
+
 def body(**updates: Any) -> dict[str, Any]:
     value: dict[str, Any] = {
         "model": MODEL_ID,
@@ -584,6 +617,75 @@ def test_nonstream_completion_has_exact_shape_and_usage(
     assert fake_worker.requests[0].temperature == 0
     assert fake_worker.requests[0].seed == 7
     assert fake_worker.requests[0].completion_id == value["id"]
+
+
+def test_nonstream_reasoning_is_separated_and_usage_is_detailed(tmp_path: Path) -> None:
+    fake_worker = FakeWorker(token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]))
+    app = create_app(
+        reasoning_settings(tmp_path),
+        tokenizer=ReasoningFakeTokenizer(),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+    with TestClient(app) as instance:
+        response = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(reasoning_effort="low"),
+        )
+
+    assert response.status_code == 200
+    value = response.json()
+    message = value["choices"][0]["message"]
+    assert message["reasoning_content"] == "思考"
+    assert message["content"] == "答"
+    assert value["usage"]["completion_tokens"] == 6
+    assert value["usage"]["completion_tokens_details"] == {"reasoning_tokens": 2}
+    assert fake_worker.requests[0].reasoning is not None
+    assert fake_worker.requests[0].reasoning.budget_tokens == 2
+
+
+def test_stream_reasoning_fields_reassemble_to_nonstream_fields(tmp_path: Path) -> None:
+    fake_worker = FakeWorker(token_ids=(201, 202, 20, 21, 101, EOS_TOKEN_IDS[0]))
+    app = create_app(
+        reasoning_settings(tmp_path),
+        tokenizer=ReasoningFakeTokenizer(),
+        worker=fake_worker,
+        api_key=API_KEY,
+    )
+    with TestClient(app) as instance:
+        response = instance.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json=body(
+                stream=True,
+                stream_options={"include_usage": True},
+                reasoning_effort="low",
+            ),
+        )
+
+    assert response.status_code == 200
+    records = parse_sse(response.text)
+    chunks = [json.loads(record) for record in records[:-1]]
+    reasoning = "".join(
+        chunk["choices"][0]["delta"]["reasoning_content"]
+        for chunk in chunks
+        if chunk["choices"]
+        if "reasoning_content" in chunk["choices"][0]["delta"]
+    )
+    content = "".join(
+        chunk["choices"][0]["delta"]["content"]
+        for chunk in chunks
+        if chunk["choices"]
+        if "content" in chunk["choices"][0]["delta"]
+        and "role" not in chunk["choices"][0]["delta"]
+    )
+    assert reasoning == "思考"
+    assert content == "答"
+    assert chunks[-2]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"]["completion_tokens_details"] == {
+        "reasoning_tokens": 2
+    }
 
 
 def test_context_boundary_is_reported_without_changing_openai_finish_reason(

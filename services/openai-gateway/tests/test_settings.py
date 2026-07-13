@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -193,6 +195,43 @@ def test_manifest_mode_builds_gateway_and_worker_contract(
     for guard in settings.served_model.worker.required_environment:
         assert config.environment[guard] == "1"
     settings.validate_paths()
+
+
+def test_manifest_mode_builds_v2_worker_and_reasoning_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    root = tmp_path / "aq4-v2"
+    shutil.copytree(MANIFEST_FIXTURES / "aq4", root)
+    manifest = root / "served-model.json"
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.multi-token.v1",
+        "start_token_ids": [248068, 12],
+        "end_token_ids": [248069, 13],
+        "forced_end_token_ids": [248069, 13],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
+    monkeypatch.setenv("ULLM_HIP_VISIBLE_DEVICES", "0")
+
+    settings = GatewaySettings.from_env()
+    config = WorkerConfig.from_settings(settings)
+
+    assert config.worker_schema == "ullm.worker.v2"
+    assert config.reasoning_dialect is not None
+    assert config.reasoning_dialect.identity == "synthetic.multi-token.v1"
+    assert config.command[-2:] == ("--served-model-manifest", str(manifest.resolve()))
 
 
 @pytest.mark.parametrize("legacy_name", sorted(LEGACY_MODEL_ENVIRONMENT))
