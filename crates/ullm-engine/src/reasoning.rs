@@ -409,4 +409,17 @@ mod tests {
         assert!(state.on_eos().request_forced_close);
         assert_eq!(state.phase, ReasoningPhase::ForcingEndSequence);
     }
+
+    #[test]
+    fn dialect_rejects_duplicate_tokens_and_prefix_collision() {
+        let mut duplicate = dialect();
+        duplicate.start_sequence = vec![10, 10];
+        assert!(ReasoningState::new(duplicate, true, Some(1), 100).is_err());
+
+        let mut collision = dialect();
+        collision.start_sequence = vec![20];
+        collision.end_sequence = vec![20, 21, 22];
+        collision.forced_end_sequence = vec![20, 21, 22];
+        assert!(ReasoningState::new(collision, true, Some(1), 100).is_err());
+    }
 }

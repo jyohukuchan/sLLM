@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from ullm_openai_gateway.reasoning import (
@@ -72,6 +74,39 @@ def test_eos_uses_declared_close_policy(dialect: ReasoningDialect) -> None:
     step = state.on_eos()
     assert step.request_forced_close
     assert state.phase == ReasoningPhase.FORCING_END_SEQUENCE
+
+
+@pytest.mark.parametrize(
+    ("eos_policy", "expected_phase"),
+    [
+        ("finish", ReasoningPhase.FINISHED),
+        ("continue", ReasoningPhase.REASONING),
+    ],
+)
+def test_eos_policy_is_model_declared(
+    dialect: ReasoningDialect, eos_policy: str, expected_phase: ReasoningPhase
+) -> None:
+    configured = replace(dialect, eos_policy=eos_policy)
+    state = ReasoningState(configured, enabled=True, budget_tokens=None, vocab_size=100)
+    state.on_eos()
+    assert state.phase == expected_phase
+
+
+def test_answer_initial_phase_bypasses_reasoning(dialect: ReasoningDialect) -> None:
+    configured = ReasoningDialect(
+        identity=dialect.identity,
+        start_sequence=dialect.start_sequence,
+        end_sequence=dialect.end_sequence,
+        forced_end_sequence=dialect.forced_end_sequence,
+        max_budget_tokens=dialect.max_budget_tokens,
+        reserved_answer_tokens=dialect.reserved_answer_tokens,
+        effort_budgets=dialect.effort_budgets,
+        initial_phase="answer",
+    )
+    state = ReasoningState(configured, enabled=True, budget_tokens=2, vocab_size=100)
+    assert state.phase == ReasoningPhase.ANSWER
+    step = state.accept_sampled(30)
+    assert step.emissions[0].kind == EmissionKind.ANSWER
 
 
 def test_invalid_forced_token_is_rejected(dialect: ReasoningDialect) -> None:
