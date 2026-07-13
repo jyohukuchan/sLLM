@@ -3446,6 +3446,172 @@ pub fn qwen35_m1_production_registry() -> Result<BackendOperationRegistry, Strin
     ])
 }
 
+/// Rebinds a canonical width-one paged descriptor to one exact cache geometry.
+///
+/// A canonical registry may carry stable implementation IDs while describing one production
+/// cache capacity. Compatibility paths can use this generic adapter when they size a short-lived
+/// cache differently; no alternate implementation is introduced and the descriptor remains
+/// subject to the original typed validation and device feature requirements.
+pub fn rebind_paged_geometry_registry(
+    canonical: &BackendOperationRegistry,
+    kind: OperationKind,
+    geometry: OperationGeometry,
+    device: &DeviceCapabilities,
+) -> Result<BackendOperationRegistry, String> {
+    let matches_geometry = match (kind, geometry) {
+        (OperationKind::PagedKvWrite, OperationGeometry::PagedKvWrite { .. })
+        | (
+            OperationKind::FusedQkNormRopePagedKvWrite,
+            OperationGeometry::FusedQkNormRopePagedKvWrite { .. },
+        )
+        | (OperationKind::PagedCausalGqaRead, OperationGeometry::PagedCausalGqaRead { .. }) => true,
+        _ => false,
+    };
+    if !matches_geometry {
+        return Err(format!(
+            "paged geometry registry requires a paged operation, got {kind:?}"
+        ));
+    }
+    match geometry {
+        OperationGeometry::PagedKvWrite {
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+        } => {
+            if [kv_heads, head_dim, value_dim, block_size, cache_blocks]
+                .into_iter()
+                .any(|value| value == 0)
+            {
+                return Err("paged geometry registry contains zero dimensions".into());
+            }
+            if head_dim > 256 || value_dim > 256 {
+                return Err("paged geometry registry head dimensions must be <= 256".into());
+            }
+        }
+        OperationGeometry::FusedQkNormRopePagedKvWrite {
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            block_size,
+            cache_blocks,
+            ..
+        } => {
+            if [
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                rotary_dim,
+                block_size,
+                cache_blocks,
+            ]
+            .into_iter()
+            .any(|value| value == 0)
+            {
+                return Err("paged geometry registry contains zero dimensions".into());
+            }
+            if !q_heads.is_multiple_of(kv_heads) {
+                return Err(
+                    "paged geometry registry q_heads must be a multiple of kv_heads".into(),
+                );
+            }
+            if head_dim > 256
+                || value_dim > 256
+                || rotary_dim > head_dim
+                || !rotary_dim.is_multiple_of(2)
+            {
+                return Err("paged geometry registry fused head geometry is unsupported".into());
+            }
+        }
+        OperationGeometry::PagedCausalGqaRead { .. } => {
+            validate_generic_paged_decode_geometry(geometry)?;
+        }
+        _ => unreachable!("paged geometry was validated above"),
+    }
+    if !canonical
+        .implementations()
+        .iter()
+        .any(|descriptor| descriptor.kind == kind && descriptor.backend == device.backend)
+    {
+        return Err(format!(
+            "paged geometry registry has no {kind:?} implementation for requested backend {:?}",
+            device.backend
+        ));
+    }
+    let descriptor = canonical
+        .implementations()
+        .iter()
+        .find(|descriptor| {
+            descriptor.kind == kind
+                && descriptor.backend == device.backend
+                && match (kind, geometry, descriptor.geometry) {
+                    (
+                        OperationKind::PagedCausalGqaRead,
+                        OperationGeometry::PagedCausalGqaRead { sigmoid_gate, .. },
+                        OperationGeometry::PagedCausalGqaRead {
+                            sigmoid_gate: descriptor_sigmoid_gate,
+                            ..
+                        },
+                    ) => sigmoid_gate == descriptor_sigmoid_gate,
+                    _ => true,
+                }
+        })
+        .ok_or_else(|| format!("paged operation {kind:?} is not registered"))?;
+    let mut adapted = descriptor.clone();
+    adapted.geometry = geometry;
+    let persistent_bytes = match geometry {
+        OperationGeometry::PagedKvWrite {
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+        }
+        | OperationGeometry::FusedQkNormRopePagedKvWrite {
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+            ..
+        }
+        | OperationGeometry::PagedCausalGqaRead {
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+            ..
+        } => paged_cache_bytes(block_size, cache_blocks, kv_heads, head_dim, value_dim)?,
+        _ => unreachable!("paged geometry was validated above"),
+    };
+    adapted.workspace.fixed_persistent_bytes = persistent_bytes;
+    adapted.workspace.maximum_total_bytes = persistent_bytes
+        .checked_add(adapted.workspace.fixed_temporary_bytes)
+        .and_then(|value| {
+            value.checked_add(
+                adapted
+                    .workspace
+                    .temporary_bytes_per_batch_item
+                    .checked_mul(adapted.maximum_batch_width)?,
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                adapted
+                    .workspace
+                    .temporary_bytes_per_chunk_token
+                    .checked_mul(adapted.maximum_chunk_width)?,
+            )
+        })
+        .ok_or_else(|| "paged geometry workspace overflows".to_string())?;
+    BackendOperationRegistry::new(vec![adapted])
+}
+
 fn validate_generic_paged_decode_geometry(
     geometry: OperationGeometry,
 ) -> Result<(usize, usize, usize, usize, usize, usize, bool), String> {
@@ -4731,6 +4897,53 @@ mod tests {
                 plan.trace().executable,
                 ExecutableOperation::HipLinearAttentionRecurrentF32
             );
+        }
+    }
+
+    #[test]
+    fn paged_geometry_registry_keeps_single_reader_for_short_legacy_cache() {
+        let mut device = test_hip_capabilities();
+        // The single reader must remain resolvable when only its own feature is proven; the
+        // optional split feature is deliberately absent on this compatibility path.
+        device.runtime_features =
+            RuntimeFeatureSet::from_feature(RuntimeFeature::HipPagedDecodeAttention);
+        let geometry = OperationGeometry::PagedCausalGqaRead {
+            q_heads: 16,
+            kv_heads: 4,
+            head_dim: 256,
+            value_dim: 256,
+            block_size: 3,
+            cache_blocks: 1,
+            sigmoid_gate: true,
+        };
+        let canonical = qwen35_m1_production_registry().unwrap();
+        let registry = rebind_paged_geometry_registry(
+            &canonical,
+            OperationKind::PagedCausalGqaRead,
+            geometry,
+            &device,
+        )
+        .unwrap();
+        let plans = ResolvedPhasePlans::resolve_m1(
+            &registry,
+            OperationKind::PagedCausalGqaRead,
+            geometry,
+            &device,
+            u64::MAX,
+        )
+        .unwrap();
+        for phase in [
+            ExecutionPhase::ColdPrefill,
+            ExecutionPhase::CachedPrefixPrefill,
+            ExecutionPhase::Decode,
+        ] {
+            let trace = plans.for_phase(phase).trace();
+            assert_eq!(trace.phase, phase);
+            assert_eq!(
+                trace.implementation_id,
+                "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa"
+            );
+            assert_eq!(trace.geometry, geometry);
         }
     }
 

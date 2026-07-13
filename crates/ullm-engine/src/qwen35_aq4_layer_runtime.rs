@@ -10,6 +10,7 @@ use crate::backend_operation_registry::{
     PagedDecodeSplitConfig, QueryScale, ResolvedOperationPlan, ResolvedPhasePlans, RuntimeFeature,
     RuntimeFeatureSet, paged_decode_split_production_registry, qwen35_m1_production_registry,
     qwen35_paged_chunk_operation_request, qwen35_paged_chunk_production_registry,
+    rebind_paged_geometry_registry,
 };
 use crate::decoder::PagedDecodeShape;
 use crate::execution_batch::ExecutionPhase;
@@ -1451,8 +1452,15 @@ impl PackageSelfAttnResidentStepLayer {
         // Always retain the existing Qwen3.5 M1 registry as the canonical single reader. The
         // generic split resolves only a typed alternate, so prefill/chunk audit IDs remain
         // the historical `.m1-gqa` entries below the split threshold.
+        let canonical_registry = qwen35_m1_production_registry()?;
+        let single_registry = rebind_paged_geometry_registry(
+            &canonical_registry,
+            OperationKind::PagedCausalGqaRead,
+            read_geometry,
+            &device,
+        )?;
         let single_operation_plans = ResolvedPhasePlans::resolve_m1(
-            &qwen35_m1_production_registry()?,
+            &single_registry,
             OperationKind::PagedCausalGqaRead,
             read_geometry,
             &device,
@@ -1517,8 +1525,15 @@ impl PackageSelfAttnResidentStepLayer {
                 },
             ),
         };
+        let writer_canonical_registry = qwen35_m1_production_registry()?;
+        let writer_registry = rebind_paged_geometry_registry(
+            &writer_canonical_registry,
+            writer_kind,
+            writer_geometry,
+            &device,
+        )?;
         let writer_operation_plans = ResolvedPhasePlans::resolve_m1(
-            &qwen35_m1_production_registry()?,
+            &writer_registry,
             writer_kind,
             writer_geometry,
             &device,
