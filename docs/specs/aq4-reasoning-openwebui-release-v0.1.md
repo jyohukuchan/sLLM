@@ -62,7 +62,9 @@ the gates from the raw records and reject incomplete or identity-mismatched
 evidence. Temporary evidence uses an `.incomplete` name and is atomically
 renamed only after validation.
 
-The release evidence validator is `tools/validate-generic-reasoning-release.py`.
+The release evidence schema is defined in
+`docs/specs/generic-reasoning-release-evidence-v0.1.md`, and its validator is
+`tools/validate-generic-reasoning-release.py`.
 It validates the hash-only record shape, recomputes token accounting and usage
 cross-checks, rejects budget overshoot and forbidden body or credential fields,
 and reports structural validity separately from production-gate eligibility.

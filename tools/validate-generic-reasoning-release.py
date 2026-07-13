@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -15,6 +16,8 @@ SCHEMA_VERSION = "ullm.generic_reasoning_release_evidence.v1"
 VALIDATOR_SCHEMA_VERSION = "ullm.generic_reasoning_release_validator.v1"
 REQUIRED_MODES = {"disabled", "budget-32", "budget-128", "budget-256", "unbounded"}
 HASH_FIELDS = {"manifest_sha256", "worker_binary_sha256", "tokenizer_sha256", "prompt_sha256"}
+COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+IMAGE_DIGEST_RE = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*)?@sha256:[0-9a-f]{64}\Z")
 FORBIDDEN_KEYS = {
     "prompt",
     "response",
@@ -66,6 +69,16 @@ def _text(value: Any, label: str) -> None:
         raise ValidationError(f"{label} is invalid")
 
 
+def _commit(value: Any, label: str) -> None:
+    if not isinstance(value, str) or COMMIT_RE.fullmatch(value) is None:
+        raise ValidationError(f"{label} is not a lowercase Git commit")
+
+
+def _image_digest(value: Any, label: str) -> None:
+    if not isinstance(value, str) or IMAGE_DIGEST_RE.fullmatch(value) is None:
+        raise ValidationError(f"{label} is not a content-addressed image")
+
+
 def _integer(value: Any, label: str, *, minimum: int = 0) -> None:
     if type(value) is not int or value < minimum:
         raise ValidationError(f"{label} is invalid")
@@ -90,7 +103,7 @@ def _validate_identity(identity: Any) -> None:
         raise ValidationError("release evidence identity fields differ")
     for field in HASH_FIELDS - {"prompt_sha256"}:
         _hash(identity[field], f"identity.{field}")
-    _text(identity["openwebui_image"], "identity.openwebui_image")
+    _image_digest(identity["openwebui_image"], "identity.openwebui_image")
 
 
 def _validate_case(case: Any) -> str:
@@ -222,8 +235,11 @@ def validate(path: Path) -> dict[str, Any]:
         raise ValidationError("release evidence status is invalid")
     if document["production_activation_performed"] is not False:
         raise ValidationError("release evidence claims activation")
-    _text(document["source_commit"], "source_commit")
-    _text(document["active_promotion_source_commit"], "active_promotion_source_commit")
+    _commit(document["source_commit"], "source_commit")
+    _commit(
+        document["active_promotion_source_commit"],
+        "active_promotion_source_commit",
+    )
     if type(document["source_commit_aligned"]) is not bool:
         raise ValidationError("source alignment is invalid")
     _validate_identity(document["identity"])

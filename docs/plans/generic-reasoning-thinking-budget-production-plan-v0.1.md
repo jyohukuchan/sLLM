@@ -762,6 +762,7 @@ Rust/manifest test:
 - `tests/test_generate_served_model.py`
 - `tests/test_validate_served_model.py`
 - `tests/test_openwebui_configure.py`
+- `docs/specs/generic-reasoning-release-evidence-v0.1.md`
 
 OpenWebUI/release tool:
 

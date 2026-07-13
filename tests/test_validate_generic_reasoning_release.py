@@ -77,8 +77,8 @@ def evidence() -> dict:
         "schema_version": TOOL.SCHEMA_VERSION,
         "status": "incomplete",
         "production_activation_performed": False,
-        "source_commit": "head",
-        "active_promotion_source_commit": "old",
+        "source_commit": "1" * 40,
+        "active_promotion_source_commit": "2" * 40,
         "source_commit_aligned": False,
         "identity": {
             "manifest_sha256": "b" * 64,
@@ -108,6 +108,8 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         lambda value: value["cases"][1]["raw"].__setitem__("budget_overshoot", 1),
         lambda value: value["cases"][2]["raw"].__setitem__("usage_completion_tokens", 1),
         lambda value: value["cases"][0].__setitem__("response", "secret"),
+        lambda value: value["identity"].__setitem__("openwebui_image", "latest"),
+        lambda value: value.__setitem__("source_commit", "head"),
     ],
 )
 def test_validator_rejects_invalid_release_records(tmp_path: Path, mutation) -> None:
