@@ -1,0 +1,75 @@
+{
+  "schema_version": "ullm.aq4_register_bm8_crossover.v1",
+  "rows": [
+    {
+      "width": 2,
+      "legacy_tps": 15.898587741964679,
+      "bm8_tps": 14.10941492898287,
+      "ratio": 0.8874634123470447,
+      "tokens_match": true
+    },
+    {
+      "width": 3,
+      "legacy_tps": 76.9369492468488,
+      "bm8_tps": 76.81463632225656,
+      "ratio": 0.9984102186817961,
+      "tokens_match": true
+    },
+    {
+      "width": 4,
+      "legacy_tps": 87.73447669488259,
+      "bm8_tps": 87.0286666118241,
+      "ratio": 0.9919551570870695,
+      "tokens_match": true
+    },
+    {
+      "width": 8,
+      "legacy_tps": 102.48176766086875,
+      "bm8_tps": 79.73634380557249,
+      "ratio": 0.7780539468194468,
+      "tokens_match": true
+    },
+    {
+      "width": 16,
+      "legacy_tps": 107.97887271879026,
+      "bm8_tps": 130.13503600279304,
+      "ratio": 1.2051897998759828,
+      "tokens_match": true
+    },
+    {
+      "width": 32,
+      "legacy_tps": 112.58679800029242,
+      "bm8_tps": 133.06601922507906,
+      "ratio": 1.1818971814504704,
+      "tokens_match": true
+    },
+    {
+      "width": 64,
+      "legacy_tps": 115.33146255129026,
+      "bm8_tps": 133.99738753668356,
+      "ratio": 1.1618459054665347,
+      "tokens_match": true
+    },
+    {
+      "width": 96,
+      "legacy_tps": 116.05529432737862,
+      "bm8_tps": 134.17595741411648,
+      "ratio": 1.1561381856102277,
+      "tokens_match": true
+    },
+    {
+      "width": 127,
+      "legacy_tps": 115.76307224846171,
+      "bm8_tps": 134.27299691107086,
+      "ratio": 1.1598948982874382,
+      "tokens_match": true
+    },
+    {
+      "width": 128,
+      "legacy_tps": 115.66828040756005,
+      "bm8_tps": 133.89950339310337,
+      "ratio": 1.157616443516798,
+      "tokens_match": true
+    }
+  ]
+}

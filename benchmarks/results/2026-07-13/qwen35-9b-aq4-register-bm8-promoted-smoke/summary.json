@@ -1,0 +1,59 @@
+{
+  "schema_version": "ullm.aq4_register_bm8_promoted_summary.v1",
+  "decision": "promoted",
+  "sources": {
+    "resident": "resident-evidence.json",
+    "source_commit": "67740a09f6f42c961f9b7c0960987d62e72ecc6c",
+    "resident_sha256": "ca2dd86d3c826ec0714fb63d2d6c69701e3f139d420cafec03af3cc13a7ec9bb",
+    "full_native_sha256": "c339c0930d7b7eacbb46a41686ede76efd451c1019cad7f205c3e77b75fa0e56",
+    "m1_sha256": "8971f3a74b2761c461f6541ec567932fb944a0cadefd59ce004ef4e9ecac1303",
+    "profile_sha256": "d889b195369d3bee263aebdce0ad83ed3a1909770628137dd497210fb079c307"
+  },
+  "verification": {
+    "experimental_env": false,
+    "case_count": 7,
+    "tokens_progress_outcome_reset_exact_vs_full_native_and_m1": true,
+    "resident_verified": true,
+    "clean_shutdown": true,
+    "child_process_checks": 67,
+    "child_processes_clean": true,
+    "audit_equations_valid_all": true,
+    "self_chunk_ids_coverage_unchanged": true,
+    "coverage_complete_all": true,
+    "canonical_guard_present": "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+    "canonical_profile_has_experimental_env": false
+  },
+  "cases": [
+    {"prompt_tokens": 1, "promoted_tps": 26.38870424126116, "full_native_tps": 22.011351033614524, "m1_tps": 24.57970245041199, "over_full_native": 1.1988679931986812, "over_m1": 1.0735973836338628, "physical": 256, "token_equivalent": 256, "self_chunk_ids_each": 0},
+    {"prompt_tokens": 8, "promoted_tps": 49.983267476421425, "full_native_tps": 47.474999427926264, "m1_tps": 80.44274641873166, "over_full_native": 1.0528334508419124, "over_m1": 0.6213520758756997, "physical": 256, "token_equivalent": 704, "self_chunk_ids_each": 8},
+    {"prompt_tokens": 127, "promoted_tps": 136.75037768892997, "full_native_tps": 116.60856947691124, "m1_tps": 78.96369607140491, "over_full_native": 1.172730085810776, "over_m1": 1.7318132824642605, "physical": 256, "token_equivalent": 8320, "self_chunk_ids_each": 8},
+    {"prompt_tokens": 128, "promoted_tps": 135.76964321031818, "full_native_tps": 116.56120198487007, "m1_tps": 78.84927554536128, "over_full_native": 1.1647927517763708, "over_m1": 1.721888276985007, "physical": 256, "token_equivalent": 8384, "self_chunk_ids_each": 8},
+    {"prompt_tokens": 129, "promoted_tps": 134.95808895378903, "full_native_tps": 115.97169595507725, "m1_tps": 78.72802270628469, "over_full_native": 1.1637157484190481, "over_m1": 1.7142319127877146, "physical": 320, "token_equivalent": 8448, "self_chunk_ids_each": 8},
+    {"prompt_tokens": 255, "promoted_tps": 135.13770404058383, "full_native_tps": 115.84745069221073, "m1_tps": 76.55566791325714, "over_full_native": 1.1665142671082542, "over_m1": 1.765221409781235, "physical": 320, "token_equivalent": 16512, "self_chunk_ids_each": 16},
+    {"prompt_tokens": 256, "promoted_tps": 134.72644207483881, "full_native_tps": 115.59014817906564, "m1_tps": 76.40568001950298, "over_full_native": 1.1655529835131653, "over_m1": 1.763304011435395, "physical": 320, "token_equivalent": 16576, "self_chunk_ids_each": 16}
+  ],
+  "audit_contract": {
+    "physical": "64*prefill_chunks + 64*3 decode steps",
+    "token_equivalent": "64*prompt_tokens + 64*3 decode steps",
+    "self_chunk_ids": [
+      "hip.paged-kv-write-chunk-f32.m2-m128",
+      "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128"
+    ]
+  },
+  "rocprof": {
+    "baseline_db": {"path": "/tmp/ullm-rocprof-full-native/full-native_results.db", "sha256": "cb0f19001374bf9c877c8de9552642b10055665cb8ce4a87d2befaedb262a35e"},
+    "promoted_db": {"path": "/tmp/ullm-rocprof-bm8-promoted/bm8-promoted_results.db", "sha256": "2a9c13b7aa7dc001dd12b3b458274ab99319684c113331725315fdd21b73df84"},
+    "top_kernels_selected": {
+      "baseline": [
+        {"kernel": "ullm_aq4_matvec_batch_f32_kernel.kd", "calls": 249, "total_us": 1010487.923, "percent": 91.74479468632349}
+      ],
+      "promoted": [
+        {"kernel": "ullm_aq4_gemm_register_bm8_f32_kernel.kd", "calls": 201, "total_us": 761549.001, "percent": 79.39965472703892},
+        {"kernel": "ullm_aq4_matvec_batch_f32_kernel.kd", "calls": 49, "total_us": 117133.115, "percent": 12.212384069692376},
+        {"kernel": "ullm_linear_attn_recurrent_f32_kernel.kd", "calls": 26, "total_us": 58268.813, "percent": 6.075148975941466},
+        {"kernel": "ullm_paged_causal_gqa_chunk_f32_kernel.kd", "calls": 10, "total_us": 5676.021, "percent": 0.5917860925976346}
+      ]
+    },
+    "limitations": "rocprof overhead is included; each database is a single p128 request profile and is not a throughput distribution"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": "ullm.aq4_register_bm8_experimental_summary.v1",
+  "decision": "promoted_later_through_typed_registry",
+  "sources": {
+    "resident": "resident-evidence.json",
+    "crossover": "crossover.json",
+    "source_commit": "e1c9877d5452b19695cdd63bda26e0a737bafb66",
+    "resident_sha256": "8d54f47f545f0f29584c625df1e6aab258ac5651ae7b7bd102178c3f5c2c97f9",
+    "crossover_sha256": "c68372fbc26393ea3427d1f360475515bfd3034dd73f8adc308ee186b55b20d8"
+  },
+  "experimental_environment": {
+    "ULLM_EXPERIMENTAL_HIP_AQ4_REGISTER_BM": "8"
+  },
+  "verification": {
+    "json_parse_all": true,
+    "resident_verified": true,
+    "tokens_match_all_crossover_rows": true,
+    "raw_files_unchanged": true
+  },
+  "crossover": {
+    "cold_first_candidate": {
+      "width": 8,
+      "legacy_tps": 102.48176766086875,
+      "bm8_tps": 79.73634380557249,
+      "bm8_over_legacy": 0.7780539468194468,
+      "interpretation": "first BM8 candidate invocation includes cold compile/setup overhead and is excluded from steady comparison"
+    },
+    "steady_rows": [
+      {"width": 16, "legacy_tps": 107.97887271879026, "bm8_tps": 130.13503600279304, "bm8_over_legacy": 1.2051897998759828},
+      {"width": 32, "legacy_tps": 112.58679800029242, "bm8_tps": 133.06601922507906, "bm8_over_legacy": 1.1818971814504704},
+      {"width": 64, "legacy_tps": 115.33146255129026, "bm8_tps": 133.99738753668356, "bm8_over_legacy": 1.1618459054665347},
+      {"width": 96, "legacy_tps": 116.05529432737862, "bm8_tps": 134.17595741411648, "bm8_over_legacy": 1.1561381856102277},
+      {"width": 127, "legacy_tps": 115.76307224846171, "bm8_tps": 134.27299691107086, "bm8_over_legacy": 1.1598948982874382},
+      {"width": 128, "legacy_tps": 115.66828040756005, "bm8_tps": 133.89950339310337, "bm8_over_legacy": 1.157616443516798}
+    ]
+  },
+  "limitations": [
+    "The crossover file contains one observation per width, not a repeated-run distribution.",
+    "Manual or repeated observations not present in the raw files are intentionally excluded."
+  ]
+}
