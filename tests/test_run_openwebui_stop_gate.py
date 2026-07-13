@@ -308,6 +308,9 @@ def final_fixture(interim, screenshot: bytes):
 
 
 class JsonAndLifecycleTests(unittest.TestCase):
+    def test_observer_bound_covers_the_100_chat_soak_schedule(self):
+        self.assertGreaterEqual(TOOL.MAX_OBSERVER_EVENTS, 5 * 100 + 5)
+
     def test_strict_json_and_lifecycle_reject_mutation(self):
         with self.assertRaisesRegex(TOOL.StopGateError, "duplicate"):
             TOOL.strict_json_object(b'{"a":1,"a":2}', "fixture")

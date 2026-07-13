@@ -40,7 +40,10 @@ SCREENSHOT_NAME = "openwebui-stop-before.png"
 BROWSER_SUMMARY_NAME = "openwebui-stop-summary.json"
 MAX_JSON_LINE_BYTES = 1024 * 1024
 MAX_DATAGRAM_BYTES = 64 * 1024
-MAX_OBSERVER_EVENTS = 256
+# A 100-chat OpenWebUI soak can emit up to five lifecycle events per request
+# before journal correlation is sealed. Keep a bounded margin for the fixed
+# smoke and future lifecycle additions without making the observer unbounded.
+MAX_OBSERVER_EVENTS = 4096
 MAX_JOURNAL_LINES = 4096
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 MAX_BROWSER_LINES = 4
