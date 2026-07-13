@@ -43,8 +43,10 @@ must finish before the receipt is published:
 
 The runner pins `HIP_VISIBLE_DEVICES=1`, matching the deployed WRX80 isolation,
 for both the resident v2 worker and the sequential legacy comparison. It does
-not stop or restart the active services; the operator must provide the
-exclusive window first.
+not stop or restart the active services. Before starting either process, it
+also runs `rocm-smi --showpids --json` and fails closed if the target R9700 has
+positive-VRAM processes, so the operator must provide the exclusive window
+first.
 
 ```bash
 PRODUCT=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
