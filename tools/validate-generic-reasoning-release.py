@@ -8,6 +8,7 @@ import json
 import math
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -96,6 +97,19 @@ def _number(value: Any, label: str, *, minimum: float = 0.0) -> None:
         raise ValidationError(f"{label} is invalid")
     if not math.isfinite(float(value)) or float(value) < minimum:
         raise ValidationError(f"{label} is invalid")
+
+
+def _percentile(values: list[float], probability: float) -> float:
+    if not values or not 0.0 <= probability <= 1.0:
+        raise ValidationError("percentile input is invalid")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * probability
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
 
 
 def _validate_identity(identity: Any) -> None:
@@ -273,6 +287,23 @@ def validate(path: Path) -> dict[str, Any]:
         ids.add(case["id"])
         modes.add(mode)
     reasons: list[str] = []
+    timing_fields = (
+        "prefill_tokens_per_second",
+        "first_reasoning_token_ms",
+        "first_answer_token_ms",
+        "reasoning_decode_tokens_per_second",
+        "answer_decode_tokens_per_second",
+        "decode_tokens_per_second",
+        "latency_ms",
+    )
+    timing_samples: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for case in cases:
+        for field in timing_fields:
+            value = case["timing"][field]
+            if value is not None:
+                timing_samples[case["mode"]][field].append(float(value))
     if not computed_source_alignment:
         reasons.append("source commit is not aligned with the active promotion source")
     missing_modes = sorted(REQUIRED_MODES - modes)
@@ -306,6 +337,18 @@ def validate(path: Path) -> dict[str, Any]:
         "gate_eligible": not reasons,
         "case_count": len(cases),
         "observed_modes": sorted(modes),
+        "timing_percentiles": {
+            mode: {
+                field: {
+                    "count": len(values),
+                    "p50": _percentile(values, 0.50),
+                    "p95": _percentile(values, 0.95),
+                    "p99": _percentile(values, 0.99),
+                }
+                for field, values in sorted(fields.items())
+            }
+            for mode, fields in sorted(timing_samples.items())
+        },
         "reasons": reasons,
     }
 

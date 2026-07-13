@@ -100,6 +100,12 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
     assert report["gate_eligible"] is False
     assert report["case_count"] == 5
     assert set(report["observed_modes"]) == TOOL.REQUIRED_MODES
+    assert report["timing_percentiles"]["budget-128"]["latency_ms"] == {
+        "count": 1,
+        "p50": 100.0,
+        "p95": 100.0,
+        "p99": 100.0,
+    }
 
 
 @pytest.mark.parametrize(
