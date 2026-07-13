@@ -28,6 +28,10 @@ GENERATOR = load_module(
     "test_run_aq4_resident_promotion_evidence_generator",
     ROOT / "tools/generate-served-model.py",
 )
+RECEIPT = load_module(
+    "test_run_aq4_resident_promotion_evidence_receipt",
+    ROOT / "tools/write-aq4-resident-promotion-receipt.py",
+)
 
 
 FAKE_WORKER = r'''#!/usr/bin/env python3
@@ -259,3 +263,54 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> Non
         "raw-p0001-g0004",
         "raw-p0008-g0004",
     ]
+
+
+def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(tmp_path: Path) -> None:
+    worker = tmp_path / "fake-worker-v2-pipeline"
+    worker.write_text(FAKE_WORKER, encoding="utf-8")
+    worker.chmod(0o755)
+    profile, production_receipt = write_fixture_profile(tmp_path, worker)
+    product = production_receipt.parent
+    evidence_path = product / "resident-promotion-reasoning-v2.json"
+    receipt_path = product / "promotion-reasoning-v2.json"
+    value = json.loads(profile.read_text(encoding="ascii"))
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "fixture-thinking-v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20, 21],
+        "forced_end_token_ids": [20, 21],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 1, "medium": 1, "high": 1},
+        "max_budget_tokens": 1,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    value["promotion"].update(
+        {
+            "receipt": os.fspath(receipt_path),
+            "required_schema_version": "ullm.aq4_resident_promotion.v1",
+            "evidence_from_receipt": ["evidence", "path"],
+            "evidence_sha256_from_receipt": ["evidence", "sha256"],
+        }
+    )
+    profile.write_text(json.dumps(value) + "\n", encoding="ascii")
+
+    evidence = TOOL.run_evidence(
+        profile,
+        evidence_path,
+        worker,
+        worker,
+        ready_timeout_seconds=5.0,
+        request_timeout_seconds=5.0,
+        source_commit="fixture-v2-pipeline",
+    )
+    assert evidence["verified"] is True
+    receipt = RECEIPT.write_receipt(profile, evidence_path, receipt_path)
+    assert receipt["schema_version"] == "ullm.aq4_resident_promotion.v1"
+    manifest = GENERATOR.materialize(profile)
+    assert manifest["schema_version"] == "ullm.served_model.v2"
+    assert manifest["worker"]["protocol"] == "ullm.worker.v2"
+    assert manifest["promotion"]["source_commit"] == "fixture-v2-pipeline"
