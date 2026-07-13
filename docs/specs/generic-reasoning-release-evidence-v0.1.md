@@ -121,3 +121,11 @@ structurally valid but incomplete artifact is expected during a measurement run
 and must produce `gate_eligible=false`. `--require-complete` exits with status
 `2` for that condition and with status `1` for structural or security
 violations.
+
+After the six release artifacts have been staged in one directory,
+`tools/prepare-generic-reasoning-release-bundle.py` records their relative
+hashes and the hashes of the previous active manifest, systemd unit, and
+environment file. It invokes `tools/validate-generic-reasoning-release-bundle.py`
+before publishing. The producer rejects symlinked or out-of-directory artifact
+paths and `--status complete` requires the recomputed bundle gate to be
+eligible.

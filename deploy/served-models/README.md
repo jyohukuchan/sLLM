@@ -80,13 +80,35 @@ correctness by itself.
 For the final hash-only handoff, keep the generic release evidence, its
 validator report, the OpenWebUI browser evidence and report, and the promotion
 evidence and receipt beside a `ullm.generic_reasoning_release_bundle.v1`
-document. Validate that document with:
+document. Stage those six artifacts and the rollback source files under one
+bundle directory, then assemble and validate the bundle with:
 
 Measured case records can be assembled with
 `tools/prepare-generic-reasoning-release-evidence.py`; it computes the current
 Git/worktree and artifact identities and runs the release validator before
 publishing. Use `--status incomplete` during collection and reserve
 `--status complete` for the final aligned, clean, gate-eligible run.
+
+`tools/prepare-generic-reasoning-release-bundle.py` hashes the staged artifacts
+and the previous active manifest, systemd unit, and environment file. It writes
+only relative, non-symlink references and invokes the bundle validator before
+publishing. The six artifact paths must be below the output bundle directory.
+
+```bash
+uv run --project services/openai-gateway python \
+  tools/prepare-generic-reasoning-release-bundle.py \
+  --release-evidence /path/to/release.json \
+  --release-validator /path/to/release-validator.json \
+  --browser-evidence /path/to/browser.json \
+  --browser-validator /path/to/browser-validator.json \
+  --promotion-evidence /path/to/promotion-evidence.json \
+  --promotion-receipt /path/to/promotion-receipt.json \
+  --rollback-manifest /path/to/previous-active.json \
+  --systemd-unit /path/to/ullm-openai.service \
+  --environment-file /path/to/ullm-openai.env \
+  --output /path/to/release-bundle.json \
+  --status incomplete
+```
 
 ```bash
 uv run --project services/openai-gateway python \

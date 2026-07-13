@@ -675,44 +675,51 @@ busy contractの正否は直接Gatewayの429と`Retry-After`で判定し、UI表
 #### Gateway
 
 - `services/openai-gateway/src/ullm_openai_gateway/schemas.py`
-  - `reasoning_effort`は既知fieldだが`ALWAYS_UNSUPPORTED`である。
-  - assistant messageは現在`role`と`content`だけである。
+  - `reasoning_effort`と`thinking_budget_tokens`を排他的に正規化し、served-modelの
+    `ReasoningDialect`からbudget、history policy、予約tokenを解決する。
+  - assistant messageは`reasoning_content`を受理し、既定のhistory policyは`omit`である。
 - `services/openai-gateway/src/ullm_openai_gateway/app.py`
-  - stream/non-streamとも全生成tokenを`content`へdecodeする。
-  - `completion_tokens`は生成token ID列の長さである。
-  - reasoning field別decoderとusageを追加する主要境界である。
+  - stream/non-streamの双方でtoken IDからreasoningとanswerを分離し、
+    `reasoning_content`、`content`、usage detailsを生成する。
+  - v2 workerの`reasoning_tokens`と`forced_end_tokens`をraw splitと突き合わせ、
+    不一致をfail closedにする。v1 requestの既存経路は維持する。
 - `services/openai-gateway/src/ullm_openai_gateway/tokenizer.py`
-  - `enable_thinking`はmanifest読込値で固定され、request単位で切り替えられない。
+  - v2 requestの`enable_thinking`をtemplate adapterへ渡し、assistant履歴の
+    `reasoning_content`はdialectのpolicyに従ってomitまたはpreserveする。
 - `services/openai-gateway/src/ullm_openai_gateway/worker.py`
-  - worker requestはprompt、max generation、temperature、top-p、seed等だけを持つ。
+  - v2 worker requestへ汎用reasoning controlを渡し、v1 requestの形状は維持する。
 
 #### Tokenizer
 
-現行Qwen3.5 tokenizerのplanning auditでは次を確認した。
+現行Qwen3.5 tokenizerのplanning auditとv2 fixtureでは次を確認した。
 
 - chat templateは`enable_thinking`を受け付ける。
 - `enable_thinking=false`では空のthinking区間をpromptへ形成する。
 - thinking有効時はassistant generation prefixでreasoning開始区切りを形成する。
 - assistant履歴の`reasoning_content`を扱える。
 - 観測したthinking開始token IDは`248068`、終了token IDは`248069`だった。
-- これらは`skip_special_tokens=True`だけでは除去されない。
+- これらは`skip_special_tokens=True`だけでは除去されない。v2 candidate profileの
+  dialectへtoken列として結合し、engineへhard-codeしていない。
 
 token IDはengineへhard-codeしない。active tokenizerのhashとtokenization結果をPhase 0で再検証し、
 manifestのReasoningDialectへtoken列として保存する。別modelでは複数token区切りを許容する。
 
 #### Workerとengine
 
-- `crates/ullm-engine/src/worker_protocol.rs`は量子化非依存のprotocol入口である。
-- `crates/ullm-engine/src/sq8_worker_protocol.rs`の`ullm.worker.v1`はunknown fieldを厳格に拒否する。
-- `crates/ullm-engine/src/inference_api.rs`の`InferenceRequest`はreasoning制御を持たない。
-- `crates/ullm-engine/src/worker_driver.rs`の終了理由はStop、Length、Cancelledが中心である。
-- `crates/ullm-engine/src/qwen35_aq4_session.rs`はsampled tokenをprepareし、flush callback後に
-  commitする。forced close queueを追加できる境界だが、現在はreasoning phaseを持たずtop-1を採用する。
+- `crates/ullm-engine/src/worker_protocol.rs`は量子化非依存のv1/v2 protocol入口であり、v2の
+  reasoning request、strict response、nested array、duplicate/unknown fieldを検証する。
+- `crates/ullm-engine/src/inference_api.rs`とworker runtimeは汎用reasoning controlと
+  `ReasoningUsage`を扱う。v1はreasoningなしの既存形状を維持する。
+- `crates/ullm-engine/src/worker_driver.rs`はStop、Length、Cancelledに加えてreasoningの
+  release accountingをlifecycle evidenceへ渡す。
+- `crates/ullm-engine/src/qwen35_aq4_session.rs`はsampled tokenとforced tokenを同じ
+  prepare、publish、commit境界で処理する。`crates/ullm-engine/src/reasoning.rs`の
+  `ReasoningState`がbudget到達、自然終了、EOS、cancel/resetを量子化非依存に管理する。
 - `crates/ullm-engine/src/session_worker_backend.rs`はsessionとworker protocolを接続する。
 
-AQ4 sessionの`publish_prepared`周辺には生成token計数を二重加算している可能性があるという監査上の
-疑いがある。これは確定bugではない。Phase 0でraw event、session counter、Gateway usageを突き合わせ、
-reasoning計数実装より前に結論を出す。
+AQ4 sessionの`publish_prepared`周辺にあった生成token計数の監査上の疑いは、offlineのv2 worker、Gateway
+usage、lifecycle accounting回帰では二重加算なしを確認している。実modelのsame-HEAD GPU evidenceで
+最終的なruntime identityと実測値を結合する作業は未完了である。
 
 #### Manifestとdeploy
 
@@ -724,8 +731,10 @@ reasoning計数実装より前に結論を出す。
 - OpenWebUI config: `deploy/openwebui/configure.py`
 - systemd unit: `deploy/systemd/ullm-openai.service`
 
-v1はPython、Rust、generator、validator、OpenWebUI設定の各所でexact-key schemaとして扱われる。
-v2追加時は一箇所だけを拡張せず、全loader、generator、validator、fixtureを同じcommit seriesで更新する。
+v1はPython、Rust、generator、validator、OpenWebUI設定の各所でexact-key schemaとして扱われ、
+v2も全loader、generator、validator、fixtureへ反映済みである。
+`qwen35-9b-aq4-reasoning.profile.json`と隔離v2 workerの候補経路は用意済みだが、v2 promotion
+receipt未発行のためactive manifestへは結合されていない。
 
 ### 13.8 現在の性能context
 
@@ -746,6 +755,11 @@ reasoning実装では次の2種類の性能変化を分離する。
 `benchmarks/results/2026-07-12/qwen35-9b-aq4-resident-openwebui-v0.1/summary.json`にある。
 EOS、length、cancel、post-cancel、browserの基準候補だが、reasoning別TTFT、最初の可視回答時刻、
 budget overshoot、field別stream一致を記録しない。Phase 0で新しいraw evidence schemaを作る。
+
+Hash-only generic release evidenceのschema、validator、bundle validator、assemblerは実装済みである。
+assemblerはserved-model契約、worker/tokenizer/manifest identity、Git worktree状態を検証してから
+atomic publishする。ただし、実測case、v2 promotion receipt、same-HEAD GPU evidenceがないため、
+`status=complete`のproduction-gate eligible artifactはまだ生成できない。
 
 ### 13.9 再利用するtestとtool
 
@@ -780,6 +794,8 @@ OpenWebUI/release tool:
 - `tools/validate-generic-reasoning-phase0-http-baseline.py`
 - `tools/validate-generic-reasoning-release.py`
 - `tools/prepare-generic-reasoning-release-evidence.py`
+- `tools/prepare-generic-reasoning-release-bundle.py`
+- `tools/validate-generic-reasoning-release-bundle.py`
 - `tools/validate-openwebui-reasoning-browser-smoke.py`
 - `tools/write-aq4-resident-promotion-receipt.py`
 - `deploy/openwebui/browser-reasoning-smoke.cjs`
@@ -805,7 +821,8 @@ gateをAQ4 reasoning用に明示的に分ける。既存SQ8 evidenceを名前だ
 8. root権限でrepository、`/etc`、live nftablesの8000/8001 ruleを照合する。
 9. OpenWebUI DBを変更する前にbackupを作る。DB内容を標準出力やjournalへdumpしない。
 10. reasoning未指定のAPI/SSE/token/performance baselineを、本文を保存しないmachine-readable evidenceとして取得する。
-11. v0.2仕様とfixtureを先に固定し、production serviceを変更する前にunit testを通す。
+11. v0.2仕様とfixture、Gateway/worker/AQ4のoffline契約は固定済みである。production serviceを
+    変更する前に、candidate identityを実機evidenceへ結合し、unit testと全production gateを通す。
 12. 実装中は小さい意味単位でcommitし、各commitの検証結果をjournalへ記録する。
 
 現行サービスは稼働中である。userが明示した停止は正常操作として扱い、停止履歴だけを障害と判定しない。
