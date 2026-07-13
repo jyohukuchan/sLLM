@@ -820,7 +820,16 @@ class WorkerSupervisor:
             raise WorkerProtocolError("worker release event violates counters")
         if active.request.reasoning is not None:
             dialect = self._config.reasoning_dialect
-            if dialect is None or forced_end_tokens > len(dialect.forced_end_sequence):
+            budget = active.request.reasoning.budget_tokens
+            if (
+                dialect is None
+                or forced_end_tokens > len(dialect.forced_end_sequence)
+                or (budget is not None and reasoning_tokens > budget)
+                or (
+                    outcome != "cancelled"
+                    and forced_end_tokens not in {0, len(dialect.forced_end_sequence)}
+                )
+            ):
                 raise WorkerProtocolError("worker release reasoning accounting is invalid")
         if outcome in {"stop", "length"} and active.terminal_outcome != outcome:
             raise WorkerProtocolError(
