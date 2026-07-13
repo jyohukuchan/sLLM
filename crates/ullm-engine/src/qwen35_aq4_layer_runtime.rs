@@ -6,9 +6,9 @@ use crate::aq4_package_runtime::{
 use crate::backend_operation_registry::{
     DeviceCapabilities, ExecutableOperation, OperationBackend, OperationExecutionRecord,
     OperationExecutionStatus, OperationGeometry, OperationKind, OperationResolutionTrace,
-    PagedDecodeDispatchPlans, PagedDecodeSourceTile, PagedDecodeSplitConfig, QueryScale,
-    ResolvedOperationPlan, ResolvedPhasePlans, RuntimeFeature, RuntimeFeatureSet,
-    paged_decode_split_production_registry, qwen35_m1_production_registry,
+    PAGED_DECODE_SPLIT_PRODUCTION_CONFIG, PagedDecodeDispatchPlans, PagedDecodeSourceTile,
+    PagedDecodeSplitConfig, QueryScale, ResolvedOperationPlan, ResolvedPhasePlans, RuntimeFeature,
+    RuntimeFeatureSet, paged_decode_split_production_registry, qwen35_m1_production_registry,
     qwen35_paged_chunk_operation_request, qwen35_paged_chunk_production_registry,
 };
 use crate::decoder::PagedDecodeShape;
@@ -101,6 +101,28 @@ fn read_paged_decode_split_experiment_config()
     let source_tile = read("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE")?;
     let min_cache_len = read("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN")?;
     parse_paged_decode_split_experiment_config(source_tile.as_deref(), min_cache_len.as_deref())
+}
+
+/// Selects the typed split configuration for a resident layer load.
+///
+/// An explicitly configured experiment is always preferred for diagnostics. Without the complete
+/// experiment pair, only a probed split runtime feature enables the measured production config;
+/// ordinary profiles and CPU devices therefore remain single-reader only.
+fn select_paged_decode_split_config(
+    experimental: Option<PagedDecodeSplitExperimentConfig>,
+    device: &DeviceCapabilities,
+) -> Option<PagedDecodeSplitConfig> {
+    experimental
+        .map(|config| PagedDecodeSplitConfig {
+            source_tile: config.source_tile,
+            min_cache_len: config.min_cache_len,
+        })
+        .or_else(|| {
+            device
+                .runtime_features
+                .contains(RuntimeFeature::HipPagedDecodeAttentionSplit)
+                .then_some(PAGED_DECODE_SPLIT_PRODUCTION_CONFIG)
+        })
 }
 
 fn paged_decode_split_workspace_capacity_bytes(
@@ -1427,7 +1449,7 @@ impl PackageSelfAttnResidentStepLayer {
             sigmoid_gate: use_paged_decode_sigmoid_gate,
         };
         // Always retain the existing Qwen3.5 M1 registry as the canonical single reader. The
-        // experiment resolves only its typed split alternate, so prefill/chunk audit IDs remain
+        // generic split resolves only a typed alternate, so prefill/chunk audit IDs remain
         // the historical `.m1-gqa` entries below the split threshold.
         let single_operation_plans = ResolvedPhasePlans::resolve_m1(
             &qwen35_m1_production_registry()?,
@@ -1439,16 +1461,15 @@ impl PackageSelfAttnResidentStepLayer {
         .map_err(|error| {
             format!("self-attn resident backend operation preflight failed: {error}")
         })?;
-        let paged_decode_dispatch_plans = if let Some(config) = split_experiment_config {
+        let split_config = select_paged_decode_split_config(split_experiment_config, &device);
+        let paged_decode_dispatch_plans = if let Some(config) = split_config {
             let split_registry = paged_decode_split_production_registry(
                 read_geometry,
                 &device,
                 config.source_tile,
             )
             .map_err(|error| {
-                format!(
-                    "self-attn resident experimental paged decode split registry preflight failed: {error}"
-                )
+                format!("self-attn resident paged decode split registry preflight failed: {error}")
             })?;
             let split_operation_plans = ResolvedPhasePlans::resolve_paged_decode(
                 &split_registry,
@@ -1457,22 +1478,15 @@ impl PackageSelfAttnResidentStepLayer {
                 device.workspace_capacity_bytes,
             )
             .map_err(|error| {
-                format!(
-                    "self-attn resident experimental paged decode split preflight failed: {error}"
-                )
+                format!("self-attn resident paged decode split preflight failed: {error}")
             })?;
             PagedDecodeDispatchPlans::new(
                 single_operation_plans,
                 Some(split_operation_plans),
-                Some(PagedDecodeSplitConfig {
-                    source_tile: config.source_tile,
-                    min_cache_len: config.min_cache_len,
-                }),
+                Some(config),
             )
             .map_err(|error| {
-                format!(
-                    "self-attn resident experimental paged decode split dispatch preflight failed: {error}"
-                )
+                format!("self-attn resident paged decode split dispatch preflight failed: {error}")
             })?
         } else {
             PagedDecodeDispatchPlans::single_only(single_operation_plans)
@@ -2266,7 +2280,8 @@ impl PackageSelfAttnResidentStepLayer {
         traces
     }
 
-    /// Returns the load-time split configuration, if the explicit experiment is enabled.
+    /// Returns the load-time split configuration, whether selected by diagnostic override or the
+    /// production runtime feature.
     pub fn paged_decode_split_config(
         &self,
     ) -> Option<crate::backend_operation_registry::PagedDecodeSplitConfig> {
@@ -7404,6 +7419,53 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
+    fn paged_decode_split_config_prefers_experiment_then_production_feature() {
+        let mut device = DeviceCapabilities {
+            device_id: 1,
+            backend: OperationBackend::Hip,
+            architecture: Some("gfx1201".into()),
+            device_name: Some("test HIP device".into()),
+            abi_version: ullm_runtime_sys::abi_version(),
+            runtime_features: RuntimeFeatureSet::from_feature(
+                RuntimeFeature::HipPagedDecodeAttentionSplit,
+            ),
+            workspace_capacity_bytes: u64::MAX,
+        };
+        assert_eq!(
+            select_paged_decode_split_config(None, &device),
+            Some(PAGED_DECODE_SPLIT_PRODUCTION_CONFIG)
+        );
+        assert_eq!(
+            select_paged_decode_split_config(
+                Some(PagedDecodeSplitExperimentConfig {
+                    source_tile: PagedDecodeSourceTile::Tokens256,
+                    min_cache_len: 1,
+                }),
+                &device,
+            ),
+            Some(PagedDecodeSplitConfig {
+                source_tile: PagedDecodeSourceTile::Tokens256,
+                min_cache_len: 1,
+            })
+        );
+        device.runtime_features = RuntimeFeatureSet::EMPTY;
+        assert_eq!(select_paged_decode_split_config(None, &device), None);
+        assert_eq!(
+            select_paged_decode_split_config(
+                Some(PagedDecodeSplitExperimentConfig {
+                    source_tile: PagedDecodeSourceTile::Tokens128,
+                    min_cache_len: 17,
+                }),
+                &device,
+            ),
+            Some(PagedDecodeSplitConfig {
+                source_tile: PagedDecodeSourceTile::Tokens128,
+                min_cache_len: 17,
+            })
+        );
+    }
+
+    #[test]
     fn paged_decode_split_workspace_capacity_uses_generic_runtime_formula() {
         assert_eq!(
             paged_decode_split_workspace_capacity_bytes(
@@ -7497,7 +7559,7 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
-    fn experimental_dispatch_composes_qwen_canonical_single_with_generic_split() {
+    fn production_dispatch_composes_qwen_canonical_single_with_generic_split() {
         let device = DeviceCapabilities {
             device_id: 0,
             backend: OperationBackend::Hip,
@@ -7555,12 +7617,10 @@ mod linear_attn_step_state_tests {
             let dispatch = PagedDecodeDispatchPlans::new(
                 single,
                 Some(split),
-                Some(PagedDecodeSplitConfig {
-                    source_tile: PagedDecodeSourceTile::Tokens128,
-                    min_cache_len: 1,
-                }),
+                Some(PAGED_DECODE_SPLIT_PRODUCTION_CONFIG),
             )
             .unwrap();
+            assert_eq!(dispatch.config, Some(PAGED_DECODE_SPLIT_PRODUCTION_CONFIG));
             for phase in [
                 ExecutionPhase::ColdPrefill,
                 ExecutionPhase::CachedPrefixPrefill,
@@ -7578,6 +7638,14 @@ mod linear_attn_step_state_tests {
                         .for_phase(phase)
                         .trace()
                         .implementation_id,
+                    expected_split
+                );
+                assert_eq!(
+                    dispatch.for_cache_len(phase, 255).trace().implementation_id,
+                    expected_single
+                );
+                assert_eq!(
+                    dispatch.for_cache_len(phase, 256).trace().implementation_id,
                     expected_split
                 );
             }

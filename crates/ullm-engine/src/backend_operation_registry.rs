@@ -4557,6 +4557,16 @@ pub struct PagedDecodeSplitConfig {
     pub min_cache_len: usize,
 }
 
+/// Measured production configuration for the generic typed paged-GQA split operation.
+///
+/// The tile and threshold come from the AQ4/RDNA4 crossover measurement (tile 128, threshold
+/// 256); this is a generic operation configuration and is selected by a probed runtime feature,
+/// never by model name.
+pub const PAGED_DECODE_SPLIT_PRODUCTION_CONFIG: PagedDecodeSplitConfig = PagedDecodeSplitConfig {
+    source_tile: PagedDecodeSourceTile::Tokens128,
+    min_cache_len: 256,
+};
+
 /// Single and optional split plans resolved once for all execution phases.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagedDecodeDispatchPlans {
@@ -4876,6 +4886,17 @@ mod tests {
                 assert!(split_descriptor.id.ends_with(suffix));
             }
         }
+    }
+
+    #[test]
+    fn production_split_config_uses_measured_tile_and_crossover_threshold() {
+        assert_eq!(
+            PAGED_DECODE_SPLIT_PRODUCTION_CONFIG,
+            PagedDecodeSplitConfig {
+                source_tile: PagedDecodeSourceTile::Tokens128,
+                min_cache_len: 256,
+            }
+        );
     }
 
     #[test]
