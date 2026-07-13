@@ -29,6 +29,10 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 ACTIVATOR = load_module("test_activate_served_model_tool", TOOL_PATH)
+BUNDLE_FIXTURES = load_module(
+    "test_activate_served_model_bundle_fixtures",
+    ROOT / "tests/test_validate_generic_reasoning_release_bundle.py",
+)
 
 
 def activation_directory(tmp_path: Path) -> tuple[Path, Path]:
@@ -208,6 +212,72 @@ def test_v2_activation_rejects_rollback_identity_mismatch(
         )
 
     assert active.read_bytes() == b"known-old-active"
+
+
+def test_v2_activation_accepts_real_complete_bundle_binding(tmp_path: Path) -> None:
+    root, candidate = v2_activation_directory(tmp_path)
+    active = root / "active.json"
+    old = b"known-old-active"
+    active.write_bytes(old)
+    unit = root / "ullm-openai.service"
+    environment = root / "ullm-openai.env"
+    unit.write_bytes(b"[Service]\nExecStart=/usr/bin/ullm\n")
+    environment.write_bytes(b"ULLM_TEST=1\n")
+
+    bundle = BUNDLE_FIXTURES.make_bundle(root)
+    summary = ACTIVATOR.load_validator().validation_summary(candidate)
+    release_path = root / "release.json"
+    release = json.loads(release_path.read_text(encoding="ascii"))
+    release["identity"]["manifest_sha256"] = summary["manifest_sha256"]
+    release["identity"]["worker_binary_sha256"] = summary["worker"]["binary_sha256"]
+    release["source_commit"] = "1" * 40
+    release["active_promotion_source_commit"] = "1" * 40
+    release["source_commit_aligned"] = True
+    BUNDLE_FIXTURES.write_json(release_path, release)
+    release_report = BUNDLE_FIXTURES.RELEASE_FIXTURE.TOOL.validate(release_path)
+    release_report_path = root / "release-validator.json"
+    BUNDLE_FIXTURES.write_json(release_report_path, release_report)
+
+    promotion_path = root / "promotion-evidence.json"
+    promotion = json.loads(promotion_path.read_text(encoding="ascii"))
+    promotion["source_commit"] = "1" * 40
+    promotion["worker_binary_sha256"] = summary["worker"]["binary_sha256"]
+    promotion["ephemeral_bundle"]["manifest_sha256"] = summary["manifest_sha256"]
+    BUNDLE_FIXTURES.write_json(promotion_path, promotion)
+    receipt_path = root / "promotion-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+    receipt["source_commit"] = "1" * 40
+    receipt["evidence"]["sha256"] = BUNDLE_FIXTURES.digest(promotion_path)
+    BUNDLE_FIXTURES.write_json(receipt_path, receipt)
+
+    bundle_document = json.loads(bundle.read_text(encoding="ascii"))
+    bundle_document["source_commit"] = "1" * 40
+    bundle_document["active_promotion_source_commit"] = "1" * 40
+    bundle_document["identity"] = release["identity"]
+    bundle_document["rollback_target"] = {
+        "manifest_sha256": hashlib.sha256(old).hexdigest(),
+        "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
+        "environment_sha256": hashlib.sha256(environment.read_bytes()).hexdigest(),
+    }
+    for name, path in (
+        ("release_evidence", release_path),
+        ("release_validator", release_report_path),
+        ("promotion_evidence", promotion_path),
+        ("promotion_receipt", receipt_path),
+    ):
+        bundle_document["artifacts"][name]["sha256"] = BUNDLE_FIXTURES.digest(path)
+    BUNDLE_FIXTURES.write_json(bundle, bundle_document)
+
+    result = ACTIVATOR.activate(
+        candidate,
+        active,
+        release_bundle=bundle,
+        systemd_unit=unit,
+        environment_file=environment,
+    )
+
+    assert result.model_id == "ullm-qwen3.5-9b-aq4"
+    assert active.read_bytes() == candidate.read_bytes()
 
 
 @pytest.mark.parametrize("failed_stage", ["check", "reconcile", "final-check"])
