@@ -31,6 +31,12 @@ worker under `target/reasoning-v2/`, but the current v1 promotion receipt is
 still incompatible with it; generation must fail until matching v2 resident
 evidence and a new receipt exist.
 
+Rebuild that isolated candidate worker from the current checkout with:
+
+```bash
+cargo build --release --bin ullm-aq4-worker --target-dir target/reasoning-v2
+```
+
 Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release
 gates. Generation proves file and contract identity; it does not prove runtime
