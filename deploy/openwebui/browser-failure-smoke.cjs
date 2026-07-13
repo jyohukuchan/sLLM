@@ -7,8 +7,8 @@ const path = require("node:path");
 const SUMMARY_SCHEMA = "ullm.openwebui.failure_smoke.v1";
 const CONTROL_SCHEMA = "ullm.openwebui.failure_control.v1";
 const BROWSER_CASE = "post_header_worker_failure";
-const MODEL_ID = "ullm-qwen3-14b-sq8";
-const MODEL_LABEL = "uLLM Qwen3 14B SQ8";
+const MODEL_ID = process.env.ULLM_MODEL_ID || "ullm-qwen3-14b-sq8";
+const MODEL_LABEL = process.env.ULLM_MODEL_NAME || "uLLM Qwen3 14B SQ8";
 const SCREENSHOT_FILE = "browser/post-header-failure.png";
 const ASSISTANT_SELECTOR = ".chat-assistant";
 const INPUT_SELECTOR = "#chat-input";
@@ -1020,6 +1020,8 @@ module.exports = {
   CONTROL_SCHEMA,
   EXPECTED_ACTION_SEQUENCE,
   FAILURE_PROMPT,
+  MODEL_ID,
+  MODEL_LABEL,
   RECOVERY_MARKER,
   RECOVERY_PROMPT,
   SCREENSHOT_FILE,

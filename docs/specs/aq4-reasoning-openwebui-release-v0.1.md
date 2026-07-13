@@ -43,6 +43,12 @@ patch. The following behavior is required:
   Gateway and worker to ready state;
 - a direct Gateway 429 busy response and `Retry-After` remain unchanged.
 
+The existing OpenWebUI Stop, worker-failure, and 20-chat soak gates retain
+their SQ8 defaults but accept `ULLM_MODEL_ID` and `ULLM_MODEL_NAME` overrides.
+The v2 candidate gates MUST set these to
+`ullm-qwen3.5-9b-aq4` and `uLLM Qwen3.5 9B AQ4`; this keeps the gate logic
+shared without silently measuring the SQ8 model.
+
 ## 3. Evidence layout
 
 Evidence is written under a dated directory as streaming JSONL or bounded JSON.

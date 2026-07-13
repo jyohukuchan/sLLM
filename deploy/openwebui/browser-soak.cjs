@@ -13,8 +13,8 @@ const CASE_PREFIX = "openwebui_soak_chat_";
 const SMOKE_CASE = "openwebui_smoke";
 const SMOKE_MARKER = "OPENWEBUI_SMOKE_OK";
 const SOAK_CHAT_COUNT = 20;
-const MODEL_ID = "ullm-qwen3-14b-sq8";
-const MODEL_LABEL = "uLLM Qwen3 14B SQ8";
+const MODEL_ID = process.env.ULLM_MODEL_ID || "ullm-qwen3-14b-sq8";
+const MODEL_LABEL = process.env.ULLM_MODEL_NAME || "uLLM Qwen3 14B SQ8";
 const ASSISTANT_SELECTOR = ".chat-assistant";
 const INPUT_SELECTOR = "#chat-input";
 const STOP_SELECTOR =
@@ -771,6 +771,7 @@ module.exports = {
   COMBINED_SUMMARY_SCHEMA,
   EXPECTED_ACTION_SEQUENCE,
   MODEL_ID,
+  MODEL_LABEL,
   RUN_CASE,
   SMOKE_CASE,
   SMOKE_MARKER,

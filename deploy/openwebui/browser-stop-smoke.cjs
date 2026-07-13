@@ -7,8 +7,8 @@ const path = require("node:path");
 const SUMMARY_SCHEMA = "ullm.openwebui.stop_smoke.v1";
 const CONTROL_SCHEMA = "ullm.openwebui.stop_gateway_release_control.v1";
 const BROWSER_CASE = "openwebui_stop_after_visible_content";
-const MODEL_ID = "ullm-qwen3-14b-sq8";
-const MODEL_LABEL = "uLLM Qwen3 14B SQ8";
+const MODEL_ID = process.env.ULLM_MODEL_ID || "ullm-qwen3-14b-sq8";
+const MODEL_LABEL = process.env.ULLM_MODEL_NAME || "uLLM Qwen3 14B SQ8";
 const SCREENSHOT_FILE = "browser/openwebui-stop-before.png";
 const ASSISTANT_SELECTOR = ".chat-assistant";
 const INPUT_SELECTOR = "#chat-input";
@@ -886,6 +886,8 @@ module.exports = {
   BROWSER_CASE,
   CONTROL_SCHEMA,
   EXPECTED_ACTION_SEQUENCE,
+  MODEL_ID,
+  MODEL_LABEL,
   SCREENSHOT_FILE,
   STOP_SELECTOR,
   SUMMARY_SCHEMA,
