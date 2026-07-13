@@ -993,7 +993,7 @@
     }
 
     #[test]
-    fn first_hip_aq4_register_batch_matches_cpu_for_production_shapes_when_available() {
+    fn first_hip_aq4_register_and_forced_bm8_match_cpu_when_available() {
         let selected_device = (1..device_count().unwrap()).find(|&device_index| {
             device_info(device_index)
                 .map(|info| info.gcn_arch_name == "gfx1201")
@@ -1012,21 +1012,18 @@
             (seed as f32) / (u32::MAX as f32)
         };
         for register_bm in [4_usize, 8_usize] {
-            let register_value = if register_bm == 4 { "4" } else { "8" };
             let _lds = ExperimentalEnvGuard::new("ULLM_EXPERIMENTAL_HIP_AQ4_TILED_GEMM", None);
             let _register = ExperimentalEnvGuard::new(
                 "ULLM_EXPERIMENTAL_HIP_AQ4_REGISTER_BM",
-                Some(register_value),
+                if register_bm == 4 { Some("4") } else { None },
             );
             for &batch_count in &[4_usize, 8, 16, 32, 64, 127, 128] {
                 for &rows in &[32_usize, 64] {
                     for &cols in &[128_usize, 256] {
-                        let expected_dispatch = if batch_count < register_bm {
+                        let expected_dispatch = if register_bm == 8 || batch_count < register_bm {
                             Aq4MatvecBatchDispatchKind::Legacy
-                        } else if register_bm == 4 {
-                            Aq4MatvecBatchDispatchKind::RegisterBm4
                         } else {
-                            Aq4MatvecBatchDispatchKind::RegisterBm8
+                            Aq4MatvecBatchDispatchKind::RegisterBm4
                         };
                         assert_eq!(
                             aq4_matvec_batch_dispatch_kind_for_shape(
@@ -1173,24 +1170,45 @@
                     .unwrap();
             }
             hip_stream.synchronize().unwrap();
-            aq4_matvec_batch_f32(
-                &hip_index,
-                &hip_scale,
-                &hip_codebook,
-                &hip_scale_values,
-                &hip_input,
-                hip_row_scale.as_ref(),
-                scale_count,
-                16,
-                tensor_scale,
-                row_scale_count,
-                rows,
-                cols,
-                batch_count,
-                &mut hip_output,
-                Some(&mut hip_stream),
-            )
-            .unwrap();
+            if register_bm == 8 && batch_count >= 8 {
+                aq4_matvec_batch_register_bm8_f32(
+                    &hip_index,
+                    &hip_scale,
+                    &hip_codebook,
+                    &hip_scale_values,
+                    &hip_input,
+                    hip_row_scale.as_ref(),
+                    scale_count,
+                    16,
+                    tensor_scale,
+                    row_scale_count,
+                    rows,
+                    cols,
+                    batch_count,
+                    &mut hip_output,
+                    Some(&mut hip_stream),
+                )
+                .unwrap();
+            } else {
+                aq4_matvec_batch_f32(
+                    &hip_index,
+                    &hip_scale,
+                    &hip_codebook,
+                    &hip_scale_values,
+                    &hip_input,
+                    hip_row_scale.as_ref(),
+                    scale_count,
+                    16,
+                    tensor_scale,
+                    row_scale_count,
+                    rows,
+                    cols,
+                    batch_count,
+                    &mut hip_output,
+                    Some(&mut hip_stream),
+                )
+                .unwrap();
+            }
             hip_stream.synchronize().unwrap();
             let mut hip_output_bytes = vec![0_u8; batch_count * rows * std::mem::size_of::<f32>()];
             hip_output

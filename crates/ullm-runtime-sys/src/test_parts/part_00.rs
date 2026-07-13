@@ -4402,6 +4402,115 @@
     }
 
     #[test]
+    fn cpu_aq4_register_bm8_batch_rejects_without_fallback_or_output_mutation() {
+        let rows = 32_usize;
+        let cols = 128_usize;
+        let batch_count = 8_usize;
+        let elements = rows * cols;
+        let groups = elements / 16;
+        let scale_count = 7_usize;
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(elements / 2).unwrap();
+        let mut scale = context.alloc_buffer(groups).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(scale_count * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(batch_count * cols * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(batch_count * rows * std::mem::size_of::<f32>())
+            .unwrap();
+        index.zero(0, elements / 2, Some(&mut stream)).unwrap();
+        scale.zero(0, groups, Some(&mut stream)).unwrap();
+        codebook
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&(0..16).map(|value| value as f32).collect::<Vec<_>>()),
+                Some(&mut stream),
+            )
+            .unwrap();
+        scale_values
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .zero(
+                0,
+                batch_count * cols * std::mem::size_of::<f32>(),
+                Some(&mut stream),
+            )
+            .unwrap();
+        let sentinel = vec![0x5a_u8; batch_count * rows * std::mem::size_of::<f32>()];
+        output.copy_from_host(0, &sentinel, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        for (group_size, test_rows, test_cols, test_batch) in [
+            (8_usize, rows, cols, batch_count),
+            (16, rows - 1, cols, batch_count),
+            (16, rows, cols - 1, batch_count),
+            (16, rows, cols, batch_count - 1),
+        ] {
+            let error = aq4_matvec_batch_register_bm8_f32(
+                &index,
+                &scale,
+                &codebook,
+                &scale_values,
+                &input,
+                None,
+                scale_count,
+                group_size,
+                0.75,
+                0,
+                test_rows,
+                test_cols,
+                test_batch,
+                &mut output,
+                Some(&mut stream),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("requires") || error.contains("at least 8"),
+                "{error}"
+            );
+        }
+
+        let error = aq4_matvec_batch_register_bm8_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            scale_count,
+            16,
+            0.75,
+            0,
+            rows,
+            cols,
+            batch_count,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap_err();
+        assert!(error.contains("HIP gfx1201"), "{error}");
+
+        let mut output_bytes = vec![0_u8; sentinel.len()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(output_bytes, sentinel);
+    }
+
+    #[test]
     fn cpu_aq4_matvec_top1_f32_writes_partial_maximum() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();

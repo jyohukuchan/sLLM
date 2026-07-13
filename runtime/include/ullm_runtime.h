@@ -242,6 +242,28 @@ ullm_status ullm_runtime_aq4_matvec_batch_f32(
     ullm_runtime_stream *stream);
 
 /*
+ * Directly launches the cached gfx1201/group16 register BM8 kernel. This additive ABI has no
+ * environment dependency and never falls back to another implementation. Unsupported backend
+ * or geometry is rejected before launch, so ULLM_RUNTIME_ABI_VERSION remains 1.
+ */
+ullm_status ullm_runtime_aq4_matvec_batch_register_bm8_f32(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const ullm_runtime_buffer *scale_values_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *row_scale_buffer,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t row_scale_count,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/*
  * Classifies the active AQ4 batch path, including explicit experiment environment gates,
  * without launching or timing a kernel.
  * device_index follows ullm_runtime_context_create: 0 is CPU and HIP devices start at 1.
