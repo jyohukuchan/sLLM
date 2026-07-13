@@ -4,8 +4,9 @@ use crate::aq4_package_runtime::{
     PackageAq4ResidentMatvec, PackageResidentSharedBufferRegistry, package_resident_f32_buffer,
 };
 use crate::backend_operation_registry::{
-    DeviceCapabilities, OperationBackend, OperationExecutionRecord, OperationExecutionStatus,
-    OperationGeometry, OperationKind, OperationResolutionTrace, QueryScale, ResolvedOperationPlan,
+    DeviceCapabilities, ExecutableOperation, OperationBackend, OperationExecutionRecord,
+    OperationExecutionStatus, OperationGeometry, OperationKind, OperationResolutionTrace,
+    PagedDecodeDispatchPlans, PagedDecodeSourceTile, QueryScale, ResolvedOperationPlan,
     ResolvedPhasePlans, RuntimeFeature, RuntimeFeatureSet, qwen35_m1_production_registry,
     qwen35_paged_chunk_operation_request, qwen35_paged_chunk_production_registry,
 };
@@ -23,6 +24,100 @@ fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PagedDecodeSplitExperimentConfig {
+    source_tile: PagedDecodeSourceTile,
+    min_cache_len: usize,
+}
+
+/// Parses the opt-in split paged-decode configuration without consulting process state.
+///
+/// The two variables are deliberately all-or-nothing: an incomplete configuration must fail at
+/// load time instead of silently changing the dispatch path. `usize::from_str` provides the
+/// decimal-only and overflow checks required by the public environment contract.
+fn parse_paged_decode_split_experiment_config(
+    source_tile: Option<&str>,
+    min_cache_len: Option<&str>,
+) -> Result<Option<PagedDecodeSplitExperimentConfig>, String> {
+    match (source_tile, min_cache_len) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(concat!(
+            "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE is required when ",
+            "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN is set",
+        )
+        .into()),
+        (Some(_), None) => Err(concat!(
+            "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN is required when ",
+            "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE is set",
+        )
+        .into()),
+        (Some(tile), Some(min_cache_len)) => {
+            let source_tile = match tile {
+                "128" => PagedDecodeSourceTile::Tokens128,
+                "256" => PagedDecodeSourceTile::Tokens256,
+                other => {
+                    return Err(format!(
+                        "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE must be exactly 128 or 256, got {other:?}"
+                    ));
+                }
+            };
+            if min_cache_len.is_empty() || !min_cache_len.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(format!(
+                    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN must be a decimal usize greater than zero, got {min_cache_len:?}"
+                ));
+            }
+            let min_cache_len = min_cache_len.parse::<usize>().map_err(|_| {
+                format!(
+                    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN must be a decimal usize greater than zero, got {min_cache_len:?}"
+                )
+            })?;
+            if min_cache_len == 0 {
+                return Err(
+                    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN must be greater than zero"
+                        .into(),
+                );
+            }
+            Ok(Some(PagedDecodeSplitExperimentConfig {
+                source_tile,
+                min_cache_len,
+            }))
+        }
+    }
+}
+
+fn read_paged_decode_split_experiment_config()
+-> Result<Option<PagedDecodeSplitExperimentConfig>, String> {
+    fn read(name: &'static str) -> Result<Option<String>, String> {
+        match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8")),
+        }
+    }
+    let source_tile = read("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE")?;
+    let min_cache_len = read("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN")?;
+    parse_paged_decode_split_experiment_config(source_tile.as_deref(), min_cache_len.as_deref())
+}
+
+fn paged_decode_split_workspace_capacity_bytes(
+    q_heads: usize,
+    value_dim: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    source_tile: PagedDecodeSourceTile,
+) -> Result<usize, String> {
+    let cache_capacity = block_size
+        .checked_mul(cache_blocks)
+        .ok_or_else(|| "paged decode split workspace cache capacity overflows".to_string())?;
+    ullm_runtime_sys::paged_decode_attn_split_workspace_bytes(
+        q_heads,
+        value_dim,
+        cache_capacity,
+        source_tile.as_usize(),
+    )
 }
 
 fn format_u64_shape(shape: &[u64]) -> String {
@@ -950,7 +1045,7 @@ pub struct PackageSelfAttnResidentStepWeights {
     block_size: usize,
     cache_blocks: usize,
     pub q_projection_layout: PackageSelfAttnQProjectionLayout,
-    operation_plans: ResolvedPhasePlans,
+    paged_decode_dispatch_plans: PagedDecodeDispatchPlans,
     writer_operation_plans: ResolvedPhasePlans,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     q_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
@@ -1161,6 +1256,7 @@ pub struct PackageSelfAttnResidentStepLayer {
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    paged_decode_split_workspace: Option<ullm_runtime_sys::RuntimeBuffer>,
 }
 
 impl std::ops::Deref for PackageSelfAttnResidentStepLayer {
@@ -1295,6 +1391,7 @@ impl PackageSelfAttnResidentStepLayer {
                 preflight_q_layout,
                 PackageSelfAttnQProjectionLayout::Qwen35Gated
             ) && !env_flag_enabled("ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN");
+        let split_experiment_config = read_paged_decode_split_experiment_config()?;
         let device = DeviceCapabilities::probe_m1_runtime_context(context, stream)?;
         device.require_features(RuntimeFeatureSet::from_feature(
             RuntimeFeature::HipPagedDecodeAttention,
@@ -1319,24 +1416,48 @@ impl PackageSelfAttnResidentStepLayer {
                 RuntimeFeature::HipPagedKvWrite,
             ))?;
         }
-        let operation_plans = ResolvedPhasePlans::resolve_m1(
-            &qwen35_m1_production_registry()?,
-            OperationKind::PagedCausalGqaRead,
-            OperationGeometry::PagedCausalGqaRead {
-                q_heads,
-                kv_heads,
-                head_dim,
-                value_dim,
-                block_size,
-                cache_blocks,
-                sigmoid_gate: use_paged_decode_sigmoid_gate,
-            },
-            &device,
-            device.workspace_capacity_bytes,
-        )
-        .map_err(|error| {
-            format!("self-attn resident backend operation preflight failed: {error}")
-        })?;
+        let read_geometry = OperationGeometry::PagedCausalGqaRead {
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            block_size,
+            cache_blocks,
+            sigmoid_gate: use_paged_decode_sigmoid_gate,
+        };
+        let paged_decode_dispatch_plans = if let Some(config) = split_experiment_config {
+            let dispatch = PagedDecodeDispatchPlans::resolve(
+                read_geometry,
+                &device,
+                config.source_tile,
+                config.min_cache_len,
+                device.workspace_capacity_bytes,
+            )
+            .map_err(|error| {
+                format!(
+                    "self-attn resident experimental paged decode split preflight failed: {error}"
+                )
+            })?;
+            if dispatch.split.is_none() {
+                return Err(
+                    "self-attn resident experimental paged decode split was requested, but no split plan was resolved (verify ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1 and workspace capacity)"
+                        .into(),
+                );
+            }
+            dispatch
+        } else {
+            let single_operation_plans = ResolvedPhasePlans::resolve_m1(
+                &qwen35_m1_production_registry()?,
+                OperationKind::PagedCausalGqaRead,
+                read_geometry,
+                &device,
+                device.workspace_capacity_bytes,
+            )
+            .map_err(|error| {
+                format!("self-attn resident backend operation preflight failed: {error}")
+            })?;
+            PagedDecodeDispatchPlans::single_only(single_operation_plans)
+        };
         let (writer_kind, writer_geometry) = match preflight_q_layout {
             PackageSelfAttnQProjectionLayout::Plain => (
                 OperationKind::PagedKvWrite,
@@ -1657,6 +1778,30 @@ impl PackageSelfAttnResidentStepLayer {
         let layer_output_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident layer output: {err}"))?;
+        let paged_decode_split_workspace = if let Some(config) = paged_decode_dispatch_plans.config
+        {
+            let bytes = paged_decode_split_workspace_capacity_bytes(
+                q_heads,
+                value_dim,
+                block_size,
+                cache_blocks,
+                config.source_tile,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to size self-attn resident paged decode split workspace for shape q_heads={q_heads}, value_dim={value_dim}, block_size={block_size}, cache_blocks={cache_blocks}, tile={} threshold={}: {error}",
+                    config.source_tile.as_usize(), config.min_cache_len
+                )
+            })?;
+            Some(context.alloc_buffer(bytes).map_err(|error| {
+                format!(
+                    "failed to allocate self-attn resident paged decode split workspace for shape q_heads={q_heads}, value_dim={value_dim}, block_size={block_size}, cache_blocks={cache_blocks}, tile={} threshold={}: {error}",
+                    config.source_tile.as_usize(), config.min_cache_len
+                )
+            })?)
+        } else {
+            None
+        };
 
         block_table_buffer
             .copy_from_host(0, &encode_u32_to_bytes(block_table), Some(stream))
@@ -1748,7 +1893,7 @@ impl PackageSelfAttnResidentStepLayer {
             block_size,
             cache_blocks,
             q_projection_layout,
-            operation_plans,
+            paged_decode_dispatch_plans,
             writer_operation_plans,
             input_norm_weight_buffer,
             q_norm_weight_buffer,
@@ -1790,6 +1935,7 @@ impl PackageSelfAttnResidentStepLayer {
             post_normed_buffer,
             mlp_activation_buffer,
             layer_output_buffer,
+            paged_decode_split_workspace,
         })
     }
 
@@ -1801,7 +1947,10 @@ impl PackageSelfAttnResidentStepLayer {
     ) -> Result<Self, String> {
         validate_resolved_device_context(
             context,
-            weights.operation_plans.for_phase(ExecutionPhase::Decode),
+            weights
+                .paged_decode_dispatch_plans
+                .single
+                .for_phase(ExecutionPhase::Decode),
         )?;
         if block_table.len() != weights.cache_blocks {
             return Err(format!(
@@ -1912,6 +2061,41 @@ impl PackageSelfAttnResidentStepLayer {
         let layer_output_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident layer output: {err}"))?;
+        let paged_decode_split_workspace = if let Some(config) =
+            weights.paged_decode_dispatch_plans.config
+        {
+            let bytes = paged_decode_split_workspace_capacity_bytes(
+                weights.q_heads,
+                weights.value_dim,
+                weights.block_size,
+                weights.cache_blocks,
+                config.source_tile,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to size self-attn resident shared-weight paged decode split workspace for shape q_heads={}, value_dim={}, block_size={}, cache_blocks={}, tile={} threshold={}: {error}",
+                    weights.q_heads,
+                    weights.value_dim,
+                    weights.block_size,
+                    weights.cache_blocks,
+                    config.source_tile.as_usize(),
+                    config.min_cache_len
+                )
+            })?;
+            Some(context.alloc_buffer(bytes).map_err(|error| {
+                format!(
+                    "failed to allocate self-attn resident shared-weight paged decode split workspace for shape q_heads={}, value_dim={}, block_size={}, cache_blocks={}, tile={} threshold={}: {error}",
+                    weights.q_heads,
+                    weights.value_dim,
+                    weights.block_size,
+                    weights.cache_blocks,
+                    config.source_tile.as_usize(),
+                    config.min_cache_len
+                )
+            })?)
+        } else {
+            None
+        };
 
         block_table_buffer
             .copy_from_host(0, &encode_u32_to_bytes(block_table), Some(stream))
@@ -1962,6 +2146,7 @@ impl PackageSelfAttnResidentStepLayer {
             post_normed_buffer,
             mlp_activation_buffer,
             layer_output_buffer,
+            paged_decode_split_workspace,
         })
     }
 
@@ -2053,10 +2238,33 @@ impl PackageSelfAttnResidentStepLayer {
     }
 
     pub fn operation_resolution_traces(&self) -> Vec<OperationResolutionTrace> {
-        let mut traces = Vec::with_capacity(6);
+        let mut traces = Vec::with_capacity(9);
         traces.extend(self.weights.writer_operation_plans.traces());
-        traces.extend(self.weights.operation_plans.traces());
+        traces.extend(self.weights.paged_decode_dispatch_plans.single.traces());
+        if let Some(split) = &self.weights.paged_decode_dispatch_plans.split {
+            traces.extend(split.traces());
+        }
         traces
+    }
+
+    /// Returns the load-time split configuration, if the explicit experiment is enabled.
+    pub fn paged_decode_split_config(
+        &self,
+    ) -> Option<crate::backend_operation_registry::PagedDecodeSplitConfig> {
+        self.weights.paged_decode_dispatch_plans.config
+    }
+
+    /// Reports whether the already-resolved dispatch selects split attention at `cache_len`.
+    pub fn paged_decode_uses_split_for_cache_len(&self, cache_len: usize) -> bool {
+        matches!(
+            self.weights
+                .paged_decode_dispatch_plans
+                .for_cache_len(ExecutionPhase::Decode, cache_len)
+                .trace()
+                .executable,
+            ExecutableOperation::HipPagedDecodeAttentionSplitF32(_)
+                | ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(_)
+        )
     }
 
     pub fn read_output(
@@ -2527,45 +2735,139 @@ impl PackageSelfAttnResidentStepLayer {
             .ok_or_else(|| format!("{label} self-attn written length overflows"))?;
 
         let component_started = Instant::now();
-        let read_plan = self.weights.operation_plans.for_phase(self.operation_phase);
-        self.last_operation_executions[1] =
-            Some(read_plan.execution_record(OperationExecutionStatus::Started));
-        let result = if self.weights.use_paged_decode_sigmoid_gate {
-            read_plan
-                .attempt()
-                .start()
-                .execute_paged_decode_attention_sigmoid_gate_f32(
-                    &self.q_rope_buffer,
-                    &self.q_gate_buffer,
-                    &self.k_cache_buffer,
-                    &self.v_cache_buffer,
-                    &self.block_table_buffer,
-                    self.written_len,
-                    &mut self.attention_output_buffer,
-                    stream,
-                )
-        } else {
-            read_plan
-                .attempt()
-                .start()
-                .execute_paged_decode_attention_f32(
-                    &self.q_rope_buffer,
-                    &self.k_cache_buffer,
-                    &self.v_cache_buffer,
-                    &self.block_table_buffer,
-                    self.written_len,
-                    &mut self.attention_output_buffer,
-                    stream,
-                )
+        let read_plan = self
+            .weights
+            .paged_decode_dispatch_plans
+            .for_cache_len(self.operation_phase, self.written_len);
+        let selected_executable = read_plan.trace().executable;
+        let split_tile = match selected_executable {
+            ExecutableOperation::HipPagedDecodeAttentionSplitF32(tile)
+            | ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(tile) => Some(tile),
+            _ => None,
         };
-        self.last_operation_executions[1] = Some(read_plan.execution_record(if result.is_ok() {
-            OperationExecutionStatus::Succeeded
+        let split_gated = matches!(
+            selected_executable,
+            ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(_)
+        );
+        let result = if let Some(source_tile) = split_tile {
+            let config = self.weights.paged_decode_dispatch_plans.config;
+            if config.is_none_or(|config| {
+                config.source_tile != source_tile || self.written_len < config.min_cache_len
+            }) {
+                self.request_state.mark_execution_failed();
+                return Err(format!(
+                    "{label} self-attn split paged decode selected without matching configuration"
+                ));
+            }
+            if split_gated != self.weights.use_paged_decode_sigmoid_gate {
+                self.request_state.mark_execution_failed();
+                return Err(format!(
+                    "{label} self-attn split paged decode gate/layout mismatch"
+                ));
+            }
+            let Some(workspace) = self.paged_decode_split_workspace.as_mut() else {
+                self.request_state.mark_execution_failed();
+                return Err(format!(
+                    "{label} self-attn split paged decode selected without resident workspace"
+                ));
+            };
+            self.last_operation_executions[1] =
+                Some(read_plan.execution_record(OperationExecutionStatus::Started));
+            let result = if self.weights.use_paged_decode_sigmoid_gate {
+                read_plan
+                    .attempt()
+                    .start()
+                    .execute_paged_decode_attention_split_sigmoid_gate_f32(
+                        &self.q_rope_buffer,
+                        &self.q_gate_buffer,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        self.written_len,
+                        source_tile,
+                        workspace,
+                        &mut self.attention_output_buffer,
+                        stream,
+                    )
+            } else {
+                read_plan
+                    .attempt()
+                    .start()
+                    .execute_paged_decode_attention_split_f32(
+                        &self.q_rope_buffer,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        self.written_len,
+                        source_tile,
+                        workspace,
+                        &mut self.attention_output_buffer,
+                        stream,
+                    )
+            };
+            self.last_operation_executions[1] =
+                Some(read_plan.execution_record(if result.is_ok() {
+                    OperationExecutionStatus::Succeeded
+                } else {
+                    OperationExecutionStatus::Failed
+                }));
+            if result.is_err() {
+                self.request_state.mark_execution_failed();
+            }
+            result
         } else {
-            OperationExecutionStatus::Failed
-        }));
-        if result.is_err() {
-            self.request_state.mark_execution_failed();
-        }
+            if self
+                .weights
+                .paged_decode_dispatch_plans
+                .config
+                .is_some_and(|config| self.written_len >= config.min_cache_len)
+            {
+                self.request_state.mark_execution_failed();
+                return Err(format!(
+                    "{label} self-attn split paged decode threshold selected a non-split executable"
+                ));
+            }
+            self.last_operation_executions[1] =
+                Some(read_plan.execution_record(OperationExecutionStatus::Started));
+            let result = if self.weights.use_paged_decode_sigmoid_gate {
+                read_plan
+                    .attempt()
+                    .start()
+                    .execute_paged_decode_attention_sigmoid_gate_f32(
+                        &self.q_rope_buffer,
+                        &self.q_gate_buffer,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        self.written_len,
+                        &mut self.attention_output_buffer,
+                        stream,
+                    )
+            } else {
+                read_plan
+                    .attempt()
+                    .start()
+                    .execute_paged_decode_attention_f32(
+                        &self.q_rope_buffer,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        self.written_len,
+                        &mut self.attention_output_buffer,
+                        stream,
+                    )
+            };
+            self.last_operation_executions[1] =
+                Some(read_plan.execution_record(if result.is_ok() {
+                    OperationExecutionStatus::Succeeded
+                } else {
+                    OperationExecutionStatus::Failed
+                }));
+            if result.is_err() {
+                self.request_state.mark_execution_failed();
+            }
+            result
+        };
         result.map_err(|err| format!("failed to run {label} self-attn paged decode: {err}"))?;
         component_step_ms.paged_decode_ms =
             finish_component(stream, component_started, "paged decode")?;
@@ -7048,6 +7350,132 @@ mod linear_attn_step_test_support {
 mod linear_attn_step_state_tests {
     use super::linear_attn_step_test_support::*;
     use super::*;
+
+    #[test]
+    fn paged_decode_split_experiment_parser_is_all_or_nothing_and_strict() {
+        assert_eq!(
+            parse_paged_decode_split_experiment_config(None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_paged_decode_split_experiment_config(Some("128"), Some("17")).unwrap(),
+            Some(PagedDecodeSplitExperimentConfig {
+                source_tile: PagedDecodeSourceTile::Tokens128,
+                min_cache_len: 17,
+            })
+        );
+        assert_eq!(
+            parse_paged_decode_split_experiment_config(Some("256"), Some("1")).unwrap(),
+            Some(PagedDecodeSplitExperimentConfig {
+                source_tile: PagedDecodeSourceTile::Tokens256,
+                min_cache_len: 1,
+            })
+        );
+        for (tile, min_cache_len) in [
+            (None, Some("1")),
+            (Some("128"), None),
+            (Some("64"), Some("1")),
+            (Some("128"), Some("0")),
+            (Some("128"), Some("1x")),
+        ] {
+            assert!(parse_paged_decode_split_experiment_config(tile, min_cache_len).is_err());
+        }
+        let overflow = format!("{}0", usize::MAX);
+        assert!(parse_paged_decode_split_experiment_config(Some("128"), Some(&overflow)).is_err());
+    }
+
+    #[test]
+    fn paged_decode_split_workspace_capacity_uses_generic_runtime_formula() {
+        assert_eq!(
+            paged_decode_split_workspace_capacity_bytes(
+                16,
+                256,
+                256,
+                16,
+                PagedDecodeSourceTile::Tokens128,
+            )
+            .unwrap(),
+            528_384
+        );
+        assert_eq!(
+            paged_decode_split_workspace_capacity_bytes(
+                16,
+                256,
+                256,
+                16,
+                PagedDecodeSourceTile::Tokens256,
+            )
+            .unwrap(),
+            264_192
+        );
+        assert!(
+            paged_decode_split_workspace_capacity_bytes(
+                usize::MAX,
+                1,
+                2,
+                2,
+                PagedDecodeSourceTile::Tokens128,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn paged_decode_dispatch_selects_split_threshold_on_host_and_single_only_without_config() {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let device = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let geometry = OperationGeometry::PagedCausalGqaRead {
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 8,
+            value_dim: 8,
+            block_size: 16,
+            cache_blocks: 4,
+            sigmoid_gate: false,
+        };
+        let single_registry =
+            crate::backend_operation_registry::paged_decode_single_production_registry(
+                geometry, &device,
+            )
+            .unwrap();
+        let single =
+            ResolvedPhasePlans::resolve_paged_decode(&single_registry, geometry, &device, u64::MAX)
+                .unwrap();
+        let single_only = PagedDecodeDispatchPlans::single_only(single);
+        assert!(single_only.config.is_none());
+        assert!(single_only.split.is_none());
+        assert_eq!(
+            single_only
+                .for_cache_len(ExecutionPhase::Decode, 128)
+                .trace()
+                .executable,
+            ExecutableOperation::HipPagedDecodeAttentionF32
+        );
+
+        let dispatch = PagedDecodeDispatchPlans::resolve(
+            geometry,
+            &device,
+            PagedDecodeSourceTile::Tokens128,
+            16,
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(dispatch.split.is_some());
+        assert_eq!(
+            dispatch
+                .for_cache_len(ExecutionPhase::Decode, 15)
+                .trace()
+                .executable,
+            ExecutableOperation::HipPagedDecodeAttentionF32
+        );
+        assert_eq!(
+            dispatch
+                .for_cache_len(ExecutionPhase::Decode, 16)
+                .trace()
+                .executable,
+            ExecutableOperation::HipPagedDecodeAttentionSplitF32(PagedDecodeSourceTile::Tokens128)
+        );
+    }
 
     #[test]
     fn self_attention_sequence_workspace_qwen9b_is_one_39_5_mib_arena() {
