@@ -199,6 +199,22 @@ def test_evidence_uses_ephemeral_bundle_and_sequential_processes(tmp_path: Path)
     )
 
 
+def test_worker_environment_pins_deployed_hip_visibility() -> None:
+    manifest = {"worker": {"protocol": "ullm.worker.v2", "required_environment": []}}
+
+    previous = os.environ.get("HIP_VISIBLE_DEVICES")
+    os.environ["HIP_VISIBLE_DEVICES"] = "0,1,2"
+    try:
+        environment = TOOL._worker_environment(manifest, legacy=False)
+    finally:
+        if previous is None:
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        else:
+            os.environ["HIP_VISIBLE_DEVICES"] = previous
+
+    assert environment["HIP_VISIBLE_DEVICES"] == TOOL.PROMOTION_HIP_VISIBLE_DEVICES
+
+
 def test_atomic_output_refuses_symlink(tmp_path: Path) -> None:
     target = tmp_path / "target.json"
     target.write_text("unchanged", encoding="ascii")

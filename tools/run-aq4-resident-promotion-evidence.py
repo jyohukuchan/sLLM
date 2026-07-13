@@ -55,6 +55,7 @@ RAW_TOKEN_CASES = (
     },
 )
 REASONING_CASE_ID = "reasoning-budget-zero"
+PROMOTION_HIP_VISIBLE_DEVICES = "1"
 
 
 class EvidenceError(RuntimeError):
@@ -154,6 +155,9 @@ def prepare_smoke_bundle(
 
 def _worker_environment(manifest: dict[str, Any], *, legacy: bool) -> dict[str, str]:
     environment = dict(os.environ)
+    # Match the deployed WRX80 isolation.  A standalone promotion command must
+    # never inherit an unrestricted HIP device list from the caller shell.
+    environment["HIP_VISIBLE_DEVICES"] = PROMOTION_HIP_VISIBLE_DEVICES
     for name in LEGACY_PROFILE_ENVIRONMENT:
         environment.pop(name, None)
     worker = manifest["worker"]

@@ -41,6 +41,11 @@ After an exclusive R9700 window is available, keep the evidence and receipt in
 the product directory and run the following sequence. The promotion runner
 must finish before the receipt is published:
 
+The runner pins `HIP_VISIBLE_DEVICES=1`, matching the deployed WRX80 isolation,
+for both the resident v2 worker and the sequential legacy comparison. It does
+not stop or restart the active services; the operator must provide the
+exclusive window first.
+
 ```bash
 PRODUCT=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
 EVIDENCE="$PRODUCT/resident-promotion-reasoning-v2-v0.1.json"
