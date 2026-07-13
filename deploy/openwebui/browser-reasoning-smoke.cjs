@@ -3,10 +3,15 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 
-const SUMMARY_SCHEMA = "ullm.openwebui.reasoning_browser_smoke.v1";
+const SUMMARY_SCHEMA = "ullm.openwebui.reasoning_browser_smoke.v2";
 const BASE_URL = process.env.OPENWEBUI_URL || "http://192.168.0.66:3000";
 const MODEL_ID = process.env.ULLM_MODEL_ID || "ullm-qwen3.5-9b-aq4";
 const MODEL_LABEL = process.env.ULLM_MODEL_NAME || "uLLM Qwen3.5 9B AQ4";
+const SWITCH_MODEL_ID =
+  process.env.OPENWEBUI_SWITCH_MODEL_ID || "llama-qwen3.5-9b-ud-q4";
+const SWITCH_MODEL_LABEL =
+  process.env.OPENWEBUI_SWITCH_MODEL_NAME ||
+  "llama.cpp Qwen3.5 9B UD-Q4_K_XL";
 const TOKEN_FILE = process.env.OPENWEBUI_TOKEN_FILE || "/run/secrets/openwebui-token";
 const FIRST_MARKER = process.env.OPENWEBUI_REASONING_ANSWER || "REASONING_BROWSER_OK";
 const SECOND_MARKER =
@@ -17,6 +22,16 @@ const FIRST_PROMPT =
 const SECOND_PROMPT =
   process.env.OPENWEBUI_REASONING_SECOND_PROMPT ||
   `Reply exactly ${SECOND_MARKER} and nothing else.`;
+const SWITCH_MARKER =
+  process.env.OPENWEBUI_REASONING_SWITCH_ANSWER || "PROVIDER_SWITCH_OK";
+const SWITCH_PROMPT =
+  process.env.OPENWEBUI_REASONING_SWITCH_PROMPT ||
+  `Reply exactly ${SWITCH_MARKER} and nothing else.`;
+const SWITCH_BACK_MARKER =
+  process.env.OPENWEBUI_REASONING_SWITCH_BACK_ANSWER || "PROVIDER_RETURN_OK";
+const SWITCH_BACK_PROMPT =
+  process.env.OPENWEBUI_REASONING_SWITCH_BACK_PROMPT ||
+  `Reply exactly ${SWITCH_BACK_MARKER} and nothing else.`;
 const INPUT_SELECTOR = "#chat-input";
 const ASSISTANT_SELECTOR = ".chat-assistant";
 const TOGGLE_SELECTOR = 'button[aria-label="Toggle details"]';
@@ -96,9 +111,13 @@ function summarizeRequestBody(raw) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("OpenWebUI provider request body is not an object");
   }
+  if (typeof value.model !== "string" || !value.model) {
+    throw new Error("OpenWebUI provider request has no model ID");
+  }
   return {
     sha256: sha256(raw),
     utf8_bytes: Buffer.byteLength(raw, "utf8"),
+    model_id_sha256: sha256(value.model),
     has_reasoning_content_key: hasKey(value, "reasoning_content"),
     assistant_has_reasoning_content: assistantHasReasoningContent(value),
   };
@@ -207,6 +226,54 @@ async function run(browser) {
     throw new Error("hidden reasoning was reinserted into the next turn");
   }
 
+  const switchUrl = new URL("/", baseUrl);
+  switchUrl.searchParams.set("temporary-chat", "true");
+  switchUrl.searchParams.set("models", SWITCH_MODEL_ID);
+  await page.goto(switchUrl.toString(), {
+    waitUntil: "domcontentloaded",
+    timeout: NAVIGATION_TIMEOUT_MS,
+  });
+  await page.waitForFunction(
+    (modelLabel) => document.body?.innerText?.includes(modelLabel) === true,
+    SWITCH_MODEL_LABEL,
+    { timeout: NAVIGATION_TIMEOUT_MS },
+  );
+  await submit(page, SWITCH_PROMPT);
+  const switchedAssistant = await waitForAnswer(page, SWITCH_MARKER);
+  const switchedText = (await switchedAssistant.innerText()).trim();
+  if (switchedText !== SWITCH_MARKER) {
+    throw new Error("provider switch answer is not separated from reasoning details");
+  }
+  if (requestBodies.length < 3) throw new Error("provider switch request was not observed");
+  const switchRequest = requestBodies[requestBodies.length - 1];
+  if (switchRequest.model_id_sha256 !== sha256(SWITCH_MODEL_ID)) {
+    throw new Error("provider switch request used the wrong model");
+  }
+
+  const switchBackUrl = new URL("/", baseUrl);
+  switchBackUrl.searchParams.set("temporary-chat", "true");
+  switchBackUrl.searchParams.set("models", MODEL_ID);
+  await page.goto(switchBackUrl.toString(), {
+    waitUntil: "domcontentloaded",
+    timeout: NAVIGATION_TIMEOUT_MS,
+  });
+  await page.waitForFunction(
+    (modelLabel) => document.body?.innerText?.includes(modelLabel) === true,
+    MODEL_LABEL,
+    { timeout: NAVIGATION_TIMEOUT_MS },
+  );
+  await submit(page, SWITCH_BACK_PROMPT);
+  const switchedBackAssistant = await waitForAnswer(page, SWITCH_BACK_MARKER);
+  const switchedBackText = (await switchedBackAssistant.innerText()).trim();
+  if (switchedBackText !== SWITCH_BACK_MARKER) {
+    throw new Error("provider return answer is not separated from reasoning details");
+  }
+  if (requestBodies.length < 4) throw new Error("provider return request was not observed");
+  const switchBackRequest = requestBodies[requestBodies.length - 1];
+  if (switchBackRequest.model_id_sha256 !== sha256(MODEL_ID)) {
+    throw new Error("provider return request used the wrong model");
+  }
+
   if (requestBodyError) throw new Error("provider request body validation failed");
   if (pageErrors.length > 0) throw new Error("OpenWebUI page errors were observed");
   await context.close();
@@ -216,6 +283,12 @@ async function run(browser) {
     first_answer: textEvidence(firstText),
     expanded_view: textEvidence(expandedText),
     second_answer: textEvidence(secondText),
+    provider_switch_performed: true,
+    provider_switch_model_id_sha256: sha256(SWITCH_MODEL_ID),
+    provider_switch_answer: textEvidence(switchedText),
+    provider_return_performed: true,
+    provider_return_model_id_sha256: sha256(MODEL_ID),
+    provider_return_answer: textEvidence(switchedBackText),
     reasoning_details_expanded: true,
     provider_request_count: requestBodies.length,
     provider_requests: requestBodies,

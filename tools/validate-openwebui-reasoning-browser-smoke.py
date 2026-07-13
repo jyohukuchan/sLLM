@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-SCHEMA_VERSION = "ullm.openwebui.reasoning_browser_smoke.v1"
+SCHEMA_VERSION_V1 = "ullm.openwebui.reasoning_browser_smoke.v1"
+SCHEMA_VERSION = "ullm.openwebui.reasoning_browser_smoke.v2"
 VALIDATOR_SCHEMA_VERSION = "ullm.openwebui.reasoning_browser_smoke_validator.v1"
 MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
 MAX_PROVIDER_REQUESTS = 4
@@ -98,16 +99,21 @@ def _text_evidence(value: Any, label: str) -> None:
     _hash(value["sha256"], f"{label}.sha256")
 
 
-def _request(value: Any, index: int) -> None:
-    if not isinstance(value, dict) or set(value) != {
+def _request(value: Any, index: int, *, version: str) -> None:
+    expected = {
         "sha256",
         "utf8_bytes",
         "has_reasoning_content_key",
         "assistant_has_reasoning_content",
-    }:
+    }
+    if version == SCHEMA_VERSION:
+        expected.add("model_id_sha256")
+    if not isinstance(value, dict) or set(value) != expected:
         raise ValidationError(f"provider request {index} fields differ")
     _hash(value["sha256"], f"provider request {index}.sha256")
     _integer(value["utf8_bytes"], f"provider request {index}.utf8_bytes", minimum=2)
+    if version == SCHEMA_VERSION:
+        _hash(value["model_id_sha256"], f"provider request {index}.model_id_sha256")
     if type(value["has_reasoning_content_key"]) is not bool or type(
         value["assistant_has_reasoning_content"]
     ) is not bool:
@@ -117,7 +123,7 @@ def _request(value: Any, index: int) -> None:
 def validate(path: Path) -> dict[str, Any]:
     document = _load(path)
     _scan_forbidden(document)
-    expected = {
+    expected_v1 = {
         "schema_version",
         "model_id_sha256",
         "first_answer",
@@ -130,7 +136,22 @@ def validate(path: Path) -> dict[str, Any]:
         "page_error_count",
         "page_error_digests",
     }
-    if set(document) != expected or document["schema_version"] != SCHEMA_VERSION:
+    expected_v2 = expected_v1 | {
+        "provider_switch_performed",
+        "provider_switch_model_id_sha256",
+        "provider_switch_answer",
+        "provider_return_performed",
+        "provider_return_model_id_sha256",
+        "provider_return_answer",
+    }
+    version = document.get("schema_version")
+    if version == SCHEMA_VERSION_V1:
+        expected = expected_v1
+    elif version == SCHEMA_VERSION:
+        expected = expected_v2
+    else:
+        expected = set()
+    if set(document) != expected:
         raise ValidationError("browser evidence root fields differ")
     _hash(document["model_id_sha256"], "model_id_sha256")
     _text_evidence(document["first_answer"], "first_answer")
@@ -150,7 +171,35 @@ def validate(path: Path) -> dict[str, Any]:
     if not isinstance(requests, list) or len(requests) != document["provider_request_count"]:
         raise ValidationError("provider request count differs")
     for index, request in enumerate(requests):
-        _request(request, index)
+        _request(request, index, version=version)
+    if version == SCHEMA_VERSION:
+        if document["provider_switch_performed"] is not True:
+            raise ValidationError("provider switch was not performed")
+        _hash(
+            document["provider_switch_model_id_sha256"],
+            "provider_switch_model_id_sha256",
+        )
+        _text_evidence(document["provider_switch_answer"], "provider_switch_answer")
+        if document["provider_return_performed"] is not True:
+            raise ValidationError("provider return was not performed")
+        _hash(
+            document["provider_return_model_id_sha256"],
+            "provider_return_model_id_sha256",
+        )
+        _text_evidence(document["provider_return_answer"], "provider_return_answer")
+        if len(requests) < 4:
+            raise ValidationError("provider switch request is missing")
+        if any(
+            request["model_id_sha256"] != document["model_id_sha256"]
+            for request in requests[:2]
+        ):
+            raise ValidationError("initial provider request model differs")
+        if requests[-2]["model_id_sha256"] != document["provider_switch_model_id_sha256"]:
+            raise ValidationError("provider switch request model differs")
+        if requests[-1]["model_id_sha256"] == requests[-2]["model_id_sha256"]:
+            raise ValidationError("provider return request model is not distinct")
+        if requests[-1]["model_id_sha256"] != document["provider_return_model_id_sha256"]:
+            raise ValidationError("provider return request model differs")
     if document["hidden_reasoning_reinserted"] is not False:
         raise ValidationError("hidden reasoning was reinserted")
     _integer(document["page_error_count"], "page_error_count", maximum=0)
@@ -162,7 +211,7 @@ def validate(path: Path) -> dict[str, Any]:
         reasons.append("last provider request contains assistant reasoning_content")
     return {
         "schema_version": VALIDATOR_SCHEMA_VERSION,
-        "input_schema_version": SCHEMA_VERSION,
+        "input_schema_version": version,
         "structurally_valid": True,
         "gate_eligible": not reasons,
         "provider_request_count": len(requests),

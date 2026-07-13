@@ -290,7 +290,10 @@ def validate(path: Path) -> dict[str, Any]:
     if browser_report.get("schema_version") != "ullm.openwebui.reasoning_browser_smoke_validator.v1":
         raise ValidationError("browser validator schema differs")
     browser_gate_eligible = browser_report.get("gate_eligible") is True
-    if browser.get("schema_version") != "ullm.openwebui.reasoning_browser_smoke.v1":
+    if browser.get("schema_version") not in {
+        "ullm.openwebui.reasoning_browser_smoke.v1",
+        "ullm.openwebui.reasoning_browser_smoke.v2",
+    }:
         raise ValidationError("browser evidence schema differs")
     _validate_promotion(
         promotion,

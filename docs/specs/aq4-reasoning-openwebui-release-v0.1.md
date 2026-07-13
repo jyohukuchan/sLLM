@@ -85,6 +85,10 @@ The release evidence schema is defined in
 The browser-side Phase 5 smoke is
 `deploy/openwebui/browser-reasoning-smoke.cjs`; it records only hashes, counts,
 and boolean state, and must be run only after a v2 candidate is configured.
+Its current evidence schema is
+`ullm.openwebui.reasoning_browser_smoke.v2`; v2 records the model hash for
+each provider request and verifies a uLLM → llama.cpp → uLLM switch cycle.
+The validator retains read compatibility with the earlier v1 hash-only record.
 The `expanded_view` field is a hash and byte count of the expanded assistant
 view; it is required to be larger than the answer-only view without retaining
 the visible text.

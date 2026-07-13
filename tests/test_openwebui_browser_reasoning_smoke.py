@@ -45,6 +45,7 @@ assert.equal(summary.assistant_has_reasoning_content, true);
 assert.equal(summary.has_reasoning_content_key, true);
 assert.equal(Object.hasOwn(summary, "raw"), false);
 const noReasoning = tool.summarizeRequestBody(JSON.stringify({
+  model: "model",
   messages: [{role: "user", content: "prompt-secret"}, {role: "assistant", content: "answer"}],
 }));
 assert.equal(noReasoning.assistant_has_reasoning_content, false);
@@ -54,7 +55,7 @@ console.log(JSON.stringify({schema: tool.SUMMARY_SCHEMA, ok: true}));
     completed = node(program)
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {
-        "schema": "ullm.openwebui.reasoning_browser_smoke.v1",
+        "schema": "ullm.openwebui.reasoning_browser_smoke.v2",
         "ok": True,
     }
 
