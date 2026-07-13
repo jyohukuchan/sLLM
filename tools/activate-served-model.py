@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -31,6 +32,7 @@ MAX_COMMANDS_PER_STAGE = 128
 RESULT_SCHEMA = "ullm.served_model.activation.v1"
 _VALIDATOR_MODULE_NAME = "_ullm_served_model_activation_validator"
 _BUNDLE_VALIDATOR_MODULE_NAME = "_ullm_release_bundle_activation_validator"
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class ActivationError(RuntimeError):
@@ -332,6 +334,70 @@ def _restore_active(active: Path, backup: Path | None, directory: Path) -> None:
     _fsync_directory(directory)
 
 
+def _write_bootstrap_backup(path: Path, raw: bytes) -> None:
+    """Publish the old active manifest for the later complete-bundle bind."""
+
+    if not path.is_absolute():
+        raise ActivationError("bootstrap backup path must be absolute")
+    _reject_symlink_components(path, "bootstrap backup", leaf_may_absent=True)
+    parent = path.parent
+    try:
+        metadata = parent.stat()
+    except OSError as error:
+        raise ActivationError("bootstrap backup directory is unavailable") from error
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & stat.S_IWOTH:
+        raise ActivationError("bootstrap backup directory is unsafe")
+    if path.exists() or path.is_symlink():
+        raise ActivationError("bootstrap backup already exists or is a symlink")
+    descriptor, temporary_raw = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=parent
+    )
+    temporary = Path(temporary_raw)
+    try:
+        os.fchmod(descriptor, 0o644)
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ActivationError("bootstrap backup write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.replace(temporary, path)
+        temporary = None
+        _fsync_directory(parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(descriptor)
+
+
+def _require_inactive_services(services: Sequence[str]) -> None:
+    if not services:
+        raise ActivationError("v2 bootstrap requires explicit inactive services")
+    for service in services:
+        if not service or "\x00" in service or len(service.encode("utf-8")) > 512:
+            raise ActivationError("inactive service name is invalid")
+        try:
+            result = subprocess.run(
+                ["systemctl", "show", service, "--property=LoadState", "--property=ActiveState", "--value"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ActivationError("inactive service preflight failed") from error
+        states = result.stdout.splitlines()
+        if result.returncode != 0 or len(states) != 2:
+            raise ActivationError("inactive service preflight failed")
+        load_state, active_state = states
+        if load_state != "loaded" or active_state not in {"inactive", "failed"}:
+            raise ActivationError("v2 bootstrap requires inactive services")
+
+
 def _parse_command(raw: str) -> tuple[str, ...]:
     try:
         value = json.loads(raw)
@@ -397,6 +463,9 @@ def activate(
     final_check_commands: Sequence[Sequence[str]] = (),
     rollback_commands: Sequence[Sequence[str]] = (),
     command_timeout_seconds: float = 60.0,
+    bootstrap_v2: bool = False,
+    bootstrap_backup: Path | None = None,
+    require_inactive_services: Sequence[str] = (),
 ) -> ActivationResult:
     """Activate a candidate and restore the prior manifest on any later failure."""
 
@@ -432,6 +501,7 @@ def activate(
         raise ActivationError("activation lock is unsafe")
     staged: Path | None = None
     backup: Path | None = None
+    bootstrap_backup_written = False
     switched = False
     try:
         try:
@@ -452,21 +522,50 @@ def activate(
 
         candidate_document = json.loads(raw)
         if candidate_document.get("schema_version") == "ullm.served_model.v2":
-            if release_bundle is None:
-                raise ActivationError("v2 activation requires a release bundle")
             active_raw = (
                 _read_safe_manifest(normalized_active, "existing active manifest")
                 if _safe_existing_active(normalized_active)
                 else None
             )
-            _validate_release_bundle(
-                release_bundle,
-                candidate_raw=raw,
-                candidate_summary=summary,
-                active_raw=active_raw,
-                systemd_unit=systemd_unit,
-                environment_file=environment_file,
-            )
+            if release_bundle is None:
+                if not bootstrap_v2:
+                    raise ActivationError("v2 activation requires a release bundle")
+                if bootstrap_backup is None:
+                    raise ActivationError("v2 bootstrap requires an active-manifest backup path")
+                if systemd_unit is None or environment_file is None:
+                    raise ActivationError(
+                        "v2 bootstrap requires systemd unit and environment rollback inputs"
+                    )
+                if active_raw is None:
+                    raise ActivationError("v2 bootstrap requires an existing v1 active manifest")
+                try:
+                    old_document = json.loads(active_raw)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ActivationError("existing active manifest is not valid JSON") from error
+                if not isinstance(old_document, dict) or old_document.get("schema_version") != "ullm.served_model.v1":
+                    raise ActivationError("v2 bootstrap requires an existing v1 active manifest")
+                promotion = candidate_document.get("promotion")
+                source_commit = promotion.get("source_commit") if isinstance(promotion, dict) else None
+                if _COMMIT_RE.fullmatch(source_commit or "") is None:
+                    raise ActivationError("v2 bootstrap candidate promotion identity is invalid")
+                _hash_safe_file(systemd_unit, "bootstrap systemd unit")
+                _hash_safe_file(environment_file, "bootstrap environment file")
+                _require_inactive_services(require_inactive_services)
+                _write_bootstrap_backup(bootstrap_backup, active_raw)
+                bootstrap_backup_written = True
+            else:
+                if bootstrap_v2:
+                    raise ActivationError("v2 bootstrap cannot be combined with a release bundle")
+                _validate_release_bundle(
+                    release_bundle,
+                    candidate_raw=raw,
+                    candidate_summary=summary,
+                    active_raw=active_raw,
+                    systemd_unit=systemd_unit,
+                    environment_file=environment_file,
+                )
+        elif bootstrap_v2 or bootstrap_backup is not None or require_inactive_services:
+            raise ActivationError("v2 bootstrap options require a v2 candidate")
 
         backup = _snapshot_active(normalized_active, directory)
         # Mark the transaction rollback-capable before the replace so even an
@@ -511,6 +610,11 @@ def activate(
                 )
             except BaseException as rollback_error:
                 raise ActivationError("activation and rollback failed") from rollback_error
+        if bootstrap_backup_written and not switched and bootstrap_backup is not None:
+            try:
+                bootstrap_backup.unlink(missing_ok=True)
+            except OSError:
+                pass
         if isinstance(error, (KeyboardInterrupt, SystemExit)):
             raise
         if isinstance(error, ActivationError):
@@ -544,6 +648,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--systemd-unit", type=Path)
     parser.add_argument("--environment-file", type=Path)
     parser.add_argument(
+        "--bootstrap-v2",
+        action="store_true",
+        help="allow an explicitly temporary v1-to-v2 candidate switch before the complete release bundle exists",
+    )
+    parser.add_argument("--bootstrap-backup", type=Path)
+    parser.add_argument("--require-inactive-service", action="append", default=[])
+    parser.add_argument(
         "--check-command-json", action="append", default=[], type=_parse_command
     )
     parser.add_argument(
@@ -573,6 +684,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             final_check_commands=args.final_check_command_json,
             rollback_commands=args.rollback_command_json,
             command_timeout_seconds=args.command_timeout_seconds,
+            bootstrap_v2=args.bootstrap_v2,
+            bootstrap_backup=args.bootstrap_backup,
+            require_inactive_services=args.require_inactive_service,
         )
     except Exception:
         # Commands and manifests can contain deployment paths or secrets. Keep

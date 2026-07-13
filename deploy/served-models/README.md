@@ -72,6 +72,42 @@ uv run --project services/openai-gateway python \
 Only after those commands succeed may `generate-served-model.py` materialize
 the v2 manifest. The existing active v1 receipt must not be overwritten.
 
+There is one intentional bootstrap step because the normal v2 activation gate
+requires the complete release bundle, while the release evidence must be
+collected against the v2 runtime. First stop every service that can own the
+target R9700, preserve the v1 manifest, and perform an explicitly marked
+temporary switch. This command refuses to proceed unless each named service
+is loaded but inactive:
+
+```bash
+PRODUCT=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
+V2_CANDIDATE=/etc/ullm/served-models/candidates/qwen35-9b-aq4-reasoning.json
+PREVIOUS_ACTIVE="$PRODUCT/previous-active-reasoning-v2-v0.1.json"
+UNIT=/etc/systemd/system/ullm-openai.service
+ENVIRONMENT=/etc/ullm/openai-gateway-manifest.env
+
+systemctl stop llama-qwen35-udq4.service ullm-openai.service
+
+uv run --project services/openai-gateway python \
+  tools/activate-served-model.py \
+  --candidate "$V2_CANDIDATE" \
+  --active-manifest /etc/ullm/served-models/active.json \
+  --bootstrap-v2 --bootstrap-backup "$PREVIOUS_ACTIVE" \
+  --systemd-unit "$UNIT" --environment-file "$ENVIRONMENT" \
+  --require-inactive-service ullm-openai.service \
+  --require-inactive-service llama-qwen35-udq4.service \
+  --reconcile-command-json '["systemctl","start","ullm-openai.service"]' \
+  --final-check-command-json '["systemctl","is-active","--quiet","ullm-openai.service"]' \
+  --rollback-command-json '["systemctl","start","ullm-openai.service"]'
+```
+
+`--bootstrap-v2` is not a production approval: it only permits the v1-to-v2
+candidate switch needed for evidence collection, and it always requires an
+external backup path and explicit inactive-service checks. Keep
+`$PREVIOUS_ACTIVE` for the final bundle and rollback. If any v2 evidence or
+gate fails, activate that v1 backup with the normal v1 activation path before
+assembling the complete bundle.
+
 Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release
 gates. Generation proves file and contract identity; it does not prove runtime

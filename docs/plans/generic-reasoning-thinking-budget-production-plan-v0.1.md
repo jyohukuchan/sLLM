@@ -495,9 +495,13 @@ activation前のactive manifestとsystemd設定を保持する。rollbackは旧m
 serviceを再起動し、reasoning未指定のbaseline smokeを再実行する。OpenWebUIへ恒久patchを入れないため、
 UI imageの特別なrollbackは不要である。
 
-v2 candidateのactivationは、`tools/activate-served-model.py`へcomplete release bundleと
+v2 candidateの最終activationは、`tools/activate-served-model.py`へcomplete release bundleと
 current systemd/environment fileを渡し、candidate identityとrollback hashの一致を確認してから
-atomic replaceする。v1 active pathは従来どおり維持する。
+atomic replaceする。release evidenceを取得するための一時v1→v2切替は、同toolの明示的な
+`--bootstrap-v2`だけで許可する。この経路はcomplete bundleを免除する代わりに、v1 active manifestの
+外部backup、systemd/environment hash、全対象serviceのinactive確認を必須とし、実production gateの
+合格を宣言しない。evidence収集後はbackupしたv1へ戻してからcomplete bundleを組み立て、通常のv2
+activationを行う。v1 active pathは従来どおり維持する。
 
 ## 11. 見積もりとmilestone
 

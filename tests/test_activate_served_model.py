@@ -109,6 +109,46 @@ def test_v2_activation_requires_a_release_bundle(tmp_path: Path) -> None:
     assert active.read_bytes() == b"known-old-active"
 
 
+def test_v2_bootstrap_requires_explicit_inactive_services_and_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, candidate = v2_activation_directory(tmp_path)
+    active = root / "active.json"
+    active.write_bytes((FIXTURE / "served-model.json").read_bytes())
+    unit = root / "ullm-openai.service"
+    environment = root / "ullm-openai.env"
+    unit.write_bytes(b"[Service]\nExecStart=/usr/bin/ullm\n")
+    environment.write_bytes(b"ULLM_TEST=1\n")
+    backup = root / "previous-active.json"
+
+    with pytest.raises(ACTIVATOR.ActivationError, match="inactive services"):
+        ACTIVATOR.activate(
+            candidate,
+            active,
+            bootstrap_v2=True,
+            bootstrap_backup=backup,
+            systemd_unit=unit,
+            environment_file=environment,
+        )
+    assert active.read_bytes() == (FIXTURE / "served-model.json").read_bytes()
+    assert not backup.exists()
+
+    monkeypatch.setattr(ACTIVATOR, "_require_inactive_services", lambda _services: None)
+    result = ACTIVATOR.activate(
+        candidate,
+        active,
+        bootstrap_v2=True,
+        bootstrap_backup=backup,
+        systemd_unit=unit,
+        environment_file=environment,
+        require_inactive_services=("ullm-openai.service", "llama-qwen35-udq4.service"),
+    )
+
+    assert result.manifest_sha256 == hashlib.sha256(candidate.read_bytes()).hexdigest()
+    assert active.read_bytes() == candidate.read_bytes()
+    assert backup.read_bytes() == (FIXTURE / "served-model.json").read_bytes()
+
+
 def test_v2_activation_binds_bundle_and_rollback_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

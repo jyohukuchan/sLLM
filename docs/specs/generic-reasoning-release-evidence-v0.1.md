@@ -162,3 +162,10 @@ environment file. It invokes `tools/validate-generic-reasoning-release-bundle.py
 before publishing. The producer rejects symlinked or out-of-directory artifact
 paths and `--status complete` requires the recomputed bundle gate to be
 eligible.
+
+Because final v2 activation requires this complete bundle, the deployment tool
+provides an explicitly named `--bootstrap-v2` path for the evidence window. It
+is not a production approval: it accepts only a v1 active manifest, requires an
+external backup path, systemd/environment files, and explicit inactive-service
+checks. The operator must restore the backed-up v1 manifest before assembling
+the final bundle; normal v2 activation remains bundle-gated.
