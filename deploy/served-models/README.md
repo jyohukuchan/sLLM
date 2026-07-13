@@ -37,6 +37,34 @@ Rebuild that isolated candidate worker from the current checkout with:
 cargo build --release --bin ullm-aq4-worker --target-dir target/reasoning-v2
 ```
 
+After an exclusive R9700 window is available, keep the evidence and receipt in
+the product directory and run the following sequence. The promotion runner
+must finish before the receipt is published:
+
+```bash
+PRODUCT=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
+EVIDENCE="$PRODUCT/resident-promotion-reasoning-v2-v0.1.json"
+EVIDENCE_INCOMPLETE="$EVIDENCE.incomplete"
+RECEIPT="$PRODUCT/promotion-reasoning-v2-v0.1.json"
+
+uv run --project services/openai-gateway python \
+  tools/run-aq4-resident-promotion-evidence.py \
+  --profile deploy/served-models/qwen35-9b-aq4-reasoning.profile.json \
+  --worker-binary target/reasoning-v2/release/ullm-aq4-worker \
+  --legacy-engine target/release/ullm-engine \
+  --output "$EVIDENCE_INCOMPLETE" && \
+  mv -- "$EVIDENCE_INCOMPLETE" "$EVIDENCE"
+
+uv run --project services/openai-gateway python \
+  tools/write-aq4-resident-promotion-receipt.py \
+  --profile deploy/served-models/qwen35-9b-aq4-reasoning.profile.json \
+  --evidence "$EVIDENCE" \
+  --output "$RECEIPT"
+```
+
+Only after those commands succeed may `generate-served-model.py` materialize
+the v2 manifest. The existing active v1 receipt must not be overwritten.
+
 Generated manifests are ready for activation only after the corresponding
 release worker, product, and promotion evidence pass the real-model release
 gates. Generation proves file and contract identity; it does not prove runtime
