@@ -22,12 +22,20 @@ production_activation_performed: false
 source_commit: lowercase 40-character Git commit
 active_promotion_source_commit: lowercase 40-character Git commit
 source_commit_aligned: boolean
+git_worktree_clean: boolean
+git_worktree_status_sha256: lowercase SHA-256 of bounded Git status text
 identity: object
 cases: nonempty array
 ```
 
 The validator recomputes `source_commit_aligned` by comparing the two commit
 values and rejects a declaration that differs from that comparison.
+The producer computes `git_worktree_status_sha256` from
+`git status --porcelain=v1 --untracked-files=all -- . ':(exclude).rocprofv3'`.
+The profiling directory is pre-existing workspace state and is outside this
+release's worktree scope. A production candidate must set
+`git_worktree_clean=true`; a dirty declaration remains structurally valid but
+is not production-gate eligible.
 
 The validator report also contains `timing_percentiles` grouped by mode and
 timing field. It recomputes p50, p95, and p99 with linear interpolation over

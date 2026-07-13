@@ -80,6 +80,8 @@ def evidence() -> dict:
         "source_commit": "1" * 40,
         "active_promotion_source_commit": "2" * 40,
         "source_commit_aligned": False,
+        "git_worktree_clean": True,
+        "git_worktree_status_sha256": "f" * 64,
         "identity": {
             "manifest_sha256": "b" * 64,
             "worker_binary_sha256": "c" * 64,
@@ -130,6 +132,7 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         lambda value: value["identity"].__setitem__("openwebui_image", "@sha256:" + "e" * 64),
         lambda value: value.__setitem__("source_commit", "head"),
         lambda value: value.__setitem__("source_commit_aligned", True),
+        lambda value: value.__setitem__("git_worktree_status_sha256", "dirty"),
         lambda value: value["cases"][0].__setitem__("sse_chunk_count", 0),
     ],
 )
@@ -172,6 +175,19 @@ def test_validator_reports_quality_and_timing_gate_failures(tmp_path: Path) -> N
     assert report["gate_eligible"] is False
     assert "case quality is incorrect: budget-32" in report["reasons"]
     assert any("case timing is incomplete: budget-128" in reason for reason in report["reasons"])
+
+
+def test_validator_reports_dirty_git_worktree_as_gate_failure(tmp_path: Path) -> None:
+    value = evidence()
+    value["git_worktree_clean"] = False
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    report = TOOL.validate(path)
+
+    assert report["structurally_valid"] is True
+    assert report["gate_eligible"] is False
+    assert "Git worktree is not clean" in report["reasons"]
 
 
 def test_validator_recomputes_percentiles_over_raw_cases(tmp_path: Path) -> None:

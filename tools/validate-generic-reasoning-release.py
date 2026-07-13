@@ -270,6 +270,8 @@ def validate(path: Path) -> dict[str, Any]:
         "source_commit",
         "active_promotion_source_commit",
         "source_commit_aligned",
+        "git_worktree_clean",
+        "git_worktree_status_sha256",
         "identity",
         "cases",
     }
@@ -291,6 +293,9 @@ def validate(path: Path) -> dict[str, Any]:
     )
     if document["source_commit_aligned"] != computed_source_alignment:
         raise ValidationError("source alignment declaration differs from commit identity")
+    if type(document["git_worktree_clean"]) is not bool:
+        raise ValidationError("Git worktree clean declaration is invalid")
+    _hash(document["git_worktree_status_sha256"], "git_worktree_status_sha256")
     _validate_identity(document["identity"])
     cases = document["cases"]
     if not isinstance(cases, list) or not cases or len(cases) > MAX_CASES:
@@ -334,6 +339,8 @@ def validate(path: Path) -> dict[str, Any]:
             resource_samples[case["mode"]][field].append(float(value))
     if not computed_source_alignment:
         reasons.append("source commit is not aligned with the active promotion source")
+    if document["git_worktree_clean"] is not True:
+        reasons.append("Git worktree is not clean")
     missing_modes = sorted(REQUIRED_MODES - modes)
     if missing_modes:
         reasons.append("required benchmark modes are missing: " + ", ".join(missing_modes))
@@ -364,6 +371,7 @@ def validate(path: Path) -> dict[str, Any]:
         "structurally_valid": True,
         "gate_eligible": not reasons,
         "case_count": len(cases),
+        "git_worktree_clean": document["git_worktree_clean"],
         "observed_modes": sorted(modes),
         "timing_percentiles": {
             mode: {
