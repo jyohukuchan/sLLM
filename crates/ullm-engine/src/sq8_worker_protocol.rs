@@ -23,6 +23,7 @@ use std::io::{BufRead, Write};
 use std::sync::{Mutex, TryLockError};
 
 pub const SQ8_WORKER_SCHEMA_VERSION: &str = "ullm.worker.v1";
+pub const SQ8_WORKER_SCHEMA_VERSION_V2: &str = "ullm.worker.v2";
 pub const SQ8_WORKER_MAX_RECORD_BYTES: usize = 4_194_304;
 pub const SQ8_WORKER_MAX_JSON_DEPTH: usize = 16;
 pub const SQ8_WORKER_MAX_ERROR_MESSAGE_BYTES: usize = 1024;
@@ -39,6 +40,7 @@ pub const SQ8_WORKER_EXECUTION_PROFILE: &str = "rdna4_w8a8_block_ck";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sq8WorkerProfile {
+    pub worker_schema: String,
     pub model: String,
     pub model_revision: String,
     pub artifact_content_sha256: String,
@@ -50,6 +52,7 @@ pub struct Sq8WorkerProfile {
     pub vocab_size: usize,
     pub eos_token_ids: Vec<usize>,
     pub top_k: usize,
+    pub reasoning: Option<crate::reasoning::ReasoningDialect>,
 }
 
 pub fn configured_worker_profile() -> Sq8WorkerProfile {
@@ -59,6 +62,7 @@ pub fn configured_worker_profile() -> Sq8WorkerProfile {
 impl Sq8WorkerProfile {
     pub fn sq8_defaults() -> Self {
         Self {
+            worker_schema: SQ8_WORKER_SCHEMA_VERSION.to_string(),
             model: SQ8_WORKER_MODEL.to_string(),
             model_revision: SQ8_WORKER_MODEL_REVISION.to_string(),
             artifact_content_sha256: QWEN3_14B_SQ8_SERVING_ARTIFACT_CONTENT_SHA256.to_string(),
@@ -70,11 +74,13 @@ impl Sq8WorkerProfile {
             vocab_size: QWEN3_14B_VOCAB_SIZE,
             eos_token_ids: crate::sq8_serving_runtime::QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS.to_vec(),
             top_k: QWEN3_14B_SQ8_SERVING_TOP_K,
+            reasoning: None,
         }
     }
 
     pub fn from_environment_with_defaults(defaults: &Self) -> Self {
         Self {
+            worker_schema: env_string("ULLM_WORKER_SCHEMA_VERSION", &defaults.worker_schema),
             model: env_string("ULLM_MODEL_ID", &defaults.model),
             model_revision: env_string("ULLM_MODEL_REVISION", &defaults.model_revision),
             artifact_content_sha256: env_string(
@@ -92,6 +98,7 @@ impl Sq8WorkerProfile {
             vocab_size: env_usize("ULLM_VOCAB_SIZE", defaults.vocab_size),
             eos_token_ids: env_usize_csv("ULLM_EOS_TOKEN_IDS", &defaults.eos_token_ids),
             top_k: env_usize("ULLM_TOP_K", defaults.top_k),
+            reasoning: defaults.reasoning.clone(),
         }
     }
 }
@@ -291,6 +298,7 @@ pub struct Sq8GenerateCommand {
     pub max_new_tokens: usize,
     pub sampling: Sq8WorkerSampling,
     pub eos_token_ids: Vec<usize>,
+    pub reasoning: Option<crate::reasoning::ReasoningExecution>,
 }
 
 impl Sq8GenerateCommand {
@@ -327,6 +335,36 @@ impl Sq8GenerateCommand {
             sampling,
         );
         request.eos_token_ids = self.eos_token_ids;
+        request.reasoning = self.reasoning;
+        if let Some(execution) = request.reasoning.as_ref() {
+            let Some(dialect) = profile.reasoning.as_ref() else {
+                return Err(Sq8WorkerProtocolError::invalid_request(
+                    "reasoning execution is not declared by the loaded worker profile",
+                ));
+            };
+            if execution.dialect_id != dialect.identity
+                || execution.end_sequence != dialect.end_sequence
+                || execution.forced_end_sequence != dialect.forced_end_sequence
+                || execution.reserved_answer_tokens != dialect.reserved_answer_tokens
+            {
+                return Err(Sq8WorkerProtocolError::invalid_request(
+                    "reasoning execution does not match the loaded worker profile",
+                ));
+            }
+            dialect.validate(profile.vocab_size).map_err(|_| {
+                Sq8WorkerProtocolError::invalid_request(
+                    "loaded worker reasoning dialect is invalid",
+                )
+            })?;
+            if execution
+                .budget_tokens
+                .is_some_and(|budget| budget > dialect.max_budget_tokens)
+            {
+                return Err(Sq8WorkerProtocolError::invalid_request(
+                    "reasoning budget exceeds the loaded worker profile",
+                ));
+            }
+        }
         request
             .validate_for_worker(
                 profile.context_length,
@@ -891,6 +929,7 @@ enum RawWorkerCommand {
         max_new_tokens: u64,
         sampling: RawWorkerSampling,
         eos_token_ids: Vec<u64>,
+        reasoning: Option<RawWorkerReasoning>,
     },
     Cancel {
         schema_version: String,
@@ -911,6 +950,7 @@ struct RawWorkerCommandFields {
     max_new_tokens: Option<u64>,
     sampling: Option<RawWorkerSampling>,
     eos_token_ids: Option<Vec<u64>>,
+    reasoning: Option<RawWorkerReasoning>,
     reason: Option<Sq8CancelReason>,
 }
 
@@ -994,6 +1034,14 @@ impl<'de> Visitor<'de> for RawWorkerCommandVisitor {
                         })?,
                     )?;
                 }
+                "reasoning" => {
+                    set_once(
+                        &mut fields.reasoning,
+                        object.next_value_seed(RawWorkerReasoningSeed {
+                            token_id_limit: self.token_id_limit,
+                        })?,
+                    )?;
+                }
                 "reason" => {
                     set_once(&mut fields.reason, object.next_value::<Sq8CancelReason>()?)?;
                 }
@@ -1019,6 +1067,7 @@ impl<'de> Visitor<'de> for RawWorkerCommandVisitor {
                     max_new_tokens: require_field(fields.max_new_tokens, "max_new_tokens")?,
                     sampling: require_field(fields.sampling, "sampling")?,
                     eos_token_ids: require_field(fields.eos_token_ids, "eos_token_ids")?,
+                    reasoning: fields.reasoning,
                 })
             }
             "cancel" => {
@@ -1026,6 +1075,7 @@ impl<'de> Visitor<'de> for RawWorkerCommandVisitor {
                     || fields.max_new_tokens.is_some()
                     || fields.sampling.is_some()
                     || fields.eos_token_ids.is_some()
+                    || fields.reasoning.is_some()
                 {
                     return Err(de::Error::custom("cancel contains a generate field"));
                 }
@@ -1070,6 +1120,92 @@ struct RawWorkerSampling {
     top_p: f64,
     top_k: u64,
     seed: i64,
+}
+
+struct RawWorkerReasoning {
+    enabled: bool,
+    budget_tokens: Option<u64>,
+    dialect_id: String,
+    end_token_ids: Vec<u64>,
+    forced_end_token_ids: Vec<u64>,
+    reserved_answer_tokens: u64,
+}
+
+struct RawWorkerReasoningSeed {
+    token_id_limit: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for RawWorkerReasoningSeed {
+    type Value = RawWorkerReasoning;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(RawWorkerReasoningVisitor {
+            token_id_limit: self.token_id_limit,
+        })
+    }
+}
+
+struct RawWorkerReasoningVisitor {
+    token_id_limit: usize,
+}
+
+impl<'de> Visitor<'de> for RawWorkerReasoningVisitor {
+    type Value = RawWorkerReasoning;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an exact reasoning execution object")
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut enabled = None;
+        let mut budget_tokens = None;
+        let mut dialect_id = None;
+        let mut end_token_ids = None;
+        let mut forced_end_token_ids = None;
+        let mut reserved_answer_tokens = None;
+        while let Some(key) = object.next_key::<String>()? {
+            match key.as_str() {
+                "enabled" => set_once(&mut enabled, object.next_value::<bool>()?)?,
+                "budget_tokens" => {
+                    set_once(&mut budget_tokens, object.next_value::<Option<u64>>()?)?
+                }
+                "dialect_id" => set_once(&mut dialect_id, object.next_value::<String>()?)?,
+                "end_token_ids" => set_once(
+                    &mut end_token_ids,
+                    object.next_value_seed(BoundedTokenIdsSeed {
+                        limit: self.token_id_limit,
+                    })?,
+                )?,
+                "forced_end_token_ids" => set_once(
+                    &mut forced_end_token_ids,
+                    object.next_value_seed(BoundedTokenIdsSeed {
+                        limit: self.token_id_limit,
+                    })?,
+                )?,
+                "reserved_answer_tokens" => {
+                    set_once(&mut reserved_answer_tokens, object.next_value::<u64>()?)?
+                }
+                _ => return Err(de::Error::custom("unknown reasoning execution field")),
+            }
+        }
+        Ok(RawWorkerReasoning {
+            enabled: require_field(enabled, "enabled")?,
+            budget_tokens: require_field(budget_tokens, "budget_tokens")?,
+            dialect_id: require_field(dialect_id, "dialect_id")?,
+            end_token_ids: require_field(end_token_ids, "end_token_ids")?,
+            forced_end_token_ids: require_field(forced_end_token_ids, "forced_end_token_ids")?,
+            reserved_answer_tokens: require_field(
+                reserved_answer_tokens,
+                "reserved_answer_tokens",
+            )?,
+        })
+    }
 }
 
 pub fn decode_sq8_worker_command(
@@ -1131,11 +1267,17 @@ fn decode_inspected_sq8_worker_command(
             max_new_tokens,
             sampling,
             eos_token_ids,
+            reasoning,
         } => {
             validate_schema_version(&schema_version)?;
             if inspected_kind != Sq8WorkerCommandKind::Generate {
                 return Err(Sq8WorkerProtocolError::invalid_command(
                     "command type changed after inspection",
+                ));
+            }
+            if schema_version == SQ8_WORKER_SCHEMA_VERSION && reasoning.is_some() {
+                return Err(Sq8WorkerProtocolError::invalid_command(
+                    "reasoning execution requires ullm.worker.v2",
                 ));
             }
             Ok(Sq8WorkerCommand::Generate(Sq8GenerateCommand {
@@ -1157,6 +1299,7 @@ fn decode_inspected_sq8_worker_command(
                     seed: sampling.seed,
                 },
                 eos_token_ids: convert_token_ids(eos_token_ids)?,
+                reasoning: reasoning.map(convert_reasoning).transpose()?,
             }))
         }
         RawWorkerCommand::Cancel {
@@ -1314,12 +1457,43 @@ impl<'de> Visitor<'de> for LenientStringVisitor {
 }
 
 fn validate_schema_version(value: &str) -> Result<(), Sq8WorkerProtocolError> {
-    if value != SQ8_WORKER_SCHEMA_VERSION {
+    if value != SQ8_WORKER_SCHEMA_VERSION && value != SQ8_WORKER_SCHEMA_VERSION_V2 {
         return Err(Sq8WorkerProtocolError::invalid_command(
-            "command schema_version is not ullm.worker.v1",
+            "command schema_version is not a supported SQ8 worker version",
         ));
     }
     Ok(())
+}
+
+fn convert_reasoning(
+    raw: RawWorkerReasoning,
+) -> Result<crate::reasoning::ReasoningExecution, Sq8WorkerProtocolError> {
+    if raw.dialect_id.is_empty() || raw.dialect_id.len() > 256 {
+        return Err(Sq8WorkerProtocolError::invalid_command(
+            "reasoning dialect_id violates the bounded text contract",
+        ));
+    }
+    Ok(crate::reasoning::ReasoningExecution {
+        enabled: raw.enabled,
+        budget_tokens: raw
+            .budget_tokens
+            .map(|value| {
+                usize::try_from(value).map_err(|_| {
+                    Sq8WorkerProtocolError::invalid_command(
+                        "reasoning budget_tokens does not fit the worker integer type",
+                    )
+                })
+            })
+            .transpose()?,
+        dialect_id: raw.dialect_id,
+        end_sequence: convert_token_ids(raw.end_token_ids)?,
+        forced_end_sequence: convert_token_ids(raw.forced_end_token_ids)?,
+        reserved_answer_tokens: usize::try_from(raw.reserved_answer_tokens).map_err(|_| {
+            Sq8WorkerProtocolError::invalid_command(
+                "reasoning reserved_answer_tokens does not fit the worker integer type",
+            )
+        })?,
+    })
 }
 
 fn convert_token_ids(values: Vec<u64>) -> Result<Vec<usize>, Sq8WorkerProtocolError> {
@@ -1595,7 +1769,7 @@ impl Sq8WorkerErrorCode {
 pub enum Sq8WorkerEvent {
     #[serde(rename = "ready")]
     Ready {
-        schema_version: &'static str,
+        schema_version: String,
         model: String,
         model_revision: String,
         artifact_content_sha256: String,
@@ -1607,27 +1781,27 @@ pub enum Sq8WorkerEvent {
     },
     #[serde(rename = "started")]
     Started {
-        schema_version: &'static str,
+        schema_version: String,
         request_id: String,
         prompt_tokens: usize,
     },
     #[serde(rename = "progress")]
     Progress {
-        schema_version: &'static str,
+        schema_version: String,
         request_id: String,
         phase: &'static str,
         processed_prompt_tokens: usize,
     },
     #[serde(rename = "token")]
     Token {
-        schema_version: &'static str,
+        schema_version: String,
         request_id: String,
         index: usize,
         token_id: usize,
     },
     #[serde(rename = "released")]
     Released {
-        schema_version: &'static str,
+        schema_version: String,
         request_id: String,
         outcome: Sq8ReleaseOutcomeEvent,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1640,7 +1814,7 @@ pub enum Sq8WorkerEvent {
     },
     #[serde(rename = "error")]
     Error {
-        schema_version: &'static str,
+        schema_version: String,
         request_id: Option<String>,
         code: Sq8WorkerErrorCode,
         recoverable: bool,
@@ -1656,7 +1830,7 @@ impl Sq8WorkerEvent {
 
     pub fn ready_with_profile(profile: &Sq8WorkerProfile) -> Self {
         Self::Ready {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: profile.worker_schema.clone(),
             model: profile.model.clone(),
             model_revision: profile.model_revision.clone(),
             artifact_content_sha256: profile.artifact_content_sha256.clone(),
@@ -1669,16 +1843,36 @@ impl Sq8WorkerEvent {
     }
 
     pub fn started(request_id: impl Into<String>, prompt_tokens: usize) -> Self {
+        Self::started_with_schema(SQ8_WORKER_SCHEMA_VERSION, request_id, prompt_tokens)
+    }
+
+    pub fn started_with_schema(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        prompt_tokens: usize,
+    ) -> Self {
         Self::Started {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: schema_version.to_string(),
             request_id: request_id.into(),
             prompt_tokens,
         }
     }
 
     pub fn progress(request_id: impl Into<String>, processed_prompt_tokens: usize) -> Self {
+        Self::progress_with_schema(
+            SQ8_WORKER_SCHEMA_VERSION,
+            request_id,
+            processed_prompt_tokens,
+        )
+    }
+
+    pub fn progress_with_schema(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        processed_prompt_tokens: usize,
+    ) -> Self {
         Self::Progress {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: schema_version.to_string(),
             request_id: request_id.into(),
             phase: "prefill",
             processed_prompt_tokens,
@@ -1686,8 +1880,17 @@ impl Sq8WorkerEvent {
     }
 
     pub fn token(request_id: impl Into<String>, index: usize, token_id: usize) -> Self {
+        Self::token_with_schema(SQ8_WORKER_SCHEMA_VERSION, request_id, index, token_id)
+    }
+
+    pub fn token_with_schema(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        index: usize,
+        token_id: usize,
+    ) -> Self {
         Self::Token {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: schema_version.to_string(),
             request_id: request_id.into(),
             index,
             token_id,
@@ -1701,7 +1904,26 @@ impl Sq8WorkerEvent {
         prompt_tokens: usize,
         completion_tokens: usize,
     ) -> Result<Self, Sq8WorkerProtocolError> {
+        Self::released_with_schema(
+            SQ8_WORKER_SCHEMA_VERSION,
+            request_id,
+            outcome,
+            cancel_reason,
+            prompt_tokens,
+            completion_tokens,
+        )
+    }
+
+    pub fn released_with_schema(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        outcome: Sq8ReleaseOutcomeEvent,
+        cancel_reason: Option<Sq8CancelReason>,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
         Self::released_inner(
+            schema_version,
             request_id,
             outcome,
             cancel_reason,
@@ -1719,7 +1941,28 @@ impl Sq8WorkerEvent {
         completion_tokens: usize,
         timings: Sq8WorkerTimings,
     ) -> Result<Self, Sq8WorkerProtocolError> {
+        Self::released_with_timings_schema(
+            SQ8_WORKER_SCHEMA_VERSION,
+            request_id,
+            outcome,
+            cancel_reason,
+            prompt_tokens,
+            completion_tokens,
+            timings,
+        )
+    }
+
+    pub fn released_with_timings_schema(
+        schema_version: &str,
+        request_id: impl Into<String>,
+        outcome: Sq8ReleaseOutcomeEvent,
+        cancel_reason: Option<Sq8CancelReason>,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        timings: Sq8WorkerTimings,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
         Self::released_inner(
+            schema_version,
             request_id,
             outcome,
             cancel_reason,
@@ -1730,6 +1973,7 @@ impl Sq8WorkerEvent {
     }
 
     fn released_inner(
+        schema_version: &str,
         request_id: impl Into<String>,
         outcome: Sq8ReleaseOutcomeEvent,
         cancel_reason: Option<Sq8CancelReason>,
@@ -1753,7 +1997,7 @@ impl Sq8WorkerEvent {
                 .map_err(Sq8WorkerProtocolError::invalid_command)?;
         }
         Ok(Self::Released {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: schema_version.to_string(),
             request_id: request_id.into(),
             outcome,
             cancel_reason,
@@ -1780,8 +2024,28 @@ impl Sq8WorkerEvent {
         if let Some(request_id) = request_id.as_deref() {
             validate_worker_request_id(request_id)?;
         }
+        Self::error_with_schema(SQ8_WORKER_SCHEMA_VERSION, request_id, code, message)
+    }
+
+    pub fn error_with_schema(
+        schema_version: &str,
+        request_id: Option<String>,
+        code: Sq8WorkerErrorCode,
+        message: impl Into<String>,
+    ) -> Result<Self, Sq8WorkerProtocolError> {
+        let message = message.into();
+        if message.len() > SQ8_WORKER_MAX_ERROR_MESSAGE_BYTES
+            || message.chars().any(char::is_control)
+        {
+            return Err(Sq8WorkerProtocolError::invalid_command(
+                "worker error message violates the bounded text contract",
+            ));
+        }
+        if let Some(request_id) = request_id.as_deref() {
+            validate_worker_request_id(request_id)?;
+        }
         Ok(Self::Error {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: schema_version.to_string(),
             request_id,
             code,
             recoverable: code.recoverable(),
@@ -1802,7 +2066,7 @@ impl Sq8WorkerEvent {
                 context_length,
                 max_new_tokens,
             } => {
-                if *schema_version != SQ8_WORKER_SCHEMA_VERSION
+                if schema_version != &profile.worker_schema
                     || *model != profile.model
                     || *model_revision != profile.model_revision
                     || *artifact_content_sha256 != profile.artifact_content_sha256
@@ -1820,7 +2084,7 @@ impl Sq8WorkerEvent {
                 request_id,
                 prompt_tokens,
             } => {
-                validate_event_common(schema_version, request_id)?;
+                validate_event_common(schema_version, request_id, &profile.worker_schema)?;
                 if !(1..=profile.context_length).contains(prompt_tokens) {
                     return Err("SQ8 started prompt count is out of range".into());
                 }
@@ -1831,7 +2095,7 @@ impl Sq8WorkerEvent {
                 phase,
                 processed_prompt_tokens,
             } => {
-                validate_event_common(schema_version, request_id)?;
+                validate_event_common(schema_version, request_id, &profile.worker_schema)?;
                 if *phase != "prefill"
                     || !(1..=profile.context_length).contains(processed_prompt_tokens)
                 {
@@ -1844,7 +2108,7 @@ impl Sq8WorkerEvent {
                 index,
                 token_id,
             } => {
-                validate_event_common(schema_version, request_id)?;
+                validate_event_common(schema_version, request_id, &profile.worker_schema)?;
                 if *index >= profile.max_new_tokens || *token_id >= profile.vocab_size {
                     return Err("SQ8 token event is out of range".into());
                 }
@@ -1859,7 +2123,7 @@ impl Sq8WorkerEvent {
                 timings,
                 reset_complete,
             } => {
-                validate_event_common(schema_version, request_id)?;
+                validate_event_common(schema_version, request_id, &profile.worker_schema)?;
                 if matches!(outcome, Sq8ReleaseOutcomeEvent::Cancelled) != cancel_reason.is_some()
                     || !(1..=profile.context_length).contains(prompt_tokens)
                     || *completion_tokens > profile.max_new_tokens
@@ -1879,7 +2143,7 @@ impl Sq8WorkerEvent {
                 recoverable,
                 message,
             } => {
-                if *schema_version != SQ8_WORKER_SCHEMA_VERSION
+                if schema_version != &profile.worker_schema
                     || *recoverable != code.recoverable()
                     || message.len() > SQ8_WORKER_MAX_ERROR_MESSAGE_BYTES
                     || message.chars().any(char::is_control)
@@ -1897,8 +2161,12 @@ impl Sq8WorkerEvent {
     }
 }
 
-fn validate_event_common(schema_version: &str, request_id: &str) -> Result<(), String> {
-    if schema_version != SQ8_WORKER_SCHEMA_VERSION {
+fn validate_event_common(
+    schema_version: &str,
+    request_id: &str,
+    expected_schema_version: &str,
+) -> Result<(), String> {
+    if schema_version != expected_schema_version {
         return Err("SQ8 event schema version changed".into());
     }
     validate_worker_request_id(request_id)
@@ -2242,6 +2510,34 @@ mod tests {
                 .unwrap(),
             Sq8WorkerCommand::Shutdown
         );
+        assert_eq!(
+            decode_sq8_worker_command(br#"{"schema_version":"ullm.worker.v2","type":"shutdown"}"#)
+                .unwrap(),
+            Sq8WorkerCommand::Shutdown
+        );
+    }
+
+    #[test]
+    fn strict_decoder_accepts_v2_reasoning_execution() {
+        let payload = br#"{"schema_version":"ullm.worker.v2","type":"generate","request_id":"req-1","prompt_token_ids":[1,2,3],"max_new_tokens":16,"sampling":{"temperature":0.6,"top_p":0.95,"top_k":20,"seed":7},"eos_token_ids":[151645,151643],"reasoning":{"enabled":true,"budget_tokens":8,"dialect_id":"qwen3.5-thinking-v1","end_token_ids":[248069],"forced_end_token_ids":[248069],"reserved_answer_tokens":1}}"#;
+        let Sq8WorkerCommand::Generate(command) = decode_sq8_worker_command(payload).unwrap()
+        else {
+            panic!("expected generate")
+        };
+        let reasoning = command.reasoning.as_ref().expect("reasoning contract");
+        assert!(reasoning.enabled);
+        assert_eq!(reasoning.budget_tokens, Some(8));
+        assert_eq!(reasoning.dialect_id, "qwen3.5-thinking-v1");
+        assert_eq!(reasoning.end_sequence, vec![248069]);
+        assert_eq!(reasoning.forced_end_sequence, vec![248069]);
+        assert_eq!(reasoning.reserved_answer_tokens, 1);
+    }
+
+    #[test]
+    fn v1_rejects_reasoning_execution_without_hidden_defaults() {
+        let payload = br#"{"schema_version":"ullm.worker.v1","type":"generate","request_id":"req-1","prompt_token_ids":[1,2,3],"max_new_tokens":16,"sampling":{"temperature":0.6,"top_p":0.95,"top_k":20,"seed":7},"eos_token_ids":[151645,151643],"reasoning":{"enabled":false,"budget_tokens":null,"dialect_id":"qwen3.5-thinking-v1","end_token_ids":[248069],"forced_end_token_ids":[248069],"reserved_answer_tokens":1}}"#;
+        let error = decode_sq8_worker_command(payload).unwrap_err();
+        assert_eq!(error.kind, Sq8WorkerProtocolErrorKind::InvalidCommand);
     }
 
     #[test]
@@ -2288,7 +2584,6 @@ mod tests {
         for payload in [
             br#"{"schema_version":"ullm.worker.v1","type":"shutdown","schema":"bad"}"#.as_slice(),
             br#"{"type":"shutdown"}"#.as_slice(),
-            br#"{"schema_version":"ullm.worker.v2","type":"shutdown"}"#.as_slice(),
             br#"{"schema_version":"ullm.worker.v1","type":"ready"}"#.as_slice(),
         ] {
             assert_eq!(
@@ -2934,7 +3229,7 @@ mod tests {
     #[test]
     fn ordered_writer_rejects_invalid_event_before_output() {
         let invalid = Sq8WorkerEvent::Token {
-            schema_version: SQ8_WORKER_SCHEMA_VERSION,
+            schema_version: SQ8_WORKER_SCHEMA_VERSION.to_string(),
             request_id: "req-1".into(),
             index: 0,
             token_id: QWEN3_14B_VOCAB_SIZE,

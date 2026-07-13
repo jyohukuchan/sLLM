@@ -7,6 +7,7 @@ use ullm_engine::sq8_worker_protocol::{
 
 fn profile() -> Sq8WorkerProfile {
     Sq8WorkerProfile {
+        worker_schema: "ullm.worker.v1".into(),
         model: "snapshot-model".into(),
         model_revision: "snapshot-revision".into(),
         artifact_content_sha256: "a".repeat(64),
@@ -18,6 +19,7 @@ fn profile() -> Sq8WorkerProfile {
         vocab_size: 32,
         eos_token_ids: vec![2, 3],
         top_k: 1,
+        reasoning: None,
     }
 }
 
@@ -55,4 +57,26 @@ fn command_decode_and_request_validation_share_the_explicit_snapshot() {
         .unwrap();
     assert_eq!(request.prompt_token_ids, vec![1, 4]);
     assert_eq!(request.eos_token_ids, vec![2, 3]);
+}
+
+#[test]
+fn v2_profile_drives_ready_and_regular_event_schema() {
+    let mut profile = profile();
+    profile.worker_schema = "ullm.worker.v2".into();
+    let mut writer = Sq8OrderedJsonlWriter::with_profile(Vec::new(), profile.clone());
+    writer
+        .write_ready_event(&Sq8WorkerEvent::ready_with_profile(&profile))
+        .unwrap();
+    writer
+        .write_event(&Sq8WorkerEvent::started_with_schema(
+            &profile.worker_schema,
+            "req-1",
+            1,
+        ))
+        .unwrap();
+    let json = String::from_utf8(writer.into_inner()).unwrap();
+    assert!(
+        json.lines()
+            .all(|line| line.contains("\"schema_version\":\"ullm.worker.v2\""))
+    );
 }

@@ -260,6 +260,17 @@ impl ReasoningState {
         })
     }
 
+    pub fn next_forced_token(&self) -> Option<usize> {
+        (self.phase == ReasoningPhase::ForcingEndSequence)
+            .then(|| {
+                self.dialect
+                    .forced_end_sequence
+                    .get(self.forced_index)
+                    .copied()
+            })
+            .flatten()
+    }
+
     pub fn on_eos(&mut self) -> ReasoningStep {
         if self.phase == ReasoningPhase::Reasoning
             && self.dialect.eos_policy == ReasoningEosPolicy::Close

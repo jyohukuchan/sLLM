@@ -50,11 +50,16 @@ struct Sq8WriterEnvelope {
 pub struct Sq8WorkerEventPublisher {
     sender: SyncSender<Sq8WriterEnvelope>,
     poisoned: Arc<AtomicBool>,
+    schema_version: String,
 }
 
 impl Sq8WorkerEventPublisher {
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn schema_version(&self) -> &str {
+        &self.schema_version
     }
 
     fn publish(&self, event: Sq8WorkerEvent) -> Result<(), String> {
@@ -178,6 +183,7 @@ where
 {
     let (sender, receiver) = sync_channel(1);
     let poisoned = Arc::new(AtomicBool::new(false));
+    let schema_version = profile.worker_schema.clone();
     let writer_poisoned = Arc::clone(&poisoned);
     let closer = sender.clone();
     let join = thread::Builder::new()
@@ -186,7 +192,11 @@ where
         .map_err(|_| "failed to spawn ordered writer thread".to_string())?;
     let thread_poisoned = Arc::clone(&poisoned);
     Ok((
-        Sq8WorkerEventPublisher { sender, poisoned },
+        Sq8WorkerEventPublisher {
+            sender,
+            poisoned,
+            schema_version,
+        },
         Sq8WriterThread {
             closer,
             poisoned: thread_poisoned,
@@ -377,7 +387,8 @@ impl<'a> Sq8RequestEventPublisher<'a> {
         if self.started || self.released {
             return Err("SQ8 request started event is out of order".into());
         }
-        self.events.publish(Sq8WorkerEvent::started(
+        self.events.publish(Sq8WorkerEvent::started_with_schema(
+            &self.profile.worker_schema,
             self.request_id.clone(),
             self.prompt_tokens,
         ))?;
@@ -395,8 +406,11 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             .progress
             .observe_unit(processed_prompt_tokens, execution_width)?
         {
-            self.events
-                .publish(Sq8WorkerEvent::progress(self.request_id.clone(), processed))?;
+            self.events.publish(Sq8WorkerEvent::progress_with_schema(
+                &self.profile.worker_schema,
+                self.request_id.clone(),
+                processed,
+            ))?;
         }
         Ok(())
     }
@@ -404,8 +418,11 @@ impl<'a> Sq8RequestEventPublisher<'a> {
     pub fn observe_prefill_transition(&mut self) -> Result<(), String> {
         self.require_prefill_event("prefill transition")?;
         if let Some(processed) = self.progress.observe_transition()? {
-            self.events
-                .publish(Sq8WorkerEvent::progress(self.request_id.clone(), processed))?;
+            self.events.publish(Sq8WorkerEvent::progress_with_schema(
+                &self.profile.worker_schema,
+                self.request_id.clone(),
+                processed,
+            ))?;
         }
         Ok(())
     }
@@ -420,7 +437,8 @@ impl<'a> Sq8RequestEventPublisher<'a> {
         {
             return Err("SQ8 token publication is out of order or range".into());
         }
-        self.events.publish(Sq8WorkerEvent::token(
+        self.events.publish(Sq8WorkerEvent::token_with_schema(
+            &self.profile.worker_schema,
             self.request_id.clone(),
             self.completion_tokens,
             token_id,
@@ -473,7 +491,8 @@ impl<'a> Sq8RequestEventPublisher<'a> {
             None
         };
         let event = match timings {
-            Some(timings) => Sq8WorkerEvent::released_with_timings(
+            Some(timings) => Sq8WorkerEvent::released_with_timings_schema(
+                &self.profile.worker_schema,
                 self.request_id.clone(),
                 outcome,
                 cancel_reason,
@@ -481,7 +500,8 @@ impl<'a> Sq8RequestEventPublisher<'a> {
                 self.completion_tokens,
                 timings,
             ),
-            None => Sq8WorkerEvent::released(
+            None => Sq8WorkerEvent::released_with_schema(
+                &self.profile.worker_schema,
                 self.request_id.clone(),
                 outcome,
                 cancel_reason,
@@ -1253,8 +1273,9 @@ fn publish_recoverable(
     if !code.recoverable() {
         return Err("SQ8 reader attempted to publish a fatal code as recoverable".into());
     }
-    let event = Sq8WorkerEvent::error(request_id, code, message)
-        .map_err(|_| "failed to construct SQ8 recoverable error event".to_string())?;
+    let event =
+        Sq8WorkerEvent::error_with_schema(events.schema_version(), request_id, code, message)
+            .map_err(|_| "failed to construct SQ8 recoverable error event".to_string())?;
     events.publish(event).inspect_err(|_| {
         let _ = control.mark_failed();
     })
@@ -1305,7 +1326,9 @@ fn publish_fatal_best_effort(
     code: Sq8WorkerErrorCode,
     message: &'static str,
 ) {
-    if let Ok(event) = Sq8WorkerEvent::error(request_id, code, message) {
+    if let Ok(event) =
+        Sq8WorkerEvent::error_with_schema(events.schema_version(), request_id, code, message)
+    {
         events.try_publish_fatal(event);
     }
 }

@@ -147,6 +147,7 @@ pub struct PromotionContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerProfileSnapshot {
+    pub worker_schema: String,
     pub model: String,
     pub model_revision: String,
     pub artifact_content_sha256: String,
@@ -158,11 +159,13 @@ pub struct WorkerProfileSnapshot {
     pub vocab_size: usize,
     pub eos_token_ids: Vec<usize>,
     pub top_k: usize,
+    pub reasoning: Option<crate::reasoning::ReasoningDialect>,
 }
 
 impl WorkerProfileSnapshot {
     pub fn into_worker_profile(self) -> crate::sq8_worker_protocol::Sq8WorkerProfile {
         crate::sq8_worker_protocol::Sq8WorkerProfile {
+            worker_schema: self.worker_schema,
             model: self.model,
             model_revision: self.model_revision,
             artifact_content_sha256: self.artifact_content_sha256,
@@ -174,6 +177,7 @@ impl WorkerProfileSnapshot {
             vocab_size: self.vocab_size,
             eos_token_ids: self.eos_token_ids,
             top_k: self.top_k,
+            reasoning: self.reasoning,
         }
     }
 }
@@ -204,11 +208,13 @@ pub struct WorkerStartupConfig {
     pub package_dir: PathBuf,
     pub profile: WorkerProfileSnapshot,
     pub required_environment: Vec<String>,
+    pub reasoning: Option<crate::reasoning::ReasoningDialect>,
 }
 
 impl ServedModel {
     pub fn profile_snapshot(&self) -> WorkerProfileSnapshot {
         WorkerProfileSnapshot {
+            worker_schema: self.worker.protocol.clone(),
             model: self.public.id.clone(),
             model_revision: self.public.revision.clone(),
             artifact_content_sha256: self
@@ -225,6 +231,7 @@ impl ServedModel {
             vocab_size: self.generation.vocab_size,
             eos_token_ids: self.generation.eos_token_ids.clone(),
             top_k: self.generation.sampling.top_k,
+            reasoning: self.reasoning.clone(),
         }
     }
 
@@ -291,6 +298,7 @@ impl ServedModel {
             package_dir,
             profile: self.profile_snapshot(),
             required_environment: self.worker.required_environment.clone(),
+            reasoning: self.reasoning.clone(),
         })
     }
 }

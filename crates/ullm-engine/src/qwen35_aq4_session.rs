@@ -16,6 +16,7 @@ use crate::inference_api::{
     CancellationToken, FinishReason, InferenceRequest, ReleaseOutcome, ReleaseSummary,
 };
 use crate::qwen35_aq4_model_runtime::{Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime};
+use crate::reasoning::{ReasoningPhase, ReasoningState};
 use crate::worker_driver::{InferenceSession, PublishedAdvance, SessionAdvance};
 use sha2::{Digest, Sha256};
 
@@ -56,6 +57,7 @@ pub struct Qwen35Aq4SessionConfig {
     pub rotary_dim: usize,
     pub rope_base: f32,
     pub sync_each_layer_for_timing: bool,
+    pub reasoning_dialect: Option<crate::reasoning::ReasoningDialect>,
 }
 
 impl Qwen35Aq4SessionConfig {
@@ -66,6 +68,7 @@ impl Qwen35Aq4SessionConfig {
             rotary_dim: QWEN35_AQ4_ROTARY_DIM,
             rope_base: QWEN35_AQ4_ROPE_BASE,
             sync_each_layer_for_timing: false,
+            reasoning_dialect: None,
         }
     }
 }
@@ -1021,6 +1024,7 @@ struct ActiveRequest {
     generated_tokens: usize,
     decode_input: Option<usize>,
     terminal_outcome: Option<ReleaseOutcome>,
+    reasoning: Option<ReasoningState>,
 }
 
 pub struct Qwen35Aq4InferenceSession<M = Qwen35Aq4ModelRuntime> {
@@ -1226,9 +1230,27 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         &mut self,
         label: &str,
     ) -> Result<SessionAdvance<Qwen35Aq4PreparedToken>, String> {
-        let token_id = match self.model.top_token_from_last_layer(label) {
-            Ok(token_id) => token_id,
-            Err(error) => return self.fail(format!("{label} top-1 failed: {error}")),
+        let forced_token = self
+            .active
+            .as_ref()
+            .and_then(|active| active.reasoning.as_ref())
+            .and_then(ReasoningState::next_forced_token);
+        if self
+            .active
+            .as_ref()
+            .and_then(|active| active.reasoning.as_ref())
+            .is_some_and(|reasoning| {
+                reasoning.phase == ReasoningPhase::ForcingEndSequence && forced_token.is_none()
+            })
+        {
+            return self.fail(format!("{label} reasoning forced sequence is exhausted"));
+        }
+        let token_id = match forced_token {
+            Some(token_id) => token_id,
+            None => match self.model.top_token_from_last_layer(label) {
+                Ok(token_id) => token_id,
+                Err(error) => return self.fail(format!("{label} top-1 failed: {error}")),
+            },
         };
         if token_id >= self.model.vocab_size() {
             return self.fail(format!(
@@ -1236,35 +1258,48 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
                 self.model.vocab_size()
             ));
         }
-        let (generated_index, cache_len, next_generated, max_new_tokens) =
-            match self.active.as_ref() {
-                Some(active) => {
-                    let generated_index = active.generated_tokens;
-                    let Some(cache_len) =
-                        active.prompt_token_ids.len().checked_add(generated_index)
-                    else {
-                        return self.fail("Qwen3.5 AQ4 prepared cache length overflows");
-                    };
-                    let Some(next_generated) = generated_index.checked_add(1) else {
-                        return self.fail("Qwen3.5 AQ4 generated token count overflows");
-                    };
-                    (
-                        generated_index,
-                        cache_len,
-                        next_generated,
-                        active.max_new_tokens,
-                    )
+        let (generated_index, cache_len, next_generated) = match self.active.as_ref() {
+            Some(active) => {
+                let generated_index = active.generated_tokens;
+                let Some(cache_len) = active.prompt_token_ids.len().checked_add(generated_index)
+                else {
+                    return self.fail("Qwen3.5 AQ4 prepared cache length overflows");
+                };
+                let Some(next_generated) = generated_index.checked_add(1) else {
+                    return self.fail("Qwen3.5 AQ4 generated token count overflows");
+                };
+                (generated_index, cache_len, next_generated)
+            }
+            None => {
+                return self.fail("Qwen3.5 AQ4 token preparation has no active request");
+            }
+        };
+        let terminal_reason = if let Some(active) = self.active.as_mut() {
+            if let Some(reasoning) = active.reasoning.as_mut() {
+                if forced_token.is_some() {
+                    reasoning.accept_forced(token_id)
+                } else if self.config.eos_token_ids.contains(&token_id) {
+                    Ok(reasoning.on_eos())
+                } else {
+                    reasoning.accept_sampled(token_id)
                 }
-                None => {
-                    return self.fail("Qwen3.5 AQ4 token preparation has no active request");
+                .map_err(|error| format!("{label} reasoning transition failed: {error:?}"))?;
+                if reasoning.phase == ReasoningPhase::Finished {
+                    Some(FinishReason::Stop)
+                } else if next_generated == active.max_new_tokens {
+                    Some(FinishReason::Length)
+                } else {
+                    None
                 }
-            };
-        let terminal_reason = if self.config.eos_token_ids.contains(&token_id) {
-            Some(FinishReason::Stop)
-        } else if next_generated == max_new_tokens {
-            Some(FinishReason::Length)
+            } else if self.config.eos_token_ids.contains(&token_id) {
+                Some(FinishReason::Stop)
+            } else if next_generated == active.max_new_tokens {
+                Some(FinishReason::Length)
+            } else {
+                None
+            }
         } else {
-            None
+            return self.fail("Qwen3.5 AQ4 token preparation has no active request");
         };
         let Some(next_nonce) = self.next_nonce.checked_add(1) else {
             return self.fail("Qwen3.5 AQ4 prepared token nonce overflows");
@@ -1381,6 +1416,32 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
                     .to_string(),
             );
         }
+        let reasoning = match (request.reasoning, self.config.reasoning_dialect.as_ref()) {
+            (Some(execution), Some(dialect)) => {
+                if execution.dialect_id != dialect.identity
+                    || execution.end_sequence != dialect.end_sequence
+                    || execution.forced_end_sequence != dialect.forced_end_sequence
+                    || execution.reserved_answer_tokens != dialect.reserved_answer_tokens
+                {
+                    return Err("Qwen3.5 AQ4 reasoning dialect is not bound to the session".into());
+                }
+                Some(
+                    ReasoningState::new(
+                        dialect.clone(),
+                        execution.enabled,
+                        execution.budget_tokens,
+                        self.model.vocab_size(),
+                    )
+                    .map_err(|error| {
+                        format!("Qwen3.5 AQ4 reasoning contract is invalid: {error:?}")
+                    })?,
+                )
+            }
+            (Some(_), None) => {
+                return Err("Qwen3.5 AQ4 reasoning request has no loaded dialect".into());
+            }
+            (None, _) => None,
+        };
         self.active = Some(ActiveRequest {
             request_id: request.request_id,
             prompt_token_ids: request.prompt_token_ids,
@@ -1390,6 +1451,7 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             generated_tokens: 0,
             decode_input: None,
             terminal_outcome: None,
+            reasoning,
         });
         self.active_operation_audit = self
             .execution_contract
@@ -2255,6 +2317,22 @@ mod tests {
         )
     }
 
+    fn reasoning_dialect() -> crate::reasoning::ReasoningDialect {
+        crate::reasoning::ReasoningDialect {
+            identity: "synthetic.qwen35-thinking.v1".into(),
+            start_sequence: vec![10],
+            end_sequence: vec![20, 21],
+            forced_end_sequence: vec![20, 21],
+            max_budget_tokens: 8,
+            reserved_answer_tokens: 1,
+            enabled_by_default: false,
+            effort_budgets: vec![("low".into(), 2), ("medium".into(), 4), ("high".into(), 8)],
+            history_reasoning_policy: crate::reasoning::HistoryReasoningPolicy::Omit,
+            initial_phase: crate::reasoning::InitialReasoningPhase::Reasoning,
+            eos_policy: crate::reasoning::ReasoningEosPolicy::Close,
+        }
+    }
+
     fn prepared(advance: SessionAdvance<Qwen35Aq4PreparedToken>) -> Qwen35Aq4PreparedToken {
         match advance {
             SessionAdvance::Token { prepared, .. } => prepared,
@@ -2305,6 +2383,44 @@ mod tests {
                 ExecutionPhase::CachedPrefixPrefill,
             ]
         );
+    }
+
+    #[test]
+    fn forced_reasoning_sequence_uses_the_prepare_publish_commit_boundary() {
+        let dialect = reasoning_dialect();
+        let mut config = Qwen35Aq4SessionConfig::greedy(8, vec![2]);
+        config.reasoning_dialect = Some(dialect.clone());
+        let mut session = Qwen35Aq4InferenceSession::from_model(model(&[7, 9, 2]), config).unwrap();
+        let mut request = request("forced-reasoning", &[4], 6);
+        request.reasoning = Some(crate::reasoning::ReasoningExecution {
+            enabled: true,
+            budget_tokens: Some(1),
+            dialect_id: dialect.identity.clone(),
+            end_sequence: dialect.end_sequence.clone(),
+            forced_end_sequence: dialect.forced_end_sequence.clone(),
+            reserved_answer_tokens: dialect.reserved_answer_tokens,
+        });
+        session
+            .start_request(request, CancellationToken::new())
+            .unwrap();
+
+        let first = next_prepared(&mut session);
+        assert_eq!(first.token_id, 7);
+        session.publish_prepared(first, |_| Ok(())).unwrap();
+
+        let forced_first = next_prepared(&mut session);
+        assert_eq!(forced_first.token_id, 20);
+        session.publish_prepared(forced_first, |_| Ok(())).unwrap();
+        let forced_second = next_prepared(&mut session);
+        assert_eq!(forced_second.token_id, 21);
+        session.publish_prepared(forced_second, |_| Ok(())).unwrap();
+
+        let answer = next_prepared(&mut session);
+        assert_eq!(answer.token_id, 9);
+        session.publish_prepared(answer, |_| Ok(())).unwrap();
+        let eos = next_prepared(&mut session);
+        assert_eq!(eos.token_id, 2);
+        assert_eq!(eos.terminal_reason, Some(FinishReason::Stop));
     }
 
     #[test]

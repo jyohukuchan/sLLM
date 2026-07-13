@@ -1,7 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Quantization-independent names for the stable `ullm.worker.v1` protocol.
+//! Quantization-independent names for the stable `ullm.worker.v1` and `.v2` protocols.
 //!
 //! The implementation remains in `sq8_worker_protocol` during the compatibility
 //! migration. New backends must depend on this module so a quantization format
@@ -12,6 +12,7 @@ pub use crate::sq8_worker_protocol::{
     SQ8_WORKER_MAX_JSON_DEPTH as WORKER_MAX_JSON_DEPTH,
     SQ8_WORKER_MAX_RECORD_BYTES as WORKER_MAX_RECORD_BYTES,
     SQ8_WORKER_SCHEMA_VERSION as WORKER_SCHEMA_VERSION,
+    SQ8_WORKER_SCHEMA_VERSION_V2 as WORKER_SCHEMA_VERSION_V2,
     Sq8ActiveTerminalFlushAck as ActiveTerminalFlushAck,
     Sq8ActiveTerminalPermit as ActiveTerminalPermit, Sq8BoundedJsonlReader as BoundedJsonlReader,
     Sq8CancelReason as CancelReason, Sq8GenerateCommand as GenerateCommand,

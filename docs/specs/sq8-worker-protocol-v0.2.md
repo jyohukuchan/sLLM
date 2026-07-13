@@ -20,6 +20,7 @@ model-independent reasoning execution data to `generate`.
   "reasoning": {
     "enabled": true,
     "budget_tokens": 128,
+    "dialect_id": "qwen3.5-thinking-v1",
     "end_token_ids": [248069],
     "forced_end_token_ids": [248069],
     "reserved_answer_tokens": 1

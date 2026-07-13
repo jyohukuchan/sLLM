@@ -204,10 +204,11 @@ fn resident_config_from_startup(
         lm_head_mode: PackageLmHeadMode::GpuResidentF32,
         lm_head_chunk_rows: RESIDENT_LM_HEAD_CHUNK_ROWS,
     };
-    let session = Qwen35Aq4SessionConfig::greedy(
+    let mut session = Qwen35Aq4SessionConfig::greedy(
         startup.profile.max_new_tokens,
         startup.profile.eos_token_ids.clone(),
     );
+    session.reasoning_dialect = startup.reasoning;
     Ok((
         ResidentWorkerConfig {
             model,
@@ -348,6 +349,7 @@ fn default_engine_path() -> Result<PathBuf, String> {
 
 fn configured_aq4_worker_profile() -> Sq8WorkerProfile {
     let defaults = Sq8WorkerProfile {
+        worker_schema: "ullm.worker.v1".into(),
         model: "ullm-qwen3.5-9b-aq4".into(),
         model_revision: "aq4-cli-compat-v0.1".into(),
         artifact_content_sha256: "0".repeat(64),
@@ -359,6 +361,7 @@ fn configured_aq4_worker_profile() -> Sq8WorkerProfile {
         vocab_size: 248320,
         eos_token_ids: vec![248044, 248046],
         top_k: 1,
+        reasoning: None,
     };
     Sq8WorkerProfile::from_environment_with_defaults(&defaults)
 }
@@ -514,6 +517,7 @@ mod tests {
 
     fn profile_snapshot() -> WorkerProfileSnapshot {
         WorkerProfileSnapshot {
+            worker_schema: "ullm.worker.v1".into(),
             model: "ullm-qwen3.5-9b-aq4".into(),
             model_revision: "resident-test".into(),
             artifact_content_sha256: "a".repeat(64),
@@ -525,6 +529,7 @@ mod tests {
             vocab_size: 248320,
             eos_token_ids: vec![248044, 248046],
             top_k: 1,
+            reasoning: None,
         }
     }
 
@@ -535,6 +540,7 @@ mod tests {
             package_dir: PathBuf::from("/product/package"),
             profile: profile_snapshot(),
             required_environment: vec!["ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL".into()],
+            reasoning: None,
         };
         let (config, profile) = resident_config_from_startup(startup).unwrap();
 
@@ -567,6 +573,7 @@ mod tests {
             package_dir: PathBuf::from("/package"),
             profile,
             required_environment: vec![],
+            reasoning: None,
         })
         .unwrap_err();
         assert!(error.0.contains("inconsistent"));
@@ -631,6 +638,7 @@ mod tests {
 
     fn scripted_profile() -> Sq8WorkerProfile {
         Sq8WorkerProfile {
+            worker_schema: "ullm.worker.v1".into(),
             model: "scripted-aq4".into(),
             model_revision: "resident".into(),
             artifact_content_sha256: "a".repeat(64),
@@ -642,6 +650,7 @@ mod tests {
             vocab_size: 32,
             eos_token_ids: vec![2],
             top_k: 1,
+            reasoning: None,
         }
     }
 
