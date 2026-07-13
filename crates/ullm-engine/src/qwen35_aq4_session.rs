@@ -2486,6 +2486,53 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_during_reasoning_forced_close_resets_for_reuse() {
+        let dialect = reasoning_dialect();
+        let mut config = Qwen35Aq4SessionConfig::greedy(8, vec![2]);
+        config.reasoning_dialect = Some(dialect.clone());
+        let mut session = Qwen35Aq4InferenceSession::from_model(model(&[7, 9, 2]), config).unwrap();
+        let cancel = CancellationToken::new();
+        let mut reasoning_request = request("reasoning-cancel", &[4], 6);
+        reasoning_request.reasoning = Some(crate::reasoning::ReasoningExecution {
+            enabled: true,
+            budget_tokens: Some(1),
+            dialect_id: dialect.identity.clone(),
+            end_sequence: dialect.end_sequence.clone(),
+            forced_end_sequence: dialect.forced_end_sequence.clone(),
+            reserved_answer_tokens: dialect.reserved_answer_tokens,
+        });
+        session
+            .start_request(reasoning_request, cancel.clone())
+            .unwrap();
+        let body = next_prepared(&mut session);
+        session.publish_prepared(body, |_| Ok(())).unwrap();
+        let forced = next_prepared(&mut session);
+        assert_eq!(forced.token_id, 20);
+        cancel.cancel();
+        assert_eq!(
+            session
+                .publish_prepared(forced, |_| panic!("cancelled publication must not run"))
+                .unwrap(),
+            PublishedAdvance::CancellationObserved
+        );
+        assert_eq!(session.abort_and_reset().unwrap().generated_tokens, 1);
+        assert_eq!(session.status(), Qwen35Aq4SessionStatus::Ready);
+
+        session
+            .start_request(
+                request("after-reasoning-cancel", &[4], 1),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let next = next_prepared(&mut session);
+        session.publish_prepared(next, |_| Ok(())).unwrap();
+        assert_eq!(
+            session.finish_and_reset().unwrap().outcome,
+            ReleaseOutcome::Length
+        );
+    }
+
+    #[test]
     fn prefill_chunk_widths_cover_boundaries_and_tail_without_partial_progress() {
         for (prompt_len, expected_widths) in [
             (1, vec![1]),
