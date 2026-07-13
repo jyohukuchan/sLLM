@@ -131,11 +131,27 @@ uv run --project services/openai-gateway python tools/run-openwebui-failure-gate
   --openwebui-url "$OPENWEBUI_URL" --service "$SERVICE"
 ```
 
-The `--include-smoke` run is still not a substitute for
-`deploy/openwebui/browser-reasoning-smoke.cjs`; run that v2-specific browser
-smoke separately and validate its hash-only output before assembling release
-evidence. Never run these gates against the active v1 service and label their
-output as v2 evidence.
+Run the v2-specific browser smoke separately through its safe runner. It binds
+the candidate and switch model IDs into the container environment, checks the
+four observed provider-request hashes against those IDs, validates the v2
+schema, and atomically publishes only gate-eligible hash-only evidence:
+
+```bash
+uv run --project services/openai-gateway python \
+  tools/run-openwebui-reasoning-browser-smoke.py \
+  --output "$OUT/browser-reasoning.json" --token-file "$TOKEN_FILE" \
+  --browser-image "$BROWSER_IMAGE" --openwebui-url "$OPENWEBUI_URL" \
+  --model-id "$ULLM_MODEL_ID" --model-name "$ULLM_MODEL_NAME" \
+  --switch-model-id llama-qwen3.5-9b-ud-q4 \
+  --switch-model-name 'llama.cpp Qwen3.5 9B UD-Q4_K_XL'
+
+uv run --project services/openai-gateway python \
+  tools/validate-openwebui-reasoning-browser-smoke.py \
+  "$OUT/browser-reasoning.json" --require-pass > "$OUT/browser-reasoning-validator.json"
+```
+
+Never run these gates against the active v1 service and label their output as
+v2 evidence.
 
 For the final hash-only handoff, keep the generic release evidence, its
 validator report, the OpenWebUI browser evidence and report, and the promotion

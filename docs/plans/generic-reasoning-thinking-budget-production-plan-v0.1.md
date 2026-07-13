@@ -803,6 +803,7 @@ OpenWebUI/release tool:
 - `tools/prepare-generic-reasoning-release-bundle.py`
 - `tools/validate-generic-reasoning-release-bundle.py`
 - `tools/validate-openwebui-reasoning-browser-smoke.py`
+- `tools/run-openwebui-reasoning-browser-smoke.py`
 - `tools/write-aq4-resident-promotion-receipt.py`
 - `deploy/openwebui/browser-reasoning-smoke.cjs`
 

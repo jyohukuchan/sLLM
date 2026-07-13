@@ -88,6 +88,9 @@ that correlation.
 The browser-side Phase 5 smoke is
 `deploy/openwebui/browser-reasoning-smoke.cjs`; it records only hashes, counts,
 and boolean state, and must be run only after a v2 candidate is configured.
+The checked-in runner `tools/run-openwebui-reasoning-browser-smoke.py` binds the
+candidate and comparison model IDs, validates the v2 record, and atomically
+publishes only gate-eligible hash-only output.
 Its current evidence schema is
 `ullm.openwebui.reasoning_browser_smoke.v2`; v2 records the model hash for
 each provider request and verifies a uLLM → llama.cpp → uLLM switch cycle.
