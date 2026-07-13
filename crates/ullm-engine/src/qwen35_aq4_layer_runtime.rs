@@ -6,8 +6,9 @@ use crate::aq4_package_runtime::{
 use crate::backend_operation_registry::{
     DeviceCapabilities, ExecutableOperation, OperationBackend, OperationExecutionRecord,
     OperationExecutionStatus, OperationGeometry, OperationKind, OperationResolutionTrace,
-    PagedDecodeDispatchPlans, PagedDecodeSourceTile, QueryScale, ResolvedOperationPlan,
-    ResolvedPhasePlans, RuntimeFeature, RuntimeFeatureSet, qwen35_m1_production_registry,
+    PagedDecodeDispatchPlans, PagedDecodeSourceTile, PagedDecodeSplitConfig, QueryScale,
+    ResolvedOperationPlan, ResolvedPhasePlans, RuntimeFeature, RuntimeFeatureSet,
+    paged_decode_split_production_registry, qwen35_m1_production_registry,
     qwen35_paged_chunk_operation_request, qwen35_paged_chunk_production_registry,
 };
 use crate::decoder::PagedDecodeShape;
@@ -1425,12 +1426,34 @@ impl PackageSelfAttnResidentStepLayer {
             cache_blocks,
             sigmoid_gate: use_paged_decode_sigmoid_gate,
         };
+        // Always retain the existing Qwen3.5 M1 registry as the canonical single reader. The
+        // experiment resolves only its typed split alternate, so prefill/chunk audit IDs remain
+        // the historical `.m1-gqa` entries below the split threshold.
+        let single_operation_plans = ResolvedPhasePlans::resolve_m1(
+            &qwen35_m1_production_registry()?,
+            OperationKind::PagedCausalGqaRead,
+            read_geometry,
+            &device,
+            device.workspace_capacity_bytes,
+        )
+        .map_err(|error| {
+            format!("self-attn resident backend operation preflight failed: {error}")
+        })?;
         let paged_decode_dispatch_plans = if let Some(config) = split_experiment_config {
-            let dispatch = PagedDecodeDispatchPlans::resolve(
+            let split_registry = paged_decode_split_production_registry(
                 read_geometry,
                 &device,
                 config.source_tile,
-                config.min_cache_len,
+            )
+            .map_err(|error| {
+                format!(
+                    "self-attn resident experimental paged decode split registry preflight failed: {error}"
+                )
+            })?;
+            let split_operation_plans = ResolvedPhasePlans::resolve_paged_decode(
+                &split_registry,
+                read_geometry,
+                &device,
                 device.workspace_capacity_bytes,
             )
             .map_err(|error| {
@@ -1438,24 +1461,20 @@ impl PackageSelfAttnResidentStepLayer {
                     "self-attn resident experimental paged decode split preflight failed: {error}"
                 )
             })?;
-            if dispatch.split.is_none() {
-                return Err(
-                    "self-attn resident experimental paged decode split was requested, but no split plan was resolved (verify ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1 and workspace capacity)"
-                        .into(),
-                );
-            }
-            dispatch
-        } else {
-            let single_operation_plans = ResolvedPhasePlans::resolve_m1(
-                &qwen35_m1_production_registry()?,
-                OperationKind::PagedCausalGqaRead,
-                read_geometry,
-                &device,
-                device.workspace_capacity_bytes,
+            PagedDecodeDispatchPlans::new(
+                single_operation_plans,
+                Some(split_operation_plans),
+                Some(PagedDecodeSplitConfig {
+                    source_tile: config.source_tile,
+                    min_cache_len: config.min_cache_len,
+                }),
             )
             .map_err(|error| {
-                format!("self-attn resident backend operation preflight failed: {error}")
-            })?;
+                format!(
+                    "self-attn resident experimental paged decode split dispatch preflight failed: {error}"
+                )
+            })?
+        } else {
             PagedDecodeDispatchPlans::single_only(single_operation_plans)
         };
         let (writer_kind, writer_geometry) = match preflight_q_layout {
@@ -7475,6 +7494,94 @@ mod linear_attn_step_state_tests {
                 .executable,
             ExecutableOperation::HipPagedDecodeAttentionSplitF32(PagedDecodeSourceTile::Tokens128)
         );
+    }
+
+    #[test]
+    fn experimental_dispatch_composes_qwen_canonical_single_with_generic_split() {
+        let device = DeviceCapabilities {
+            device_id: 0,
+            backend: OperationBackend::Hip,
+            architecture: Some("gfx1201".into()),
+            device_name: Some("test HIP device".into()),
+            abi_version: ullm_runtime_sys::abi_version(),
+            runtime_features: RuntimeFeatureSet::EMPTY
+                .with(RuntimeFeature::HipPagedDecodeAttention)
+                .with(RuntimeFeature::HipPagedDecodeAttentionSplit),
+            workspace_capacity_bytes: u64::MAX,
+        };
+        for (sigmoid_gate, expected_single, expected_split) in [
+            (
+                false,
+                "hip.paged-decode-attention-f32.m1-gqa",
+                "hip.paged-decode-attention-split-f32.tile128",
+            ),
+            (
+                true,
+                "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+                "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128",
+            ),
+        ] {
+            let geometry = OperationGeometry::PagedCausalGqaRead {
+                q_heads: 16,
+                kv_heads: 4,
+                head_dim: 256,
+                value_dim: 256,
+                block_size: 256,
+                cache_blocks: 16,
+                sigmoid_gate,
+            };
+            let single_registry = qwen35_m1_production_registry().unwrap();
+            let single = ResolvedPhasePlans::resolve_m1(
+                &single_registry,
+                OperationKind::PagedCausalGqaRead,
+                geometry,
+                &device,
+                u64::MAX,
+            )
+            .unwrap();
+            let split_registry = paged_decode_split_production_registry(
+                geometry,
+                &device,
+                PagedDecodeSourceTile::Tokens128,
+            )
+            .unwrap();
+            let split = ResolvedPhasePlans::resolve_paged_decode(
+                &split_registry,
+                geometry,
+                &device,
+                u64::MAX,
+            )
+            .unwrap();
+            let dispatch = PagedDecodeDispatchPlans::new(
+                single,
+                Some(split),
+                Some(PagedDecodeSplitConfig {
+                    source_tile: PagedDecodeSourceTile::Tokens128,
+                    min_cache_len: 1,
+                }),
+            )
+            .unwrap();
+            for phase in [
+                ExecutionPhase::ColdPrefill,
+                ExecutionPhase::CachedPrefixPrefill,
+                ExecutionPhase::Decode,
+            ] {
+                assert_eq!(
+                    dispatch.single.for_phase(phase).trace().implementation_id,
+                    expected_single
+                );
+                assert_eq!(
+                    dispatch
+                        .split
+                        .as_ref()
+                        .unwrap()
+                        .for_phase(phase)
+                        .trace()
+                        .implementation_id,
+                    expected_split
+                );
+            }
+        }
     }
 
     #[test]
