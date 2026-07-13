@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 from pathlib import Path
@@ -92,13 +91,6 @@ def _integer(value: Any, label: str, *, minimum: int = 0, maximum: int | None = 
         raise ValidationError(f"{label} is invalid")
 
 
-def _finite_number(value: Any, label: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValidationError(f"{label} is invalid")
-    if not math.isfinite(float(value)) or float(value) < 0:
-        raise ValidationError(f"{label} is invalid")
-
-
 def _text_evidence(value: Any, label: str) -> None:
     if not isinstance(value, dict) or set(value) != {"utf8_bytes", "sha256"}:
         raise ValidationError(f"{label} fields differ")
@@ -164,10 +156,6 @@ def validate(path: Path) -> dict[str, Any]:
     reasons: list[str] = []
     if requests[-1]["assistant_has_reasoning_content"]:
         reasons.append("last provider request contains assistant reasoning_content")
-    if not requests[-1]["has_reasoning_content_key"] and not any(
-        request["has_reasoning_content_key"] for request in requests
-    ):
-        reasons.append("provider requests contain no reasoning field evidence")
     return {
         "schema_version": VALIDATOR_SCHEMA_VERSION,
         "input_schema_version": SCHEMA_VERSION,

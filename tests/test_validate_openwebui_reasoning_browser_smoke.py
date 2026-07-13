@@ -91,8 +91,7 @@ def test_validator_reports_reinserted_reasoning_as_gate_failure(tmp_path: Path) 
 
 def test_validator_require_pass_uses_distinct_exit_code(tmp_path: Path) -> None:
     value = evidence()
-    value["provider_requests"][-1]["has_reasoning_content_key"] = False
-    value["provider_requests"][0]["has_reasoning_content_key"] = False
+    value["provider_requests"][-1]["assistant_has_reasoning_content"] = True
     path = tmp_path / "browser.json"
     path.write_text(json.dumps(value), encoding="ascii")
 
