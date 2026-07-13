@@ -120,6 +120,28 @@ def lifecycle_trace(request: str, completion: str, start: int, *, cancelled: boo
     return values
 
 
+def test_lifecycle_validator_accepts_v2_reasoning_release_accounting() -> None:
+    value = lifecycle(
+        "request_released",
+        10,
+        "req-v2",
+        "chatcmpl-v2",
+        stream=True,
+        outcome="stop",
+        cancel_reason=None,
+        prompt_tokens=32,
+        completion_tokens=4,
+        reasoning_tokens=1,
+        forced_end_tokens=2,
+        reset_complete=True,
+        admit_to_start_ns=1,
+        start_to_release_ns=4,
+        admit_to_release_ns=5,
+    )
+
+    assert TOOL.validate_lifecycle_payload(TOOL.compact_json(value)) == value
+
+
 def action(index: int, name: str):
     input_sha = None
     if index == 0:

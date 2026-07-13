@@ -33,6 +33,7 @@ BROWSER_CASE = "openwebui_stop_after_visible_content"
 MODEL_ID = os.environ.get("ULLM_MODEL_ID", "ullm-qwen3-14b-sq8")
 MODEL_LABEL = os.environ.get("ULLM_MODEL_NAME", "uLLM Qwen3 14B SQ8")
 OBSERVER_SOCKET = Path("/run/ullm/lifecycle-observer.sock")
+REASONING_RELEASE_FIELDS = {"reasoning_tokens", "forced_end_tokens"}
 CONTROL_CONTAINER_PATH = "/run/control/gateway-released"
 BROWSER_SCRIPT_CONTAINER_PATH = "/usr/src/app/ullm-browser-stop-smoke.cjs"
 SCREENSHOT_NAME = "openwebui-stop-before.png"
@@ -531,11 +532,18 @@ def validate_lifecycle_payload(raw: bytes) -> dict[str, Any]:
         or event not in LIFECYCLE_FIELDS
     ):
         fail("lifecycle schema or event differs")
-    exact_keys(
-        value,
-        {"schema_version", "event", "observed_monotonic_ns"} | LIFECYCLE_FIELDS[event],
-        "lifecycle event",
+    expected_fields = (
+        {"schema_version", "event", "observed_monotonic_ns"}
+        | LIFECYCLE_FIELDS[event]
     )
+    if event == "request_released":
+        actual_fields = set(value)
+        if actual_fields != expected_fields and actual_fields != (
+            expected_fields | REASONING_RELEASE_FIELDS
+        ):
+            fail("lifecycle event fields differ")
+    else:
+        exact_keys(value, expected_fields, "lifecycle event")
     integer(value["observed_monotonic_ns"], "lifecycle timestamp")
     if event == "worker_fatal":
         fail("gateway worker_fatal occurred during the Stop gate")
@@ -580,6 +588,18 @@ def validate_lifecycle_payload(raw: bytes) -> dict[str, Any]:
         integer(value["completion_tokens"], "release completion tokens")
         for name in ("admit_to_start_ns", "start_to_release_ns", "admit_to_release_ns"):
             integer(value[name], name)
+        has_reasoning_fields = "reasoning_tokens" in value
+        if has_reasoning_fields != ("forced_end_tokens" in value):
+            fail("reasoning release accounting fields are incomplete")
+        if has_reasoning_fields:
+            reasoning_tokens = integer(
+                value["reasoning_tokens"], "reasoning release tokens"
+            )
+            forced_end_tokens = integer(
+                value["forced_end_tokens"], "forced-end release tokens"
+            )
+            if reasoning_tokens + forced_end_tokens > value["completion_tokens"]:
+                fail("reasoning release accounting exceeds completion tokens")
         if value["outcome"] == "cancelled":
             nonempty_string(value["cancel_reason"], "gateway release cancel reason")
         elif value["cancel_reason"] is not None:

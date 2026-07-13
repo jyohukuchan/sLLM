@@ -52,6 +52,7 @@ CONTENT_IMAGE_RE = re.compile(
 SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.service\Z")
 NETWORK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+REASONING_RELEASE_FIELDS = {"reasoning_tokens", "forced_end_tokens"}
 
 FAILURE_PROMPT = " ".join(
     (
@@ -712,11 +713,18 @@ def validate_lifecycle_payload(raw: bytes) -> dict[str, Any]:
         or event not in LIFECYCLE_FIELDS
     ):
         fail("lifecycle schema or event differs")
-    exact_keys(
-        value,
-        {"schema_version", "event", "observed_monotonic_ns"} | LIFECYCLE_FIELDS[event],
-        "lifecycle event",
+    expected_fields = (
+        {"schema_version", "event", "observed_monotonic_ns"}
+        | LIFECYCLE_FIELDS[event]
     )
+    if event == "request_released":
+        actual_fields = set(value)
+        if actual_fields != expected_fields and actual_fields != (
+            expected_fields | REASONING_RELEASE_FIELDS
+        ):
+            fail("lifecycle event fields differ")
+    else:
+        exact_keys(value, expected_fields, "lifecycle event")
     integer(value["observed_monotonic_ns"], "lifecycle timestamp")
     request_id = value["request_id"]
     completion_id = value["completion_id"]
@@ -772,6 +780,18 @@ def validate_lifecycle_payload(raw: bytes) -> dict[str, Any]:
         integer(value["completion_tokens"], "release completion tokens")
         for name in ("admit_to_start_ns", "start_to_release_ns", "admit_to_release_ns"):
             integer(value[name], name)
+        has_reasoning_fields = "reasoning_tokens" in value
+        if has_reasoning_fields != ("forced_end_tokens" in value):
+            fail("reasoning release accounting fields are incomplete")
+        if has_reasoning_fields:
+            reasoning_tokens = integer(
+                value["reasoning_tokens"], "reasoning release tokens"
+            )
+            forced_end_tokens = integer(
+                value["forced_end_tokens"], "forced-end release tokens"
+            )
+            if reasoning_tokens + forced_end_tokens > value["completion_tokens"]:
+                fail("reasoning release accounting exceeds completion tokens")
         if value["admit_to_release_ns"] != (
             value["admit_to_start_ns"] + value["start_to_release_ns"]
         ):

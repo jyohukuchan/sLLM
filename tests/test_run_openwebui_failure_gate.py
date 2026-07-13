@@ -55,6 +55,29 @@ RECOVERY = {
 ACTION_STARTS = (100, 120, 140, 160, 200, 280, 300, 320, 340)
 
 
+def test_lifecycle_validator_accepts_v2_reasoning_release_accounting() -> None:
+    value = {
+        "schema_version": TOOL.LIFECYCLE_SCHEMA,
+        "event": "request_released",
+        "observed_monotonic_ns": 10,
+        "request_id": "req-v2",
+        "completion_id": "chatcmpl-v2",
+        "stream": True,
+        "outcome": "stop",
+        "cancel_reason": None,
+        "prompt_tokens": 32,
+        "completion_tokens": 4,
+        "reasoning_tokens": 1,
+        "forced_end_tokens": 2,
+        "reset_complete": True,
+        "admit_to_start_ns": 1,
+        "start_to_release_ns": 4,
+        "admit_to_release_ns": 5,
+    }
+
+    assert TOOL.validate_lifecycle_payload(TOOL.compact_json(value)) == value
+
+
 def action(index: int) -> dict:
     name = TOOL.FINAL_ACTIONS[index]
     selectors = (
