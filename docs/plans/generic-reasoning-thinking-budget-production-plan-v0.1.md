@@ -655,9 +655,11 @@ llama.cppの短い2-token回答でdecode 131.61 tok/sという記録があるが
 model rowを保持する。
 
 planning auditではOpenWebUI 0.9.4 middlewareがOpenAI SSEの`delta.reasoning_content`をreasoning
-itemとして扱うことを確認した。ただし現行browser gateにはreasoning表示試験がない。表示対応を
-実装済みとみなさず、Phase 5で実containerに対するreasoning panel、完了状態、Stop、refresh、複数turnを
-必ず自動検証する。
+itemとして扱うことを確認した。当時はbrowser gateにreasoning表示試験がなかったため、表示対応を
+実装済みとは扱わなかった。その後、`deploy/openwebui/browser-reasoning-smoke.cjs`へhash-onlyの
+reasoning panel、完了状態、refresh、複数turn、hidden-history omission、uLLM/llama.cpp切り替え検証を
+追加した。これは実containerでの成功を意味しないため、Phase 5ではv2 candidateを設定した実containerに
+対してこのsmokeとStop、failure、soakを必ず実行する。
 
 networkはDocker bridgeから8000/8001へ到達させ、bridge外から遮断する設計である。repository上の
 `deploy/nftables/ullm-openai.nft`は8000/8001双方のdrop ruleを持つ。一方、2026-07-11のsystemd journal
