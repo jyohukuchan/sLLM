@@ -106,6 +106,11 @@ def test_validator_accepts_structure_but_not_incomplete_production_gate(tmp_path
         "p95": 100.0,
         "p99": 100.0,
     }
+    assert report["quality_summary"]["budget-128"] == {
+        "total": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+    }
 
 
 @pytest.mark.parametrize(

@@ -34,6 +34,9 @@ timing field. It recomputes p50, p95, and p99 with linear interpolation over
 the raw case values and includes the contributing sample count; producer-side
 percentile declarations are not trusted.
 
+The report also contains `quality_summary` grouped by mode with raw total,
+correct count, and recomputed accuracy.
+
 `identity` has exactly `manifest_sha256`, `worker_binary_sha256`,
 `tokenizer_sha256`, and `openwebui_image`. The first three values are lowercase
 SHA-256 strings. `openwebui_image` is a content-addressed image reference in

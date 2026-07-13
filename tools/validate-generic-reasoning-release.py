@@ -299,11 +299,17 @@ def validate(path: Path) -> dict[str, Any]:
     timing_samples: dict[str, dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
+    quality_samples: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"total": 0, "correct": 0}
+    )
     for case in cases:
         for field in timing_fields:
             value = case["timing"][field]
             if value is not None:
                 timing_samples[case["mode"]][field].append(float(value))
+        quality_samples[case["mode"]]["total"] += 1
+        if case["quality"]["correct"]:
+            quality_samples[case["mode"]]["correct"] += 1
     if not computed_source_alignment:
         reasons.append("source commit is not aligned with the active promotion source")
     missing_modes = sorted(REQUIRED_MODES - modes)
@@ -348,6 +354,14 @@ def validate(path: Path) -> dict[str, Any]:
                 for field, values in sorted(fields.items())
             }
             for mode, fields in sorted(timing_samples.items())
+        },
+        "quality_summary": {
+            mode: {
+                "total": values["total"],
+                "correct": values["correct"],
+                "accuracy": values["correct"] / values["total"],
+            }
+            for mode, values in sorted(quality_samples.items())
         },
         "reasons": reasons,
     }
