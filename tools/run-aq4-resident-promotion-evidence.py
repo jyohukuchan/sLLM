@@ -156,6 +156,9 @@ def _worker_environment(manifest: dict[str, Any], *, legacy: bool) -> dict[str, 
     for name in LEGACY_PROFILE_ENVIRONMENT:
         environment.pop(name, None)
     worker = manifest["worker"]
+    environment["ULLM_WORKER_SCHEMA_VERSION"] = (
+        "ullm.worker.v1" if legacy else str(worker["protocol"])
+    )
     for name in worker["required_environment"]:
         environment[name] = "1"
     if legacy:
@@ -269,6 +272,9 @@ def _run_cases_in_process(
     ready_timeout_seconds: float,
     request_timeout_seconds: float,
 ) -> dict[str, Any]:
+    protocol = "ullm.worker.v1" if mode == "legacy" else str(manifest["worker"]["protocol"])
+    if protocol not in {"ullm.worker.v1", "ullm.worker.v2"}:
+        raise EvidenceError(f"{mode} worker protocol is unsupported: {protocol}")
     with tempfile.TemporaryFile(mode="w+b") as stderr:
         process = subprocess.Popen(
             command,
@@ -282,7 +288,7 @@ def _run_cases_in_process(
         clean_shutdown = False
         try:
             ready = _read_event(process, ready_timeout_seconds)
-            if ready.get("type") != "ready" or ready.get("schema_version") != "ullm.worker.v1":
+            if ready.get("type") != "ready" or ready.get("schema_version") != protocol:
                 raise EvidenceError(f"{mode} worker did not emit a valid ready event")
             if mode == "resident":
                 child_checks.append(_inspect_resident_children(process, "ready"))
@@ -291,7 +297,7 @@ def _run_cases_in_process(
             for case in RAW_TOKEN_CASES:
                 request_id = str(case["id"])
                 command_record = {
-                    "schema_version": "ullm.worker.v1",
+                    "schema_version": protocol,
                     "type": "generate",
                     "request_id": request_id,
                     "prompt_token_ids": case["prompt_token_ids"],
@@ -316,6 +322,10 @@ def _run_cases_in_process(
                     if remaining <= 0:
                         raise EvidenceError(f"{mode} case {request_id} timed out")
                     event = _read_event(process, remaining)
+                    if event.get("schema_version") != protocol:
+                        raise EvidenceError(
+                            f"{mode} case {request_id} emitted a mismatched schema version"
+                        )
                     if mode == "resident":
                         child_checks.append(
                             _inspect_resident_children(
@@ -367,7 +377,13 @@ def _run_cases_in_process(
                     child_checks.append(_inspect_resident_children(process, f"after:{request_id}"))
 
             assert process.stdin is not None
-            process.stdin.write(b'{"schema_version":"ullm.worker.v1","type":"shutdown"}\n')
+            process.stdin.write(
+                json.dumps(
+                    {"schema_version": protocol, "type": "shutdown"},
+                    separators=(",", ":"),
+                ).encode("ascii")
+                + b"\n"
+            )
             process.stdin.flush()
             process.stdin.close()
             return_code = process.wait(timeout=ready_timeout_seconds)

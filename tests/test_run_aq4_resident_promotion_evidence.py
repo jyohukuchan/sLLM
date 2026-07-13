@@ -28,10 +28,12 @@ TOOL = load_module("test_run_aq4_resident_promotion_evidence_tool", TOOL_PATH)
 
 FAKE_WORKER = r'''#!/usr/bin/env python3
 import json
+import os
 import sys
 
+schema = os.environ.get("ULLM_WORKER_SCHEMA_VERSION", "ullm.worker.v1")
 print(json.dumps({
-    "schema_version": "ullm.worker.v1",
+    "schema_version": schema,
     "type": "ready",
     "model": "fixture-aq4",
     "model_revision": "fixture-resident",
@@ -49,23 +51,23 @@ for line in sys.stdin:
     request_id = command["request_id"]
     prompt = command["prompt_token_ids"]
     print(json.dumps({
-        "schema_version": "ullm.worker.v1", "type": "started",
+        "schema_version": schema, "type": "started",
         "request_id": request_id, "prompt_tokens": len(prompt),
     }), flush=True)
     for processed in range(1, len(prompt) + 1):
         print(json.dumps({
-            "schema_version": "ullm.worker.v1", "type": "progress",
+            "schema_version": schema, "type": "progress",
             "request_id": request_id, "phase": "prompt",
             "processed_prompt_tokens": processed,
         }), flush=True)
     tokens = [prompt[-1] + offset for offset in range(1, command["max_new_tokens"] + 1)]
     for index, token in enumerate(tokens):
         print(json.dumps({
-            "schema_version": "ullm.worker.v1", "type": "token",
+            "schema_version": schema, "type": "token",
             "request_id": request_id, "index": index, "token_id": token,
         }), flush=True)
     print(json.dumps({
-        "schema_version": "ullm.worker.v1", "type": "released",
+        "schema_version": schema, "type": "released",
         "request_id": request_id, "outcome": "length",
         "prompt_tokens": len(prompt), "completion_tokens": len(tokens),
         "timings": {
@@ -187,3 +189,41 @@ def test_atomic_output_refuses_symlink(tmp_path: Path) -> None:
         TOOL._atomic_write_json(output, {"verified": True})
 
     assert target.read_text(encoding="ascii") == "unchanged"
+
+
+def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(tmp_path: Path) -> None:
+    worker = tmp_path / "fake-worker-v2"
+    worker.write_text(FAKE_WORKER, encoding="utf-8")
+    worker.chmod(0o755)
+    profile, _ = write_fixture_profile(tmp_path, worker)
+    value = json.loads(profile.read_text(encoding="ascii"))
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "fixture-thinking-v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20, 21],
+        "forced_end_token_ids": [20, 21],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 1, "medium": 1, "high": 1},
+        "max_budget_tokens": 1,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    profile.write_text(json.dumps(value) + "\n", encoding="ascii")
+    output = tmp_path / "evidence-v2.json"
+
+    document = TOOL.run_evidence(
+        profile,
+        output,
+        worker,
+        worker,
+        ready_timeout_seconds=5.0,
+        request_timeout_seconds=5.0,
+        source_commit="fixture-v2-commit",
+    )
+
+    assert document["ephemeral_bundle"]["manifest"]["worker"]["protocol"] == "ullm.worker.v2"
+    assert document["resident"]["ready"]["schema_version"] == "ullm.worker.v2"
+    assert document["legacy"]["ready"]["schema_version"] == "ullm.worker.v1"
