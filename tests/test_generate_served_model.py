@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools/generate-served-model.py"
 RECEIPT_TOOL_PATH = ROOT / "tools/write-aq4-resident-promotion-receipt.py"
 AQ4_DEPLOYMENT_PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4.profile.json"
+AQ4_REASONING_DEPLOYMENT_PROFILE = (
+    ROOT / "deploy/served-models/qwen35-9b-aq4-reasoning.profile.json"
+)
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -47,6 +50,20 @@ def test_aq4_split_profile_uses_versioned_receipt_and_production_guard() -> None
         name.startswith("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_")
         for name in required_environment
     )
+
+
+def test_aq4_reasoning_candidate_binds_v2_worker_separately_from_active_v1() -> None:
+    profile = json.loads(
+        AQ4_REASONING_DEPLOYMENT_PROFILE.read_text(encoding="utf-8")
+    )
+    worker = profile["worker"]
+
+    assert worker["protocol"] == "ullm.worker.v2"
+    assert profile["reasoning"]["dialect_id"] == "qwen3.5-thinking-v1"
+    assert Path(worker["binary"]) == (
+        ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
+    )
+    assert Path(worker["binary"]) != ROOT / "target/release/ullm-aq4-worker"
 
 
 def write_profile(root: Path, *, receipt_exists: bool = True) -> Path:
