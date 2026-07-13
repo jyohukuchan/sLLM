@@ -16,7 +16,8 @@ use crate::backend_dispatch::{
     sq8_0_projection_descriptor_family,
 };
 use crate::backend_operation_registry::{
-    DeviceCapabilities, OperationGeometry, ResolvedPhasePlans, aq4_matvec_batch_production_registry,
+    DeviceCapabilities, ExecutableOperation, OperationGeometry, ResolvedPhasePlans,
+    aq4_matvec_batch_production_registry,
 };
 use crate::execution_batch::ExecutionPhase;
 use crate::format_id::FORMAT_SQ8_0;
@@ -303,6 +304,20 @@ fn resolve_aq4_batch_plans(
         )?);
     }
     Ok(plans.into_boxed_slice())
+}
+
+fn cached_aq4_batch_plan(
+    plans: &[ResolvedPhasePlans],
+    batch_count: usize,
+) -> Result<&ResolvedPhasePlans, String> {
+    if !(2..=128).contains(&batch_count) {
+        return Err(format!(
+            "AQ4 matvec batch width must be in 2..=128, got {batch_count}"
+        ));
+    }
+    plans.get(batch_count - 2).ok_or_else(|| {
+        format!("AQ4 matvec batch width plan is unavailable for width {batch_count}")
+    })
 }
 
 #[derive(Default)]
@@ -909,23 +924,39 @@ impl PackageAq4ResidentMatvec {
                 let plans = self.aq4_batch_plans.as_ref().ok_or_else(|| {
                     format!("{label} AQ4 matvec batch has no resolved production plan")
                 })?;
-                let plan = plans
-                    .get(batch_count - 2)
-                    .ok_or_else(|| format!("{label} AQ4 matvec batch width plan is unavailable"))?;
-                plan.for_phase(phase)
-                    .attempt()
-                    .start()
-                    .execute_aq4_matvec_batch_f32(
-                        aq4.index_buffer,
-                        aq4.scale_buffer,
-                        aq4.codebook_buffer,
-                        aq4.scale_values_buffer,
-                        input_buffer,
-                        aq4.row_scale_buffer,
-                        output_buffer,
-                        stream,
-                    )
-                    .map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
+                let plan = cached_aq4_batch_plan(plans, batch_count)
+                    .map_err(|err| format!("{label} {err}"))?;
+                let resolved = plan.for_phase(phase);
+                let executable = resolved.trace().executable;
+                let started = resolved.attempt().start();
+                let result = match executable {
+                    ExecutableOperation::HipAq4MatvecBatchF32 => started
+                        .execute_aq4_matvec_batch_f32(
+                            aq4.index_buffer,
+                            aq4.scale_buffer,
+                            aq4.codebook_buffer,
+                            aq4.scale_values_buffer,
+                            input_buffer,
+                            aq4.row_scale_buffer,
+                            output_buffer,
+                            stream,
+                        ),
+                    ExecutableOperation::HipAq4GemmRegisterBm8F32 => started
+                        .execute_aq4_gemm_register_bm8_f32(
+                            aq4.index_buffer,
+                            aq4.scale_buffer,
+                            aq4.codebook_buffer,
+                            aq4.scale_values_buffer,
+                            input_buffer,
+                            aq4.row_scale_buffer,
+                            output_buffer,
+                            stream,
+                        ),
+                    other => Err(format!(
+                        "{label} AQ4 matvec batch plan selected incompatible executable {other:?}"
+                    )),
+                };
+                result.map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
             }
             PackageResidentMatvecStorage::SqFp8 {
                 payload_buffer,
@@ -1491,5 +1522,53 @@ impl PackageAq4ResidentMatvec {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} AQ4 fused gate/beta: {err}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend_operation_registry::aq4_matvec_batch_production_registry;
+
+    fn cache_geometry() -> OperationGeometry {
+        OperationGeometry::Aq4MatvecBatch {
+            rows: 32,
+            cols: 128,
+            group_size: 16,
+            scale_count: 2,
+            row_scale_count: 0,
+            tensor_scale_bits: 1.0_f32.to_bits(),
+        }
+    }
+
+    #[test]
+    fn aq4_batch_hot_lookup_indexes_pre_resolved_phase_cache_only() -> Result<(), String> {
+        let context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let device = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let geometry = cache_geometry();
+        let registry = aq4_matvec_batch_production_registry(geometry, &device).unwrap();
+        let plans = (2..=128_u64)
+            .map(|batch_count| {
+                ResolvedPhasePlans::resolve_aq4_batch(
+                    &registry,
+                    geometry,
+                    batch_count,
+                    &device,
+                    u64::MAX,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for width in [7, 8, 127, 128] {
+            let first = cached_aq4_batch_plan(&plans, width).unwrap();
+            let second = cached_aq4_batch_plan(&plans, width).unwrap();
+            assert!(std::ptr::eq(first, second));
+            assert_eq!(
+                first.for_phase(ExecutionPhase::Decode).trace().batch_width,
+                width as u64
+            );
+        }
+        assert!(cached_aq4_batch_plan(&plans, 1).is_err());
+        assert!(cached_aq4_batch_plan(&plans, 129).is_err());
+        Ok(())
     }
 }

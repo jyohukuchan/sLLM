@@ -30,6 +30,7 @@ enum ProbeFaultStage {
     QkNormRopeBatch = 12,
     PagedKvWriteChunk = 13,
     PagedCausalGqaChunk = 14,
+    Aq4RegisterBm8 = 15,
 }
 
 #[cfg(test)]
@@ -56,8 +57,8 @@ fn probe_cache_key(capabilities: &DeviceCapabilities) -> ProbeCacheKey {
 }
 
 #[cfg(test)]
-static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 15] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 15];
+static M1_PROBE_CHECKPOINT_COUNTS: [std::sync::atomic::AtomicUsize; 16] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 16];
 
 #[cfg(test)]
 std::thread_local! {
@@ -317,6 +318,8 @@ pub enum RuntimeFeature {
     HipPagedCausalGqaChunk = 9,
     /// Generic Q/K normalization and RoPE batch scratch capability.
     HipQkNormRopeBatch = 10,
+    /// Direct gfx1201/group16 register BM8 AQ4 GEMM ABI capability.
+    HipAq4RegisterBm8 = 11,
 }
 
 /// Canonical production guard for a probed runtime feature.
@@ -341,6 +344,7 @@ pub const fn runtime_feature_environment(feature: RuntimeFeature) -> &'static st
         RuntimeFeature::HipPagedKvWriteChunk => "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
         RuntimeFeature::HipPagedCausalGqaChunk => "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
         RuntimeFeature::HipQkNormRopeBatch => "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+        RuntimeFeature::HipAq4RegisterBm8 => "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
     }
 }
 
@@ -376,6 +380,7 @@ impl DeviceCapabilities {
                 RuntimeFeature::HipPagedKvWriteChunk,
                 RuntimeFeature::HipPagedCausalGqaChunk,
                 RuntimeFeature::HipQkNormRopeBatch,
+                RuntimeFeature::HipAq4RegisterBm8,
             ] {
                 if std::env::var_os(runtime_feature_environment(feature)).as_deref()
                     == Some(std::ffi::OsStr::new("1"))
@@ -757,6 +762,44 @@ impl DeviceCapabilities {
             probe_fault_checkpoint(9, "aq4-matvec-batch")?;
             proven = proven.with(RuntimeFeature::HipAq4MatvecBatch);
         }
+        if policy.contains(RuntimeFeature::HipAq4RegisterBm8) {
+            // Keep this probe shape-exact: the production register kernel is only admitted for
+            // gfx1201/group16 matrices with rows divisible by 32 and cols divisible by 128.
+            let binding = aq4_probe_binding(128);
+            let packed_indices = aq4_probe_packed_indices(binding)?;
+            let scale_indices = aq4_probe_scale_indices(binding)?;
+            let codebook_bytes = aq4_probe_codebook_bytes();
+            let scale_value_bytes = aq4_probe_scale_value_bytes();
+            let mut index = context.alloc_buffer(packed_indices.len())?;
+            index.copy_from_host(0, &packed_indices, Some(stream))?;
+            let mut scale = context.alloc_buffer(scale_indices.len())?;
+            scale.copy_from_host(0, &scale_indices, Some(stream))?;
+            let mut codebook = context.alloc_buffer(codebook_bytes.len())?;
+            codebook.copy_from_host(0, &codebook_bytes, Some(stream))?;
+            let mut scale_values = context.alloc_buffer(scale_value_bytes.len())?;
+            scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
+            let input = zeros(context, stream, binding.input_elements()?)?;
+            let mut output = zeros(context, stream, binding.output_elements()?)?;
+            ullm_runtime_sys::aq4_matvec_batch_register_bm8_f32(
+                &index,
+                &scale,
+                &codebook,
+                &scale_values,
+                &input,
+                None,
+                binding.scale_count,
+                binding.group_size,
+                f32::from_bits(binding.tensor_scale_bits),
+                binding.row_scale_count,
+                binding.rows,
+                binding.cols,
+                binding.batch_count,
+                &mut output,
+                Some(stream),
+            )?;
+            probe_fault_checkpoint(15, "aq4-register-bm8")?;
+            proven = proven.with(RuntimeFeature::HipAq4RegisterBm8);
+        }
         if policy.contains(RuntimeFeature::HipLinearAttentionQkvPrepareBatch) {
             const SEQUENCE_LEN: usize = 128;
             let qkv = zeros(context, stream, SEQUENCE_LEN * 8_192)?;
@@ -1028,6 +1071,7 @@ pub enum ExecutableOperation {
     HipLinearAttentionRecurrentF32,
     HipLinearAttentionRecurrentSequenceF32,
     HipAq4MatvecBatchF32,
+    HipAq4GemmRegisterBm8F32,
     HipPagedDecodeAttentionF32,
     HipPagedDecodeAttentionSigmoidGateF32,
     HipPagedCausalGqaChunkF32,
@@ -1945,6 +1989,86 @@ impl StartedOperationPlan<'_> {
         .map_err(|error| error.to_string())
     }
 
+    /// Executes the production gfx1201/group16 register BM8 AQ4 GEMM ABI selected at load time.
+    ///
+    /// This method intentionally has no fallback path: once a started BM8 plan is handed to the
+    /// execution boundary, an ABI error is terminal for that operation.
+    pub fn execute_aq4_gemm_register_bm8_f32(
+        self,
+        index: &ullm_runtime_sys::RuntimeBuffer,
+        scale: &ullm_runtime_sys::RuntimeBuffer,
+        codebook: &ullm_runtime_sys::RuntimeBuffer,
+        scale_values: &ullm_runtime_sys::RuntimeBuffer,
+        input: &ullm_runtime_sys::RuntimeBuffer,
+        row_scale: Option<&ullm_runtime_sys::RuntimeBuffer>,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        let plan = self.plan();
+        let OperationGeometry::Aq4MatvecBatch {
+            rows,
+            cols,
+            group_size,
+            scale_count,
+            row_scale_count,
+            tensor_scale_bits,
+        } = plan.geometry
+        else {
+            return Err("resolved AQ4 register BM8 operation has incompatible geometry".into());
+        };
+        if plan.kind != OperationKind::Aq4MatvecBatch
+            || plan.executable != ExecutableOperation::HipAq4GemmRegisterBm8F32
+            || plan.device.backend != OperationBackend::Hip
+            || plan.device.architecture.as_deref() != Some("gfx1201")
+            || plan.batch_width < 8
+            || plan.batch_width > 128
+            || plan.chunk_width != 1
+            || group_size != 16
+            || rows == 0
+            || !rows.is_multiple_of(32)
+            || cols == 0
+            || !cols.is_multiple_of(128)
+        {
+            return Err(format!(
+                "resolved backend operation {} is not a gfx1201/group16 AQ4 register BM8 operation",
+                plan.implementation_id
+            ));
+        }
+        if scale_count == 0 {
+            return Err("resolved AQ4 register BM8 operation has zero scale count".into());
+        }
+        let tensor_scale = f32::from_bits(tensor_scale_bits);
+        if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+            return Err("resolved AQ4 register BM8 tensor scale is invalid".into());
+        }
+        if row_scale_count == 0 && row_scale.is_some() {
+            return Err("resolved AQ4 register BM8 has an unexpected row scale buffer".into());
+        }
+        if row_scale_count != 0 && row_scale.is_none() {
+            return Err("resolved AQ4 register BM8 is missing its row scale buffer".into());
+        }
+        let batch_count = usize::try_from(plan.batch_width)
+            .map_err(|_| "resolved AQ4 register BM8 width exceeds usize".to_string())?;
+        ullm_runtime_sys::aq4_matvec_batch_register_bm8_f32(
+            index,
+            scale,
+            codebook,
+            scale_values,
+            input,
+            row_scale,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn execute_paged_kv_write_f32(
         self,
@@ -2440,6 +2564,11 @@ fn validate_descriptor(descriptor: &ImplementationDescriptor) -> Result<(), Stri
             OperationKind::Aq4MatvecBatch,
             OperationGeometry::Aq4MatvecBatch { .. },
             ExecutableOperation::HipAq4MatvecBatchF32,
+        ) => true,
+        (
+            OperationKind::Aq4MatvecBatch,
+            OperationGeometry::Aq4MatvecBatch { .. },
+            ExecutableOperation::HipAq4GemmRegisterBm8F32,
         ) => true,
         (
             OperationKind::PagedCausalGqaRead,
@@ -3597,10 +3726,10 @@ pub fn aq4_matvec_batch_operation_request(
     })
 }
 
-fn aq4_matvec_batch_descriptor(
+fn aq4_matvec_batch_descriptors(
     geometry: OperationGeometry,
     device: &DeviceCapabilities,
-) -> Result<ImplementationDescriptor, String> {
+) -> Result<Vec<ImplementationDescriptor>, String> {
     let OperationGeometry::Aq4MatvecBatch {
         rows,
         cols,
@@ -3644,73 +3773,117 @@ fn aq4_matvec_batch_descriptor(
     if maximum_estimate > maximum_total_bytes {
         return Err("AQ4 matvec batch descriptor workspace exceeds bounded maximum".into());
     }
-    let (backend, architecture, required_features, id) = match device.backend {
-        OperationBackend::Host => (
-            OperationBackend::Host,
-            None,
-            RuntimeFeatureSet::EMPTY,
-            "host.aq4-matvec-batch-f32.m2-m128",
-        ),
-        OperationBackend::Hip => {
-            if device.architecture.as_deref() != Some("gfx1201") {
-                return Err(format!(
-                    "AQ4 matvec batch production requires gfx1201, got {}",
-                    device.architecture.as_deref().unwrap_or("unavailable")
-                ));
-            }
-            (
-                OperationBackend::Hip,
-                Some("gfx1201"),
-                RuntimeFeatureSet::from_feature(RuntimeFeature::HipAq4MatvecBatch),
-                "hip.aq4-matvec-batch-f32.m2-m128",
-            )
-        }
+    let eligible_register_bm8 = device.backend == OperationBackend::Hip
+        && device.architecture.as_deref() == Some("gfx1201")
+        && group_size == 16
+        && rows.is_multiple_of(32)
+        && cols.is_multiple_of(128);
+    let mut descriptors = Vec::with_capacity(if eligible_register_bm8 { 2 } else { 1 });
+    let push_descriptor = |descriptors: &mut Vec<ImplementationDescriptor>,
+                           minimum_batch_width,
+                           maximum_batch_width,
+                           id,
+                           required_features,
+                           executable,
+                           architecture,
+                           workspace| {
+        descriptors.push(ImplementationDescriptor {
+            id,
+            semantic_version: "1.0.0",
+            kind: OperationKind::Aq4MatvecBatch,
+            phases: PhaseSet::ALL_CURRENT,
+            input_layout: TensorLayout::TokensHidden,
+            output_layout: TensorLayout::TokensHidden,
+            weight_layout: Some(TensorLayout::RowMajor),
+            state_layout: OperationStateLayout::None,
+            activation_format: NumericalFormat::F32,
+            value_format: NumericalFormat::F32,
+            weight_format: Some(NumericalFormat::Aq4_0),
+            state_format: NumericalFormat::F32,
+            geometry,
+            minimum_batch_width,
+            maximum_batch_width,
+            minimum_chunk_width: 1,
+            maximum_chunk_width: 1,
+            backend: device.backend,
+            architecture,
+            device_name: None,
+            minimum_abi_version: 1,
+            required_features,
+            workspace,
+            state_effect: StateEffect {
+                reads: StateResourceSet::EMPTY,
+                writes: StateResourceSet::EMPTY,
+                prepares: StateResourceSet::EMPTY,
+                commits: StateResourceSet::EMPTY,
+                update_mode: StateUpdateMode::ReadOnly,
+                externally_visible_before_commit: false,
+            },
+            promotion: PromotionStatus::Production,
+            priority: 100,
+            fallback_id: None,
+            deterministic: true,
+            executable,
+            runtime_build: env!("CARGO_PKG_VERSION"),
+        });
     };
-    Ok(ImplementationDescriptor {
-        id,
-        semantic_version: "1.0.0",
-        kind: OperationKind::Aq4MatvecBatch,
-        phases: PhaseSet::ALL_CURRENT,
-        input_layout: TensorLayout::TokensHidden,
-        output_layout: TensorLayout::TokensHidden,
-        weight_layout: Some(TensorLayout::RowMajor),
-        state_layout: OperationStateLayout::None,
-        activation_format: NumericalFormat::F32,
-        value_format: NumericalFormat::F32,
-        weight_format: Some(NumericalFormat::Aq4_0),
-        state_format: NumericalFormat::F32,
-        geometry,
-        minimum_batch_width: 2,
-        maximum_batch_width: 128,
-        minimum_chunk_width: 1,
-        maximum_chunk_width: 1,
-        backend,
-        architecture,
-        device_name: None,
-        minimum_abi_version: 1,
-        required_features,
-        workspace: WorkspaceFormula {
-            fixed_persistent_bytes: 0,
-            fixed_temporary_bytes: 0,
-            temporary_bytes_per_batch_item: bytes_per_item,
-            temporary_bytes_per_chunk_token: 0,
-            maximum_total_bytes,
-        },
-        state_effect: StateEffect {
-            reads: StateResourceSet::EMPTY,
-            writes: StateResourceSet::EMPTY,
-            prepares: StateResourceSet::EMPTY,
-            commits: StateResourceSet::EMPTY,
-            update_mode: StateUpdateMode::ReadOnly,
-            externally_visible_before_commit: false,
-        },
-        promotion: PromotionStatus::Production,
-        priority: 100,
-        fallback_id: None,
-        deterministic: true,
-        executable: ExecutableOperation::HipAq4MatvecBatchF32,
-        runtime_build: env!("CARGO_PKG_VERSION"),
-    })
+    let legacy_features = match device.backend {
+        OperationBackend::Host => RuntimeFeatureSet::EMPTY,
+        OperationBackend::Hip => RuntimeFeatureSet::from_feature(RuntimeFeature::HipAq4MatvecBatch),
+    };
+    let legacy_architecture = (device.backend == OperationBackend::Hip)
+        .then_some("gfx1201")
+        .filter(|_| eligible_register_bm8);
+    if eligible_register_bm8 {
+        push_descriptor(
+            &mut descriptors,
+            2,
+            7,
+            "hip.aq4-matvec-batch-f32.m2-m7",
+            legacy_features,
+            ExecutableOperation::HipAq4MatvecBatchF32,
+            legacy_architecture,
+            WorkspaceFormula {
+                fixed_persistent_bytes: 0,
+                fixed_temporary_bytes: 0,
+                temporary_bytes_per_batch_item: bytes_per_item,
+                temporary_bytes_per_chunk_token: 0,
+                maximum_total_bytes,
+            },
+        );
+        push_descriptor(
+            &mut descriptors,
+            8,
+            128,
+            "hip.aq4-gemm-register-bm8-f32.gfx1201.group16.m8-m128",
+            RuntimeFeatureSet::from_feature(RuntimeFeature::HipAq4RegisterBm8),
+            ExecutableOperation::HipAq4GemmRegisterBm8F32,
+            Some("gfx1201"),
+            WorkspaceFormula::ZERO,
+        );
+    } else {
+        let (id, architecture) = match device.backend {
+            OperationBackend::Host => ("host.aq4-matvec-batch-f32.m2-m128", None),
+            OperationBackend::Hip => ("hip.aq4-matvec-batch-f32.m2-m128", None),
+        };
+        push_descriptor(
+            &mut descriptors,
+            2,
+            128,
+            id,
+            legacy_features,
+            ExecutableOperation::HipAq4MatvecBatchF32,
+            architecture,
+            WorkspaceFormula {
+                fixed_persistent_bytes: 0,
+                fixed_temporary_bytes: 0,
+                temporary_bytes_per_batch_item: bytes_per_item,
+                temporary_bytes_per_chunk_token: 0,
+                maximum_total_bytes,
+            },
+        );
+    }
+    Ok(descriptors)
 }
 
 /// Builds a production AQ4 batch registry for one exact resident matrix shape.
@@ -3718,7 +3891,7 @@ pub fn aq4_matvec_batch_production_registry(
     geometry: OperationGeometry,
     device: &DeviceCapabilities,
 ) -> Result<BackendOperationRegistry, String> {
-    BackendOperationRegistry::new(vec![aq4_matvec_batch_descriptor(geometry, device)?])
+    BackendOperationRegistry::new(aq4_matvec_batch_descriptors(geometry, device)?)
 }
 
 /// One pre-resolved plan for every current execution phase.
@@ -3864,7 +4037,8 @@ mod tests {
                 .with(RuntimeFeature::HipLinearAttentionRecurrentSequence)
                 .with(RuntimeFeature::HipPagedKvWriteChunk)
                 .with(RuntimeFeature::HipPagedCausalGqaChunk)
-                .with(RuntimeFeature::HipQkNormRopeBatch),
+                .with(RuntimeFeature::HipQkNormRopeBatch)
+                .with(RuntimeFeature::HipAq4RegisterBm8),
             workspace_capacity_bytes: u64::MAX,
         }
     }
@@ -3954,6 +4128,17 @@ mod tests {
             scale_count: 2,
             row_scale_count: 0,
             tensor_scale_bits: 10.0_f32.to_bits(),
+        }
+    }
+
+    fn eligible_aq4_geometry() -> OperationGeometry {
+        OperationGeometry::Aq4MatvecBatch {
+            rows: 32,
+            cols: 128,
+            group_size: 16,
+            scale_count: 2,
+            row_scale_count: 0,
+            tensor_scale_bits: 1.0_f32.to_bits(),
         }
     }
 
@@ -4409,6 +4594,140 @@ mod tests {
     }
 
     #[test]
+    fn eligible_aq4_batch_registry_promotes_only_widths_eight_through_128() {
+        let device = test_hip_capabilities();
+        let geometry = eligible_aq4_geometry();
+        let registry = aq4_matvec_batch_production_registry(geometry, &device).unwrap();
+        assert_eq!(registry.implementations().len(), 2);
+        let legacy = registry
+            .implementations()
+            .iter()
+            .find(|descriptor| descriptor.executable == ExecutableOperation::HipAq4MatvecBatchF32)
+            .unwrap();
+        assert_eq!(legacy.minimum_batch_width, 2);
+        assert_eq!(legacy.maximum_batch_width, 7);
+        let bm8 = registry
+            .implementations()
+            .iter()
+            .find(|descriptor| {
+                descriptor.executable == ExecutableOperation::HipAq4GemmRegisterBm8F32
+            })
+            .unwrap();
+        assert_eq!(bm8.minimum_batch_width, 8);
+        assert_eq!(bm8.maximum_batch_width, 128);
+        assert_eq!(bm8.workspace.estimate(128, 1).unwrap().temporary_bytes, 0);
+        assert_eq!(bm8.workspace.maximum_total_bytes, 0);
+        for (width, executable) in [
+            (7, ExecutableOperation::HipAq4MatvecBatchF32),
+            (8, ExecutableOperation::HipAq4GemmRegisterBm8F32),
+            (127, ExecutableOperation::HipAq4GemmRegisterBm8F32),
+            (128, ExecutableOperation::HipAq4GemmRegisterBm8F32),
+        ] {
+            let request = aq4_matvec_batch_operation_request(
+                ExecutionPhase::Decode,
+                geometry,
+                width,
+                device.clone(),
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(
+                registry.resolve(&request).unwrap().trace().executable,
+                executable
+            );
+        }
+        let mut missing_feature = device;
+        missing_feature.runtime_features =
+            RuntimeFeatureSet::from_feature(RuntimeFeature::HipAq4MatvecBatch);
+        let request = aq4_matvec_batch_operation_request(
+            ExecutionPhase::Decode,
+            geometry,
+            8,
+            missing_feature,
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(registry.resolve(&request).is_err());
+    }
+
+    #[test]
+    fn ineligible_aq4_batch_registry_is_legacy_for_every_width() {
+        let mut device = test_hip_capabilities();
+        device.architecture = Some("gfx1200".into());
+        let registry =
+            aq4_matvec_batch_production_registry(eligible_aq4_geometry(), &device).unwrap();
+        assert_eq!(registry.implementations().len(), 1);
+        for width in [2, 8, 127, 128] {
+            let request = aq4_matvec_batch_operation_request(
+                ExecutionPhase::Decode,
+                eligible_aq4_geometry(),
+                width,
+                device.clone(),
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(
+                registry.resolve(&request).unwrap().trace().executable,
+                ExecutableOperation::HipAq4MatvecBatchF32
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_started_bm8_plan_rejects_before_abi_and_preserves_output() {
+        let geometry = eligible_aq4_geometry();
+        let hip_registry =
+            aq4_matvec_batch_production_registry(geometry, &test_hip_capabilities()).unwrap();
+        let descriptor = hip_registry
+            .implementations()
+            .iter()
+            .find(|descriptor| {
+                descriptor.executable == ExecutableOperation::HipAq4GemmRegisterBm8F32
+            })
+            .unwrap();
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let host = DeviceCapabilities::from_runtime_context(&context).unwrap();
+        let request =
+            aq4_matvec_batch_operation_request(ExecutionPhase::Decode, geometry, 8, host, u64::MAX)
+                .unwrap();
+        let workspace = descriptor.workspace.estimate(8, 1).unwrap();
+        let plan = resolved_plan(descriptor, &request, workspace, ResolutionKind::Primary);
+        let index = context.alloc_buffer(32 * 128 / 2).unwrap();
+        let scale = context.alloc_buffer(32 * 128 / 16).unwrap();
+        let codebook = context.alloc_buffer(16 * 4).unwrap();
+        let scale_values = context.alloc_buffer(2 * 4).unwrap();
+        let input = context.alloc_buffer(8 * 128 * 4).unwrap();
+        let mut output = context.alloc_buffer(8 * 32 * 4).unwrap();
+        let sentinel = vec![0xa5_u8; 8 * 32 * 4];
+        output
+            .copy_from_host(0, &sentinel, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let error = plan
+            .attempt()
+            .start()
+            .execute_aq4_gemm_register_bm8_f32(
+                &index,
+                &scale,
+                &codebook,
+                &scale_values,
+                &input,
+                None,
+                &mut output,
+                &mut stream,
+            )
+            .unwrap_err();
+        assert!(error.contains("gfx1201/group16"));
+        let mut output_bytes = vec![0_u8; sentinel.len()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(output_bytes, sentinel);
+    }
+
+    #[test]
     fn planned_aq4_batch_wrapper_matches_direct_cpu_abi() {
         let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -4815,6 +5134,7 @@ mod tests {
             (ProbeFaultStage::PagedKvWrite, 6, "paged-kv-write"),
             (ProbeFaultStage::FusedWriter, 7, "fused-writer"),
             (ProbeFaultStage::Aq4MatvecBatch, 9, "aq4-matvec-batch"),
+            (ProbeFaultStage::Aq4RegisterBm8, 15, "aq4-register-bm8"),
             (ProbeFaultStage::QkvPrepareBatch, 10, "qkv-prepare-batch"),
             (ProbeFaultStage::RecurrentSequence, 11, "recurrent-sequence"),
             (ProbeFaultStage::QkNormRopeBatch, 12, "qk-norm-rope-batch"),
@@ -4962,6 +5282,7 @@ mod tests {
             "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
             "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
             "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+            "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
         ] {
             assert_eq!(std::env::var(environment).as_deref(), Ok("1"));
         }
