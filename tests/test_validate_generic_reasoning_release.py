@@ -166,6 +166,26 @@ def test_validator_reports_quality_and_timing_gate_failures(tmp_path: Path) -> N
     assert any("case timing is incomplete: budget-128" in reason for reason in report["reasons"])
 
 
+def test_validator_recomputes_percentiles_over_raw_cases(tmp_path: Path) -> None:
+    value = evidence()
+    for index, latency in enumerate((200.0, 300.0), start=2):
+        extra = case(f"budget-128-{index}", "budget-128", reasoning=20, forced=1)
+        extra["timing"]["latency_ms"] = latency
+        value["cases"].append(extra)
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    report = TOOL.validate(path)
+
+    assert report["timing_percentiles"]["budget-128"]["latency_ms"] == {
+        "count": 3,
+        "p50": 200.0,
+        "p95": 290.0,
+        "p99": 298.0,
+    }
+    assert report["quality_summary"]["budget-128"]["total"] == 3
+
+
 def test_validator_rejects_oversized_evidence_and_sse_count(tmp_path: Path) -> None:
     oversized = tmp_path / "oversized.json"
     oversized.write_bytes(b"{" + b" " * TOOL.MAX_EVIDENCE_BYTES + b"}")
