@@ -77,6 +77,66 @@ release worker, product, and promotion evidence pass the real-model release
 gates. Generation proves file and contract identity; it does not prove runtime
 correctness by itself.
 
+### v2 OpenWebUI gates
+
+Run these gates only after the v2 manifest has been activated and OpenWebUI has
+been reconciled from that manifest. They must run during an exclusive R9700
+window. The model overrides are required: without them, the shared gate tools
+default to the legacy SQ8 model and the evidence would be for the wrong
+deployment.
+
+Use immutable local Docker content identities for the browser and probe images.
+The example identities below are the images currently present on WRX80; obtain
+fresh identities with `docker image inspect` before a later run.
+
+```bash
+export ULLM_MODEL_ID=ullm-qwen3.5-9b-aq4
+export ULLM_MODEL_NAME='uLLM Qwen3.5 9B AQ4'
+export TOKEN_FILE=/etc/ullm/openai-api-key
+export BROWSER_IMAGE=sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409
+export PROBE_IMAGE=sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54
+export OPENWEBUI_URL=http://192.168.0.66:3000/
+export SERVICE=ullm-openai.service
+export OUT=benchmarks/results/2026-07-13/qwen35-9b-aq4-reasoning-v0.1
+mkdir -p "$OUT"
+```
+
+The image identities above are the current local content identities; they MUST
+be refreshed with `docker image inspect` before a later run. Run the normal
+100-chat soak, the restart-recovery
+20-chat soak, Stop, and worker-failure gates as separate output directories:
+
+```bash
+ULLM_OPENWEBUI_SOAK_COUNT=100 uv run --project services/openai-gateway python \
+  tools/run-openwebui-soak-gate.py \
+  --output-dir "$OUT/soak-100" --token-file "$TOKEN_FILE" \
+  --browser-image "$BROWSER_IMAGE" --openwebui-url "$OPENWEBUI_URL" \
+  --service "$SERVICE" --include-smoke
+
+systemctl restart "$SERVICE"
+ULLM_OPENWEBUI_SOAK_COUNT=20 uv run --project services/openai-gateway python \
+  tools/run-openwebui-soak-gate.py \
+  --output-dir "$OUT/soak-restart-20" --token-file "$TOKEN_FILE" \
+  --browser-image "$BROWSER_IMAGE" --openwebui-url "$OPENWEBUI_URL" \
+  --service "$SERVICE" --include-smoke
+
+uv run --project services/openai-gateway python tools/run-openwebui-stop-gate.py \
+  --output-dir "$OUT/stop" --token-file "$TOKEN_FILE" \
+  --browser-image "$BROWSER_IMAGE" --openwebui-url "$OPENWEBUI_URL" \
+  --service "$SERVICE"
+
+uv run --project services/openai-gateway python tools/run-openwebui-failure-gate.py \
+  --output-dir "$OUT/failure" --token-file "$TOKEN_FILE" \
+  --browser-image "$BROWSER_IMAGE" --probe-image "$PROBE_IMAGE" \
+  --openwebui-url "$OPENWEBUI_URL" --service "$SERVICE"
+```
+
+The `--include-smoke` run is still not a substitute for
+`deploy/openwebui/browser-reasoning-smoke.cjs`; run that v2-specific browser
+smoke separately and validate its hash-only output before assembling release
+evidence. Never run these gates against the active v1 service and label their
+output as v2 evidence.
+
 For the final hash-only handoff, keep the generic release evidence, its
 validator report, the OpenWebUI browser evidence and report, and the promotion
 evidence and receipt beside a `ullm.generic_reasoning_release_bundle.v1`
