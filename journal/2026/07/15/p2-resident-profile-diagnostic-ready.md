@@ -8,9 +8,11 @@ base one-case chainはreadyだったが、runner `e93a2c1`のROCTx markerとP3 r
 
 - runner→validator→B→launcher→harnessの順に再固定した。
 - 通常one-case argvを変えず、profile modeだけROCTx libraryと12 rangeをexact透過・検証する。
-- capture tool `489183a`がrocprofv3経由でmaintenance harnessを包むexact commandをprofile-readyへ固定した。
+- 実行所有順を`outer maintenance harness -> capture tool -> rocprofv3 -> launcher -> runner`へ変更し、capture失敗やtimeoutでも外側`finally`がservice復旧を試行する構成へ固定した。
+- capture tool `b4d515f`、launcher `eec6922`、harness `426290f`を固定し、capture tool、profiler、Python、launcher、target manifestを4段階で再検証する。
+- target manifestはexact argv、入力file SHA、fresh output path、raw file SHA、self-hashを二重束縛する。
 - base readyはactual one-case最大1回、profile-readyはdiagnostic actual最大1回で、両方ともpromotion不可・output no-reuseである。
-- 主要回帰155、marker 55、capture 8 testsが通過した。手動marker境界15件も通過済みである。
+- 主要回帰168、marker 55、capture 11 testsとcapture関連集合85 testsが通過した。手動marker境界15件も通過済みである。
 - base/profile canonical dry-runは全actual process count 0である。
 - actual service停止、GPU command、model load、rocprof captureは実行していない。
 

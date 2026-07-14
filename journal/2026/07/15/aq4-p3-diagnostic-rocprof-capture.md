@@ -38,9 +38,8 @@
 ## 残課題
 
 - runner sourceのROCTx run marker hookは実装済みだが、prepared bundle/trust hashには未反映である。
-- outer maintenance harnessからcapture tool自身のSHA-256とtarget command manifestを固定する必要がある。
+- outer maintenance harnessからcapture tool、profiler、target launcher、target manifestを4段階で固定する再束縛は完了した。
 
 ## 次の行動
 
-- prepared bundle/trust chainを再生成し、outer harnessの固定入力とrestore契約を独立QAする。
-- 全入力のhash pin後、別の明示承認がある場合にだけ実R9700 diagnostic captureを行う。
+- 別の明示承認がある場合にだけ、再生成済みprofile-ready artifactから実R9700 diagnostic captureを行う。

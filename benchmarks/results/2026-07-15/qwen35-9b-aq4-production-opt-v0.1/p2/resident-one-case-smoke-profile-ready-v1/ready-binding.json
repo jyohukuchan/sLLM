@@ -272,16 +272,24 @@
   "measurement_eligible": false,
   "profile_diagnostic": {
     "capture_tool": {
-      "commit": "489183abba581332544d0d004338a2cee08a0d89",
+      "commit": "b4d515f9908136fa773f957775beab79edc3065d",
+      "git_blob": "5197f7a2607da2ec281ab8a013ce1476178bf1b1",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/capture-aq4-p3-diagnostic-profile.py",
-      "sha256": "be62caa7eee810cd6b33033eab15418b803ac1cee6559153e0cf7af446fa21f7"
+      "sha256": "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8",
+      "tree": "228bbbd0d05b8055640bd47dd3ed95952e504eef"
     },
     "command": [
       "/usr/bin/python3.12",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/capture-aq4-p3-diagnostic-profile.py",
       "capture",
-      "--profiler",
+      "--profiler-path",
       "/opt/rocm-7.2.1/bin/rocprofv3",
+      "--profiler-sha256",
+      "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "--target-command-manifest",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/target-command-manifest.json",
+      "--target-command-manifest-sha256",
+      "61d6db729023e2cbf62737c25c7c9042fda8431ac7b108606ce577998d3d58f4",
       "--profile-output-directory",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1",
       "--profile-output-name",
@@ -295,20 +303,9 @@
       "--artifact",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1/capture-artifact.json",
       "--timeout",
-      "1800.0",
-      "--runner-command",
-      "/usr/bin/python3.12",
-      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "--mode",
-      "execute",
-      "--profile-diagnostic",
-      "--ready-artifact",
-      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/ready-binding.json",
-      "--evidence-output",
-      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1",
-      "--confirm-one-case"
+      "1800.0"
     ],
-    "command_sha256": "7cdf634d252d04bc64d0bdb01abe01ed171bf8825b6ba4468bd2d5b5161419c7",
+    "command_sha256": "73a8e5195a2871c74b89a2f1c8ebd546008bf14f32e3dd792691643b43e1bc97",
     "maximum_invocations": 1,
     "measurement_eligible": false,
     "output": {
@@ -379,10 +376,40 @@
       "schema_version": "ullm.aq4_p2_resident_profile_diagnostic.v1"
     },
     "schema_version": "ullm.aq4_p3_diagnostic_rocprof_ready.v1",
-    "status": "ready_for_one_profile_diagnostic"
+    "status": "ready_for_one_profile_diagnostic",
+    "target_launcher": {
+      "binding_sha256": "d9980142f6ee3464356dc57753bcf9607187b556feffc383d930f44828b171ff",
+      "command": [
+        "/usr/bin/python3.12",
+        "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
+        "--mode",
+        "profile-execute",
+        "--evidence-output",
+        "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1",
+        "--runner-output",
+        "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1",
+        "--run-id",
+        "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+        "--trusted-launcher-sha",
+        "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
+      ],
+      "command_sha256": "93c8a0dc4a8b2e6467ab16930e246ea995c3f4e9f8f751abfae32353487aa0a0",
+      "commit": "eec6922fa9c90267213d2749c5dc816be54de527",
+      "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1",
+      "manifest": {
+        "manifest_sha256": "c2a93dd26e0a1a3f8fb80b815b95b2ed524b3ee869c08a442f61d03883034c51",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/target-command-manifest.json",
+        "sha256": "61d6db729023e2cbf62737c25c7c9042fda8431ac7b108606ce577998d3d58f4"
+      },
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
+      "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+      "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1",
+      "schema_version": "ullm.aq4_p2_profile_target_launcher.v1",
+      "sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
+    }
   },
   "promotion_eligible": false,
-  "qa_attestation_sha256": "72225d27f773d1e8f2b7f51d1466c19104a505a4bf8612f9bcd6a68a482106ef",
+  "qa_attestation_sha256": "d68e78656aabdf9a09fcf660566cec43d970753f7a79329c3990f3196a1e2edc",
   "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1",
   "status": "ready_for_one_case",
   "trust": {
@@ -391,17 +418,17 @@
       "manifest_sha256": "8302eb03329fd2c14fc5d9faa9ad24be2262a23a72c84d09049e84f7968cb86d"
     },
     "harness": {
-      "commit": "c5f6f2ac0130642f3d5c31204e84e15eecaf1e29",
-      "git_blob": "c70126325fab72612c78c45935d747ba70a74c62",
+      "commit": "426290f1087ef7d9003dda921c24468067cd1b5a",
+      "git_blob": "99d0dcca20de6535352bc02a7f700ae1b646ff36",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "sha256": "7a04647c50334f3f7df12e4def0272e43e1dcb37db953f680a589f9fe33aebf0",
-      "tree": "abb71b1f736414aebe0d43f05c065787d2b360eb"
+      "sha256": "f2d8e67db466770b19024ea296288f899d7d2c7f3712659abc673041643ff90e",
+      "tree": "8a932c6e25861bd225c325fb2a100a972fdb0cce"
     },
     "launcher": {
-      "commit": "bdb06083ca3646c8f934fea10dac691a6efd4626",
-      "git_blob": "5e7a3feebe82de13eeefbb3b99f95ad14244953b",
-      "sha256": "ddd84b5b85dc303f381f44048b03eeb1e542bcf8173dfe506aeb0e7ebd235ee5",
-      "tree": "7d7f9f30e90118ade4d0d66f058447b6b7777367"
+      "commit": "eec6922fa9c90267213d2749c5dc816be54de527",
+      "git_blob": "c422e4235a2ee6595cf43656c573b7e863489f9e",
+      "sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835",
+      "tree": "f6cef14d1e2a75dc1a12371d2a8e2a754d506482"
     },
     "production": {
       "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",

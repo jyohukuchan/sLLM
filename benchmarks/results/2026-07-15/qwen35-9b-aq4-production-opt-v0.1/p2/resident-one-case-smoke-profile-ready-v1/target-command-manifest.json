@@ -1,0 +1,43 @@
+{
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
+    "--mode",
+    "profile-execute",
+    "--evidence-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1",
+    "--runner-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1",
+    "--run-id",
+    "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+    "--trusted-launcher-sha",
+    "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
+  ],
+  "input_files": [
+    {
+      "argument_index": 0,
+      "executable": true,
+      "path": "/usr/bin/python3.12",
+      "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    {
+      "argument_index": 1,
+      "executable": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
+      "sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
+    }
+  ],
+  "manifest_sha256": "c2a93dd26e0a1a3f8fb80b815b95b2ed524b3ee869c08a442f61d03883034c51",
+  "output_paths": [
+    {
+      "argument_index": 5,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1"
+    },
+    {
+      "argument_index": 7,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1"
+    }
+  ],
+  "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+  "status": "bound"
+}
