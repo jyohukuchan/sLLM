@@ -26,6 +26,10 @@ required-features = ["rocm-ck-gfx1201"]
 name = "ullm-aq4-worker"
 path = "src/bin/ullm-aq4-worker.rs"
 
+[[bin]]
+name = "ullm-aq4-p2-full-model"
+path = "src/bin/ullm-aq4-p2-full-model.rs"
+
 [[example]]
 name = "sq8_ck_layer"
 required-features = ["rocm-ck-gfx1201"]
