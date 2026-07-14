@@ -177,28 +177,30 @@ def capture_source(model_dir: Path, cases_path: Path, output: Path) -> dict[str,
         with payload_path.open("w", encoding="utf-8") as handle:
             for case in cases:
                 past = None
-                input_ids = list(case["prompt_token_ids"])
+                context_ids = list(case["prompt_token_ids"])
+                model_input_ids = list(context_ids)
                 for step in range(case["step_count"]):
                     capture.clear()
-                    input_hash = _context_hash(input_ids)
-                    tokens = torch.tensor([input_ids], dtype=torch.long, device="cpu")
+                    input_hash = _context_hash(context_ids)
+                    tokens = torch.tensor([model_input_ids], dtype=torch.long, device="cpu")
                     with torch.inference_mode():
                         base = model.model(input_ids=tokens, past_key_values=past, use_cache=True, return_dict=True)
                         hidden = base.last_hidden_state[:, -1, :]
                         logits = model.lm_head(hidden.unsqueeze(1))[:, -1, :]
                     stages = _stage_records(capture)
                     greedy = int(torch.argmax(logits.reshape(-1)).item())
-                    row = {"case_id": case["case_id"], "step": step, "context_length": len(input_ids), "context_token_ids_sha256": input_hash, "stages": stages, "greedy_token_id": greedy}
+                    row = {"case_id": case["case_id"], "step": step, "context_length": len(context_ids), "context_token_ids_sha256": input_hash, "stages": stages, "greedy_token_id": greedy}
                     handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
                     rows += 1
                     past = getattr(base, "past_key_values", None)
-                    input_ids = [greedy]
+                    model_input_ids = [greedy]
+                    context_ids.append(greedy)
                     del tokens, base, hidden, logits
                 del past
     finally:
         capture.close()
         del model
-    manifest = {"schema_version": SCHEMA, "mode": "source_cpu", "model_dir": str(model_dir.resolve()), "cases_path": str(cases_path.resolve()), "source_manifest_sha256": _sha(source_manifest_path) if source_manifest_path.is_file() else None, "rows": rows, "stage_contract": {"decoder_layers": 32, "hidden_coordinates": list(HIDDEN_COORDINATES), "logit_coordinates": list(LOGIT_COORDINATES)}, "runtime": {"device": "cpu", "dtype": "bfloat16", "model_loads": 1, "elapsed_seconds": time.monotonic() - started}}
+    manifest = {"schema_version": SCHEMA, "mode": "source_cpu", "model_dir": str(model_dir.resolve()), "cases_path": str(cases_path.resolve()), "source_manifest_sha256": _sha(source_manifest_path) if source_manifest_path.is_file() else None, "rows": rows, "context_contract": "prompt_plus_replay_prefix_v2", "stage_contract": {"decoder_layers": 32, "hidden_coordinates": list(HIDDEN_COORDINATES), "logit_coordinates": list(LOGIT_COORDINATES)}, "runtime": {"device": "cpu", "dtype": "bfloat16", "model_loads": 1, "elapsed_seconds": time.monotonic() - started}}
     _write_json(output / "manifest.json", manifest)
     _write_json(output / "runtime.json", manifest["runtime"])
     sums = []

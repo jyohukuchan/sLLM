@@ -29,6 +29,20 @@ def write_trace(root: Path, *, mismatch_layer: int | None = None) -> None:
 
 
 class Qwen35Aq4DifferentialTests(unittest.TestCase):
+    def test_full_context_hash_contract(self) -> None:
+        self.assertEqual(
+            TRACE._context_hash([11, 12, 13]),
+            "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        )
+        self.assertEqual(
+            TRACE._context_hash([11, 12, 13, 220]),
+            "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+        )
+        self.assertEqual(
+            TRACE._context_hash([21, 22]),
+            "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        )
+
     def test_first_decoder_layer_mismatch_is_localized(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
