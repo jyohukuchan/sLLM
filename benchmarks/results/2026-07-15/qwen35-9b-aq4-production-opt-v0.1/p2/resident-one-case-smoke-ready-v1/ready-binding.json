@@ -6,7 +6,7 @@
     "one_case_only": true,
     "output_no_reuse": true,
     "rocprof_wrapper_required": false,
-    "run_id": "p2-r9700-resident-one-case-smoke-execute-v1"
+    "run_id": "p2-r9700-resident-one-case-smoke-execute-v2"
   },
   "execution_mode": "one_case",
   "launcher_binding": {
@@ -69,7 +69,7 @@
       "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
       "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json"
     },
-    "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1",
+    "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v2",
     "execution_contract": {
       "case_count": 1,
       "measured_runs": 10,
@@ -84,7 +84,7 @@
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
     },
     "live_preflight": {
-      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1/live-preflight.json",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v2/live-preflight.json",
       "replaces_synthetic_preflight": true,
       "required": true,
       "sha256": null
@@ -98,8 +98,8 @@
       "served_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
       "sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
     },
-    "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
-    "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v1",
+    "run_id": "p2-r9700-resident-one-case-smoke-execute-v2",
+    "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v2",
     "runtime_mapping": {
       "amd_smi_index": 2,
       "bdf": "0000:47:00.0",
@@ -194,7 +194,7 @@
     ],
     "pre_execution_sha256": null,
     "reason": "generated only after external service stop and all launcher live gates pass",
-    "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
+    "run_id": "p2-r9700-resident-one-case-smoke-execute-v2",
     "runtime_mapping": {
       "amd_smi_index": 2,
       "bdf": "0000:47:00.0",
@@ -247,7 +247,7 @@
     "sudo_keepalive_seconds": 30
   },
   "promotion_eligible": false,
-  "qa_attestation_sha256": "5f03ce65bfcff78a46e5d2a886399ef47f52ed15073a81dd285d0d1aa98dfaeb",
+  "qa_attestation_sha256": "9c256216bb97906706558dffb64c66cc86f4ca23757c4840b367066011ed3594",
   "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1",
   "status": "ready_for_one_case",
   "trust": {
@@ -290,17 +290,17 @@
       }
     },
     "harness": {
-      "commit": "d3d9eaee1f62043d5ecffbf56cf063b32409dc72",
-      "git_blob": "b82e23d97098a69b4ccd2751dde02a760f278121",
+      "commit": "7e597eb6e6ecbc61a727db91d68f7054101046c7",
+      "git_blob": "131043221eb97cddc7dfc754d4dcfb1cc88fcf3d",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "sha256": "55e9e0af0e812b1887b8dd06b0e233741646dd3c8433a4835e17f61462cd771b",
-      "tree": "12bfe48fd82ff3f16dcd80586554e0f6befccd51"
+      "sha256": "a9c17e589781dcecf0d7aebd30009deb40176b313d783309871beea63910f323",
+      "tree": "1e5b2e2bad19d6bf5c68e1321b4590fb1552afe8"
     },
     "launcher": {
-      "commit": "79ce2aa199413323da6fee10ddfa06fbb530b750",
-      "git_blob": "49014ed017676f401086d67f40ba564ff6e21410",
-      "sha256": "90f5e43a68b438bdf5f4421d2e5651073fd14ae52158be2ae5d66d607014d783",
-      "tree": "a6559659e1c8d14745bc1823d8cbcb6647e1e9a0"
+      "commit": "4a7c0ed9a5df941661efe17d48c131ffd0215f25",
+      "git_blob": "2fdbd01268dcbe1f451a8e8039617899f4e6eeaf",
+      "sha256": "3d1b67d108585c62ae2ff6ce9e22f3c9b5b0378152c9e65e6230c6027d1f5b96",
+      "tree": "1c24e7b7e695832a686831ebeb654492bcc6f020"
     },
     "production": {
       "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",

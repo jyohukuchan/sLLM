@@ -24,8 +24,8 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "79ce2aa199413323da6fee10ddfa06fbb530b750",
-    "sha256": "90f5e43a68b438bdf5f4421d2e5651073fd14ae52158be2ae5d66d607014d783"
+    "commit": "4a7c0ed9a5df941661efe17d48c131ffd0215f25",
+    "sha256": "3d1b67d108585c62ae2ff6ce9e22f3c9b5b0378152c9e65e6230c6027d1f5b96"
   },
   "manual_boundary_count": 15,
   "runner": {
