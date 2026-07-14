@@ -203,9 +203,30 @@ def normalize_fixture_paths(fixture_index: dict[str, Any]) -> None:
         entry["fixture_path"] = str(resolved)
 
 
-def validate_driver_command(command: list[str], identity: dict[str, Any]) -> dict[str, Any]:
+def validate_driver_argv_schema(command: list[str], identity: dict[str, Any], *, expected_argv: list[str] | None = None) -> None:
     if not command or not all(isinstance(item, str) and item for item in command):
         raise BatchError("driver command is empty or invalid")
+    bound = identity.get("resident_driver_identity")
+    runtime_device = bound.get("runtime_device") if isinstance(bound, dict) else None
+    expected_device_index = runtime_device.get("runtime_device_index") if isinstance(runtime_device, dict) else None
+    expected_build_commit = bound.get("build_git_commit") if isinstance(bound, dict) else None
+    if (
+        len(command) != 7
+        or command[1] != "--served-model-manifest"
+        or not Path(command[2]).is_absolute()
+        or ".." in Path(command[2]).parts
+        or command[3] != "--device-index"
+        or command[4] != str(expected_device_index)
+        or command[5] != "--build-git-commit"
+        or command[6] != expected_build_commit
+    ):
+        raise BatchError("resident driver argv does not match the exact production schema")
+    if expected_argv is not None and command != expected_argv:
+        raise BatchError("resident driver argv differs from the one-case launch binding")
+
+
+def validate_driver_command(command: list[str], identity: dict[str, Any], *, expected_argv: list[str] | None = None) -> dict[str, Any]:
+    validate_driver_argv_schema(command, identity, expected_argv=expected_argv)
     path = Path(command[0])
     _, digest, metadata = read_regular(path, "resident driver executable", absolute=True, collect=False)
     if metadata.st_mode & 0o111 == 0:
@@ -543,6 +564,15 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
     expected_binary_sha256 = identity.get("resident_driver_identity", {}).get("binary_sha256")
     if not isinstance(expected_binary_sha256, str) or SHA256_RE.fullmatch(expected_binary_sha256) is None or files["resident-driver"]["sha256"] != expected_binary_sha256:
         raise BatchError("one-case smoke resident binary binding is invalid")
+    launch = load(root / "launch-command.json", "one-case smoke launch command")
+    expected_driver_argv = launch.get("resident_driver_argv")
+    if (
+        launch.get("schema_version") != "ullm.aq4_p2_resident_launch_command.v1"
+        or not isinstance(expected_driver_argv, list)
+        or expected_driver_argv[0:1] != [str(root / "resident-driver")]
+    ):
+        raise BatchError("one-case smoke resident driver argv binding is invalid")
+    validate_driver_argv_schema(expected_driver_argv, identity)
     fake_ready = _run_fake_ready_handshake(fake_ready_path, args.timeout)
     session_id, driver_identity = validate_ready(fake_ready, identity, cases, expected_binary_sha256)
     prepared_plan = load(root / "dry-run.json", "one-case smoke prepared dry-run")
@@ -587,6 +617,7 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         "driver_fake_handshake": "passed",
         "resident_session_id": session_id,
         "driver_identity": driver_identity,
+        "resident_driver_argv": expected_driver_argv,
         "trusted_bundle_validator": validator,
     }
 
@@ -785,7 +816,8 @@ def run_batch(args: argparse.Namespace) -> int:
         return 0
     if not args.driver_command:
         raise BatchError("--driver-command is required unless --dry-run is set")
-    driver_executable = validate_driver_command(args.driver_command, identity)
+    expected_driver_argv = smoke_validation["resident_driver_argv"] if smoke_validation is not None else None
+    driver_executable = validate_driver_command(args.driver_command, identity, expected_argv=expected_driver_argv)
     completed_cases = 0
     with acquire_device_lock(args.lock_path, args.run_id, driver_executable) as lock_owner:
         args.output_dir.mkdir(parents=True, exist_ok=False)
@@ -860,7 +892,7 @@ def run_batch(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expanded", type=Path, required=True)
     parser.add_argument("--fixture-index", type=Path, required=True)
@@ -870,7 +902,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--baseline-kind", choices=("active-production", "p3-current-head"), required=True)
-    parser.add_argument("--driver-command", nargs="+")
     parser.add_argument("--lock-path", type=Path, default=DEFAULT_LOCK_PATH)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -878,7 +909,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bundle-root", type=Path, help="absolute complete 791a20c bundle root; required by --one-case-smoke")
     parser.add_argument("--trusted-validator", type=Path, help="trusted bundle validator Python source required by --one-case-smoke")
     parser.add_argument("--trusted-validator-sha256", help="expected lowercase SHA-256 of --trusted-validator")
-    args = parser.parse_args(argv)
+    parser.add_argument("--driver-command", nargs=argparse.REMAINDER, help="exact resident driver argv; this option and its value must be last")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     try:
         return run_batch(args)
     except (BatchError, OSError, subprocess.SubprocessError) as error:

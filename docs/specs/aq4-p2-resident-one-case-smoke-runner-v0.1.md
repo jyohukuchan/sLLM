@@ -14,6 +14,8 @@ one-case smokeも2 warmup + 10 measuredを固定し、`smoke_only=true`、`promo
 
 one-case dry-runはplannerだけを通さない。`fake-ready.json`はrunner本体から直接JSON readせず、分離したchild processをexactly 1回起動してstdout handshakeとして実runnerのready identity validatorへ入力する。plan artifactはroot member inventory、bundle/fake-ready hash、session/driver identity、`fake_driver_subprocess_count=1`、`driver_fake_handshake=passed`を保持する。normative one-case modeは`--trusted-validator`と`--trusted-validator-sha256`を必須とする。validatorのraw CLI pathはresolve前にabsoluteでなければならず、全ancestorとleafのsymlinkを拒否し、single-link regular fileを`O_NOFOLLOW`でopenする。期待SHAとpinned file identity/hashを実行前後で照合し、source/stdout/report SHAをplanへbindする。validator省略、SHA差し替え、symlink経由は許可しない。これはvalidate-only evidenceであり、model load、GPU、service操作を証明しない。
 
+live実行の`--driver-command`はrunner optionの最後に置き、以降を残余argvとしてそのままdriverへ渡す。driver argvは`DRIVER --served-model-manifest PATH --device-index N --build-git-commit SHA`の7要素・固定順序だけを許可し、device indexとbuild commitをbound resident identityへ照合する。one-case modeはさらに`launch-command.json`の`resident_driver_argv`と完全一致しなければならない。これによりdriver自身のoption風引数をrunnerが誤解釈せず、末尾追加、並べ替え、欠落、別manifestへの差し替えを起動前に拒否する。通常84-case modeも同じargv schemaを使い、case数、transaction数、raw/summary schemaは変更しない。
+
 ## 次の行動
 
 信頼連鎖は自己参照cycleを避けて3段に分離する。Rはこのgeneric runner validation commit、BはR blobと実dry-runをpinする更新bundle、LはB manifest SHAとR blob/validator SHAをpinしてvalidator→runnerの順に起動する最後のimmutable launcherである。この変更はRだけを完成させるため、B/L更新が次に必要である。sanctioned実行ではLが選んだbundle rootとdetached resident driverを使用し、one-case smokeの成功を84件または完全matrixのpromotion evidenceへ転用しない。
