@@ -31,6 +31,18 @@ MAX_STEPS = 128
 MAX_TOP_K = 32
 MAX_SAMPLE_VALUES = 256
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+TOKENIZER_FILES = (
+    "chat_template.jinja",
+    "merges.txt",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+)
+RANKING_CONTRACT = {
+    "greedy": "maximum_logit_then_smallest_token_id",
+    "scope": "entire_vocabulary",
+    "topk": "logit_descending_then_token_id_ascending",
+}
 
 
 class OracleError(ValueError):
@@ -69,6 +81,11 @@ def sha256_file(path: Path, chunk_bytes: int = 1024 * 1024) -> str:
         while chunk := handle.read(chunk_bytes):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def canonical_sha256(value: Any) -> str:
+    raw = (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def safe_relative(root: Path, raw: Any, label: str) -> Path:
@@ -260,8 +277,9 @@ def inspect_source_model(root: Path) -> dict[str, Any]:
     text_config = config.get("text_config")
     if not isinstance(text_config, dict) or text_config.get("dtype") not in {"bfloat16", "float32", "bf16", "f32"}:
         raise OracleError("source config does not declare BF16/F32 text weights")
-    required = ["config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json"]
-    files = [metadata_file(root, name) for name in required]
+    required = ["config.json", "model.safetensors.index.json"]
+    for name in required:
+        metadata_file(root, name)
     index = load_json(root / "model.safetensors.index.json")
     weight_map = index.get("weight_map") if isinstance(index, dict) else None
     if not isinstance(weight_map, dict) or not weight_map:
@@ -288,11 +306,42 @@ def inspect_source_model(root: Path) -> dict[str, Any]:
         "model_id": "Qwen/Qwen3.5-9B",
         "revision": revision,
         "dtype": text_config["dtype"],
+        "root": str(root.resolve(strict=True)),
         "config": metadata_file(root, "config.json"),
         "weight_index": metadata_file(root, "model.safetensors.index.json"),
-        "tokenizer_files": files[2:],
+        "tokenizer_files": [metadata_file(root, name) for name in TOKENIZER_FILES],
         "weight_shards": [metadata_file(root, name) for name in shards],
     }
+
+
+def source_checkpoint_identity(inspected: dict[str, Any]) -> dict[str, Any]:
+    files = sorted(
+        [inspected["config"], inspected["weight_index"], *inspected["weight_shards"]],
+        key=lambda item: item["file"],
+    )
+    return {
+        "aggregate_sha256": canonical_sha256(files),
+        "dtype": inspected["dtype"],
+        "files": files,
+        "root": inspected["root"],
+    }
+
+
+def _validate_file_identity(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise OracleError(f"{label} must be nonempty")
+    previous: str | None = None
+    result = []
+    for index, raw in enumerate(value):
+        entry = _exact_keys(raw, {"bytes", "file", "sha256"}, f"{label}[{index}]")
+        name = entry["file"]
+        if not isinstance(name, str) or not name or (previous is not None and name <= previous):
+            raise OracleError(f"{label} must have unique file-sorted names")
+        previous = name
+        integer(entry["bytes"], f"{label}[{index}].bytes", minimum=1)
+        ensure_sha256(entry["sha256"], f"{label}[{index}].sha256")
+        result.append(entry)
+    return result
 
 
 def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[str, Any]:
@@ -311,12 +360,17 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
         raise OracleError("manifest status is invalid")
     if manifest.get("evidence_class") not in {"production", "synthetic_fixture", "blocked"}:
         raise OracleError("manifest evidence_class is invalid")
-    if not isinstance(manifest.get("promotion_eligible"), bool):
-        raise OracleError("manifest promotion_eligible must be boolean")
-    if manifest["evidence_class"] != "production" and manifest["promotion_eligible"]:
-        raise OracleError("non-production oracle cannot be promotion eligible")
+    if "promotion_eligible" in manifest:
+        raise OracleError("oracle manifest must not make a candidate promotion decision")
+    eligibility_key = "usable_as_source_evidence" if kind == "independent_source" else "usable_as_path_evidence"
+    if not isinstance(manifest.get(eligibility_key), bool):
+        raise OracleError(f"manifest {eligibility_key} must be boolean")
+    if manifest["evidence_class"] != "production" and manifest[eligibility_key]:
+        raise OracleError("non-production oracle cannot be usable as production evidence")
     validate_utc(manifest.get("created_utc"))
-    identity = _exact_keys(manifest.get("identity"), {"artifact", "model_id", "model_revision", "tokenizer"}, "identity")
+    if manifest.get("ranking") != RANKING_CONTRACT:
+        raise OracleError("manifest ranking contract differs")
+    identity = _exact_keys(manifest.get("identity"), {"artifact", "model_id", "model_revision", "source_checkpoint", "tokenizer"}, "identity")
     if not isinstance(identity["model_id"], str) or not identity["model_id"]:
         raise OracleError("identity.model_id is invalid")
     if identity["model_revision"] is not None and not isinstance(identity["model_revision"], str):
@@ -325,16 +379,26 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
     for key in artifact:
         if artifact[key] is not None:
             ensure_sha256(artifact[key], f"identity.artifact.{key}")
-    tokenizer = _exact_keys(identity["tokenizer"], {"aggregate_sha256", "files"}, "identity.tokenizer")
+    tokenizer = _exact_keys(identity["tokenizer"], {"aggregate_sha256", "files", "root"}, "identity.tokenizer")
+    if not isinstance(tokenizer["root"], str) or not Path(tokenizer["root"]).is_absolute():
+        raise OracleError("identity.tokenizer.root must be absolute")
     ensure_sha256(tokenizer["aggregate_sha256"], "identity.tokenizer.aggregate_sha256")
-    if not isinstance(tokenizer["files"], list) or not tokenizer["files"]:
-        raise OracleError("identity.tokenizer.files must be nonempty")
-    for index, item in enumerate(tokenizer["files"]):
-        entry = _exact_keys(item, {"bytes", "file", "sha256"}, f"identity.tokenizer.files[{index}]")
-        if not isinstance(entry["file"], str) or not entry["file"]:
-            raise OracleError("tokenizer file name is invalid")
-        integer(entry["bytes"], f"tokenizer.files[{index}].bytes", minimum=1)
-        ensure_sha256(entry["sha256"], f"tokenizer.files[{index}].sha256")
+    tokenizer_files = _validate_file_identity(tokenizer["files"], "identity.tokenizer.files")
+    if tokenizer["aggregate_sha256"] != canonical_sha256(tokenizer_files):
+        raise OracleError("identity.tokenizer aggregate differs")
+    source_checkpoint = identity["source_checkpoint"]
+    if kind == "independent_source":
+        source_checkpoint = _exact_keys(source_checkpoint, {"aggregate_sha256", "dtype", "files", "root"}, "identity.source_checkpoint")
+        if not isinstance(source_checkpoint["root"], str) or not Path(source_checkpoint["root"]).is_absolute():
+            raise OracleError("identity.source_checkpoint.root must be absolute")
+        if source_checkpoint["dtype"] not in {"bfloat16", "float32", "bf16", "f32"}:
+            raise OracleError("identity.source_checkpoint.dtype must be BF16/F32")
+        checkpoint_files = _validate_file_identity(source_checkpoint["files"], "identity.source_checkpoint.files")
+        ensure_sha256(source_checkpoint["aggregate_sha256"], "identity.source_checkpoint.aggregate_sha256")
+        if source_checkpoint["aggregate_sha256"] != canonical_sha256(checkpoint_files):
+            raise OracleError("identity.source_checkpoint aggregate differs")
+    elif source_checkpoint is not None:
+        raise OracleError("same-artifact path oracle must not claim a source checkpoint")
     limits = _exact_keys(manifest.get("limits"), {"max_cases", "max_payload_bytes", "max_sample_values", "max_steps", "max_top_k"}, "limits")
     expected_limits = {"max_cases": MAX_CASES, "max_payload_bytes": MAX_PAYLOAD_BYTES, "max_sample_values": MAX_SAMPLE_VALUES, "max_steps": MAX_STEPS, "max_top_k": MAX_TOP_K}
     if limits != expected_limits:

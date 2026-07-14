@@ -40,12 +40,12 @@ def _canonical(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _tokenizer_identity(files: list[dict[str, Any]]) -> dict[str, Any]:
+def _tokenizer_identity(files: list[dict[str, Any]], root: Path) -> dict[str, Any]:
     normalized = sorted(
         ({"file": item["file"], "bytes": int(item["bytes"]), "sha256": item["sha256"]} for item in files),
         key=lambda item: item["file"],
     )
-    return {"files": normalized, "aggregate_sha256": hashlib.sha256(_canonical(normalized)).hexdigest()}
+    return {"files": normalized, "aggregate_sha256": oracle.canonical_sha256(normalized), "root": str(root.resolve(strict=True))}
 
 
 def _load_cases(path: Path) -> list[dict[str, Any]]:
@@ -111,8 +111,8 @@ def _copy_payload(source: Path, destination: Path, cases: list[dict[str, Any]]) 
 
 def _source_identity(source_root: Path) -> tuple[str, dict[str, Any]]:
     inspected = oracle.inspect_source_model(source_root)
-    tokenizer = _tokenizer_identity(inspected["tokenizer_files"])
-    return inspected["model_id"], {"artifact": {"package_manifest_sha256": None, "artifact_manifest_sha256": None}, "model_id": inspected["model_id"], "model_revision": inspected["revision"], "tokenizer": tokenizer}
+    tokenizer = _tokenizer_identity(inspected["tokenizer_files"], source_root)
+    return inspected["model_id"], {"artifact": {"package_manifest_sha256": None, "artifact_manifest_sha256": None}, "model_id": inspected["model_id"], "model_revision": inspected["revision"], "source_checkpoint": oracle.source_checkpoint_identity(inspected), "tokenizer": tokenizer}
 
 
 def _path_identity(args: argparse.Namespace) -> dict[str, Any]:
@@ -128,7 +128,7 @@ def _path_identity(args: argparse.Namespace) -> dict[str, Any]:
     model_id = args.model_id
     if not model_id:
         raise oracle.OracleError("path oracle requires --model-id")
-    return {"artifact": {"package_manifest_sha256": _sha(package), "artifact_manifest_sha256": _sha(artifact)}, "model_id": model_id, "model_revision": args.model_revision, "tokenizer": _tokenizer_identity(tokenizer_files)}
+    return {"artifact": {"package_manifest_sha256": _sha(package), "artifact_manifest_sha256": _sha(artifact)}, "model_id": model_id, "model_revision": args.model_revision, "source_checkpoint": None, "tokenizer": _tokenizer_identity(tokenizer_files, tokenizer_root)}
 
 
 def _write_manifest(output: Path, manifest: dict[str, Any], payload_src: Path | None = None) -> None:
@@ -168,9 +168,10 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
             "oracle_kind": "independent_source" if args.kind == "source" else "same_artifact_all_m1",
             "status": status,
             "evidence_class": evidence_class,
-            "promotion_eligible": evidence_class == "production",
+            ("usable_as_source_evidence" if args.kind == "source" else "usable_as_path_evidence"): evidence_class == "production",
             "created_utc": oracle.utc_now(),
             "identity": identity,
+            "ranking": oracle.RANKING_CONTRACT,
             "limits": {"max_cases": oracle.MAX_CASES, "max_payload_bytes": oracle.MAX_PAYLOAD_BYTES, "max_sample_values": oracle.MAX_SAMPLE_VALUES, "max_steps": oracle.MAX_STEPS, "max_top_k": oracle.MAX_TOP_K},
             "cases": cases,
             "payload": {"file": "payload.jsonl", "bytes": payload_bytes, "record_count": record_count, "sha256": payload_sha},
@@ -185,7 +186,7 @@ def link(args: argparse.Namespace) -> dict[str, Any]:
     path = oracle.validate_manifest(path_root, expected_kind="same_artifact_all_m1")
     if source["identity"]["model_id"] != path["identity"]["model_id"] or source["identity"]["model_revision"] != path["identity"]["model_revision"]:
         raise oracle.OracleError("source/path model identity differs")
-    if source["identity"]["tokenizer"] != path["identity"]["tokenizer"]:
+    if source["identity"]["tokenizer"]["aggregate_sha256"] != path["identity"]["tokenizer"]["aggregate_sha256"] or source["identity"]["tokenizer"]["files"] != path["identity"]["tokenizer"]["files"]:
         raise oracle.OracleError("source/path tokenizer identity differs")
     if path["identity"]["artifact"]["artifact_manifest_sha256"] is None or path["identity"]["artifact"]["package_manifest_sha256"] is None:
         raise oracle.OracleError("path oracle must bind artifact and package manifests")
@@ -199,12 +200,10 @@ def link(args: argparse.Namespace) -> dict[str, Any]:
         "source": {"manifest_sha256": _sha(source_root / "manifest.json"), "payload_sha256": source["payload"]["sha256"]},
         "path": {"manifest_sha256": _sha(path_root / "manifest.json"), "payload_sha256": path["payload"]["sha256"], "artifact_manifest_sha256": path["identity"]["artifact"]["artifact_manifest_sha256"], "package_manifest_sha256": path["identity"]["artifact"]["package_manifest_sha256"]},
         "agreement": agreement,
+        "usable_as_p2_oracle_link": False,
         "promotion_eligible": False,
     }
-    # Keep promotion eligibility explicit and fail-closed for fixture links or
-    # any disagreement.  This assignment is deliberately separate to avoid a
-    # truthy summary accidentally becoming a promotion decision.
-    manifest["promotion_eligible"] = bool(manifest["evidence_class"] == "production" and agreement["greedy_token_exact"] and agreement["topk_exact"] and agreement["hidden_sample_within_atol"] and agreement["logit_sample_within_atol"])
+    manifest["usable_as_p2_oracle_link"] = bool(manifest["evidence_class"] == "production" and source["identity"]["model_revision"] is not None and source["usable_as_source_evidence"] and path["usable_as_path_evidence"] and agreement["greedy_token_exact"] and agreement["topk_exact"] and agreement["hidden_sample_within_atol"] and agreement["logit_sample_within_atol"])
     if os.path.lexists(args.output):
         raise oracle.OracleError(f"refusing to overwrite existing output: {args.output}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--evidence-class", choices=("production", "synthetic_fixture"), default="production")
     capture_parser.add_argument("--source-root", type=Path)
     capture_parser.add_argument("--tokenizer-root", type=Path)
-    capture_parser.add_argument("--tokenizer-file", action="append", default=["tokenizer.json", "tokenizer_config.json"])
+    capture_parser.add_argument("--tokenizer-file", action="append", default=list(oracle.TOKENIZER_FILES))
     capture_parser.add_argument("--artifact-manifest", type=Path)
     capture_parser.add_argument("--package-manifest", type=Path)
     capture_parser.add_argument("--model-id")

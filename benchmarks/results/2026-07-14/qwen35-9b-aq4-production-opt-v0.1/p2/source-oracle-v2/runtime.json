@@ -1,0 +1,29 @@
+{
+  "device": "cpu",
+  "dtype": "bfloat16",
+  "full_vocab_ranking": true,
+  "inference_mode": true,
+  "low_cpu_mem_usage": false,
+  "low_cpu_mem_usage_blocker": "accelerate package is unavailable in the installed environment",
+  "max_resident_logit_rows": 1,
+  "model_loads": 1,
+  "preflight": {
+    "checkpoint_bytes": 19306310880,
+    "headroom_factor": 1.5,
+    "mem_available_bytes": 62965350400,
+    "mem_total_bytes": 117933965312,
+    "required_headroom_bytes": 28959466320,
+    "status": "passed"
+  },
+  "python": "3.12.3",
+  "run": {
+    "elapsed_seconds": 17.0112606768962,
+    "row_count": 3
+  },
+  "runtime": "transformers.AutoModelForCausalLM",
+  "safetensors": "0.8.0",
+  "torch": "2.12.0+cpu",
+  "torch_num_interop_threads": 1,
+  "torch_num_threads": 1,
+  "transformers": "5.12.1"
+}

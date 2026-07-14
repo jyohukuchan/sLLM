@@ -12,16 +12,17 @@ P2では、AQ4 packageの同一artifact pathだけでなく、独立したBF16/F
 - `ullm.qwen35_aq4_path_oracle.v1`: 同一AQ4 artifactのall-M=1 path。source oracleとは別root・別manifestで保存する。
 - `ullm.qwen35_aq4_oracle_link.v1`: 両manifest、payload、artifact/package、tokenizer identityをhashで結ぶ比較結果。
 
-PayloadはJSONLを逐次読み取りし、4 MiB、128 cases、128 steps、256 sample values、top-k 32を上限とする。validatorは重複キー、非有限数、symlink/path escape、順序、coverage、payload hashを再計算する。hidden/logitの完全な行列は保存しない。
+PayloadはJSONLを逐次読み取りし、4 MiB、128 cases、128 steps、256 sample values、top-k 32を上限とする。validatorは重複キー、非有限数、symlink/path escape、順序、coverage、payload hashを再計算する。sourceではconfig、index、全4 shard、tokenizer 5 filesを実pathからstreaming SHA-256で再読し、canonical aggregateを照合する。manifest runtime、runtime.json、CPU/BF16、package version、thread数、preflight、row count、SHA256SUMSも相互照合する。hidden/logitの完全な行列は保存しない。
 
-`same_artifact_all_m1` は path oracle の意味であり、source oracleの代替ではない。linkの `promotion_eligible` は必ず falseから始まり、synthetic fixtureは production evidenceへ昇格できない。
-source/path manifestにも `promotion_eligible` を持たせ、`evidence_class=synthetic_fixture` では常に falseを要求する。
+greedy tokenは全語彙の最大logitとし、同値では最小token IDを選ぶ。top-kは全語彙をlogit降順、同値token ID昇順に並べた先頭kである。実行中に保持できるlogitはfinal tokenの1 vocabulary rowまでで、sequence×vocabulary matrixは保持しない。
+
+`same_artifact_all_m1` は path oracle の意味であり、source oracleの代替ではない。source/path単体は `usable_as_source_evidence` / `usable_as_path_evidence` のみを判定し、candidate promotionを判定しない。linkも `usable_as_p2_oracle_link` と `promotion_eligible=false` を分け、最終promotionはP2 validation側だけが判断する。synthetic fixtureはproduction evidenceへ昇格できない。
 
 ## 次の行動
 
 `export-qwen35-aq4-source-oracle.py` は、installed official `transformers` によるCPU-only BF16 source forwardを実行する。`local_files_only`、1 process、`inference_mode`、caseごとのcache解放、final tokenの1行logitだけを使う。CPU preflightはcheckpoint bytesの1.5倍をMemAvailableから要求し、失敗時は実行しない。`accelerate` がないため現環境では `low_cpu_mem_usage=False` を記録するが、full logit matrixを保存しない。
 
-実行済みsource oracleは `benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-oracle-v1/` にあり、独立validatorとSHA256SUMSを通過している。Qwen3.5-9B BF16 source、revision、tokenizer、3 bounded rows、exact greedy/top-kを記録する。AQ4 path oracleは同じcaseを同一artifact identityで供給する。両方の独立payloadが揃うまでP2 candidateはpromotion不可とする。
+QA修正版source oracleは `benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-oracle-v2/` にあり、独立validatorとSHA256SUMSを通過する。Qwen3.5-9B BF16 source、revision、checkpoint/tokenizer aggregate、3 bounded rows、全語彙tie規則に従うexact greedy/top-kを記録する。旧v1は上書きせず履歴として残す。AQ4 path oracleは同じcaseを同一artifact identityで供給する。両方の独立payloadが揃うまでP2 candidateはpromotion不可とする。
 
 ### CLI bridge
 

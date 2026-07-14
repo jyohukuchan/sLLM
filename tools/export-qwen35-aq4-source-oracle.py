@@ -117,13 +117,10 @@ def _preflight(model_dir: Path) -> dict[str, Any]:
 def _topk(logits: torch.Tensor, count: int = TOP_K) -> list[dict[str, Any]]:
     # This is one final-token logit vector, not a sequence/vocabulary matrix.
     values = logits.detach().to(dtype=torch.float32, device="cpu").flatten()
-    if values.numel() <= count:
-        indices = torch.arange(values.numel(), dtype=torch.int64)
-    else:
-        indices = torch.topk(values, k=count, largest=True, sorted=False).indices
-    pairs = [(int(index), float(values[index])) for index in indices.tolist()]
-    pairs.sort(key=lambda item: (-item[1], item[0]))
-    return [{"token_id": token_id, "logit": logit} for token_id, logit in pairs[:count]]
+    # Stable descending sort preserves the original ascending token-ID order
+    # for equal logits.  This is the normative order over the entire vocab.
+    indices = torch.argsort(values, descending=True, stable=True)[:count]
+    return [{"token_id": int(index), "logit": float(values[index])} for index in indices.tolist()]
 
 
 def _sample_tensor(tensor: torch.Tensor, indices: tuple[int, ...]) -> dict[str, Any]:
@@ -166,6 +163,7 @@ def _run_model(model_dir: Path, cases: list[dict[str, Any]], payload_path: Path)
     if torch.cuda.is_available():
         raise ExportError("GPU is visible; source exporter is CPU-only")
     torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
     try:
         from transformers import AutoModelForCausalLM
     except ImportError as error:
@@ -190,7 +188,7 @@ def _run_model(model_dir: Path, cases: list[dict[str, Any]], payload_path: Path)
                 gc.collect()
     del model
     gc.collect()
-    return {"rows": rows, "elapsed_seconds": time.monotonic() - started}
+    return {"row_count": rows, "elapsed_seconds": time.monotonic() - started}
 
 
 def export(args: argparse.Namespace) -> dict[str, Any]:
@@ -210,7 +208,7 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
         manifest = capture_qwen35_aq4_p2_oracle.capture(capture_args)
         manifest_path = args.output / "manifest.json"
         manifest = oracle.load_json(manifest_path)
-        manifest["runtime"] = {"runtime": "transformers.AutoModelForCausalLM", "transformers": package_version("transformers"), "torch": package_version("torch"), "safetensors": package_version("safetensors"), "python": platform.python_version(), "device": "cpu", "dtype": "bfloat16", "low_cpu_mem_usage": False, "low_cpu_mem_usage_blocker": "accelerate package is unavailable in the installed environment", "preflight": preflight, "run": run}
+        manifest["runtime"] = {"runtime": "transformers.AutoModelForCausalLM", "transformers": package_version("transformers"), "torch": package_version("torch"), "safetensors": package_version("safetensors"), "python": platform.python_version(), "device": "cpu", "dtype": "bfloat16", "low_cpu_mem_usage": False, "low_cpu_mem_usage_blocker": "accelerate package is unavailable in the installed environment", "torch_num_threads": torch.get_num_threads(), "torch_num_interop_threads": torch.get_num_interop_threads(), "model_loads": 1, "inference_mode": True, "full_vocab_ranking": True, "max_resident_logit_rows": 1, "preflight": preflight, "run": run}
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         oracle.validate_manifest(args.output, expected_kind="source")
         runtime_path = args.output / "runtime.json"
