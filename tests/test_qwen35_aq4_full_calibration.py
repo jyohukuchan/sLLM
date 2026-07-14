@@ -114,6 +114,15 @@ def test_full_source_validator_and_comparator(tmp_path: Path):
     assert (comparison_dir / "manifest.json").exists()
 
 
+def test_validator_rejects_tampered_legacy_payload_hash(tmp_path: Path):
+    source = make_artifact(tmp_path / "source")
+    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    manifest["legacy_cross_check"]["legacy_payload_sha256"] = "0" * 64
+    write_json(source / "manifest.json", manifest)
+    with pytest.raises(validator.ValidationError, match="legacy cross-check summary differs"):
+        validator.validate(source)
+
+
 def test_path_gate_rejects_source_reference(tmp_path: Path):
     source = make_artifact(tmp_path / "source")
     candidate = make_artifact(tmp_path / "candidate", target=True)

@@ -444,7 +444,7 @@ def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int
     legacy_records = list(legacy_oracle.payload_records(legacy_manifest_path.parent, legacy))
     overlap = {(old["case_id"], old["step"]) for old in legacy_records if (old["case_id"], old["step"]) in rows}
     if set(summary) == new_fields:
-        if summary["legacy_manifest_sha256"] != sha256_file(legacy_manifest_path, "parent sampled manifest") or not all(isinstance(summary[field], str) and Path(summary[field]).is_absolute() for field in ("split_manifest_path", "policy_path", "calibration_cases_path")):
+        if summary["legacy_manifest_sha256"] != sha256_file(legacy_manifest_path, "parent sampled manifest") or summary["legacy_payload_sha256"] != legacy["payload"]["sha256"] or not all(isinstance(summary[field], str) and Path(summary[field]).is_absolute() for field in ("split_manifest_path", "policy_path", "calibration_cases_path")):
             raise ValidationError("legacy parent/path hash binding differs")
         split_path = Path(summary["split_manifest_path"]); policy_path = Path(summary["policy_path"]); calibration_cases_path = Path(summary["calibration_cases_path"])
         if sha256_file(split_path, "split manifest") != summary["split_manifest_sha256"] or sha256_file(policy_path, "policy") != summary["policy_sha256"] or sha256_file(calibration_cases_path, "calibration cases") != summary["calibration_cases_sha256"]:
