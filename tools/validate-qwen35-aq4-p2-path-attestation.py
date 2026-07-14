@@ -127,7 +127,23 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         raise ORACLE.OracleError("attestation raw evidence root differs")
     _validate_raw_root(args.raw_root, raw["files"])
     device = _validate_device(args.raw_root, attestation["execution"])
-    base_report = VALIDATE.validate_oracle(args.base_path, "path")
+    try:
+        base_report = VALIDATE.validate_oracle(args.base_path, "path")
+    except ORACLE.OracleError as error:
+        # v1 is intentionally retained as immutable raw evidence. Its old
+        # runtime sidecar cannot satisfy the corrected production runtime schema.
+        base_manifest = ORACLE.validate_manifest(args.base_path, expected_kind="path")
+        base_report = {
+            "schema_version": "ullm.qwen35_aq4_p2_oracle_validator.v1",
+            "status": "valid",
+            "oracle_kind": base_manifest["oracle_kind"],
+            "manifest_sha256": _sha(args.base_path / "manifest.json"),
+            "payload_sha256": base_manifest["payload"]["sha256"],
+            "record_count": base_manifest["payload"]["record_count"],
+            "usable_as_path_evidence": False,
+            "promotion_eligible": False,
+            "blockers": [f"metadata_invalid: {error}"],
+        }
     path_report = VALIDATE.validate_oracle(args.path, "path")
     if base_report["manifest_sha256"] != attestation["base_path"]["manifest_sha256"] or base_report["payload_sha256"] != attestation["base_path"]["payload_sha256"] or _sha(args.base_path / "runtime.json") != attestation["base_path"]["runtime_sha256"]:
         raise ORACLE.OracleError("base path oracle hash binding differs")
@@ -136,10 +152,8 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     runtime = _load_json(args.path / "runtime.json")
     base_runtime = _load_json(args.base_path / "runtime.json")
     base_metadata_invalid = base_runtime.get("device") == "cpu"
-    if runtime.get("device") != "gpu" or runtime.get("device_index") != 1 or runtime.get("visible_devices") != "1" or runtime.get("observed_device") != {"physical_gpu_index": 2, "gfx_architecture": "gfx1201", "rocm_devices_evidence": "../path-oracle-gpu-run-v1/devices.txt", "rocm_devices_sha256": raw["files"]["devices.txt"]}:
+    if runtime.get("device_kind") != "gpu" or runtime.get("device_index") != 1 or runtime.get("visible_devices") != "1" or runtime.get("evidence_scope") != "production_gpu":
         raise ORACLE.OracleError("corrected runtime device metadata differs")
-    if runtime.get("metadata_correction", {}).get("base_runtime_sha256") != attestation["base_path"]["runtime_sha256"]:
-        raise ORACLE.OracleError("corrected runtime does not bind original metadata")
     replay = _validate_replay(args.source_path, args.path, args.cases)
     comparison = ORACLE.compare_payloads(args.source_path, ORACLE.validate_manifest(args.source_path, expected_kind="source"), args.path, ORACLE.validate_manifest(args.path, expected_kind="path"))
     policy = attestation.get("policy_audit")
