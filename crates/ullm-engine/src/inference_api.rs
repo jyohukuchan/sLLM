@@ -145,6 +145,51 @@ impl InferenceRequest {
             .and_then(|()| self.validate_reasoning_reservation())
     }
 
+    /// Validates the AQ4 benchmark's prefill-only request without weakening the
+    /// ordinary generation contract, which continues to require at least one token.
+    pub fn validate_prefill_only_for_worker(
+        &self,
+        context_tokens: usize,
+        vocab_size: usize,
+        eos_token_ids: &[usize],
+        top_k: usize,
+    ) -> Result<(), InferenceError> {
+        validate_request_id(&self.request_id)?;
+        if context_tokens == 0
+            || self.prompt_token_ids.is_empty()
+            || self.prompt_token_ids.len() > context_tokens
+        {
+            return Err(InferenceError::invalid_request(format!(
+                "prefill-only prompt token count must be in 1..={}, got {}",
+                context_tokens,
+                self.prompt_token_ids.len()
+            )));
+        }
+        if let Some((index, token_id)) = self
+            .prompt_token_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, token_id)| *token_id >= vocab_size)
+        {
+            return Err(InferenceError::invalid_request(format!(
+                "prompt_token_ids[{index}]={token_id} exceeds vocabulary size {vocab_size}"
+            )));
+        }
+        if self.max_new_tokens != 0 || self.reasoning.is_some() {
+            return Err(InferenceError::invalid_request(
+                "prefill-only request requires max_new_tokens=0 and no reasoning execution",
+            ));
+        }
+        if self.eos_token_ids != eos_token_ids {
+            return Err(InferenceError::invalid_request(format!(
+                "eos_token_ids must be {:?}, got {:?}",
+                eos_token_ids, self.eos_token_ids
+            )));
+        }
+        self.sampling.validate_with_top_k(top_k)
+    }
+
     fn validate_reasoning_reservation(&self) -> Result<(), InferenceError> {
         let Some(reasoning) = self.reasoning.as_ref().filter(|value| value.enabled) else {
             return Ok(());

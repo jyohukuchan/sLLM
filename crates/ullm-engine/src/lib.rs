@@ -4,6 +4,8 @@
 pub mod adapter_admission;
 pub mod adapter_fixtures;
 pub mod aq;
+pub mod aq4_benchmark_worker_protocol;
+pub mod aq4_benchmark_worker_runtime;
 pub mod aq4_package_runtime;
 pub mod aq4_worker_backend;
 pub mod backend_dispatch;

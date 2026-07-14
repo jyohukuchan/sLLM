@@ -1574,6 +1574,7 @@ struct ActiveRequest {
     request_id: String,
     prompt_token_ids: Vec<usize>,
     max_new_tokens: usize,
+    prefill_chunk_tokens: usize,
     cancel: CancellationToken,
     prompt_tokens_processed: usize,
     generated_tokens: usize,
@@ -1670,6 +1671,81 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     /// when operation-contract accounting was enabled for the model.
     pub fn last_terminal_request_execution_audit(&self) -> Option<&Qwen35Aq4RequestExecutionAudit> {
         self.last_terminal_request_audit.as_ref()
+    }
+
+    /// Starts the opt-in production-server benchmark path. The model and loaded
+    /// operation plans remain resident; only this request's prefill width changes.
+    pub fn start_benchmark_prefill_request(
+        &mut self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+        requested_m: usize,
+        resolved_m: usize,
+    ) -> Result<(), String> {
+        if self.status != Qwen35Aq4SessionStatus::Ready {
+            return Err(format!(
+                "Qwen3.5 AQ4 benchmark start requires Ready, got {:?}",
+                self.status
+            ));
+        }
+        validate_prefill_chunk_tokens(requested_m)?;
+        validate_prefill_chunk_tokens(resolved_m)?;
+        if resolved_m != requested_m && resolved_m != 1 {
+            return Err("Qwen3.5 AQ4 benchmark resolved M must equal requested M or all-M1".into());
+        }
+        request
+            .validate_prefill_only_for_worker(
+                self.model.context_length(),
+                self.model.vocab_size(),
+                &self.config.eos_token_ids,
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        if request.sampling.temperature != 0.0 || request.sampling.top_p != 1.0 {
+            return Err("Qwen3.5 AQ4 benchmark supports greedy sampling metadata only".into());
+        }
+        self.active = Some(ActiveRequest {
+            request_id: request.request_id,
+            prompt_token_ids: request.prompt_token_ids,
+            max_new_tokens: 0,
+            prefill_chunk_tokens: resolved_m,
+            cancel,
+            prompt_tokens_processed: 0,
+            generated_tokens: 0,
+            decode_input: None,
+            terminal_outcome: None,
+            reasoning: None,
+        });
+        self.active_operation_audit = self
+            .execution_contract
+            .as_ref()
+            .map(|_| OperationAuditAccumulator::new());
+        self.last_terminal_operation_audit = None;
+        self.active_lifecycle_observer = Some(Qwen35Aq4LifecycleObserver::new(requested_m));
+        self.last_terminal_request_audit = None;
+        self.pending = None;
+        self.status = Qwen35Aq4SessionStatus::Prefilling;
+        Ok(())
+    }
+
+    /// Completes a benchmark request after its final prefill progress unit and
+    /// performs the same synchronized reset used by ordinary generation.
+    pub fn finish_benchmark_prefill_and_reset(&mut self) -> Result<ReleaseSummary, String> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or_else(|| "Qwen3.5 AQ4 benchmark finish has no active request".to_string())?;
+        if self.status != Qwen35Aq4SessionStatus::Prefilling
+            || active.max_new_tokens != 0
+            || active.prompt_tokens_processed != active.prompt_token_ids.len()
+            || active.generated_tokens != 0
+        {
+            return Err("Qwen3.5 AQ4 benchmark finish requires complete prefill-only state".into());
+        }
+        active.terminal_outcome = Some(ReleaseOutcome::Length);
+        self.status = Qwen35Aq4SessionStatus::Terminal;
+        self.snapshot_terminal_request_audit()?;
+        self.reset_with_outcome(ReleaseOutcome::Length)
     }
 
     /// Starts a diagnostic request whose decode history is committed from one immutable,
@@ -1920,7 +1996,7 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
                 .ok_or_else(|| "Qwen3.5 AQ4 prefill chunk has no active request".to_string())?;
             let absolute_start = active.prompt_tokens_processed;
             let end = absolute_start
-                .checked_add(self.config.prefill_chunk_tokens)
+                .checked_add(active.prefill_chunk_tokens)
                 .unwrap_or(usize::MAX)
                 .min(active.prompt_token_ids.len());
             (
@@ -2433,6 +2509,7 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             request_id: request.request_id,
             prompt_token_ids: request.prompt_token_ids,
             max_new_tokens: request.max_new_tokens,
+            prefill_chunk_tokens: self.config.prefill_chunk_tokens,
             cancel,
             prompt_tokens_processed: 0,
             generated_tokens: 0,
@@ -4556,6 +4633,58 @@ mod tests {
         assert_eq!(terminal_facts["resolved_m"], 128);
         assert_eq!(terminal_facts["actual_token_batch_width"], 128);
         assert_eq!(terminal_facts["lifecycle"]["reset"]["complete"], 1);
+    }
+
+    #[test]
+    fn benchmark_prefill_uses_request_scoped_m_and_generates_no_token() {
+        for (requested_m, resolved_m) in [(128, 128), (128, 1)] {
+            let mut scripted = model(&[]);
+            scripted.context = 256;
+            scripted.audited = true;
+            scripted.native_hybrid_prefill = true;
+            let mut session = Qwen35Aq4InferenceSession::from_model(
+                scripted,
+                Qwen35Aq4SessionConfig::greedy(8, vec![2]),
+            )
+            .unwrap();
+            session.execution_contract = Some(native_hybrid_contract(resolved_m));
+            session
+                .start_benchmark_prefill_request(
+                    request("benchmark-prefill", &[4; 128], 0),
+                    CancellationToken::new(),
+                    requested_m,
+                    resolved_m,
+                )
+                .unwrap();
+            let mut processed = 0;
+            while processed < 128 {
+                let SessionAdvance::PromptProgress {
+                    prompt_tokens_processed,
+                    execution_width,
+                    ..
+                } = session.prepare_advance().unwrap()
+                else {
+                    panic!("benchmark prefill attempted token generation");
+                };
+                processed = prompt_tokens_processed;
+                assert_eq!(execution_width, resolved_m);
+            }
+            let summary = session.finish_benchmark_prefill_and_reset().unwrap();
+            assert_eq!(summary.generated_tokens, 0);
+            assert!(summary.reset_complete);
+            let audit = session.last_terminal_request_execution_audit().unwrap();
+            assert_eq!(audit.requested_m, requested_m);
+            assert_eq!(audit.resolved_m, Some(resolved_m));
+            assert_eq!(audit.actual_token_batch_width, Some(resolved_m));
+            assert_eq!(
+                audit.lifecycle.reset,
+                Qwen35Aq4ResetCounts {
+                    attempted: 1,
+                    complete: 1,
+                    failed: 0,
+                }
+            );
+        }
     }
 
     #[test]
