@@ -180,7 +180,9 @@ def selected_cases(expanded: dict[str, Any], index: dict[str, Any], index_path: 
             raise ProtocolError(f"fixture index does not bind selected case: {case_id}")
         fixture_path = Path(entry.get("fixture_path", ""))
         if not fixture_path.is_absolute():
-            fixture_path = index_path.parent / fixture_path
+            fixture_path = index_path.parent.resolve() / fixture_path
+        else:
+            fixture_path = fixture_path.resolve()
         if sha_file(fixture_path, f"fixture {case_id}") != entry.get("fixture_sha256"):
             raise ProtocolError(f"fixture hash differs: {case_id}")
         fixture, _ = load(fixture_path, f"fixture {case_id}")

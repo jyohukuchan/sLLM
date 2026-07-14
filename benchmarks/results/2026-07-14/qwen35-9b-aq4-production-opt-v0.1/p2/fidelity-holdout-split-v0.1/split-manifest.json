@@ -12,11 +12,11 @@
     ]
   },
   "calibration_case_count": 24,
-  "calibration_sha256": "f9ad1e61c41adcd78c0be77bca0c85d34e3a668efaf728b7f996298f8e6469dc",
+  "calibration_sha256": "20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f",
   "expanded_manifest_sha256": "427bd765cc8ce56d95ee3414a2a5cd9a39309929f1c2a5198a4786aeb189ff4c",
   "fixture_index_sha256": "26d22e4f209c482e0479dba67525149d6a3e38a3897d721c47b3d4b0ed04aec1",
   "holdout_case_count": 24,
-  "holdout_sha256": "7eace033220e523b41a33d4ec7b10a24294843e03ab63432093b2e3637fb5ad2",
+  "holdout_sha256": "7e5a87ff103f54b754659828493b066da495708aaa2596a7f9ca9917bfde27a9",
   "policy_sha256": "302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03",
   "schema_version": "ullm.aq4_p2_fidelity_split.v1",
   "selected_case_count": 48,

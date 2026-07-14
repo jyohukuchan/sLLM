@@ -74,6 +74,20 @@ def validate(root: Path, receipt_path: Path | None = None) -> dict[str, Any]:
             raise ValidationError(f"row full-context/step contract differs: {row.get('case_id')}")
         if row.get("baseline_mode") not in ("all_m1", "cold_batched") or row.get("prompt_tokens") not in (1011, 1024, 1339, 2048):
             raise ValidationError(f"row stratum differs: {row.get('case_id')}")
+        fixture_path = Path(row.get("fixture_path", ""))
+        if not fixture_path.is_absolute():
+            fixture_path = root / fixture_path
+        if protocol.sha_file(fixture_path, f"fixture {row.get('case_id')}") != row["fixture_sha256"]:
+            raise ValidationError(f"fixture hash differs: {row.get('case_id')}")
+        fixture, _ = protocol.load(fixture_path, f"fixture {row.get('case_id')}")
+        if fixture.get("schema_version") != protocol.FIXTURE_SCHEMA or not isinstance(fixture.get("cases"), list) or len(fixture["cases"]) != 1:
+            raise ValidationError(f"fixture schema differs: {row.get('case_id')}")
+        fixture_case = fixture["cases"][0]
+        token_ids = fixture_case.get("prompt_token_ids")
+        if fixture_case.get("case_id") != row["case_id"] or not isinstance(token_ids, list) or len(token_ids) != row["prompt_tokens"] or any(type(token) is not int or token < 0 for token in token_ids):
+            raise ValidationError(f"fixture token contract differs: {row.get('case_id')}")
+        if protocol.sha_bytes(protocol.canonical(token_ids)) != row["prompt_token_ids_sha256"] or protocol.context_hash(token_ids) != row["context_token_ids_sha256"]:
+            raise ValidationError(f"fixture token hash differs: {row.get('case_id')}")
     strata: dict[tuple[int, str], list[dict[str, Any]]] = {}
     for row in all_rows:
         strata.setdefault((row["prompt_tokens"], row["baseline_mode"]), []).append(row)
