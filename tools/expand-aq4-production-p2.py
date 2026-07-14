@@ -182,6 +182,10 @@ def expand(manifest: dict[str, Any], manifest_sha256: str) -> dict[str, Any]:
     controls_axis = manifest.get("axes", {}).get("controls")
     if not isinstance(controls_axis, list): raise ExpansionError("control axis is missing")
     control_by_id = {safe_id(item.get("control_id"), "control_id"): item for item in controls_axis}
+    target_contracts = {(item.get("format_id"), item.get("implementation_id")) for item in controls_axis if item.get("role") == "target"}
+    binding = manifest.get("identity_binding", {})
+    if target_contracts != {(binding.get("format_id"), binding.get("implementation_id"))}:
+        raise ExpansionError("target control differs from model implementation contract")
     sampling = manifest.get("identity_binding", {}).get("sampling")
     cases: list[dict[str, Any]] = []
     stage_counts: dict[str, int] = {}

@@ -153,6 +153,18 @@ def bind(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
     correctness_values = validate_number_set(correctness_source, CORRECTNESS_FIELDS, "correctness")
     if not isinstance(correctness_values["minimum_top_k_overlap"], int) or correctness_values["minimum_top_k_overlap"] > template.get("correctness_thresholds", {}).get("top_k", 0): raise BindError("minimum_top_k_overlap is invalid")
     model = load_json(args.model_identity, "model identity")
+    served_model = load_json(args.served_model_manifest, "served model manifest")
+    model_format = model.get("format", model)
+    target_control_ids = {item.get("control_id") for item in manifest.get("axes", {}).get("controls", []) if item.get("role") == "target"}
+    target_contracts = {
+        (case.get("format_id"), case.get("implementation_id"))
+        for case in cases if case.get("control_id") in target_control_ids
+    }
+    if len(target_contracts) != 1 or next(iter(target_contracts)) != (model_format.get("format_id"), model_format.get("implementation_id")):
+        raise BindError("target case implementation differs from model format contract")
+    served_format = served_model.get("format")
+    if not isinstance(served_format, dict) or (served_format.get("format_id"), served_format.get("implementation_id")) != next(iter(target_contracts)):
+        raise BindError("served model implementation differs from target case contract")
     graph = load_json(args.graph, "graph identity")
     state = load_json(args.state, "state schema")
     package_sha, package_files = tree_hash(args.package_root, "package")

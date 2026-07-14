@@ -58,8 +58,9 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
         package_manifest = package / "package-manifest.json"; write_json(package_manifest, {"schema": "synthetic"})
         worker = root / "worker"; worker.write_text(worker_body, encoding="utf-8"); worker.chmod(0o755)
         tokenizer = root / "tokenizer.json"; write_json(tokenizer, {"tokenizer": "synthetic"})
-        served = root / "served-model.json"; write_json(served, {"model": "Qwen3.5-9B"})
-        model = root / "model-identity.json"; write_json(model, {"id": "synthetic-qwen35", "revision": "fixture", "format_id": "AQ4_0", "implementation_id": "synthetic"})
+        model_contract = {"id": "ullm-qwen3.5-9b-aq4", "revision": "aq4-reasoning-v0.1-candidate", "format_id": "AQ4_0", "implementation_id": "qwen35_aq4_rdna4_v1"}
+        served = root / "served-model.json"; write_json(served, {"public": {"id": model_contract["id"], "revision": model_contract["revision"]}, "format": {"format_id": model_contract["format_id"], "implementation_id": model_contract["implementation_id"]}})
+        model = root / "model-identity.json"; write_json(model, model_contract)
         graph = root / "graph.json"; write_json(graph, {"source": "fixture", "nodes": 1})
         state_schema = root / "state-schema.json"; write_json(state_schema, {"schema": "fixture-state-v1"})
         source = root / "source-oracle.json"; write_json(source, {"schema_version": "ullm.qwen35_aq4_source_oracle.v1", "oracle_kind": "independent_source", "status": "fixture", "evidence_class": "synthetic_fixture", "promotion_eligible": False})
@@ -70,7 +71,7 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
         identity = root / "identity.json"; bound_policy = root / "bound-policy.json"
         completed = invoke(BIND, "--manifest", str(MANIFEST), "--expanded", str(expanded_path), "--policy", str(POLICY), "--worker", str(worker), "--package-root", str(package), "--package-manifest", str(package_manifest), "--tokenizer", str(tokenizer), "--served-model-manifest", str(served), "--model-identity", str(model), "--graph", str(graph), "--state", str(state_schema), "--source-oracle", str(source), "--power-capture", str(power), "--correctness-thresholds", str(correctness), "--baseline-result", str(baseline), "--effective-at", "2026-07-14T12:00:00Z", "--git-commit", "a" * 40, "--output", str(identity), "--bound-policy", str(bound_policy))
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        return {"expanded_path": expanded_path, "expanded": expanded, "package": package, "package_manifest": package_manifest, "worker": worker, "source": source, "source_validation": source_validation, "identity": identity, "policy": bound_policy, "baseline": baseline}
+        return {"expanded_path": expanded_path, "expanded": expanded, "package": package, "package_manifest": package_manifest, "worker": worker, "source": source, "source_validation": source_validation, "identity": identity, "policy": bound_policy, "baseline": baseline, "model": model, "served": served}
 
     def case(self, bound: dict[str, Path | dict], root: Path, predicate) -> tuple[Path, dict]:
         expanded = bound["expanded"]
@@ -169,12 +170,19 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
     def test_binder_rejects_unbound_threshold_and_expanded_case_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); bound = self.bind(root)
+            expanded_contract = json.loads(Path(bound["expanded_path"]).read_text())
+            target_cases = [case for case in expanded_contract["cases"] if case["control_id"] == "aq4_0_target"]
+            self.assertTrue(target_cases); self.assertEqual({case["implementation_id"] for case in target_cases}, {"qwen35_aq4_rdna4_v1"})
+            self.assertEqual(json.loads(Path(bound["identity"]).read_text())["model_identity"]["implementation_id"], "qwen35_aq4_rdna4_v1")
             bad = json.loads(Path(bound["expanded_path"]).read_text()); bad["cases"][0]["prompt_tokens"] += 1
             tampered = root / "tampered-expanded.json"; write_json(tampered, bad)
             # Reuse all bound artifact paths, but a changed expanded case must fail before output.
             identity = json.loads(Path(bound["identity"]).read_text()); artifacts = identity["artifacts"]
             command = ["--manifest", str(MANIFEST), "--expanded", str(tampered), "--policy", str(POLICY), "--worker", artifacts["worker"], "--package-root", artifacts["package_root"], "--package-manifest", artifacts["package_manifest"], "--tokenizer", artifacts["tokenizer"], "--served-model-manifest", artifacts["served_model_manifest"], "--model-identity", str(root / "model-identity.json"), "--graph", artifacts["graph"], "--state", artifacts["state"], "--source-oracle", artifacts["source_oracle"], "--power-capture", artifacts["power_capture"], "--correctness-thresholds", str(root / "correctness.json"), "--baseline-result", artifacts["baseline_result"], "--effective-at", "2026-07-14T12:00:00Z", "--git-commit", "a" * 40, "--output", str(root / "bad-id.json"), "--bound-policy", str(root / "bad-policy.json")]
             self.assertNotEqual(invoke(BIND, *command).returncode, 0)
+            mismatch_model = root / "mismatch-model.json"; model = json.loads(Path(bound["model"]).read_text()); model["implementation_id"] = "qwen35_aq4_wrong_v1"; write_json(mismatch_model, model)
+            mismatch = list(command); mismatch[mismatch.index(str(tampered))] = str(bound["expanded_path"]); mismatch[mismatch.index(str(root / "model-identity.json"))] = str(mismatch_model)
+            rejected = invoke(BIND, *mismatch); self.assertNotEqual(rejected.returncode, 0); self.assertIn("implementation differs", rejected.stderr)
 
     def test_runner_rejects_executable_bypass_and_does_not_store_argv(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -343,7 +351,7 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
     def test_full_trace_bundle_exact_case_association_and_decode_prefill_swaps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); bundle = ROOT / "tests/fixtures/production-execution-trace-p1/schema-r1"
-            manifest = json.loads(MANIFEST.read_text()); manifest["identity_binding"]["sampling"] = None
+            manifest = json.loads(MANIFEST.read_text()); manifest["identity_binding"]["sampling"] = None; manifest["identity_binding"]["implementation_id"] = "cpu_fixture_v1"
             manifest["axes"]["devices"] = [{"device_id": "cpu-fixture", "backend": "cpu", "name": "CPU fixture", "architecture": "x86_64", "runtime_device_index": 0, "required": True}]
             manifest["axes"]["controls"] = [{"control_id": "aq4_0_target", "role": "target", "format_id": "AQ4_0", "implementation_id": "cpu_fixture_v1", "trace_control": None, "promotion_eligible": False}]
             manifest["stages"] = [{"stage_id": "trace", "order": 1, "fixture_id": "cpu-production-trace-r1", "devices": ["cpu-fixture"], "controls": ["aq4_0_target"], "sampling": None, "prefill": {"prompt_tokens": [4], "requested_m": [4], "modes": ["all_m1", "cold_batched"], "scopes": ["full_model"], "cached_prefix_tokens": [], "cached_prefix_prompt_tokens": [], "generated_tokens": 1}, "decode": {"start_context_tokens": [4], "request_count": 1, "generated_tokens": 1, "scopes": []}, "expected_case_count": {"prefill": 2, "decode": 0, "total": 2}}]

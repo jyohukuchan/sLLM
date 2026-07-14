@@ -10,6 +10,7 @@
     "model_name": "Qwen3.5-9B",
     "model_identity_sha256": null,
     "format_id": "AQ4_0",
+    "implementation_id": "qwen35_aq4_rdna4_v1",
     "tokenizer_sha256": null,
     "served_model_manifest_sha256": null,
     "worker_binary_sha256": null,
@@ -113,7 +114,7 @@
         "control_id": "aq4_0_target",
         "role": "target",
         "format_id": "AQ4_0",
-        "implementation_id": "qwen35_aq4_0_v1",
+        "implementation_id": "qwen35_aq4_rdna4_v1",
         "promotion_eligible": true
       },
       {
