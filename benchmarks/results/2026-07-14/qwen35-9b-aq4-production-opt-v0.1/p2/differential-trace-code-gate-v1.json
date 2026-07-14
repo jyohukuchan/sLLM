@@ -1,0 +1,71 @@
+{
+  "schema_version": "ullm.qwen35_aq4_differential_trace_code_gate.v1",
+  "status": "go_for_r9700_gpu_gate",
+  "created_utc": "2026-07-14T13:34:50Z",
+  "attested_head": "1c73f10",
+  "scope": {
+    "code_gate": "aq4_differential_trace",
+    "runtime_gpu_execution": "not_performed",
+    "production_worker_modified": false
+  },
+  "identity_guard": {
+    "helper": "required_regular_sha256",
+    "targets": ["trace_binary", "active_served_model_manifest", "package_manifest"],
+    "regular_file_required": true,
+    "hardlink_count_required": 1,
+    "max_identity_file_bytes": 268435456,
+    "streaming_chunk_bytes": 1048576,
+    "same_fd_metadata_before_after": true,
+    "path_reopen_for_identity_digest": false,
+    "manifest_cases_path_literal_count": 1
+  },
+  "verification": {
+    "cargo_test_ullm_aq4_differential_trace": {
+      "status": "passed",
+      "tests": 9
+    },
+    "python_differential_and_input_controls": {
+      "status": "passed",
+      "tests": 6
+    },
+    "rustfmt_check": "passed",
+    "cargo_check_ullm_engine_lib": "passed",
+    "git_diff_check_863157b_to_1c73f10": "passed"
+  },
+  "evidence": {
+    "source_differential_trace_v2": {
+      "manifest_sha256": "6ae2d7f975207b3844dd5648660b160915adeeed8f6cf08ba4475089643ca252",
+      "payload_sha256": "ee6698a91883c9e723eb5c82bcf929ed6d7d4a6f1944ff06a36910e32c6a20e8",
+      "runtime_sha256": "3fc65e5734e1e7928c05c2722a6bc7fca95506c728b3992dbd78335e5e08b213",
+      "rows": 3,
+      "context_contract": "prompt_plus_replay_prefix_v2",
+      "sha256sums_verified": true
+    },
+    "path_differential_endpoint_v2": {
+      "manifest_sha256": "7a6d3d93afe928955ad407a4f2af707e9d970e9e7cc64afbdf8c4d90ece366a4",
+      "payload_sha256": "fe54e24a9ef0dc45e555c5bbcf6be1f814f5523e066e04d4bcff67a96cfe00b3",
+      "runtime_sha256": "0e5409c4fbb7506887bffa167870b5df4b1765774c6315f29f187cabff78e925",
+      "sha256sums_verified": true
+    },
+    "path_differential_analysis_v2": {
+      "analysis_sha256": "36940feaa908062a384956b7ec900436ad00c186db6cabb4b02bf530daf4a1a6",
+      "sha256sums_verified": true
+    },
+    "source_oracle_v2": {
+      "manifest_sha256": "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692",
+      "payload_sha256": "7055590cc6f5d068d06edfa85a0464b38af42c7adb6eabfa219444cabd41d8a5",
+      "runtime_sha256": "72af62fd7e4d3b0a6123385e443481beca512b8712de37695ec0369fd189f1d4",
+      "sha256sums_verified": true
+    },
+    "path_oracle_v2": {
+      "manifest_sha256": "2197a7e29743f0f1cd6d42f1a832c1baf9d58acb8c8bf12d71388ad7bbbf0773",
+      "payload_sha256": "3dee780aa6d2383bd75687dd3dd4f6b36f1680dbfa49c2310c6d240e6e0d74f1",
+      "runtime_sha256": "927e86657d7d8bcddea873cab3cfaac00ee91ea6c5bd7a2c1bd578e18376842b",
+      "sha256sums_verified": true
+    }
+  },
+  "notes": [
+    "This is a code-safety and evidence-integrity gate; it does not claim a completed R9700 GPU run.",
+    "Parent agent worktree changes were not staged or modified by this attestation."
+  ]
+}
