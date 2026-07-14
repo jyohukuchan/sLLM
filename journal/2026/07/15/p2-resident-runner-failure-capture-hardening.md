@@ -15,7 +15,10 @@
 - Bundle validator: 36 passed.
 - Launcher: 7 passed.
 - Execute launcher: 58 passed.
-- Maintenance: 69 passed with 7 fake execute-CLI cases deselected because the canonical runner output from actual attempt v5 already exists and must not be removed or reused.
+- The historical actual-attempt-v5 output remains untouched. The next base one-case run ID, runner output, launcher evidence, and live-preflight binding were advanced together from v1 to unused v2 paths.
+- Maintenance: all 76 passed, including the 7 fake execute-CLI cases, with no deselection.
+- Combined runner, validator, launcher, execute-launcher, and maintenance regression: 214 passed.
+- The v2 runner output and launcher evidence paths remained absent after all offline tests. The third fresh output is the next operator-selected maintenance evidence path and is checked by the operator manifest.
 - All regenerated binding, execute-binding, base/profile ready, and base/profile dry-run `SHA256SUMS` verified.
 - No actual execution, service operation, GPU access, HTTP request, or sudo command was performed.
 
@@ -24,7 +27,8 @@
 - Runner: `4005c80e`
 - Validator: `741616fd`
 - Binding v4: `1d964602`
-- Launcher: `79ce2aa1`
-- Execute binding: `4507b20b`
-- Maintenance harness: `d3d9eaee`
-- Ready/profile artifacts: `a1547b6f`
+- Initial hardened launcher/execute/harness/ready chain: `79ce2aa1`, `4507b20b`, `d3d9eaee`, `a1547b6f`
+- V2 output launcher: `4a7c0ed9`
+- V2 execute binding: `e1fe6353`
+- V2 maintenance harness: `7e597eb6`
+- V2 ready/profile artifacts: `b5e85b60`
