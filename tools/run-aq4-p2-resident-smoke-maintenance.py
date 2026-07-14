@@ -73,9 +73,35 @@ PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"
 PACKAGE_MANIFEST_SHA = "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
 PACKAGE_CONTENT_SHA = "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1"
 GATEWAY_READY_URL = "http://172.20.0.1:8000/readyz"
+GATEWAY_HEALTH_URL = "http://172.20.0.1:8000/healthz"
+GATEWAY_MODELS_URL = "http://172.20.0.1:8000/v1/models"
 OPENWEBUI_HEALTH_URL = "http://127.0.0.1:3000/health"
+OPENWEBUI_CONTAINER_HEALTH_URL = "http://127.0.0.1:8080/health"
 GATEWAY_READY_BODY = b'{"status":"ready"}'
+GATEWAY_HEALTH_BODY = b'{"status":"ok"}'
 OPENWEBUI_HEALTH_BODY = b'{"status":true}'
+GATEWAY_MODEL_ID = "ullm-qwen3.5-9b-aq4"
+DOCKER = Path("/usr/bin/docker")
+DOCKER_SHA = "f8470ebe5d201284a9fb4e7e59326f116e5b764a8d0d9a47097c26d52257d446"
+DOCKER_CLIENT_VERSION = "29.6.0"
+DOCKER_CLIENT_API_VERSION = "1.55"
+OPENWEBUI_CONTAINER_NAME = "open-webui"
+OPENWEBUI_CONTAINER_ID = "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a"
+OPENWEBUI_IMAGE_ID = "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
+OPENWEBUI_NETWORK_NAME = "open-webui-network"
+OPENWEBUI_NETWORK_ID = "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8"
+OPENWEBUI_CONTAINER_IP = "172.20.0.2"
+OPENWEBUI_GATEWAY_IP = "172.20.0.1"
+CONTAINER_CURL = "/usr/bin/curl"
+CONTAINER_CURL_SHA = "58824afa640f512e07e895c0f2d1e1fe2c3fd1456acab689b6e4c1c75cef2593"
+CONTAINER_CURL_VERSION = "7.88.1"
+CONTAINER_CURL_VERSION_SHA = "cc1470d1e66681b5b01a8df907c86e2947cb30622d2419b9d7d10aea1ddcf7b8"
+API_KEY_FILE = Path("/etc/ullm/openai-api-key")
+API_KEY_UID = 0
+API_KEY_GID = 1000
+API_KEY_MODE = 0o640
+HTTP_STATUS_MARKER = b"\n__ULLM_HTTP_STATUS__"
+DOCKER_INSPECT_FORMAT = '{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks "open-webui-network"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}'
 RUN_ID = LAUNCHER.EXECUTE_RUN_ID
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -194,6 +220,308 @@ def default_http_probe(url: str) -> dict[str, Any]:
     return {"url": url, "status": status, "body": body}
 
 
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _api_key_snapshot() -> tuple[bytes, tuple[int, ...]]:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            API_KEY_FILE,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        entry_before = API_KEY_FILE.lstat()
+        if (
+            _file_identity(before) != _file_identity(entry_before)
+            or not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != API_KEY_MODE
+            or before.st_nlink != 1
+            or before.st_uid != API_KEY_UID
+            or before.st_gid != API_KEY_GID
+            or not 17 <= before.st_size <= 4096
+        ):
+            raise HarnessError("gateway API key file identity differs")
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(descriptor, min(4097 - total, 1024)):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 4096:
+                raise HarnessError("gateway API key exceeds bound")
+        after = os.fstat(descriptor)
+        entry_after = API_KEY_FILE.lstat()
+        if _file_identity(before) != _file_identity(after) or _file_identity(before) != _file_identity(entry_after):
+            raise HarnessError("gateway API key changed while reading")
+        raw = b"".join(chunks)
+        if raw.endswith(b"\r\n"):
+            secret = raw[:-2]
+        elif raw.endswith(b"\n"):
+            secret = raw[:-1]
+        else:
+            secret = raw
+        if not 16 <= len(secret) <= 4094 or any(item in secret for item in (b"\r", b"\n", b"\x00")):
+            raise HarnessError("gateway API key is not one bounded line")
+        return secret, _file_identity(before)
+    except HarnessError:
+        raise
+    except OSError as error:
+        raise HarnessError("gateway API key snapshot failed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _container_command(
+    run: Callable[..., subprocess.CompletedProcess[bytes]],
+    argv: list[str],
+    label: str,
+    *,
+    stdin_secret: bytes | None = None,
+) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
+    kwargs: dict[str, Any] = {
+        "cwd": ROOT,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "check": False,
+        "timeout": 10,
+    }
+    if stdin_secret is None:
+        kwargs["stdin"] = subprocess.DEVNULL
+    else:
+        kwargs["input"] = stdin_secret
+    completed = run(argv, **kwargs)
+    if len(completed.stdout) > 65536 or len(completed.stderr) > 65536:
+        raise HarnessError("container health command output exceeds bound")
+    command_raw = "\0".join(argv).encode("utf-8")
+    if stdin_secret is not None:
+        candidates = [stdin_secret]
+        prefix = b"Authorization: Bearer "
+        if stdin_secret.startswith(prefix):
+            candidates.append(stdin_secret[len(prefix):].rstrip(b"\r\n"))
+        if any(candidate and (candidate in command_raw or candidate in completed.stdout or candidate in completed.stderr) for candidate in candidates):
+            raise HarnessError("secret material escaped container health probe")
+    record = {
+        "label": label,
+        "argv": argv,
+        "exit_code": completed.returncode,
+        "stdout_sha256": sha_bytes(completed.stdout),
+        "stderr_sha256": sha_bytes(completed.stderr),
+        "stdin": "authorization_header_redacted" if stdin_secret is not None else "devnull",
+        "captured_unix_ns": time.time_ns(),
+    }
+    return completed, record
+
+
+def _curl_command(container_id: str, url: str, *, authenticated: bool) -> list[str]:
+    command = [str(DOCKER), "exec"]
+    if authenticated:
+        command.append("-i")
+    command.extend(
+        [
+            container_id,
+            CONTAINER_CURL,
+            "--silent",
+            "--show-error",
+            "--fail-with-body",
+            "--max-time",
+            "5",
+            "--request",
+            "GET",
+            "--header",
+            "Accept: application/json",
+        ]
+    )
+    if authenticated:
+        command.extend(["--header", "@-"])
+    command.extend(["--write-out", "\n__ULLM_HTTP_STATUS__%{http_code}\n", "--url", url])
+    return command
+
+
+def _parse_curl_response(
+    completed: subprocess.CompletedProcess[bytes],
+    url: str,
+    expected: bytes | None,
+    *,
+    authenticated: bool,
+) -> dict[str, Any]:
+    body, marker, status_raw = completed.stdout.rpartition(HTTP_STATUS_MARKER)
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or marker != HTTP_STATUS_MARKER
+        or status_raw.strip() != b"200"
+        or len(body) > 65536
+        or (expected is not None and body != expected)
+    ):
+        raise HarnessError(f"container health endpoint differs: {url}")
+    return {
+        "url": url,
+        "status": 200,
+        "body_sha256": sha_bytes(body),
+        "body_bytes": len(body),
+        "authenticated": authenticated,
+    }
+
+
+class ContainerHealthGuard:
+    def __init__(self) -> None:
+        self.snapshot = LAUNCHER.Snapshot()
+        self.initialized = False
+        self.api_key_identity: tuple[int, ...] | None = None
+        self.api_key: bytes | None = None
+
+    def _inspect(self, run: Callable[..., subprocess.CompletedProcess[bytes]], records: list[dict[str, Any]]) -> dict[str, Any]:
+        command = [str(DOCKER), "inspect", "--type", "container", "--format", DOCKER_INSPECT_FORMAT, OPENWEBUI_CONTAINER_NAME]
+        completed, record = _container_command(run, command, "openwebui-container-inspect")
+        records.append(record)
+        try:
+            fields = completed.stdout.decode("ascii").strip().split("|")
+        except UnicodeError as error:
+            raise HarnessError("OpenWebUI container identity is not ASCII") from error
+        expected = [
+            OPENWEBUI_CONTAINER_ID,
+            OPENWEBUI_IMAGE_ID,
+            f"/{OPENWEBUI_CONTAINER_NAME}",
+            "running",
+            "true",
+            "healthy",
+            OPENWEBUI_NETWORK_ID,
+            OPENWEBUI_CONTAINER_IP,
+            OPENWEBUI_GATEWAY_IP,
+        ]
+        if completed.returncode != 0 or completed.stderr or fields != expected:
+            raise HarnessError("OpenWebUI container/image/network identity differs")
+        return {
+            "id": fields[0],
+            "image_id": fields[1],
+            "name": OPENWEBUI_CONTAINER_NAME,
+            "status": fields[3],
+            "running": True,
+            "health": fields[5],
+            "network": {"name": OPENWEBUI_NETWORK_NAME, "id": fields[6], "ip": fields[7], "gateway": fields[8]},
+        }
+
+    def __call__(self, run: Callable[..., subprocess.CompletedProcess[bytes]]) -> dict[str, Any]:
+        if not self.initialized:
+            self.snapshot.file(DOCKER, DOCKER_SHA, "Docker executable")
+            self.initialized = True
+        self.snapshot.verify()
+        secret, secret_identity = _api_key_snapshot()
+        if self.api_key is None:
+            self.api_key = secret
+            self.api_key_identity = secret_identity
+        elif secret != self.api_key or secret_identity != self.api_key_identity:
+            raise HarnessError("gateway API key changed across maintenance boundary")
+        records: list[dict[str, Any]] = []
+        version_command = [str(DOCKER), "version", "--format", "{{json .Client}}"]
+        version, record = _container_command(run, version_command, "docker-client-version")
+        records.append(record)
+        try:
+            version_value = LAUNCHER.parse_json(version.stdout, "Docker client version")
+        except LAUNCHER.LauncherError as error:
+            raise HarnessError("Docker client version JSON differs") from error
+        if (
+            version.returncode != 0
+            or version.stderr
+            or not isinstance(version_value, dict)
+            or version_value.get("Version") != DOCKER_CLIENT_VERSION
+            or version_value.get("ApiVersion") != DOCKER_CLIENT_API_VERSION
+            or version_value.get("Os") != "linux"
+            or version_value.get("Arch") != "amd64"
+        ):
+            raise HarnessError("Docker client version identity differs")
+        container = self._inspect(run, records)
+        container_id = container["id"]
+        curl_version_command = [str(DOCKER), "exec", container_id, CONTAINER_CURL, "--version"]
+        curl_version, record = _container_command(run, curl_version_command, "container-curl-version")
+        records.append(record)
+        try:
+            curl_line = curl_version.stdout.decode("ascii").splitlines()[0]
+        except (UnicodeError, IndexError) as error:
+            raise HarnessError("container curl version output differs") from error
+        if (
+            curl_version.returncode != 0
+            or curl_version.stderr
+            or sha_bytes(curl_version.stdout) != CONTAINER_CURL_VERSION_SHA
+            or not curl_line.startswith(f"curl {CONTAINER_CURL_VERSION} ")
+        ):
+            raise HarnessError("container curl version identity differs")
+        curl_sha_command = [str(DOCKER), "exec", container_id, "/usr/bin/sha256sum", CONTAINER_CURL]
+        curl_sha, record = _container_command(run, curl_sha_command, "container-curl-sha256")
+        records.append(record)
+        if curl_sha.returncode != 0 or curl_sha.stderr or curl_sha.stdout != f"{CONTAINER_CURL_SHA}  {CONTAINER_CURL}\n".encode("ascii"):
+            raise HarnessError("container curl SHA-256 differs")
+        endpoints: dict[str, Any] = {}
+        for name, url, expected in (
+            ("gateway_healthz", GATEWAY_HEALTH_URL, GATEWAY_HEALTH_BODY),
+            ("gateway_readyz", GATEWAY_READY_URL, GATEWAY_READY_BODY),
+            ("openwebui_health", OPENWEBUI_CONTAINER_HEALTH_URL, OPENWEBUI_HEALTH_BODY),
+        ):
+            command = _curl_command(container_id, url, authenticated=False)
+            completed, record = _container_command(run, command, name)
+            records.append(record)
+            endpoints[name] = _parse_curl_response(completed, url, expected, authenticated=False)
+        models_command = _curl_command(container_id, GATEWAY_MODELS_URL, authenticated=True)
+        authorization = b"Authorization: Bearer " + secret + b"\n"
+        models, record = _container_command(run, models_command, "gateway-models", stdin_secret=authorization)
+        records.append(record)
+        endpoints["gateway_models"] = _parse_curl_response(models, GATEWAY_MODELS_URL, None, authenticated=True)
+        try:
+            models_value = LAUNCHER.parse_json(models.stdout.rpartition(HTTP_STATUS_MARKER)[0], "gateway model list")
+        except LAUNCHER.LauncherError as error:
+            raise HarnessError("gateway model list JSON differs") from error
+        expected_models = {"object": "list", "data": [{"id": GATEWAY_MODEL_ID, "object": "model", "owned_by": "ullm"}]}
+        if models_value != expected_models:
+            raise HarnessError("gateway model identity differs")
+        endpoints["gateway_models"]["model_id"] = GATEWAY_MODEL_ID
+        if self._inspect(run, records) != container:
+            raise HarnessError("OpenWebUI container identity changed during health probe")
+        docker_metadata = DOCKER.lstat()
+        self.snapshot.verify()
+        result = {
+            "transport": "docker-exec-container-network-namespace",
+            "docker": {
+                "path": str(DOCKER),
+                "sha256": DOCKER_SHA,
+                "device": docker_metadata.st_dev,
+                "inode": docker_metadata.st_ino,
+                "size": docker_metadata.st_size,
+                "mode": stat.S_IMODE(docker_metadata.st_mode),
+                "client_version": DOCKER_CLIENT_VERSION,
+                "client_api_version": DOCKER_CLIENT_API_VERSION,
+            },
+            "container": container,
+            "curl": {"path": CONTAINER_CURL, "sha256": CONTAINER_CURL_SHA, "version": CONTAINER_CURL_VERSION},
+            "endpoints": endpoints,
+            "commands": records,
+            "process_counts": {
+                "docker": len(records),
+                "docker_exec": sum(record["argv"][1:2] == ["exec"] for record in records),
+                "container_curl": sum(
+                    record["argv"][1:2] == ["exec"] and CONTAINER_CURL in record["argv"]
+                    for record in records
+                ),
+            },
+            "secret_material_recorded": False,
+        }
+        serialized = canonical(result)
+        if secret in serialized or authorization.rstrip(b"\n") in serialized:
+            raise HarnessError("secret material escaped container health evidence")
+        return result
+
+
 def default_lock_busy() -> bool:
     descriptor = os.open(LAUNCHER.LOCK_PATH, os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -225,6 +553,7 @@ def default_owner_probe(run: Callable[..., subprocess.CompletedProcess[bytes]], 
 class Dependencies:
     run: Callable[..., subprocess.CompletedProcess[bytes]]
     http_probe: Callable[[str], dict[str, Any]]
+    container_health: Callable[[Callable[..., subprocess.CompletedProcess[bytes]]], dict[str, Any]]
     stopped_gates: Callable[[], dict[str, Any]]
     lock_busy: Callable[[], bool]
     owner_probe: Callable[[Callable[..., subprocess.CompletedProcess[bytes]], int], dict[str, Any]]
@@ -235,11 +564,36 @@ class Dependencies:
     sleep: Callable[[float], None]
 
 
-def _http_health(dependencies: Dependencies, url: str, expected: bytes) -> dict[str, Any]:
-    value = dependencies.http_probe(url)
-    if not isinstance(value, dict) or set(value) != {"url", "status", "body"} or value.get("url") != url or value.get("status") != 200 or value.get("body") != expected:
-        raise HarnessError(f"health endpoint differs: {url}")
-    return {"url": url, "status": 200, "body_sha256": sha_bytes(expected), "body_bytes": len(expected)}
+def _host_route_diagnostics(dependencies: Dependencies) -> dict[str, Any]:
+    result: dict[str, Any] = {"formal_gate": False, "probes": {}}
+    for name, url, expected in (
+        ("gateway_readyz", GATEWAY_READY_URL, GATEWAY_READY_BODY),
+        ("openwebui_health", OPENWEBUI_HEALTH_URL, OPENWEBUI_HEALTH_BODY),
+    ):
+        try:
+            value = dependencies.http_probe(url)
+            valid_shape = isinstance(value, dict) and set(value) == {"url", "status", "body"} and value.get("url") == url and isinstance(value.get("status"), int) and isinstance(value.get("body"), bytes)
+            body = value.get("body", b"") if valid_shape else b""
+            result["probes"][name] = {
+                "url": url,
+                "reachable": valid_shape,
+                "status": value.get("status") if valid_shape else None,
+                "body_sha256": sha_bytes(body) if valid_shape and len(body) <= 65536 else None,
+                "body_bytes": len(body) if valid_shape and len(body) <= 65536 else None,
+                "matches_formal_response": valid_shape and value.get("status") == 200 and body == expected,
+                "error_type": None,
+            }
+        except Exception as error:
+            result["probes"][name] = {
+                "url": url,
+                "reachable": False,
+                "status": None,
+                "body_sha256": None,
+                "body_bytes": None,
+                "matches_formal_response": False,
+                "error_type": type(error).__name__,
+            }
+    return result
 
 
 def capture_running(dependencies: Dependencies, previous: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -255,15 +609,22 @@ def capture_running(dependencies: Dependencies, previous: dict[str, Any] | None 
     if not dependencies.lock_busy():
         raise HarnessError("production service does not hold device lock")
     owners = dependencies.owner_probe(dependencies.run, worker_pid)
-    gateway = _http_health(dependencies, GATEWAY_READY_URL, GATEWAY_READY_BODY)
-    openwebui = _http_health(dependencies, OPENWEBUI_HEALTH_URL, OPENWEBUI_HEALTH_BODY)
+    container_health = dependencies.container_health(dependencies.run)
+    if (
+        not isinstance(container_health, dict)
+        or container_health.get("secret_material_recorded") is not False
+        or container_health.get("process_counts")
+        != {"docker": 9, "docker_exec": 6, "container_curl": 5}
+    ):
+        raise HarnessError("container namespace health contract differs")
+    host_diagnostics = _host_route_diagnostics(dependencies)
     if previous is not None and (service["main_pid"] == previous["service"]["main_pid"] or worker_pid == previous["worker"]["pid"] or service["nrestarts"] != previous["service"]["nrestarts"] or service["control_group"] != previous["service"]["control_group"]):
         raise HarnessError("restored service epoch/NRestarts differs")
     return {
         "service": service, "worker": {"path": str(WORKER), "pid": worker_pid, "sha256": worker_sha}, "gpu": gpu,
         "owners": owners, "lock": {"path": str(LAUNCHER.LOCK_PATH), "busy": True},
         "hashes": {"served_manifest_sha256": manifest_sha, "worker_sha256": worker_sha, "package_manifest_sha256": package_manifest_sha, "package_content_sha256": package_content_sha},
-        "health": {"gateway": gateway, "openwebui": openwebui}, "commands": [service_record, worker_record, gpu_record],
+        "health": {"formal": container_health, "host_route_diagnostics": host_diagnostics}, "commands": [service_record, worker_record, gpu_record],
     }
 
 
@@ -402,7 +763,8 @@ def run_profile_capture(contract: dict[str, Any]) -> dict[str, Any]:
 def default_dependencies() -> Dependencies:
     stopped_gates = lambda: LAUNCHER.collect_execute_gates(environment=dict(LAUNCHER.EXECUTE_ENV))
     trust = ProfileTrustGuard()
-    return Dependencies(subprocess.run, default_http_probe, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep)
+    container_health = ContainerHealthGuard()
+    return Dependencies(subprocess.run, default_http_probe, container_health, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep)
 
 
 def profile_launcher_command() -> list[str]:
@@ -495,9 +857,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 234, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 168, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 246, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 180, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
@@ -520,7 +882,17 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "vram": {"minimum_total_bytes": 30_000_000_000, "used_bytes": 0, "free_equals_total": True, "headroom_equals_total": True},
             "gates": ["sudo-n-v", "services-inactive", "worker-absent", "amd-owner-zero", "kfd-owner-zero", "lock-free", "exact-environment", "exact-probe-contract"],
         },
-        "maintenance": {"service": SERVICE, "marker_required_before_stop": True, "restore_in_outer_finally": True, "same_pty_sudo_cache_required": True, "sudo_keepalive_seconds": 30, "secret_storage_forbidden": True},
+        "maintenance": {
+            "service": SERVICE,
+            "marker_required_before_stop": True,
+            "restore_in_outer_finally": True,
+            "same_pty_sudo_cache_required": True,
+            "sudo_keepalive_seconds": 30,
+            "secret_storage_forbidden": True,
+            "formal_health_route": "docker-exec-openwebui-container-network-namespace",
+            "host_direct_health_is_diagnostic_only": True,
+            "authenticated_models_header_transport": "docker-exec-stdin-header-file",
+        },
         "trust": {
             "launcher": {"commit": LAUNCHER_COMMIT, "tree": LAUNCHER_TREE, "git_blob": LAUNCHER_GIT_BLOB, "sha256": LAUNCHER_SHA},
             "harness": harness_identity,
@@ -529,6 +901,13 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "B": {"commit": B_COMMIT, "manifest_sha256": LAUNCHER.BINDING_MANIFEST_SHA},
             "resident": {"commit": RESIDENT_COMMIT, "sha256": LAUNCHER.RESIDENT_SHA},
             "production": {"manifest_sha256": LAUNCHER.SERVED_SHA, "worker_sha256": WORKER_SHA, "package_manifest_sha256": PACKAGE_MANIFEST_SHA, "package_content_sha256": PACKAGE_CONTENT_SHA},
+            "container_health": {
+                "docker": {"path": str(DOCKER), "sha256": DOCKER_SHA, "client_version": DOCKER_CLIENT_VERSION, "client_api_version": DOCKER_CLIENT_API_VERSION},
+                "container": {"name": OPENWEBUI_CONTAINER_NAME, "id": OPENWEBUI_CONTAINER_ID, "image_id": OPENWEBUI_IMAGE_ID, "status": "running", "health": "healthy"},
+                "network": {"name": OPENWEBUI_NETWORK_NAME, "id": OPENWEBUI_NETWORK_ID, "container_ip": OPENWEBUI_CONTAINER_IP, "gateway": OPENWEBUI_GATEWAY_IP},
+                "curl": {"path": CONTAINER_CURL, "sha256": CONTAINER_CURL_SHA, "version": CONTAINER_CURL_VERSION, "version_output_sha256": CONTAINER_CURL_VERSION_SHA},
+                "endpoints": {"healthz": GATEWAY_HEALTH_URL, "readyz": GATEWAY_READY_URL, "models": GATEWAY_MODELS_URL, "openwebui_health": OPENWEBUI_CONTAINER_HEALTH_URL, "model_id": GATEWAY_MODEL_ID},
+            },
         },
         "qa_attestation_sha256": sha_bytes(pretty(QA_ATTESTATION)),
     }
@@ -670,7 +1049,7 @@ def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_
     if output.exists() or output.is_symlink():
         raise HarnessError("ready dry-run output already exists")
     output.mkdir(mode=0o700)
-    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
+    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
     if value["execution_mode"] == "profile_diagnostic":
         evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "capture_executed": False, "measurement_eligible": False, "promotion_eligible": False}
     _finalize(output, evidence)
@@ -707,11 +1086,13 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     else:
         trust_records = []
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
     stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
         stage = "pre-stop-snapshot"; pre = capture_running(dependencies); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
+        for name, count in pre["health"]["formal"]["process_counts"].items():
+            evidence["process_counts"][name] += count
         marker = {"schema_version": "ullm.aq4_p2_resident_maintenance_marker.v1", "run_id": run_id, "restore_required": True, "service": SERVICE, "pre_stop_sha256": sha_bytes(canonical(pre)), "created_unix_ns": time.time_ns()}
         LAUNCHER.atomic_write(output, "maintenance-marker.json", pretty(marker)); evidence["marker"] = {"path": str(output / "maintenance-marker.json"), "sha256": sha_bytes(pretty(marker))}; evidence["sequence"].append("durable-marker")
         stage = "service-stop"; evidence["commands"].append(_sudo_valid(dependencies.run, "sudo-before-stop")); evidence["process_counts"]["sudo"] += 1
@@ -772,6 +1153,8 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                         last_error = error; dependencies.sleep(1.0)
                 if last_error is not None or post is None:
                     raise HarnessError(f"service recovery validation failed: {last_error}")
+                for name, count in post["health"]["formal"]["process_counts"].items():
+                    evidence["process_counts"][name] += count
                 evidence["sequence"].append("service-restored")
             except (HarnessError, OSError, ValueError, subprocess.SubprocessError) as error:
                 restore_error = str(error); code = 1

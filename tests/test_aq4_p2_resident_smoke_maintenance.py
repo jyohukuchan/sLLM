@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -64,10 +65,22 @@ class FakeRuntime:
         raise AssertionError(argv)
 
     def http(self, url: str) -> dict:
-        if self.fail == "health" and self.epoch > 0:
-            return {"url": url, "status": 503, "body": b"not ready"}
+        if self.fail == "host-route" and url == HARNESS.GATEWAY_READY_URL:
+            raise TimeoutError("synthetic host route mismatch")
         body = HARNESS.GATEWAY_READY_BODY if url == HARNESS.GATEWAY_READY_URL else HARNESS.OPENWEBUI_HEALTH_BODY
         return {"url": url, "status": 200, "body": body}
+
+    def container_health(self, run) -> dict:
+        if self.fail == "health" and self.epoch > 0:
+            raise HARNESS.HarnessError("synthetic container health failure")
+        return {
+            "transport": "docker-exec-container-network-namespace",
+            "secret_material_recorded": False,
+            "container": {"id": HARNESS.OPENWEBUI_CONTAINER_ID},
+            "endpoints": {"gateway_models": {"model_id": HARNESS.GATEWAY_MODEL_ID}},
+            "commands": [],
+            "process_counts": {"docker": 9, "docker_exec": 6, "container_curl": 5},
+        }
 
     def stopped(self) -> dict:
         if self.fail == "stopped-gate":
@@ -118,7 +131,80 @@ class FakeRuntime:
         return {"stage": stage, "passed": True}
 
     def dependencies(self) -> HARNESS.Dependencies:
-        return HARNESS.Dependencies(self.run, self.http, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, lambda seconds: None)
+        return HARNESS.Dependencies(self.run, self.http, self.container_health, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, lambda seconds: None)
+
+
+class FakeDockerRuntime:
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.fail = fail
+        self.commands: list[list[str]] = []
+        self.inspect_count = 0
+        self.secret_inputs: list[bytes] = []
+        self.curl_version = b"curl 7.88.1 fake-build\n"
+
+    def __call__(self, argv, **kwargs):
+        self.commands.append(argv)
+        if argv[1:4] == ["version", "--format", "{{json .Client}}"]:
+            value = {"Version": HARNESS.DOCKER_CLIENT_VERSION, "ApiVersion": HARNESS.DOCKER_CLIENT_API_VERSION, "Os": "linux", "Arch": "amd64"}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode() + b"\n", b"")
+        if argv[1:4] == ["inspect", "--type", "container"]:
+            self.inspect_count += 1
+            if self.fail == "container-absent":
+                return subprocess.CompletedProcess(argv, 1, b"", b"absent")
+            container_id = "f" * 64 if self.fail == "container-replaced" and self.inspect_count > 1 else HARNESS.OPENWEBUI_CONTAINER_ID
+            image_id = "sha256:" + "d" * 64 if self.fail == "image-swap" else HARNESS.OPENWEBUI_IMAGE_ID
+            health = "unhealthy" if self.fail == "health-state" else "healthy"
+            network_id = "e" * 64 if self.fail == "network-swap" else HARNESS.OPENWEBUI_NETWORK_ID
+            fields = [container_id, image_id, "/open-webui", "running", "true", health, network_id, HARNESS.OPENWEBUI_CONTAINER_IP, HARNESS.OPENWEBUI_GATEWAY_IP]
+            return subprocess.CompletedProcess(argv, 0, ("|".join(fields) + "\n").encode(), b"")
+        if argv[1] != "exec":
+            raise AssertionError(argv)
+        command_index = 4 if argv[2] == "-i" else 3
+        assert argv[command_index - 1] == HARNESS.OPENWEBUI_CONTAINER_ID
+        command = argv[command_index:]
+        if command == [HARNESS.CONTAINER_CURL, "--version"]:
+            return subprocess.CompletedProcess(argv, 0, self.curl_version, b"")
+        if command == ["/usr/bin/sha256sum", HARNESS.CONTAINER_CURL]:
+            return subprocess.CompletedProcess(argv, 0, f"{HARNESS.CONTAINER_CURL_SHA}  {HARNESS.CONTAINER_CURL}\n".encode(), b"")
+        url = argv[-1]
+        if url == HARNESS.GATEWAY_HEALTH_URL:
+            body = HARNESS.GATEWAY_HEALTH_BODY
+        elif url == HARNESS.GATEWAY_READY_URL:
+            if self.fail == "curl-failure":
+                return subprocess.CompletedProcess(argv, 1, b"", b"synthetic curl failure")
+            body = HARNESS.GATEWAY_READY_BODY
+        elif url == HARNESS.OPENWEBUI_CONTAINER_HEALTH_URL:
+            body = HARNESS.OPENWEBUI_HEALTH_BODY
+        elif url == HARNESS.GATEWAY_MODELS_URL:
+            header = kwargs.get("input")
+            assert isinstance(header, bytes)
+            self.secret_inputs.append(header)
+            if self.fail == "secret-echo":
+                token = header.removeprefix(b"Authorization: Bearer ").rstrip(b"\r\n")
+                return subprocess.CompletedProcess(argv, 0, token + b"\n__ULLM_HTTP_STATUS__200\n", b"")
+            model_id = "wrong-model" if self.fail == "model-mismatch" else HARNESS.GATEWAY_MODEL_ID
+            body = HARNESS.canonical({"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "ullm"}]})
+        else:
+            raise AssertionError(argv)
+        return subprocess.CompletedProcess(argv, 0, body + b"\n__ULLM_HTTP_STATUS__200\n", b"")
+
+
+def container_guard_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail: str | None = None):
+    docker = tmp_path / "docker"
+    docker.write_bytes(b"fake-docker-binary")
+    docker.chmod(0o755)
+    key = tmp_path / "openai-api-key"
+    secret = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    key.write_bytes(secret + b"\n")
+    key.chmod(0o640)
+    runtime = FakeDockerRuntime(fail=fail)
+    monkeypatch.setattr(HARNESS, "DOCKER", docker)
+    monkeypatch.setattr(HARNESS, "DOCKER_SHA", HARNESS.sha_bytes(docker.read_bytes()))
+    monkeypatch.setattr(HARNESS, "API_KEY_FILE", key)
+    monkeypatch.setattr(HARNESS, "API_KEY_UID", os.geteuid())
+    monkeypatch.setattr(HARNESS, "API_KEY_GID", os.getegid())
+    monkeypatch.setattr(HARNESS, "CONTAINER_CURL_VERSION_SHA", HARNESS.sha_bytes(runtime.curl_version))
+    return HARNESS.ContainerHealthGuard(), runtime, secret
 
 
 def ready(tmp_path: Path) -> dict:
@@ -157,12 +243,84 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "maintenance", runtime.dependencies())
     assert code == 0 and evidence["status"] == "passed"
     assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "launcher", "service-start", "service-restored"]
-    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0}
+    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0, "docker": 18, "docker_exec": 12, "container_curl": 10}
     assert evidence["safety"] == {"service_touched": True, "service_stopped": True, "gpu_command_executed": True, "model_load_executed": True}
     assert evidence["restore"]["passed"] is True
     assert evidence["restore"]["post_start"]["service"]["main_pid"] != evidence["pre_stop"]["service"]["main_pid"]
     assert (tmp_path / "maintenance/maintenance-marker.json").stat().st_mode & 0o777 == 0o444
     assert evidence["secret_material_recorded"] is False
+
+
+def test_host_route_mismatch_is_diagnostic_and_container_route_remains_formal(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="host-route")
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "host-route", runtime.dependencies())
+    assert code == 0 and evidence["status"] == "passed"
+    for snapshot in (evidence["pre_stop"], evidence["restore"]["post_start"]):
+        assert snapshot["health"]["formal"]["transport"] == "docker-exec-container-network-namespace"
+        diagnostic = snapshot["health"]["host_route_diagnostics"]
+        assert diagnostic["formal_gate"] is False
+        assert diagnostic["probes"]["gateway_readyz"]["reachable"] is False
+        assert diagnostic["probes"]["gateway_readyz"]["matches_formal_response"] is False
+
+
+def test_container_health_guard_pins_identity_uses_id_exec_and_keeps_secret_off_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard, runtime, secret = container_guard_fixture(tmp_path, monkeypatch)
+    before = guard(runtime)
+    after = guard(runtime)
+    assert before["container"] == after["container"]
+    assert before["endpoints"]["gateway_models"]["model_id"] == HARNESS.GATEWAY_MODEL_ID
+    assert before["secret_material_recorded"] is False
+    expected_header = b"Authorization: Bearer " + secret + b"\n"
+    assert runtime.secret_inputs == [expected_header, expected_header]
+    serialized = HARNESS.canonical([before, after, runtime.commands])
+    assert secret not in serialized and expected_header.rstrip(b"\n") not in serialized
+    exec_commands = [command for command in runtime.commands if command[1] == "exec"]
+    assert exec_commands and all(HARNESS.OPENWEBUI_CONTAINER_NAME not in command for command in exec_commands)
+    assert all(HARNESS.OPENWEBUI_CONTAINER_ID in command for command in exec_commands)
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("container-absent", "container/image/network identity differs"),
+        ("container-replaced", "container/image/network identity differs"),
+        ("image-swap", "container/image/network identity differs"),
+        ("health-state", "container/image/network identity differs"),
+        ("network-swap", "container/image/network identity differs"),
+        ("curl-failure", "container health endpoint differs"),
+        ("model-mismatch", "gateway model identity differs"),
+        ("secret-echo", "secret material escaped"),
+    ],
+)
+def test_container_health_guard_fails_closed_without_secret_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, message: str) -> None:
+    guard, runtime, secret = container_guard_fixture(tmp_path, monkeypatch, fail=failure)
+    with pytest.raises(HARNESS.HarnessError, match=message) as captured:
+        guard(runtime)
+    assert secret not in str(captured.value).encode()
+    assert all(secret not in "\0".join(command).encode() for command in runtime.commands)
+
+
+def test_container_health_guard_rejects_same_path_docker_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard, runtime, _ = container_guard_fixture(tmp_path, monkeypatch)
+    assert guard(runtime)["secret_material_recorded"] is False
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"replacement-docker")
+    replacement.chmod(0o755)
+    replacement.replace(HARNESS.DOCKER)
+    with pytest.raises(HARNESS.LAUNCHER.LauncherError, match="replacement"):
+        guard(runtime)
+
+
+def test_container_health_guard_rejects_api_key_replacement_across_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard, runtime, secret = container_guard_fixture(tmp_path, monkeypatch)
+    assert guard(runtime)["secret_material_recorded"] is False
+    replacement = tmp_path / "replacement-key"
+    replacement.write_bytes(secret + b"\n")
+    replacement.chmod(0o640)
+    replacement.replace(HARNESS.API_KEY_FILE)
+    with pytest.raises(HARNESS.HarnessError, match="API key changed across maintenance boundary") as captured:
+        guard(runtime)
+    assert secret not in str(captured.value).encode()
 
 
 @pytest.mark.parametrize("launcher_mode", ("raise", "fail"))
@@ -186,6 +344,10 @@ def test_each_fake_maintenance_gate_fails_closed(tmp_path: Path, failure: str, s
     assert evidence["process_counts"]["systemctl_stop"] == stop_count
     assert evidence["process_counts"]["launcher"] == launcher_count
     assert evidence["restore"]["attempted"] is restore_attempted
+    if failure == "health":
+        assert evidence["restore"]["passed"] is False
+        assert evidence["restore"]["post_start"] is None
+        assert runtime.active is True and runtime.epoch == 1
 
 
 def test_dry_run_writes_process_zero_evidence_without_dependencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,7 +356,7 @@ def test_dry_run_writes_process_zero_evidence_without_dependencies(tmp_path: Pat
     HARNESS.READY_PATH.write_text("{}\n")
     code, evidence = HARNESS.dry_run_ready(value, tmp_path / "dry")
     assert code == 0 and evidence["status"] == "passed"
-    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0}
+    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}
     assert evidence["service_touched"] is False and evidence["gpu_command_executed"] is False
 
 
@@ -350,7 +512,7 @@ def test_canonical_dry_run_cli_has_zero_actual_processes(tmp_path: Path) -> None
     code = HARNESS.main(["--mode", "dry-run", "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}
     assert evidence["service_touched"] is False
 
 
@@ -363,7 +525,7 @@ def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Pat
     code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}
     assert evidence["profile_diagnostic"]["capture_executed"] is False
 
 
