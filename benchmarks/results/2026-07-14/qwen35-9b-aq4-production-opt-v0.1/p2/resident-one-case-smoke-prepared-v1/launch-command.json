@@ -1,11 +1,11 @@
 {
   "bindings": {
-    "build_git_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
+    "build_git_commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
     "device_index": 1,
     "driver": {
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver",
-      "sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
-      "source_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
+      "sha256": "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8",
+      "source_commit": "084d2e71114857da77e4196061d18a1dfefd53e8"
     },
     "one_case_smoke": true,
     "protocol": "ullm.aq4_p2_resident_driver.v2",
@@ -30,7 +30,7 @@
     "--device-index",
     "1",
     "--build-git-commit",
-    "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
+    "084d2e71114857da77e4196061d18a1dfefd53e8"
   ],
   "runner_validate_only_argv": [
     "/usr/bin/python3.12",

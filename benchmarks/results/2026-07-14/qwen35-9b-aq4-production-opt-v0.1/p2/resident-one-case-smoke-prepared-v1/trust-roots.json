@@ -19,26 +19,51 @@
       "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
     },
     "worker": {
-      "observed_nlink": 2,
+      "hardlink_set": {
+        "deps_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps",
+        "exact_path_count": 2,
+        "expected": {
+          "ctime_ns": 1783937083521178513,
+          "device": 66306,
+          "gid": 1000,
+          "inode": 10506405,
+          "mode": 33277,
+          "mtime_ns": 1783937083493176979,
+          "nlink": 2,
+          "size": 3729520,
+          "uid": 1000
+        },
+        "fixture": {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json",
+          "sha256": "600df04efa3f21aed9e089f6bcaace3fafddb033a093c4adb67af989f3663b87"
+        },
+        "paths": [
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps/ullm_aq4_worker-03e49ec754c21dc7"
+        ],
+        "release_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release",
+        "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+        "unknown_hardlinks_possible": false
+      },
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
       "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
     }
   },
   "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
   "source": {
-    "commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
-    "driver_source_sha256": "d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7",
+    "commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
+    "driver_source_sha256": "9e308b4d4f455517b090e631b9aec682f96caeaedec02766d144f34f3791a8d8",
     "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
     "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
     "normative_driver": {
       "blob_unchanged_at_current_source": true,
       "clean_build": {
         "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
-        "expected_binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+        "expected_binary_sha256": "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8",
         "provenance": "detached clean Git worktree at normative driver commit"
       },
-      "commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
-      "tree": "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
+      "commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
+      "tree": "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
     },
     "one_case_smoke_runner": {
       "flag": "--one-case-smoke",
@@ -58,7 +83,9 @@
       "preflight": "absolute_without_parent_traversal",
       "served_model_manifest": "absolute_without_parent_traversal"
     },
+    "runner_source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
     "runner_source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
-    "tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8"
+    "runner_source_tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8",
+    "tree": "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
   }
 }

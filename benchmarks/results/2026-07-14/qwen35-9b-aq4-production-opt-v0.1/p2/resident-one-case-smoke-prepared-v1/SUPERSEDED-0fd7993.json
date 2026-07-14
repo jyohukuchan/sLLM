@@ -6,5 +6,5 @@
   "schema_version": "ullm.aq4_p2_resident_smoke_supersession.v1",
   "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
   "status": "superseded_historical_prepared",
-  "superseded_by_source_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
+  "superseded_by_source_commit": "084d2e71114857da77e4196061d18a1dfefd53e8"
 }
