@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -15,6 +16,8 @@ from typing import Any
 
 OK_STATUSES = {"ok", "failed", "oom", "unsupported", "skipped"}
 STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
+FIXED_EXPANDER = Path(__file__).with_name("expand-aq4-production-p2.py")
+STANDARD_MANIFEST = Path(__file__).parent.parent / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 
 
 class ResultError(ValueError): pass
@@ -67,6 +70,19 @@ def identity_hash(identity: dict[str, Any]) -> str:
 def policy_hash(policy: dict[str, Any]) -> str:
     value = json.loads(json.dumps(policy)); value.setdefault("hash_binding", {})["policy_sha256"] = None
     return sha_bytes(canonical(value))
+
+
+def validate_complete_expansion(expanded: dict[str, Any], identity: dict[str, Any], root: Path) -> None:
+    manifest_path = Path(identity.get("artifacts", {}).get("planning_manifest", ""))
+    resolved = manifest_path.resolve(strict=True)
+    if resolved != STANDARD_MANIFEST.resolve() and resolved != root.resolve() and root.resolve() not in resolved.parents: raise ResultError("planning manifest escapes run root")
+    manifest = load(resolved, "planning manifest")
+    if sha_file(resolved, "planning manifest") != identity.get("planning_manifest_sha256"): raise ResultError("planning manifest identity differs")
+    spec = importlib.util.spec_from_file_location("aq4_p2_builder_expander", FIXED_EXPANDER)
+    if spec is None or spec.loader is None: raise ResultError("fixed expander is unavailable")
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    expected = module.expand(json.loads(json.dumps(manifest)), sha_file(resolved, "planning manifest"))
+    if expanded != expected: raise ResultError("expanded matrix differs from complete planning expansion")
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -303,6 +319,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     contained(root, args.output, "output", existing=False)
     case = load(args.case, "case"); expanded = load(args.expanded, "expanded"); raw = load(args.raw, "raw"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy")
     source = load(args.source_oracle, "source oracle"); source_validation = load(args.source_oracle_validation, "source oracle validation"); independent = load(args.independent_validation, "independent validation")
+    validate_complete_expansion(expanded, identity, root)
     if expanded.get("schema_version") != "ullm.aq4_production_p2_expanded.v2" or case.get("case_sha256") != case_hash(case) or len([item for item in expanded.get("cases", []) if item == case]) != 1: raise ResultError("case/expanded binding differs")
     if raw.get("schema_version") != "ullm.aq4_production_p2_raw_result.v2" or raw.get("case_id") != case.get("case_id") or raw.get("case_sha256") != case.get("case_sha256"): raise ResultError("raw case binding differs")
     status = raw.get("status")

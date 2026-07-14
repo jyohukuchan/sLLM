@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -28,6 +29,10 @@ REQUIRED_HASHES = [
 ]
 POWER_FIELDS = ["expected_power_limit_watts", "allowed_power_tolerance_watts", "maximum_temperature_c", "minimum_vram_headroom_bytes"]
 CORRECTNESS_FIELDS = ["max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap"]
+FIXED_EXPANDER = Path(__file__).with_name("expand-aq4-production-p2.py")
+PRODUCTION_STAGE_COUNTS = {"smoke": 84, "representative": 2245, "full": 3885}
+PRODUCTION_CASE_COUNT = 6214
+PRODUCTION_CANONICAL_CASE_SHA256 = "52145d12bd2a75924c65a1a0b33abcf7efc2d5fca20392a4a8cb38a6a47c2f9f"
 
 
 class BindError(ValueError):
@@ -137,6 +142,14 @@ def bind(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
     if manifest.get("schema_version") != "ullm.aq4_production_p2_case_manifest.v1" or manifest.get("status") != "planning_only": raise BindError("planning manifest contract differs")
     if expanded.get("schema_version") != "ullm.aq4_production_p2_expanded.v2": raise BindError("expanded manifest schema differs")
     if expanded.get("manifest_sha256") != sha_file(args.manifest, "planning manifest"): raise BindError("expanded planning-manifest binding differs")
+    spec = importlib.util.spec_from_file_location("aq4_p2_fixed_expander", FIXED_EXPANDER)
+    if spec is None or spec.loader is None: raise BindError("fixed expander is unavailable")
+    expander = importlib.util.module_from_spec(spec); spec.loader.exec_module(expander)
+    expected_expanded = expander.expand(json.loads(json.dumps(manifest)), sha_file(args.manifest, "planning manifest"))
+    if expanded != expected_expanded: raise BindError("expanded manifest differs from complete planning expansion")
+    fixture_only = bool(args.fixture_only)
+    if not fixture_only and (manifest.get("manifest_id") != "aq4-production-opt-p2-v0.1" or expanded.get("stage_case_count") != PRODUCTION_STAGE_COUNTS or expanded.get("case_count") != PRODUCTION_CASE_COUNT or expanded.get("expected_case_count", {}).get("total") != PRODUCTION_CASE_COUNT or expanded.get("canonical_case_sha256") != PRODUCTION_CANONICAL_CASE_SHA256):
+        raise BindError("expanded manifest differs from official production case-set contract")
     cases = expanded.get("cases")
     if not isinstance(cases, list) or len(cases) != expanded.get("case_count") or len({item.get("case_id") for item in cases if isinstance(item, dict)}) != len(cases): raise BindError("expanded case coverage differs")
     for case in cases:
@@ -191,12 +204,14 @@ def bind(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
     hashes["policy_sha256"] = bound_policy["hash_binding"]["policy_sha256"]
     identity = {
         "schema_version": "ullm.aq4_production_p2_identity.v2", "status": "bound", "identity_sha256": None,
+        "evidence_class": "fixture_only" if fixture_only else "production_candidate", "promotion_eligible": False,
         "manifest_id": manifest.get("manifest_id"), "planning_manifest_sha256": sha_file(args.manifest, "planning manifest"),
         "expanded_manifest_sha256": expanded_sha, "canonical_case_sha256": expanded.get("canonical_case_sha256"),
         "case_count": expanded.get("case_count"), "policy_id": bound_policy.get("policy_id"), "policy_sha256": hashes["policy_sha256"],
         "build_git_commit": git_commit(args.git_commit, args.git_base), "hash_binding": hashes,
         "model_identity": model,
         "artifacts": {key: str(value.resolve(strict=True)) for key, value in {
+            "planning_manifest": args.manifest,
             "worker": args.worker, "package_root": args.package_root, "package_manifest": args.package_manifest,
             "tokenizer": args.tokenizer, "served_model_manifest": args.served_model_manifest, "graph": args.graph,
             "state": args.state, "source_oracle": args.source_oracle, "power_capture": args.power_capture,
@@ -222,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("manifest", "expanded", "policy", "worker", "package_root", "package_manifest", "tokenizer", "served_model_manifest", "model_identity", "graph", "state", "source_oracle", "power_capture", "correctness_thresholds", "baseline_result", "output", "bound_policy"):
         parser.add_argument(f"--{name.replace('_', '-')}", dest=name, type=Path, required=True)
     parser.add_argument("--effective-at", required=True); parser.add_argument("--git-commit"); parser.add_argument("--git-base", type=Path, default=Path.cwd())
+    parser.add_argument("--fixture-only", action="store_true")
     args = parser.parse_args(argv)
     try:
         identity, policy = bind(args); atomic_write(args.bound_policy, policy); atomic_write(args.output, identity)

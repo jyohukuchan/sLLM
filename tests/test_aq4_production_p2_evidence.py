@@ -23,6 +23,7 @@ BIND = ROOT / "tools/bind-aq4-production-p2-identity.py"
 RUN = ROOT / "tools/run-aq4-production-p2.py"
 BUILD = ROOT / "tools/build-aq4-prefill-validation-result.py"
 VALIDATE = ROOT / "tools/validate-aq4-production-p2-evidence.py"
+RAW_V2_ADAPTER = ROOT / "tools/prefill_validation/aq4_p2_raw_v2_adapter.py"
 
 
 def invoke(tool: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -41,6 +42,34 @@ def sha(path: Path) -> str:
 
 
 class Aq4ProductionP2EvidenceTests(unittest.TestCase):
+    def driver_fixture(self, root: Path) -> Path:
+        driver = root / "fixture-driver.py"
+        driver.write_text('''#!/usr/bin/env python3
+import hashlib,json,sys
+from pathlib import Path
+def arg(name): return Path(sys.argv[sys.argv.index(name)+1])
+def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+case_path=arg("--case"); identity_path=arg("--identity"); preflight_path=arg("--preflight"); output=arg("--output"); fixture=json.loads(arg("--fixture").read_text()); case=json.loads(case_path.read_text()); identity=json.loads(identity_path.read_text()); preflight=json.loads(preflight_path.read_text()); index=int(output.stem.split("-")[1].split(".")[0])
+if fixture.get("mode")=="partial" and index==2: raise SystemExit(2)
+worker=Path(identity["artifacts"]["worker"]); driver=Path(__file__).resolve(); role_swap=fixture.get("mode")=="role_swap"; effective_index=0 if fixture.get("mode")=="reuse" else index
+timing={"request_elapsed_ms":20.0+effective_index,"generation":{"cache_n":case["cached_prefix_tokens"],"prompt_n":case["prompt_tokens"],"prompt_ms":10.0+effective_index,"prompt_per_token_ms":1.0,"prompt_per_second":100.0,"predicted_n":case["generated_tokens"],"predicted_ms":5.0,"predicted_per_token_ms":1.0,"predicted_per_second":1.0},"generated_tokens":case["generated_tokens"]}
+timing_sha=hashlib.sha256(json.dumps(timing,separators=(",",":"),ensure_ascii=False).encode()).hexdigest(); reset={"attempted":1,"complete":1,"failed":0}; mode=fixture.get("mode","success")
+if mode=="reset": reset={"attempted":1,"complete":0,"failed":1}
+lifecycle={"prepare":2,"commit":2,"discard":0,"error":0,"cancel":0,"prefill":{"prepare":1,"commit":1,"discard":0},"publication":{"prepare":1,"commit":1,"discard":0},"reset":reset}
+unexpected=1 if mode=="fallback" else 0; fallback={"count":unexpected,"unexpected_count":unexpected,"reasons":[]}
+failed=mode=="preflight_fail"; audit=None if failed else {"deterministic_digest_sha256":"a"*64,"outcome":"length","coverage_complete":True,"physical_operation_invocations":1,"total_records":1}
+driver_identity=None if failed else {"served_model_manifest_sha256":identity["hash_binding"]["served_model_manifest_sha256"],"model_id":identity["model_identity"]["id"],"model_revision":identity["model_identity"]["revision"],"format_id":case["format_id"],"implementation_id":case["implementation_id"],"manifest_worker_binary_path":str(worker.resolve()),"manifest_worker_binary_sha256":identity["hash_binding"]["worker_binary_sha256"],"benchmark_binary_path":str((worker if role_swap else driver).resolve()),"benchmark_binary_sha256":sha(worker if role_swap else driver),"benchmark_worker_roles_distinct":not role_swap,"package_root":identity["artifacts"]["package_root"],"package_content_sha256":identity["hash_binding"]["package_content_sha256"],"package_manifest_sha256":identity["hash_binding"]["package_manifest_sha256"],"package_file_count":1,"package_bytes":1,"manifest_device_architecture":case["device"]["architecture"],"runtime_device":{"requested_device_index":case["device"]["runtime_device_index"],"observed_device_id":0,"observed_backend":case["device"]["backend"],"observed_name":case["device"]["name"],"observed_architecture":case["device"]["architecture"]},"execution_profile":"fixture"}
+def link(path): return {"path":str(path.resolve()),"sha256":sha(path)}
+value={"schema_version":"ullm.qwen35_aq4_p2.full_model_driver.v2","raw_target_schema_version":"ullm.aq4_production_p2_raw_result.v2","scope":case["scope"],"status":"failed" if failed else "ok","immutable_status":failed,"case_id":case["case_id"],"case_sha256":case["case_sha256"],"identity":driver_identity,"requested_m":case["prefill_requested_m"],"resolved_m":None if failed else case["resolved_m"],"actual_token_batch_width":None if failed else case["resolved_m"],"actual_request_batch_width":None if failed else case["request_count"],"timing":timing,"audit":audit,"lifecycle":None if failed else lifecycle,"reset":None if failed else reset,"outcome":None if failed else "length","oom":None,"fallback":fallback,"preflight":{"input":preflight,"required_environment_count":0,"required_environment_verified":not failed,"binary_roles_verified":not failed,"package_tree_verified":not failed},"failure":{"stage":"environment_preflight","reason_code":"fixture_rejected"} if failed else None,"links":{"case":link(case_path),"identity":link(identity_path),"preflight":link(preflight_path),"timing":{"json_pointer":"/timing","sha256":timing_sha},"audit":{"json_pointer":"/audit","sha256":None if failed else "a"*64}},"adapter":{"target_schema_version":"ullm.aq4_production_p2_raw_result.v2","mapping_version":"ullm.aq4_p2_full_model_to_raw.v1","exact_root_fields":True,"benchmark_binary_role":"executed_benchmark_driver","manifest_worker_role":"served_identity_reference","raw_v2_requires_role_aware_adapter":True}}
+if mode=="case_swap": value["case_id"]="another-case"
+if mode=="unknown": value["unknown_field"]=True
+if mode=="link_hash": value["links"]["case"]["sha256"]="0"*64
+text=json.dumps(value,separators=(",",":"))
+if mode=="duplicate": text=text.replace('{"schema_version":','{"schema_version":"duplicate","schema_version":',1)
+output.write_text(text); raise SystemExit(1 if failed else 0)
+''', encoding="utf-8")
+        driver.chmod(0o755); return driver
+
     def expand(self, root: Path, manifest: Path = MANIFEST) -> tuple[Path, dict]:
         output = root / "expanded.json"
         completed = invoke(EXPAND, "--manifest", str(manifest), "--output", str(output))
@@ -94,6 +123,13 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
         if trace: command += ["--trace", str(trace)]
         completed = invoke(RUN, *command)
         return output, completed
+
+    def adapted_raw(self, bound: dict[str, Path | dict], root: Path, case_path: Path, case: dict, mode: str = "success") -> tuple[Path, subprocess.CompletedProcess[str]]:
+        preflight = root / "adapter-preflight.json"; write_json(preflight, {"weights_bytes": 1, "persistent_state_bytes": 1, "kv_cache_bytes": 1, "workspace_bytes": 1, "temporary_bytes": 1, "vram_headroom_bytes": 100, "gpu_process_snapshot": []})
+        fixture = root / "adapter-fixture.json"; write_json(fixture, {"mode": mode})
+        driver = self.driver_fixture(root); raw = root / "adapted.raw.json"
+        command = ["--run-root", str(root), "--case", str(case_path), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--preflight", str(preflight), "--driver", str(driver), "--served-model-manifest", str(bound["served"]), "--fixture", str(fixture), "--raw-dir", str(root / "driver-runs"), "--output", str(raw), "--measurement", str(root / "adapted.measurement.json"), "--state", str(root / "adapted.state.json"), "--driver-lifecycle-input", str(root / "adapted.lifecycle.json"), "--cpu-fixture"]
+        return raw, invoke(RAW_V2_ADAPTER, *command)
 
     def result(self, bound: dict[str, Path | dict], root: Path, case_path: Path, case: dict, raw: Path, *, path_result: Path | None = None, trace: Path | None = None, trace_bundle: dict[str, Path] | None = None) -> tuple[Path, subprocess.CompletedProcess[str]]:
         independent = root / f"{case['case_id']}.independent.json"
@@ -183,6 +219,15 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             mismatch_model = root / "mismatch-model.json"; model = json.loads(Path(bound["model"]).read_text()); model["implementation_id"] = "qwen35_aq4_wrong_v1"; write_json(mismatch_model, model)
             mismatch = list(command); mismatch[mismatch.index(str(tampered))] = str(bound["expanded_path"]); mismatch[mismatch.index(str(root / "model-identity.json"))] = str(mismatch_model)
             rejected = invoke(BIND, *mismatch); self.assertNotEqual(rejected.returncode, 0); self.assertIn("implementation differs", rejected.stderr)
+            partial = copy.deepcopy(expanded_contract); removed = partial["cases"].pop(); partial["case_count"] -= 1; partial["expected_case_count"]["total"] -= 1; partial["stage_case_count"][removed["stage_id"]] -= 1
+            partial["canonical_case_sha256"] = hashlib.sha256(json.dumps(partial["cases"], ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            partial_path = root / "partial-rehashed-expanded.json"; write_json(partial_path, partial)
+            partial_command = list(command); partial_command[partial_command.index(str(tampered))] = str(partial_path)
+            partial_command[partial_command.index(str(root / "bad-id.json"))] = str(root / "partial-id.json"); partial_command[partial_command.index(str(root / "bad-policy.json"))] = str(root / "partial-policy.json")
+            partial_rejected = invoke(BIND, *partial_command); self.assertNotEqual(partial_rejected.returncode, 0); self.assertIn("complete planning expansion", partial_rejected.stderr)
+            validator_spec = importlib.util.spec_from_file_location("p2_complete_validator", VALIDATE); assert validator_spec and validator_spec.loader
+            validator_module = importlib.util.module_from_spec(validator_spec); validator_spec.loader.exec_module(validator_module)
+            self.assertEqual(validator_module.complete_expansion_failure(partial, identity, root), "expanded_not_complete_planning_set")
 
     def test_runner_rejects_executable_bypass_and_does_not_store_argv(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +252,27 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             Path(bound["package"]).joinpath("weights.bin").write_bytes(b"changed")
             raw, completed = self.raw(bound, root, case_path, case)
             self.assertNotEqual(completed.returncode, 0); self.assertFalse(raw.exists())
+
+    def test_role_aware_raw_v2_adapter_end_to_end_and_fail_closed_mutations(self) -> None:
+        select = lambda item: item["scope"] == "full_model" and item["phase"] == "cold_prefill" and item["mode"] == "all_m1" and item["control_id"] == "aq4_0_target"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); bound = self.bind(root); case_path, case = self.case(bound, root, select)
+            raw, adapted = self.adapted_raw(bound, root, case_path, case); self.assertEqual(adapted.returncode, 0, adapted.stderr)
+            value = json.loads(raw.read_text()); self.assertEqual(len(value["links"]["driver_runs"]), 12)
+            self.assertNotEqual(value["executed_benchmark_driver"]["sha256"], value["served_identity_reference"]["worker_sha256"])
+            self.assertIsNone(value["links"]["trace"]); self.assertIn("driver_lifecycle_input", value["links"])
+            self.assertTrue(json.loads((root / "adapted.lifecycle.json").read_text())["not_a_production_execution_trace"])
+            result, built = self.result(bound, root, case_path, case, raw); self.assertEqual(built.returncode, 0, built.stderr)
+            result_value = json.loads(result.read_text()); self.assertIsNone(result_value["evidence"]["execution_trace"]); self.assertFalse(result_value["promotion"]["eligible"])
+            report = root / "partial-validation.json"; checked = invoke(VALIDATE, "--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--result", str(result), "--output", str(report))
+            self.assertNotEqual(checked.returncode, 0); self.assertTrue(any(code.startswith("partial_matrix:") for code in json.loads(report.read_text())["failure_codes"]))
+        for mode in ("role_swap", "reset", "fallback", "partial", "reuse", "case_swap", "unknown", "duplicate", "link_hash"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); bound = self.bind(root); case_path, case = self.case(bound, root, select)
+                raw, rejected = self.adapted_raw(bound, root, case_path, case, mode); self.assertNotEqual(rejected.returncode, 0, mode); self.assertTrue((root / "driver-runs").is_dir()); self.assertFalse(raw.exists())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); bound = self.bind(root); case_path, case = self.case(bound, root, select)
+            raw, rejected = self.adapted_raw(bound, root, case_path, case, "preflight_fail"); self.assertNotEqual(rejected.returncode, 0); self.assertTrue(raw.is_file()); self.assertTrue(json.loads(raw.read_text())["immutable_status"]); self.assertIsNone(json.loads(raw.read_text())["links"]["trace"])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); bound = self.bind(root)
             case_path, case = self.case(bound, root, lambda item: item["stage_id"] == "smoke" and item["mode"] == "all_m1")
@@ -365,7 +431,10 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             correctness = root / "correctness.json"; write_json(correctness, {"max_hidden_relative_l2": 1, "max_hidden_max_abs": 1, "max_logits_relative_l2": 1, "max_logits_max_abs": 1, "minimum_top_k_overlap": 1})
             baseline = root / "baseline.json"; write_json(baseline, {"prefill_tokens_per_second_p50": 1, "prefill_tokens_per_second_p95": 1, "oom": False})
             identity_path = root / "identity.json"; policy_path = root / "policy.json"
-            bound = invoke(BIND, "--manifest", str(manifest_path), "--expanded", str(expanded_path), "--policy", str(POLICY), "--worker", str(bundle / "worker.bin"), "--package-root", str(bundle), "--package-manifest", str(bundle / "package.json"), "--tokenizer", str(tokenizer), "--served-model-manifest", str(bundle / "manifest.json"), "--model-identity", str(model_path), "--graph", str(graph), "--state", str(state), "--source-oracle", str(source), "--power-capture", str(power), "--correctness-thresholds", str(correctness), "--baseline-result", str(baseline), "--effective-at", "2026-07-14T12:00:00Z", "--git-commit", "a" * 40, "--output", str(identity_path), "--bound-policy", str(policy_path)); self.assertEqual(bound.returncode, 0, bound.stderr)
+            bind_args = ["--manifest", str(manifest_path), "--expanded", str(expanded_path), "--policy", str(POLICY), "--worker", str(bundle / "worker.bin"), "--package-root", str(bundle), "--package-manifest", str(bundle / "package.json"), "--tokenizer", str(tokenizer), "--served-model-manifest", str(bundle / "manifest.json"), "--model-identity", str(model_path), "--graph", str(graph), "--state", str(state), "--source-oracle", str(source), "--power-capture", str(power), "--correctness-thresholds", str(correctness), "--baseline-result", str(baseline), "--effective-at", "2026-07-14T12:00:00Z", "--git-commit", "a" * 40, "--output", str(identity_path), "--bound-policy", str(policy_path)]
+            production_rejected = invoke(BIND, *bind_args); self.assertNotEqual(production_rejected.returncode, 0); self.assertIn("official production case-set", production_rejected.stderr)
+            bound = invoke(BIND, *bind_args, "--fixture-only"); self.assertEqual(bound.returncode, 0, bound.stderr)
+            self.assertEqual(json.loads(identity_path.read_text())["evidence_class"], "fixture_only"); self.assertFalse(json.loads(identity_path.read_text())["promotion_eligible"])
             identity = json.loads(identity_path.read_text()); trace_path = bundle / "verified.json"; trace = json.loads(trace_path.read_text()); trace_sha = sha(trace_path)
             fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "request_count", "decode_request_count", "sampling", "control", "control_id", "format_id", "implementation_id", "device")
             raw = {"case_contract": {key: case.get(key) for key in fields}, "links": {"trace": {"path": str(trace_path), "sha256": trace_sha, "trace_id": trace["trace_id"]}}}

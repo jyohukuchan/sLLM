@@ -21,6 +21,8 @@ POWER_FIELDS = ("expected_power_limit_watts", "allowed_power_tolerance_watts", "
 CORRECTNESS_FIELDS = ("max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap")
 STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
 P2_RESULT_BUILDER = Path(__file__).with_name("build-aq4-prefill-validation-result.py")
+FIXED_EXPANDER = Path(__file__).with_name("expand-aq4-production-p2.py")
+STANDARD_MANIFEST = Path(__file__).parent.parent / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 
 
 class EvidenceError(ValueError): pass
@@ -73,6 +75,20 @@ def identity_hash(identity: dict[str, Any]) -> str:
 def policy_hash(policy: dict[str, Any]) -> str:
     value = json.loads(json.dumps(policy)); value.setdefault("hash_binding", {})["policy_sha256"] = None
     return sha_bytes(canonical(value))
+
+
+def complete_expansion_failure(expanded: dict[str, Any], identity: dict[str, Any], root: Path) -> str | None:
+    try:
+        manifest_path = Path(identity.get("artifacts", {}).get("planning_manifest", "")).resolve(strict=True)
+        if manifest_path != STANDARD_MANIFEST.resolve() and manifest_path != root.resolve() and root.resolve() not in manifest_path.parents: return "planning_manifest_path"
+        manifest = load(manifest_path, "planning manifest")
+        if sha_file(manifest_path, "planning manifest") != identity.get("planning_manifest_sha256"): return "planning_manifest_identity"
+        spec = importlib.util.spec_from_file_location("aq4_p2_validator_expander", FIXED_EXPANDER)
+        if spec is None or spec.loader is None: return "fixed_expander"
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        expected = module.expand(json.loads(json.dumps(manifest)), sha_file(manifest_path, "planning manifest"))
+        return None if expanded == expected else "expanded_not_complete_planning_set"
+    except Exception: return "complete_expansion_unavailable"
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -160,6 +176,9 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     for path, label in ((args.expanded, "expanded"), (args.identity, "identity"), (args.policy, "policy"), (args.source_oracle, "source oracle")): contained(root, path, label)
     expanded = load(args.expanded, "expanded"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy"); source = load(args.source_oracle, "source oracle")
     failures: list[str] = []
+    complete_failure = complete_expansion_failure(expanded, identity, root)
+    if complete_failure: failures.append(complete_failure)
+    if identity.get("evidence_class") != "production_candidate" or identity.get("promotion_eligible") is not False: failures.append("non_production_identity_class")
     if expanded.get("schema_version") != "ullm.aq4_production_p2_expanded.v2": failures.append("expanded_schema")
     cases = expanded.get("cases") if isinstance(expanded.get("cases"), list) else []
     if len(cases) != expanded.get("case_count") or len(cases) != expanded.get("expected_case_count", {}).get("total"): failures.append("expanded_case_count")
