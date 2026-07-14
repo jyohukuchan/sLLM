@@ -1,0 +1,22 @@
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+                    "pid": 4101820,
+                    "mem_usage": {
+                        "value": 7351832576,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 682,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]

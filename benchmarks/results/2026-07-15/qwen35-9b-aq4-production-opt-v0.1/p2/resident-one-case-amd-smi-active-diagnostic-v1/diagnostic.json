@@ -1,0 +1,81 @@
+{
+  "actual_executed": false,
+  "command": [
+    "/opt/rocm/bin/amd-smi",
+    "process",
+    "--gpu",
+    "2",
+    "--general",
+    "--json"
+  ],
+  "command_invocations": 1,
+  "comparison": {
+    "expected_entry_fields_used": [
+      "process_info"
+    ],
+    "expected_process_info_fields_used": [
+      "pid"
+    ],
+    "expected_root_fields_used": [
+      "gpu",
+      "process_list"
+    ],
+    "expected_top_level": "list length 1",
+    "field_diff_for_active_capture": []
+  },
+  "elapsed_ns": 243008513,
+  "ended_unix_ns": 1784059292406197282,
+  "gpu_state_changed": false,
+  "json_shape": {
+    "entry_shapes": [
+      {
+        "entry_keys": [
+          "process_info"
+        ],
+        "evicted_time_keys": [
+          "unit",
+          "value"
+        ],
+        "mem_usage_keys": [
+          "unit",
+          "value"
+        ],
+        "pid_type": "int",
+        "process_info_keys": [
+          "cu_occupancy",
+          "evicted_time",
+          "mem_usage",
+          "name",
+          "pid"
+        ]
+      }
+    ],
+    "parsed_owner_pids": [
+      4101820
+    ],
+    "root_keys": [
+      [
+        "gpu",
+        "process_list"
+      ]
+    ],
+    "top_level_length": 1,
+    "top_level_type": "list"
+  },
+  "observer_parser_accepts_active_shape": true,
+  "raw_bytes": 631,
+  "raw_sha256": "247105d398f2b1087a29330e4ce1085d7c277da8d2ddf47ba02bf6b2f5b4bc3f",
+  "returncode": 0,
+  "schema_version": "ullm.aq4_p2_amd_smi_active_diagnostic.v1",
+  "secret_material_recorded": false,
+  "service_precheck": {
+    "active_state": "active",
+    "main_pid": 4101742,
+    "nrestarts": 0,
+    "sub_state": "running"
+  },
+  "service_touched": false,
+  "started_unix_ns": 1784059292163188769,
+  "status": "captured",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
