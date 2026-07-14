@@ -1,0 +1,101 @@
+{
+  "actual_executed": false,
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+    "--mode",
+    "execute",
+    "--ready-artifact",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1/ready-binding.json",
+    "--evidence-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v4",
+    "--confirm-one-case"
+  ],
+  "authorization": {
+    "confirmation_flag": "--confirm-one-case",
+    "confirmation_flag_count": 1,
+    "maximum_invocations": 1,
+    "output_no_reuse": true,
+    "promotion_eligible": false
+  },
+  "command_sha256": "fc7b4eaa10c2070ebf0269c8c1871cf83fab33f31c58501b0361d065c1cfd7c1",
+  "execution": {
+    "argument_count": 9,
+    "execution_mode": "one_case",
+    "operator_must_use_manifest_argv_exactly": true,
+    "requires_fresh_output_recheck_immediately_before_execution": true,
+    "requires_same_pty_sudo_cache": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "fresh_outputs": [
+    {
+      "derived_from": "manifest.argv[7]",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v4",
+      "path_sha256": "9009bf00dc3e3efd973943fa473f95fe416fe339ec3b56c66ca635f18695b258",
+      "role": "maintenance_evidence"
+    },
+    {
+      "derived_from": "ready_artifact.launcher_binding.evidence_output",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1",
+      "path_sha256": "d7cd0632fa8b57731ee9ba4f094f30ef58574da1f3d593bf14b6678e23f65fca",
+      "ready_artifact_sha256": "f93b20920820840b0d0a39421ac957d1348d84c0ea24977e76a4c40a106ed8e2",
+      "role": "launcher_evidence"
+    },
+    {
+      "derived_from": "ready_artifact.launcher_binding.runner_output",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v1",
+      "path_sha256": "557fd9ecdf2b1be39c535e66fc060b71baf5ec856b578e826a6b96bfa13f9e1f",
+      "ready_artifact_sha256": "f93b20920820840b0d0a39421ac957d1348d84c0ea24977e76a4c40a106ed8e2",
+      "role": "runner_output"
+    }
+  ],
+  "inputs": {
+    "harness": {
+      "commit": "c4c3d9f3d40cdddd6a7625e8361c4c855fbde565",
+      "git_blob": "7f9ecc15698b22b6480fc0bbbcf4854c0c836cf9",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+      "sha256": "91ff4e0d18f8292d518c3fd26dd3cef1e08ed697778cc48c0d1e787b4cf37651",
+      "tree": "de7e2fb0e01c98850a292f30c298d29f0658d96f"
+    },
+    "python": {
+      "path": "/usr/bin/python3.12",
+      "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    "ready_artifact": {
+      "artifact_commit": "0bb6d016e01ad3dab5d3c3bb759754764846a536",
+      "git_blob": "93db163188c538bf9eac6d41e4d0916cab602a5d",
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1/ready-binding.json",
+      "sha256": "f93b20920820840b0d0a39421ac957d1348d84c0ea24977e76a4c40a106ed8e2"
+    }
+  },
+  "pre_execution_audit": {
+    "absolute_ready_artifact_fake_boundary": {
+      "actual_process_count": 0,
+      "durable_marker_created": true,
+      "fake_dependency_call_count": 5,
+      "service_stop_count": 0,
+      "status": "passed_before_service_stop"
+    },
+    "canonical_dry_run": {
+      "all_process_counts_zero": true,
+      "status": "passed"
+    },
+    "relative_ready_artifact": {
+      "actual_process_count": 0,
+      "fake_dependency_call_count": 0,
+      "status": "rejected"
+    }
+  },
+  "schema_version": "ullm.aq4_p2_resident_operator_command.v1",
+  "secret_material_embedded": false,
+  "status": "audited_ready_for_single_explicit_execution"
+}
