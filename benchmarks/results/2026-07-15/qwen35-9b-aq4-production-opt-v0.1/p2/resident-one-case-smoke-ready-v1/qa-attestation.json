@@ -8,7 +8,8 @@
     "safety-success-start-failure-partial",
     "validator-runner-finalize-toctou",
     "identity-and-hash-bindings",
-    "stable2-stopped-gate-poll-and-foreign-owner-rejection",
+    "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection",
+    "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive",
     "immutable-streamed-stop-poll-evidence",
     "container-namespace-health-and-authenticated-model-binding",
     "secret-free-stdin-header-transport",
@@ -28,10 +29,10 @@
   "runner_strict_negative_count": 18,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 256,
+  "test_count": 260,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 190,
+    "existing_and_profile_regression": 194,
     "marker_chain": 55
   }
 }

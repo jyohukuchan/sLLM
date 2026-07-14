@@ -9,10 +9,10 @@ production gatewayはOpenWebUI container内からhealthyだったが、maintenan
 - 正式health gateを固定済み`/usr/bin/docker`から固定済みOpenWebUI container IDへの`docker exec`へ変更し、container内の固定済みcurlでgateway `/healthz`、`/readyz`、認証済み`/v1/models`、OpenWebUI `/health`を検査するようにした。
 - Dockerのpath/SHA/identity/client version、container ID/image/name/running/health、network ID/IP/gateway、curl path/version/SHA、API key file identityを事前・復旧後で固定する。認証headerは`docker exec -i ... curl --header @-`のstdinだけで渡し、tokenをargv、log、evidenceへ保存しない。
 - host直結HTTPはtimeoutを許容する診断情報へ降格した。container不在・差し替え、image/health/network変更、curl失敗、model不一致、secret echo、Docker/API key同一path差し替え、復旧後health失敗を偽装試験で閉じた。
-- harnessを`f586f9a1`へ固定し、正式probe 1回のprocess countをDocker 9、docker exec 6、互換container curl total 6、version 1、非version endpoint区分5へ固定した。9本の実argv fixtureと旧total 5の拒否を維持した。
-- stop後の旧worker GPU owner遅延解放に対し、30秒bounded poll、0.25秒から1秒のbackoff、stable2、10秒sudo keepaliveを追加した。pre worker/pre service PID以外のowner、zero後再出現、unknown lock holderは即時拒否する。全pollはsource raw SHA、PID、VRAM、secret-safe cmdline metadata、分類を含むmode 0444 JSONとして逐次保存する。
-- delayed release、never release timeout、foreign AMD/lock owner、owner再出現、lock/KFD delay、stable2、既定observer parsingを偽装検証した。
-- base/profile readyと両canonical dry-runを再生成した。主要190、marker 55、diagnostic capture 11、capture関連85 testsが通過した。dry-runではpoll/keepaliveを含む全process countが0である。
+- harnessを`7f1ad5c1`へ固定し、正式probe 1回のprocess countをDocker 9、docker exec 6、互換container curl total 6、version 1、非version endpoint区分5へ固定した。9本の実argv fixtureと旧total 5の拒否を維持した。
+- stop後の旧worker GPU owner遅延解放に対し、開始時に一度だけ固定する30秒monotonic absolute deadline、0.25秒から1秒のbackoff、stable2、10秒sudo keepaliveを追加した。各観測・probeの前後で期限を確認し、subprocessとkeepaliveを2秒または残時間の小さい方へ制限する。pre worker/pre service PID以外のowner、zero後再出現、unknown lock holderは即時拒否する。全pollはsource raw SHA、PID、VRAM、secret-safe cmdline metadata、期限checkpoint、timeout partial evidence、分類を含むmode 0444 JSONとして逐次保存する。
+- delayed release、never release timeout、foreign AMD/lock owner、owner再出現、lock/KFD delay、stable2、既定observer parsingに加え、slow stable2のdeadline越境、deadline-crossing probe、blocked probe後keepalive、残時間未満へのtimeout短縮を偽装検証した。timeout時もlauncher 0、外側復旧、immutable evidence保存を確認した。
+- base/profile readyと両canonical dry-runを再生成した。主要194、marker 55（25 subtests）、diagnostic capture 11、capture関連85 testsが通過した。dry-runではpoll/keepaliveを含む全process countが0である。
 - actual HTTP、service停止・起動、GPU command、model load、rocprof captureは実行していない。
 
 ## 次の行動

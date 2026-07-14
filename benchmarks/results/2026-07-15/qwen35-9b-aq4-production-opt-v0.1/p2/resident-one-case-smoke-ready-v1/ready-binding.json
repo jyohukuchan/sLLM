@@ -222,10 +222,12 @@
     "secret_storage_forbidden": true,
     "service": "ullm-openai.service",
     "stopped_gate_poll": {
+      "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_observation_and_probe",
       "evidence": "atomic_immutable_per_poll_secret_safe_digests_and_parsed_pids",
       "foreign_new_or_reappeared_owner": "immediate_fail_closed",
       "initial_interval_seconds": 0.25,
       "maximum_interval_seconds": 1.0,
+      "maximum_probe_timeout_seconds": 2.0,
       "required_consecutive_stable": 2,
       "sudo_keepalive_seconds": 10.0,
       "timeout_seconds": 30.0,
@@ -235,7 +237,7 @@
     "sudo_keepalive_seconds": 30
   },
   "promotion_eligible": false,
-  "qa_attestation_sha256": "3afd7589e8351ef084a2aca2da2f33e2fb0fde7c3c148701b23acb2c8b02306b",
+  "qa_attestation_sha256": "bac8dcc71368d5463bc9e6d6589236014560129292d0b69700c4246bb68cf15c",
   "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1",
   "status": "ready_for_one_case",
   "trust": {
@@ -278,11 +280,11 @@
       }
     },
     "harness": {
-      "commit": "f586f9a124e5af302fc35653a33702c2d56ad77c",
-      "git_blob": "9b523dac5f587ea3cdd309cc5fc18d46f431a6de",
+      "commit": "7f1ad5c1785c50d99e0952afa7ce018a0204d29c",
+      "git_blob": "5b4f54f120fcd25429d7d2c8050a33080bb00c0c",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "sha256": "53b7a1f233721efc254245d5c04666514c99e9884aedc74f525e2f73594c541c",
-      "tree": "2485708f38de148b5d931459cb2a0315124655f6"
+      "sha256": "7a0a3d48453eec49821c78e9a99f11cfc9973112b63cce29dee4c80c1bbe0468",
+      "tree": "0740198f8b02c5171856b0044613f2b1654f888e"
     },
     "launcher": {
       "commit": "eec6922fa9c90267213d2749c5dc816be54de527",
