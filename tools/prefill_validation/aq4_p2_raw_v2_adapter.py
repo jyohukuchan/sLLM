@@ -57,6 +57,111 @@ def ordered_json(value: Any) -> bytes: return json.dumps(value, ensure_ascii=Fal
 def digest(value: Any) -> str: return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def identity_self_hash(value: dict[str, Any]) -> str:
+    copy = json.loads(json.dumps(value))
+    copy["identity_sha256"] = None
+    return digest(copy)
+
+
+def policy_self_hash(value: dict[str, Any]) -> str:
+    copy = json.loads(json.dumps(value))
+    copy.setdefault("hash_binding", {})["policy_sha256"] = None
+    return digest(copy)
+
+
+def validate_policy_binding(policy: dict[str, Any], identity: dict[str, Any]) -> None:
+    """Re-check the binding that the driver consumes.
+
+    The adapter used to trust a policy after merely parsing it.  That allowed a caller to swap a
+    bound policy between the adapter's preflight and the result publication.  Keep this check
+    local to the adapter so the executed benchmark command and the raw result share one immutable
+    policy identity.
+    """
+    if policy.get("status") != "bound":
+        raise AdapterError("policy is not bound")
+    policy_hash = policy.get("hash_binding", {}).get("policy_sha256")
+    if not isinstance(policy_hash, str) or policy_hash != policy_self_hash(policy):
+        raise AdapterError("policy self-binding differs")
+    if identity.get("schema_version") != "ullm.aq4_production_p2_identity.v2" or identity.get("status") != "bound":
+        raise AdapterError("identity is not a bound v2 identity")
+    identity_hash = identity.get("identity_sha256")
+    if not isinstance(identity_hash, str) or identity_hash != identity_self_hash(identity):
+        raise AdapterError("identity self-binding differs")
+    if identity.get("policy_sha256") != policy_hash:
+        raise AdapterError("identity/policy binding differs")
+    required = (
+        "expected_power_limit_watts",
+        "allowed_power_tolerance_watts",
+        "maximum_temperature_c",
+        "minimum_vram_headroom_bytes",
+    )
+    power = policy.get("power_condition")
+    if not isinstance(power, dict):
+        raise AdapterError("policy power binding is missing")
+    for field in required:
+        value = power.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+            raise AdapterError(f"policy power binding {field} is not finite")
+    if power["expected_power_limit_watts"] <= 0 or power["maximum_temperature_c"] <= 0 or power["minimum_vram_headroom_bytes"] <= 0:
+        raise AdapterError("policy power binding must be positive")
+
+
+def validate_preflight(value: dict[str, Any]) -> None:
+    expected = {"weights_bytes", "persistent_state_bytes", "kv_cache_bytes", "workspace_bytes", "temporary_bytes", "vram_headroom_bytes", "gpu_process_snapshot"}
+    if set(value) != expected:
+        raise AdapterError("preflight fields differ")
+    for field in expected - {"gpu_process_snapshot"}:
+        item = value[field]
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+            raise AdapterError(f"preflight.{field} is invalid")
+    snapshot = value["gpu_process_snapshot"]
+    if not isinstance(snapshot, list):
+        raise AdapterError("preflight.gpu_process_snapshot is not an array")
+    for item in snapshot:
+        if not isinstance(item, dict) or set(item) != {"pid", "process_name", "vram_bytes"}:
+            raise AdapterError("preflight GPU process entry differs")
+        if not isinstance(item["pid"], int) or item["pid"] <= 0 or not isinstance(item["process_name"], str) or not item["process_name"] or not isinstance(item["vram_bytes"], int) or item["vram_bytes"] < 0:
+            raise AdapterError("preflight GPU process entry is invalid")
+
+
+def build_driver_command(
+    driver: Path,
+    served_model_manifest: Path,
+    fixture: Path,
+    case: Path,
+    identity: Path,
+    preflight: Path,
+    artifact: Path,
+    case_value: dict[str, Any],
+) -> list[str]:
+    """Build the only command shape accepted by the full-model driver.
+
+    Keeping this as an argv list is deliberate: the adapter never interprets case content as a
+    shell program, and the runtime device index is taken from the bound case rather than a host
+    default.
+    """
+    device = case_value.get("device", {})
+    device_index = device.get("runtime_device_index")
+    if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
+        raise AdapterError("case runtime device index is invalid")
+    case_id = case_value.get("case_id")
+    requested_m = case_value.get("prefill_requested_m")
+    if not isinstance(case_id, str) or not case_id or not isinstance(requested_m, int) or isinstance(requested_m, bool) or requested_m <= 0:
+        raise AdapterError("case command fields are invalid")
+    return [
+        str(driver),
+        "--served-model-manifest", str(served_model_manifest),
+        "--fixture", str(fixture),
+        "--case", str(case),
+        "--identity", str(identity),
+        "--preflight", str(preflight),
+        "--m", str(requested_m),
+        "--case-id", case_id,
+        "--device-index", str(device_index),
+        "--output", str(artifact),
+    ]
+
+
 def contained(root: Path, path: Path, label: str, *, existing: bool = True) -> Path:
     root = root.resolve(strict=True); result = path.resolve(strict=existing)
     if result != root and root not in result.parents: raise AdapterError(f"{label} escapes run root")
@@ -88,7 +193,7 @@ def validate_driver(value: dict[str, Any], path: Path, case: dict[str, Any], ide
     worker = Path(identity.get("artifacts", {}).get("worker", "")); package = Path(identity.get("artifacts", {}).get("package_root", "")); package_manifest = Path(identity.get("artifacts", {}).get("package_manifest", ""))
     expected_identity = {"served_model_manifest_sha256": identity.get("hash_binding", {}).get("served_model_manifest_sha256"), "model_id": model.get("id"), "model_revision": model.get("revision"), "format_id": case.get("format_id"), "implementation_id": case.get("implementation_id"), "manifest_worker_binary_path": str(worker.resolve()), "manifest_worker_binary_sha256": identity.get("hash_binding", {}).get("worker_binary_sha256"), "benchmark_binary_path": str(driver.resolve()), "benchmark_binary_sha256": sha_file(driver), "package_root": str(package.resolve()), "package_content_sha256": identity.get("hash_binding", {}).get("package_content_sha256"), "package_manifest_sha256": identity.get("hash_binding", {}).get("package_manifest_sha256")}
     if any(driver_identity.get(key) != wanted for key, wanted in expected_identity.items()) or driver_identity["benchmark_worker_roles_distinct"] is not True or worker.resolve() == driver.resolve() or sha_file(worker) == sha_file(driver): raise AdapterError("driver/served identity roles differ")
-    device = case.get("device", {}); expected_runtime = {"requested_device_index": device.get("runtime_device_index"), "observed_backend": device.get("backend"), "observed_name": device.get("name"), "observed_architecture": device.get("architecture")}
+    device = case.get("device", {}); expected_runtime = {"requested_device_index": device.get("runtime_device_index"), "observed_device_id": device.get("runtime_device_index"), "observed_backend": device.get("backend"), "observed_name": device.get("name"), "observed_architecture": device.get("architecture")}
     if any(runtime.get(key) != wanted for key, wanted in expected_runtime.items()): raise AdapterError("runtime device differs")
     if value["requested_m"] != case.get("prefill_requested_m") or value["resolved_m"] != case.get("resolved_m") or value["actual_token_batch_width"] != case.get("resolved_m") or value["actual_request_batch_width"] != case.get("request_count"): raise AdapterError("driver request/width differs")
     generation = exact(timing["generation"], GENERATION_FIELDS, "generation timing")
@@ -117,14 +222,16 @@ def run(args: argparse.Namespace) -> int:
     for path, label in ((args.case, "case"), (args.identity, "identity"), (args.policy, "policy"), (args.preflight, "preflight"), (args.driver, "driver"), (args.served_model_manifest, "served manifest"), (args.fixture, "fixture")): contained(root, path, label)
     for path in (args.output, args.measurement, args.state, args.trace_input): contained(root, path, "output", existing=False)
     raw_dir = contained(root, args.raw_dir, "raw directory", existing=False); raw_dir.mkdir(parents=True, exist_ok=False)
-    case = load(args.case, "case"); identity = load(args.identity, "identity"); load(args.policy, "policy"); preflight = load(args.preflight, "preflight")
+    case = load(args.case, "case"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy"); preflight = load(args.preflight, "preflight")
+    validate_policy_binding(policy, identity)
+    validate_preflight(preflight)
     case["_path"] = str(args.case.resolve()); identity["_path"] = str(args.identity.resolve())
     worker = Path(identity.get("artifacts", {}).get("worker", ""))
     if worker.resolve() == args.driver.resolve() or sha_file(worker) == sha_file(args.driver): raise AdapterError("benchmark driver and served worker roles must be distinct")
     artifacts: list[dict[str, Any]] = []; failure: str | None = None; artifact_hashes: set[str] = set()
     for index in range(12):
         artifact_path = raw_dir / f"run-{index:02d}.driver.json"
-        command = [str(args.driver), "--served-model-manifest", str(args.served_model_manifest), "--fixture", str(args.fixture), "--case", str(args.case), "--identity", str(args.identity), "--preflight", str(args.preflight), "--m", str(case.get("prefill_requested_m")), "--output", str(artifact_path)]
+        command = build_driver_command(args.driver, args.served_model_manifest, args.fixture, args.case, args.identity, args.preflight, artifact_path, case)
         completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=args.timeout, check=False)
         if not artifact_path.is_file(): raise AdapterError(f"driver did not publish run {index} artifact")
         artifact_sha = sha_file(artifact_path)
