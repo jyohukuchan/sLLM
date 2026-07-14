@@ -17,6 +17,7 @@ import os
 import stat
 import struct
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -39,6 +40,10 @@ MAX_ROWS = 16384
 MAX_STEPS = 128
 MAX_TOPK = 32
 MAX_CHUNK_ELEMENTS = 1_048_576
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_ROWS_FILE_BYTES = 64 * 1024 * 1024
+MAX_ROW_LINE_BYTES = 64 * 1024
+MAX_SHA_SUMS_BYTES = 8 * 1024 * 1024
 
 
 class ValidationError(ValueError):
@@ -58,32 +63,87 @@ def reject_nonfinite(value: str) -> None:
     raise ValidationError(f"non-finite JSON number: {value}")
 
 
+def _path_components(path: Path) -> list[Path]:
+    absolute = path.absolute()
+    return [Path(absolute.anchor), *(Path(absolute.anchor, *absolute.parts[1:index]) for index in range(1, len(absolute.parts) + 1))]
+
+
+def no_symlink_components(path: Path, label: str, *, missing_leaf: bool = False) -> None:
+    components = _path_components(path)
+    for index, component in enumerate(components):
+        try:
+            info = os.lstat(component)
+        except FileNotFoundError:
+            if missing_leaf and index == len(components) - 1:
+                return
+            raise ValidationError(f"{label} path component is unavailable: {component}")
+        if stat.S_ISLNK(info.st_mode):
+            raise ValidationError(f"{label} path component is a symlink: {component}")
+
+
+def stat_identity_info(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink, info.st_mode
+
+
 def regular(path: Path, label: str, *, max_bytes: int | None = None) -> Path:
-    if path.is_symlink():
-        raise ValidationError(f"{label} must not be a symlink")
+    no_symlink_components(path, label)
     try:
-        info = path.lstat()
+        info = os.lstat(path)
     except OSError as error:
         raise ValidationError(f"{label} is unavailable: {error}") from error
     if not stat.S_ISREG(info.st_mode):
         raise ValidationError(f"{label} must be a regular file")
+    if info.st_nlink != 1:
+        raise ValidationError(f"{label} must have exactly one hard link")
     if max_bytes is not None and info.st_size > max_bytes:
         raise ValidationError(f"{label} exceeds {max_bytes} bytes")
     return path
 
 
-def stat_identity(path: Path) -> tuple[int, int, int, int, int]:
-    info = path.lstat()
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_mode
+def stat_identity(path: Path) -> tuple[int, int, int, int, int, int, int]:
+    return stat_identity_info(os.lstat(path))
+
+
+@contextmanager
+def stable_fd(path: Path, label: str, *, max_bytes: int | None = None) -> Iterator[tuple[int, os.stat_result]]:
+    regular(path, label, max_bytes=max_bytes)
+    before = os.lstat(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        raise ValidationError(f"{label} cannot be opened safely: {error}") from error
+    try:
+        opened = os.fstat(fd)
+        if stat_identity_info(opened) != stat_identity_info(before):
+            raise ValidationError(f"{label} changed while being opened")
+        yield fd, opened
+        if stat_identity_info(os.fstat(fd)) != stat_identity_info(before):
+            raise ValidationError(f"{label} changed while being read")
+        no_symlink_components(path, label)
+        if stat_identity(path) != stat_identity_info(before):
+            raise ValidationError(f"{label} path changed while being read")
+    finally:
+        os.close(fd)
+
+
+def read_fd_all(fd: int, max_bytes: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, min(1024 * 1024, max_bytes + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValidationError(f"{label} exceeds {max_bytes} bytes")
+    return b"".join(chunks)
 
 
 def read_json(path: Path, label: str, *, max_bytes: int = MAX_CASE_FILE_BYTES) -> Any:
-    regular(path, label, max_bytes=max_bytes)
-    before = stat_identity(path)
-    raw = path.read_bytes()
-    after = stat_identity(path)
-    if before != after:
-        raise ValidationError(f"{label} changed while being read")
+    with stable_fd(path, label, max_bytes=max_bytes) as (fd, _):
+        raw = read_fd_all(fd, max_bytes, label)
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -91,15 +151,10 @@ def read_json(path: Path, label: str, *, max_bytes: int = MAX_CASE_FILE_BYTES) -
 
 
 def sha256_file(path: Path, label: str, chunk_bytes: int = 1024 * 1024) -> str:
-    regular(path, label)
-    before = stat_identity(path)
     digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(chunk_bytes):
+    with stable_fd(path, label) as (fd, _):
+        while chunk := os.read(fd, chunk_bytes):
             digest.update(chunk)
-    after = stat_identity(path)
-    if before != after:
-        raise ValidationError(f"{label} changed while being hashed")
     return digest.hexdigest()
 
 
@@ -148,8 +203,10 @@ def load_cases(path: Path) -> tuple[list[dict[str, Any]], str]:
     seen: set[str] = set()
     rows = 0
     for index, case in enumerate(raw["cases"]):
-        if not isinstance(case, dict) or set(case) - {"case_id", "prompt_token_ids", "step_count", "semantic_input_id", "observation"}:
-            raise ValidationError(f"cases[{index}] contains unknown fields")
+        required = {"case_id", "prompt_token_ids", "step_count"}
+        allowed = required | {"semantic_input_id", "observation"}
+        if not isinstance(case, dict) or not required <= set(case) or set(case) - allowed:
+            raise ValidationError(f"cases[{index}] fields differ")
         case_id = case.get("case_id")
         if not isinstance(case_id, str) or not case_id or case_id in seen:
             raise ValidationError("case IDs must be unique non-empty strings")
@@ -162,19 +219,24 @@ def load_cases(path: Path) -> tuple[list[dict[str, Any]], str]:
         rows += step_count
         if rows > MAX_ROWS:
             raise ValidationError("calibration row count exceeds bound")
-        cases.append({"case_id": case_id, "prompt_token_ids": normalized_tokens, "step_count": step_count, "semantic_input_id": case.get("semantic_input_id", case_id), "observation": case.get("observation", "first_token")})
+        semantic = case.get("semantic_input_id", case_id)
+        observation = case.get("observation", "first_token")
+        if not isinstance(semantic, str) or not semantic or not isinstance(observation, str) or not observation:
+            raise ValidationError(f"cases[{index}] semantic fields are invalid")
+        cases.append({"case_id": case_id, "prompt_token_ids": normalized_tokens, "step_count": step_count, "semantic_input_id": semantic, "observation": observation})
     return cases, sha256_file(path, "calibration cases")
 
 
-def read_f32_chunks(handle: Any, offset: int, elements: int, chunk_elements: int) -> Iterator[list[float]]:
-    handle.seek(offset)
+def read_f32_chunks(fd: int, offset: int, elements: int, chunk_elements: int) -> Iterator[list[float]]:
     remaining = elements
+    cursor = offset
     while remaining:
         count = min(remaining, chunk_elements)
-        raw = handle.read(count * F32_BYTES)
+        raw = os.pread(fd, count * F32_BYTES, cursor)
         if len(raw) != count * F32_BYTES:
             raise ValidationError("vector sidecar ended before row boundary")
         yield list(struct.unpack(f"<{count}f", raw))
+        cursor += len(raw)
         remaining -= count
 
 
@@ -245,18 +307,75 @@ def row_fields(row: Any, label: str) -> dict[str, Any]:
             raise ValidationError(f"{label}.{name}.offset_bytes is not aligned")
         ensure_sha(item["sha256"], f"{label}.{name}.sha256")
         integer(item["nonfinite_count"], f"{label}.{name}.nonfinite_count")
-    integer(row["greedy_token_id"], f"{label}.greedy_token_id", 0, VOCAB_SIZE - 1)
-    validate_topk(row["topk"], f"{label}.topk", TOP_K)
-    if row["topk"][0]["token_id"] != row["greedy_token_id"] or not isinstance(row["finite"], bool):
-        raise ValidationError(f"{label} greedy/finite fields differ")
+    if not isinstance(row["finite"], bool):
+        raise ValidationError(f"{label}.finite must be boolean")
+    vector_finite = row["hidden"]["nonfinite_count"] == 0 and row["logits"]["nonfinite_count"] == 0
+    if vector_finite:
+        integer(row["greedy_token_id"], f"{label}.greedy_token_id", 0, VOCAB_SIZE - 1)
+        validate_topk(row["topk"], f"{label}.topk", TOP_K)
+        if row["topk"][0]["token_id"] != row["greedy_token_id"] or row["finite"] is not True:
+            raise ValidationError(f"{label} greedy/finite fields differ")
+    elif row["greedy_token_id"] is not None or row["topk"] is not None or row["finite"] is not False:
+        raise ValidationError(f"{label} blocked rows must use null greedy/top-k")
     return row
 
 
+def read_rows(path: Path, parser: Any = row_fields) -> dict[tuple[str, int], dict[str, Any]]:
+    rows: dict[tuple[str, int], dict[str, Any]] = {}
+    with stable_fd(path, "rows file", max_bytes=MAX_ROWS_FILE_BYTES) as (fd, _):
+        pending = b""
+        line_number = 0
+        while True:
+            chunk = os.read(fd, 64 * 1024)
+            if not chunk:
+                break
+            pending += chunk
+            if len(pending) > MAX_ROW_LINE_BYTES and b"\n" not in pending:
+                raise ValidationError("rows line exceeds byte bound")
+            while b"\n" in pending:
+                raw, pending = pending.split(b"\n", 1)
+                line_number += 1
+                if not raw or len(raw) > MAX_ROW_LINE_BYTES:
+                    raise ValidationError(f"rows line {line_number} is empty or oversized")
+                try:
+                    value = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValidationError(f"invalid rows JSON at line {line_number}: {error}") from error
+                row = parser(value, f"rows[{line_number}]")
+                key = (row["case_id"], row["step"])
+                if key in rows:
+                    raise ValidationError("rows contain duplicate case/step")
+                rows[key] = row
+                if len(rows) > MAX_ROWS:
+                    raise ValidationError("rows exceed row-count bound")
+        if pending:
+            line_number += 1
+            if len(pending) > MAX_ROW_LINE_BYTES:
+                raise ValidationError("rows final line exceeds byte bound")
+            try:
+                value = json.loads(pending.decode("utf-8"), object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValidationError(f"invalid rows JSON at line {line_number}: {error}") from error
+            row = parser(value, f"rows[{line_number}]")
+            key = (row["case_id"], row["step"])
+            if key in rows:
+                raise ValidationError("rows contain duplicate case/step")
+            rows[key] = row
+        if not rows:
+            raise ValidationError("rows file is empty")
+    return rows
+
+
 def verify_sha_sums(root: Path, expected_files: set[str]) -> None:
-    sums_path = regular(root / "SHA256SUMS", "SHA256SUMS", max_bytes=8 * 1024 * 1024)
+    sums_path = root / "SHA256SUMS"
     entries: dict[str, str] = {}
-    before = stat_identity(sums_path)
-    for line_number, line in enumerate(sums_path.read_text(encoding="ascii").splitlines(), 1):
+    with stable_fd(sums_path, "SHA256SUMS", max_bytes=MAX_SHA_SUMS_BYTES) as (fd, _):
+        raw = read_fd_all(fd, MAX_SHA_SUMS_BYTES, "SHA256SUMS")
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValidationError(f"SHA256SUMS must be ASCII: {error}") from error
+    for line_number, line in enumerate(lines, 1):
         fields = line.split("  ", 1)
         if len(fields) != 2:
             raise ValidationError(f"SHA256SUMS line {line_number} is invalid")
@@ -265,12 +384,45 @@ def verify_sha_sums(root: Path, expected_files: set[str]) -> None:
         if name in entries:
             raise ValidationError("SHA256SUMS contains duplicate path")
         entries[name] = digest
-    if before != stat_identity(sums_path) or entries.keys() != expected_files:
+    if set(entries) != expected_files:
         raise ValidationError("SHA256SUMS file set differs")
     for name, expected in entries.items():
         path = relative_path(root, name, f"SHA256SUMS {name}")
         if sha256_file(path, name) != expected:
             raise ValidationError(f"SHA256SUMS digest differs for {name}")
+
+
+def artifact_inventory(root: Path, expected_files: set[str]) -> None:
+    expected_dirs = {""}
+    for name in expected_files:
+        parent = Path(name).parent
+        while parent.as_posix() not in {".", ""}:
+            expected_dirs.add(parent.as_posix())
+            parent = parent.parent
+    actual_files: set[str] = set()
+    actual_dirs: set[str] = {""}
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        base = Path(current)
+        for name in list(directories):
+            path = base / name
+            rel = path.relative_to(root).as_posix()
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                raise ValidationError(f"artifact contains symlink: {rel}")
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValidationError(f"artifact contains non-directory: {rel}")
+            actual_dirs.add(rel)
+        for name in files:
+            path = base / name
+            rel = path.relative_to(root).as_posix()
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                raise ValidationError(f"artifact contains symlink: {rel}")
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValidationError(f"artifact file is not single-link regular: {rel}")
+            actual_files.add(rel)
+    if actual_files != expected_files or actual_dirs != expected_dirs:
+        raise ValidationError(f"artifact exact file set differs: files={sorted(actual_files ^ expected_files)} dirs={sorted(actual_dirs ^ expected_dirs)}")
 
 
 def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int], dict[str, Any]], hidden_path: Path, logits_path: Path) -> dict[str, Any]:
@@ -287,7 +439,7 @@ def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int
     checked = 0
     hidden_max = 0.0
     logits_max = 0.0
-    with hidden_path.open("rb") as hidden, logits_path.open("rb") as logit:
+    with stable_fd(hidden_path, "hidden sidecar") as (hidden, _), stable_fd(logits_path, "logits sidecar") as (logit, _):
         for old in legacy_oracle.payload_records(legacy_manifest_path.parent, legacy):
             row = rows.get((old["case_id"], old["step"]))
             if row is None:
@@ -298,109 +450,158 @@ def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int
                 raise ValidationError("parent hidden row length differs")
             for index, expected in zip(old["hidden_sample"]["indices"], old["hidden_sample"]["values"]):
                 hidden_max = max(hidden_max, abs(hidden_values[index] - float(expected)))
-            logit_values: list[float] = []
-            for chunk in read_f32_chunks(logit, row["logits"]["offset_bytes"], VOCAB_SIZE, 65536):
-                logit_values.extend(chunk)
             for index, expected in zip(old["logit_sample"]["indices"], old["logit_sample"]["values"]):
-                logits_max = max(logits_max, abs(logit_values[index] - float(expected)))
+                raw = os.pread(logit, F32_BYTES, row["logits"]["offset_bytes"] + index * F32_BYTES)
+                if len(raw) != F32_BYTES:
+                    raise ValidationError("parent logit sample is truncated")
+                logits_max = max(logits_max, abs(struct.unpack("<f", raw)[0] - float(expected)))
             if row["greedy_token_id"] != old["greedy_token_id"] or row["topk"] != old["topk"]:
                 raise ValidationError(f"parent sampled top-k/greedy differs: {old['case_id']}/{old['step']}")
             checked += 1
     return {"status": "passed", "legacy_manifest_sha256": sha256_file(legacy_manifest_path, "parent sampled manifest"), "legacy_payload_sha256": legacy["payload"]["sha256"], "row_count": checked, "hidden_sample_max_abs_diff": hidden_max, "logit_sample_max_abs_diff": logits_max}
 
 
-def validate(root: Path) -> dict[str, Any]:
-    if root.is_symlink() or not root.is_dir():
-        raise ValidationError("artifact root must be a real directory")
-    manifest = read_json(root / "manifest.json", "calibration manifest", max_bytes=16 * 1024 * 1024)
-    expected = {"schema_version", "oracle_kind", "status", "evidence_class", "usable_as_source_evidence", "promotion_eligible", "created_utc", "identity", "parent_sampled_oracle", "vector_contract", "limits", "cases", "files", "runtime", "legacy_cross_check"}
-    if not isinstance(manifest, dict) or set(manifest) != expected or manifest["schema_version"] != SCHEMA or manifest["oracle_kind"] != ORACLE_KIND:
-        raise ValidationError("calibration manifest fields/schema differ")
+ROOT_FIELDS = {"schema_version", "oracle_kind", "status", "evidence_class", "usable_as_source_evidence", "promotion_eligible", "created_utc", "identity", "parent_sampled_oracle", "vector_contract", "limits", "cases", "files", "runtime", "legacy_cross_check"}
+
+
+def _file_records(value: Any, label: str) -> None:
+    if not isinstance(value, list):
+        raise ValidationError(f"{label} must be a list")
+    for index, item in enumerate(value):
+        exact_fields(item, {"file", "bytes", "sha256"}, f"{label}[{index}]")
+        if not isinstance(item["file"], str) or not item["file"]:
+            raise ValidationError(f"{label}[{index}].file is invalid")
+        integer(item["bytes"], f"{label}[{index}].bytes")
+        ensure_sha(item["sha256"], f"{label}[{index}].sha256")
+
+
+def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
+    manifest = exact_fields(manifest, ROOT_FIELDS, "manifest")
+    if manifest["schema_version"] not in schemas:
+        raise ValidationError("calibration manifest schema differs")
+    allowed_kinds = {"independent_source_full", "aq4_target", "same_artifact_all_m1", "aq4_optimized"}
+    if manifest["oracle_kind"] not in allowed_kinds:
+        raise ValidationError("calibration oracle kind differs")
     if manifest["status"] not in {"available", "blocked"} or manifest["evidence_class"] not in {"production", "blocked", "synthetic_fixture"} or not isinstance(manifest["usable_as_source_evidence"], bool) or manifest["promotion_eligible"] is not False:
         raise ValidationError("calibration status/evidence fields differ")
     legacy_oracle.validate_utc(manifest["created_utc"])
-    identity = exact_fields(manifest["identity"], {"artifact", "model_id", "model_revision", "source_checkpoint", "tokenizer", "hidden_size", "vocab_size"}, "identity")
-    exact_fields(identity["artifact"], {"package_manifest_sha256", "artifact_manifest_sha256"}, "identity.artifact")
-    exact_fields(identity["source_checkpoint"], {"aggregate_sha256", "dtype", "files", "root"}, "identity.source_checkpoint")
-    exact_fields(identity["tokenizer"], {"aggregate_sha256", "files", "root"}, "identity.tokenizer")
-    if identity.get("model_id") != "Qwen/Qwen3.5-9B" or identity.get("hidden_size") != HIDDEN_SIZE or identity.get("vocab_size") != VOCAB_SIZE:
+    base_identity = {"artifact", "model_id", "model_revision", "source_checkpoint", "tokenizer", "hidden_size", "vocab_size"}
+    target_extra = {"package_content_sha256", "package_manifest_sha256", "worker_binary_sha256"}
+    identity_keys = set(manifest["identity"]) if isinstance(manifest["identity"], dict) else set()
+    expected_identity = base_identity if manifest["schema_version"] == SCHEMA else base_identity | target_extra
+    if identity_keys != expected_identity:
+        raise ValidationError("identity fields differ")
+    identity = manifest["identity"]
+    artifact = exact_fields(identity["artifact"], {"package_manifest_sha256", "artifact_manifest_sha256"}, "identity.artifact")
+    for key, value in artifact.items():
+        if value is not None:
+            ensure_sha(value, f"identity.artifact.{key}")
+    checkpoint = exact_fields(identity["source_checkpoint"], {"aggregate_sha256", "dtype", "files", "root"}, "identity.source_checkpoint")
+    tokenizer = exact_fields(identity["tokenizer"], {"aggregate_sha256", "files", "root"}, "identity.tokenizer")
+    if identity["model_id"] != "Qwen/Qwen3.5-9B" or not isinstance(identity["model_revision"], str) or identity["hidden_size"] != HIDDEN_SIZE or identity["vocab_size"] != VOCAB_SIZE:
         raise ValidationError("calibration model/vector identity differs")
-    ensure_sha(identity["source_checkpoint"]["aggregate_sha256"], "source checkpoint aggregate")
-    ensure_sha(identity["tokenizer"]["aggregate_sha256"], "tokenizer aggregate")
+    ensure_sha(checkpoint["aggregate_sha256"], "source checkpoint aggregate")
+    ensure_sha(tokenizer["aggregate_sha256"], "tokenizer aggregate")
+    _file_records(checkpoint["files"], "identity.source_checkpoint.files")
+    _file_records(tokenizer["files"], "identity.tokenizer.files")
+    if not isinstance(checkpoint["dtype"], str) or not isinstance(checkpoint["root"], str) or not isinstance(tokenizer["root"], str):
+        raise ValidationError("checkpoint/tokenizer metadata differs")
+    for key in target_extra & identity_keys:
+        ensure_sha(identity[key], f"identity.{key}")
+    parent = exact_fields(manifest["parent_sampled_oracle"], {"path", "manifest_sha256", "schema_version"}, "parent_sampled_oracle")
+    if not isinstance(parent["path"], str) or not Path(parent["path"]).is_absolute() or parent["schema_version"] != legacy_oracle.SOURCE_SCHEMA:
+        raise ValidationError("parent sampled oracle binding differs")
+    ensure_sha(parent["manifest_sha256"], "parent sampled oracle manifest")
     contract = exact_fields(manifest["vector_contract"], {"hidden_shape", "logits_shape", "dtype", "endianness", "layout", "chunk_elements", "row_bytes", "semantic_hidden", "semantic_logits"}, "vector_contract")
-    if not isinstance(contract, dict) or contract.get("hidden_shape") != [HIDDEN_SIZE] or contract.get("logits_shape") != [VOCAB_SIZE] or contract.get("dtype") != "f32" or contract.get("endianness") != "little" or contract.get("layout") != "flat" or integer(contract.get("chunk_elements"), "chunk_elements", 1, MAX_CHUNK_ELEMENTS) <= 0 or contract.get("row_bytes") != ROW_BYTES:
+    if contract["hidden_shape"] != [HIDDEN_SIZE] or contract["logits_shape"] != [VOCAB_SIZE] or contract["dtype"] != "f32" or contract["endianness"] != "little" or contract["layout"] != "flat" or integer(contract["chunk_elements"], "chunk_elements", 1, MAX_CHUNK_ELEMENTS) <= 0 or contract["row_bytes"] != ROW_BYTES or not isinstance(contract["semantic_hidden"], str) or not isinstance(contract["semantic_logits"], str):
         raise ValidationError("vector contract differs")
     limits = exact_fields(manifest["limits"], {"max_case_file_bytes", "max_cases", "max_rows", "max_steps"}, "limits")
     for field, upper in (("max_case_file_bytes", MAX_CASE_FILE_BYTES), ("max_cases", MAX_CASES), ("max_rows", MAX_ROWS), ("max_steps", MAX_STEPS)):
-        if integer(limits.get(field), f"limits.{field}", 1, upper) <= 0:
-            raise ValidationError(f"limits.{field} is invalid")
-    files = exact_fields(manifest["files"], {"rows", "hidden", "logits"}, "files")
-    if not isinstance(files, dict) or set(files) != {"rows", "hidden", "logits"}:
-        raise ValidationError("calibration file map differs")
+        integer(limits[field], f"limits.{field}", 1, upper)
+    cases = exact_fields(manifest["cases"], {"path", "sha256", "case_count", "row_count"}, "cases")
+    if not isinstance(cases["path"], str) or not Path(cases["path"]).is_absolute():
+        raise ValidationError("cases.path must be absolute")
+    ensure_sha(cases["sha256"], "cases.sha256")
+    integer(cases["case_count"], "cases.case_count", 1, MAX_CASES)
+    integer(cases["row_count"], "cases.row_count", 1, MAX_ROWS)
+    exact_fields(manifest["files"], {"rows", "hidden", "logits"}, "files")
+    runtime = exact_fields(manifest["runtime"], {"runtime", "transformers", "torch", "safetensors", "python", "device", "dtype", "low_cpu_mem_usage", "torch_num_threads", "torch_num_interop_threads", "model_loads", "inference_mode", "full_vocab_ranking", "max_resident_logit_rows", "memory_preflight", "disk_preflight", "run"}, "runtime")
+    exact_fields(runtime["memory_preflight"], {"checkpoint_bytes", "mem_total_bytes", "mem_available_bytes", "required_headroom_bytes", "headroom_factor", "status"}, "runtime.memory_preflight")
+    exact_fields(runtime["disk_preflight"], {"expected_vector_bytes", "required_free_bytes", "free_bytes", "status"}, "runtime.disk_preflight")
+    exact_fields(runtime["run"], {"row_count", "nonfinite_rows", "elapsed_seconds"}, "runtime.run")
+    exact_fields(manifest["legacy_cross_check"], {"status", "legacy_manifest_sha256", "legacy_payload_sha256", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}, "legacy_cross_check")
+    return manifest
+
+
+def validate(root: Path) -> dict[str, Any]:
+    no_symlink_components(root, "artifact root")
+    root_info = os.lstat(root)
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise ValidationError("artifact root must be a real directory")
+    manifest = validate_manifest_shape(read_json(root / "manifest.json", "calibration manifest", max_bytes=MAX_MANIFEST_BYTES), {SCHEMA})
+    if manifest["oracle_kind"] != ORACLE_KIND:
+        raise ValidationError("source calibration oracle kind differs")
+    files = manifest["files"]
     rows_path = relative_path(root, files["rows"], "rows file")
     hidden_path = relative_path(root, files["hidden"], "hidden file")
     logits_path = relative_path(root, files["logits"], "logits file")
-    cases_path = Path(manifest["cases"].get("path", ""))
+    expected_artifact_files = {"manifest.json", "SHA256SUMS", files["rows"], files["hidden"], files["logits"]}
+    artifact_inventory(root, expected_artifact_files)
+    cases_path = Path(manifest["cases"]["path"])
     cases, cases_sha = load_cases(cases_path)
-    if manifest["cases"].get("sha256") != cases_sha or manifest["cases"].get("case_count") != len(cases) or manifest["cases"].get("row_count") != sum(case["step_count"] for case in cases):
+    if manifest["cases"]["sha256"] != cases_sha or manifest["cases"]["case_count"] != len(cases):
         raise ValidationError("calibration cases binding differs")
-    rows: dict[tuple[str, int], dict[str, Any]] = {}
-    with rows_path.open("r", encoding="utf-8") as source:
-        for line_number, line in enumerate(source, 1):
-            try:
-                row = row_fields(json.loads(line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite), f"rows[{line_number}]")
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ValidationError(f"invalid rows JSON at line {line_number}: {error}") from error
-            key = (row["case_id"], row["step"])
-            if key in rows:
-                raise ValidationError("rows contain duplicate case/step")
-            rows[key] = row
+    rows = read_rows(rows_path)
     expected_keys = {(case["case_id"], step) for case in cases for step in range(case["step_count"])}
-    if set(rows) != expected_keys:
+    if manifest["cases"]["row_count"] != len(rows):
+        raise ValidationError("calibration cases row binding differs")
+    if manifest["status"] == "available" and set(rows) != expected_keys:
         raise ValidationError("rows case/step coverage differs")
-    hidden_size = hidden_path.stat().st_size
-    logits_size = logits_path.stat().st_size
-    if hidden_size != len(rows) * HIDDEN_SIZE * F32_BYTES or logits_size != len(rows) * VOCAB_SIZE * F32_BYTES:
-        raise ValidationError("vector sidecar size differs from row count")
+    if manifest["status"] == "blocked" and not set(rows) <= expected_keys:
+        raise ValidationError("blocked rows exceed case/step coverage")
     previous_hidden = previous_logits = 0
     nonfinite_rows = 0
-    chunk_elements = contract["chunk_elements"]
-    with hidden_path.open("rb") as hidden, logits_path.open("rb") as logits:
+    chunk_elements = manifest["vector_contract"]["chunk_elements"]
+    expected_hidden_bytes = len(rows) * HIDDEN_SIZE * F32_BYTES
+    expected_logits_bytes = len(rows) * VOCAB_SIZE * F32_BYTES
+    with stable_fd(hidden_path, "hidden sidecar", max_bytes=expected_hidden_bytes) as (hidden, hidden_info), stable_fd(logits_path, "logits sidecar", max_bytes=expected_logits_bytes) as (logits, logits_info):
+        if hidden_info.st_size != expected_hidden_bytes or logits_info.st_size != expected_logits_bytes:
+            raise ValidationError("vector sidecar size differs from row count")
         for key in sorted(rows):
             row = rows[key]
             if row["hidden"]["offset_bytes"] != previous_hidden or row["logits"]["offset_bytes"] != previous_logits:
                 raise ValidationError("vector offsets are not contiguous")
-            for name, handle, elements, item in (("hidden", hidden, HIDDEN_SIZE, row["hidden"]), ("logits", logits, VOCAB_SIZE, row["logits"])):
+            for name, fd, elements, item in (("hidden", hidden, HIDDEN_SIZE, row["hidden"]), ("logits", logits, VOCAB_SIZE, row["logits"])):
                 digest = hashlib.sha256()
-                finite_count = 0
-                value_count = 0
-                for chunk in read_f32_chunks(handle, item["offset_bytes"], elements, chunk_elements):
+                nonfinite = value_count = 0
+                for chunk in read_f32_chunks(fd, item["offset_bytes"], elements, chunk_elements):
                     encoded = struct.pack(f"<{len(chunk)}f", *chunk)
                     digest.update(encoded)
-                    finite_count += sum(1 for value in chunk if not math.isfinite(value))
+                    nonfinite += sum(1 for value in chunk if not math.isfinite(value))
                     value_count += len(chunk)
-                if digest.hexdigest() != item["sha256"] or value_count != elements or finite_count != item["nonfinite_count"]:
+                if digest.hexdigest() != item["sha256"] or value_count != elements or nonfinite != item["nonfinite_count"]:
                     raise ValidationError(f"{name} row hash/nonfinite differs for {key}")
                 if name == "hidden":
                     previous_hidden += item["bytes"]
                 else:
                     previous_logits += item["bytes"]
-            if row["hidden"]["nonfinite_count"] or row["logits"]["nonfinite_count"]:
-                nonfinite_rows += 1
-            # Ranking validation is a second bounded pass over the logit row.
-            ranked = topk_from_chunks(read_f32_chunks(logits, row["logits"]["offset_bytes"], VOCAB_SIZE, chunk_elements), VOCAB_SIZE, TOP_K)
-            if ranked != row["topk"]:
-                raise ValidationError(f"top-k ranking differs for {key}")
-    parent_check = legacy_check(root, manifest, rows, hidden_path, logits_path)
-    exact_fields(manifest["legacy_cross_check"], {"status", "legacy_manifest_sha256", "legacy_payload_sha256", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}, "legacy_cross_check")
-    if manifest["legacy_cross_check"] != parent_check:
-        raise ValidationError("legacy cross-check summary differs")
-    expected_sidecars = {files["rows"], files["hidden"], files["logits"], "manifest.json"}
-    actual_files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and not path.is_symlink()}
-    if "SHA256SUMS" not in actual_files:
-        raise ValidationError("SHA256SUMS is missing")
-    verify_sha_sums(root, actual_files - {"SHA256SUMS"})
-    return {"schema_version": SCHEMA, "status": "valid" if nonfinite_rows == 0 else "blocked", "artifact_root": str(root.resolve()), "manifest_sha256": sha256_file(root / "manifest.json", "manifest"), "row_count": len(rows), "nonfinite_rows": nonfinite_rows, "legacy_cross_check": parent_check}
+            row_nonfinite = row["hidden"]["nonfinite_count"] + row["logits"]["nonfinite_count"] > 0
+            nonfinite_rows += int(row_nonfinite)
+            if not row_nonfinite:
+                ranked = topk_from_chunks(read_f32_chunks(logits, row["logits"]["offset_bytes"], VOCAB_SIZE, chunk_elements), VOCAB_SIZE, TOP_K)
+                if ranked != row["topk"]:
+                    raise ValidationError(f"top-k ranking differs for {key}")
+    blocked = nonfinite_rows > 0
+    if (manifest["status"] == "blocked") != blocked or (manifest["evidence_class"] == "blocked") != blocked or manifest["usable_as_source_evidence"] == blocked or manifest["runtime"]["run"]["nonfinite_rows"] != nonfinite_rows:
+        raise ValidationError("manifest blocked status differs from vector finiteness")
+    if blocked:
+        parent_check = manifest["legacy_cross_check"]
+    else:
+        parent_check = legacy_check(root, manifest, rows, hidden_path, logits_path)
+        if manifest["legacy_cross_check"] != parent_check:
+            raise ValidationError("legacy cross-check summary differs")
+    verify_sha_sums(root, expected_artifact_files - {"SHA256SUMS"})
+    return {"schema_version": SCHEMA, "status": "blocked" if blocked else "valid", "artifact_root": str(root.resolve()), "manifest_sha256": sha256_file(root / "manifest.json", "manifest"), "row_count": len(rows), "nonfinite_rows": nonfinite_rows, "legacy_cross_check": parent_check}
 
 
 def main(argv: list[str] | None = None) -> int:
