@@ -383,7 +383,7 @@ def test_canonical_execute_binding_pins_launcher_self_and_remains_blocked() -> N
     assert binding["actual_eligible"] is False
     assert trust["actual_eligible"] is False and trust["status"] == "qa_pending"
     assert trust["sha256"] == LAUNCHER.sha_bytes(SCRIPT.read_bytes())
-    assert trust["commit"] == "bb7a5fb00c453d911cd0ccb9499a47863c6eb07c"
+    assert trust["commit"] == "bdb06083ca3646c8f934fea10dac691a6efd4626"
 
 
 def test_execute_rejects_untrusted_launcher_self_before_output_creation(tmp_path: Path) -> None:
