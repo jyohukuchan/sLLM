@@ -22,6 +22,12 @@ pub const QWEN3_EMBED_TOKENS_TENSOR: &str = "model.language_model.embed_tokens.w
 pub const QWEN3_FINAL_NORM_TENSOR: &str = "model.language_model.norm.weight";
 pub const QWEN3_LM_HEAD_TENSOR: &str = "lm_head.weight";
 
+/// Number of f32 values exposed by one calibration visitor call.
+///
+/// Calibration is deliberately chunked: callers may reduce a complete hidden/logit vector, but
+/// cannot retain a borrow into the runtime-owned staging buffer after the callback returns.
+pub const QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageTokenLogit {
     pub token_id: usize,
@@ -594,6 +600,53 @@ impl PackageLmHeadRuntime {
         }
     }
 
+    /// Copies the already-produced resident logit row to the runtime-owned host staging buffer
+    /// and visits it in monotonically increasing token-id chunks.
+    ///
+    /// This never launches the LM head again and allocates no second vocabulary-sized vector.
+    /// It is intended only for an opt-in calibration path after `top_logits_from_device_buffer`
+    /// has produced the current prepared token's logits.
+    pub fn visit_last_device_logits(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        visitor: &mut dyn FnMut(usize, &[f32]) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        let (vocab, logits_buffer, logits_host) = match self {
+            Self::CpuChunked { .. } => {
+                return Err(
+                    "calibration logit observation requires a resident device LM head".into(),
+                );
+            }
+            Self::GpuResidentAq4 {
+                vocab,
+                logits_buffer,
+                logits_host,
+                ..
+            }
+            | Self::GpuResidentF32 {
+                vocab,
+                logits_buffer,
+                logits_host,
+                ..
+            } => (*vocab, logits_buffer, logits_host),
+        };
+        let expected_bytes = checked_f32_byte_len(vocab, "calibration logits")?;
+        if logits_host.len() != expected_bytes {
+            return Err(format!(
+                "calibration logit host staging length differs: got {} expected {expected_bytes}",
+                logits_host.len()
+            ));
+        }
+        logits_buffer
+            .copy_to_host(0, logits_host, Some(stream))
+            .map_err(|err| format!("failed to copy calibration logits: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize calibration logits: {err}"))?;
+        visit_f32_bytes_in_chunks(logits_host, vocab, "calibration logits", visitor)?;
+        Ok(vocab)
+    }
+
     pub fn report_json(&self, load_ms: f64) -> serde_json::Value {
         match self {
             Self::CpuChunked { chunk_rows } => serde_json::json!({
@@ -1037,6 +1090,38 @@ impl PackageFinalNormRuntime {
         &self.output_buffer
     }
 
+    /// Visits the current post-final-RMSNorm hidden row without allocating a hidden-sized host
+    /// vector. Each device-to-host chunk is synchronized before its borrowed f32 view is exposed.
+    pub fn visit_last_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        visitor: &mut dyn FnMut(usize, &[f32]) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        let mut bytes =
+            [0_u8; QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS * std::mem::size_of::<f32>()];
+        let mut values = [0.0_f32; QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS];
+        let mut start = 0_usize;
+        while start < self.hidden {
+            let elements = (self.hidden - start).min(QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS);
+            let byte_len = checked_f32_byte_len(elements, "calibration hidden chunk")?;
+            let byte_offset = checked_f32_byte_len(start, "calibration hidden offset")?;
+            self.output_buffer
+                .copy_to_host(byte_offset, &mut bytes[..byte_len], Some(stream))
+                .map_err(|err| {
+                    format!("failed to copy calibration hidden chunk at {start}: {err}")
+                })?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize calibration hidden chunk at {start}: {err}")
+            })?;
+            decode_f32_chunk(&bytes[..byte_len], &mut values[..elements]);
+            visitor(start, &values[..elements])?;
+            start = start
+                .checked_add(elements)
+                .ok_or_else(|| "calibration hidden visitor offset overflows".to_string())?;
+        }
+        Ok(self.hidden)
+    }
+
     pub fn report_json(&self) -> serde_json::Value {
         serde_json::json!({
             "mode": "gpu_resident_f32",
@@ -1408,6 +1493,44 @@ fn package_top_logits_from_f32_bytes(
     Ok(top_logits)
 }
 
+fn decode_f32_chunk(bytes: &[u8], values: &mut [f32]) {
+    debug_assert_eq!(bytes.len(), values.len() * std::mem::size_of::<f32>());
+    for (value, chunk) in values
+        .iter_mut()
+        .zip(bytes.chunks_exact(std::mem::size_of::<f32>()))
+    {
+        *value = f32::from_le_bytes(chunk.try_into().expect("f32 chunk"));
+    }
+}
+
+fn visit_f32_bytes_in_chunks(
+    bytes: &[u8],
+    expected_elements: usize,
+    label: &str,
+    visitor: &mut dyn FnMut(usize, &[f32]) -> Result<(), String>,
+) -> Result<(), String> {
+    let expected_bytes = checked_f32_byte_len(expected_elements, label)?;
+    if bytes.len() != expected_bytes {
+        return Err(format!(
+            "{label} byte length differs: got {} expected {expected_bytes}",
+            bytes.len()
+        ));
+    }
+    let mut values = [0.0_f32; QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS];
+    for (chunk_index, chunk) in bytes
+        .chunks(QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS * std::mem::size_of::<f32>())
+        .enumerate()
+    {
+        let elements = chunk.len() / std::mem::size_of::<f32>();
+        decode_f32_chunk(chunk, &mut values[..elements]);
+        let start = chunk_index
+            .checked_mul(QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS)
+            .ok_or_else(|| format!("{label} visitor offset overflows"))?;
+        visitor(start, &values[..elements])?;
+    }
+    Ok(())
+}
+
 fn package_top1_from_partial_bytes(
     partial_value_bytes: &[u8],
     partial_index_bytes: &[u8],
@@ -1559,6 +1682,58 @@ mod tests {
         for value in ["", "0", "false", "True", "on"] {
             assert!(!flag_value_enabled(value));
         }
+    }
+
+    #[test]
+    fn calibration_byte_visitor_is_chunked_and_token_ordered() {
+        let element_count = QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS * 2 + 7;
+        let bytes = (0..element_count)
+            .flat_map(|value| (value as f32).to_le_bytes())
+            .collect::<Vec<_>>();
+        let mut starts = Vec::new();
+        let mut observed = Vec::new();
+        visit_f32_bytes_in_chunks(
+            &bytes,
+            element_count,
+            "test calibration logits",
+            &mut |start, values| {
+                starts.push((start, values.len()));
+                observed.extend_from_slice(values);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            starts,
+            vec![
+                (0, QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS),
+                (
+                    QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS,
+                    QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS
+                ),
+                (QWEN35_AQ4_CALIBRATION_VISIT_CHUNK_ELEMENTS * 2, 7),
+            ]
+        );
+        assert_eq!(observed.len(), element_count);
+        assert!(
+            observed
+                .iter()
+                .enumerate()
+                .all(|(index, value)| *value == index as f32)
+        );
+    }
+
+    #[test]
+    fn calibration_byte_visitor_rejects_length_and_stops_on_callback_failure() {
+        let bytes = [1.0_f32, 2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert!(visit_f32_bytes_in_chunks(&bytes, 3, "test", &mut |_, _| Ok(())).is_err());
+        let error =
+            visit_f32_bytes_in_chunks(&bytes, 2, "test", &mut |_, _| Err("observer closed".into()))
+                .unwrap_err();
+        assert_eq!(error, "observer closed");
     }
 
     #[test]

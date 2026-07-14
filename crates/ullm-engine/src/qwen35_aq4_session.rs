@@ -16,7 +16,9 @@ use crate::inference_api::{
     CancellationToken, FinishReason, InferenceRequest, ReasoningUsage, ReleaseOutcome,
     ReleaseSummary,
 };
-use crate::qwen35_aq4_model_runtime::{Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime};
+use crate::qwen35_aq4_model_runtime::{
+    Qwen35Aq4CalibrationObserver, Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime,
+};
 use crate::reasoning::{ReasoningPhase, ReasoningState};
 use crate::worker_driver::{InferenceSession, PublishedAdvance, SessionAdvance};
 use sha2::{Digest, Sha256};
@@ -500,6 +502,13 @@ pub trait Qwen35Aq4SessionModel {
 
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String>;
 
+    fn visit_last_generation_state(
+        &mut self,
+        _observer: &mut dyn Qwen35Aq4CalibrationObserver,
+    ) -> Result<(), String> {
+        Err("Qwen3.5 AQ4 session model does not support calibration observation".into())
+    }
+
     fn reset_all_request_state_synchronized(&mut self) -> Result<(), String>;
 
     fn shutdown_synchronized(&mut self) -> Result<(), String> {
@@ -611,6 +620,13 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
         Ok(top.token_id)
     }
 
+    fn visit_last_generation_state(
+        &mut self,
+        observer: &mut dyn Qwen35Aq4CalibrationObserver,
+    ) -> Result<(), String> {
+        Qwen35Aq4ModelRuntime::visit_last_generation_state(self, observer)
+    }
+
     fn take_failed_operation_executions(&mut self) -> Vec<[Option<OperationExecutionRecord>; 2]> {
         self.take_last_partial_operation_executions()
     }
@@ -653,6 +669,102 @@ pub struct Qwen35Aq4PreparedToken {
     reasoning_tokens_before: usize,
     forced_end_tokens_before: usize,
     nonce: u64,
+}
+
+/// Immutable source-token sequence used only by the calibration replay path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen35Aq4CalibrationReplay {
+    source_sequence_sha256: String,
+    token_ids: Vec<usize>,
+}
+
+impl Qwen35Aq4CalibrationReplay {
+    pub fn new(
+        source_sequence_sha256: impl Into<String>,
+        token_ids: Vec<usize>,
+    ) -> Result<Self, String> {
+        let source_sequence_sha256 = source_sequence_sha256.into();
+        if source_sequence_sha256.len() != 64
+            || !source_sequence_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(
+                "Qwen3.5 AQ4 calibration source sequence SHA-256 must be lowercase hex".into(),
+            );
+        }
+        if token_ids.is_empty() {
+            return Err("Qwen3.5 AQ4 calibration replay sequence must not be empty".into());
+        }
+        let canonical_sha256 = Self::source_sequence_sha256_for_tokens(&token_ids)?;
+        if source_sequence_sha256 != canonical_sha256 {
+            return Err(format!(
+                "Qwen3.5 AQ4 calibration source sequence SHA-256 differs: declared={source_sequence_sha256} canonical={canonical_sha256}"
+            ));
+        }
+        Ok(Self {
+            source_sequence_sha256,
+            token_ids,
+        })
+    }
+
+    /// Hashes the fixed replay sequence as a domain tag, u64 token count, and u64 token ids, all
+    /// integer fields little-endian.
+    pub fn source_sequence_sha256_for_tokens(token_ids: &[usize]) -> Result<String, String> {
+        if token_ids.is_empty() {
+            return Err("Qwen3.5 AQ4 calibration replay sequence must not be empty".into());
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"ullm.qwen35_aq4.calibration_replay.v1\0");
+        let count = u64::try_from(token_ids.len())
+            .map_err(|_| "Qwen3.5 AQ4 calibration replay length exceeds u64".to_string())?;
+        digest.update(count.to_le_bytes());
+        for (index, token_id) in token_ids.iter().copied().enumerate() {
+            let token_id = u64::try_from(token_id).map_err(|_| {
+                format!("Qwen3.5 AQ4 calibration replay token at step {index} exceeds u64")
+            })?;
+            digest.update(token_id.to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut encoded = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "{byte:02x}").expect("writing SHA-256 to String cannot fail");
+        }
+        Ok(encoded)
+    }
+
+    pub fn source_sequence_sha256(&self) -> &str {
+        &self.source_sequence_sha256
+    }
+
+    pub fn token_ids(&self) -> &[usize] {
+        &self.token_ids
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen35Aq4CalibrationPreparedStep {
+    pub source_sequence_sha256: String,
+    pub predicted_token_id: usize,
+    pub committed_replay_token_id: usize,
+    pub generated_index: usize,
+    pub cache_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Qwen35Aq4CalibrationPublishedAdvance {
+    Token {
+        step: Qwen35Aq4CalibrationPreparedStep,
+        terminal_reason: Option<FinishReason>,
+    },
+    CancellationObserved,
+}
+
+#[derive(Debug)]
+struct ActiveCalibrationReplay {
+    replay: Qwen35Aq4CalibrationReplay,
+    observed_nonce: Option<u64>,
 }
 
 /// Compares one runtime implementation with the canonical load-time contract entry.
@@ -1463,6 +1575,7 @@ pub struct Qwen35Aq4InferenceSession<M = Qwen35Aq4ModelRuntime> {
     last_terminal_operation_audit: Option<OperationExecutionAudit>,
     active_lifecycle_observer: Option<Qwen35Aq4LifecycleObserver>,
     last_terminal_request_audit: Option<Qwen35Aq4RequestExecutionAudit>,
+    active_calibration_replay: Option<ActiveCalibrationReplay>,
 }
 
 impl Qwen35Aq4InferenceSession<Qwen35Aq4ModelRuntime> {
@@ -1498,6 +1611,7 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             last_terminal_operation_audit: None,
             active_lifecycle_observer: None,
             last_terminal_request_audit: None,
+            active_calibration_replay: None,
         })
     }
 
@@ -1529,6 +1643,204 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     /// when operation-contract accounting was enabled for the model.
     pub fn last_terminal_request_execution_audit(&self) -> Option<&Qwen35Aq4RequestExecutionAudit> {
         self.last_terminal_request_audit.as_ref()
+    }
+
+    /// Starts a diagnostic request whose decode history is committed from one immutable,
+    /// hash-bound source token sequence. The ordinary worker request path is unchanged.
+    pub fn start_calibration_request(
+        &mut self,
+        request: InferenceRequest,
+        cancel: CancellationToken,
+        replay: Qwen35Aq4CalibrationReplay,
+    ) -> Result<(), String> {
+        if self.status != Qwen35Aq4SessionStatus::Ready {
+            return Err(format!(
+                "Qwen3.5 AQ4 calibration start requires Ready, got {:?}",
+                self.status
+            ));
+        }
+        if request.reasoning.is_some() {
+            return Err("Qwen3.5 AQ4 calibration replay does not support reasoning state".into());
+        }
+        if request.max_new_tokens != replay.token_ids.len() {
+            return Err(format!(
+                "Qwen3.5 AQ4 calibration replay length {} differs from request max_new_tokens {}",
+                replay.token_ids.len(),
+                request.max_new_tokens
+            ));
+        }
+        for (index, token_id) in replay.token_ids.iter().copied().enumerate() {
+            if token_id >= self.model.vocab_size() {
+                return Err(format!(
+                    "Qwen3.5 AQ4 calibration replay token {token_id} at step {index} exceeds vocabulary size {}",
+                    self.model.vocab_size()
+                ));
+            }
+            if index + 1 < replay.token_ids.len() && self.config.eos_token_ids.contains(&token_id) {
+                return Err(format!(
+                    "Qwen3.5 AQ4 calibration replay contains terminal token {token_id} before final step {index}"
+                ));
+            }
+        }
+        <Self as InferenceSession>::start_request(self, request, cancel)?;
+        self.active_calibration_replay = Some(ActiveCalibrationReplay {
+            replay,
+            observed_nonce: None,
+        });
+        Ok(())
+    }
+
+    /// Visits exactly one currently pending prepared token. Stale, repeated, cancelled, or
+    /// non-calibration observations poison the active diagnostic request and require reset.
+    pub fn observe_prepared_calibration(
+        &mut self,
+        prepared: &Qwen35Aq4PreparedToken,
+        observer: &mut dyn Qwen35Aq4CalibrationObserver,
+    ) -> Result<Qwen35Aq4CalibrationPreparedStep, String> {
+        let step = match self.calibration_prepared_step(prepared, true) {
+            Ok(step) => step,
+            Err(error) if self.active_calibration_replay.is_some() => return self.fail(error),
+            Err(error) => return Err(error),
+        };
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.cancel.is_cancelled())
+        {
+            return self.fail("Qwen3.5 AQ4 calibration observation rejected cancellation");
+        }
+        if let Err(error) = self.model.visit_last_generation_state(observer) {
+            return self.fail(format!(
+                "Qwen3.5 AQ4 calibration observation failed: {error}"
+            ));
+        }
+        let calibration = self
+            .active_calibration_replay
+            .as_mut()
+            .expect("calibration state validated above");
+        calibration.observed_nonce = Some(prepared.nonce);
+        Ok(step)
+    }
+
+    /// Publishes the predicted token as diagnostic evidence while committing the hash-bound
+    /// replay token as the next model input.
+    pub fn publish_calibration_prepared<F>(
+        &mut self,
+        prepared: Qwen35Aq4PreparedToken,
+        publish: F,
+    ) -> Result<Qwen35Aq4CalibrationPublishedAdvance, String>
+    where
+        F: FnOnce(&Qwen35Aq4CalibrationPreparedStep) -> Result<(), String>,
+    {
+        let step = match self.calibration_prepared_step(&prepared, false) {
+            Ok(step) => step,
+            Err(error) if self.active_calibration_replay.is_some() => return self.fail(error),
+            Err(error) => return Err(error),
+        };
+        let next_generated = prepared
+            .generated_index
+            .checked_add(1)
+            .ok_or_else(|| "Qwen3.5 AQ4 calibration generated count overflows".to_string())?;
+        let max_new_tokens = self
+            .active
+            .as_ref()
+            .ok_or_else(|| "Qwen3.5 AQ4 calibration publication has no active request".to_string())?
+            .max_new_tokens;
+        let terminal_reason = if self
+            .config
+            .eos_token_ids
+            .contains(&step.committed_replay_token_id)
+        {
+            Some(FinishReason::Stop)
+        } else if next_generated == max_new_tokens {
+            Some(FinishReason::Length)
+        } else {
+            None
+        };
+        let mut replay_prepared = prepared;
+        replay_prepared.token_id = step.committed_replay_token_id;
+        replay_prepared.terminal_reason = terminal_reason;
+        self.pending = Some(replay_prepared.clone());
+
+        // Temporarily move the replay capability out so the ordinary publication transaction can
+        // be reused internally; external callers cannot bypass replay with `publish_prepared`.
+        let mut calibration = self
+            .active_calibration_replay
+            .take()
+            .expect("calibration state validated above");
+        calibration.observed_nonce = None;
+        let callback_step = step.clone();
+        let result = <Self as InferenceSession>::publish_prepared(
+            self,
+            replay_prepared,
+            |committed_token_id| {
+                if committed_token_id != callback_step.committed_replay_token_id {
+                    return Err("Qwen3.5 AQ4 calibration committed token changed".into());
+                }
+                publish(&callback_step)
+            },
+        );
+        self.active_calibration_replay = Some(calibration);
+        match result? {
+            PublishedAdvance::Token {
+                terminal_reason, ..
+            } => Ok(Qwen35Aq4CalibrationPublishedAdvance::Token {
+                step,
+                terminal_reason,
+            }),
+            PublishedAdvance::CancellationObserved => {
+                Ok(Qwen35Aq4CalibrationPublishedAdvance::CancellationObserved)
+            }
+        }
+    }
+
+    fn calibration_prepared_step(
+        &self,
+        prepared: &Qwen35Aq4PreparedToken,
+        require_unobserved: bool,
+    ) -> Result<Qwen35Aq4CalibrationPreparedStep, String> {
+        let calibration = self.active_calibration_replay.as_ref().ok_or_else(|| {
+            "Qwen3.5 AQ4 calibration observation has no source replay binding".to_string()
+        })?;
+        if self.status != Qwen35Aq4SessionStatus::PreparedToken {
+            return Err(format!(
+                "Qwen3.5 AQ4 calibration requires PreparedToken, got {:?}",
+                self.status
+            ));
+        }
+        if self.pending.as_ref() != Some(prepared) {
+            return Err("Qwen3.5 AQ4 calibration handle does not match pending token nonce".into());
+        }
+        if require_unobserved && calibration.observed_nonce.is_some() {
+            return Err("Qwen3.5 AQ4 calibration token was already observed".into());
+        }
+        if !require_unobserved && calibration.observed_nonce != Some(prepared.nonce) {
+            return Err(
+                "Qwen3.5 AQ4 calibration publication requires the matching observation".into(),
+            );
+        }
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| "Qwen3.5 AQ4 calibration has no active request".to_string())?;
+        if active.generated_tokens != prepared.generated_index {
+            return Err(
+                "Qwen3.5 AQ4 calibration prepared index does not match active request".into(),
+            );
+        }
+        let committed_replay_token_id = calibration
+            .replay
+            .token_ids
+            .get(prepared.generated_index)
+            .copied()
+            .ok_or_else(|| "Qwen3.5 AQ4 calibration replay sequence is exhausted".to_string())?;
+        Ok(Qwen35Aq4CalibrationPreparedStep {
+            source_sequence_sha256: calibration.replay.source_sequence_sha256.clone(),
+            predicted_token_id: prepared.token_id,
+            committed_replay_token_id,
+            generated_index: prepared.generated_index,
+            cache_len: prepared.cache_len,
+        })
     }
 
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, String> {
@@ -2004,6 +2316,7 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         }
         self.pending = None;
         self.active_lifecycle_observer = None;
+        self.active_calibration_replay = None;
         self.status = Qwen35Aq4SessionStatus::Ready;
         Ok(summary)
     }
@@ -2206,6 +2519,11 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
     where
         F: FnOnce(usize) -> Result<(), String>,
     {
+        if self.active_calibration_replay.is_some() {
+            return Err(
+                "Qwen3.5 AQ4 calibration token requires publish_calibration_prepared".into(),
+            );
+        }
         if self.status != Qwen35Aq4SessionStatus::PreparedToken {
             return Err(format!(
                 "Qwen3.5 AQ4 publish requires PreparedToken, got {:?}",
@@ -2894,6 +3212,9 @@ mod tests {
         cancel_on_prefill_sync: Option<CancellationToken>,
         fail_prefill_sync: bool,
         native_hybrid_prefill: bool,
+        calibration_hidden: Vec<f32>,
+        calibration_logits: Vec<f32>,
+        calibration_observations: usize,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -2984,6 +3305,21 @@ mod tests {
             self.logits
                 .pop_front()
                 .unwrap_or_else(|| Err("script exhausted".to_string()))
+        }
+
+        fn visit_last_generation_state(
+            &mut self,
+            observer: &mut dyn Qwen35Aq4CalibrationObserver,
+        ) -> Result<(), String> {
+            self.calibration_observations += 1;
+            observer.begin(self.calibration_hidden.len(), self.calibration_logits.len())?;
+            for (chunk_index, values) in self.calibration_hidden.chunks(2).enumerate() {
+                observer.observe_hidden_chunk(chunk_index * 2, values)?;
+            }
+            for (chunk_index, values) in self.calibration_logits.chunks(3).enumerate() {
+                observer.observe_logit_chunk(chunk_index * 3, values)?;
+            }
+            observer.finish()
         }
 
         fn take_failed_operation_executions(
@@ -3087,6 +3423,59 @@ mod tests {
             SessionAdvance::Token { prepared, .. } => prepared,
             other => panic!("expected token, got {other:?}"),
         }
+    }
+
+    #[derive(Default)]
+    struct CalibrationCollector {
+        shape: Option<(usize, usize)>,
+        hidden_chunks: Vec<(usize, Vec<f32>)>,
+        logit_chunks: Vec<(usize, Vec<f32>)>,
+        finished: usize,
+        fail_on_logits: bool,
+    }
+
+    impl Qwen35Aq4CalibrationObserver for CalibrationCollector {
+        fn begin(&mut self, hidden_elements: usize, logit_elements: usize) -> Result<(), String> {
+            if self
+                .shape
+                .replace((hidden_elements, logit_elements))
+                .is_some()
+            {
+                return Err("collector began twice".into());
+            }
+            Ok(())
+        }
+
+        fn observe_hidden_chunk(&mut self, start: usize, values: &[f32]) -> Result<(), String> {
+            self.hidden_chunks.push((start, values.to_vec()));
+            Ok(())
+        }
+
+        fn observe_logit_chunk(&mut self, start: usize, values: &[f32]) -> Result<(), String> {
+            if self.fail_on_logits {
+                return Err("collector rejected logits".into());
+            }
+            self.logit_chunks.push((start, values.to_vec()));
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<(), String> {
+            self.finished += 1;
+            Ok(())
+        }
+    }
+
+    fn calibration_replay(tokens: &[usize]) -> Qwen35Aq4CalibrationReplay {
+        let sha256 = Qwen35Aq4CalibrationReplay::source_sequence_sha256_for_tokens(tokens).unwrap();
+        Qwen35Aq4CalibrationReplay::new(sha256, tokens.to_vec()).unwrap()
+    }
+
+    fn calibration_session(tokens: &[usize]) -> Qwen35Aq4InferenceSession<ScriptedModel> {
+        let mut scripted = model(tokens);
+        scripted.calibration_hidden = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        scripted.calibration_logits = vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        Qwen35Aq4InferenceSession::from_model(scripted, Qwen35Aq4SessionConfig::greedy(8, vec![2]))
+            .unwrap()
     }
 
     #[test]
@@ -3282,6 +3671,311 @@ mod tests {
                 advance => return prepared(advance),
             }
         }
+    }
+
+    #[test]
+    fn calibration_observes_ordered_chunks_and_commits_source_replay_after_divergence() {
+        let mut session = calibration_session(&[7, 8]);
+        session
+            .start_calibration_request(
+                request("calibration-replay", &[4], 2),
+                CancellationToken::new(),
+                calibration_replay(&[11, 12]),
+            )
+            .unwrap();
+
+        let first = next_prepared(&mut session);
+        assert_eq!(first.token_id, 7);
+        let mut first_observer = CalibrationCollector::default();
+        let first_step = session
+            .observe_prepared_calibration(&first, &mut first_observer)
+            .unwrap();
+        assert_eq!(first_observer.shape, Some((5, 7)));
+        assert_eq!(
+            first_observer.hidden_chunks,
+            vec![(0, vec![1.0, 2.0]), (2, vec![3.0, 4.0]), (4, vec![5.0])]
+        );
+        assert_eq!(
+            first_observer.logit_chunks,
+            vec![
+                (0, vec![6.0, 7.0, 8.0]),
+                (3, vec![9.0, 10.0, 11.0]),
+                (6, vec![12.0]),
+            ]
+        );
+        assert_eq!(first_observer.finished, 1);
+        assert_eq!(
+            (
+                first_step.predicted_token_id,
+                first_step.committed_replay_token_id
+            ),
+            (7, 11)
+        );
+        assert!(session.publish_prepared(first.clone(), |_| Ok(())).is_err());
+        let mut published = Vec::new();
+        let first_publication = session
+            .publish_calibration_prepared(first, |step| {
+                published.push((step.predicted_token_id, step.committed_replay_token_id));
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            first_publication,
+            Qwen35Aq4CalibrationPublishedAdvance::Token {
+                terminal_reason: None,
+                ..
+            }
+        ));
+
+        let second = next_prepared(&mut session);
+        assert_eq!(second.token_id, 8);
+        assert_eq!(session.model().dispatches[1].0, 11);
+        let mut second_observer = CalibrationCollector::default();
+        let second_step = session
+            .observe_prepared_calibration(&second, &mut second_observer)
+            .unwrap();
+        assert_eq!(
+            (
+                second_step.predicted_token_id,
+                second_step.committed_replay_token_id
+            ),
+            (8, 12)
+        );
+        let second_publication = session
+            .publish_calibration_prepared(second, |step| {
+                published.push((step.predicted_token_id, step.committed_replay_token_id));
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            second_publication,
+            Qwen35Aq4CalibrationPublishedAdvance::Token {
+                terminal_reason: Some(FinishReason::Length),
+                ..
+            }
+        ));
+        assert_eq!(published, vec![(7, 11), (8, 12)]);
+        assert_eq!(session.finish_and_reset().unwrap().generated_tokens, 2);
+        assert_eq!(session.status(), Qwen35Aq4SessionStatus::Ready);
+        assert_eq!(session.model().calibration_observations, 2);
+        let lifecycle = session
+            .last_terminal_request_execution_audit()
+            .unwrap()
+            .lifecycle;
+        assert_eq!(lifecycle.publication.prepare, 2);
+        assert_eq!(lifecycle.publication.commit, 2);
+        assert_eq!(lifecycle.publication.discard, 0);
+        assert_eq!(lifecycle.reset.complete, 1);
+    }
+
+    #[test]
+    fn calibration_observation_boundaries_fail_closed_and_reset() {
+        let mut before = calibration_session(&[7]);
+        before
+            .start_calibration_request(
+                request("before", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let fabricated = Qwen35Aq4PreparedToken {
+            token_id: 7,
+            generated_index: 0,
+            cache_len: 1,
+            terminal_reason: Some(FinishReason::Length),
+            reasoning_tokens_before: 0,
+            forced_end_tokens_before: 0,
+            nonce: 0,
+        };
+        assert!(
+            before
+                .observe_prepared_calibration(&fabricated, &mut CalibrationCollector::default())
+                .is_err()
+        );
+        assert_eq!(before.status(), Qwen35Aq4SessionStatus::Failed);
+        before.abort_and_reset().unwrap();
+
+        let mut repeated = calibration_session(&[7]);
+        repeated
+            .start_calibration_request(
+                request("repeated", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut repeated);
+        repeated
+            .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+            .unwrap();
+        assert!(
+            repeated
+                .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+                .is_err()
+        );
+        assert_eq!(repeated.status(), Qwen35Aq4SessionStatus::Failed);
+        repeated.abort_and_reset().unwrap();
+        assert!(
+            repeated
+                .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+                .is_err()
+        );
+        assert_eq!(repeated.status(), Qwen35Aq4SessionStatus::Ready);
+
+        let mut stale = calibration_session(&[7, 8]);
+        stale
+            .start_calibration_request(
+                request("stale", &[4], 2),
+                CancellationToken::new(),
+                calibration_replay(&[11, 12]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut stale);
+        stale
+            .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+            .unwrap();
+        stale
+            .publish_calibration_prepared(token.clone(), |_| Ok(()))
+            .unwrap();
+        assert!(
+            stale
+                .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+                .is_err()
+        );
+        assert_eq!(stale.status(), Qwen35Aq4SessionStatus::Failed);
+        stale.abort_and_reset().unwrap();
+
+        let mut cancelled = calibration_session(&[7]);
+        let cancel = CancellationToken::new();
+        cancelled
+            .start_calibration_request(
+                request("cancelled", &[4], 1),
+                cancel.clone(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut cancelled);
+        cancel.cancel();
+        assert!(
+            cancelled
+                .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+                .is_err()
+        );
+        assert_eq!(cancelled.status(), Qwen35Aq4SessionStatus::Failed);
+        cancelled.abort_and_reset().unwrap();
+    }
+
+    #[test]
+    fn calibration_failure_discards_pending_state_and_session_is_reusable() {
+        let mut session = calibration_session(&[7, 8]);
+        session
+            .start_calibration_request(
+                request("observation-failure", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut session);
+        let mut rejecting_observer = CalibrationCollector {
+            fail_on_logits: true,
+            ..CalibrationCollector::default()
+        };
+        assert!(
+            session
+                .observe_prepared_calibration(&token, &mut rejecting_observer)
+                .is_err()
+        );
+        assert_eq!(session.status(), Qwen35Aq4SessionStatus::Failed);
+        assert_eq!(session.abort_and_reset().unwrap().generated_tokens, 0);
+
+        session
+            .start_calibration_request(
+                request("observation-reuse", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[12]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut session);
+        session
+            .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+            .unwrap();
+        session
+            .publish_calibration_prepared(token, |_| Ok(()))
+            .unwrap();
+        session.finish_and_reset().unwrap();
+        assert_eq!(session.model().resets, 2);
+
+        let mut callback = calibration_session(&[7]);
+        callback
+            .start_calibration_request(
+                request("callback-failure", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut callback);
+        callback
+            .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+            .unwrap();
+        assert!(
+            callback
+                .publish_calibration_prepared(token, |_| Err("evidence sink closed".into()))
+                .is_err()
+        );
+        assert_eq!(callback.status(), Qwen35Aq4SessionStatus::Terminal);
+        assert_eq!(callback.abort_and_reset().unwrap().generated_tokens, 0);
+        let lifecycle = callback
+            .last_terminal_request_execution_audit()
+            .unwrap()
+            .lifecycle;
+        assert_eq!(lifecycle.publication.prepare, 1);
+        assert_eq!(lifecycle.publication.commit, 0);
+        assert_eq!(lifecycle.publication.discard, 1);
+    }
+
+    #[test]
+    fn calibration_replay_binding_validation_precedes_request_mutation() {
+        assert!(Qwen35Aq4CalibrationReplay::new("A".repeat(64), vec![1]).is_err());
+        assert!(Qwen35Aq4CalibrationReplay::new("a".repeat(63), vec![1]).is_err());
+        assert!(Qwen35Aq4CalibrationReplay::new("a".repeat(64), Vec::new()).is_err());
+        assert!(Qwen35Aq4CalibrationReplay::new("a".repeat(64), vec![1]).is_err());
+
+        let mut session = calibration_session(&[7]);
+        assert!(
+            session
+                .start_calibration_request(
+                    request("length", &[4], 1),
+                    CancellationToken::new(),
+                    calibration_replay(&[11, 12]),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .start_calibration_request(
+                    request("vocab", &[4], 1),
+                    CancellationToken::new(),
+                    calibration_replay(&[32]),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .start_calibration_request(
+                    request("early-eos", &[4], 2),
+                    CancellationToken::new(),
+                    calibration_replay(&[2, 11]),
+                )
+                .is_err()
+        );
+        assert_eq!(session.status(), Qwen35Aq4SessionStatus::Ready);
+
+        session
+            .start_request(request("ordinary", &[4], 1), CancellationToken::new())
+            .unwrap();
+        let token = next_prepared(&mut session);
+        session.publish_prepared(token, |_| Ok(())).unwrap();
+        session.finish_and_reset().unwrap();
+        assert_eq!(session.model().calibration_observations, 0);
     }
 
     #[test]

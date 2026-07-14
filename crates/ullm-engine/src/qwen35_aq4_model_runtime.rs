@@ -36,6 +36,20 @@ const QWEN35_SELF_PERSISTENT_STATE_BYTES: u64 = 33_554_432;
 const QWEN35_REQUIRED_DEVICE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 pub const QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH: usize = 128;
 
+/// Borrowed, ordered view of one prepared generation step's post-final-RMSNorm hidden row and
+/// complete vocabulary logit row.
+///
+/// Every slice is runtime-owned scratch and is valid only for the duration of its callback.
+pub trait Qwen35Aq4CalibrationObserver {
+    fn begin(&mut self, hidden_elements: usize, logit_elements: usize) -> Result<(), String>;
+
+    fn observe_hidden_chunk(&mut self, start: usize, values: &[f32]) -> Result<(), String>;
+
+    fn observe_logit_chunk(&mut self, start: usize, values: &[f32]) -> Result<(), String>;
+
+    fn finish(&mut self) -> Result<(), String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen35Aq4PrefillInvocation {
     pub layer_index: usize,
@@ -1239,6 +1253,43 @@ impl Qwen35Aq4ModelRuntime {
             final_norm.output_buffer(),
             top_k,
         )
+    }
+
+    /// Observes the normalized hidden row and logits that produced the current prepared token.
+    ///
+    /// The caller must invoke this after `top_logits_from_last_layer` and before another model
+    /// dispatch. No norm/head kernel is launched here; only calibration-only device-to-host reads
+    /// are performed.
+    pub fn visit_last_generation_state(
+        &mut self,
+        observer: &mut dyn Qwen35Aq4CalibrationObserver,
+    ) -> Result<(), String> {
+        let hidden = self.geometry.hidden;
+        let vocab = self.geometry.vocab;
+        observer.begin(hidden, vocab)?;
+        let final_norm = self
+            .final_norm_runtime
+            .as_ref()
+            .ok_or_else(|| "Qwen3.5 AQ4 calibration requires resident final RMSNorm".to_string())?;
+        let mut hidden_visitor =
+            |start: usize, values: &[f32]| observer.observe_hidden_chunk(start, values);
+        let visited_hidden = final_norm.visit_last_output(&mut self.stream, &mut hidden_visitor)?;
+        if visited_hidden != hidden {
+            return Err(format!(
+                "Qwen3.5 AQ4 calibration hidden length differs: got {visited_hidden} expected {hidden}"
+            ));
+        }
+        let mut logit_visitor =
+            |start: usize, values: &[f32]| observer.observe_logit_chunk(start, values);
+        let visited_logits = self
+            .lm_head
+            .visit_last_device_logits(&mut self.stream, &mut logit_visitor)?;
+        if visited_logits != vocab {
+            return Err(format!(
+                "Qwen3.5 AQ4 calibration logit length differs: got {visited_logits} expected {vocab}"
+            ));
+        }
+        observer.finish()
     }
 
     pub fn final_norm(&self) -> &PassthroughF32Data {
