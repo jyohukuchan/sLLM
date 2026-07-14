@@ -22,10 +22,27 @@ from typing import Any
 
 MAX_JSON_BYTES = 64 * 1024 * 1024
 CASE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SCHEMA = "ullm.aq4_p2_resident_batch.v1"
 DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v1"
 WARMUP_RUNS = 2
 MEASURED_RUNS = 10
+READY_IDENTITY_KEYS = {
+    "binary_sha256",
+    "build_git_commit",
+    "protocol",
+    "package_manifest_sha256",
+    "runtime_device",
+    "guard_set_sha256",
+}
+RUNTIME_DEVICE_KEYS = {
+    "runtime_device_index",
+    "device_id",
+    "backend",
+    "name",
+    "architecture",
+}
 
 
 class BatchError(ValueError):
@@ -167,10 +184,51 @@ def _recv(process: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
     return value
 
 
-def validate_ready(value: dict[str, Any]) -> str:
-    if value.get("event") != "ready" or value.get("schema_version") != DRIVER_SCHEMA or type(value.get("model_loads")) is not int or value.get("model_loads") != 1 or not isinstance(value.get("resident_session_id"), str) or not value["resident_session_id"]:
+def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != READY_IDENTITY_KEYS:
+        raise BatchError("resident driver identity fields differ")
+    for field in ("binary_sha256", "package_manifest_sha256", "guard_set_sha256"):
+        if not isinstance(value[field], str) or SHA256_RE.fullmatch(value[field]) is None:
+            raise BatchError(f"resident driver identity.{field} is invalid")
+    if not isinstance(value["build_git_commit"], str) or GIT_SHA_RE.fullmatch(value["build_git_commit"]) is None:
+        raise BatchError("resident driver identity.build_git_commit is invalid")
+    if value["protocol"] != DRIVER_SCHEMA:
+        raise BatchError("resident driver identity protocol differs")
+    runtime = value["runtime_device"]
+    if not isinstance(runtime, dict) or set(runtime) != RUNTIME_DEVICE_KEYS:
+        raise BatchError("resident driver runtime device fields differ")
+    if type(runtime["runtime_device_index"]) is not int or runtime["runtime_device_index"] < 0:
+        raise BatchError("resident driver runtime device index is invalid")
+    if not isinstance(runtime["device_id"], (str, int)) or isinstance(runtime["device_id"], bool) or (isinstance(runtime["device_id"], str) and not runtime["device_id"]):
+        raise BatchError("resident driver runtime device ID is invalid")
+    for field in ("backend", "name", "architecture"):
+        if not isinstance(runtime[field], str) or not runtime[field]:
+            raise BatchError(f"resident driver runtime device {field} is invalid")
+    bound = identity.get("resident_driver_identity")
+    if not isinstance(bound, dict) or set(bound) != READY_IDENTITY_KEYS:
+        raise BatchError("identity file lacks resident driver identity")
+    if bound != value:
+        raise BatchError("resident driver identity differs from identity file")
+    bound_hashes = identity.get("hash_binding", {})
+    if isinstance(bound_hashes, dict) and bound_hashes.get("package_manifest_sha256") != value["package_manifest_sha256"]:
+        raise BatchError("resident package manifest identity differs")
+    if identity.get("build_git_commit") not in (None, value["build_git_commit"]):
+        raise BatchError("resident build commit identity differs")
+    for case in cases:
+        device = case.get("device")
+        if not isinstance(device, dict):
+            raise BatchError(f"case device identity is missing: {case.get('case_id')}")
+        for field in RUNTIME_DEVICE_KEYS:
+            if field in device and device[field] != runtime[field]:
+                raise BatchError(f"resident runtime device differs from case: {case['case_id']}")
+    return value
+
+
+def validate_ready(value: dict[str, Any], identity: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    if set(value) != {"event", "schema_version", "model_loads", "resident_session_id", "driver_identity"} or value.get("event") != "ready" or value.get("schema_version") != DRIVER_SCHEMA or type(value.get("model_loads")) is not int or value.get("model_loads") != 1 or not isinstance(value.get("resident_session_id"), str) or not value["resident_session_id"]:
         raise BatchError("resident driver did not prove one model load")
-    return value["resident_session_id"]
+    ready_identity = _validate_ready_identity(value["driver_identity"], identity, cases)
+    return value["resident_session_id"], ready_identity
 
 
 def validate_run(value: dict[str, Any], case: dict[str, Any], session_id: str) -> dict[str, Any]:
@@ -191,7 +249,7 @@ def validate_run(value: dict[str, Any], case: dict[str, Any], session_id: str) -
     return value
 
 
-def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_link: dict[str, str], policy_link: dict[str, str], run_id: str, baseline_kind: str, session_id: str, runs: list[dict[str, Any]], failure_reason: str | None = None) -> dict[str, Any]:
+def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_link: dict[str, str], policy_link: dict[str, str], run_id: str, baseline_kind: str, session_id: str, driver_identity: dict[str, Any], runs: list[dict[str, Any]], failure_reason: str | None = None) -> dict[str, Any]:
     status = "ok" if not failure_reason and all(run["status"] == "ok" for run in runs) else "oom" if any(run["status"] == "oom" for run in runs) else "failed"
     terminal = {
         "audit_digests": [run.get("audit", {}).get("deterministic_digest_sha256") for run in runs if isinstance(run.get("audit"), dict)],
@@ -209,7 +267,7 @@ def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_
             "kind": baseline_kind,
             "identity_file": identity_link,
         },
-        "resident": {"session_id": session_id, "model_loads": 1, "case_reset_count": sum(1 for run in runs if run.get("reset") == {"attempted": 1, "complete": 1, "failed": 0})},
+        "resident": {"session_id": session_id, "model_loads": 1, "driver_identity": driver_identity, "case_reset_count": sum(1 for run in runs if run.get("reset") == {"attempted": 1, "complete": 1, "failed": 0})},
         "workload": {key: case.get(key) for key in ("scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "prefill_requested_m", "resolved_m", "request_count", "generated_tokens")},
         "schedule": {"warmup_runs": WARMUP_RUNS, "measured_runs": MEASURED_RUNS, "completed_runs": len(runs)},
         "runs": runs,
@@ -263,7 +321,7 @@ def run_batch(args: argparse.Namespace) -> int:
         raise BatchError("--driver-command is required unless --dry-run is set")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     process = subprocess.Popen(args.driver_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=False, bufsize=1)
-    session_id = validate_ready(_recv(process, args.timeout))
+    session_id, driver_identity = validate_ready(_recv(process, args.timeout), identity, cases)
     by_id = {entry["case_id"]: entry for entry in fixture_index["cases"]}
     completed_cases = 0
     try:
@@ -286,7 +344,7 @@ def run_batch(args: argparse.Namespace) -> int:
             end = _recv(process, args.timeout)
             if end.get("event") != "case_complete" or end.get("resident_session_id") != session_id:
                 raise BatchError(f"resident driver case end failed: {case['case_id']}")
-            raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, runs, "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else None)
+            raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, runs, "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else None)
             atomic_write(args.output_dir / f"{case['case_id']}.raw.json", raw)
             completed_cases += 1
             if raw["status"] == "oom":

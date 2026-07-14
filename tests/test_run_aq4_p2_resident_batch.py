@@ -9,6 +9,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DRIVER_IDENTITY = {
+    "binary_sha256": "d" * 64,
+    "build_git_commit": "e" * 40,
+    "protocol": "ullm.aq4_p2_resident_driver.v1",
+    "package_manifest_sha256": "f" * 64,
+    "runtime_device": {
+        "runtime_device_index": 1,
+        "device_id": "r9700-rdna4",
+        "backend": "hip",
+        "name": "AMD Radeon Graphics",
+        "architecture": "gfx1201",
+    },
+    "guard_set_sha256": "a" * 64,
+}
 SPEC = importlib.util.spec_from_file_location("aq4_resident_batch", ROOT / "tools/run-aq4-p2-resident-batch.py")
 assert SPEC and SPEC.loader
 BATCH = importlib.util.module_from_spec(SPEC)
@@ -32,7 +46,13 @@ def _case(tmp_path: Path, prompt: int, requested_m: int, mode: str, index: int) 
         "request_count": 1,
         "generated_tokens": 0,
         "control_id": "aq4_0_target",
-        "device": {"device_id": "r9700-rdna4"},
+        "device": {
+            "device_id": "r9700-rdna4",
+            "runtime_device_index": 1,
+            "backend": "hip",
+            "name": "AMD Radeon Graphics",
+            "architecture": "gfx1201",
+        },
     }
     value["case_sha256"] = BATCH.case_hash(value)
     fixture = tmp_path / f"{case_id}.fixture.json"
@@ -41,6 +61,7 @@ def _case(tmp_path: Path, prompt: int, requested_m: int, mode: str, index: int) 
 
 
 def _bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     expanded_path = tmp_path / "expanded.json"
     fixture_index_path = tmp_path / "fixture-index.json"
     identity_path = tmp_path / "identity.json"
@@ -54,21 +75,26 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                 cases.append(case); entries.append(entry); index += 1
     expanded_path.write_text(json.dumps({"schema_version": "ullm.aq4_production_p2_expanded.v2", "cases": cases}), encoding="utf-8")
     fixture_index_path.write_text(json.dumps({"schema_version": "ullm.aq4_p2_fixture_index.v1", "case_count": len(entries), "cases": entries}), encoding="utf-8")
-    identity_path.write_text(json.dumps({"schema_version": "ullm.aq4_production_p2_identity.v2", "status": "bound", "build_git_commit": "a" * 40, "hash_binding": {"served_model_manifest_sha256": "b" * 64, "worker_binary_sha256": "c" * 64}}), encoding="utf-8")
+    identity_path.write_text(json.dumps({"schema_version": "ullm.aq4_production_p2_identity.v2", "status": "bound", "build_git_commit": DRIVER_IDENTITY["build_git_commit"], "resident_driver_identity": DRIVER_IDENTITY, "hash_binding": {"served_model_manifest_sha256": "b" * 64, "worker_binary_sha256": "c" * 64, "package_manifest_sha256": DRIVER_IDENTITY["package_manifest_sha256"]}}), encoding="utf-8")
     policy_path.write_text(json.dumps({"schema_version": "ullm.aq4_production_p2_threshold_policy.v1", "status": "bound"}), encoding="utf-8")
     return expanded_path, fixture_index_path, identity_path, policy_path
 
 
-def _driver(tmp_path: Path, oom: bool = False, reset_bad: bool = False) -> Path:
-    suffix = "oom" if oom else "reset-bad" if reset_bad else "ok"
+def _driver(tmp_path: Path, oom: bool = False, reset_bad: bool = False, drift: str | None = None) -> Path:
+    suffix = drift or ("oom" if oom else "reset-bad" if reset_bad else "ok")
     path = tmp_path / f"fake-{suffix}-driver.py"
     path.write_text(
         """import json,sys
 oom = %r
 reset_bad = %r
+drift = %r
+identity = %r
+if drift == 'driver': identity['binary_sha256'] = '0' * 64
+if drift == 'package': identity['package_manifest_sha256'] = '0' * 64
+if drift == 'device': identity['runtime_device']['architecture'] = 'gfx9999'
 session = 'fake-session'
 resolved = 1
-print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v1','model_loads':1,'resident_session_id':session}), flush=True)
+print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v1','model_loads':1,'resident_session_id':session,'driver_identity':identity}), flush=True)
 for line in sys.stdin:
     msg=json.loads(line)
     if msg['command']=='case_begin': resolved=msg['resolved_m']; print(json.dumps({'event':'case_ready','resident_session_id':session}), flush=True)
@@ -81,7 +107,7 @@ for line in sys.stdin:
         print(json.dumps(out), flush=True)
     elif msg['command']=='case_end': print(json.dumps({'event':'case_complete','resident_session_id':session}), flush=True)
     elif msg['command']=='shutdown': break
-""" % (oom, reset_bad),
+""" % (oom, reset_bad, drift, DRIVER_IDENTITY),
         encoding="utf-8",
     )
     return path
@@ -112,7 +138,7 @@ def test_fake_resident_driver_writes_one_atomic_raw_per_case(tmp_path: Path) -> 
     assert len(raws) == 84
     sample = json.loads(raws[0].read_text())
     assert sample["status"] == "ok"
-    assert sample["resident"] == {"session_id": "fake-session", "model_loads": 1, "case_reset_count": 12}
+    assert sample["resident"] == {"session_id": "fake-session", "model_loads": 1, "driver_identity": DRIVER_IDENTITY, "case_reset_count": 12}
     assert sample["schedule"] == {"warmup_runs": 2, "measured_runs": 10, "completed_runs": 12}
     assert json.loads((output / "resident-batch.summary.json").read_text())["completed_cases"] == 84
 
@@ -137,3 +163,14 @@ def test_incomplete_reset_is_rejected_before_raw_publication(tmp_path: Path) -> 
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
     assert list(output.glob("*.raw.json")) == []
+
+
+def test_ready_identity_drift_is_rejected_before_case_begin(tmp_path: Path) -> None:
+    for drift in ("driver", "package", "device"):
+        expanded, index, identity, policy = _bundle(tmp_path / drift)
+        output = tmp_path / f"{drift}-drift-run"
+        driver = _driver(tmp_path / drift, drift=drift)
+        command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--policy", str(policy), "--output-dir", str(output), "--run-id", f"r-{drift}", "--baseline-kind", "p3-current-head", "--driver-command", sys.executable, str(driver)]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        assert completed.returncode != 0
+        assert list(output.glob("*.raw.json")) == []
