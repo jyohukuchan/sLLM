@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {
+      "case_id": "fixture-prompt-0",
+      "token_ids": [220, 16]
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "token_ids": [15]
+    }
+  ]
+}

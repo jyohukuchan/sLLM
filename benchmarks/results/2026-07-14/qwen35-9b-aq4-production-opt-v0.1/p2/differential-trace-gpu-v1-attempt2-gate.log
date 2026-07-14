@@ -1,0 +1,71 @@
+gate_started=2026-07-15T00:09:04+09:00
+required_commit=28ec343ac59e6d22e710035d7874df9fbd8f890f
+source_bin=/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-aq4-differential-trace
+package_arg=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package
+attempt1_gate_log=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-gate.log sha256=f6fa8e3ec523f174d1ccd8371fa4ec20579d5d921d0be3a4b680d605bebb80cc
+attempt1_monitor_log=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-monitor.log sha256=d482724f6269b836e5faeba3d97833e69ea412ec0d738d272315fc59b274dd14
+attempt1_run_log=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-run.log sha256=507ecb23aabe4c89770f27ca7ff5e6338cf96ab7b4d3a570710b61839eec0eb2
+source_bin_sha256=356d131fc578debea418f6c67d7b89272bfb02700495775be98471c44e3bd0b7
+cases_sha256=15fed90dd2e16a5b68d4498c8632257d80ac94c56ed614696b0884c65f4836f2
+replay_sha256=1ee0b9228e1bc3a0ae9175e5693bf3770f9b89e872349554562dbd4b6b4747dc
+rocm_smi_link=/opt/rocm/bin/rocm-smi
+rocm_smi_real=/opt/rocm-7.2.1/libexec/rocm_smi/rocm_smi.py
+rocm_smi_stat=regular file:1:207746:41551340
+rocm_smi_sha256=5a64729944c9bcd7eccd647ddc39cca1a942b3a51cf234fa1cb59a7b20591f46
+rocm_smi_shebang=#!/usr/bin/env python3
+rocm_smi_version=ROCM-SMI version: 4.0.0+e1a6bc5663
+rocm_python=/usr/bin/python3.12
+rocm_python_version=Python 3.12.3
+rocm_python_sha256=1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118
+active_manifest_sha256=feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44
+package_manifest_sha256=a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad
+worker_sha256=177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d
+worker_stat_pre=10302:10506405:2:3729520:1783937083:1783937083:regular file
+runtime_dir_pre=directory:750:1000:1000
+runtime_lock_pre=regular empty file:600:1000:1000
+runtime_expected_uid_gid=1000:1000
+runtime_dir_pre_nlink=2
+runtime_lock_pre_nlink_size=1:0
+service_mainpid=2906051
+lock_owner_pid=2906051
+lock_owner_command=ullm-openai-gat
+MainPID=2906051
+NRestarts=0
+ActiveState=active
+SubState=running
+2906051 /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/python3 /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+2906568 /home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker --served-model-manifest /etc/ullm/served-models/active.json
+{"card0": {"GPU use (%)": "0", "VRAM Total Memory (B)": "32195477504", "VRAM Total Used Memory (B)": "21463040", "Card Series": "AMD Radeon Pro V620", "Card Model": "0x73a1", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "D6030500", "Subsystem ID": "0x0e34", "Device Rev": "0x00", "Node ID": "3", "GUID": "8042", "GFX Version": "gfx1030"}, "card1": {"GPU use (%)": "0", "VRAM Total Memory (B)": "32195477504", "VRAM Total Used Memory (B)": "21463040", "Card Series": "AMD Radeon Pro V620", "Card Model": "0x73a1", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "D6030500", "Subsystem ID": "0x0e34", "Device Rev": "0x00", "Node ID": "1", "GUID": "61275", "GFX Version": "gfx1030"}, "card2": {"GPU use (%)": "3", "VRAM Total Memory (B)": "34208743424", "VRAM Total Used Memory (B)": "7439523840", "Card Series": "AMD Radeon Graphics", "Card Model": "0x7551", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "1E4990U", "Subsystem ID": "-0x1b67", "Device Rev": "0xc0", "Node ID": "2", "GUID": "51545", "GFX Version": "gfx1201"}}
+{"status":"ok"}
+{"object":"list","data":[{"id":"ullm-qwen3.5-9b-aq4","object":"model","owned_by":"ullm"}]}
+candidate_bin=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/ullm-aq4-differential-trace-detached-attempt2
+candidate_bin_sha256=356d131fc578debea418f6c67d7b89272bfb02700495775be98471c44e3bd0b7
+candidate_bin_stat=regular file:1:2928200:10509260
+embedded_commit_match=differential trace final row shape is too smallembeddingdecoder_layerstruct Casecase_idstep_countstruct ReplayCasestruct ReplayFilecasestoken_idslayer_indexcontext_token_ids_sha256differential trace row has incomplete bounded stages42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6trace output contains a non-regular entrytrace output byte count overflowsReplayCase28ec343ac59e6d22e710035d7874df9fbd8f890fULLM_BUILD_GIT_COMMITruntime ULLM_BUILD_GIT_COMMIT differs from embedded build commitULLM_BUILD_GIT_COMMIT must be a 40-character hexadecimal commitintermediate trace is disabled; pass --enable-intermediate-trace explicitlyreplaytrace binaryULLM_SERVED_MODEL_MANIFESTactive served-model manifestmanifest.json--enable-intermediate-traceruntime device identity is incomplete/etc/ullm/served-models/active.jsonpayload.jsonl
+observer_ready_sample=1784041746106531904
+service_after_stop=inactive
+{"card0": {"GPU use (%)": "0", "VRAM Total Memory (B)": "32195477504", "VRAM Total Used Memory (B)": "21401600", "Card Series": "AMD Radeon Pro V620", "Card Model": "0x73a1", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "D6030500", "Subsystem ID": "0x0e34", "Device Rev": "0x00", "Node ID": "3", "GUID": "8042", "GFX Version": "gfx1030"}, "card1": {"GPU use (%)": "0", "VRAM Total Memory (B)": "32195477504", "VRAM Total Used Memory (B)": "21401600", "Card Series": "AMD Radeon Pro V620", "Card Model": "0x73a1", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "D6030500", "Subsystem ID": "0x0e34", "Device Rev": "0x00", "Node ID": "1", "GUID": "61275", "GFX Version": "gfx1030"}, "card2": {"GPU use (%)": "11", "VRAM Total Memory (B)": "34208743424", "VRAM Total Used Memory (B)": "87384064", "Card Series": "AMD Radeon Graphics", "Card Model": "0x7551", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "1E4990U", "Subsystem ID": "-0x1b67", "Device Rev": "0xc0", "Node ID": "2", "GUID": "51545", "GFX Version": "gfx1201"}}
+lock_acquired_after_service_stop=2026-07-15T00:09:07+09:00
+sha256sum: manifest.json: No such file or directory
+manifest.json: FAILED open or read
+sha256sum: payload.jsonl: No such file or directory
+payload.jsonl: FAILED open or read
+sha256sum: runtime.json: No such file or directory
+runtime.json: FAILED open or read
+sha256sum: WARNING: 3 listed files could not be read
+runtime_lock_removed=1
+runtime_dir_removed=1
+restore_started=2026-07-15T00:09:12+09:00
+restore_rc=0
+service_restored=active
+service_restored_substate=running
+service_restored_mainpid=2952687
+service_restored_lock_owner=2952687
+restore_health_ready=1
+MainPID=2952687
+NRestarts=0
+ActiveState=active
+SubState=running
+active_manifest_sha256_after=feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44
+package_manifest_sha256_after=a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad
+worker_sha256_after=177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d
