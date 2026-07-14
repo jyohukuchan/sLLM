@@ -77,7 +77,7 @@ def test_cpu_fixture_source_active_to_metrics(monkeypatch: pytest.MonkeyPatch, t
     identity = {"model_id": "fixture", "model_revision": "fixture", "tokenizer": {"aggregate_sha256": "a" * 64}}
     artifacts = {
         "independent_source_full": {"rows": source_rows, "hidden": source_hidden, "logits": source_logits, "chunk_elements": 2, "manifest_sha256": "b" * 64, "manifest": {"identity": identity}},
-        "aq4_target": {"rows": active_rows, "hidden": active_hidden, "logits": active_logits, "chunk_elements": 2, "manifest_sha256": "c" * 64, "manifest": {"identity": identity, "runtime": {"runtime": {"served_model_manifest_sha256": "s" * 64, "package_manifest_sha256": "p" * 64, "worker_binary_sha256": "w" * 64, "guard_sha256": "g" * 64, "quantized_artifact_revision": "quantized", "upstream_model_revision": "fixture", "device": {"architecture": "cpu"}}}}},
+        "aq4_target": {"rows": active_rows, "hidden": active_hidden, "logits": active_logits, "chunk_elements": 2, "manifest_sha256": "c" * 64, "manifest": {"identity": identity, "runtime": {"runtime": {"served_model_manifest_sha256": "s" * 64, "package_manifest_sha256": "p" * 64, "worker_binary_sha256": "w" * 64, "guard_sha256": "g" * 64, "quantized_artifact_revision": "quantized", "upstream_model_revision": "fixture", "tokenizer_aggregate_sha256": "a" * 64, "device": {"architecture": "cpu"}}}}},
     }
     monkeypatch.setattr(CAPTURE, "_artifact", lambda _root, kind: artifacts[kind])
     monkeypatch.setattr(CAPTURE, "_load_split", lambda _root, *_expected: ({}, {"status": "ready_for_calibration"}, rows, "d" * 64, "e" * 64, "f" * 64))
