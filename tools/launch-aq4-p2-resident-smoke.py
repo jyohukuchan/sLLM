@@ -152,6 +152,12 @@ class LauncherError(ValueError):
     pass
 
 
+class AmdProcessSchemaError(LauncherError):
+    def __init__(self, diagnostic: dict[str, Any]) -> None:
+        self.diagnostic = diagnostic
+        super().__init__(f"amd-smi process schema rejected: {diagnostic['reason_code']}")
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
@@ -171,6 +177,109 @@ def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
             raise LauncherError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def _json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "bool"
+    if type(value) is int:
+        return "int"
+    if type(value) is float:
+        return "float"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "object"
+    return "unknown"
+
+
+def _amd_process_diagnostic(raw: bytes, value: Any = None) -> dict[str, Any]:
+    top_is_list = isinstance(value, list)
+    root = value[0] if top_is_list and len(value) == 1 and isinstance(value[0], dict) else None
+    process_list = root.get("process_list") if isinstance(root, dict) else None
+    entries = process_list if isinstance(process_list, list) else []
+    return {
+        "schema_version": "ullm.aq4_p2_amd_process_parse_diagnostic.v1",
+        "status": "rejected",
+        "reason_code": "unclassified",
+        "raw_sha256": sha_bytes(raw),
+        "raw_bytes": len(raw),
+        "top_level_type": _json_type(value),
+        "top_level_length": len(value) if top_is_list else None,
+        "root_keys": sorted(root) if isinstance(root, dict) and all(isinstance(key, str) for key in root) else None,
+        "process_list_type": _json_type(process_list),
+        "process_list_length": len(process_list) if isinstance(process_list, list) else None,
+        "entry_key_sets": [sorted(entry) if isinstance(entry, dict) and all(isinstance(key, str) for key in entry) else None for entry in entries],
+        "process_info_types": [_json_type(entry.get("process_info")) if isinstance(entry, dict) else _json_type(entry) for entry in entries],
+    }
+
+
+def parse_amd_process_owners(raw: bytes) -> dict[str, Any]:
+    value: Any = None
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(LauncherError(f"non-finite JSON: {item}")))
+    except (UnicodeError, json.JSONDecodeError, LauncherError):
+        diagnostic = _amd_process_diagnostic(raw)
+        diagnostic["reason_code"] = "invalid_json"
+        raise AmdProcessSchemaError(diagnostic) from None
+    diagnostic = _amd_process_diagnostic(raw, value)
+
+    def reject(reason_code: str) -> None:
+        diagnostic["reason_code"] = reason_code
+        raise AmdProcessSchemaError(diagnostic)
+
+    if not isinstance(value, list):
+        reject("top_level_not_list")
+    if len(value) != 1:
+        reject("top_level_length_not_one")
+    root = value[0]
+    if not isinstance(root, dict):
+        reject("gpu_root_not_object")
+    if set(root) != {"gpu", "process_list"}:
+        reject("gpu_root_keys_differ")
+    if type(root["gpu"]) is not int or root["gpu"] != AMD_SMI_INDEX:
+        reject("gpu_index_differs")
+    process_list = root["process_list"]
+    if not isinstance(process_list, list) or not process_list:
+        reject("process_list_not_nonempty_list")
+    zero_sentinel = [{"process_info": "No running processes detected"}]
+    if process_list == zero_sentinel:
+        diagnostic.update({"status": "accepted", "reason_code": "accepted_zero_sentinel"})
+        return {"owners": [], "diagnostic": diagnostic}
+    if any(isinstance(entry, dict) and isinstance(entry.get("process_info"), str) for entry in process_list):
+        reject("sentinel_mixed_or_unknown")
+    owners: list[int] = []
+    expected_info_keys = {"name", "pid", "mem_usage", "cu_occupancy", "evicted_time"}
+    for entry in process_list:
+        if not isinstance(entry, dict) or set(entry) != {"process_info"}:
+            reject("process_entry_keys_differ")
+        info = entry["process_info"]
+        if not isinstance(info, dict) or set(info) != expected_info_keys:
+            reject("process_info_keys_differ")
+        name = info["name"]
+        pid = info["pid"]
+        memory = info["mem_usage"]
+        occupancy = info["cu_occupancy"]
+        evicted = info["evicted_time"]
+        if not isinstance(name, str) or not name.startswith("/") or "\x00" in name:
+            reject("process_name_differs")
+        if type(pid) is not int or pid <= 0:
+            reject("process_pid_differs")
+        if not isinstance(memory, dict) or set(memory) != {"value", "unit"} or type(memory.get("value")) is not int or memory["value"] < 0 or memory.get("unit") != "B":
+            reject("process_mem_usage_differs")
+        if not ((type(occupancy) is int and occupancy >= 0) or occupancy == "N/A"):
+            reject("process_cu_occupancy_differs")
+        if not isinstance(evicted, dict) or set(evicted) != {"value", "unit"} or type(evicted.get("value")) is not int or evicted["value"] < 0 or evicted.get("unit") != "ms":
+            reject("process_evicted_time_differs")
+        owners.append(pid)
+    if len(set(owners)) != len(owners):
+        reject("duplicate_process_pid")
+    diagnostic.update({"status": "accepted", "reason_code": "accepted_owner_records"})
+    return {"owners": sorted(owners), "diagnostic": diagnostic}
 
 
 def parse_json(raw: bytes, label: str) -> dict[str, Any]:
@@ -807,11 +916,10 @@ def collect_execute_gates(*, run: Callable[..., subprocess.CompletedProcess[byte
     if info.returncode != 0 or info.stderr or info.stdout.count(b"Name:                    gfx1201") != 1 or b"Uuid:                    GPU-a8e9ddefa2d60f55" not in info.stdout or b"Marketing Name:          AMD Radeon Graphics" not in info.stdout:
         raise LauncherError("rocminfo target schema differs")
     processes, record = _probe([str(AMD_SMI), "process", "--gpu", str(AMD_SMI_INDEX), "--general", "--json"], "amd-smi-process", run); probes.append(record)
-    try:
-        process_value = json.loads(processes.stdout, object_pairs_hook=pairs)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise LauncherError("amd-smi process schema differs") from error
-    if processes.returncode != 0 or processes.stderr or not isinstance(process_value, list) or len(process_value) != 1 or process_value[0] != {"gpu": AMD_SMI_INDEX, "process_list": []}:
+    if processes.returncode != 0 or processes.stderr:
+        raise LauncherError("amd-smi process probe failed")
+    parsed_processes = parse_amd_process_owners(processes.stdout)
+    if parsed_processes["owners"]:
         raise LauncherError("target GPU compute owners are not zero")
     static, record = _probe([str(AMD_SMI), "static", "--gpu", str(AMD_SMI_INDEX), "--vram", "--json"], "amd-smi-static-vram", run); probes.append(record)
     try:
@@ -830,7 +938,7 @@ def collect_execute_gates(*, run: Callable[..., subprocess.CompletedProcess[byte
     lock = lock_provider()
     if not isinstance(lock, dict) or set(lock) != {"path", "free", "device", "inode"} or lock.get("path") != str(LOCK_PATH) or lock.get("free") is not True or type(lock.get("device")) is not int or lock["device"] < 0 or type(lock.get("inode")) is not int or lock["inode"] < 0:
         raise LauncherError("device lock gate contract differs")
-    return {"passed": True, "environment": EXECUTE_ENV, "services": services, "old_worker_pids": [], "runtime_mapping": {"runtime_device_index": DEVICE_INDEX, "visible_token": "1", "amd_smi_index": AMD_SMI_INDEX, "bdf": GPU_BDF, "uuid": GPU_UUID, "kfd_id": KFD_ID, "node_id": matches[0]["node_id"]}, "amd_smi_owners": [], "kfd_owners": [], "lock": lock, "vram": {"total_bytes": total_bytes, "used_bytes": 0, "free_bytes": total_bytes, "headroom_bytes": total_bytes}, "probes": probes}
+    return {"passed": True, "environment": EXECUTE_ENV, "services": services, "old_worker_pids": [], "runtime_mapping": {"runtime_device_index": DEVICE_INDEX, "visible_token": "1", "amd_smi_index": AMD_SMI_INDEX, "bdf": GPU_BDF, "uuid": GPU_UUID, "kfd_id": KFD_ID, "node_id": matches[0]["node_id"]}, "amd_smi_owners": [], "amd_smi_process": parsed_processes["diagnostic"], "kfd_owners": [], "lock": lock, "vram": {"total_bytes": total_bytes, "used_bytes": 0, "free_bytes": total_bytes, "headroom_bytes": total_bytes}, "probes": probes}
 
 
 def _result_inventory(root: Path) -> dict[str, Any]:
@@ -1012,7 +1120,7 @@ def execute_bound(
     self_sha = observed_self_sha
     evidence = make_evidence("execute", self_sha)
     profile_enabled = "profile_diagnostic" in binding
-    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "gates": None, "restore": None, "trust_verifications": []})
+    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "gates": None, "gate_failure_diagnostic": None, "restore": None, "trust_verifications": []})
     evidence["safety"]["execution_state_source"] = "runner_not_started"
     snapshot = Snapshot()
     snapshot_ready = False
@@ -1105,6 +1213,8 @@ def execute_bound(
         evidence["status"] = "passed"
         code = 0
     except (LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
+        if isinstance(error, AmdProcessSchemaError):
+            evidence["gate_failure_diagnostic"] = error.diagnostic
         evidence["failure"] = {"stage": stage, "reason": str(error), "runner_started": evidence["process_counts"]["runner"] == 1}
         if runner_output.exists() and not runner_output.is_symlink():
             try:

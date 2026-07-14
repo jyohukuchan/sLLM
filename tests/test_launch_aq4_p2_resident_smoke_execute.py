@@ -460,7 +460,7 @@ def _gate_router(*, duplicate_bdf: bool = False, active_service: bool = False):
             stdout = b"Name:                    gfx1201\nUuid:                    GPU-a8e9ddefa2d60f55\nMarketing Name:          AMD Radeon Graphics\n"
             return subprocess.CompletedProcess(argv, 0, stdout, b"")
         if argv[0] == str(LAUNCHER.AMD_SMI) and argv[1] == "process":
-            return subprocess.CompletedProcess(argv, 0, b'[{"gpu": 2, "process_list": []}]', b"")
+            return subprocess.CompletedProcess(argv, 0, b'[{"gpu":2,"process_list":[{"process_info":"No running processes detected"}]}]', b"")
         if argv[0] == str(LAUNCHER.AMD_SMI) and argv[1] == "static":
             return subprocess.CompletedProcess(argv, 0, b'{"gpu_data": [{"gpu": 2, "vram": {"size": {"value": 32624, "unit": "MB"}}}]}', b"")
         raise AssertionError(argv)
@@ -474,7 +474,80 @@ def test_collect_execute_gates_uses_order_independent_unique_gpu_mapping_and_no_
     assert gates["passed"] is True
     assert gates["runtime_mapping"] == {"runtime_device_index": 1, "visible_token": "1", "amd_smi_index": 2, "bdf": LAUNCHER.GPU_BDF, "uuid": LAUNCHER.GPU_UUID, "kfd_id": LAUNCHER.KFD_ID, "node_id": 2}
     assert gates["amd_smi_owners"] == gates["kfd_owners"] == []
+    assert gates["amd_smi_process"]["reason_code"] == "accepted_zero_sentinel"
+    assert len(gates["amd_smi_process"]["raw_sha256"]) == 64
     assert gates["probes"][0]["argv"] == [str(LAUNCHER.SUDO), "-n", "-v"]
+
+
+def _active_amd_process(pid: int = 4101820) -> bytes:
+    return json.dumps([{
+        "gpu": 2,
+        "process_list": [{"process_info": {
+            "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+            "pid": pid,
+            "mem_usage": {"value": 7_351_832_576, "unit": "B"},
+            "cu_occupancy": "N/A",
+            "evicted_time": {"value": 682, "unit": "ms"},
+        }}],
+    }]).encode()
+
+
+def test_strict_amd_process_parser_accepts_live_active_and_exact_zero_sentinel() -> None:
+    active = LAUNCHER.parse_amd_process_owners(_active_amd_process())
+    assert active["owners"] == [4101820]
+    assert active["diagnostic"]["reason_code"] == "accepted_owner_records"
+    sentinel = b'[{"gpu":2,"process_list":[{"process_info":"No running processes detected"}]}]'
+    zero = LAUNCHER.parse_amd_process_owners(sentinel)
+    assert zero["owners"] == []
+    assert zero["diagnostic"] == {
+        "schema_version": "ullm.aq4_p2_amd_process_parse_diagnostic.v1",
+        "status": "accepted",
+        "reason_code": "accepted_zero_sentinel",
+        "raw_sha256": LAUNCHER.sha_bytes(sentinel),
+        "raw_bytes": len(sentinel),
+        "top_level_type": "list",
+        "top_level_length": 1,
+        "root_keys": ["gpu", "process_list"],
+        "process_list_type": "list",
+        "process_list_length": 1,
+        "entry_key_sets": [["process_info"]],
+        "process_info_types": ["string"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "reason_code"),
+    [
+        ([{"gpu": 2, "process_list": []}], "process_list_not_nonempty_list"),
+        ([{"gpu": 2, "process_list": [{"process_info": "N/A"}]}], "sentinel_mixed_or_unknown"),
+        ([{"gpu": 2, "process_list": [{"process_info": "No running processes detected"}, {"process_info": {}}]}], "sentinel_mixed_or_unknown"),
+        ([{"gpu": 1, "process_list": [{"process_info": "No running processes detected"}]}], "gpu_index_differs"),
+        ([{"gpu": 2, "process_list": [{"process_info": "No running processes detected"}], "extra": 1}], "gpu_root_keys_differ"),
+    ],
+)
+def test_strict_amd_process_parser_rejects_malformed_zero_variants(value: object, reason_code: str) -> None:
+    raw = json.dumps(value).encode()
+    with pytest.raises(LAUNCHER.AmdProcessSchemaError) as caught:
+        LAUNCHER.parse_amd_process_owners(raw)
+    assert caught.value.diagnostic["reason_code"] == reason_code
+    assert caught.value.diagnostic["raw_sha256"] == LAUNCHER.sha_bytes(raw)
+    assert "ullm-aq4-worker" not in LAUNCHER.canonical(caught.value.diagnostic).decode()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason_code"),
+    [
+        (lambda info: info.update(pid=True), "process_pid_differs"),
+        (lambda info: info.update(extra=1), "process_info_keys_differ"),
+        (lambda info: info["mem_usage"].update(unit="MiB"), "process_mem_usage_differs"),
+    ],
+)
+def test_strict_amd_process_parser_rejects_malformed_active_records(mutate, reason_code: str) -> None:
+    value = json.loads(_active_amd_process())
+    mutate(value[0]["process_list"][0]["process_info"])
+    with pytest.raises(LAUNCHER.AmdProcessSchemaError) as caught:
+        LAUNCHER.parse_amd_process_owners(json.dumps(value).encode())
+    assert caught.value.diagnostic["reason_code"] == reason_code
 
 
 def test_collect_execute_gates_rejects_active_service_duplicate_mapping_and_kfd_owner() -> None:
