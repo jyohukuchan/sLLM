@@ -122,6 +122,21 @@ class ProductionExecutionTraceTests(unittest.TestCase):
             )
             self.assertNotEqual(completed.returncode, 0)
 
+    def test_validator_rejects_unreconstructed_129_internal_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / "schema-r1"
+            shutil.copytree(FIXTURE, work)
+            record = json.loads((work / "executor-record.json").read_text())
+            record["state_commit"]["prepared_batch_count"] = 129
+            record["state_commit"]["committed_batch_count"] = 129
+            (work / "executor-record.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+            for name in ("trace.json", "binding.json"):
+                (work / name).unlink()
+            produced = subprocess.run(["python3", str(PRODUCER), "--manifest", str(work / "manifest.json"), "--executor-record", str(work / "executor-record.json"), "--output", str(work / "trace.json"), "--binding-output", str(work / "binding.json")], cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            completed = subprocess.run(["python3", str(VALIDATOR), "--trace", str(work / "trace.json"), "--manifest", str(work / "manifest.json"), "--executor-record", str(work / "executor-record.json"), "--binding", str(work / "binding.json")], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(completed.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

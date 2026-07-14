@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from collections import Counter
 import hashlib
 import json
 import math
@@ -48,7 +49,7 @@ def reject_constant(value: str) -> None:
 
 
 def load(path: Path, label: str) -> tuple[Any, bytes]:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES or path.stat().st_mode & 0o002:
         raise ValidationError(f"{label} must be a bounded regular non-symlink file")
     raw = path.read_bytes()
     try:
@@ -63,7 +64,7 @@ def sha(raw: bytes) -> str:
 
 
 def file_sha(path: Path) -> str:
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o002:
         raise ValidationError(f"identity path is unavailable: {path}")
     h = hashlib.sha256()
     with path.open("rb") as source:
@@ -240,7 +241,7 @@ def validate_phases(phases: Any, request: dict[str, Any], executor: dict[str, An
     if not isinstance(phases, list) or not phases:
         raise ValidationError("phases must be nonempty")
     seen: set[str] = set()
-    total_in = total_out = cached = 0
+    total_in = total_out = cached = expected_batches = 0
     prefill_input = 0
     first_decode_context: int | None = None
     previous_after = 0
@@ -260,6 +261,14 @@ def validate_phases(phases: Any, request: dict[str, Any], executor: dict[str, An
         nonnegative(phase["wall_time_ms"], "phase.wall_time_ms", integer=False)
         if min(phase["chunk_width_tokens"], phase["actual_token_batch_width"], phase["actual_request_batch_width"]) <= 0:
             raise ValidationError("zero-width phase")
+        if phase["actual_token_batch_width"] > phase["chunk_width_tokens"]:
+            raise ValidationError("actual token width exceeds requested chunk width")
+        if phase["kind"] == "cold_prefill" and phase["cached_prefix_token_count"] != 0:
+            raise ValidationError("cold prefill cannot report cached prefix tokens")
+        if phase["kind"] == "cached_prefix_prefill" and phase["cached_prefix_token_count"] == 0:
+            raise ValidationError("cached-prefix prefill must report cached prefix tokens")
+        if phase["kind"] == "decode" and phase["cached_prefix_token_count"] != 0:
+            raise ValidationError("decode cannot report cached prefix tokens")
         if phase["request_count"] != request["request_count"] or phase["actual_request_batch_width"] > phase["request_count"]:
             raise ValidationError("phase request width/count does not reconcile")
         if phase["context_tokens_before"] != previous_after:
@@ -281,11 +290,12 @@ def validate_phases(phases: Any, request: dict[str, Any], executor: dict[str, An
         previous_after = phase["context_tokens_after"]
         total_in += phase["input_token_count"]
         total_out += phase["output_token_count"]
-    if total_out != request["generated_token_count"] or prefill_input + cached != request["prompt_token_count"] or (first_decode_context is not None and first_decode_context != request["context_tokens_at_decode_start"]):
+        expected_batches += (phase["input_token_count"] + phase["actual_token_batch_width"] - 1) // phase["actual_token_batch_width"]
+    if total_out != request["generated_token_count"] or prefill_input + cached != request["prompt_token_count"] or (first_decode_context is not None and first_decode_context != request["context_tokens_at_decode_start"]) or (first_decode_context is None and previous_after != request["context_tokens_at_decode_start"]):
         raise ValidationError("phase/request counters do not reconcile")
     if cached != request["cached_prefix_token_count"]:
         raise ValidationError("phase cached-prefix counters do not reconcile")
-    return len(phases)
+    return expected_batches
 
 
 def validate_operator(operator: Any, phase_kinds: set[str]) -> None:
@@ -379,6 +389,13 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
     manifest_artifact = product.get("artifact") if isinstance(product.get("artifact"), dict) else {}
     for name in ("manifest_sha256", "content_sha256"):
         if identity["artifact"][name] != manifest_artifact.get(name): raise ValidationError(f"artifact identity differs at {name}")
+    if identity["artifact"]["manifest_sha256"] is not None:
+        artifact_manifest = resolve_manifest_path(manifest_artifact.get("manifest_path", ""), manifest_path=manifest_path, root=product_root, label="artifact manifest")
+        if file_sha(artifact_manifest) != identity["artifact"]["manifest_sha256"]: raise ValidationError("artifact manifest binding differs")
+    if identity["artifact"]["content_sha256"] is not None:
+        content_path = manifest_artifact.get("content_path") or manifest_artifact.get("payload_path")
+        artifact_content = resolve_manifest_path(content_path, manifest_path=manifest_path, root=product_root, label="artifact content")
+        if file_sha(artifact_content) != identity["artifact"]["content_sha256"]: raise ValidationError("artifact content binding differs")
     validate_graph(trace["graph"], facts.get("graph"))
     validate_executor(trace["executor"]); validate_request(trace["request_summary"]); phase_count = validate_phases(trace["phases"], trace["request_summary"], trace["executor"])
     phase_kinds = {item["kind"] for item in trace["phases"]}
@@ -390,17 +407,24 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
         exact(event, {"phase_kind", "op_kind", "from_implementation_id", "to_implementation_id", "reason_code", "classification"}, "fallback.event")
         if event["classification"] not in {"expected", "unexpected", "unsupported", "fail_closed"}: raise ValidationError("fallback classification invalid")
         for name in ("phase_kind", "op_kind", "from_implementation_id", "to_implementation_id", "reason_code"): string(event[name], f"fallback.{name}", identifier=True)
+        if event["from_implementation_id"] == event["to_implementation_id"]: raise ValidationError("fallback event does not change implementation")
         counts["fallback"] += 1; counts[event["classification"]] += 1
     for name in ("fallback_count", "unexpected_fallback_count", "unsupported_count", "fail_closed_count"): nonnegative(trace["fallback"][name], f"fallback.{name}")
     if trace["fallback"]["fallback_count"] != counts["fallback"] or trace["fallback"]["unexpected_fallback_count"] != counts["unexpected"] or trace["fallback"]["unsupported_count"] != counts["unsupported"] or trace["fallback"]["fail_closed_count"] != counts["fail_closed"]: raise ValidationError("fallback counts do not reconcile")
     for operator in trace["operator_resolutions"]:
         if operator["resolution_status"] != "selected" and not any(event["phase_kind"] == operator["phase_kind"] and event["op_kind"] == operator["op_kind"] and event["to_implementation_id"] == operator["implementation_id"] for event in trace["fallback"]["events"]): raise ValidationError("non-selected operator has no fallback event")
-    nonselected = {(item["phase_kind"], item["op_kind"], item["implementation_id"]) for item in trace["operator_resolutions"] if item["resolution_status"] != "selected"}
-    event_targets = {(item["phase_kind"], item["op_kind"], item["to_implementation_id"]) for item in trace["fallback"]["events"]}
+    nonselected = Counter((item["phase_kind"], item["op_kind"], item["implementation_id"]) for item in trace["operator_resolutions"] if item["resolution_status"] != "selected")
+    event_targets = Counter((item["phase_kind"], item["op_kind"], item["to_implementation_id"]) for item in trace["fallback"]["events"])
     if nonselected != event_targets:
         raise ValidationError("fallback events do not reconstruct non-selected operators exactly")
     if any(item["resolution_status"] in {"unsupported", "fail_closed"} for item in trace["operator_resolutions"]) and trace["status"] == "ok":
         raise ValidationError("unsupported/fail-closed operator cannot be reported as ok")
+    for item in trace["operator_resolutions"]:
+        if item["resolution_status"] == "selected": continue
+        matching = [event for event in trace["fallback"]["events"] if event["phase_kind"] == item["phase_kind"] and event["op_kind"] == item["op_kind"] and event["to_implementation_id"] == item["implementation_id"]]
+        if len(matching) != 1: raise ValidationError("fallback event multiplicity differs")
+        expected_class = {"fallback": {"expected", "unexpected"}, "unsupported": {"unsupported"}, "fail_closed": {"fail_closed"}}[item["resolution_status"]]
+        if matching[0]["classification"] not in expected_class: raise ValidationError("fallback classification differs from operator status")
     memory = exact(trace["memory"], {"vram_capacity_bytes", "resident_bytes", "persistent_state_bytes", "planned_temporary_bytes", "planned_total_bytes", "planned_headroom_bytes", "observed_peak_bytes", "observed_headroom_bytes", "observer", "oom"}, "memory")
     for name in ("vram_capacity_bytes", "resident_bytes", "persistent_state_bytes", "planned_temporary_bytes", "planned_total_bytes", "planned_headroom_bytes"): nonnegative(memory[name], f"memory.{name}")
     for name in ("observed_peak_bytes", "observed_headroom_bytes"): nonnegative(memory[name], f"memory.{name}", nullable=True)
@@ -421,6 +445,8 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
         if not isinstance(state["reset"][name], bool): raise ValidationError("state reset flag is invalid")
     if state["prepared_batch_count"] != state["committed_batch_count"] + state["discarded_batch_count"]: raise ValidationError("state batch counters do not reconcile")
     if state["prepared_batch_count"] != phase_count: raise ValidationError("prepared batch count does not reconcile with recorded phases")
+    if state["stale_nonce_count"] + state["cancelled_batch_count"] + state["error_batch_count"] > state["discarded_batch_count"]:
+        raise ValidationError("stale/cancel/error batches exceed discarded batches")
     if state["reset"]["required"] and (not state["reset"]["attempted"] or not state["reset"]["complete"] or state["reset"]["failed"]): raise ValidationError("required reset is incomplete")
     aggregation = exact(trace["aggregation"], {"is_aggregated", "source_trace_sha256s", "component_trace_count", "full_model_trace_count", "coverage"}, "aggregation")
     if not isinstance(aggregation["is_aggregated"], bool) or not isinstance(aggregation["source_trace_sha256s"], list) or len(set(aggregation["source_trace_sha256s"])) != len(aggregation["source_trace_sha256s"]): raise ValidationError("aggregation sources are invalid or duplicated")

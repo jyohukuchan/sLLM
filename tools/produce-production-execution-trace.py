@@ -28,7 +28,7 @@ def canonical(value: Any) -> bytes:
 
 
 def digest(path: Path) -> str:
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o002:
         raise ProducerError(f"identity path is unavailable: {path}")
     h = hashlib.sha256()
     with path.open("rb") as source:
@@ -55,7 +55,7 @@ def resolve_manifest_path(value: Any, *, manifest_path: Path, label: str, root: 
 
 
 def load_json(path: Path, label: str) -> Any:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES or path.stat().st_mode & 0o002:
         raise ProducerError(f"{label} must be a bounded regular file")
     try:
         return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
@@ -105,6 +105,15 @@ def manifest_identity(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
         raise ProducerError("manifest receipt digest differs")
     product_identity = {"id": public.get("id"), "revision": public.get("revision"), "root": str(product_root), "package_manifest_sha256": package_hash}
     artifact = product.get("artifact") if isinstance(product.get("artifact"), dict) else {}
+    if artifact.get("manifest_sha256") is not None:
+        artifact_manifest = resolve_manifest_path(artifact.get("manifest_path", ""), manifest_path=path, root=product_root, label="artifact manifest")
+        if digest(artifact_manifest) != artifact.get("manifest_sha256"):
+            raise ProducerError("manifest artifact digest differs")
+    if artifact.get("content_sha256") is not None:
+        content_path = artifact.get("content_path") or artifact.get("payload_path")
+        artifact_content = resolve_manifest_path(content_path, manifest_path=path, root=product_root, label="artifact content")
+        if digest(artifact_content) != artifact.get("content_sha256"):
+            raise ProducerError("artifact content digest differs")
     return {
         "model": {"id": public.get("id"), "revision": public.get("revision"), "format_id": fmt.get("format_id"), "implementation_id": fmt.get("implementation_id")},
         "served_model_manifest_sha256": digest(path),
@@ -186,6 +195,7 @@ def build_trace(args: argparse.Namespace, manifest: dict[str, Any], facts: dict[
 def atomic_write(path: Path, raw: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() or path.is_symlink(): raise ProducerError(f"refusing to overwrite {path}")
+    if path.parent.stat().st_mode & 0o002: raise ProducerError("trace destination directory is world-writable")
     temporary = path.with_name(f".{path.name}.incomplete")
     with temporary.open("xb") as target:
         target.write(raw); target.flush(); os.fsync(target.fileno())
