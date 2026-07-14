@@ -131,15 +131,45 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
         command = ["--run-root", str(root), "--case", str(case_path), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--preflight", str(preflight), "--driver", str(driver), "--served-model-manifest", str(bound["served"]), "--fixture", str(fixture), "--raw-dir", str(root / "driver-runs"), "--output", str(raw), "--measurement", str(root / "adapted.measurement.json"), "--state", str(root / "adapted.state.json"), "--driver-lifecycle-input", str(root / "adapted.lifecycle.json"), "--cpu-fixture"]
         return raw, invoke(RAW_V2_ADAPTER, *command)
 
-    def result(self, bound: dict[str, Path | dict], root: Path, case_path: Path, case: dict, raw: Path, *, path_result: Path | None = None, trace: Path | None = None, trace_bundle: dict[str, Path] | None = None) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    def calibration_evidence(self, bound: dict[str, Path | dict], root: Path, case: dict, compare_kind: str) -> Path:
+        identity = json.loads(Path(bound["identity"]).read_text()); policy = json.loads(Path(bound["policy"]).read_text()); expanded = bound["expanded"]; assert isinstance(expanded, dict)
+        step_count = case["generated_tokens"] if case["phase"] == "decode" else 1
+        comparison = root / f"{case['case_id']}.{compare_kind}.comparison.json"
+        roles = {"source_gate": ("independent_source_full", "aq4_target"), "path_gate": ("same_artifact_all_m1", "aq4_optimized")}[compare_kind]
+        comparison_value = {
+            "schema_version": "ullm.qwen35_aq4_calibration_comparison.v1", "status": "valid", "promotion_eligible": False,
+            "created_utc": "2026-07-14T12:00:00Z", "compare_kind": compare_kind,
+            "reference": {"path": f"reference/{case['case_id']}", "manifest_sha256": hashlib.sha256(f"reference:{compare_kind}:{case['case_id']}".encode()).hexdigest(), "schema_version": "fixture.v1", "oracle_kind": roles[0]},
+            "candidate": {"path": f"candidate/{case['case_id']}", "manifest_sha256": hashlib.sha256(f"candidate:{compare_kind}:{case['case_id']}".encode()).hexdigest(), "schema_version": "fixture.v1", "oracle_kind": roles[1]},
+            "vector_contract": {"hidden_shape": [4096], "logits_shape": [248320], "dtype": "f32", "endianness": "little", "metric_denominator": "max(reference_l2,1e-30)", "top_k": 10},
+            "rows": {"file": "rows.jsonl", "record_count": step_count, "sha256": hashlib.sha256(f"rows:{compare_kind}:{case['case_id']}".encode()).hexdigest()},
+            "summary": {"row_count": step_count, "nonfinite_rows": 0, "greedy_mismatch_rows": 0, "max_hidden_relative_l2": 0.0, "max_hidden_max_abs": 0.0, "max_logits_relative_l2": 0.0, "max_logits_max_abs": 0.0, "minimum_top_k_overlap": 10},
+            "observed_values_only": True,
+        }
+        write_json(comparison, comparison_value)
+        hashes = identity["hash_binding"]
+        evidence = root / f"{case['case_id']}.{compare_kind}.calibration.json"
+        write_json(evidence, {
+            "schema_version": "ullm.aq4_p2_calibration_evidence.v1", "status": "valid", "compare_kind": compare_kind,
+            "case": case, "canonical_case_sha256": expanded["canonical_case_sha256"], "step_count": step_count,
+            "identity": {"model": identity["model_identity"], "source_oracle_sha256": sha(Path(bound["source"])), "package_content_sha256": hashes["package_content_sha256"], "package_manifest_sha256": hashes["package_manifest_sha256"], "worker_binary_sha256": hashes["worker_binary_sha256"], "policy_sha256": policy["hash_binding"]["policy_sha256"]},
+            "comparison": {"path": str(comparison), "sha256": sha(comparison)},
+        })
+        return evidence
+
+    def result(self, bound: dict[str, Path | dict], root: Path, case_path: Path, case: dict, raw: Path, *, path_result: Path | None = None, trace: Path | None = None, trace_bundle: dict[str, Path] | None = None, source_calibration: Path | bool | None = None, path_calibration: Path | bool | None = None) -> tuple[Path, subprocess.CompletedProcess[str]]:
         independent = root / f"{case['case_id']}.independent.json"
         correctness = {field: True for field in ("finite", "shape_contract_passed", "source_oracle_passed", "greedy_tokens_exact", "kv_state_cache_passed", "scheduler_progress_passed", "chunk_equivalence_passed", "cancel_reset_passed", "publish_failure_reset_passed")}
         correctness["path_oracle_passed"] = case["mode"] != "all_m1"
         correctness["final_hidden"] = {"relative_l2": 0.0, "max_abs": 0.0}; correctness["logits"] = {"relative_l2": 0.0, "max_abs": 0.0, "top_k_overlap": 1}
         write_json(independent, {"schema_version": "ullm.aq4_p2_independent_validation.v1", "status": "valid", "validator_independent": True, "case_id": case["case_id"], "case_sha256": case["case_sha256"], "raw_sha256": sha(raw), "source_oracle_sha256": sha(bound["source"]), "path_oracle_result_sha256": sha(path_result) if path_result else None, "trace_sha256": sha(trace) if trace else None, "correctness": correctness})
         output = root / f"{case['case_id']}.result.json"
+        if source_calibration is None: source_calibration = self.calibration_evidence(bound, root, case, "source_gate")
+        if case["mode"] in {"cold_batched", "cached_prefix_chunked"} and path_calibration is None: path_calibration = self.calibration_evidence(bound, root, case, "path_gate")
         command = ["--run-root", str(root), "--case", str(case_path), "--expanded", str(bound["expanded_path"]), "--raw", str(raw), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--source-oracle-validation", str(bound["source_validation"]), "--independent-validation", str(independent), "--output", str(output)]
+        if source_calibration is not False: command += ["--source-calibration-evidence", str(source_calibration)]
         if path_result: command += ["--path-oracle-result", str(path_result)]
+        if path_calibration is not False and path_calibration is not None: command += ["--path-calibration-evidence", str(path_calibration)]
         if trace:
             command += ["--trace", str(trace)]
             if trace_bundle:
@@ -307,11 +337,80 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
             raw, completed = self.raw(bound, root, case_path, case); self.assertEqual(completed.returncode, 0, completed.stderr)
             result, built = self.result(bound, root, case_path, case, raw); self.assertEqual(built.returncode, 0, built.stderr)
             value = json.loads(result.read_text()); self.assertEqual(value["schema_version"], "ullm.prefill_validation.v1"); self.assertFalse(value["promotion"]["eligible"]); self.assertEqual(value["performance"]["warmup_runs"], 2); self.assertEqual(value["performance"]["measured_runs"], 10)
+            self.assertEqual(value["calibration"]["source_gate"]["metrics"]["minimum_top_k_overlap"], 10.0); self.assertIsNone(value["calibration"]["path_gate"])
+            self.assertFalse(any("calibration" in key for key in value["performance"]))
             report = root / "report.json"
             checked = invoke(VALIDATE, "--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--result", str(result), "--output", str(report))
             self.assertNotEqual(checked.returncode, 0)
             self.assertTrue(any(code.startswith("partial_matrix:") for code in json.loads(report.read_text())["failure_codes"]))
             self.assertNotEqual(invoke(BUILD, "--status", "failed").returncode, 0)
+
+    def test_builder_calibration_binding_swap_hash_identity_threshold_nonfinite_unknown_and_missing(self) -> None:
+        mutations = ("case_swap", "hash", "identity", "threshold", "nonfinite", "unknown", "symlink", "hardlink", "missing")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); bound = self.bind(root)
+                case_path, case = self.case(bound, root, lambda item: item["stage_id"] == "smoke" and item["mode"] == "all_m1")
+                raw, ran = self.raw(bound, root, case_path, case); self.assertEqual(ran.returncode, 0, ran.stderr)
+                evidence = self.calibration_evidence(bound, root, case, "source_gate")
+                if mutation == "case_swap":
+                    expanded = bound["expanded"]; assert isinstance(expanded, dict)
+                    other = next(item for item in expanded["cases"] if item["mode"] == "all_m1" and item["case_id"] != case["case_id"])
+                    evidence = self.calibration_evidence(bound, root, other, "source_gate")
+                elif mutation in {"hash", "identity", "unknown"}:
+                    value = json.loads(evidence.read_text())
+                    if mutation == "hash": value["comparison"]["sha256"] = "0" * 64
+                    elif mutation == "identity": value["identity"]["worker_binary_sha256"] = "0" * 64
+                    else: value["unknown"] = True
+                    write_json(evidence, value)
+                elif mutation in {"threshold", "nonfinite"}:
+                    value = json.loads(evidence.read_text()); comparison = Path(value["comparison"]["path"]); compared = json.loads(comparison.read_text())
+                    compared["summary"]["max_hidden_relative_l2"] = 2.0 if mutation == "threshold" else float("nan")
+                    write_json(comparison, compared); value["comparison"]["sha256"] = sha(comparison); write_json(evidence, value)
+                elif mutation in {"symlink", "hardlink"}:
+                    outside = root / "hardlink-peer.json"; shutil.copyfile(evidence, outside); evidence.unlink(); os.link(outside, evidence)
+                    if mutation == "symlink": evidence.unlink(); evidence.symlink_to(outside.name)
+                result, built = self.result(bound, root, case_path, case, raw, source_calibration=False if mutation == "missing" else evidence)
+                self.assertNotEqual(built.returncode, 0, built.stderr); self.assertFalse(result.exists())
+
+    def test_final_validator_rejects_calibration_comparison_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); bound = self.bind(root); expanded = bound["expanded"]; assert isinstance(expanded, dict)
+            cases = [item for item in expanded["cases"] if item["stage_id"] == "smoke" and item["mode"] == "all_m1"][:2]
+            results = []; first_comparison = None
+            for index, case in enumerate(cases):
+                case_path = root / f"{case['case_id']}.case.json"; write_json(case_path, case)
+                raw, ran = self.raw(bound, root, case_path, case); self.assertEqual(ran.returncode, 0, ran.stderr)
+                evidence = self.calibration_evidence(bound, root, case, "source_gate"); value = json.loads(evidence.read_text())
+                if index == 0: first_comparison = copy.deepcopy(value["comparison"])
+                else:
+                    value["comparison"] = first_comparison; write_json(evidence, value)
+                result, built = self.result(bound, root, case_path, case, raw, source_calibration=evidence); self.assertEqual(built.returncode, 0, built.stderr)
+                results.append(result)
+            report = root / "reuse-report.json"; command = ["--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"])]
+            for result in results: command += ["--result", str(result)]
+            checked = invoke(VALIDATE, *command, "--output", str(report)); self.assertNotEqual(checked.returncode, 0)
+            self.assertTrue(any(code.startswith("calibration_source_reuse:") for code in json.loads(report.read_text())["failure_codes"]))
+
+    def test_optimized_requires_separate_path_calibration_and_all_m1_rejects_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); bound = self.bind(root); expanded = bound["expanded"]; assert isinstance(expanded, dict)
+            candidate = next(item for item in expanded["cases"] if item["stage_id"] == "smoke" and item["mode"] == "cold_batched")
+            oracle = next(item for item in expanded["cases"] if item["case_id"] == candidate["path_oracle_case_id"])
+            oracle_path = root / f"{oracle['case_id']}.case.json"; write_json(oracle_path, oracle)
+            oracle_raw, ran = self.raw(bound, root, oracle_path, oracle); self.assertEqual(ran.returncode, 0, ran.stderr)
+            oracle_result, built = self.result(bound, root, oracle_path, oracle, oracle_raw); self.assertEqual(built.returncode, 0, built.stderr)
+            candidate_path = root / f"{candidate['case_id']}.case.json"; write_json(candidate_path, candidate)
+            candidate_raw, ran = self.raw(bound, root, candidate_path, candidate); self.assertEqual(ran.returncode, 0, ran.stderr)
+            candidate_result, built = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result); self.assertEqual(built.returncode, 0, built.stderr)
+            calibration = json.loads(candidate_result.read_text())["calibration"]
+            self.assertNotEqual(calibration["source_gate"]["comparison"]["sha256"], calibration["path_gate"]["comparison"]["sha256"])
+            candidate_result.unlink()
+            missing, rejected = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result, path_calibration=False)
+            self.assertNotEqual(rejected.returncode, 0); self.assertFalse(missing.exists())
+            oracle_result.unlink(); unexpected_path = self.calibration_evidence(bound, root, oracle, "path_gate")
+            rejected_output, rejected = self.result(bound, root, oracle_path, oracle, oracle_raw, path_calibration=unexpected_path)
+            self.assertNotEqual(rejected.returncode, 0); self.assertFalse(rejected_output.exists())
 
     def test_builder_rejects_raw_status_override_dummy_trace_and_path_state_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -9,6 +9,7 @@ import importlib.util
 import json
 import math
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,10 @@ OK_STATUSES = {"ok", "failed", "oom", "unsupported", "skipped"}
 STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
 FIXED_EXPANDER = Path(__file__).with_name("expand-aq4-production-p2.py")
 STANDARD_MANIFEST = Path(__file__).parent.parent / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
+CALIBRATION_BINDING_SCHEMA = "ullm.aq4_p2_calibration_evidence.v1"
+CALIBRATION_COMPARISON_SCHEMA = "ullm.qwen35_aq4_calibration_comparison.v1"
+CALIBRATION_METRICS = ("max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap")
+SHA256_CHARS = frozenset("0123456789abcdef")
 
 
 class ResultError(ValueError): pass
@@ -31,29 +36,76 @@ def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink
+
+
+def _open_regular(path: Path, label: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try: descriptor = os.open(path, flags)
+    except OSError as error: raise ResultError(f"{label} is unavailable: {error}") from error
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(descriptor); raise ResultError(f"{label} must be a single-link regular file")
+    return descriptor
+
+
+def _read_stable(path: Path, label: str, maximum: int) -> bytes:
+    descriptor = _open_regular(path, label)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size > maximum: raise ResultError(f"{label} exceeds {maximum} bytes")
+        chunks: list[bytes] = []; remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk: break
+            chunks.append(chunk); remaining -= len(chunk)
+        if remaining == 0: raise ResultError(f"{label} exceeds {maximum} bytes")
+        after = os.fstat(descriptor)
+        if _identity(before) != _identity(after): raise ResultError(f"{label} changed while being read")
+        return b"".join(chunks)
+    finally: os.close(descriptor)
+
+
 def load(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024: raise ResultError(f"{label} must be a bounded regular file")
-    try: value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(ResultError(f"non-finite JSON number: {item}")))
+    try: value = json.loads(_read_stable(path, label, 32 * 1024 * 1024).decode("utf-8"), object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(ResultError(f"non-finite JSON number: {item}")))
     except (UnicodeError, json.JSONDecodeError) as error: raise ResultError(f"invalid {label}: {error}") from error
     if not isinstance(value, dict): raise ResultError(f"{label} root must be an object")
     return value
 
 
 def sha_file(path: Path, label: str) -> str:
-    if path.is_symlink() or not path.is_file(): raise ResultError(f"{label} must be a regular file")
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024): digest.update(chunk)
-    return digest.hexdigest()
+    descriptor = _open_regular(path, label); digest = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        while chunk := os.read(descriptor, 1024 * 1024): digest.update(chunk)
+        if _identity(before) != _identity(os.fstat(descriptor)): raise ResultError(f"{label} changed while being hashed")
+        return digest.hexdigest()
+    finally: os.close(descriptor)
 
 
 def canonical(value: Any) -> bytes: return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 def sha_bytes(value: bytes) -> str: return hashlib.sha256(value).hexdigest()
 
 
+def _reject_symlink_components(path: Path, label: str, *, allow_missing_leaf: bool = False) -> None:
+    absolute = Path(os.path.abspath(path)); components = [Path(absolute.anchor)]
+    components.extend(Path(absolute.anchor, *absolute.parts[1:index]) for index in range(1, len(absolute.parts) + 1))
+    for index, component in enumerate(components):
+        try: info = component.lstat()
+        except FileNotFoundError:
+            if allow_missing_leaf and index == len(components) - 1: return
+            raise ResultError(f"{label} path component is missing: {component}")
+        if stat.S_ISLNK(info.st_mode): raise ResultError(f"{label} path component is a symlink: {component}")
+
+
 def contained(root: Path, path: Path, label: str, *, existing: bool = True) -> Path:
-    root = root.resolve(strict=True); resolved = path.resolve(strict=existing)
-    if resolved != root and root not in resolved.parents: raise ResultError(f"{label} escapes run root")
+    lexical_root = Path(os.path.abspath(root)); lexical = Path(os.path.abspath(path))
+    if lexical != lexical_root and lexical_root not in lexical.parents: raise ResultError(f"{label} escapes run root")
+    _reject_symlink_components(lexical_root, "run root")
+    _reject_symlink_components(lexical, label, allow_missing_leaf=not existing)
+    resolved_root = lexical_root.resolve(strict=True); resolved = lexical.resolve(strict=existing)
+    if resolved != resolved_root and resolved_root not in resolved.parents: raise ResultError(f"{label} escapes run root")
     return resolved
 
 
@@ -94,6 +146,88 @@ def percentile(values: list[float], quantile: float) -> float:
 def numeric(value: Any, label: str, *, minimum: float = 0.0) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < minimum: raise ResultError(f"{label} must be finite and >= {minimum}")
     return float(value)
+
+
+def exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        actual = set(value) if isinstance(value, dict) else set()
+        raise ResultError(f"{label} fields differ: missing={sorted(fields - actual)} extra={sorted(actual - fields)}")
+    return value
+
+
+def ensure_sha(value: Any, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(char not in SHA256_CHARS for char in value): raise ResultError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def calibration_identity(identity: dict[str, Any], source_sha: str, policy: dict[str, Any]) -> dict[str, Any]:
+    hashes = identity.get("hash_binding", {})
+    return {
+        "model": identity.get("model_identity"),
+        "source_oracle_sha256": source_sha,
+        "package_content_sha256": hashes.get("package_content_sha256"),
+        "package_manifest_sha256": hashes.get("package_manifest_sha256"),
+        "worker_binary_sha256": hashes.get("worker_binary_sha256"),
+        "policy_sha256": policy.get("hash_binding", {}).get("policy_sha256"),
+    }
+
+
+def calibration_step_count(case: dict[str, Any]) -> int:
+    return int(case.get("generated_tokens", 0)) if case.get("phase") == "decode" else 1
+
+
+def calibration_thresholds(policy: dict[str, Any]) -> dict[str, float]:
+    values = policy.get("correctness_thresholds")
+    if not isinstance(values, dict): raise ResultError("calibration correctness thresholds are absent")
+    result: dict[str, float] = {}
+    for field in CALIBRATION_METRICS:
+        value = numeric(values.get(field), f"policy {field}")
+        if field == "minimum_top_k_overlap" and (not float(value).is_integer() or value > 10): raise ResultError("policy minimum_top_k_overlap must be an integer in 0..10")
+        result[field] = value
+    return result
+
+
+def validate_calibration_comparison(value: dict[str, Any], compare_kind: str, thresholds: dict[str, float]) -> dict[str, Any]:
+    exact(value, {"schema_version", "status", "promotion_eligible", "created_utc", "compare_kind", "reference", "candidate", "vector_contract", "rows", "summary", "observed_values_only"}, "calibration comparison")
+    if value["schema_version"] != CALIBRATION_COMPARISON_SCHEMA or value["status"] != "valid" or value["promotion_eligible"] is not False or value["observed_values_only"] is not True or value["compare_kind"] != compare_kind or not isinstance(value["created_utc"], str): raise ResultError("calibration comparison schema/status/kind differs")
+    reference = exact(value["reference"], {"path", "manifest_sha256", "schema_version", "oracle_kind"}, "calibration reference")
+    candidate = exact(value["candidate"], {"path", "manifest_sha256", "schema_version", "oracle_kind"}, "calibration candidate")
+    for side, item in (("reference", reference), ("candidate", candidate)):
+        if not isinstance(item["path"], str) or not item["path"] or not isinstance(item["schema_version"], str): raise ResultError(f"calibration {side} identity differs")
+        ensure_sha(item["manifest_sha256"], f"calibration {side} manifest")
+    expected_kinds = {"source_gate": ("independent_source_full", "aq4_target"), "path_gate": ("same_artifact_all_m1", "aq4_optimized")}
+    if (reference["oracle_kind"], candidate["oracle_kind"]) != expected_kinds[compare_kind]: raise ResultError("calibration reference/candidate roles differ")
+    contract = exact(value["vector_contract"], {"hidden_shape", "logits_shape", "dtype", "endianness", "metric_denominator", "top_k"}, "calibration vector contract")
+    if contract != {"hidden_shape": [4096], "logits_shape": [248320], "dtype": "f32", "endianness": "little", "metric_denominator": "max(reference_l2,1e-30)", "top_k": 10}: raise ResultError("calibration vector contract differs")
+    rows = exact(value["rows"], {"file", "record_count", "sha256"}, "calibration rows")
+    if rows["file"] != "rows.jsonl" or not isinstance(rows["record_count"], int) or isinstance(rows["record_count"], bool) or rows["record_count"] <= 0: raise ResultError("calibration rows contract differs")
+    ensure_sha(rows["sha256"], "calibration rows")
+    summary = exact(value["summary"], {"row_count", "nonfinite_rows", "greedy_mismatch_rows", *CALIBRATION_METRICS}, "calibration summary")
+    if summary["row_count"] != rows["record_count"] or summary["nonfinite_rows"] != 0 or summary["greedy_mismatch_rows"] != 0: raise ResultError("calibration row status/count differs")
+    metrics = {field: numeric(summary[field], f"calibration {field}") for field in CALIBRATION_METRICS}
+    if not metrics["minimum_top_k_overlap"].is_integer() or metrics["minimum_top_k_overlap"] > 10: raise ResultError("calibration top-k overlap differs")
+    if metrics["max_hidden_relative_l2"] > thresholds["max_hidden_relative_l2"] or metrics["max_hidden_max_abs"] > thresholds["max_hidden_max_abs"] or metrics["max_logits_relative_l2"] > thresholds["max_logits_relative_l2"] or metrics["max_logits_max_abs"] > thresholds["max_logits_max_abs"] or metrics["minimum_top_k_overlap"] < thresholds["minimum_top_k_overlap"]: raise ResultError("calibration comparison exceeds pre-bound correctness policy")
+    return {"row_count": summary["row_count"], **metrics}
+
+
+def validate_calibration_evidence(path: Path, compare_kind: str, root: Path, case: dict[str, Any], expanded: dict[str, Any], identity: dict[str, Any], policy: dict[str, Any], source_sha: str) -> dict[str, Any]:
+    resolved = contained(root, path, f"{compare_kind} calibration evidence")
+    value = load(resolved, f"{compare_kind} calibration evidence")
+    exact(value, {"schema_version", "status", "compare_kind", "case", "canonical_case_sha256", "step_count", "identity", "comparison"}, f"{compare_kind} calibration evidence")
+    if value["schema_version"] != CALIBRATION_BINDING_SCHEMA or value["status"] != "valid" or value["compare_kind"] != compare_kind: raise ResultError(f"{compare_kind} calibration binding schema/status differs")
+    if value["case"] != case or value["canonical_case_sha256"] != expanded.get("canonical_case_sha256") or value["step_count"] != calibration_step_count(case): raise ResultError(f"{compare_kind} calibration case/prompt/step/case-set binding differs")
+    bound_identity = exact(value["identity"], {"model", "source_oracle_sha256", "package_content_sha256", "package_manifest_sha256", "worker_binary_sha256", "policy_sha256"}, f"{compare_kind} calibration identity")
+    if bound_identity != calibration_identity(identity, source_sha, policy): raise ResultError(f"{compare_kind} calibration model/source/package/worker/device/policy identity differs")
+    # Device identity is nested in the exact case object; keep it explicit in
+    # the diagnostic boundary because case swaps between devices must fail.
+    if value["case"].get("device") != case.get("device"): raise ResultError(f"{compare_kind} calibration device identity differs")
+    comparison_link = exact(value["comparison"], {"path", "sha256"}, f"{compare_kind} calibration comparison link")
+    comparison_path = contained(root, Path(comparison_link["path"]), f"{compare_kind} calibration comparison")
+    comparison_sha = sha_file(comparison_path, f"{compare_kind} calibration comparison")
+    if comparison_link["sha256"] != comparison_sha: raise ResultError(f"{compare_kind} calibration comparison hash differs")
+    metrics = validate_calibration_comparison(load(comparison_path, f"{compare_kind} calibration comparison"), compare_kind, calibration_thresholds(policy))
+    if metrics["row_count"] != value["step_count"]: raise ResultError(f"{compare_kind} calibration step coverage differs")
+    return {"path": str(resolved), "sha256": sha_file(resolved, f"{compare_kind} calibration evidence"), "comparison": {"path": str(comparison_path), "sha256": comparison_sha}, "metrics": metrics}
 
 
 def validate_measurements(value: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
@@ -309,9 +443,10 @@ def validate_independent(value: dict[str, Any], case: dict[str, Any], raw_sha: s
 
 
 def build(args: argparse.Namespace) -> dict[str, Any]:
-    root = args.run_root.resolve(strict=True)
-    paths = [(args.case, "case"), (args.expanded, "expanded"), (args.raw, "raw"), (args.identity, "identity"), (args.policy, "policy"), (args.source_oracle, "source oracle"), (args.source_oracle_validation, "source oracle validation"), (args.independent_validation, "independent validation")]
+    root = contained(args.run_root, args.run_root, "run root")
+    paths = [(args.case, "case"), (args.expanded, "expanded"), (args.raw, "raw"), (args.identity, "identity"), (args.policy, "policy"), (args.source_oracle, "source oracle"), (args.source_oracle_validation, "source oracle validation"), (args.source_calibration_evidence, "source calibration evidence"), (args.independent_validation, "independent validation")]
     if args.path_oracle_result: paths.append((args.path_oracle_result, "path oracle result"))
+    if args.path_calibration_evidence: paths.append((args.path_calibration_evidence, "path calibration evidence"))
     if args.trace: paths.append((args.trace, "trace"))
     elif any((args.trace_manifest, args.trace_executor_record, args.trace_binding, args.trace_report, args.trace_source)):
         raise ResultError("trace validation artifacts cannot be supplied without a trace")
@@ -329,13 +464,15 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     if policy.get("status") != "bound" or policy.get("hash_binding", {}).get("policy_sha256") != policy_hash(policy) or identity.get("policy_sha256") != policy.get("hash_binding", {}).get("policy_sha256") or raw.get("links", {}).get("policy", {}).get("sha256") != sha_file(args.policy, "policy"): raise ResultError("bound policy differs")
     source_sha = sha_file(args.source_oracle, "source oracle"); validate_source_oracle(source, source_validation, source_sha)
     if identity.get("hash_binding", {}).get("source_oracle_sha256") != source_sha: raise ResultError("source oracle identity differs")
+    source_calibration = validate_calibration_evidence(args.source_calibration_evidence, "source_gate", root, case, expanded, identity, policy, source_sha)
     measurement_path = Path(raw.get("links", {}).get("measurement", {}).get("path", "")); state_path = Path(raw.get("links", {}).get("state", {}).get("path", ""))
     contained(root, measurement_path, "measurement"); contained(root, state_path, "state")
     if sha_file(measurement_path, "measurement") != raw["links"]["measurement"]["sha256"] or sha_file(state_path, "state") != raw["links"]["state"]["sha256"]: raise ResultError("raw evidence hash differs")
     measurement = load(measurement_path, "measurement"); performance = validate_measurements(measurement, case); state = load(state_path, "state"); validate_state(state, case["case_id"])
-    path_sha = None; path_link = None
+    path_sha = None; path_link = None; path_calibration = None
     if case.get("mode") in {"cold_batched", "cached_prefix_chunked"}:
         if args.path_oracle_result is None: raise ResultError("optimized case requires a path oracle result")
+        if args.path_calibration_evidence is None: raise ResultError("optimized case requires a same-artifact all-M1 path calibration")
         path_result = load(args.path_oracle_result, "path oracle result"); path_sha = sha_file(args.path_oracle_result, "path oracle result")
         if path_result.get("schema_version") != "ullm.prefill_validation.v1" or path_result.get("case_id") != case.get("path_oracle_case_id") or path_result.get("status") != "ok" or path_result.get("workload", {}).get("baseline_mode") != "all_m1": raise ResultError("path oracle result identity/status differs")
         if path_result.get("identity", {}).get("sha256") != sha_file(args.identity, "identity") or path_result.get("oracles", {}).get("source_oracle", {}).get("sha256") != source_sha or path_result.get("oracles", {}).get("threshold_policy", {}).get("self_sha256") != policy.get("hash_binding", {}).get("policy_sha256"): raise ResultError("path oracle artifact/source/policy identity differs")
@@ -343,7 +480,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             left = path_result.get("workload", {}).get(field) if field in {"phase", "cached_prefix_tokens", "prompt_tokens", "prefill_requested_m"} else path_result.get(field)
             if left != case.get(field): raise ResultError(f"path oracle same-state field differs: {field}")
         path_link = {"mode": "all_m1", "result_path": str(args.path_oracle_result.resolve()), "result_sha256": path_sha}
-    elif args.path_oracle_result is not None: raise ResultError("all-M1/decode case must not attach a path oracle result")
+        path_calibration = validate_calibration_evidence(args.path_calibration_evidence, "path_gate", root, case, expanded, identity, policy, source_sha)
+        if path_calibration["comparison"]["sha256"] == source_calibration["comparison"]["sha256"]: raise ResultError("source/path calibration comparisons must be separate artifacts")
+    elif args.path_oracle_result is not None or args.path_calibration_evidence is not None: raise ResultError("all-M1/decode case must not attach path evidence")
     trace_sha = None; trace_link = None
     if args.trace:
         trace, trace_validation = validate_trace_bundle(args, root, case); trace_sha = sha_file(args.trace, "trace")
@@ -371,6 +510,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "workload": {key: case.get(key) for key in ("phase", "baseline_mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "generated_tokens")},
         "evidence": {"raw_result": {"path": str(args.raw.resolve()), "sha256": raw_sha, "status": status}, "measurement": raw["links"]["measurement"], "state": raw["links"]["state"], "execution_trace": trace_link, "independent_validation": {"path": str(args.independent_validation.resolve()), "sha256": sha_file(args.independent_validation, "independent validation")}, "source_oracle_validation": {"path": str(args.source_oracle_validation.resolve()), "sha256": sha_file(args.source_oracle_validation, "source oracle validation")}},
         "oracles": {"path_oracle": path_link, "source_oracle": {"path": str(args.source_oracle.resolve()), "sha256": source_sha, "independent": True}, "threshold_policy": {"policy_id": policy.get("policy_id"), "path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy"), "self_sha256": policy.get("hash_binding", {}).get("policy_sha256")}},
+        "calibration": {"source_gate": source_calibration, "path_gate": path_calibration},
         "correctness": correctness, "performance": performance, "regression": regression,
         "promotion": {"eligible": False, "reason_codes": reasons, "required_next_scope": "independent_complete_matrix_validator"},
         "error": raw.get("failure_reason"), "notes": [],
@@ -379,17 +519,26 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def atomic_write(path: Path, value: dict[str, Any]) -> None:
-    if path.exists() or path.is_symlink(): raise ResultError(f"refusing to overwrite {path}")
-    path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_name(f".{path.name}.incomplete")
-    with temporary.open("xb") as target: target.write((json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode()); target.flush(); os.fsync(target.fileno())
-    temporary.replace(path)
+    if os.path.lexists(path): raise ResultError(f"refusing to overwrite {path}")
+    _reject_symlink_components(path.parent, "output parent")
+    temporary = path.with_name(f".{path.name}.incomplete-{os.getpid()}")
+    try:
+        with temporary.open("xb") as target: target.write((json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode()); target.flush(); os.fsync(target.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    except FileExistsError as error: raise ResultError(f"refusing to overwrite {path}") from error
+    finally:
+        try: temporary.unlink()
+        except FileNotFoundError: pass
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("run_root", "case", "expanded", "raw", "identity", "policy", "source_oracle", "source_oracle_validation", "independent_validation", "output"):
+    for name in ("run_root", "case", "expanded", "raw", "identity", "policy", "source_oracle", "source_oracle_validation", "source_calibration_evidence", "independent_validation", "output"):
         parser.add_argument(f"--{name.replace('_', '-')}", dest=name, type=Path, required=True)
-    parser.add_argument("--path-oracle-result", type=Path); parser.add_argument("--trace", type=Path)
+    parser.add_argument("--path-oracle-result", type=Path); parser.add_argument("--path-calibration-evidence", type=Path); parser.add_argument("--trace", type=Path)
     parser.add_argument("--trace-manifest", type=Path); parser.add_argument("--trace-executor-record", type=Path); parser.add_argument("--trace-binding", type=Path); parser.add_argument("--trace-report", type=Path); parser.add_argument("--trace-source", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
     try:

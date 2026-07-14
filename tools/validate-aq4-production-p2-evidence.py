@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -36,9 +37,38 @@ def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink
+
+
+def _open_regular(path: Path, label: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try: descriptor = os.open(path, flags)
+    except OSError as error: raise EvidenceError(f"{label} is unavailable: {error}") from error
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(descriptor); raise EvidenceError(f"{label} must be a single-link regular file")
+    return descriptor
+
+
+def _read_stable(path: Path, label: str, maximum: int) -> bytes:
+    descriptor = _open_regular(path, label)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size > maximum: raise EvidenceError(f"{label} exceeds {maximum} bytes")
+        chunks: list[bytes] = []; remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk: break
+            chunks.append(chunk); remaining -= len(chunk)
+        if remaining == 0: raise EvidenceError(f"{label} exceeds {maximum} bytes")
+        if _identity(before) != _identity(os.fstat(descriptor)): raise EvidenceError(f"{label} changed while being read")
+        return b"".join(chunks)
+    finally: os.close(descriptor)
+
+
 def load(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024: raise EvidenceError(f"{label} must be a bounded regular file")
-    try: value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(EvidenceError(f"non-finite JSON number: {item}")))
+    try: value = json.loads(_read_stable(path, label, 64 * 1024 * 1024).decode("utf-8"), object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(EvidenceError(f"non-finite JSON number: {item}")))
     except (UnicodeError, json.JSONDecodeError) as error: raise EvidenceError(f"invalid {label}: {error}") from error
     if not isinstance(value, dict): raise EvidenceError(f"{label} root must be an object")
     return value
@@ -49,16 +79,33 @@ def sha_bytes(value: bytes) -> str: return hashlib.sha256(value).hexdigest()
 
 
 def sha_file(path: Path, label: str) -> str:
-    if path.is_symlink() or not path.is_file(): raise EvidenceError(f"{label} must be a regular file")
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024): digest.update(chunk)
-    return digest.hexdigest()
+    descriptor = _open_regular(path, label); digest = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        while chunk := os.read(descriptor, 1024 * 1024): digest.update(chunk)
+        if _identity(before) != _identity(os.fstat(descriptor)): raise EvidenceError(f"{label} changed while being hashed")
+        return digest.hexdigest()
+    finally: os.close(descriptor)
 
 
-def contained(root: Path, path: Path, label: str) -> Path:
-    root = root.resolve(strict=True); resolved = path.resolve(strict=True)
-    if resolved != root and root not in resolved.parents: raise EvidenceError(f"{label} escapes run root")
+def _reject_symlink_components(path: Path, label: str, *, allow_missing_leaf: bool = False) -> None:
+    absolute = Path(os.path.abspath(path)); components = [Path(absolute.anchor)]
+    components.extend(Path(absolute.anchor, *absolute.parts[1:index]) for index in range(1, len(absolute.parts) + 1))
+    for index, component in enumerate(components):
+        try: info = component.lstat()
+        except FileNotFoundError:
+            if allow_missing_leaf and index == len(components) - 1: return
+            raise EvidenceError(f"{label} path component is missing: {component}")
+        if stat.S_ISLNK(info.st_mode): raise EvidenceError(f"{label} path component is a symlink: {component}")
+
+
+def contained(root: Path, path: Path, label: str, *, existing: bool = True) -> Path:
+    lexical_root = Path(os.path.abspath(root)); lexical = Path(os.path.abspath(path))
+    if lexical != lexical_root and lexical_root not in lexical.parents: raise EvidenceError(f"{label} escapes run root")
+    _reject_symlink_components(lexical_root, "run root")
+    _reject_symlink_components(lexical, label, allow_missing_leaf=not existing)
+    resolved_root = lexical_root.resolve(strict=True); resolved = lexical.resolve(strict=existing)
+    if resolved != resolved_root and resolved_root not in resolved.parents: raise EvidenceError(f"{label} escapes run root")
     return resolved
 
 
@@ -89,6 +136,13 @@ def complete_expansion_failure(expanded: dict[str, Any], identity: dict[str, Any
         expected = module.expand(json.loads(json.dumps(manifest)), sha_file(manifest_path, "planning manifest"))
         return None if expanded == expected else "expanded_not_complete_planning_set"
     except Exception: return "complete_expansion_unavailable"
+
+
+def result_builder_module() -> Any:
+    spec = importlib.util.spec_from_file_location("aq4_p2_calibration_binding", P2_RESULT_BUILDER)
+    if spec is None or spec.loader is None: raise EvidenceError("P2 result builder is unavailable")
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -172,7 +226,7 @@ def trace_association_failures(root: Path, trace_path: Path, trace: dict[str, An
 
 
 def validate(args: argparse.Namespace) -> dict[str, Any]:
-    root = args.run_root.resolve(strict=True)
+    root = contained(args.run_root, args.run_root, "run root")
     for path, label in ((args.expanded, "expanded"), (args.identity, "identity"), (args.policy, "policy"), (args.source_oracle, "source oracle")): contained(root, path, label)
     expanded = load(args.expanded, "expanded"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy"); source = load(args.source_oracle, "source oracle")
     failures: list[str] = []
@@ -204,6 +258,10 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     if identity.get("policy_sha256") != policy.get("hash_binding", {}).get("policy_sha256"): failures.append("identity_policy_binding")
     source_sha = sha_file(args.source_oracle, "source oracle")
     if source.get("schema_version") != "ullm.qwen35_aq4_source_oracle.v1" or source.get("oracle_kind") != "independent_source" or identity.get("hash_binding", {}).get("source_oracle_sha256") != source_sha: failures.append("source_oracle_binding")
+    try: calibration_module = result_builder_module()
+    except EvidenceError:
+        calibration_module = None; failures.append("calibration_validator_unavailable")
+    used_calibration_comparisons: dict[str, dict[str, str]] = {"source_gate": {}, "path_gate": {}}
     result_paths = list(args.result)
     if args.result_dir:
         directory = contained(root, args.result_dir, "result directory")
@@ -256,6 +314,38 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             if sha_file(source_validation_path, "source oracle validation") != source_validation_link.get("sha256") or source_validation.get("schema_version") != "ullm.qwen35_aq4_p2_oracle_validator.v1" or source_validation.get("status") != "valid" or source_validation.get("oracle_kind") != "independent_source" or source_validation.get("manifest_sha256") != source_sha:
                 failures.append(f"source_oracle_validation:{prefix}")
         except (EvidenceError, OSError): failures.append(f"source_oracle_validation:{prefix}")
+        calibration = result.get("calibration")
+        source_calibration = None; path_calibration = None
+        if not isinstance(calibration, dict) or set(calibration) != {"source_gate", "path_gate"}:
+            failures.append(f"calibration_fields:{prefix}")
+        elif calibration_module is not None:
+            try:
+                source_link = calibration["source_gate"]
+                if not isinstance(source_link, dict) or set(source_link) != {"path", "sha256", "comparison", "metrics"}: raise EvidenceError("source calibration link fields differ")
+                source_calibration = calibration_module.validate_calibration_evidence(Path(source_link["path"]), "source_gate", root, case, expanded, identity, policy, source_sha)
+                if source_link != source_calibration: raise EvidenceError("source calibration result link differs")
+                source_comparison_sha = source_calibration["comparison"]["sha256"]
+                prior = used_calibration_comparisons["source_gate"].get(source_comparison_sha)
+                if prior is not None and prior != case_id: failures.append(f"calibration_source_reuse:{prefix}:{prior}")
+                used_calibration_comparisons["source_gate"][source_comparison_sha] = case_id
+            except Exception:
+                failures.append(f"calibration_source_gate:{prefix}")
+            optimized = case.get("mode") in {"cold_batched", "cached_prefix_chunked"}
+            if optimized:
+                try:
+                    path_link_value = calibration["path_gate"]
+                    if not isinstance(path_link_value, dict) or set(path_link_value) != {"path", "sha256", "comparison", "metrics"}: raise EvidenceError("path calibration link fields differ")
+                    path_calibration = calibration_module.validate_calibration_evidence(Path(path_link_value["path"]), "path_gate", root, case, expanded, identity, policy, source_sha)
+                    if path_link_value != path_calibration: raise EvidenceError("path calibration result link differs")
+                    path_comparison_sha = path_calibration["comparison"]["sha256"]
+                    if source_calibration is not None and source_calibration["comparison"]["sha256"] == path_comparison_sha: raise EvidenceError("source/path calibration comparison is reused")
+                    prior = used_calibration_comparisons["path_gate"].get(path_comparison_sha)
+                    if prior is not None and prior != case_id: failures.append(f"calibration_path_reuse:{prefix}:{prior}")
+                    used_calibration_comparisons["path_gate"][path_comparison_sha] = case_id
+                except Exception:
+                    failures.append(f"calibration_path_gate:{prefix}")
+            elif calibration["path_gate"] is not None:
+                failures.append(f"calibration_unexpected_path_gate:{prefix}")
         path_link = result.get("oracles", {}).get("path_oracle"); expected_path_sha = None
         if case.get("mode") in {"cold_batched", "cached_prefix_chunked"}:
             oracle_case_id = case.get("path_oracle_case_id"); oracle_entry = results.get(oracle_case_id)
@@ -337,10 +427,19 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def atomic_write(path: Path, value: dict[str, Any]) -> None:
-    if path.exists() or path.is_symlink(): raise EvidenceError(f"refusing to overwrite {path}")
-    path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_name(f".{path.name}.incomplete")
-    with temporary.open("xb") as target: target.write((json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode()); target.flush(); os.fsync(target.fileno())
-    temporary.replace(path)
+    if os.path.lexists(path): raise EvidenceError(f"refusing to overwrite {path}")
+    _reject_symlink_components(path.parent, "output parent")
+    temporary = path.with_name(f".{path.name}.incomplete-{os.getpid()}")
+    try:
+        with temporary.open("xb") as target: target.write((json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode()); target.flush(); os.fsync(target.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    except FileExistsError as error: raise EvidenceError(f"refusing to overwrite {path}") from error
+    finally:
+        try: temporary.unlink()
+        except FileNotFoundError: pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -348,8 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.result and not args.result_dir: parser.error("at least one --result or --result-dir is required")
     try:
-        root = args.run_root.resolve(strict=True); output = args.output.resolve(strict=False)
-        if output != root and root not in output.parents: raise EvidenceError("output escapes run root")
+        root = contained(args.run_root, args.run_root, "run root"); output = contained(root, args.output, "output", existing=False)
         report = validate(args); atomic_write(args.output, report); print(json.dumps({"status": report["status"], "failure_count": len(report["failure_codes"])}, sort_keys=True)); return 0 if report["status"] == "valid" else 1
     except (EvidenceError, OSError, ValueError) as error:
         print(f"P2 evidence validation failed closed: {error}", file=sys.stderr); return 1
