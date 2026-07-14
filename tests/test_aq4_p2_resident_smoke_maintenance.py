@@ -338,8 +338,10 @@ def test_canonical_ready_artifact_readback_and_harness_pin() -> None:
     value = HARNESS.load_ready_artifact()
     assert value["status"] == "ready_for_one_case" and value["actual_eligible"] is True
     assert value["promotion_eligible"] is False
-    assert value["trust"]["harness"]["commit"] == "c5f6f2ac0130642f3d5c31204e84e15eecaf1e29"
-    assert value["trust"]["harness"]["sha256"] == "7a04647c50334f3f7df12e4def0272e43e1dcb37db953f680a589f9fe33aebf0"
+    harness = value["trust"]["harness"]
+    assert harness["sha256"] == HARNESS.sha_bytes(SCRIPT.read_bytes())
+    committed = subprocess.run(["git", "show", f'{harness["commit"]}:tools/run-aq4-p2-resident-smoke-maintenance.py'], cwd=ROOT, check=True, stdout=subprocess.PIPE)
+    assert committed.stdout == SCRIPT.read_bytes()
     assert value["qa_attestation_sha256"] == HARNESS.sha_bytes(HARNESS.pretty(HARNESS.QA_ATTESTATION))
 
 
