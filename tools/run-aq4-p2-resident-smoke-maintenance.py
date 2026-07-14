@@ -1861,9 +1861,58 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 
 QA_ATTESTATION = {
-    "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 318, "manual_boundary_count": 15, "runner_strict_negative_count": 38,
-    "test_suites": {"existing_and_profile_regression": 252, "marker_chain": 55, "diagnostic_capture": 11},
+    "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
+    "automated_tests": {
+        "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
+        "aggregate": {"distinct_test_file_count": 11, "collected": 342, "passed": 342, "failed": 0, "deselected": 0},
+        "suites": [
+            {
+                "name": "resident_trust_chain",
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
+                "collected": 252, "passed": 252, "failed": 0, "deselected": 0,
+                "files": [
+                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "2c24b7670b52610f6b1db33633139023778b18e9", "git_blob": "34c25be2a019d52564e4eb2449cb68622b2336f3", "collected": 50, "passed": 50},
+                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "4005c80e542d7e37cf79e62d2fd053f99c0353c1", "git_blob": "61778f9935e2d8bcd469cdf1a8a74495543c1aee", "collected": 37, "passed": 37},
+                    {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "774f6ddc10791db8795b37f41c5245d0edfebe42", "git_blob": "9ca9a777e96c34d308a3ce64354acf62e05f7d2d", "collected": 24, "passed": 24},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "3642999bd89bac462330a15da1e114f92204f8b5", "git_blob": "00ebb0291738b373c1bdc3e848da82cc54100291", "collected": 58, "passed": 58},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "9a3de26914fee595466644bc9f47f276ae7337c0", "git_blob": "c6f55e522435c037ee607d3bc661a2954371bd61", "collected": 76, "passed": 76},
+                ],
+            },
+            {
+                "name": "resident_roctx_ranges",
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_aq4_p2_resident_roctx_ranges.py"],
+                "collected": 5, "passed": 5, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_aq4_p2_resident_roctx_ranges.py", "source_commit": "62eadada3082b0c72eb1b467177ffe0c9445f26d", "git_blob": "a6ee8886ffdf58ea668b1b4c49452fa47637f7d9", "collected": 5, "passed": 5}],
+            },
+            {
+                "name": "diagnostic_capture",
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
+                "collected": 11, "passed": 11, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "b4d515f9908136fa773f957775beab79edc3065d", "git_blob": "86b95305159a831151c12472e3366a937e38e0fd", "collected": 11, "passed": 11}],
+            },
+            {
+                "name": "selection_raw_producer",
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_build_aq4_p3_selection_raw.py"],
+                "collected": 21, "passed": 21, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_build_aq4_p3_selection_raw.py", "source_commit": "78ba33c982c994df47c8ff4541df85b8d7da4a63", "git_blob": "1227c0a4fd60b9730e2e9e8b9f663fbc5867914f", "collected": 21, "passed": 21}],
+            },
+            {
+                "name": "profile_family_exclusion",
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_profile_aq4_p2_family_exclusive.py"],
+                "collected": 27, "passed": 27, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_profile_aq4_p2_family_exclusive.py", "source_commit": "0a630c705b7594a016edb42e32a29e4647da9d10", "git_blob": "30827a375a2dacd329e3023fd02b0631d8526b67", "collected": 27, "passed": 27}],
+            },
+            {
+                "name": "candidate_selector",
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_select_aq4_p3_candidate.py"],
+                "collected": 26, "passed": 26, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_select_aq4_p3_candidate.py", "source_commit": "01055a1960e55ab98990a6ee109e4a778f5bfd67", "git_blob": "9665da8fd81cd875b522c80f42bea6777642caf7", "collected": 26, "passed": 26}],
+            },
+        ],
+    },
+    "manual_checks": {"boundary_count": 15, "status": "passed"},
+    "strict_negative_contract_count": 38,
     "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "worker-exact-two-hardlink-set-pre-open-post-and-rehash", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
@@ -1871,7 +1920,49 @@ QA_ATTESTATION = {
 }
 
 
+def validate_qa_test_manifest() -> None:
+    automated = QA_ATTESTATION.get("automated_tests")
+    if not isinstance(automated, dict) or set(automated) != {"schema_version", "aggregate", "suites"} or automated.get("schema_version") != "ullm.aq4_p2_exact_test_file_manifest.v1":
+        raise HarnessError("QA exact test manifest schema differs")
+    aggregate = automated.get("aggregate")
+    suites = automated.get("suites")
+    if not isinstance(aggregate, dict) or set(aggregate) != {"distinct_test_file_count", "collected", "passed", "failed", "deselected"} or not isinstance(suites, list) or not suites:
+        raise HarnessError("QA exact test manifest aggregate differs")
+    observed_paths: set[str] = set()
+    collected = passed = failed = deselected = 0
+    for suite in suites:
+        exact_suite = {"name", "command", "collected", "passed", "failed", "deselected", "files"}
+        if not isinstance(suite, dict) or set(suite) != exact_suite or not isinstance(suite.get("name"), str) or not suite["name"] or not isinstance(suite.get("files"), list) or not suite["files"]:
+            raise HarnessError("QA exact test suite schema differs")
+        suite_paths: list[str] = []
+        suite_collected = suite_passed = 0
+        for item in suite["files"]:
+            if not isinstance(item, dict) or set(item) != {"path", "source_commit", "git_blob", "collected", "passed"}:
+                raise HarnessError("QA exact test file schema differs")
+            path = item.get("path")
+            if not isinstance(path, str) or not path.startswith("tests/test_") or Path(path).is_absolute() or ".." in Path(path).parts or path in observed_paths:
+                raise HarnessError("QA exact test file coverage differs")
+            if not isinstance(item.get("source_commit"), str) or re.fullmatch(r"[0-9a-f]{40}", item["source_commit"]) is None or not isinstance(item.get("git_blob"), str) or re.fullmatch(r"[0-9a-f]{40}", item["git_blob"]) is None:
+                raise HarnessError("QA exact test file Git identity differs")
+            if type(item.get("collected")) is not int or type(item.get("passed")) is not int or item["collected"] <= 0 or item["passed"] != item["collected"]:
+                raise HarnessError("QA exact test file counts differ")
+            observed_paths.add(path)
+            suite_paths.append(path)
+            suite_collected += item["collected"]
+            suite_passed += item["passed"]
+        if suite.get("command") != ["python3", "-m", "pytest", "-q", *suite_paths] or suite.get("collected") != suite_collected or suite.get("passed") != suite_passed or suite.get("failed") != 0 or suite.get("deselected") != 0:
+            raise HarnessError("QA exact test suite command/counts differ")
+        collected += suite_collected
+        passed += suite_passed
+        failed += suite["failed"]
+        deselected += suite["deselected"]
+    expected = {"distinct_test_file_count": len(observed_paths), "collected": collected, "passed": passed, "failed": failed, "deselected": deselected}
+    if aggregate != expected:
+        raise HarnessError("QA exact test manifest sum differs")
+
+
 def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool = False) -> dict[str, Any]:
+    validate_qa_test_manifest()
     run_id = LAUNCHER.PROFILE_RUN_ID if profile_diagnostic else RUN_ID
     value = {
         "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1", "status": "ready_for_one_case", "actual_eligible": True, "promotion_eligible": False,
