@@ -25,14 +25,21 @@ CASE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SCHEMA = "ullm.aq4_p2_resident_batch.v1"
-DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v1"
+DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v2"
 WARMUP_RUNS = 2
 MEASURED_RUNS = 10
 READY_IDENTITY_KEYS = {
     "binary_sha256",
     "build_git_commit",
     "protocol",
+    "worker_binary_sha256",
     "package_manifest_sha256",
+    "package_content_sha256",
+    "served_model_manifest_sha256",
+    "model_id",
+    "model_revision",
+    "format_id",
+    "implementation_id",
     "runtime_device",
     "guard_set_sha256",
 }
@@ -139,6 +146,9 @@ def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any])
     ]
     if len(selected) != 84:
         raise BatchError(f"representative full_model target profile must contain 84 cases, got {len(selected)}")
+    selected_ids = [case.get("case_id") for case in selected]
+    if len(set(selected_ids)) != len(selected_ids):
+        raise BatchError("representative target profile contains duplicate case IDs")
     index_cases = fixture_index.get("cases")
     if not isinstance(index_cases, list):
         raise BatchError("fixture index cases are missing")
@@ -187,13 +197,16 @@ def _recv(process: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
 def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != READY_IDENTITY_KEYS:
         raise BatchError("resident driver identity fields differ")
-    for field in ("binary_sha256", "package_manifest_sha256", "guard_set_sha256"):
+    for field in ("binary_sha256", "worker_binary_sha256", "package_manifest_sha256", "package_content_sha256", "served_model_manifest_sha256", "guard_set_sha256"):
         if not isinstance(value[field], str) or SHA256_RE.fullmatch(value[field]) is None:
             raise BatchError(f"resident driver identity.{field} is invalid")
     if not isinstance(value["build_git_commit"], str) or GIT_SHA_RE.fullmatch(value["build_git_commit"]) is None:
         raise BatchError("resident driver identity.build_git_commit is invalid")
     if value["protocol"] != DRIVER_SCHEMA:
         raise BatchError("resident driver identity protocol differs")
+    for field in ("model_id", "model_revision", "format_id", "implementation_id"):
+        if not isinstance(value[field], str) or not value[field]:
+            raise BatchError(f"resident driver identity.{field} is invalid")
     runtime = value["runtime_device"]
     if not isinstance(runtime, dict) or set(runtime) != RUNTIME_DEVICE_KEYS:
         raise BatchError("resident driver runtime device fields differ")
@@ -210,8 +223,9 @@ def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[d
     if bound != value:
         raise BatchError("resident driver identity differs from identity file")
     bound_hashes = identity.get("hash_binding", {})
-    if isinstance(bound_hashes, dict) and bound_hashes.get("package_manifest_sha256") != value["package_manifest_sha256"]:
-        raise BatchError("resident package manifest identity differs")
+    for field in ("package_manifest_sha256", "package_content_sha256", "served_model_manifest_sha256", "worker_binary_sha256"):
+        if isinstance(bound_hashes, dict) and bound_hashes.get(field) != value[field]:
+            raise BatchError(f"resident {field} identity differs")
     if identity.get("build_git_commit") not in (None, value["build_git_commit"]):
         raise BatchError("resident build commit identity differs")
     for case in cases:
@@ -219,7 +233,10 @@ def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[d
         if not isinstance(device, dict):
             raise BatchError(f"case device identity is missing: {case.get('case_id')}")
         for field in RUNTIME_DEVICE_KEYS:
-            if field in device and device[field] != runtime[field]:
+            expected = device.get(field)
+            if field == "architecture" and runtime[field] == "gfx1201" and expected == "RDNA4":
+                expected = "gfx1201"
+            if field in device and expected != runtime[field]:
                 raise BatchError(f"resident runtime device differs from case: {case['case_id']}")
     return value
 
@@ -232,20 +249,32 @@ def validate_ready(value: dict[str, Any], identity: dict[str, Any], cases: list[
 
 
 def validate_run(value: dict[str, Any], case: dict[str, Any], session_id: str) -> dict[str, Any]:
-    if value.get("event") != "run_complete" or value.get("resident_session_id") != session_id or value.get("status") not in {"ok", "failed", "oom"}:
+    required = {"event", "schema_version", "resident_session_id", "case_id", "run_index", "run_kind", "status", "elapsed_ms", "requested_m", "resolved_m", "actual_token_batch_width", "actual_request_batch_width", "timing", "audit", "state", "lifecycle", "reset", "resource", "terminal"}
+    if set(value) != required or value.get("event") != "run_complete" or value.get("schema_version") != DRIVER_SCHEMA or value.get("resident_session_id") != session_id or value.get("case_id") != case["case_id"] or value.get("status") not in {"ok", "failed", "oom"}:
         raise BatchError(f"resident driver run identity/status differs: {case['case_id']}")
     if type(value.get("elapsed_ms")) not in {int, float} or value["elapsed_ms"] < 0:
         raise BatchError("resident driver elapsed_ms is invalid")
     reset = value.get("reset")
-    if not isinstance(reset, dict) or reset != {"attempted": 1, "complete": 1, "failed": 0}:
+    terminal = value.get("terminal")
+    if not isinstance(terminal, dict) or set(terminal) != {"reuse_forbidden", "reason_code", "oom", "hip_fault"} or type(terminal["reuse_forbidden"]) is not bool or type(terminal["oom"]) is not bool or type(terminal["hip_fault"]) is not bool or not isinstance(terminal["reason_code"], str):
+        raise BatchError(f"resident driver terminal fields differ: {case['case_id']}")
+    valid_resets = ({"attempted": 1, "complete": 1, "failed": 0}, {"attempted": 1, "complete": 0, "failed": 1}) if terminal["reuse_forbidden"] else ({"attempted": 1, "complete": 1, "failed": 0},)
+    if not isinstance(reset, dict) or reset not in valid_resets:
         raise BatchError(f"resident driver reset is not complete: {case['case_id']}")
+    if value["status"] == "oom" and (not terminal["oom"] or not terminal["reuse_forbidden"]):
+        raise BatchError("resident driver OOM is not terminal")
+    if terminal["hip_fault"] and not terminal["reuse_forbidden"]:
+        raise BatchError("resident driver HIP fault is reusable")
     if value["status"] == "ok":
         audit = value.get("audit")
         resource = value.get("resource")
         if not isinstance(audit, dict) or audit.get("coverage_complete") is not True or not isinstance(audit.get("deterministic_digest_sha256"), str) or not isinstance(resource, dict) or not resource.get("samples") or not isinstance(resource.get("peak"), dict):
             raise BatchError(f"resident driver terminal audit/resource is incomplete: {case['case_id']}")
-        if value.get("actual_token_batch_width") != case.get("resolved_m") or value.get("actual_request_batch_width") != case.get("request_count"):
+        if terminal["reuse_forbidden"] or value.get("requested_m") != case.get("prefill_requested_m") or value.get("resolved_m") != case.get("resolved_m") or value.get("actual_token_batch_width") != case.get("resolved_m") or value.get("actual_request_batch_width") != case.get("request_count"):
             raise BatchError(f"resident driver actual width differs: {case['case_id']}")
+        for field in ("timing", "state", "lifecycle"):
+            if not isinstance(value.get(field), dict):
+                raise BatchError(f"resident driver {field} is incomplete: {case['case_id']}")
     return value
 
 
@@ -305,8 +334,11 @@ def run_batch(args: argparse.Namespace) -> int:
     expanded = load(args.expanded, "expanded")
     fixture_index = load(args.fixture_index, "fixture index")
     identity = load(args.identity, "identity")
+    preflight = load(args.preflight, "preflight")
     policy = load(args.policy, "policy")
+    expanded_link = {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}
     identity_link = {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}
+    preflight_link = {"path": str(args.preflight.resolve()), "sha256": sha_file(args.preflight, "preflight")}
     policy_link = {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}
     identity["_path"], identity["_sha256"] = str(args.identity.resolve()), identity_link["sha256"]
     policy["_path"], policy["_sha256"] = str(args.policy.resolve()), policy_link["sha256"]
@@ -327,31 +359,55 @@ def run_batch(args: argparse.Namespace) -> int:
     try:
         for case in cases:
             fixture_entry = by_id[case["case_id"]]
-            _send(process, {"command": "case_begin", "case_id": case["case_id"], "case_sha256": case["case_sha256"], "fixture_path": fixture_entry["fixture_path"], "fixture_sha256": fixture_entry["fixture_sha256"], "requested_m": case["prefill_requested_m"], "resolved_m": case["resolved_m"]})
+            sampling = case.get("sampling")
+            control = case.get("control")
+            if not isinstance(sampling, dict) or not isinstance(control, dict):
+                raise BatchError(f"case sampling/control is missing: {case['case_id']}")
+            _send(process, {
+                "command": "case_begin", "schema_version": DRIVER_SCHEMA,
+                "case_id": case["case_id"], "case_sha256": case["case_sha256"],
+                "case_binding": expanded_link, "identity": identity_link,
+                "preflight": preflight_link, "policy": policy_link,
+                "fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]},
+                "execution": {
+                    "scope": case.get("scope"), "phase": case.get("phase"), "mode": case.get("mode"),
+                    "prompt_tokens": case.get("prompt_tokens"), "cached_prefix_tokens": case.get("cached_prefix_tokens"),
+                    "context_tokens": case.get("context_tokens"), "generated_tokens": case.get("generated_tokens"),
+                    "request_count": case.get("request_count"), "requested_m": case.get("prefill_requested_m"),
+                    "resolved_m": case.get("resolved_m"), "sampling": sampling, "control": control,
+                },
+            })
             begin = _recv(process, args.timeout)
-            if begin.get("event") != "case_ready" or begin.get("resident_session_id") != session_id:
+            if set(begin) != {"event", "schema_version", "resident_session_id", "case_id", "requested_m", "resolved_m", "baseline_clean"} or begin.get("event") != "case_ready" or begin.get("schema_version") != DRIVER_SCHEMA or begin.get("resident_session_id") != session_id or begin.get("case_id") != case["case_id"] or begin.get("requested_m") != case["prefill_requested_m"] or begin.get("resolved_m") != case["resolved_m"] or begin.get("baseline_clean") is not True:
                 raise BatchError(f"resident driver case begin failed: {case['case_id']}")
             runs: list[dict[str, Any]] = []
+            reuse_forbidden = False
             for run_index in range(WARMUP_RUNS + MEASURED_RUNS):
                 run_kind = "warmup" if run_index < WARMUP_RUNS else "measured"
-                _send(process, {"command": "run", "case_id": case["case_id"], "run_index": run_index, "run_kind": run_kind})
+                _send(process, {"command": "run", "schema_version": DRIVER_SCHEMA, "case_id": case["case_id"], "run_index": run_index, "run_kind": run_kind})
                 value = validate_run(_recv(process, args.timeout), case, session_id)
-                value["run_index"], value["run_kind"] = run_index, run_kind
+                if value["run_index"] != run_index or value["run_kind"] != run_kind:
+                    raise BatchError(f"resident driver run order differs: {case['case_id']}")
                 runs.append(value)
-                if value["status"] == "oom":
+                if value["terminal"]["reuse_forbidden"] or value["status"] != "ok":
+                    reuse_forbidden = value["terminal"]["reuse_forbidden"]
                     break
-            _send(process, {"command": "case_end", "case_id": case["case_id"]})
-            end = _recv(process, args.timeout)
-            if end.get("event") != "case_complete" or end.get("resident_session_id") != session_id:
-                raise BatchError(f"resident driver case end failed: {case['case_id']}")
-            raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, runs, "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else None)
+            if not reuse_forbidden:
+                _send(process, {"command": "case_end", "schema_version": DRIVER_SCHEMA, "case_id": case["case_id"]})
+                end = _recv(process, args.timeout)
+                case_failed = any(item["status"] != "ok" for item in runs)
+                expected_release = {"commit": int(not case_failed), "discard": int(case_failed), "reset": 1, "baseline_restored": True}
+                if set(end) != {"event", "schema_version", "resident_session_id", "case_id", "release"} or end.get("event") != "case_complete" or end.get("schema_version") != DRIVER_SCHEMA or end.get("resident_session_id") != session_id or end.get("case_id") != case["case_id"] or end.get("release") != expected_release:
+                    raise BatchError(f"resident driver case end failed: {case['case_id']}")
+            failure_reason = "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else next((item["terminal"]["reason_code"] for item in runs if item["status"] != "ok"), None)
+            raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, runs, failure_reason)
             atomic_write(args.output_dir / f"{case['case_id']}.raw.json", raw)
             completed_cases += 1
-            if raw["status"] == "oom":
-                raise BatchError(f"resident driver OOM at {case['case_id']}; remaining cases were not executed")
+            if reuse_forbidden:
+                raise BatchError(f"resident driver became non-reusable at {case['case_id']}; remaining cases were not executed")
     finally:
         try:
-            _send(process, {"command": "shutdown"})
+            _send(process, {"command": "shutdown", "schema_version": DRIVER_SCHEMA})
         except (BatchError, OSError):
             pass
         try:
@@ -367,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expanded", type=Path, required=True)
     parser.add_argument("--fixture-index", type=Path, required=True)
     parser.add_argument("--identity", type=Path, required=True)
+    parser.add_argument("--preflight", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
