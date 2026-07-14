@@ -67,10 +67,10 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "e9065925d7b5af0352cb8dfd454a7e106abd7172"
-BINDING_SOURCE_TREE = "9f2ff38d06d5ea5724a6e84af1c00d2b8147f241"
-BINDING_RUNNER_GIT_BLOB = "9c097d1a97af3e15ca695c6da08b1e2928d08df7"
-BINDING_RUNNER_SHA = "3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc"
+BINDING_SOURCE_COMMIT = "ee341c019d873f7c250adbb81414d58b5285a454"
+BINDING_SOURCE_TREE = "9014020d0e833d6de38aa28bdefeb949d981e871"
+BINDING_RUNNER_GIT_BLOB = "380efa2f07caa1f5eee6efe94c6c72b6b1b75f40"
+BINDING_RUNNER_SHA = "3258f9a65a8c9c370555469a824b9891c018effd23d97dbad8661015df1f8f03"
 BINDING_DRIVER_GIT_BLOB = "0bed05e56a07807fa1338a80dfba2f72de64d5af"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
@@ -730,7 +730,7 @@ def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, b
     normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if current_driver != normative_driver:
         raise BundleError("binding commit changed the normative resident driver blob")
-    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"fake_driver_subprocess_count", b"--bundle-root"):
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root"):
         if contract not in runner:
             raise BundleError("binding runner generic root/validator contract differs")
     return runner, validator, validator_tree, validator_object
@@ -817,6 +817,7 @@ def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[st
         "fake_ready": {"path": str(CANONICAL_ROOT / "fake-ready.json"), "sha256": members["fake-ready.json"]["sha256"]},
         "fake_driver_subprocess_count": 1, "driver_fake_handshake": "passed",
         "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": identity["resident_driver_identity"],
+        "resident_driver_argv": resident_driver_argv(),
         "trusted_bundle_validator": expected_validator,
     }
     if validation != expected_validation:
