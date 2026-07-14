@@ -45,7 +45,7 @@ python3 tools/export-qwen35-aq4-source-calibration.py \
   --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B \
   --cases benchmarks/workloads/qwen35-aq4-p2-source-calibration-cases-v0.1.json \
   --legacy-oracle benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-oracle-v2 \
-  --output "$CAL/source-full" --chunk-elements 65536 --top-k 10 --threads 1
+  --output "$CAL/source-full" --chunk-elements 65536 --top-k 10 --threads 32
 python3 tools/validate-qwen35-aq4-p2-full-calibration.py --artifact "$CAL/source-full"
 ```
 

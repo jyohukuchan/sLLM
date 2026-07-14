@@ -14,7 +14,7 @@ P2 fidelity split は `ullm.aq4_p2_fidelity_split.v1` として 24 calibration /
 - source checkpoint index の既存実体は 19,306,393,663 B（17.98 GiB）で、CPU exporter の 2.0 倍 memory preflight は 38,612,787,326 B（35.96 GiB）以上の available memory を要求する。source/active の新しい実測時間・RSS・VRAM はまだ取得していない。
 - `8be3d37` で実行CLIの split/policy/calibration SHA と served/package/worker/guard/device/quantized-revision を必須引数として固定し、plan template と `validate_plan` に伝播した。Rust は package manifest の `source_model_dir` から upstream revision、checkpoint aggregate、tokenizer aggregate を再計算し、source artifact と一致する場合だけ active capture を許可する。upstream revision と quantized artifact revision は別々に記録し、同値を拒否する。policy schema、metric role/aggregation/formula、relative-L2 rejection もRust側で再検証する。
 - Rust observer は hidden/logit non-finite を検出した時点で中断する。strict duplicate-key JSON、canonical package tree hash（既存 production runner と同じ `relative\0 + raw file SHA + newline`）、renameat2 `NOREPLACE` 出力公開、dangling symlink/duplicate/nonfinite/provenance のnegative testsを追加した。
-- `ae543a9` で metrics lane が source/active の model ID、upstream revision、tokenizer aggregateを再検証する。source exporter の `--threads` は PyTorch intra/inter-op threadsだけを制御し、plan は再現性のため16固定とする。BF16 reduction順序の最下位bit/top-k tieが変わり得るため、個別artifactの全SHAとlegacy cross-checkを再検証する。
+- `ae543a9` で metrics lane が source/active の model ID、upstream revision、tokenizer aggregateを再検証する。source exporter の `--threads` は PyTorch intra/inter-op threadsだけを制御し、plan は再現性のため32固定とする。BF16 reduction順序の最下位bit/top-k tieが変わり得るため、個別artifactの全SHAとlegacy cross-checkを再検証する。
 
 ## 次の行動
 

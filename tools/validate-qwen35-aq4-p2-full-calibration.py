@@ -436,14 +436,38 @@ def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int
             raise ValidationError(f"parent sampled identity differs: {key}")
     if legacy["identity"]["source_checkpoint"]["aggregate_sha256"] != manifest["identity"]["source_checkpoint"]["aggregate_sha256"] or legacy["identity"]["tokenizer"]["aggregate_sha256"] != manifest["identity"]["tokenizer"]["aggregate_sha256"]:
         raise ValidationError("parent sampled checkpoint/tokenizer differs")
+    summary = manifest["legacy_cross_check"]
+    old_fields = {"status", "legacy_manifest_sha256", "legacy_payload_sha256", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}
+    new_fields = old_fields | {"split_manifest_path", "policy_path", "calibration_cases_path", "split_manifest_sha256", "policy_sha256", "calibration_cases_sha256", "excluded_case_ids", "excluded_case_ids_sha256", "overlap_case_ids"}
+    if set(summary) not in (old_fields, new_fields):
+        raise ValidationError("legacy cross-check summary fields differ")
+    legacy_records = list(legacy_oracle.payload_records(legacy_manifest_path.parent, legacy))
+    overlap = {(old["case_id"], old["step"]) for old in legacy_records if (old["case_id"], old["step"]) in rows}
+    if set(summary) == new_fields:
+        if summary["legacy_manifest_sha256"] != sha256_file(legacy_manifest_path, "parent sampled manifest") or not all(isinstance(summary[field], str) and Path(summary[field]).is_absolute() for field in ("split_manifest_path", "policy_path", "calibration_cases_path")):
+            raise ValidationError("legacy parent/path hash binding differs")
+        split_path = Path(summary["split_manifest_path"]); policy_path = Path(summary["policy_path"]); calibration_cases_path = Path(summary["calibration_cases_path"])
+        if sha256_file(split_path, "split manifest") != summary["split_manifest_sha256"] or sha256_file(policy_path, "policy") != summary["policy_sha256"] or sha256_file(calibration_cases_path, "calibration cases") != summary["calibration_cases_sha256"]:
+            raise ValidationError("legacy split/policy/calibration hash binding differs")
+        split_value = read_json(split_path, "split manifest")
+        exclusions = split_value.get("attempt2_exclusions") if isinstance(split_value, dict) else None
+        if not isinstance(exclusions, dict) or exclusions.get("case_ids") != summary["excluded_case_ids"]:
+            raise ValidationError("legacy split exclusion binding differs")
+        encoded_exclusions = json.dumps(summary["excluded_case_ids"], ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        if summary["excluded_case_ids_sha256"] != hashlib.sha256(encoded_exclusions).hexdigest() or summary["overlap_case_ids"] != sorted({case_id for case_id, _step in overlap}):
+            raise ValidationError("legacy exclusion/overlap binding differs")
+        if summary["status"] == "not_applicable_disjoint_by_policy":
+            if overlap or not {old["case_id"] for old in legacy_records}.issubset(set(summary["excluded_case_ids"])) or summary["row_count"] != 0 or summary["hidden_sample_max_abs_diff"] != 0.0 or summary["logit_sample_max_abs_diff"] != 0.0:
+                raise ValidationError("legacy disjoint policy summary differs")
+            return summary
     checked = 0
     hidden_max = 0.0
     logits_max = 0.0
     with stable_fd(hidden_path, "hidden sidecar") as (hidden, _), stable_fd(logits_path, "logits sidecar") as (logit, _):
-        for old in legacy_oracle.payload_records(legacy_manifest_path.parent, legacy):
+        for old in legacy_records:
             row = rows.get((old["case_id"], old["step"]))
             if row is None:
-                raise ValidationError(f"parent sampled row is missing: {old['case_id']}/{old['step']}")
+                raise ValidationError(f"parent sampled overlapping row is missing: {old['case_id']}/{old['step']}")
             hidden_values = next(read_f32_chunks(hidden, row["hidden"]["offset_bytes"], HIDDEN_SIZE, 65536))
             # Hidden is only 4096 values, so one bounded chunk is expected.
             if len(hidden_values) != HIDDEN_SIZE:
@@ -458,7 +482,12 @@ def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int
             if row["greedy_token_id"] != old["greedy_token_id"] or row["topk"] != old["topk"]:
                 raise ValidationError(f"parent sampled top-k/greedy differs: {old['case_id']}/{old['step']}")
             checked += 1
-    return {"status": "passed", "legacy_manifest_sha256": sha256_file(legacy_manifest_path, "parent sampled manifest"), "legacy_payload_sha256": legacy["payload"]["sha256"], "row_count": checked, "hidden_sample_max_abs_diff": hidden_max, "logit_sample_max_abs_diff": logits_max}
+    expected = {"status": "passed", "legacy_manifest_sha256": sha256_file(legacy_manifest_path, "parent sampled manifest"), "legacy_payload_sha256": legacy["payload"]["sha256"], "row_count": checked, "hidden_sample_max_abs_diff": hidden_max, "logit_sample_max_abs_diff": logits_max}
+    if set(summary) == new_fields:
+        expected = {**expected, "split_manifest_path": summary["split_manifest_path"], "policy_path": summary["policy_path"], "calibration_cases_path": summary["calibration_cases_path"], "split_manifest_sha256": summary["split_manifest_sha256"], "policy_sha256": summary["policy_sha256"], "calibration_cases_sha256": summary["calibration_cases_sha256"], "excluded_case_ids": summary["excluded_case_ids"], "excluded_case_ids_sha256": summary["excluded_case_ids_sha256"], "overlap_case_ids": summary["overlap_case_ids"]}
+    if summary != expected:
+        raise ValidationError("legacy cross-check summary differs")
+    return summary
 
 
 ROOT_FIELDS = {"schema_version", "oracle_kind", "status", "evidence_class", "usable_as_source_evidence", "promotion_eligible", "created_utc", "identity", "parent_sampled_oracle", "vector_contract", "limits", "cases", "files", "runtime", "legacy_cross_check"}
@@ -529,7 +558,9 @@ def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
     exact_fields(runtime["memory_preflight"], {"checkpoint_bytes", "mem_total_bytes", "mem_available_bytes", "required_headroom_bytes", "headroom_factor", "status"}, "runtime.memory_preflight")
     exact_fields(runtime["disk_preflight"], {"expected_vector_bytes", "required_free_bytes", "free_bytes", "status"}, "runtime.disk_preflight")
     exact_fields(runtime["run"], {"row_count", "nonfinite_rows", "elapsed_seconds"}, "runtime.run")
-    exact_fields(manifest["legacy_cross_check"], {"status", "legacy_manifest_sha256", "legacy_payload_sha256", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}, "legacy_cross_check")
+    legacy_fields = manifest["legacy_cross_check"]
+    if not isinstance(legacy_fields, dict) or set(legacy_fields) not in ({"status", "legacy_manifest_sha256", "legacy_payload_sha256", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}, {"status", "legacy_manifest_sha256", "legacy_payload_sha256", "split_manifest_path", "policy_path", "calibration_cases_path", "split_manifest_sha256", "policy_sha256", "calibration_cases_sha256", "excluded_case_ids", "excluded_case_ids_sha256", "overlap_case_ids", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}):
+        raise ValidationError("legacy_cross_check fields differ")
     return manifest
 
 

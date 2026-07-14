@@ -388,17 +388,27 @@ def read_values(handle: Any, offset: int, elements: int) -> list[float]:
     return list(struct.unpack(f"<{elements}f", raw))
 
 
-def legacy_cross_check(legacy_root: Path, legacy_manifest: dict[str, Any], row_index_path: Path, hidden_path: Path, logits_path: Path) -> dict[str, Any]:
+def legacy_cross_check(legacy_root: Path, legacy_manifest: dict[str, Any], row_index_path: Path, hidden_path: Path, logits_path: Path, *, excluded_case_ids: list[str], split_manifest_sha256: str, policy_sha256: str, calibration_cases_sha256: str, split_manifest_path: Path, policy_path: Path, calibration_cases_path: Path) -> dict[str, Any]:
     rows = _row_map(row_index_path)
+    legacy_records = list(legacy_oracle.payload_records(legacy_root, legacy_manifest))
+    overlap = {(old["case_id"], old["step"]) for old in legacy_records if (old["case_id"], old["step"]) in rows}
+    exclusion_sha256 = hashlib.sha256(json.dumps(sorted(excluded_case_ids), ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    base = {"legacy_manifest_sha256": sha256_file_stable(legacy_root / "manifest.json", "legacy manifest"), "legacy_payload_sha256": legacy_manifest["payload"]["sha256"], "split_manifest_path": str(split_manifest_path.resolve(strict=True)), "policy_path": str(policy_path.resolve(strict=True)), "calibration_cases_path": str(calibration_cases_path.resolve(strict=True)), "split_manifest_sha256": split_manifest_sha256, "policy_sha256": policy_sha256, "calibration_cases_sha256": calibration_cases_sha256, "excluded_case_ids": sorted(excluded_case_ids), "excluded_case_ids_sha256": exclusion_sha256, "overlap_case_ids": sorted({case_id for case_id, _step in overlap})}
+    if not overlap:
+        legacy_case_ids = {old["case_id"] for old in legacy_records}
+        if not legacy_case_ids.issubset(set(excluded_case_ids)):
+            missing = sorted(legacy_case_ids - set(excluded_case_ids))
+            raise CalibrationError(f"legacy rows are absent without a bound split exclusion: {missing}")
+        return {**base, "status": "not_applicable_disjoint_by_policy", "row_count": 0, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}
     checked = 0
     hidden_max = 0.0
     logit_max = 0.0
     with stable_fd(hidden_path, "generated hidden sidecar") as (hidden, _), stable_fd(logits_path, "generated logits sidecar") as (logits, _):
-        for old in legacy_oracle.payload_records(legacy_root, legacy_manifest):
+        for old in legacy_records:
             key = (old["case_id"], old["step"])
             row = rows.get(key)
             if row is None:
-                raise CalibrationError(f"full calibration misses legacy row {key}")
+                raise CalibrationError(f"full calibration misses overlapping legacy row {key}")
             hidden_values = read_values(hidden, int(row["hidden"]["offset_bytes"]), HIDDEN_SIZE)
             logit_values = read_values(logits, int(row["logits"]["offset_bytes"]), VOCAB_SIZE)
             for index, expected in zip(old["hidden_sample"]["indices"], old["hidden_sample"]["values"]):
@@ -408,7 +418,7 @@ def legacy_cross_check(legacy_root: Path, legacy_manifest: dict[str, Any], row_i
             if row["greedy_token_id"] != old["greedy_token_id"] or row["topk"] != old["topk"]:
                 raise CalibrationError(f"legacy top-k/greedy differs for {key}")
             checked += 1
-    return {"status": "passed", "legacy_manifest_sha256": sha256_file_stable(legacy_root / "manifest.json", "legacy manifest"), "legacy_payload_sha256": legacy_manifest["payload"]["sha256"], "row_count": checked, "hidden_sample_max_abs_diff": hidden_max, "logit_sample_max_abs_diff": logit_max}
+    return {**base, "status": "passed", "row_count": checked, "hidden_sample_max_abs_diff": hidden_max, "logit_sample_max_abs_diff": logit_max}
 
 
 def capture_model(model_dir: Path, cases: list[dict[str, Any]], temporary: Path, *, chunk_elements: int, top_k_count: int, threads: int) -> dict[str, Any]:
@@ -475,11 +485,17 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
     if args.output.exists() or os.path.lexists(args.output):
         raise CalibrationError(f"refusing to overwrite existing output: {args.output}")
     cases = load_cases(args.cases)
-    split_manifest_sha = sha256_file_stable(args.split_root / "split-manifest.json", "split manifest")
+    split_manifest_path = args.split_root / "split-manifest.json"
+    split_manifest = read_stable_json(split_manifest_path, "split manifest")
+    split_manifest_sha = sha256_file_stable(split_manifest_path, "split manifest")
     policy_sha = sha256_file_stable(args.split_root / "policy.json", "policy")
     calibration_sha = sha256_file_stable(args.split_root / "calibration-cases.jsonl", "calibration cases")
     if split_manifest_sha != args.expected_split_manifest_sha256 or policy_sha != args.expected_policy_sha256 or calibration_sha != args.expected_calibration_cases_sha256:
         raise CalibrationError("split/policy/calibration SHA does not match the pinned execution contract")
+    exclusions = split_manifest.get("attempt2_exclusions") if isinstance(split_manifest, dict) else None
+    excluded_case_ids = exclusions.get("case_ids") if isinstance(exclusions, dict) else None
+    if not isinstance(excluded_case_ids, list) or not excluded_case_ids or any(not isinstance(case_id, str) or not case_id for case_id in excluded_case_ids) or excluded_case_ids != sorted(set(excluded_case_ids)):
+        raise CalibrationError("split attempt2 exclusion contract is missing or non-canonical")
     actual_cases_sha = sha256_file_stable(args.cases, "calibration cases")
     if len(args.expected_cases_sha256) != 64 or any(char not in "0123456789abcdef" for char in args.expected_cases_sha256) or actual_cases_sha != args.expected_cases_sha256:
         raise CalibrationError("calibration cases SHA does not match the pinned execution contract")
@@ -496,13 +512,18 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
         raise CalibrationError("--legacy-oracle is required for parent sampled identity/cross-check")
     legacy_root = args.legacy_oracle
     legacy_manifest = validate_legacy_identity(legacy_root, identity)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{args.output.name}.incomplete-", dir=args.output.parent))
+    failure_destination = args.output.with_name(f"{args.output.name}.failed")
+    if os.path.lexists(failure_destination):
+        raise CalibrationError(f"refusing to overwrite failed output: {failure_destination}")
+    temporary: Path | None = Path(tempfile.mkdtemp(prefix=f".{args.output.name}.incomplete-", dir=args.output.parent))
     try:
+        assert temporary is not None
         run = capture_model(args.model_dir, cases, temporary, chunk_elements=args.chunk_elements, top_k_count=args.top_k, threads=args.threads)
         if run["nonfinite_rows"] == 0:
-            compatibility = legacy_cross_check(legacy_root, legacy_manifest, temporary / "rows.jsonl", temporary / "vectors" / "hidden.f32le", temporary / "vectors" / "logits.f32le")
+            compatibility = legacy_cross_check(legacy_root, legacy_manifest, temporary / "rows.jsonl", temporary / "vectors" / "hidden.f32le", temporary / "vectors" / "logits.f32le", excluded_case_ids=excluded_case_ids, split_manifest_sha256=split_manifest_sha, policy_sha256=policy_sha, calibration_cases_sha256=calibration_sha, split_manifest_path=split_manifest_path, policy_path=args.split_root / "policy.json", calibration_cases_path=args.split_root / "calibration-cases.jsonl")
         else:
-            compatibility = {"status": "blocked", "legacy_manifest_sha256": sha256_file_stable(legacy_root / "manifest.json", "legacy manifest"), "legacy_payload_sha256": legacy_manifest["payload"]["sha256"], "row_count": 0, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}
+            exclusion_sha256 = hashlib.sha256(json.dumps(sorted(excluded_case_ids), ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            compatibility = {"status": "blocked", "legacy_manifest_sha256": sha256_file_stable(legacy_root / "manifest.json", "legacy manifest"), "legacy_payload_sha256": legacy_manifest["payload"]["sha256"], "split_manifest_path": str(split_manifest_path.resolve(strict=True)), "policy_path": str((args.split_root / "policy.json").resolve(strict=True)), "calibration_cases_path": str((args.split_root / "calibration-cases.jsonl").resolve(strict=True)), "split_manifest_sha256": split_manifest_sha, "policy_sha256": policy_sha, "calibration_cases_sha256": calibration_sha, "excluded_case_ids": sorted(excluded_case_ids), "excluded_case_ids_sha256": exclusion_sha256, "overlap_case_ids": [], "row_count": 0, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}
         manifest = {"schema_version": SCHEMA, "oracle_kind": ORACLE_KIND, "status": "available" if run["nonfinite_rows"] == 0 else "blocked", "evidence_class": "production" if run["nonfinite_rows"] == 0 else "blocked", "usable_as_source_evidence": run["nonfinite_rows"] == 0, "promotion_eligible": False, "created_utc": legacy_oracle.utc_now(), "identity": identity, "parent_sampled_oracle": {"path": str((legacy_root / "manifest.json").resolve(strict=True)), "manifest_sha256": compatibility["legacy_manifest_sha256"], "schema_version": legacy_oracle.SOURCE_SCHEMA}, "vector_contract": {"hidden_shape": [HIDDEN_SIZE], "logits_shape": [VOCAB_SIZE], "dtype": "f32", "endianness": "little", "layout": "flat", "chunk_elements": args.chunk_elements, "row_bytes": ROW_BYTES, "semantic_hidden": "final_rmsnorm_hidden_used_by_lm_head", "semantic_logits": "raw_pre_softmax_lm_head_logits"}, "limits": {"max_case_file_bytes": MAX_CASE_FILE_BYTES, "max_cases": MAX_CASES, "max_rows": MAX_ROWS, "max_steps": MAX_STEPS}, "cases": {"path": str(args.cases.resolve(strict=True)), "sha256": sha256_file_stable(args.cases, "calibration cases"), "case_count": len(cases), "row_count": run["row_count"]}, "files": {"rows": "rows.jsonl", "hidden": "vectors/hidden.f32le", "logits": "vectors/logits.f32le"}, "runtime": {"runtime": "transformers.AutoModelForCausalLM", "transformers": package_version("transformers"), "torch": package_version("torch"), "safetensors": package_version("safetensors"), "python": platform.python_version(), "device": "cpu", "dtype": "bfloat16", "low_cpu_mem_usage": False, "torch_num_threads": args.threads, "torch_num_interop_threads": args.threads, "model_loads": 1, "inference_mode": True, "full_vocab_ranking": run["nonfinite_rows"] == 0, "max_resident_logit_rows": 1, "memory_preflight": memory, "disk_preflight": disk, "run": run}, "legacy_cross_check": compatibility}
         (temporary / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         for path in (temporary / "rows.jsonl", temporary / "vectors" / "hidden.f32le", temporary / "vectors" / "logits.f32le"):
@@ -525,11 +546,22 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
             finally:
                 os.close(fd)
         publish_noreplace(temporary, args.output)
+        temporary = None
         return manifest
-    except Exception:
+    except Exception as error:
+        if temporary is not None and temporary.exists():
+            failure = {"schema_version": f"{SCHEMA}.failure.v1", "status": "failed", "reason": str(error), "source_output": str(args.output), "cases_sha256": actual_cases_sha, "split_manifest_sha256": split_manifest_sha, "policy_sha256": policy_sha, "calibration_cases_sha256": calibration_sha, "legacy_manifest_sha256": sha256_file_stable(legacy_root / "manifest.json", "legacy manifest"), "attempt2_exclusion_case_ids": sorted(excluded_case_ids), "attempt2_exclusion_case_ids_sha256": hashlib.sha256(json.dumps(sorted(excluded_case_ids), ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
+            (temporary / "failure.json").write_text(json.dumps(failure, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            sums = []
+            for path in sorted(temporary.rglob("*")):
+                if path.is_file() and path.name != "SHA256SUMS":
+                    sums.append(f"{sha256_file_stable(path, path.name)}  {path.relative_to(temporary).as_posix()}\n")
+            (temporary / "SHA256SUMS").write_text("".join(sums), encoding="ascii")
+            publish_noreplace(temporary, failure_destination)
+            temporary = None
         raise
     finally:
-        if temporary.exists():
+        if temporary is not None and temporary.exists():
             shutil.rmtree(temporary, ignore_errors=True)
 
 
@@ -548,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args(argv)
-    if args.chunk_elements <= 0 or args.chunk_elements > 1_048_576 or args.top_k <= 0 or args.top_k > 32 or args.threads <= 0 or args.threads > 16:
+    if args.chunk_elements <= 0 or args.chunk_elements > 1_048_576 or args.top_k <= 0 or args.top_k > 32 or args.threads <= 0 or args.threads > 32:
         parser.error("chunk-elements/top-k/threads are outside bounded limits")
     try:
         result = export(args)

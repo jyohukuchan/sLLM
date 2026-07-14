@@ -97,9 +97,9 @@ def test_prepare_binds_latest_24_row_split(tmp_path: Path) -> None:
     assert value["row_count"] == 24
     assert value["split_manifest_sha256"] == "966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887"
     assert value["calibration_cases_sha256"] == "20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f"
-    assert value["source"]["threads"] == 16
-    assert "--threads 16" in value["source"]["command_template"]
-    assert value["execution_contract"]["source_torch_threads"] == 16
+    assert value["source"]["threads"] == 32
+    assert "--threads 32" in value["source"]["command_template"]
+    assert value["execution_contract"]["source_torch_threads"] == 32
     for flag in ("--split-root SPLIT_ROOT", "--expected-split-manifest-sha256 EXPECTED_SPLIT_MANIFEST_SHA256", "--expected-policy-sha256 EXPECTED_POLICY_SHA256", "--expected-calibration-cases-sha256 EXPECTED_CALIBRATION_CASES_SHA256", "--expected-cases-sha256 EXPECTED_SOURCE_CASES_SHA256"):
         assert flag in value["source"]["command_template"]
     for flag in ("--expected-split-manifest-sha256", "--expected-policy-sha256", "--expected-calibration-cases-sha256", "--expected-served-model-manifest-sha256", "--expected-package-manifest-sha256", "--expected-worker-binary-sha256", "--expected-guard-sha256", "--expected-device-architecture", "--expected-quantized-artifact-revision"):
