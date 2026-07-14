@@ -10,6 +10,8 @@
     "identity-and-hash-bindings",
     "strict-amd-process-active-owner-and-zero-sentinel-schema",
     "secret-free-amd-process-rejection-shape-and-raw-sha",
+    "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics",
+    "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding",
     "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection",
     "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive",
     "immutable-streamed-stop-poll-evidence",
@@ -20,21 +22,21 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "0994367b08534909ff42771ee5b080ec56ca4d01",
-    "sha256": "9e1e7ddd3ec9911326aa7eb81702219766ff1422494fef22cc6a2be87154c036"
+    "commit": "180ab1be976fa43cc3d4b46fa8e1f1307cb38ec8",
+    "sha256": "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e"
   },
   "manual_boundary_count": 15,
   "runner": {
-    "commit": "e93a2c162eb059cb2db883953d331f7a158d3a16",
-    "sha256": "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
+    "commit": "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db",
+    "sha256": "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"
   },
   "runner_strict_negative_count": 18,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 270,
+  "test_count": 287,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 204,
+    "existing_and_profile_regression": 221,
     "marker_chain": 55
   }
 }
