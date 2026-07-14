@@ -195,7 +195,7 @@ def validate_calibration_comparison(value: dict[str, Any], compare_kind: str, th
     for side, item in (("reference", reference), ("candidate", candidate)):
         if not isinstance(item["path"], str) or not item["path"] or not isinstance(item["schema_version"], str): raise ResultError(f"calibration {side} identity differs")
         ensure_sha(item["manifest_sha256"], f"calibration {side} manifest")
-    expected_kinds = {"source_gate": ("independent_source_full", "aq4_target"), "path_gate": ("same_artifact_all_m1", "aq4_optimized")}
+    expected_kinds = {"source_gate": ("independent_source_full", "aq4_target"), "path_gate": ("aq4_target", "aq4_optimized")}
     if (reference["oracle_kind"], candidate["oracle_kind"]) != expected_kinds[compare_kind]: raise ResultError("calibration reference/candidate roles differ")
     contract = exact(value["vector_contract"], {"hidden_shape", "logits_shape", "dtype", "endianness", "metric_denominator", "top_k"}, "calibration vector contract")
     if contract != {"hidden_shape": [4096], "logits_shape": [248320], "dtype": "f32", "endianness": "little", "metric_denominator": "max(reference_l2,1e-30)", "top_k": 10}: raise ResultError("calibration vector contract differs")
@@ -207,13 +207,58 @@ def validate_calibration_comparison(value: dict[str, Any], compare_kind: str, th
     metrics = {field: numeric(summary[field], f"calibration {field}") for field in CALIBRATION_METRICS}
     if not metrics["minimum_top_k_overlap"].is_integer() or metrics["minimum_top_k_overlap"] > 10: raise ResultError("calibration top-k overlap differs")
     if metrics["max_hidden_relative_l2"] > thresholds["max_hidden_relative_l2"] or metrics["max_hidden_max_abs"] > thresholds["max_hidden_max_abs"] or metrics["max_logits_relative_l2"] > thresholds["max_logits_relative_l2"] or metrics["max_logits_max_abs"] > thresholds["max_logits_max_abs"] or metrics["minimum_top_k_overlap"] < thresholds["minimum_top_k_overlap"]: raise ResultError("calibration comparison exceeds pre-bound correctness policy")
-    return {"row_count": summary["row_count"], **metrics}
+    return {"reference": reference, "candidate": candidate, "metrics": {"row_count": summary["row_count"], **metrics}}
 
 
-def validate_calibration_evidence(path: Path, compare_kind: str, root: Path, case: dict[str, Any], expanded: dict[str, Any], identity: dict[str, Any], policy: dict[str, Any], source_sha: str) -> dict[str, Any]:
+def calibration_artifact_manifest(root: Path, side: dict[str, Any], label: str) -> tuple[Path, dict[str, Any]]:
+    artifact_root = contained(root, Path(side["path"]), f"{label} root")
+    if not artifact_root.is_dir(): raise ResultError(f"{label} root must be a directory")
+    manifest_path = contained(root, artifact_root / "manifest.json", f"{label} manifest")
+    if sha_file(manifest_path, f"{label} manifest") != side["manifest_sha256"]: raise ResultError(f"{label} manifest hash differs")
+    return manifest_path, load(manifest_path, f"{label} manifest")
+
+
+def validate_source_calibration_reference(root: Path, side: dict[str, Any], source_path: Path, source: dict[str, Any], source_sha: str) -> dict[str, Any]:
+    manifest_path, manifest = calibration_artifact_manifest(root, side, "independent source calibration")
+    if manifest.get("schema_version") != "ullm.qwen35_aq4_source_calibration.v1" or manifest.get("oracle_kind") != "independent_source_full" or manifest.get("status") != "available": raise ResultError("independent source calibration manifest differs")
+    parent = exact(manifest.get("parent_sampled_oracle"), {"path", "manifest_sha256", "schema_version"}, "source calibration parent")
+    sampled_path = contained(root, Path(parent["path"]), "sampled source parent")
+    if sampled_path != source_path.resolve() or parent["manifest_sha256"] != source_sha or parent["schema_version"] != source.get("schema_version") or sha_file(sampled_path, "sampled source parent") != source_sha: raise ResultError("source calibration sampled-v2 parent hash chain differs")
+    full_identity = manifest.get("identity", {}); sampled_identity = source.get("identity", {})
+    if not isinstance(full_identity, dict) or not isinstance(sampled_identity, dict): raise ResultError("source calibration parent identity is absent")
+    for field in ("model_id", "model_revision"):
+        if full_identity.get(field) != sampled_identity.get(field): raise ResultError(f"source calibration parent identity differs: {field}")
+    for field in ("source_checkpoint", "tokenizer"):
+        if full_identity.get(field, {}).get("aggregate_sha256") != sampled_identity.get(field, {}).get("aggregate_sha256"): raise ResultError(f"source calibration parent identity differs: {field}")
+    return {"path": str(manifest_path), "sha256": side["manifest_sha256"], "identity": full_identity}
+
+
+def validate_target_calibration_manifest(root: Path, side: dict[str, Any], expected_kind: str, case: dict[str, Any], identity: dict[str, Any], source_manifest_sha: str | None, source_manifest_path: str | None = None) -> dict[str, Any]:
+    manifest_path, manifest = calibration_artifact_manifest(root, side, f"{expected_kind} target calibration")
+    if manifest.get("schema_version") != "ullm.qwen35_aq4_target_calibration.v1" or manifest.get("oracle_kind") != expected_kind or manifest.get("status") != "available" or manifest.get("capture_complete") is not True or manifest.get("promotion_eligible") is not False: raise ResultError(f"{expected_kind} target calibration manifest differs")
+    target_identity = manifest.get("identity", {}); hashes = identity.get("hash_binding", {}); model = identity.get("model_identity", {})
+    expected_identity = {"format_id": model.get("format_id"), "implementation_id": model.get("implementation_id"), "package_content_sha256": hashes.get("package_content_sha256"), "package_manifest_sha256": hashes.get("package_manifest_sha256"), "worker_binary_sha256": hashes.get("worker_binary_sha256")}
+    if not isinstance(target_identity, dict) or any(target_identity.get(field) != wanted for field, wanted in expected_identity.items()): raise ResultError(f"{expected_kind} target calibration identity differs")
+    binding = manifest.get("binding", {})
+    if binding.get("case_id") != case.get("case_id") or binding.get("case_sha256") != case.get("case_sha256") or binding.get("requested_m") != case.get("prefill_requested_m") or binding.get("resolved_m") != case.get("resolved_m"): raise ResultError(f"{expected_kind} target calibration case/prompt binding differs")
+    device = binding.get("device", {}); expected_device = case.get("device", {})
+    if not isinstance(device, dict) or device.get("requested_index") != expected_device.get("runtime_device_index") or any(device.get(field) != expected_device.get(field) for field in ("device_id", "backend", "name", "architecture")): raise ResultError(f"{expected_kind} target calibration device binding differs")
+    source_link = binding.get("source", {}).get("manifest", {})
+    if not isinstance(source_link, dict): raise ResultError(f"{expected_kind} target source link is absent")
+    linked_source_sha = ensure_sha(source_link.get("sha256"), f"{expected_kind} target source manifest")
+    linked_source_path = contained(root, Path(source_link.get("path", "")), f"{expected_kind} target source manifest")
+    if sha_file(linked_source_path, f"{expected_kind} target source manifest") != linked_source_sha: raise ResultError(f"{expected_kind} target source manifest hash chain differs")
+    if source_manifest_sha is not None and linked_source_sha != source_manifest_sha: raise ResultError(f"{expected_kind} target source manifest differs")
+    if source_manifest_path is not None and linked_source_path != Path(source_manifest_path).resolve(): raise ResultError(f"{expected_kind} target source manifest path differs")
+    return {"path": str(manifest_path), "sha256": side["manifest_sha256"], "source_manifest_path": str(linked_source_path), "source_manifest_sha256": linked_source_sha}
+
+
+def validate_calibration_evidence(path: Path, compare_kind: str, root: Path, case: dict[str, Any], expanded: dict[str, Any], identity: dict[str, Any], policy: dict[str, Any], source_path: Path, source: dict[str, Any], source_sha: str, path_oracle: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved = contained(root, path, f"{compare_kind} calibration evidence")
     value = load(resolved, f"{compare_kind} calibration evidence")
-    exact(value, {"schema_version", "status", "compare_kind", "case", "canonical_case_sha256", "step_count", "identity", "comparison"}, f"{compare_kind} calibration evidence")
+    fields = {"schema_version", "status", "compare_kind", "case", "canonical_case_sha256", "step_count", "identity", "comparison"}
+    if compare_kind == "path_gate": fields |= {"path_oracle_case_id", "path_oracle_result_sha256", "path_oracle_calibration_manifest_sha256"}
+    exact(value, fields, f"{compare_kind} calibration evidence")
     if value["schema_version"] != CALIBRATION_BINDING_SCHEMA or value["status"] != "valid" or value["compare_kind"] != compare_kind: raise ResultError(f"{compare_kind} calibration binding schema/status differs")
     if value["case"] != case or value["canonical_case_sha256"] != expanded.get("canonical_case_sha256") or value["step_count"] != calibration_step_count(case): raise ResultError(f"{compare_kind} calibration case/prompt/step/case-set binding differs")
     bound_identity = exact(value["identity"], {"model", "source_oracle_sha256", "package_content_sha256", "package_manifest_sha256", "worker_binary_sha256", "policy_sha256"}, f"{compare_kind} calibration identity")
@@ -225,9 +270,38 @@ def validate_calibration_evidence(path: Path, compare_kind: str, root: Path, cas
     comparison_path = contained(root, Path(comparison_link["path"]), f"{compare_kind} calibration comparison")
     comparison_sha = sha_file(comparison_path, f"{compare_kind} calibration comparison")
     if comparison_link["sha256"] != comparison_sha: raise ResultError(f"{compare_kind} calibration comparison hash differs")
-    metrics = validate_calibration_comparison(load(comparison_path, f"{compare_kind} calibration comparison"), compare_kind, calibration_thresholds(policy))
+    compared = validate_calibration_comparison(load(comparison_path, f"{compare_kind} calibration comparison"), compare_kind, calibration_thresholds(policy))
+    metrics = compared["metrics"]
     if metrics["row_count"] != value["step_count"]: raise ResultError(f"{compare_kind} calibration step coverage differs")
-    return {"path": str(resolved), "sha256": sha_file(resolved, f"{compare_kind} calibration evidence"), "comparison": {"path": str(comparison_path), "sha256": comparison_sha}, "metrics": metrics}
+    if compare_kind == "source_gate":
+        source_manifest = validate_source_calibration_reference(root, compared["reference"], source_path, source, source_sha)
+        target_manifest = validate_target_calibration_manifest(root, compared["candidate"], "aq4_target", case, identity, source_manifest["sha256"], source_manifest["path"])
+        path_binding = None
+    else:
+        if path_oracle is None: raise ResultError("path calibration requires an all-M1 result chain")
+        expected_path = {"path_oracle_case_id": path_oracle["case"]["case_id"], "path_oracle_result_sha256": path_oracle["result_sha256"], "path_oracle_calibration_manifest_sha256": path_oracle["calibration_manifest_sha256"]}
+        if any(value[field] != wanted for field, wanted in expected_path.items()): raise ResultError("path calibration all-M1 result/manifest binding differs")
+        reference_manifest = validate_target_calibration_manifest(root, compared["reference"], "aq4_target", path_oracle["case"], identity, path_oracle["source_manifest_sha256"], path_oracle["source_manifest_path"])
+        if reference_manifest["sha256"] != path_oracle["calibration_manifest_sha256"] or Path(compared["reference"]["path"]).resolve() != Path(path_oracle["calibration_root_path"]).resolve(): raise ResultError("all-M1 target manifest/path to path comparison hash chain differs")
+        target_manifest = validate_target_calibration_manifest(root, compared["candidate"], "aq4_optimized", case, identity, reference_manifest["source_manifest_sha256"], reference_manifest["source_manifest_path"])
+        source_manifest = {"path": reference_manifest["source_manifest_path"], "sha256": reference_manifest["source_manifest_sha256"]}
+        path_binding = expected_path
+    result = {"path": str(resolved), "sha256": sha_file(resolved, f"{compare_kind} calibration evidence"), "comparison": {"path": str(comparison_path), "sha256": comparison_sha}, "manifests": {"reference_path": compared["reference"]["path"], "reference_sha256": compared["reference"]["manifest_sha256"], "candidate_path": compared["candidate"]["path"], "candidate_sha256": compared["candidate"]["manifest_sha256"], "source_path": source_manifest["path"], "source_sha256": source_manifest["sha256"]}, "metrics": metrics}
+    if path_binding is not None: result["path_oracle"] = path_binding
+    return result
+
+
+def path_oracle_calibration_chain(path_result: dict[str, Any], path_result_sha: str, root: Path, expanded: dict[str, Any], identity: dict[str, Any], policy: dict[str, Any], source_path: Path, source: dict[str, Any], source_sha: str) -> dict[str, Any]:
+    oracle_case_id = path_result.get("case_id")
+    matches = [item for item in expanded.get("cases", []) if isinstance(item, dict) and item.get("case_id") == oracle_case_id]
+    if len(matches) != 1: raise ResultError("path oracle result case is absent from expanded matrix")
+    oracle_case = matches[0]
+    calibration = exact(path_result.get("calibration"), {"source_gate", "path_gate"}, "path oracle result calibration")
+    if calibration["path_gate"] is not None: raise ResultError("all-M1 path oracle result must not contain a path gate")
+    source_link = exact(calibration["source_gate"], {"path", "sha256", "comparison", "manifests", "metrics"}, "path oracle source calibration link")
+    rebuilt = validate_calibration_evidence(Path(source_link["path"]), "source_gate", root, oracle_case, expanded, identity, policy, source_path, source, source_sha)
+    if source_link != rebuilt: raise ResultError("path oracle source calibration link differs")
+    return {"case": oracle_case, "result_sha256": path_result_sha, "calibration_root_path": rebuilt["manifests"]["candidate_path"], "calibration_manifest_sha256": rebuilt["manifests"]["candidate_sha256"], "source_manifest_path": rebuilt["manifests"]["source_path"], "source_manifest_sha256": rebuilt["manifests"]["source_sha256"]}
 
 
 def validate_measurements(value: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
@@ -464,7 +538,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     if policy.get("status") != "bound" or policy.get("hash_binding", {}).get("policy_sha256") != policy_hash(policy) or identity.get("policy_sha256") != policy.get("hash_binding", {}).get("policy_sha256") or raw.get("links", {}).get("policy", {}).get("sha256") != sha_file(args.policy, "policy"): raise ResultError("bound policy differs")
     source_sha = sha_file(args.source_oracle, "source oracle"); validate_source_oracle(source, source_validation, source_sha)
     if identity.get("hash_binding", {}).get("source_oracle_sha256") != source_sha: raise ResultError("source oracle identity differs")
-    source_calibration = validate_calibration_evidence(args.source_calibration_evidence, "source_gate", root, case, expanded, identity, policy, source_sha)
+    source_calibration = validate_calibration_evidence(args.source_calibration_evidence, "source_gate", root, case, expanded, identity, policy, args.source_oracle, source, source_sha)
     measurement_path = Path(raw.get("links", {}).get("measurement", {}).get("path", "")); state_path = Path(raw.get("links", {}).get("state", {}).get("path", ""))
     contained(root, measurement_path, "measurement"); contained(root, state_path, "state")
     if sha_file(measurement_path, "measurement") != raw["links"]["measurement"]["sha256"] or sha_file(state_path, "state") != raw["links"]["state"]["sha256"]: raise ResultError("raw evidence hash differs")
@@ -480,7 +554,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             left = path_result.get("workload", {}).get(field) if field in {"phase", "cached_prefix_tokens", "prompt_tokens", "prefill_requested_m"} else path_result.get(field)
             if left != case.get(field): raise ResultError(f"path oracle same-state field differs: {field}")
         path_link = {"mode": "all_m1", "result_path": str(args.path_oracle_result.resolve()), "result_sha256": path_sha}
-        path_calibration = validate_calibration_evidence(args.path_calibration_evidence, "path_gate", root, case, expanded, identity, policy, source_sha)
+        path_chain = path_oracle_calibration_chain(path_result, path_sha, root, expanded, identity, policy, args.source_oracle, source, source_sha)
+        if path_chain["case"]["case_id"] != case.get("path_oracle_case_id"): raise ResultError("path oracle calibration case differs")
+        path_calibration = validate_calibration_evidence(args.path_calibration_evidence, "path_gate", root, case, expanded, identity, policy, args.source_oracle, source, source_sha, path_oracle=path_chain)
         if path_calibration["comparison"]["sha256"] == source_calibration["comparison"]["sha256"]: raise ResultError("source/path calibration comparisons must be separate artifacts")
     elif args.path_oracle_result is not None or args.path_calibration_evidence is not None: raise ResultError("all-M1/decode case must not attach path evidence")
     trace_sha = None; trace_link = None

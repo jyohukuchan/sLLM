@@ -92,7 +92,8 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
         model = root / "model-identity.json"; write_json(model, model_contract)
         graph = root / "graph.json"; write_json(graph, {"source": "fixture", "nodes": 1})
         state_schema = root / "state-schema.json"; write_json(state_schema, {"schema": "fixture-state-v1"})
-        source = root / "source-oracle.json"; write_json(source, {"schema_version": "ullm.qwen35_aq4_source_oracle.v1", "oracle_kind": "independent_source", "status": "fixture", "evidence_class": "synthetic_fixture", "promotion_eligible": False})
+        source_identity = {"model_id": model_contract["id"], "model_revision": model_contract["revision"], "source_checkpoint": {"aggregate_sha256": "d" * 64}, "tokenizer": {"aggregate_sha256": "e" * 64}}
+        source = root / "source-oracle.json"; write_json(source, {"schema_version": "ullm.qwen35_aq4_source_oracle.v1", "oracle_kind": "independent_source", "status": "fixture", "evidence_class": "synthetic_fixture", "promotion_eligible": False, "identity": source_identity})
         source_validation = root / "source-oracle-validation.json"; write_json(source_validation, {"schema_version": "ullm.qwen35_aq4_p2_oracle_validator.v1", "status": "valid", "oracle_kind": "independent_source", "manifest_sha256": sha(source), "production_eligible": False, "blockers": ["synthetic fixture"]})
         power = root / "power.json"; write_json(power, {"policy_binding": {"expected_power_limit_watts": 300, "allowed_power_tolerance_watts": 5, "maximum_temperature_c": 95, "minimum_vram_headroom_bytes": 1}})
         correctness = root / "correctness.json"; write_json(correctness, {"max_hidden_relative_l2": 1.0, "max_hidden_max_abs": 1.0, "max_logits_relative_l2": 1.0, "max_logits_max_abs": 1.0, "minimum_top_k_overlap": 1})
@@ -131,29 +132,51 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
         command = ["--run-root", str(root), "--case", str(case_path), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--preflight", str(preflight), "--driver", str(driver), "--served-model-manifest", str(bound["served"]), "--fixture", str(fixture), "--raw-dir", str(root / "driver-runs"), "--output", str(raw), "--measurement", str(root / "adapted.measurement.json"), "--state", str(root / "adapted.state.json"), "--driver-lifecycle-input", str(root / "adapted.lifecycle.json"), "--cpu-fixture"]
         return raw, invoke(RAW_V2_ADAPTER, *command)
 
-    def calibration_evidence(self, bound: dict[str, Path | dict], root: Path, case: dict, compare_kind: str) -> Path:
+    def calibration_evidence(self, bound: dict[str, Path | dict], root: Path, case: dict, compare_kind: str, path_result: Path | None = None) -> Path:
         identity = json.loads(Path(bound["identity"]).read_text()); policy = json.loads(Path(bound["policy"]).read_text()); expanded = bound["expanded"]; assert isinstance(expanded, dict)
         step_count = case["generated_tokens"] if case["phase"] == "decode" else 1
+        source_value = json.loads(Path(bound["source"]).read_text()); source_root = root / "source-full-calibration"; source_root.mkdir(exist_ok=True)
+        source_manifest = source_root / "manifest.json"
+        write_json(source_manifest, {"schema_version": "ullm.qwen35_aq4_source_calibration.v1", "oracle_kind": "independent_source_full", "status": "available", "identity": {**source_value["identity"], "hidden_size": 4096, "vocab_size": 248320}, "parent_sampled_oracle": {"path": str(Path(bound["source"]).resolve()), "manifest_sha256": sha(Path(bound["source"])), "schema_version": source_value["schema_version"]}})
+        hashes = identity["hash_binding"]
+
+        def target_root(target_case: dict, oracle_kind: str) -> Path:
+            destination = root / f"{target_case['case_id']}.{oracle_kind}.target"; destination.mkdir(exist_ok=True)
+            write_json(destination / "manifest.json", {
+                "schema_version": "ullm.qwen35_aq4_target_calibration.v1", "oracle_kind": oracle_kind, "status": "available", "capture_complete": True, "promotion_eligible": False,
+                "identity": {"model_id": source_value["identity"]["model_id"], "model_revision": source_value["identity"]["model_revision"], "format_id": identity["model_identity"]["format_id"], "implementation_id": identity["model_identity"]["implementation_id"], "package_content_sha256": hashes["package_content_sha256"], "package_manifest_sha256": hashes["package_manifest_sha256"], "worker_binary_sha256": hashes["worker_binary_sha256"]},
+                "binding": {"case_id": target_case["case_id"], "case_sha256": target_case["case_sha256"], "requested_m": target_case["prefill_requested_m"], "resolved_m": target_case["resolved_m"], "device": {"requested_index": target_case["device"]["runtime_device_index"], "device_id": target_case["device"]["device_id"], "backend": target_case["device"]["backend"], "name": target_case["device"]["name"], "architecture": target_case["device"]["architecture"]}, "source": {"manifest": {"path": str(source_manifest), "sha256": sha(source_manifest)}}},
+            })
+            return destination
+
+        path_oracle_fields = {}
+        if compare_kind == "source_gate":
+            reference_root = source_root; candidate_root = target_root(case, "aq4_target")
+        else:
+            assert path_result is not None
+            oracle_result = json.loads(path_result.read_text()); oracle_source_comparison = json.loads(Path(oracle_result["calibration"]["source_gate"]["comparison"]["path"]).read_text())
+            reference_root = Path(oracle_source_comparison["candidate"]["path"]); candidate_root = target_root(case, "aq4_optimized")
+            path_oracle_fields = {"path_oracle_case_id": oracle_result["case_id"], "path_oracle_result_sha256": sha(path_result), "path_oracle_calibration_manifest_sha256": sha(reference_root / "manifest.json")}
         comparison = root / f"{case['case_id']}.{compare_kind}.comparison.json"
-        roles = {"source_gate": ("independent_source_full", "aq4_target"), "path_gate": ("same_artifact_all_m1", "aq4_optimized")}[compare_kind]
+        roles = {"source_gate": ("independent_source_full", "aq4_target"), "path_gate": ("aq4_target", "aq4_optimized")}[compare_kind]
         comparison_value = {
             "schema_version": "ullm.qwen35_aq4_calibration_comparison.v1", "status": "valid", "promotion_eligible": False,
             "created_utc": "2026-07-14T12:00:00Z", "compare_kind": compare_kind,
-            "reference": {"path": f"reference/{case['case_id']}", "manifest_sha256": hashlib.sha256(f"reference:{compare_kind}:{case['case_id']}".encode()).hexdigest(), "schema_version": "fixture.v1", "oracle_kind": roles[0]},
-            "candidate": {"path": f"candidate/{case['case_id']}", "manifest_sha256": hashlib.sha256(f"candidate:{compare_kind}:{case['case_id']}".encode()).hexdigest(), "schema_version": "fixture.v1", "oracle_kind": roles[1]},
+            "reference": {"path": str(reference_root), "manifest_sha256": sha(reference_root / "manifest.json"), "schema_version": "fixture.v1", "oracle_kind": roles[0]},
+            "candidate": {"path": str(candidate_root), "manifest_sha256": sha(candidate_root / "manifest.json"), "schema_version": "fixture.v1", "oracle_kind": roles[1]},
             "vector_contract": {"hidden_shape": [4096], "logits_shape": [248320], "dtype": "f32", "endianness": "little", "metric_denominator": "max(reference_l2,1e-30)", "top_k": 10},
             "rows": {"file": "rows.jsonl", "record_count": step_count, "sha256": hashlib.sha256(f"rows:{compare_kind}:{case['case_id']}".encode()).hexdigest()},
             "summary": {"row_count": step_count, "nonfinite_rows": 0, "greedy_mismatch_rows": 0, "max_hidden_relative_l2": 0.0, "max_hidden_max_abs": 0.0, "max_logits_relative_l2": 0.0, "max_logits_max_abs": 0.0, "minimum_top_k_overlap": 10},
             "observed_values_only": True,
         }
         write_json(comparison, comparison_value)
-        hashes = identity["hash_binding"]
         evidence = root / f"{case['case_id']}.{compare_kind}.calibration.json"
         write_json(evidence, {
             "schema_version": "ullm.aq4_p2_calibration_evidence.v1", "status": "valid", "compare_kind": compare_kind,
             "case": case, "canonical_case_sha256": expanded["canonical_case_sha256"], "step_count": step_count,
             "identity": {"model": identity["model_identity"], "source_oracle_sha256": sha(Path(bound["source"])), "package_content_sha256": hashes["package_content_sha256"], "package_manifest_sha256": hashes["package_manifest_sha256"], "worker_binary_sha256": hashes["worker_binary_sha256"], "policy_sha256": policy["hash_binding"]["policy_sha256"]},
             "comparison": {"path": str(comparison), "sha256": sha(comparison)},
+            **path_oracle_fields,
         })
         return evidence
 
@@ -165,7 +188,7 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
         write_json(independent, {"schema_version": "ullm.aq4_p2_independent_validation.v1", "status": "valid", "validator_independent": True, "case_id": case["case_id"], "case_sha256": case["case_sha256"], "raw_sha256": sha(raw), "source_oracle_sha256": sha(bound["source"]), "path_oracle_result_sha256": sha(path_result) if path_result else None, "trace_sha256": sha(trace) if trace else None, "correctness": correctness})
         output = root / f"{case['case_id']}.result.json"
         if source_calibration is None: source_calibration = self.calibration_evidence(bound, root, case, "source_gate")
-        if case["mode"] in {"cold_batched", "cached_prefix_chunked"} and path_calibration is None: path_calibration = self.calibration_evidence(bound, root, case, "path_gate")
+        if case["mode"] in {"cold_batched", "cached_prefix_chunked"} and path_calibration is None and path_result is not None: path_calibration = self.calibration_evidence(bound, root, case, "path_gate", path_result)
         command = ["--run-root", str(root), "--case", str(case_path), "--expanded", str(bound["expanded_path"]), "--raw", str(raw), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--source-oracle-validation", str(bound["source_validation"]), "--independent-validation", str(independent), "--output", str(output)]
         if source_calibration is not False: command += ["--source-calibration-evidence", str(source_calibration)]
         if path_result: command += ["--path-oracle-result", str(path_result)]
@@ -346,7 +369,7 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
             self.assertNotEqual(invoke(BUILD, "--status", "failed").returncode, 0)
 
     def test_builder_calibration_binding_swap_hash_identity_threshold_nonfinite_unknown_and_missing(self) -> None:
-        mutations = ("case_swap", "hash", "identity", "threshold", "nonfinite", "unknown", "symlink", "hardlink", "missing")
+        mutations = ("case_swap", "comparison_swap", "hash", "identity", "threshold", "nonfinite", "unknown", "symlink", "hardlink", "missing")
         for mutation in mutations:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); bound = self.bind(root)
@@ -357,6 +380,11 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
                     expanded = bound["expanded"]; assert isinstance(expanded, dict)
                     other = next(item for item in expanded["cases"] if item["mode"] == "all_m1" and item["case_id"] != case["case_id"])
                     evidence = self.calibration_evidence(bound, root, other, "source_gate")
+                elif mutation == "comparison_swap":
+                    expanded = bound["expanded"]; assert isinstance(expanded, dict)
+                    other = next(item for item in expanded["cases"] if item["mode"] == "all_m1" and item["case_id"] != case["case_id"])
+                    other_evidence = self.calibration_evidence(bound, root, other, "source_gate")
+                    value = json.loads(evidence.read_text()); value["comparison"] = json.loads(other_evidence.read_text())["comparison"]; write_json(evidence, value)
                 elif mutation in {"hash", "identity", "unknown"}:
                     value = json.loads(evidence.read_text())
                     if mutation == "hash": value["comparison"]["sha256"] = "0" * 64
@@ -373,24 +401,22 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
                 result, built = self.result(bound, root, case_path, case, raw, source_calibration=False if mutation == "missing" else evidence)
                 self.assertNotEqual(built.returncode, 0, built.stderr); self.assertFalse(result.exists())
 
-    def test_final_validator_rejects_calibration_comparison_reuse(self) -> None:
+    def test_builder_rejects_bound_source_reference_swap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); bound = self.bind(root); expanded = bound["expanded"]; assert isinstance(expanded, dict)
-            cases = [item for item in expanded["cases"] if item["stage_id"] == "smoke" and item["mode"] == "all_m1"][:2]
-            results = []; first_comparison = None
-            for index, case in enumerate(cases):
-                case_path = root / f"{case['case_id']}.case.json"; write_json(case_path, case)
-                raw, ran = self.raw(bound, root, case_path, case); self.assertEqual(ran.returncode, 0, ran.stderr)
-                evidence = self.calibration_evidence(bound, root, case, "source_gate"); value = json.loads(evidence.read_text())
-                if index == 0: first_comparison = copy.deepcopy(value["comparison"])
-                else:
-                    value["comparison"] = first_comparison; write_json(evidence, value)
-                result, built = self.result(bound, root, case_path, case, raw, source_calibration=evidence); self.assertEqual(built.returncode, 0, built.stderr)
-                results.append(result)
-            report = root / "reuse-report.json"; command = ["--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"])]
-            for result in results: command += ["--result", str(result)]
-            checked = invoke(VALIDATE, *command, "--output", str(report)); self.assertNotEqual(checked.returncode, 0)
-            self.assertTrue(any(code.startswith("calibration_source_reuse:") for code in json.loads(report.read_text())["failure_codes"]))
+            root = Path(directory); bound = self.bind(root)
+            case_path, case = self.case(bound, root, lambda item: item["stage_id"] == "smoke" and item["mode"] == "all_m1")
+            raw, ran = self.raw(bound, root, case_path, case); self.assertEqual(ran.returncode, 0, ran.stderr)
+            evidence = self.calibration_evidence(bound, root, case, "source_gate"); value = json.loads(evidence.read_text())
+            alternate_sampled = root / "alternate-sampled-source.json"; shutil.copyfile(Path(bound["source"]), alternate_sampled)
+            alternate_root = root / "alternate-source-full"; alternate_root.mkdir()
+            original_manifest = json.loads((root / "source-full-calibration" / "manifest.json").read_text())
+            original_manifest["parent_sampled_oracle"]["path"] = str(alternate_sampled)
+            write_json(alternate_root / "manifest.json", original_manifest)
+            comparison = Path(value["comparison"]["path"]); compared = json.loads(comparison.read_text())
+            compared["reference"]["path"] = str(alternate_root); compared["reference"]["manifest_sha256"] = sha(alternate_root / "manifest.json")
+            write_json(comparison, compared); value["comparison"]["sha256"] = sha(comparison); write_json(evidence, value)
+            result, built = self.result(bound, root, case_path, case, raw, source_calibration=evidence)
+            self.assertNotEqual(built.returncode, 0, built.stderr); self.assertFalse(result.exists())
 
     def test_optimized_requires_separate_path_calibration_and_all_m1_rejects_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -405,10 +431,50 @@ output.write_text(text); raise SystemExit(1 if failed else 0)
             candidate_result, built = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result); self.assertEqual(built.returncode, 0, built.stderr)
             calibration = json.loads(candidate_result.read_text())["calibration"]
             self.assertNotEqual(calibration["source_gate"]["comparison"]["sha256"], calibration["path_gate"]["comparison"]["sha256"])
+            unexpected_path = Path(calibration["path_gate"]["path"])
+            path_comparison = Path(calibration["path_gate"]["comparison"]["path"])
+            evidence_value = json.loads(unexpected_path.read_text()); comparison_value = json.loads(path_comparison.read_text())
             candidate_result.unlink()
+
+            # Each of the externally supplied all-M1 bindings is rebuilt from
+            # the result and its source calibration instead of being trusted.
+            evidence_value["path_oracle_result_sha256"] = "0" * 64; write_json(unexpected_path, evidence_value)
+            rejected_output, rejected = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result, path_calibration=unexpected_path)
+            self.assertNotEqual(rejected.returncode, 0); self.assertFalse(rejected_output.exists())
+            evidence_value["path_oracle_result_sha256"] = sha(oracle_result)
+            evidence_value["path_oracle_calibration_manifest_sha256"] = "0" * 64; write_json(unexpected_path, evidence_value)
+            rejected_output, rejected = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result, path_calibration=unexpected_path)
+            self.assertNotEqual(rejected.returncode, 0); self.assertFalse(rejected_output.exists())
+            evidence_value["path_oracle_calibration_manifest_sha256"] = comparison_value["reference"]["manifest_sha256"]
+
+            swapped_reference = root / "swapped-all-m1-target"
+            shutil.copytree(Path(comparison_value["reference"]["path"]), swapped_reference)
+            swapped_comparison = copy.deepcopy(comparison_value); swapped_comparison["reference"]["path"] = str(swapped_reference)
+            write_json(path_comparison, swapped_comparison); evidence_value["comparison"]["sha256"] = sha(path_comparison); write_json(unexpected_path, evidence_value)
+            rejected_output, rejected = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result, path_calibration=unexpected_path)
+            self.assertNotEqual(rejected.returncode, 0); self.assertFalse(rejected_output.exists())
+            write_json(path_comparison, comparison_value); evidence_value["comparison"]["sha256"] = sha(path_comparison); write_json(unexpected_path, evidence_value)
+
+            other_oracle = next(item for item in expanded["cases"] if item["stage_id"] == "smoke" and item["mode"] == "all_m1" and item["case_id"] != oracle["case_id"])
+            other_path = root / f"{other_oracle['case_id']}.case.json"; write_json(other_path, other_oracle)
+            other_raw, ran = self.raw(bound, root, other_path, other_oracle); self.assertEqual(ran.returncode, 0, ran.stderr)
+            other_result, built = self.result(bound, root, other_path, other_oracle, other_raw); self.assertEqual(built.returncode, 0, built.stderr)
+            rejected_output, rejected = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=other_result, path_calibration=unexpected_path)
+            self.assertNotEqual(rejected.returncode, 0); self.assertFalse(rejected_output.exists())
+
             missing, rejected = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result, path_calibration=False)
             self.assertNotEqual(rejected.returncode, 0); self.assertFalse(missing.exists())
-            oracle_result.unlink(); unexpected_path = self.calibration_evidence(bound, root, oracle, "path_gate")
+
+            candidate_result, built = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result, path_calibration=unexpected_path); self.assertEqual(built.returncode, 0, built.stderr)
+            tampered_result = json.loads(candidate_result.read_text())
+            tampered_result["calibration"]["path_gate"]["path_oracle"]["path_oracle_calibration_manifest_sha256"] = "0" * 64
+            write_json(candidate_result, tampered_result)
+            report = root / "path-chain-report.json"
+            checked = invoke(VALIDATE, "--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--result", str(oracle_result), "--result", str(candidate_result), "--output", str(report))
+            self.assertNotEqual(checked.returncode, 0)
+            self.assertTrue(any(code.startswith("calibration_path_gate:") for code in json.loads(report.read_text())["failure_codes"]))
+
+            oracle_result.unlink()
             rejected_output, rejected = self.result(bound, root, oracle_path, oracle, oracle_raw, path_calibration=unexpected_path)
             self.assertNotEqual(rejected.returncode, 0); self.assertFalse(rejected_output.exists())
 

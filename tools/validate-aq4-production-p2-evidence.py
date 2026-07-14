@@ -466,6 +466,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
                     oracle_result, oracle_result_path = oracle_entry
                     oracle_result_sha = sha_file(oracle_result_path, "path oracle result")
                     path_chain = calibration_module.path_oracle_calibration_chain(oracle_result, oracle_result_sha, root, expanded, identity, policy, args.source_oracle, source, source_sha)
+                    if set(path_chain) != {"case", "result_sha256", "calibration_root_path", "calibration_manifest_sha256", "source_manifest_path", "source_manifest_sha256"}: raise EvidenceError("path oracle calibration chain fields differ")
                     if path_chain["case"]["case_id"] != case.get("path_oracle_case_id"): raise EvidenceError("path oracle calibration case differs")
                     path_calibration = calibration_module.validate_calibration_evidence(Path(path_link_value["path"]), "path_gate", root, case, expanded, identity, policy, args.source_oracle, source, source_sha, path_oracle=path_chain)
                     if path_link_value != path_calibration: raise EvidenceError("path calibration result link differs")
