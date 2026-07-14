@@ -518,6 +518,21 @@ def profile_execute_binding_document() -> dict[str, Any]:
     return value
 
 
+def ready_profile_execute_binding() -> dict[str, Any]:
+    value = profile_execute_binding_document()
+    value["status"] = "ready_for_explicit_execute"
+    value["actual_eligible"] = True
+    value["blocked_reasons"] = []
+    value["live_preflight"] = {
+        "required": True,
+        "path": str(PROFILE_LIVE_PREFLIGHT_PATH),
+        "sha256": None,
+        "replaces_synthetic_preflight": True,
+    }
+    validate_execute_binding(value, permit_test_live_preflight=True)
+    return value
+
+
 def validate_execute_binding(value: dict[str, Any], *, permit_test_live_preflight: bool = False) -> dict[str, Any]:
     expected = profile_execute_binding_document() if "profile_diagnostic" in value else execute_binding_document()
     live = value.get("live_preflight")
@@ -1216,11 +1231,12 @@ def launch(mode: str, output: Path, *, run: Callable[..., subprocess.CompletedPr
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("dry-run", "execute"), default="dry-run")
+    parser.add_argument("--mode", choices=("dry-run", "execute", "profile-execute"), default="dry-run")
     parser.add_argument("--evidence-output", type=Path)
     parser.add_argument("--execute-binding", type=Path)
     parser.add_argument("--runner-output", type=Path)
     parser.add_argument("--run-id")
+    parser.add_argument("--trusted-launcher-sha")
     parser.add_argument("--prepare-execute-binding", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -1230,9 +1246,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.evidence_output is None:
             raise LauncherError("--evidence-output is required")
-        if args.mode == "execute":
+        if args.mode == "profile-execute":
+            if args.execute_binding is not None or args.runner_output != PROFILE_RUN_OUTPUT or args.evidence_output != PROFILE_EVIDENCE_OUTPUT or args.run_id != PROFILE_RUN_ID or args.trusted_launcher_sha is None:
+                raise LauncherError("profile execute requires exact canonical output/run-id and no execute-binding")
+            binding = ready_profile_execute_binding()
+            code, evidence = execute_bound(binding, args.evidence_output, args.runner_output, args.run_id, trusted_launcher_sha=args.trusted_launcher_sha)
+        elif args.mode == "execute":
             if args.execute_binding is None or args.runner_output is None or args.run_id is None:
                 raise LauncherError("execute requires --execute-binding, --runner-output, and --run-id")
+            if args.trusted_launcher_sha is not None:
+                raise LauncherError("--trusted-launcher-sha is reserved for profile-execute")
             binding, launcher_trust = load_execute_binding(args.execute_binding)
             if binding.get("actual_eligible") is not True:
                 reject_symlink_components(args.evidence_output, "execute evidence", allow_missing_leaf=True)
@@ -1247,6 +1270,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 code, evidence = execute_bound(binding, args.evidence_output, args.runner_output, args.run_id, trusted_launcher_sha=launcher_trust["sha256"])
         else:
+            if args.trusted_launcher_sha is not None:
+                raise LauncherError("--trusted-launcher-sha is reserved for profile-execute")
             code, evidence = launch(args.mode, args.evidence_output)
         print(json.dumps({"status": evidence["status"], "mode": evidence["mode"], "evidence": str(args.evidence_output / "launcher-evidence.json")}, sort_keys=True))
         return code

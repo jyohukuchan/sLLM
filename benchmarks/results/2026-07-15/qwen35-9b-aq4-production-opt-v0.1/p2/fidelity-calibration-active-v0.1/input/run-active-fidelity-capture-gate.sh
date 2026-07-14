@@ -343,6 +343,19 @@ env "${guard_env[@]}" \
     >"$RUN_LOG" 2>&1 || fail "active fidelity capture failed"
 [[ -s "$OUTPUT/SHA256SUMS" ]] || fail "active output SHA256SUMS is missing"
 (cd "$OUTPUT" && sha256sum -c SHA256SUMS) || fail "active output SHA256SUMS failed"
+[[ "$(stat -Lc '%s' "$OUTPUT/vectors/hidden.f32le")" = "$MAX_HIDDEN_BYTES" ]] || fail "hidden sidecar size differs"
+[[ "$(stat -Lc '%s' "$OUTPUT/vectors/logits.f32le")" = "$MAX_LOGITS_BYTES" ]] || fail "logits sidecar size differs"
+"$PYTHON" - "$OUTPUT/manifest.json" "$OUTPUT/rows.jsonl" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+rows = pathlib.Path(sys.argv[2]).read_bytes().splitlines()
+assert manifest["row_count"] == 24 and manifest["runtime"]["runtime"]["one_model_load"] is True
+assert manifest["runtime"]["model_loads"] == 1 and manifest["runtime"]["runtime"]["model_loads"] == 1
+assert manifest["runtime"]["runtime"]["device"]["architecture"] == "gfx1201"
+assert manifest["runtime"]["runtime"]["run"]["nonfinite_rows"] == 0
+assert len(rows) == 24 and all(0 < len(row) <= 65536 for row in rows)
+print("active_output_rows=24 sidecars=bounded one_model_load=1 nonfinite_rows=0")
+PY
 "$PYTHON" tools/capture-qwen35-aq4-fidelity.py --split-root "$SPLIT_ROOT" --source "$SOURCE_ARTIFACT" --active "$OUTPUT" --output "$METRICS" \
   --expected-split-manifest-sha256 "$EXPECTED_SPLIT_SHA256" --expected-policy-sha256 "$EXPECTED_POLICY_SHA256" \
   --expected-calibration-cases-sha256 "$EXPECTED_CALIBRATION_SHA256" --expected-served-model-manifest-sha256 "$EXPECTED_SERVED_SHA256" \

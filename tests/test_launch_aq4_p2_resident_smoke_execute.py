@@ -170,6 +170,41 @@ def test_profile_diagnostic_runner_argv_is_exact_and_normal_argv_is_unchanged(tm
     assert stripped == expected
 
 
+def test_profile_execute_cli_builds_only_the_exact_ready_profile_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[tuple[dict, Path, Path, str, str]] = []
+
+    def fake_execute(binding, evidence, result, run_id, *, trusted_launcher_sha, **kwargs):
+        observed.append((binding, evidence, result, run_id, trusted_launcher_sha))
+        return 0, {"status": "passed", "mode": "execute"}
+
+    monkeypatch.setattr(LAUNCHER, "execute_bound", fake_execute)
+    code = LAUNCHER.main([
+        "--mode", "profile-execute",
+        "--evidence-output", str(LAUNCHER.PROFILE_EVIDENCE_OUTPUT),
+        "--runner-output", str(LAUNCHER.PROFILE_RUN_OUTPUT),
+        "--run-id", LAUNCHER.PROFILE_RUN_ID,
+        "--trusted-launcher-sha", TRUSTED_LAUNCHER_SHA,
+    ])
+    assert code == 0 and len(observed) == 1
+    binding, evidence, result, run_id, trusted_sha = observed[0]
+    assert binding == LAUNCHER.ready_profile_execute_binding()
+    assert evidence == LAUNCHER.PROFILE_EVIDENCE_OUTPUT
+    assert result == LAUNCHER.PROFILE_RUN_OUTPUT
+    assert run_id == LAUNCHER.PROFILE_RUN_ID and trusted_sha == TRUSTED_LAUNCHER_SHA
+
+
+def test_profile_execute_cli_rejects_noncanonical_target_before_execute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(LAUNCHER, "execute_bound", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not execute")))
+    code = LAUNCHER.main([
+        "--mode", "profile-execute",
+        "--evidence-output", str(tmp_path / "wrong"),
+        "--runner-output", str(LAUNCHER.PROFILE_RUN_OUTPUT),
+        "--run-id", LAUNCHER.PROFILE_RUN_ID,
+        "--trusted-launcher-sha", TRUSTED_LAUNCHER_SHA,
+    ])
+    assert code == 1
+
+
 def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_path: Path) -> None:
     binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
 
