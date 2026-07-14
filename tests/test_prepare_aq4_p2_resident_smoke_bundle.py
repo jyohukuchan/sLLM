@@ -13,8 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
 BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "2e39b7851b856ab067686249ce2d6284484c53d4"
-VALIDATOR_SHA = "43de32a5a9533c2714085303f80446b6a2f96f191c59830a30ecc73adef95597"
+VALIDATOR_COMMIT = "9642296b7378a38ac08358106885bc2d58272157"
+VALIDATOR_SHA = "81937753c9ea1c4f5e4d52b0d29524b1b53c462dcf73ced19c365c13d9f3ba17"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -312,9 +312,9 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert value["requires_immutable_launcher"] is True
     assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
     roots = value["trust_roots"]
-    assert roots["source_commit"] == "e9065925d7b5af0352cb8dfd454a7e106abd7172"
-    assert roots["source_tree"] == "9f2ff38d06d5ea5724a6e84af1c00d2b8147f241"
-    assert roots["runner"] == {"git_blob": "9c097d1a97af3e15ca695c6da08b1e2928d08df7", "sha256": "3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc"}
+    assert roots["source_commit"] == "3ba3a56cff9894f773c354737044cd5352fdebf0"
+    assert roots["source_tree"] == "456386d8a0725bcb335d897594e13c45c990e460"
+    assert roots["runner"] == {"git_blob": "5e02b8a15dd807213e3bc650a2134f16ae3493c3", "sha256": "1e988bc7005cda61bcb0648c0aec72b3ff94f637f8001b0d38c6a81ed8fe2053"}
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
     assert roots["resident_driver"]["blob_unchanged"] is True
@@ -332,6 +332,7 @@ def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses()
     assert plan["validation"]["root_contract"] == "ullm.aq4_p2_resident_smoke_bundle_root.v4"
     assert set(plan["validation"]["members"]) == set(BUNDLE.REQUIRED_FILES) | {"bundle.json", "SHA256SUMS"}
     assert plan["validation"]["fake_driver_subprocess_count"] == 1
+    assert plan["validation"]["resident_driver_argv"] == BUNDLE.resident_driver_argv()
     assert validator["subprocess_count"] == 1
     assert validator["source"] == {"path": str(BUNDLE.BINDING_VALIDATOR_EXEC), "sha256": VALIDATOR_SHA}
     assert validator["report_sha256"] == hashlib.sha256(BUNDLE.canonical(validator["report"])).hexdigest()

@@ -187,8 +187,8 @@
     "required": true
   },
   "outputs": {
-    "runner_evidence_sha256": "c0cd1c6258070792de8704e456ff3c2125089cdad78a34c8d964d6ec7bc42fb7",
-    "runner_plan_sha256": "bc449219b5e32882d1bca4663abf1eac631dd59c5d0503f1ee287d76ebeabd9c",
+    "runner_evidence_sha256": "a1913e06807ffe4dfa9c2e074770422aea3b1a2db707e8e048fab96fc02c82ca",
+    "runner_plan_sha256": "eaab5a567ab37b6e48a42950aa9519d0fe0d1c4a194e35dc62b4766b135f3530",
     "validator_report_canonical_sha256": "e4173764a06cd90a0d5d6faefaabd83a874595c94702549dda19004598a4684a",
     "validator_report_file_sha256": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2"
   },
@@ -210,18 +210,18 @@
       "source_sha256": "d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7"
     },
     "runner": {
-      "git_blob": "9c097d1a97af3e15ca695c6da08b1e2928d08df7",
-      "sha256": "3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc"
+      "git_blob": "5e02b8a15dd807213e3bc650a2134f16ae3493c3",
+      "sha256": "1e988bc7005cda61bcb0648c0aec72b3ff94f637f8001b0d38c6a81ed8fe2053"
     },
-    "source_commit": "e9065925d7b5af0352cb8dfd454a7e106abd7172",
-    "source_tree": "9f2ff38d06d5ea5724a6e84af1c00d2b8147f241",
+    "source_commit": "3ba3a56cff9894f773c354737044cd5352fdebf0",
+    "source_tree": "456386d8a0725bcb335d897594e13c45c990e460",
     "validator": {
       "archive_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4/trusted-validator.py",
       "execution_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
-      "git_blob": "108b50eeb0c3abfc991a7273a93cff6e06fde766",
-      "sha256": "43de32a5a9533c2714085303f80446b6a2f96f191c59830a30ecc73adef95597",
-      "source_commit": "2e39b7851b856ab067686249ce2d6284484c53d4",
-      "source_tree": "6f468b4d9c79b664c4cc2ea12c4a889ebe85f8b1"
+      "git_blob": "a2fd720e96898e6c7dcf9425fec5a5fb0654bfd2",
+      "sha256": "81937753c9ea1c4f5e4d52b0d29524b1b53c462dcf73ced19c365c13d9f3ba17",
+      "source_commit": "9642296b7378a38ac08358106885bc2d58272157",
+      "source_tree": "7168e812a88017369d06e7e9d55c2ca4b05f0304"
     }
   }
 }

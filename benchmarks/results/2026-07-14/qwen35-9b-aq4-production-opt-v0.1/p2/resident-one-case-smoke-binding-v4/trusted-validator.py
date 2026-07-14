@@ -67,10 +67,10 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "e9065925d7b5af0352cb8dfd454a7e106abd7172"
-BINDING_SOURCE_TREE = "9f2ff38d06d5ea5724a6e84af1c00d2b8147f241"
-BINDING_RUNNER_GIT_BLOB = "9c097d1a97af3e15ca695c6da08b1e2928d08df7"
-BINDING_RUNNER_SHA = "3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc"
+BINDING_SOURCE_COMMIT = "3ba3a56cff9894f773c354737044cd5352fdebf0"
+BINDING_SOURCE_TREE = "456386d8a0725bcb335d897594e13c45c990e460"
+BINDING_RUNNER_GIT_BLOB = "5e02b8a15dd807213e3bc650a2134f16ae3493c3"
+BINDING_RUNNER_SHA = "1e988bc7005cda61bcb0648c0aec72b3ff94f637f8001b0d38c6a81ed8fe2053"
 BINDING_DRIVER_GIT_BLOB = "0bed05e56a07807fa1338a80dfba2f72de64d5af"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
@@ -730,7 +730,7 @@ def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, b
     normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if current_driver != normative_driver:
         raise BundleError("binding commit changed the normative resident driver blob")
-    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"fake_driver_subprocess_count", b"--bundle-root"):
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root", b"--live-preflight", b"def validate_live_preflight", b"def verify_live_preflight"):
         if contract not in runner:
             raise BundleError("binding runner generic root/validator contract differs")
     return runner, validator, validator_tree, validator_object
@@ -817,6 +817,7 @@ def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[st
         "fake_ready": {"path": str(CANONICAL_ROOT / "fake-ready.json"), "sha256": members["fake-ready.json"]["sha256"]},
         "fake_driver_subprocess_count": 1, "driver_fake_handshake": "passed",
         "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": identity["resident_driver_identity"],
+        "resident_driver_argv": resident_driver_argv(),
         "trusted_bundle_validator": expected_validator,
     }
     if validation != expected_validation:
