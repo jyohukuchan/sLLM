@@ -45,6 +45,7 @@ const MAX_ROWS: usize = 3;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 96 * 1024;
 const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const EMBEDDED_BUILD_GIT_COMMIT: Option<&str> = option_env!("ULLM_BUILD_GIT_COMMIT");
 const EXPECTED_CASES: [(&str, usize, &str, usize, &'static [usize]); 2] = [
     (
         "fixture-prompt-0",
@@ -482,9 +483,18 @@ fn total_output_bytes(root: &Path) -> Result<u64, String> {
 }
 
 fn required_build_git_commit() -> Result<String, String> {
-    let value = env::var("ULLM_BUILD_GIT_COMMIT")
-        .map_err(|_| "ULLM_BUILD_GIT_COMMIT is required".to_string())?;
-    validate_build_git_commit(&value)
+    let embedded = EMBEDDED_BUILD_GIT_COMMIT
+        .ok_or_else(|| "ULLM_BUILD_GIT_COMMIT is missing from the binary build".to_string())?;
+    let embedded = validate_build_git_commit(embedded)?;
+    if let Ok(runtime) = env::var("ULLM_BUILD_GIT_COMMIT") {
+        let runtime = validate_build_git_commit(&runtime)?;
+        if runtime != embedded {
+            return Err(
+                "runtime ULLM_BUILD_GIT_COMMIT differs from embedded build commit".to_string(),
+            );
+        }
+    }
+    Ok(embedded)
 }
 
 fn validate_build_git_commit(value: &str) -> Result<String, String> {
