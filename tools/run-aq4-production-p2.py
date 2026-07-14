@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Run one bounded AQ4 P2 case through an argv-only worker adapter.
-
-Only CPU/synthetic runs are suitable while the parent P1 gate is open.  The
-production path remains fail-closed unless every real artifact is present.
-"""
+"""Run one declared AQ4 P2 worker with bounded, immutable raw evidence."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import selectors
 import subprocess
@@ -19,209 +16,190 @@ import time
 from pathlib import Path
 from typing import Any
 
-MAX_JSON_BYTES = 4 * 1024 * 1024
-DEFAULT_CAPTURE_BYTES = 256 * 1024
-REQUIRED_PREFLIGHT = ("weights_bytes", "persistent_state_bytes", "kv_cache_bytes", "workspace_bytes", "temporary_bytes", "vram_headroom_bytes", "gpu_process_snapshot")
+MAX_JSON_BYTES = 16 * 1024 * 1024
+DEFAULT_OUTPUT_LIMIT = 256 * 1024
+PREFLIGHT_FIELDS = {"weights_bytes", "persistent_state_bytes", "kv_cache_bytes", "workspace_bytes", "temporary_bytes", "vram_headroom_bytes", "gpu_process_snapshot"}
 
 
-class RunnerError(ValueError):
-    pass
+class RunnerError(ValueError): pass
 
 
 def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in items:
-        if key in result:
-            raise RunnerError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-def load_json(path: Path, label: str) -> Any:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
-        raise RunnerError(f"{label} must be a bounded regular file")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs, parse_constant=lambda value: (_ for _ in ()).throw(RunnerError(f"non-finite number: {value}")))
-    except (OSError, UnicodeError, json.JSONDecodeError, RunnerError) as error:
-        raise RunnerError(f"cannot parse {label}: {error}") from error
-
-
-def sha_file(path: Path, label: str) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise RunnerError(f"{label} must be a regular file: {path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def atomic_write(path: Path, value: Any) -> None:
-    if path.exists() or path.is_symlink():
-        raise RunnerError(f"refusing to overwrite {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.incomplete")
-    raw = (json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode()
-    with temporary.open("xb") as target:
-        target.write(raw); target.flush(); os.fsync(target.fileno())
-    temporary.replace(path)
-
-
-def validate_preflight(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise RunnerError("preflight must be an object")
-    for field in REQUIRED_PREFLIGHT:
-        if field not in value:
-            raise RunnerError(f"preflight field is missing: {field}")
-    for field in REQUIRED_PREFLIGHT[:-1]:
-        number = value[field]
-        if not isinstance(number, int) or isinstance(number, bool) or number < 0:
-            raise RunnerError(f"preflight.{field} must be a non-negative integer")
-    if not isinstance(value["gpu_process_snapshot"], list):
-        raise RunnerError("preflight.gpu_process_snapshot must be an array")
+    value: dict[str, Any] = {}
+    for key, child in items:
+        if key in value: raise RunnerError(f"duplicate JSON key: {key}")
+        value[key] = child
     return value
 
 
-def classify(returncode: int | None, timed_out: bool, overflow: bool) -> str:
-    if timed_out:
-        return "failed"
-    if returncode in (137, -9) or (returncode is not None and returncode == 9):
-        return "oom"
-    if returncode == 2:
-        return "unsupported"
-    if returncode == 3:
-        return "skipped"
-    if overflow:
-        return "failed"
-    return "ok" if returncode == 0 else "failed"
+def load(path: Path, label: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES: raise RunnerError(f"{label} must be a bounded regular file")
+    try: value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(RunnerError(f"non-finite JSON number: {item}")))
+    except (UnicodeError, json.JSONDecodeError) as error: raise RunnerError(f"invalid {label}: {error}") from error
+    if not isinstance(value, dict): raise RunnerError(f"{label} root must be an object")
+    return value
 
 
-def capture_process(command: list[str], timeout: float, cap: int) -> tuple[int | None, bytes, bytes, bool, bool, float]:
+def canonical(value: Any) -> bytes: return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+def sha_bytes(value: bytes) -> str: return hashlib.sha256(value).hexdigest()
+
+
+def sha_file(path: Path, label: str) -> str:
+    if path.is_symlink() or not path.is_file(): raise RunnerError(f"{label} must be a regular file")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024): digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_hash(root: Path) -> str:
+    if root.is_symlink() or not root.is_dir(): raise RunnerError("package root is invalid")
+    paths = []
+    for item in root.rglob("*"):
+        if item.is_symlink(): raise RunnerError("package contains a symlink")
+        if item.is_file(): paths.append(item)
+    if not paths: raise RunnerError("package is empty")
+    digest = hashlib.sha256()
+    for item in sorted(paths, key=lambda value: value.relative_to(root).as_posix()):
+        digest.update(item.relative_to(root).as_posix().encode()); digest.update(b"\0"); digest.update(bytes.fromhex(sha_file(item, "package file"))); digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def contained(root: Path, path: Path, label: str, *, existing: bool = True) -> Path:
+    root = root.resolve(strict=True)
+    resolved = path.resolve(strict=existing)
+    if resolved != root and root not in resolved.parents: raise RunnerError(f"{label} escapes run root")
+    return resolved
+
+
+def policy_hash(policy: dict[str, Any]) -> str:
+    value = json.loads(json.dumps(policy)); value.setdefault("hash_binding", {})["policy_sha256"] = None
+    return sha_bytes(canonical(value))
+
+
+def identity_hash(identity: dict[str, Any]) -> str:
+    value = json.loads(json.dumps(identity)); value["identity_sha256"] = None
+    return sha_bytes(canonical(value))
+
+
+def case_hash(case: dict[str, Any]) -> str:
+    value = json.loads(json.dumps(case)); value["case_sha256"] = None
+    return sha_bytes(canonical(value))
+
+
+def validate_preflight(value: dict[str, Any]) -> dict[str, Any]:
+    if set(value) != PREFLIGHT_FIELDS: raise RunnerError("preflight fields differ")
+    for field in PREFLIGHT_FIELDS - {"gpu_process_snapshot"}:
+        item = value[field]
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0: raise RunnerError(f"preflight.{field} must be a non-negative integer")
+    snapshot = value["gpu_process_snapshot"]
+    if not isinstance(snapshot, list): raise RunnerError("gpu_process_snapshot must be an array")
+    normalized = []
+    for entry in snapshot:
+        if not isinstance(entry, dict) or set(entry) != {"pid", "process_name", "vram_bytes"}: raise RunnerError("GPU process snapshot entry differs")
+        if not isinstance(entry["pid"], int) or entry["pid"] <= 0 or not isinstance(entry["process_name"], str) or not entry["process_name"] or not isinstance(entry["vram_bytes"], int) or entry["vram_bytes"] < 0: raise RunnerError("GPU process snapshot entry is invalid")
+        normalized.append(entry)
+    value["gpu_process_snapshot"] = sorted(normalized, key=lambda item: (item["pid"], item["process_name"]))
+    return value
+
+
+def capture(argv: list[str], timeout: float, limit: int) -> dict[str, Any]:
     started = time.monotonic()
-    try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, shell=False)
-    except OSError:
-        return None, b"", b"", False, False, (time.monotonic() - started) * 1000.0
-    selector = selectors.DefaultSelector()
-    assert process.stdout is not None and process.stderr is not None
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    buffers = {"stdout": bytearray(), "stderr": bytearray()}
-    overflow = False
-    timed_out = False
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    assert process.stdout and process.stderr
+    selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ, "stdout"); selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    digests = {"stdout": hashlib.sha256(), "stderr": hashlib.sha256()}; counts = {"stdout": 0, "stderr": 0}; timed_out = False
     deadline = started + timeout
     while selector.get_map():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            process.kill()
-            remaining = 0.1
-        for key, _ in selector.select(min(0.1, max(remaining, 0.01))):
-            data = key.fileobj.read1(8192) if hasattr(key.fileobj, "read1") else key.fileobj.read(8192)
-            if not data:
+        if time.monotonic() >= deadline and process.poll() is None:
+            timed_out = True; process.kill()
+        for key, _ in selector.select(0.05):
+            chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+            if not chunk:
                 selector.unregister(key.fileobj); key.fileobj.close(); continue
-            bucket = buffers[key.data]
-            if len(bucket) < cap:
-                bucket.extend(data[: cap - len(bucket)])
-            if len(data) > max(cap - len(bucket), 0):
-                overflow = True
-        if process.poll() is not None and not selector.get_map():
-            break
-    try:
-        returncode = process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        process.kill(); returncode = process.wait()
-    return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"]), timed_out, overflow, (time.monotonic() - started) * 1000.0
+            digests[key.data].update(chunk); counts[key.data] += len(chunk)
+    returncode = process.wait()
+    overflow = any(value > limit for value in counts.values())
+    status = "failed" if timed_out or overflow else "oom" if returncode in {137, -9} else "unsupported" if returncode == 2 else "skipped" if returncode == 3 else "ok" if returncode == 0 else "failed"
+    return {"status": status, "returncode": returncode, "elapsed_ms": (time.monotonic() - started) * 1000.0, "timed_out": timed_out, "output_overflow": overflow, "stdout_sha256": digests["stdout"].hexdigest(), "stderr_sha256": digests["stderr"].hexdigest(), "stdout_bytes": counts["stdout"], "stderr_bytes": counts["stderr"]}
 
 
 def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    case = load_json(args.case, "case")
-    identity = load_json(args.identity, "identity") if args.identity else None
-    preflight = validate_preflight(load_json(args.preflight, "preflight"))
-    mode = args.mode
-    device_id = args.device_id or case.get("device", {}).get("device_id", "cpu-reference")
-    trace_sha = None
-    oracle_sha = None
-    failure_reason = None
-    if (mode == "production" or device_id == "r9700-rdna4") and preflight["vram_headroom_bytes"] <= 0:
-        failure_reason = "vram_headroom_nonpositive"
-    if args.trace:
-        if args.trace.is_symlink() or not args.trace.is_file():
-            failure_reason = "trace_unavailable"
+    root = args.run_root.resolve(strict=True)
+    for path, label in ((args.case, "case"), (args.expanded, "expanded"), (args.identity, "identity"), (args.policy, "policy"), (args.preflight, "preflight"), (args.measurement, "measurement"), (args.state, "state"), (args.executable, "executable")):
+        contained(root, path, label)
+    contained(root, args.package_root, "package root")
+    contained(root, args.output, "output", existing=False)
+    case = load(args.case, "case"); expanded = load(args.expanded, "expanded"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy")
+    preflight = validate_preflight(load(args.preflight, "preflight"))
+    load(args.measurement, "measurement"); load(args.state, "state")
+    if expanded.get("schema_version") != "ullm.aq4_production_p2_expanded.v2" or sha_file(args.expanded, "expanded") != identity.get("expanded_manifest_sha256"): raise RunnerError("expanded identity differs")
+    matching = [item for item in expanded.get("cases", []) if isinstance(item, dict) and item.get("case_id") == case.get("case_id")]
+    if len(matching) != 1 or matching[0] != case or case.get("case_sha256") != case_hash(case): raise RunnerError("case is not the exact expanded case")
+    if identity.get("schema_version") != "ullm.aq4_production_p2_identity.v2" or identity.get("status") != "bound" or identity.get("identity_sha256") != identity_hash(identity): raise RunnerError("identity self-binding differs")
+    if policy.get("status") != "bound" or policy.get("hash_binding", {}).get("policy_sha256") != policy_hash(policy) or identity.get("policy_sha256") != policy.get("hash_binding", {}).get("policy_sha256"): raise RunnerError("bound policy self-binding differs")
+    if str(args.policy.resolve(strict=True)) != identity.get("artifacts", {}).get("bound_policy"): raise RunnerError("bound policy path differs from identity")
+    executable = args.executable.resolve(strict=True); package_root = args.package_root.resolve(strict=True)
+    if str(executable) != identity.get("artifacts", {}).get("worker") or sha_file(executable, "worker") != identity.get("hash_binding", {}).get("worker_binary_sha256"): raise RunnerError("executable differs from declared worker")
+    if str(package_root) != identity.get("artifacts", {}).get("package_root") or tree_hash(package_root) != identity.get("hash_binding", {}).get("package_content_sha256"): raise RunnerError("package differs from declared identity")
+    package_manifest = Path(identity.get("artifacts", {}).get("package_manifest", ""))
+    contained(root, package_manifest, "package manifest")
+    if sha_file(package_manifest, "package manifest") != identity.get("hash_binding", {}).get("package_manifest_sha256"): raise RunnerError("package manifest differs from declared identity")
+    argv = [str(executable)]
+    if identity.get("execution_contract", {}).get("worker_argv") != argv: raise RunnerError("worker argv contract differs")
+    device_id = case.get("device", {}).get("device_id")
+    failure_reason = None; lock_handle = None
+    if args.mode == "production" and (case.get("scope") != "production_server" or args.trace is None): failure_reason = "production_scope_or_trace_missing"
+    if args.trace is not None: contained(root, args.trace, "trace")
+    if device_id == "r9700-rdna4":
+        lock_name = identity.get("execution_contract", {}).get("r9700_lock_name")
+        if args.lock is None or args.lock.name != f"{lock_name}.lock": failure_reason = failure_reason or "canonical_lock_required"
         else:
-            trace_sha = sha_file(args.trace, "trace")
-    if args.oracle:
-        if args.oracle.is_symlink() or not args.oracle.is_file():
-            failure_reason = failure_reason or "source_oracle_unavailable"
-        else:
-            oracle_sha = sha_file(args.oracle, "source oracle")
-    if mode == "production":
-        if not isinstance(identity, dict) or identity.get("status") != "bound":
-            failure_reason = failure_reason or "identity_not_bound"
-        if not args.executable or args.executable.is_symlink() or not args.executable.is_file() or not os.access(args.executable, os.X_OK):
-            failure_reason = failure_reason or "production_binary_unavailable"
-        if not args.package_root or args.package_root.is_symlink() or not args.package_root.is_dir():
-            failure_reason = failure_reason or "production_package_unavailable"
-        if not args.trace or trace_sha is None:
-            failure_reason = failure_reason or "production_trace_required"
-        if not args.oracle or oracle_sha is None:
-            failure_reason = failure_reason or "source_oracle_required"
-    lock_handle = None
-    lock_busy = False
-    if device_id == "r9700-rdna4" or args.require_lock:
-        if not args.lock:
-            failure_reason = failure_reason or "exclusive_lock_required"
-        else:
-            args.lock.parent.mkdir(parents=True, exist_ok=True)
-            lock_handle = args.lock.open("a+")
-            try:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                lock_busy = True; failure_reason = failure_reason or "r9700_queue_busy"
-    command = list(args.command or [])
-    started_at = time.time()
+            contained(root, args.lock, "lock", existing=False); args.lock.parent.mkdir(parents=True, exist_ok=True); lock_handle = args.lock.open("a+")
+            try: fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError: failure_reason = failure_reason or "r9700_queue_busy"
+        allowed = set(identity.get("execution_contract", {}).get("allowed_positive_vram_processes", []))
+        if any(entry["vram_bytes"] > 0 and entry["process_name"] not in allowed for entry in preflight["gpu_process_snapshot"]): failure_reason = failure_reason or "foreign_gpu_process"
+        minimum = policy.get("power_condition", {}).get("minimum_vram_headroom_bytes")
+        if not isinstance(minimum, (int, float)) or preflight["vram_headroom_bytes"] < minimum: failure_reason = failure_reason or "insufficient_vram_headroom"
+    started = time.time()
     if failure_reason:
-        status = "skipped" if failure_reason in {"r9700_queue_busy", "identity_not_bound"} else "failed"
-        returncode, stdout, stderr, elapsed = None, b"", failure_reason.encode(), 0.0
-        timed_out = overflow = False
-    elif not command:
-        status, returncode, stdout, stderr, elapsed, timed_out, overflow = "failed", None, b"", b"command_required", 0.0, False, False
+        execution = {"status": "skipped", "returncode": None, "elapsed_ms": 0.0, "timed_out": False, "output_overflow": False, "stdout_sha256": sha_bytes(b""), "stderr_sha256": sha_bytes(failure_reason.encode()), "stdout_bytes": 0, "stderr_bytes": 0}
     else:
-        returncode, stdout, stderr, timed_out, overflow, elapsed = capture_process(command, args.timeout, args.max_output_bytes)
-        status = classify(returncode, timed_out, overflow)
+        execution = capture(argv, args.timeout, args.max_output_bytes)
     if lock_handle:
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_handle.close()
-    result = {
-        "schema_version": "ullm.aq4_production_p2_raw_result.v1", "case_id": case.get("case_id"), "mode": mode, "device_id": device_id,
-        "status": status, "started_at_unix": started_at, "finished_at_unix": time.time(), "elapsed_ms": elapsed,
-        "command_argv": command, "returncode": returncode, "stdout_sha256": hashlib.sha256(stdout).hexdigest(), "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
-        "stdout_bytes": len(stdout), "stderr_bytes": len(stderr), "stdout_truncated": overflow, "preflight": preflight,
-        "trace": {"path": str(args.trace), "sha256": trace_sha} if args.trace else None, "source_oracle": {"path": str(args.oracle), "sha256": oracle_sha} if args.oracle else None,
-        "failure_reason": failure_reason, "immutable_status": status in {"oom", "failed", "unsupported", "skipped"}, "capture_contract": {"bounded_streaming": True, "shell": False, "max_output_bytes": args.max_output_bytes},
+        try: fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        finally: lock_handle.close()
+    status = execution["status"]
+    raw = {
+        "schema_version": "ullm.aq4_production_p2_raw_result.v2", "case_id": case["case_id"], "case_sha256": case["case_sha256"],
+        "status": status, "immutable_status": status != "ok", "mode": args.mode, "device_id": device_id,
+        "started_at_unix": started, "finished_at_unix": time.time(), "execution": execution,
+        "declared_execution": {"executable": str(executable), "executable_sha256": sha_file(executable, "worker"), "package_root": str(package_root), "package_content_sha256": tree_hash(package_root), "argv_sha256": sha_bytes(canonical(argv)), "argv_count": len(argv), "argv_values_recorded": False},
+        "links": {"expanded": {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}, "measurement": {"path": str(args.measurement.resolve()), "sha256": sha_file(args.measurement, "measurement")}, "state": {"path": str(args.state.resolve()), "sha256": sha_file(args.state, "state")}, "trace": {"path": str(args.trace.resolve()), "sha256": sha_file(args.trace, "trace")} if args.trace else None},
+        "preflight": preflight, "failure_reason": failure_reason, "capture_contract": {"bounded_streaming": True, "shell": False, "max_output_bytes_per_stream": args.max_output_bytes, "command_arguments_stored": False},
     }
-    return result, 0 if status == "ok" else 1
+    return raw, 0 if status == "ok" else 1
+
+
+def atomic_write(path: Path, value: dict[str, Any]) -> None:
+    if path.exists() or path.is_symlink(): raise RunnerError(f"refusing to overwrite {path}")
+    path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_name(f".{path.name}.incomplete")
+    with temporary.open("xb") as target: target.write((json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode()); target.flush(); os.fsync(target.fileno())
+    temporary.replace(path)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", type=Path, required=True); parser.add_argument("--identity", type=Path); parser.add_argument("--preflight", type=Path, required=True)
-    parser.add_argument("--mode", choices=("cpu_synthetic", "production"), default="cpu_synthetic"); parser.add_argument("--device-id")
-    parser.add_argument("--trace", type=Path); parser.add_argument("--oracle", type=Path); parser.add_argument("--executable", type=Path); parser.add_argument("--package-root", type=Path)
-    parser.add_argument("--lock", type=Path); parser.add_argument("--require-lock", action="store_true"); parser.add_argument("--timeout", type=float, default=300.0); parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_CAPTURE_BYTES)
-    # Keep the command as an opaque argv tail.  ``argparse.REMAINDER`` is
-    # required because worker arguments such as ``-c`` must never be parsed as
-    # runner options.
-    parser.add_argument("--output", type=Path, required=True); parser.add_argument("--command", nargs=argparse.REMAINDER)
+    for name in ("run_root", "case", "expanded", "identity", "policy", "preflight", "measurement", "state", "executable", "package_root", "output"):
+        parser.add_argument(f"--{name.replace('_', '-')}", dest=name, type=Path, required=True)
+    parser.add_argument("--mode", choices=("cpu_synthetic", "production"), default="cpu_synthetic"); parser.add_argument("--trace", type=Path); parser.add_argument("--lock", type=Path); parser.add_argument("--timeout", type=float, default=300.0); parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_OUTPUT_LIMIT)
     args = parser.parse_args(argv)
-    if args.max_output_bytes <= 0 or args.max_output_bytes > MAX_JSON_BYTES: parser.error("--max-output-bytes is out of range")
+    if args.max_output_bytes <= 0 or args.max_output_bytes > 64 * 1024 * 1024: parser.error("--max-output-bytes is out of range")
     try:
-        result, code = run(args); atomic_write(args.output, result); print(json.dumps({"status": result["status"], "case_id": result.get("case_id")}, sort_keys=True)); return code
+        raw, code = run(args); atomic_write(args.output, raw); print(json.dumps({"status": raw["status"], "case_id": raw["case_id"]}, sort_keys=True)); return code
     except (RunnerError, OSError, ValueError) as error:
         print(f"P2 case run failed closed: {error}", file=sys.stderr); return 1
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__": raise SystemExit(main())

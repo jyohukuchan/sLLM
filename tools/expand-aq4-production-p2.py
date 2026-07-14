@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Deterministically expand the AQ4 P2 planning manifest into case records.
-
-This tool is planning/evidence preparation only.  It never starts a worker and
-does not infer missing identity or oracle hashes.
-"""
+"""Deterministically expand the AQ4 P2 manifest into hash-bound cases."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
-HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
-MAX_BYTES = 4 * 1024 * 1024
+MAX_JSON_BYTES = 4 * 1024 * 1024
 
 
 class ExpansionError(ValueError):
@@ -26,143 +22,218 @@ class ExpansionError(ValueError):
 
 
 def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in items:
-        if key in result:
+    value: dict[str, Any] = {}
+    for key, child in items:
+        if key in value:
             raise ExpansionError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
+        value[key] = child
+    return value
 
 
-def load(path: Path, label: str) -> Any:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
-        raise ExpansionError(f"{label} must be a bounded regular file")
+def load(path: Path) -> tuple[dict[str, Any], bytes]:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
+        raise ExpansionError("manifest must be a bounded regular file")
+    raw = path.read_bytes()
     try:
-        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs, parse_constant=lambda value: (_ for _ in ()).throw(ExpansionError(f"non-finite number: {value}")))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ExpansionError(f"cannot parse {label}: {error}") from error
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(ExpansionError(f"non-finite JSON number: {item}")))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ExpansionError(f"invalid manifest JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ExpansionError("manifest root must be an object")
+    return value, raw
 
 
 def canonical(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
-def sha_bytes(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()
-
-
-def sha_file(path: Path) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise ExpansionError(f"identity file is unavailable: {path}")
-    h = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 def safe_id(value: Any, label: str) -> str:
     if not isinstance(value, str) or ID_RE.fullmatch(value) is None:
-        raise ExpansionError(f"{label} is invalid")
+        raise ExpansionError(f"invalid {label}")
+    return value
+
+
+def nonempty_unique_ints(value: Any, label: str) -> list[int]:
+    if not isinstance(value, list) or not value or any(not isinstance(item, int) or isinstance(item, bool) or item <= 0 for item in value) or len(value) != len(set(value)):
+        raise ExpansionError(f"{label} must contain unique positive integers")
     return value
 
 
 def controls(stage: dict[str, Any], device_id: str) -> list[str]:
-    values = stage.get("controls_by_device", {}).get(device_id, stage.get("controls", []))
-    if not isinstance(values, list) or not values or any(not isinstance(value, str) for value in values):
-        raise ExpansionError(f"controls are missing for {device_id}")
-    return values
+    value = stage.get("controls_by_device", {}).get(device_id, stage.get("controls"))
+    if not isinstance(value, list) or not value or len(value) != len(set(value)):
+        raise ExpansionError(f"controls are invalid for {device_id}")
+    return [safe_id(item, "control_id") for item in value]
+
+
+def case_hash(case: dict[str, Any]) -> str:
+    value = json.loads(json.dumps(case))
+    value["case_sha256"] = None
+    return digest(canonical(value))
+
+
+def append_prefill(
+    target: list[dict[str, Any]], stage: dict[str, Any], device: dict[str, Any],
+    scope: str, phase: str, mode: str, prompts: list[int], prefixes: list[int],
+) -> None:
+    prefill = stage["prefill"]
+    device_id = device["device_id"]
+    for prefix in prefixes:
+        for prompt in prompts:
+            if prefix + prompt > 4096:
+                raise ExpansionError(f"cached-prefix context exceeds 4096: {stage['stage_id']} prefix={prefix} prompt={prompt}")
+            for requested_m in prefill["requested_m"]:
+                for control_id in controls(stage, device_id):
+                    prefix_label = f"-prefix{prefix}" if phase == "cached_prefix_prefill" else ""
+                    case_id = f"p2-{stage['stage_id']}-{scope}-{phase}-{mode}{prefix_label}-n{prompt}-m{requested_m}-{device_id}-{control_id}"
+                    value = {
+                        "case_id": safe_id(case_id, "case_id"), "case_sha256": None,
+                        "stage_id": stage["stage_id"], "stage_order": stage["order"], "scope": scope,
+                        "phase": phase, "mode": mode, "baseline_mode": mode,
+                        "prompt_tokens": prompt, "cached_prefix_tokens": prefix,
+                        "context_tokens": prefix + prompt, "decode_start_tokens": 0,
+                        "prefill_requested_m": requested_m,
+                        "resolved_m": 1 if mode == "all_m1" else requested_m,
+                        "decode_request_count": 0, "generated_tokens": 0,
+                        "device": {key: device.get(key) for key in ("device_id", "backend", "gpu_architecture", "gpu_name")},
+                        "control_id": control_id,
+                        "format_id": "AQ4_0" if control_id == "aq4_0_target" else "SQ8_0" if control_id == "sq8_0_cross_format" else "REFERENCE",
+                        "path_oracle_case_id": None, "path_oracle_result_sha256": None,
+                    }
+                    value["case_sha256"] = case_hash(value)
+                    target.append(value)
 
 
 def expand_stage(stage: dict[str, Any], device: dict[str, Any]) -> list[dict[str, Any]]:
     stage_id = safe_id(stage.get("stage_id"), "stage_id")
     device_id = safe_id(device.get("device_id"), "device_id")
-    device_identity = {key: device.get(key) for key in ("device_id", "backend", "gpu_architecture", "gpu_name")}
+    stage["stage_id"] = stage_id
+    device["device_id"] = device_id
+    prefill = stage.get("prefill")
+    decode = stage.get("decode")
+    if not isinstance(prefill, dict) or not isinstance(decode, dict):
+        raise ExpansionError(f"{stage_id} phase axes are missing")
+    prompts = nonempty_unique_ints(prefill.get("prompt_tokens"), f"{stage_id}.prompt_tokens")
+    nonempty_unique_ints(prefill.get("requested_m"), f"{stage_id}.requested_m")
+    modes = prefill.get("modes")
+    if not isinstance(modes, list) or "all_m1" not in modes or "cold_batched" not in modes:
+        raise ExpansionError(f"{stage_id} must include all_m1 and cold_batched")
+    cached_enabled = "cached_prefix_chunked" in modes
+    cached_prefixes = prefill.get("cached_prefix_tokens", [])
+    cached_prompts = prefill.get("cached_prefix_prompt_tokens", [])
+    if cached_enabled:
+        cached_prefixes = nonempty_unique_ints(cached_prefixes, f"{stage_id}.cached_prefix_tokens")
+        cached_prompts = nonempty_unique_ints(cached_prompts, f"{stage_id}.cached_prefix_prompt_tokens")
+    elif cached_prompts:
+        raise ExpansionError(f"{stage_id} has a cached prefix axis without cached mode")
     result: list[dict[str, Any]] = []
-    prefill = stage.get("prefill", {})
-    decode = stage.get("decode", {})
-    controls_for_device = controls(stage, device_id)
-    production_prompts = prefill.get("production_server_prompt_tokens", [])
-    production_contexts = decode.get("production_server_start_context_tokens", [])
-    for scope in ("component", "full_model", "production_server"):
-        prompts = production_prompts if scope == "production_server" else prefill.get("prompt_tokens", [])
-        contexts = production_contexts if scope == "production_server" else decode.get("start_context_tokens", [])
-        if scope == "production_server" and not prompts and not contexts:
+    for scope in prefill.get("scopes", []):
+        scope_prompts = prefill.get("production_server_prompt_tokens", []) if scope == "production_server" else prompts
+        if not scope_prompts:
             continue
-        for mode in prefill.get("modes", []):
-            phase = "cached_prefix_prefill" if mode == "cached_prefix_chunked" else "cold_prefill"
-            # ``cached_prefix_prompt_tokens`` describes the prefixes that the
-            # runner may materialize; it does not remove prompt lengths from
-            # the normative matrix.  Every mode therefore keeps the same
-            # prompt axis so the manifest's expected counts remain exact.
-            phase_prompts = prompts
-            for prompt_tokens in phase_prompts:
-                for requested_m in prefill.get("requested_m", []):
-                        for control_id in controls_for_device:
-                            case_id = f"p2-{stage_id}-{scope}-{phase}-{mode}-n{prompt_tokens}-m{requested_m}-{device_id}-{control_id}"
-                            result.append({
-                                "case_id": safe_id(case_id, "case_id"), "stage_id": stage_id, "stage_order": stage.get("order"), "scope": scope, "phase": phase, "mode": mode,
-                                "prompt_tokens": prompt_tokens, "cached_prefix_tokens": 0 if phase == "cold_prefill" else (prefill.get("cached_prefix_tokens", [0])[0]), "context_tokens": 0, "decode_start_tokens": 0,
-                                "prefill_requested_m": requested_m, "decode_request_count": 0, "device": device_identity, "control_id": control_id, "format_id": "AQ4_0" if control_id == "aq4_0_target" else "SQ8_0" if control_id == "sq8_0_cross_format" else "REFERENCE", "path_oracle_case_id": None, "path_oracle_result_sha256": None,
-                            })
-        for context_tokens in contexts:
-            for control_id in controls_for_device:
-                case_id = f"p2-{stage_id}-{scope}-decode-n{context_tokens}-requests{decode.get('request_count', 1)}-{device_id}-{control_id}"
-                result.append({
-                    "case_id": safe_id(case_id, "case_id"), "stage_id": stage_id, "stage_order": stage.get("order"), "scope": scope, "phase": "decode", "mode": "decode",
-                    "prompt_tokens": 0, "cached_prefix_tokens": 0, "context_tokens": context_tokens, "decode_start_tokens": context_tokens, "prefill_requested_m": 0, "decode_request_count": decode.get("request_count", 1), "generated_tokens": decode.get("generated_tokens", 64),
-                    "device": device_identity, "control_id": control_id, "format_id": "AQ4_0" if control_id == "aq4_0_target" else "SQ8_0" if control_id == "sq8_0_cross_format" else "REFERENCE", "path_oracle_case_id": None, "path_oracle_result_sha256": None,
-                })
+        append_prefill(result, stage, device, scope, "cold_prefill", "all_m1", scope_prompts, [0])
+        append_prefill(result, stage, device, scope, "cold_prefill", "cold_batched", scope_prompts, [0])
+        if cached_enabled:
+            scope_cached = [item for item in cached_prompts if item in scope_prompts]
+            if not scope_cached:
+                raise ExpansionError(f"{stage_id}.{scope} cached-prefix axis is empty")
+            append_prefill(result, stage, device, scope, "cached_prefix_prefill", "all_m1", scope_cached, cached_prefixes)
+            append_prefill(result, stage, device, scope, "cached_prefix_prefill", "cached_prefix_chunked", scope_cached, cached_prefixes)
+    contexts = nonempty_unique_ints(decode.get("start_context_tokens"), f"{stage_id}.decode contexts")
+    for scope in decode.get("scopes", []):
+        scope_contexts = decode.get("production_server_start_context_tokens", []) if scope == "production_server" else contexts
+        for context in scope_contexts:
+            if context + decode.get("generated_tokens", 0) > 4096:
+                raise ExpansionError(f"decode context exceeds 4096: {stage_id} context={context}")
+            for control_id in controls(stage, device_id):
+                case_id = f"p2-{stage_id}-{scope}-decode-n{context}-requests{decode.get('request_count')}-{device_id}-{control_id}"
+                value = {
+                    "case_id": safe_id(case_id, "case_id"), "case_sha256": None,
+                    "stage_id": stage_id, "stage_order": stage["order"], "scope": scope,
+                    "phase": "decode", "mode": "decode", "baseline_mode": "decode",
+                    "prompt_tokens": 0, "cached_prefix_tokens": 0, "context_tokens": context,
+                    "decode_start_tokens": context, "prefill_requested_m": 0, "resolved_m": 1,
+                    "decode_request_count": decode.get("request_count"), "generated_tokens": decode.get("generated_tokens"),
+                    "device": {key: device.get(key) for key in ("device_id", "backend", "gpu_architecture", "gpu_name")},
+                    "control_id": control_id,
+                    "format_id": "AQ4_0" if control_id == "aq4_0_target" else "SQ8_0" if control_id == "sq8_0_cross_format" else "REFERENCE",
+                    "path_oracle_case_id": None, "path_oracle_result_sha256": None,
+                }
+                value["case_sha256"] = case_hash(value)
+                result.append(value)
     return result
 
 
 def expand(manifest: dict[str, Any], manifest_sha256: str) -> dict[str, Any]:
-    if manifest.get("schema_version") != "ullm.aq4_production_p2_case_manifest.v1": raise ExpansionError("unexpected case manifest schema")
-    if manifest.get("status") != "planning_only": raise ExpansionError("case manifest must remain planning_only")
+    if manifest.get("schema_version") != "ullm.aq4_production_p2_case_manifest.v1" or manifest.get("status") != "planning_only":
+        raise ExpansionError("unexpected or executable manifest")
     stages = manifest.get("stages")
     devices = manifest.get("axes", {}).get("devices")
-    if not isinstance(stages, list) or not isinstance(devices, list): raise ExpansionError("manifest stages/devices are missing")
-    by_id = {safe_id(device.get("device_id"), "device_id"): device for device in devices}
+    if not isinstance(stages, list) or not isinstance(devices, list):
+        raise ExpansionError("manifest stages/devices are missing")
+    device_by_id = {safe_id(item.get("device_id"), "device_id"): item for item in devices}
     cases: list[dict[str, Any]] = []
-    for stage in sorted(stages, key=lambda value: value.get("order", 0)):
+    stage_counts: dict[str, int] = {}
+    for stage in sorted(stages, key=lambda item: item.get("order", 0)):
+        before = len(cases)
         for device_id in stage.get("devices", []):
-            if device_id not in by_id: raise ExpansionError(f"stage references unknown device: {device_id}")
-            cases.extend(expand_stage(stage, by_id[device_id]))
-    cases.sort(key=lambda value: value["case_id"])
-    seen = set()
-    for case in cases:
-        if case["case_id"] in seen: raise ExpansionError("duplicate expanded case id")
-        seen.add(case["case_id"])
-    # Link non-all-M1 prefill cases to the same artifact/control/device/path case.
-    index = {(c["stage_id"], c["scope"], c["phase"], c["prompt_tokens"], c["device"]["device_id"], c["control_id"]): c for c in cases if c["phase"] == "cold_prefill" and c["mode"] == "all_m1" and c["prefill_requested_m"] == 1}
-    for case in cases:
-        if case["phase"] in {"cold_prefill", "cached_prefix_prefill"} and case["mode"] != "all_m1":
-            linked = index.get((case["stage_id"], case["scope"], "cold_prefill", case["prompt_tokens"], case["device"]["device_id"], case["control_id"]))
-            if linked is None: raise ExpansionError(f"missing all-M1 path oracle case for {case['case_id']}")
-            case["path_oracle_case_id"] = linked["case_id"]
-    expected_by_stage = {stage["stage_id"]: stage.get("expected_case_count", {}) for stage in stages}
-    expected_total = sum(int(values.get("total", 0)) for values in expected_by_stage.values())
+            if device_id not in device_by_id:
+                raise ExpansionError(f"unknown device: {device_id}")
+            cases.extend(expand_stage(stage, device_by_id[device_id]))
+        actual = len(cases) - before
+        expected = stage.get("expected_case_count", {}).get("total")
+        if actual != expected:
+            raise ExpansionError(f"{stage['stage_id']} case count {actual} differs from expected {expected}")
+        stage_counts[stage["stage_id"]] = actual
+    cases.sort(key=lambda item: item["case_id"])
+    if len({item["case_id"] for item in cases}) != len(cases):
+        raise ExpansionError("duplicate expanded case id")
+    oracle_index = {
+        (item["stage_id"], item["scope"], item["phase"], item["cached_prefix_tokens"], item["prompt_tokens"], item["prefill_requested_m"], item["device"]["device_id"], item["control_id"]): item
+        for item in cases if item["mode"] == "all_m1" and item["phase"] != "decode"
+    }
+    for item in cases:
+        if item["mode"] not in {"cold_batched", "cached_prefix_chunked"}:
+            continue
+        key = (item["stage_id"], item["scope"], item["phase"], item["cached_prefix_tokens"], item["prompt_tokens"], item["prefill_requested_m"], item["device"]["device_id"], item["control_id"])
+        oracle = oracle_index.get(key)
+        if oracle is None or oracle["resolved_m"] != 1:
+            raise ExpansionError(f"same-state all-M1 oracle is missing for {item['case_id']}")
+        item["path_oracle_case_id"] = oracle["case_id"]
+        item["case_sha256"] = case_hash(item)
+    expected_total = sum(stage_counts.values())
     if len(cases) != expected_total:
-        raise ExpansionError(f"expanded case count {len(cases)} differs from manifest expected total {expected_total}")
-    payload = {"schema_version": "ullm.aq4_production_p2_expanded.v1", "manifest_sha256": manifest_sha256, "manifest_id": manifest.get("manifest_id"), "case_count": len(cases), "cases": cases, "path_oracle_contract": manifest.get("path_oracle_contract"), "expected_case_count": {"by_stage": expected_by_stage, "total": expected_total}, "canonical_case_sha256": sha_bytes(canonical(cases))}
-    return payload
+        raise ExpansionError("complete case count mismatch")
+    return {
+        "schema_version": "ullm.aq4_production_p2_expanded.v2", "manifest_id": manifest.get("manifest_id"),
+        "manifest_sha256": manifest_sha256, "case_count": len(cases), "stage_case_count": stage_counts,
+        "expected_case_count": {"total": expected_total}, "path_oracle_contract": manifest.get("path_oracle_contract"),
+        "canonical_case_sha256": digest(canonical(cases)), "cases": cases,
+    }
 
 
 def atomic_write(path: Path, value: Any) -> None:
-    if path.exists() or path.is_symlink(): raise ExpansionError(f"refusing to overwrite {path}")
+    if path.exists() or path.is_symlink():
+        raise ExpansionError(f"refusing to overwrite {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.incomplete")
-    raw = (json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode()
     with temporary.open("xb") as target:
-        target.write(raw); target.flush(); os.fsync(target.fileno())
+        target.write((json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n").encode())
+        target.flush(); os.fsync(target.fileno())
     temporary.replace(path)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--manifest", type=Path, required=True); parser.add_argument("--output", type=Path, required=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True); parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        raw = args.manifest.read_bytes(); manifest = load(args.manifest, "case manifest"); atomic_write(args.output, expand(manifest, sha_bytes(raw))); print(json.dumps({"status": "ok", "case_count": len(json.loads(args.output.read_text())["cases"])})); return 0
+        manifest, raw = load(args.manifest); value = expand(manifest, digest(raw)); atomic_write(args.output, value)
+        print(json.dumps({"status": "ok", "case_count": value["case_count"]}, sort_keys=True)); return 0
     except (ExpansionError, OSError, ValueError) as error:
         print(f"P2 manifest expansion failed: {error}", file=sys.stderr); return 1
 

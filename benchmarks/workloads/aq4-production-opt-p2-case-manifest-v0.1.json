@@ -165,6 +165,7 @@
     "case_link_field": "path_oracle_case_id",
     "result_hash_field": "path_oracle_result_sha256",
     "same_artifact_required": true,
+    "same_cached_prefix_state_required": true,
     "all_m1_fallback_must_be_recorded": true
   },
   "validation_dependencies": {
@@ -266,15 +267,15 @@
         "production_server_start_context_tokens": [128, 1339, 2048]
       },
       "expected_case_count": {
-        "prefill_cpu_non_server": 756,
-        "prefill_cpu_production_server": 216,
-        "prefill_r9700_non_server": 504,
-        "prefill_r9700_production_server": 144,
+        "prefill_cpu_non_server": 1008,
+        "prefill_cpu_production_server": 288,
+        "prefill_r9700_non_server": 672,
+        "prefill_r9700_production_server": 192,
         "decode_cpu_non_server": 42,
         "decode_cpu_production_server": 9,
         "decode_r9700_non_server": 28,
         "decode_r9700_production_server": 6,
-        "total": 1705
+        "total": 2245
       }
     },
     {
@@ -306,11 +307,11 @@
       },
       "context_edge_rule": "prefill prompt 4096 is prefill-only; decode starts plus 64 generated tokens must remain <= 4096",
       "expected_case_count": {
-        "prefill_cpu": 1782,
-        "prefill_r9700": 1188,
+        "prefill_cpu": 2268,
+        "prefill_r9700": 1512,
         "decode_cpu": 63,
         "decode_r9700": 42,
-        "total": 3075
+        "total": 3885
       }
     }
   ],

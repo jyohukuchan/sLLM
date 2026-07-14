@@ -208,9 +208,13 @@ def require_hash_or_null(value: Any, name: str) -> None:
 def count_prefill(stage: dict[str, Any], device_id: str, production: bool) -> int:
     selection = stage["prefill"]
     prompts = selection.get("production_server_prompt_tokens", []) if production else selection["prompt_tokens"]
+    cached_prompts = [value for value in selection.get("cached_prefix_prompt_tokens", []) if value in prompts]
     scopes = ["production_server"] if production else ["component", "full_model"]
     controls = stage.get("controls_by_device", {}).get(device_id, stage.get("controls", []))
-    return len(prompts) * len(selection["requested_m"]) * len(selection["modes"]) * len(scopes) * len(controls)
+    cold_modes = int("all_m1" in selection["modes"]) + int("cold_batched" in selection["modes"])
+    cached_modes = 2 if "cached_prefix_chunked" in selection["modes"] else 0
+    phase_width = len(prompts) * cold_modes + len(cached_prompts) * len(selection.get("cached_prefix_tokens", [])) * cached_modes
+    return phase_width * len(selection["requested_m"]) * len(scopes) * len(controls)
 
 
 def count_decode(stage: dict[str, Any], device_id: str, production: bool) -> int:
@@ -300,6 +304,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     require(path_oracle.get("case_link_field") == "path_oracle_case_id", "path oracle case link field differs")
     require(path_oracle.get("result_hash_field") == "path_oracle_result_sha256", "path oracle result hash field differs")
     require(path_oracle.get("same_artifact_required") is True, "path oracle must use the same artifact")
+    require(path_oracle.get("same_cached_prefix_state_required") is True, "cached path oracle must preserve prefix state")
     require(path_oracle.get("all_m1_fallback_must_be_recorded") is True, "all-M=1 fallback must be recorded")
 
     validation_dependencies = manifest.get("validation_dependencies", {})

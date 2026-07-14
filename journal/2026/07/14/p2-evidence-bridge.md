@@ -1,17 +1,18 @@
-# AQ4 P2 証跡ブリッジ
+# AQ4 P2 証跡ブリッジ QA 修正
 
 ## 前回の要点
 
-P1 の実行トレースと独立検証のスキーマ監査を完了し、CPU の再現可能な証跡を保持した。P1 の親ゲートとエンジン側の実行ブリッジは別担当であり、ここでは変更していない。
+初版 `c8ef5ee` ではケース展開、identity binder、runner、prefill result builder、独立validatorを追加した。しかし、cached-prefixをcold stateのall-M1へ結び付けていたこと、bound policyが未完成だったこと、runnerが任意commandを許したこと、正式result schemaと完全matrix検証が不足していたため、QAはFAILだった。
 
 ## 今回の変更点
 
-- `expand-aq4-production-p2.py` を追加し、ケースを canonical JSON として展開した。smoke 84、representative 1,705、full 3,075、合計 4,864 件で、all-M1 の経路オラクル参照を付与する。
-- `bind-aq4-production-p2-identity.py` を追加し、モデル、トークナイザー集合、worker、package、graph、state、source oracle、power、baseline、Git の SHA-256 を束ね、bound policy を生成する。
-- `run-aq4-production-p2.py` を追加し、shell 無しの argv 実行、bounded streaming、OOM/失敗/未対応/skip の不変状態、R9700 排他ロック、事前メモリ余裕、atomic 出力を実装した。production の実体不足は fail-closed とする。
-- `build-aq4-prefill-validation-result.py` と `validate-aq4-production-p2-evidence.py` を追加し、raw/result/trace/source-oracle/identity/policy のリンクと経路オラクルを独立検証する。CPU/component/full-model は promotion 不可で、production-server は独立 trace が揃うまで不可とする。
-- `tests/test_aq4_production_p2_evidence.py` と専用 fixture を追加した。CPU synthetic の正常系、hash 改ざん検出、production 実体不足の fail-closed を確認した。
+- cached-prefixは非空prefix軸だけを展開し、同じphase、prefix、prompt、requested M、device、controlのall-M1へ結び付けた。`4096 + 128` は生成しない。完全件数はsmoke 84、representative 2,245、full 3,885、合計6,214件である。
+- binderはexpanded fileと各case self-hashを結び、任意サイズのpackage fileをstreaming SHA-256で処理する。`effective_at`、power 4値、correctness 5値を必須にし、最終bound policy形に対してself-hashを計算する。
+- runnerは宣言済みworker/package/policy/identity/caseだけを受け付け、任意`--command`を削除した。argv値を証跡へ保存せず、canonical R9700 lock、GPU process snapshot、VRAM headroom、streaming output境界を検証する。
+- builderは正式な `ullm.prefill_validation.v1` を生成する。raw statusは上書き不可で、source oracle validator、same-state path oracle result、独立validation artifact、trace、2 warmup + 10 measured、p50/p95、TTFT、ITL、state/reset/fallback/memory、baseline regressionを実検証する。CPU syntheticは常にpromotion不可である。
+- validatorは6,214件の完全matrixを要求し、partial、duplicate、extra、全case identity、run-root path、case/raw/oracle/policy/trace/state/measurement/regressionのhashと内容を再構築する。component/full-model/control/CPU syntheticのpromotionを許さない。
+- negative testsを12件へ拡張した。65MiB sparse package、1/6,214 partial matrix、dummy trace、cached state mismatch、lock競合、foreign GPU process、32/33-byte出力境界などを含み、全件成功した。P1 trace tests 7件も成功した。
 
 ## 次の行動
 
-専用テストは 3 件すべて成功した。GPU/live の実測、R9700 の電力・VRAM capture、実 package/worker の production trace、P1 親ゲートの承認が残課題である。これらが揃うまで P2 は測定準備と CPU 証跡に限定する。
+GPU/liveは実行していない。実R9700 power capture、実worker/package、production-server trace、完全6,214件matrix、P1親ゲートの承認が揃うまでpromotionは常にfalseとする。commit後に独立reviewを再実行する。
