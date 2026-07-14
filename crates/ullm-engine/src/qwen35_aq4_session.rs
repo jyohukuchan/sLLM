@@ -32,13 +32,29 @@ pub const QWEN35_AQ4_PREFILL_CHUNK_GRID: &[usize] = &[1, 8, 16, 32, 64, 128];
 pub const QWEN35_AQ4_SUPPORTED_PREFILL_CHUNK_TOKENS: &[usize] = QWEN35_AQ4_PREFILL_CHUNK_GRID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Qwen35Aq4TransactionCounts {
+    pub prepare: u64,
+    pub commit: u64,
+    pub discard: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Qwen35Aq4ResetCounts {
+    pub attempted: u64,
+    pub complete: u64,
+    pub failed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Qwen35Aq4LifecycleCounts {
     pub prepare: u64,
     pub commit: u64,
     pub discard: u64,
     pub error: u64,
     pub cancel: u64,
-    pub reset: u64,
+    pub prefill: Qwen35Aq4TransactionCounts,
+    pub publication: Qwen35Aq4TransactionCounts,
+    pub reset: Qwen35Aq4ResetCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -59,10 +75,11 @@ pub struct Qwen35Aq4RequestExecutionAudit {
     pub schema_version: &'static str,
     pub requested_m: usize,
     pub resolved_m: Option<usize>,
-    pub actual_token_batch_width: usize,
-    pub actual_request_batch_width: usize,
-    pub phase_batch_counts: Qwen35Aq4PhaseBatchCounts,
-    pub internal_batch_count: u64,
+    pub actual_token_batch_width: Option<usize>,
+    pub actual_request_batch_width: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_batch_counts: Option<Qwen35Aq4PhaseBatchCounts>,
+    pub internal_batch_count: Option<u64>,
     pub lifecycle: Qwen35Aq4LifecycleCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_audit: Option<OperationExecutionAudit>,
@@ -82,12 +99,13 @@ impl Qwen35Aq4RequestExecutionAudit {
 struct Qwen35Aq4LifecycleObserver {
     requested_m: usize,
     resolved_m: Option<usize>,
-    actual_token_batch_width: usize,
-    actual_request_batch_width: usize,
-    phase_batch_counts: Qwen35Aq4PhaseBatchCounts,
-    internal_batch_count: u64,
+    actual_token_batch_width: Option<usize>,
+    actual_request_batch_width: Option<usize>,
+    phase_batch_counts: Option<Qwen35Aq4PhaseBatchCounts>,
+    internal_batch_count: Option<u64>,
     lifecycle: Qwen35Aq4LifecycleCounts,
-    open_batches: u64,
+    prefill_open: bool,
+    publication_open: bool,
     cancel_observed: bool,
 }
 
@@ -96,83 +114,219 @@ impl Qwen35Aq4LifecycleObserver {
         Self {
             requested_m,
             resolved_m: None,
-            actual_token_batch_width: 0,
-            // The session is intentionally single-request. This records the actual request
-            // batch width rather than a caller-provided target width.
-            actual_request_batch_width: 1,
-            phase_batch_counts: Qwen35Aq4PhaseBatchCounts {
-                cold_prefill: 0,
-                cached_prefix_prefill: 0,
-                decode: 0,
-            },
-            internal_batch_count: 0,
+            actual_token_batch_width: None,
+            actual_request_batch_width: None,
+            phase_batch_counts: None,
+            internal_batch_count: None,
             lifecycle: Qwen35Aq4LifecycleCounts {
                 prepare: 0,
                 commit: 0,
                 discard: 0,
                 error: 0,
                 cancel: 0,
-                reset: 0,
+                prefill: Qwen35Aq4TransactionCounts {
+                    prepare: 0,
+                    commit: 0,
+                    discard: 0,
+                },
+                publication: Qwen35Aq4TransactionCounts {
+                    prepare: 0,
+                    commit: 0,
+                    discard: 0,
+                },
+                reset: Qwen35Aq4ResetCounts {
+                    attempted: 0,
+                    complete: 0,
+                    failed: 0,
+                },
             },
-            open_batches: 0,
+            prefill_open: false,
+            publication_open: false,
             cancel_observed: false,
         }
     }
 
-    fn observe_prepare(&mut self, phase: ExecutionPhase, token_width: usize) {
-        self.lifecycle.prepare = self.lifecycle.prepare.saturating_add(1);
-        self.internal_batch_count = self.internal_batch_count.saturating_add(1);
-        self.open_batches = self.open_batches.saturating_add(1);
-        self.actual_token_batch_width = self.actual_token_batch_width.max(token_width);
-        match phase {
-            ExecutionPhase::ColdPrefill => {
-                self.phase_batch_counts.cold_prefill =
-                    self.phase_batch_counts.cold_prefill.saturating_add(1);
-                self.resolved_m = Some(self.resolved_m.unwrap_or(0).max(token_width));
-            }
-            ExecutionPhase::CachedPrefixPrefill => {
-                self.phase_batch_counts.cached_prefix_prefill = self
-                    .phase_batch_counts
-                    .cached_prefix_prefill
-                    .saturating_add(1);
-                self.resolved_m = Some(self.resolved_m.unwrap_or(0).max(token_width));
-            }
-            ExecutionPhase::Decode => {
-                self.phase_batch_counts.decode = self.phase_batch_counts.decode.saturating_add(1);
-            }
+    fn increment(counter: &mut u64, label: &str) -> Result<(), String> {
+        *counter = counter
+            .checked_add(1)
+            .ok_or_else(|| format!("Qwen3.5 AQ4 lifecycle {label} count overflows"))?;
+        Ok(())
+    }
+
+    fn prepare_prefill(&mut self) -> Result<(), String> {
+        if self.prefill_open {
+            return Err("Qwen3.5 AQ4 lifecycle prefill transaction is already open".into());
         }
+        Self::increment(&mut self.lifecycle.prepare, "prepare")?;
+        Self::increment(&mut self.lifecycle.prefill.prepare, "prefill prepare")?;
+        self.prefill_open = true;
+        Ok(())
     }
 
-    fn observe_commit(&mut self) {
-        self.lifecycle.commit = self.lifecycle.commit.saturating_add(1);
-        self.open_batches = self.open_batches.saturating_sub(1);
+    fn commit_prefill(&mut self) -> Result<(), String> {
+        if !self.prefill_open {
+            return Err("Qwen3.5 AQ4 lifecycle prefill commit has no prepare".into());
+        }
+        Self::increment(&mut self.lifecycle.commit, "commit")?;
+        Self::increment(&mut self.lifecycle.prefill.commit, "prefill commit")?;
+        self.prefill_open = false;
+        Ok(())
     }
 
-    fn observe_discard(&mut self) {
-        self.lifecycle.discard = self.lifecycle.discard.saturating_add(1);
-        self.open_batches = self.open_batches.saturating_sub(1);
+    fn discard_prefill(&mut self) -> Result<(), String> {
+        if !self.prefill_open {
+            return Err("Qwen3.5 AQ4 lifecycle prefill discard has no prepare".into());
+        }
+        Self::increment(&mut self.lifecycle.discard, "discard")?;
+        Self::increment(&mut self.lifecycle.prefill.discard, "prefill discard")?;
+        self.prefill_open = false;
+        Ok(())
     }
 
-    fn observe_error(&mut self) {
-        self.lifecycle.error = self.lifecycle.error.saturating_add(1);
+    fn prepare_publication(&mut self) -> Result<(), String> {
+        if self.publication_open {
+            return Err("Qwen3.5 AQ4 lifecycle publication transaction is already open".into());
+        }
+        Self::increment(&mut self.lifecycle.prepare, "prepare")?;
+        Self::increment(
+            &mut self.lifecycle.publication.prepare,
+            "publication prepare",
+        )?;
+        self.publication_open = true;
+        Ok(())
     }
 
-    fn observe_cancel(&mut self) {
+    fn commit_publication(&mut self) -> Result<(), String> {
+        if !self.publication_open {
+            return Err("Qwen3.5 AQ4 lifecycle publication commit has no prepare".into());
+        }
+        Self::increment(&mut self.lifecycle.commit, "commit")?;
+        Self::increment(&mut self.lifecycle.publication.commit, "publication commit")?;
+        self.publication_open = false;
+        Ok(())
+    }
+
+    fn discard_publication(&mut self) -> Result<(), String> {
+        if !self.publication_open {
+            return Err("Qwen3.5 AQ4 lifecycle publication discard has no prepare".into());
+        }
+        Self::increment(&mut self.lifecycle.discard, "discard")?;
+        Self::increment(
+            &mut self.lifecycle.publication.discard,
+            "publication discard",
+        )?;
+        self.publication_open = false;
+        Ok(())
+    }
+
+    fn observe_prefill_execution(
+        &mut self,
+        observation: ObservedPrefillExecution,
+    ) -> Result<(), String> {
+        self.resolved_m = Some(
+            self.resolved_m
+                .unwrap_or(0)
+                .max(observation.actual_token_batch_width),
+        );
+        self.actual_token_batch_width = Some(
+            self.actual_token_batch_width
+                .unwrap_or(0)
+                .max(observation.actual_token_batch_width),
+        );
+        self.actual_request_batch_width = Some(1);
+        let counts = self
+            .phase_batch_counts
+            .get_or_insert(Qwen35Aq4PhaseBatchCounts {
+                cold_prefill: 0,
+                cached_prefix_prefill: 0,
+                decode: 0,
+            });
+        counts.cold_prefill = counts
+            .cold_prefill
+            .checked_add(observation.phase_batch_counts.cold_prefill)
+            .ok_or_else(|| "Qwen3.5 AQ4 cold-prefill batch count overflows".to_string())?;
+        counts.cached_prefix_prefill = counts
+            .cached_prefix_prefill
+            .checked_add(observation.phase_batch_counts.cached_prefix_prefill)
+            .ok_or_else(|| "Qwen3.5 AQ4 cached-prefix-prefill batch count overflows".to_string())?;
+        let batches = self.internal_batch_count.get_or_insert(0);
+        *batches = batches
+            .checked_add(observation.internal_batch_count)
+            .ok_or_else(|| "Qwen3.5 AQ4 internal batch count overflows".to_string())?;
+        Ok(())
+    }
+
+    fn observe_decode_execution(&mut self) -> Result<(), String> {
+        self.actual_token_batch_width = Some(self.actual_token_batch_width.unwrap_or(0).max(1));
+        self.actual_request_batch_width = Some(1);
+        let counts = self
+            .phase_batch_counts
+            .get_or_insert(Qwen35Aq4PhaseBatchCounts {
+                cold_prefill: 0,
+                cached_prefix_prefill: 0,
+                decode: 0,
+            });
+        counts.decode = counts
+            .decode
+            .checked_add(1)
+            .ok_or_else(|| "Qwen3.5 AQ4 decode batch count overflows".to_string())?;
+        let batches = self.internal_batch_count.get_or_insert(0);
+        *batches = batches
+            .checked_add(1)
+            .ok_or_else(|| "Qwen3.5 AQ4 internal batch count overflows".to_string())?;
+        Ok(())
+    }
+
+    fn observe_error(&mut self) -> Result<(), String> {
+        Self::increment(&mut self.lifecycle.error, "error")
+    }
+
+    fn observe_cancel(&mut self) -> Result<(), String> {
         if !self.cancel_observed {
-            self.lifecycle.cancel = self.lifecycle.cancel.saturating_add(1);
+            Self::increment(&mut self.lifecycle.cancel, "cancel")?;
             self.cancel_observed = true;
         }
+        Ok(())
     }
 
-    fn observe_reset(&mut self) {
-        self.lifecycle.reset = self.lifecycle.reset.saturating_add(1);
+    fn begin_reset(&mut self) -> Result<(), String> {
+        if self.prefill_open || self.publication_open {
+            return Err("Qwen3.5 AQ4 reset cannot begin with an open transaction".into());
+        }
+        Self::increment(&mut self.lifecycle.reset.attempted, "reset attempted")
+    }
+
+    fn complete_reset(&mut self) -> Result<(), String> {
+        Self::increment(&mut self.lifecycle.reset.complete, "reset complete")
+    }
+
+    fn fail_reset(&mut self) -> Result<(), String> {
+        Self::increment(&mut self.lifecycle.reset.failed, "reset failed")
     }
 
     fn snapshot(
         &self,
         operation_audit: Option<OperationExecutionAudit>,
-    ) -> Qwen35Aq4RequestExecutionAudit {
-        Qwen35Aq4RequestExecutionAudit {
+    ) -> Result<Qwen35Aq4RequestExecutionAudit, String> {
+        if self.prefill_open || self.publication_open {
+            return Err("Qwen3.5 AQ4 terminal lifecycle retains an open transaction".into());
+        }
+        let closed = self
+            .lifecycle
+            .commit
+            .checked_add(self.lifecycle.discard)
+            .ok_or_else(|| "Qwen3.5 AQ4 lifecycle closed count overflows".to_string())?;
+        if self.lifecycle.prepare != closed
+            || self.lifecycle.prefill.prepare
+                != self.lifecycle.prefill.commit + self.lifecycle.prefill.discard
+            || self.lifecycle.publication.prepare
+                != self.lifecycle.publication.commit + self.lifecycle.publication.discard
+            || self.lifecycle.reset.complete + self.lifecycle.reset.failed
+                > self.lifecycle.reset.attempted
+        {
+            return Err("Qwen3.5 AQ4 terminal lifecycle counters do not reconcile".into());
+        }
+        Ok(Qwen35Aq4RequestExecutionAudit {
             schema_version: "ullm.qwen35_aq4.request_execution.v1",
             requested_m: self.requested_m,
             resolved_m: self.resolved_m,
@@ -182,7 +336,7 @@ impl Qwen35Aq4LifecycleObserver {
             internal_batch_count: self.internal_batch_count,
             lifecycle: self.lifecycle,
             operation_audit,
-        }
+        })
     }
 }
 
@@ -582,6 +736,13 @@ const EXECUTION_IMPLEMENTATIONS: [(&str, &str); 14] = [
 
 type LayerExecutionContract = [[&'static str; 2]; 3];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObservedPrefillExecution {
+    actual_token_batch_width: usize,
+    phase_batch_counts: Qwen35Aq4PhaseBatchCounts,
+    internal_batch_count: u64,
+}
+
 struct OperationAuditAccumulator {
     cold_prefill_steps: u64,
     cached_prefix_prefill_steps: u64,
@@ -698,7 +859,7 @@ impl OperationAuditAccumulator {
         execution_width: usize,
         contract: &[LayerExecutionContract],
         invocations: &[Qwen35PrefillExecutionStep],
-    ) -> Result<(), String> {
+    ) -> Result<ObservedPrefillExecution, String> {
         if !(1..=QWEN35_AQ4_MAX_PREFILL_CHUNK).contains(&execution_width) {
             return Err(format!(
                 "prefill execution width is outside 1..={QWEN35_AQ4_MAX_PREFILL_CHUNK}: {execution_width}"
@@ -711,6 +872,7 @@ impl OperationAuditAccumulator {
             return Err("prefill execution trace must contain layers and invocations".into());
         }
         let mut layer_widths = vec![0_usize; contract.len()];
+        let mut layer_batches = vec![Vec::new(); contract.len()];
         for (invocation_index, invocation) in invocations.iter().enumerate() {
             if invocation.layer_index >= contract.len() {
                 return Err(format!(
@@ -733,6 +895,8 @@ impl OperationAuditAccumulator {
             layer_widths[invocation.layer_index] = layer_widths[invocation.layer_index]
                 .checked_add(invocation.execution_width)
                 .ok_or_else(|| "prefill layer coverage width overflows".to_string())?;
+            layer_batches[invocation.layer_index]
+                .push((invocation.phase, invocation.execution_width));
             let phase_index = execution_phase_index(invocation.phase);
             for (operation_index, record) in invocation.records.iter().enumerate() {
                 let expected = prefill_expected_implementation(
@@ -800,6 +964,69 @@ impl OperationAuditAccumulator {
                 "prefill layer coverage mismatch at layer={layer_index}: expected={execution_width} actual={covered}"
             ));
         }
+        let physical_batches = layer_batches
+            .first()
+            .ok_or_else(|| "prefill execution has no layer batch evidence".to_string())?;
+        if physical_batches.is_empty() {
+            return Err("prefill execution has no physical batch evidence".into());
+        }
+        if let Some((layer_index, _)) = layer_batches
+            .iter()
+            .enumerate()
+            .find(|(_, batches)| batches.as_slice() != physical_batches.as_slice())
+        {
+            return Err(format!(
+                "prefill physical batch sequence differs at layer={layer_index}"
+            ));
+        }
+        match phase {
+            ExecutionPhase::ColdPrefill => {
+                if physical_batches[0].0 != ExecutionPhase::ColdPrefill
+                    || physical_batches[1..]
+                        .iter()
+                        .any(|(batch_phase, _)| *batch_phase != ExecutionPhase::CachedPrefixPrefill)
+                {
+                    return Err("cold prefill physical phase sequence is inconsistent".into());
+                }
+            }
+            ExecutionPhase::CachedPrefixPrefill => {
+                if physical_batches
+                    .iter()
+                    .any(|(batch_phase, _)| *batch_phase != ExecutionPhase::CachedPrefixPrefill)
+                {
+                    return Err(
+                        "cached-prefix prefill physical phase sequence is inconsistent".into(),
+                    );
+                }
+            }
+            ExecutionPhase::Decode => unreachable!("decode rejected above"),
+        }
+        let actual_token_batch_width = physical_batches
+            .iter()
+            .map(|(_, width)| *width)
+            .max()
+            .ok_or_else(|| "prefill physical width evidence is empty".to_string())?;
+        let phase_batch_counts = Qwen35Aq4PhaseBatchCounts {
+            cold_prefill: u64::try_from(
+                physical_batches
+                    .iter()
+                    .filter(|(batch_phase, _)| *batch_phase == ExecutionPhase::ColdPrefill)
+                    .count(),
+            )
+            .map_err(|_| "cold-prefill physical batch count does not fit u64".to_string())?,
+            cached_prefix_prefill: u64::try_from(
+                physical_batches
+                    .iter()
+                    .filter(|(batch_phase, _)| *batch_phase == ExecutionPhase::CachedPrefixPrefill)
+                    .count(),
+            )
+            .map_err(|_| {
+                "cached-prefix-prefill physical batch count does not fit u64".to_string()
+            })?,
+            decode: 0,
+        };
+        let internal_batch_count = u64::try_from(physical_batches.len())
+            .map_err(|_| "prefill physical batch count does not fit u64".to_string())?;
         let width_u64 = u64::try_from(execution_width)
             .map_err(|_| "prefill execution width does not fit u64".to_string())?;
         match phase {
@@ -842,7 +1069,11 @@ impl OperationAuditAccumulator {
         self.digest
             .update(self.prefill_chunks_executed.to_le_bytes());
         self.digest.update((execution_width as u64).to_le_bytes());
-        Ok(())
+        Ok(ObservedPrefillExecution {
+            actual_token_batch_width,
+            phase_batch_counts,
+            internal_batch_count,
+        })
     }
 
     fn commit_prefill_chunk(&mut self, execution_width: usize) -> Result<(), String> {
@@ -1301,20 +1532,26 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     }
 
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, String> {
+        let mut message = message.into();
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-            observer.observe_error();
+            if let Err(error) = observer.observe_error() {
+                message.push_str(&format!("; lifecycle error observation failed: {error}"));
+            }
         }
-        self.snapshot_terminal_request_audit();
+        if let Err(error) = self.snapshot_terminal_request_audit() {
+            message.push_str(&format!("; terminal lifecycle audit failed: {error}"));
+        }
         self.status = Qwen35Aq4SessionStatus::Failed;
-        Err(message.into())
+        Err(message)
     }
 
-    fn snapshot_terminal_request_audit(&mut self) {
+    fn snapshot_terminal_request_audit(&mut self) -> Result<(), String> {
         let operation_audit = self.last_terminal_operation_audit.clone();
-        self.last_terminal_request_audit = self
-            .active_lifecycle_observer
-            .as_ref()
-            .map(|observer| observer.snapshot(operation_audit));
+        self.last_terminal_request_audit = match self.active_lifecycle_observer.as_ref() {
+            Some(observer) => Some(observer.snapshot(operation_audit)?),
+            None => None,
+        };
+        Ok(())
     }
 
     fn prepare_prefill_chunk(&mut self) -> Result<SessionAdvance<Qwen35Aq4PreparedToken>, String> {
@@ -1385,33 +1622,61 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             }
         };
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-            observer.observe_prepare(phase, execution_width);
+            if let Err(error) = observer.prepare_prefill() {
+                return self.fail(error);
+            }
         }
         // Dispatch returns only after every requested invocation has been launched and its
         // successful operation records have been collected.  Account for that physical work
         // before the stream synchronization below: synchronization can fail after dispatch, and
         // a partial terminal audit must still retain the invocation and token-equivalent counts.
         // Commit/progress stay below synchronization and the post-sync cancellation check.
-        if let (Some(contract), Some(audit)) = (
+        let physical_observation = if let (Some(contract), Some(audit)) = (
             self.execution_contract.as_deref(),
             self.active_operation_audit.as_mut(),
         ) {
-            if let Err(error) =
-                audit.observe_prefill_chunk(phase, execution_width, contract, &execution_steps)
-            {
-                self.model.mark_prefill_chunk_uncommitted();
-                if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                    observer.observe_discard();
+            match audit.observe_prefill_chunk(phase, execution_width, contract, &execution_steps) {
+                Ok(observation) => Some(observation),
+                Err(error) => {
+                    self.model.mark_prefill_chunk_uncommitted();
+                    if let Some(observer) = self.active_lifecycle_observer.as_mut() {
+                        if let Err(lifecycle_error) = observer.discard_prefill() {
+                            return self.fail(format!(
+                                "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}; lifecycle discard failed: {lifecycle_error}"
+                            ));
+                        }
+                    }
+                    return self.fail(format!(
+                        "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
+                    ));
                 }
-                return self.fail(format!(
-                    "Qwen3.5 AQ4 prefill chunk operation audit failed: {error}"
-                ));
+            }
+        } else {
+            None
+        };
+        if let (Some(observer), Some(observation)) = (
+            self.active_lifecycle_observer.as_mut(),
+            physical_observation,
+        ) {
+            if let Err(error) = observer.observe_prefill_execution(observation) {
+                self.model.mark_prefill_chunk_uncommitted();
+                let discard_error = observer.discard_prefill().err();
+                return self.fail(match discard_error {
+                    Some(discard_error) => format!(
+                        "Qwen3.5 AQ4 physical prefill observation failed: {error}; lifecycle discard failed: {discard_error}"
+                    ),
+                    None => format!("Qwen3.5 AQ4 physical prefill observation failed: {error}"),
+                });
             }
         }
         if let Err(error) = self.model.synchronize_after_prefill_chunk() {
             self.model.mark_prefill_chunk_uncommitted();
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_discard();
+                if let Err(lifecycle_error) = observer.discard_prefill() {
+                    return self.fail(format!(
+                        "Qwen3.5 AQ4 prefill chunk synchronization failed: {error}; lifecycle discard failed: {lifecycle_error}"
+                    ));
+                }
             }
             self.last_terminal_operation_audit =
                 self.active_operation_audit.as_ref().map(|audit| {
@@ -1431,26 +1696,45 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         if cancel.is_cancelled() {
             self.model.mark_prefill_chunk_uncommitted();
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_discard();
-                observer.observe_cancel();
+                if let Err(error) = observer
+                    .discard_prefill()
+                    .and_then(|_| observer.observe_cancel())
+                {
+                    return self.fail(error);
+                }
             }
             let active = self.active.as_mut().expect("active request checked above");
             active.terminal_outcome = Some(ReleaseOutcome::Cancelled);
             self.status = Qwen35Aq4SessionStatus::Terminal;
-            self.snapshot_terminal_request_audit();
+            if let Err(error) = self.snapshot_terminal_request_audit() {
+                return self.fail(error);
+            }
             return Ok(SessionAdvance::CancellationObserved);
         }
-        let next_prompt_tokens_processed = self
+        let next_prompt_tokens_processed = match self
             .active
             .as_ref()
             .expect("active request checked above")
             .prompt_tokens_processed
             .checked_add(execution_width)
-            .ok_or_else(|| "Qwen3.5 AQ4 prefill progress overflows".to_string())?;
+        {
+            Some(value) => value,
+            None => {
+                self.model.mark_prefill_chunk_uncommitted();
+                if let Some(observer) = self.active_lifecycle_observer.as_mut() {
+                    let _ = observer.discard_prefill();
+                }
+                return self.fail("Qwen3.5 AQ4 prefill progress overflows");
+            }
+        };
         if let Some(audit) = self.active_operation_audit.as_mut() {
             if let Err(error) = audit.commit_prefill_chunk(execution_width) {
                 if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                    observer.observe_discard();
+                    if let Err(lifecycle_error) = observer.discard_prefill() {
+                        return self.fail(format!(
+                            "Qwen3.5 AQ4 prefill chunk commit audit failed: {error}; lifecycle discard failed: {lifecycle_error}"
+                        ));
+                    }
                 }
                 return self.fail(format!(
                     "Qwen3.5 AQ4 prefill chunk commit audit failed: {error}"
@@ -1458,7 +1742,9 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             }
         }
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-            observer.observe_commit();
+            if let Err(error) = observer.commit_prefill() {
+                return self.fail(error);
+            }
         }
         let active = self.active.as_mut().expect("active request checked above");
         active.prompt_tokens_processed = next_prompt_tokens_processed;
@@ -1591,6 +1877,11 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             forced_end_tokens_before,
             nonce: self.next_nonce,
         };
+        if let Some(observer) = self.active_lifecycle_observer.as_mut() {
+            if let Err(error) = observer.prepare_publication() {
+                return self.fail(error);
+            }
+        }
         self.next_nonce = next_nonce;
         self.pending = Some(prepared.clone());
         self.status = Qwen35Aq4SessionStatus::PreparedToken;
@@ -1604,9 +1895,21 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     }
 
     fn reset_with_outcome(&mut self, outcome: ReleaseOutcome) -> Result<ReleaseSummary, String> {
-        if outcome == ReleaseOutcome::Cancelled {
-            if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_cancel();
+        if let Some(prepared) = self.pending.as_ref() {
+            if let Some(reasoning) = self
+                .active
+                .as_mut()
+                .and_then(|active| active.reasoning.as_mut())
+            {
+                reasoning.reasoning_tokens = prepared.reasoning_tokens_before;
+                reasoning.forced_end_tokens = prepared.forced_end_tokens_before;
+            }
+        }
+        if let Some(observer) = self.active_lifecycle_observer.as_mut() {
+            if observer.publication_open {
+                if let Err(error) = observer.discard_publication() {
+                    return self.fail(error);
+                }
             }
         }
         let active = self
@@ -1660,25 +1963,45 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         } else {
             None
         };
+        if let Some(observer) = self.active_lifecycle_observer.as_mut() {
+            if let Err(error) = observer.begin_reset() {
+                return self.fail(error);
+            }
+        }
         if let Err(error) = self.model.reset_all_request_state_synchronized() {
             self.last_terminal_operation_audit = self
                 .active_operation_audit
                 .as_ref()
                 .map(|audit| audit.partial(audit_layers, "reset_failed", None, None, None, None));
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_error();
+                let lifecycle_result = observer.fail_reset().and_then(|_| observer.observe_error());
+                if let Err(lifecycle_error) = lifecycle_result {
+                    self.status = Qwen35Aq4SessionStatus::Failed;
+                    return Err(format!(
+                        "Qwen3.5 AQ4 request reset failed: {error}; lifecycle reset failure observation failed: {lifecycle_error}"
+                    ));
+                }
             }
-            self.snapshot_terminal_request_audit();
+            if let Err(lifecycle_error) = self.snapshot_terminal_request_audit() {
+                self.status = Qwen35Aq4SessionStatus::Failed;
+                return Err(format!(
+                    "Qwen3.5 AQ4 request reset failed: {error}; terminal lifecycle audit failed: {lifecycle_error}"
+                ));
+            }
             self.status = Qwen35Aq4SessionStatus::Failed;
             return Err(format!("Qwen3.5 AQ4 request reset failed: {error}"));
         }
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-            observer.observe_reset();
+            if let Err(error) = observer.complete_reset() {
+                return self.fail(error);
+            }
         }
         self.active = None;
         self.active_operation_audit = None;
         self.last_terminal_operation_audit = terminal_audit;
-        self.snapshot_terminal_request_audit();
+        if let Err(error) = self.snapshot_terminal_request_audit() {
+            return self.fail(error);
+        }
         self.pending = None;
         self.active_lifecycle_observer = None;
         self.status = Qwen35Aq4SessionStatus::Ready;
@@ -1784,12 +2107,16 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             .is_cancelled();
         if cancelled {
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_cancel();
+                if let Err(error) = observer.observe_cancel() {
+                    return self.fail(error);
+                }
             }
             let active = self.active.as_mut().expect("active request checked above");
             active.terminal_outcome = Some(ReleaseOutcome::Cancelled);
             self.status = Qwen35Aq4SessionStatus::Terminal;
-            self.snapshot_terminal_request_audit();
+            if let Err(error) = self.snapshot_terminal_request_audit() {
+                return self.fail(error);
+            }
             return Ok(SessionAdvance::CancellationObserved);
         }
 
@@ -1855,27 +2182,20 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
                 return self.fail(format!("{label} token dispatch failed: {error}"));
             }
         };
-        if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-            observer.observe_prepare(phase, 1);
-        }
         if let (Some(contract), Some(audit)) = (
             self.execution_contract.as_deref(),
             self.active_operation_audit.as_mut(),
         ) {
             if let Err(error) = audit.observe(phase, contract, &operation_records) {
-                if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                    observer.observe_discard();
-                }
                 return self.fail(format!("{label} operation execution audit failed: {error}"));
             }
-        }
-        let prepared = self.prepare_token(label);
-        if prepared.is_err() {
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_discard();
+                if let Err(error) = observer.observe_decode_execution() {
+                    return self.fail(error);
+                }
             }
         }
-        prepared
+        self.prepare_token(label)
     }
 
     fn publish_prepared<F>(
@@ -1919,10 +2239,23 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         let publication = match cancel.publication_guard() {
             Ok(publication) => publication,
             Err(error) => {
+                self.pending = None;
                 if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                    observer.observe_error();
+                    if let Err(lifecycle_error) = observer
+                        .discard_publication()
+                        .and_then(|_| observer.observe_error())
+                    {
+                        return self.fail(format!(
+                            "{error}; publication guard lifecycle observation failed: {lifecycle_error}"
+                        ));
+                    }
                 }
-                self.snapshot_terminal_request_audit();
+                self.status = Qwen35Aq4SessionStatus::Terminal;
+                if let Err(lifecycle_error) = self.snapshot_terminal_request_audit() {
+                    return self.fail(format!(
+                        "{error}; terminal lifecycle audit failed: {lifecycle_error}"
+                    ));
+                }
                 return Err(error);
             }
         };
@@ -1938,13 +2271,19 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             drop(publication);
             self.pending = None;
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_discard();
-                observer.observe_cancel();
+                if let Err(error) = observer
+                    .discard_publication()
+                    .and_then(|_| observer.observe_cancel())
+                {
+                    return self.fail(error);
+                }
             }
             let active = self.active.as_mut().expect("active request checked above");
             active.terminal_outcome = Some(ReleaseOutcome::Cancelled);
             self.status = Qwen35Aq4SessionStatus::Terminal;
-            self.snapshot_terminal_request_audit();
+            if let Err(error) = self.snapshot_terminal_request_audit() {
+                return self.fail(error);
+            }
             return Ok(PublishedAdvance::CancellationObserved);
         }
         if let Err(error) = publish(prepared.token_id) {
@@ -1959,12 +2298,22 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             drop(publication);
             self.pending = None;
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-                observer.observe_discard();
-                observer.observe_error();
+                if let Err(lifecycle_error) = observer
+                    .discard_publication()
+                    .and_then(|_| observer.observe_error())
+                {
+                    return self.fail(format!(
+                        "Qwen3.5 AQ4 token publisher failed before commit: {error}; lifecycle observation failed: {lifecycle_error}"
+                    ));
+                }
             }
             // A publisher failure does not poison resident model state. The caller must abort it.
             self.status = Qwen35Aq4SessionStatus::Terminal;
-            self.snapshot_terminal_request_audit();
+            if let Err(lifecycle_error) = self.snapshot_terminal_request_audit() {
+                return self.fail(format!(
+                    "Qwen3.5 AQ4 token publisher failed before commit: {error}; terminal lifecycle audit failed: {lifecycle_error}"
+                ));
+            }
             return Err(format!(
                 "Qwen3.5 AQ4 token publisher failed before commit: {error}"
             ));
@@ -1989,7 +2338,9 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         self.pending = None;
         drop(publication);
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
-            observer.observe_commit();
+            if let Err(error) = observer.commit_publication() {
+                return self.fail(error);
+            }
         }
         Ok(PublishedAdvance::Token {
             token_id: prepared.token_id,
@@ -2276,6 +2627,41 @@ mod tests {
                     })
             })
             .collect()
+    }
+
+    #[test]
+    fn prefill_physical_width_requires_identical_observed_batches_across_layers() {
+        let contract = audited_contract();
+        let fallback = fallback_prefill_invocations(&contract, 2);
+        let observation = OperationAuditAccumulator::new()
+            .observe_prefill_chunk(ExecutionPhase::ColdPrefill, 2, &contract, &fallback)
+            .unwrap();
+        assert_eq!(observation.actual_token_batch_width, 1);
+        assert_eq!(observation.internal_batch_count, 2);
+        assert_eq!(
+            observation.phase_batch_counts,
+            Qwen35Aq4PhaseBatchCounts {
+                cold_prefill: 1,
+                cached_prefix_prefill: 1,
+                decode: 0,
+            }
+        );
+
+        let mut mismatched = fallback;
+        mismatched.retain(|invocation| invocation.layer_index != 0);
+        let native_contract = native_hybrid_contract(2);
+        mismatched.push(Qwen35PrefillExecutionStep {
+            layer_index: 0,
+            execution_width: 2,
+            phase: ExecutionPhase::ColdPrefill,
+            records: audited_records(&native_contract, ExecutionPhase::ColdPrefill)[0],
+        });
+        assert!(
+            OperationAuditAccumulator::new()
+                .observe_prefill_chunk(ExecutionPhase::ColdPrefill, 2, &contract, &mismatched)
+                .unwrap_err()
+                .contains("physical batch sequence differs")
+        );
     }
 
     #[test]
@@ -2725,7 +3111,9 @@ mod tests {
             .unwrap();
         let mut scripted = model(&[2]);
         scripted.context = 256;
+        scripted.audited = true;
         let mut session = Qwen35Aq4InferenceSession::from_model(scripted, config).unwrap();
+        session.execution_contract = Some(audited_contract());
         session
             .start_request(
                 request("m64-boundary", &vec![4; 130], 1),
@@ -2747,10 +3135,20 @@ mod tests {
         session.finish_and_reset().unwrap();
         let audit = session.last_terminal_request_execution_audit().unwrap();
         assert_eq!(audit.requested_m, 64);
-        assert_eq!(audit.resolved_m, Some(64));
-        assert_eq!(audit.actual_token_batch_width, 64);
-        assert_eq!(audit.actual_request_batch_width, 1);
-        assert_eq!(audit.internal_batch_count, 3);
+        // The fallback model physically executed 130 M1 batches even though the logical
+        // scheduler chunks were 64/64/2. The terminal facts must report physical M1.
+        assert_eq!(audit.resolved_m, Some(1));
+        assert_eq!(audit.actual_token_batch_width, Some(1));
+        assert_eq!(audit.actual_request_batch_width, Some(1));
+        assert_eq!(audit.internal_batch_count, Some(130));
+        assert_eq!(
+            audit.phase_batch_counts,
+            Some(Qwen35Aq4PhaseBatchCounts {
+                cold_prefill: 1,
+                cached_prefix_prefill: 129,
+                decode: 0,
+            })
+        );
     }
 
     #[test]
@@ -2769,16 +3167,49 @@ mod tests {
                 .is_err()
         );
         publish.abort_and_reset().unwrap();
-        let lifecycle = publish
-            .last_terminal_request_execution_audit()
-            .unwrap()
-            .lifecycle;
-        assert_eq!(lifecycle.prepare, 1);
+        let publish_audit = publish.last_terminal_request_execution_audit().unwrap();
+        assert_eq!(publish_audit.resolved_m, None);
+        assert_eq!(publish_audit.actual_token_batch_width, None);
+        assert_eq!(publish_audit.actual_request_batch_width, None);
+        let lifecycle = publish_audit.lifecycle;
+        assert_eq!(lifecycle.prepare, 2);
         assert_eq!(lifecycle.commit, 1);
         assert_eq!(lifecycle.discard, 1);
         assert_eq!(lifecycle.error, 1);
-        assert_eq!(lifecycle.cancel, 1);
-        assert_eq!(lifecycle.reset, 1);
+        assert_eq!(lifecycle.cancel, 0);
+        assert_eq!(lifecycle.prepare, lifecycle.commit + lifecycle.discard);
+        assert_eq!(lifecycle.prefill.prepare, 1);
+        assert_eq!(lifecycle.prefill.commit, 1);
+        assert_eq!(lifecycle.publication.prepare, 1);
+        assert_eq!(lifecycle.publication.discard, 1);
+        assert_eq!(
+            lifecycle.reset,
+            Qwen35Aq4ResetCounts {
+                attempted: 1,
+                complete: 1,
+                failed: 0,
+            }
+        );
+
+        let mut cleanup_abort = session(&[7]);
+        cleanup_abort
+            .start_request(
+                request("observer-cleanup-abort", &[4], 1),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let _prepared_but_unpublished = next_prepared(&mut cleanup_abort);
+        cleanup_abort.abort_and_reset().unwrap();
+        let lifecycle = cleanup_abort
+            .last_terminal_request_execution_audit()
+            .unwrap()
+            .lifecycle;
+        assert_eq!(lifecycle.cancel, 0);
+        assert_eq!(lifecycle.prepare, 2);
+        assert_eq!(lifecycle.commit, 1);
+        assert_eq!(lifecycle.discard, 1);
+        assert_eq!(lifecycle.publication.discard, 1);
+        assert_eq!(lifecycle.prepare, lifecycle.commit + lifecycle.discard);
 
         let mut cancel = session(&[7]);
         let cancellation = CancellationToken::new();
@@ -2791,16 +3222,25 @@ mod tests {
             SessionAdvance::CancellationObserved
         );
         cancel.abort_and_reset().unwrap();
-        let lifecycle = cancel
-            .last_terminal_request_execution_audit()
-            .unwrap()
-            .lifecycle;
+        let cancel_audit = cancel.last_terminal_request_execution_audit().unwrap();
+        assert_eq!(cancel_audit.resolved_m, None);
+        assert_eq!(cancel_audit.actual_token_batch_width, None);
+        assert_eq!(cancel_audit.actual_request_batch_width, None);
+        let lifecycle = cancel_audit.lifecycle;
         assert_eq!(lifecycle.prepare, 0);
         assert_eq!(lifecycle.commit, 0);
         assert_eq!(lifecycle.discard, 0);
         assert_eq!(lifecycle.error, 0);
         assert_eq!(lifecycle.cancel, 1);
-        assert_eq!(lifecycle.reset, 1);
+        assert_eq!(lifecycle.prepare, lifecycle.commit + lifecycle.discard);
+        assert_eq!(
+            lifecycle.reset,
+            Qwen35Aq4ResetCounts {
+                attempted: 1,
+                complete: 1,
+                failed: 0,
+            }
+        );
 
         let mut reset = session(&[2]);
         reset.model.fail_reset = true;
@@ -2814,10 +3254,18 @@ mod tests {
             .last_terminal_request_execution_audit()
             .unwrap()
             .lifecycle;
-        assert_eq!(lifecycle.prepare, 1);
+        assert_eq!(lifecycle.prepare, 2);
         assert_eq!(lifecycle.commit, 2);
         assert_eq!(lifecycle.error, 1);
-        assert_eq!(lifecycle.reset, 0);
+        assert_eq!(lifecycle.prepare, lifecycle.commit + lifecycle.discard);
+        assert_eq!(
+            lifecycle.reset,
+            Qwen35Aq4ResetCounts {
+                attempted: 1,
+                complete: 0,
+                failed: 1,
+            }
+        );
     }
 
     fn next_prepared(
@@ -3224,6 +3672,20 @@ mod tests {
         assert_eq!(audit.prefill_width_histogram[128], 1);
         assert_eq!(audit.prefill_width_histogram[2], 1);
         assert!(audit.coverage_complete);
+        let request_audit = session.last_terminal_request_execution_audit().unwrap();
+        assert_eq!(request_audit.requested_m, 128);
+        assert_eq!(request_audit.resolved_m, Some(128));
+        assert_eq!(request_audit.actual_token_batch_width, Some(128));
+        assert_eq!(request_audit.actual_request_batch_width, Some(1));
+        assert_eq!(request_audit.internal_batch_count, Some(2));
+        assert_eq!(
+            request_audit.phase_batch_counts,
+            Some(Qwen35Aq4PhaseBatchCounts {
+                cold_prefill: 1,
+                cached_prefix_prefill: 1,
+                decode: 0,
+            })
+        );
     }
 
     #[test]
