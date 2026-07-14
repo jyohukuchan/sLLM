@@ -107,6 +107,7 @@ STOP_POLL_INITIAL_INTERVAL_SECONDS = 0.25
 STOP_POLL_MAX_INTERVAL_SECONDS = 1.0
 STOP_POLL_STABLE_OBSERVATIONS = 2
 STOP_POLL_SUDO_KEEPALIVE_SECONDS = 10.0
+STOP_POLL_PROBE_TIMEOUT_SECONDS = 2.0
 RUN_ID = LAUNCHER.EXECUTE_RUN_ID
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -165,14 +166,14 @@ def hash_regular_with_nlink(path: Path, label: str, expected_nlink: int) -> str:
     return digest.hexdigest()
 
 
-def _command(run: Callable[..., subprocess.CompletedProcess[bytes]], argv: list[str], label: str) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
-    completed = run(argv, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30)
+def _command(run: Callable[..., subprocess.CompletedProcess[bytes]], argv: list[str], label: str, *, timeout: float = 30.0) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
+    completed = run(argv, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
     record = {"label": label, "argv": argv, "exit_code": completed.returncode, "stdout_sha256": sha_bytes(completed.stdout), "stderr_sha256": sha_bytes(completed.stderr), "captured_unix_ns": time.time_ns()}
     return completed, record
 
 
-def _sudo_valid(run: Callable[..., subprocess.CompletedProcess[bytes]], label: str) -> dict[str, Any]:
-    completed, record = _command(run, [str(LAUNCHER.SUDO), "-n", "-v"], label)
+def _sudo_valid(run: Callable[..., subprocess.CompletedProcess[bytes]], label: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    completed, record = _command(run, [str(LAUNCHER.SUDO), "-n", "-v"], label, timeout=timeout)
     if completed.returncode != 0 or completed.stdout or completed.stderr:
         raise HarnessError("sudo credential cache is not valid")
     return record
@@ -695,8 +696,118 @@ def _poll_lock_observation() -> dict[str, Any]:
     }
 
 
+class StoppedPollDeadline(HarnessError):
+    pass
+
+
+class StoppedPollProbeTimeout(HarnessError):
+    pass
+
+
+class StoppedPollKeepaliveFailure(HarnessError):
+    pass
+
+
+class StoppedPollControl:
+    def __init__(
+        self,
+        *,
+        deadline_ns: int,
+        monotonic_ns: Callable[[], int],
+        keepalive: Callable[[int, float], None],
+        first_keepalive_ns: int,
+    ) -> None:
+        self.deadline_ns = deadline_ns
+        self.monotonic_ns = monotonic_ns
+        self.keepalive = keepalive
+        self.next_keepalive_ns = first_keepalive_ns
+        self.attempt = 0
+        self.checkpoints: list[dict[str, Any]] = []
+        self.probes: list[dict[str, Any]] = []
+
+    def begin_attempt(self, attempt: int) -> None:
+        self.attempt = attempt
+        self.checkpoints = []
+        self.probes = []
+
+    def checkpoint(self, label: str) -> int:
+        now_ns = self.monotonic_ns()
+        if now_ns >= self.deadline_ns:
+            self.checkpoints.append({"label": label, "monotonic_ns": now_ns, "remaining_ns": max(0, self.deadline_ns - now_ns), "keepalive": "not_run_deadline"})
+            raise StoppedPollDeadline("stopped gate absolute deadline reached")
+        keepalive_state = "not_due"
+        if now_ns >= self.next_keepalive_ns:
+            timeout = min(STOP_POLL_PROBE_TIMEOUT_SECONDS, (self.deadline_ns - now_ns) / 1_000_000_000)
+            try:
+                self.keepalive(self.attempt, timeout)
+            except (HarnessError, OSError, subprocess.SubprocessError) as error:
+                failed_ns = self.monotonic_ns()
+                self.checkpoints.append({"label": label, "monotonic_ns": failed_ns, "remaining_ns": max(0, self.deadline_ns - failed_ns), "keepalive": "failed", "timeout_seconds": timeout})
+                raise StoppedPollKeepaliveFailure("stopped gate sudo keepalive failed") from error
+            keepalive_state = "passed"
+            now_ns = self.monotonic_ns()
+            while self.next_keepalive_ns <= now_ns:
+                self.next_keepalive_ns += int(STOP_POLL_SUDO_KEEPALIVE_SECONDS * 1_000_000_000)
+            if now_ns >= self.deadline_ns:
+                self.checkpoints.append({"label": label, "monotonic_ns": now_ns, "remaining_ns": 0, "keepalive": keepalive_state})
+                raise StoppedPollDeadline("stopped gate deadline reached after sudo keepalive")
+        self.checkpoints.append({"label": label, "monotonic_ns": now_ns, "remaining_ns": self.deadline_ns - now_ns, "keepalive": keepalive_state})
+        return now_ns
+
+    def remaining_timeout(self, label: str) -> float:
+        now_ns = self.checkpoint(f"{label}:timeout")
+        remaining_seconds = (self.deadline_ns - now_ns) / 1_000_000_000
+        timeout = min(STOP_POLL_PROBE_TIMEOUT_SECONDS, remaining_seconds)
+        if timeout <= 0:
+            raise StoppedPollDeadline("stopped gate probe has no deadline remaining")
+        return timeout
+
+    def command(
+        self,
+        run: Callable[..., subprocess.CompletedProcess[bytes]],
+        argv: list[str],
+        label: str,
+    ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
+        self.checkpoint(f"{label}:before")
+        timeout = self.remaining_timeout(label)
+        try:
+            completed, record = _command(run, argv, label, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout if isinstance(error.stdout, bytes) else b""
+            stderr = error.stderr if isinstance(error.stderr, bytes) else b""
+            self.probes.append({
+                "label": label,
+                "argv": argv,
+                "exit_code": "timeout",
+                "stdout_sha256": sha_bytes(stdout),
+                "stderr_sha256": sha_bytes(stderr),
+                "captured_unix_ns": time.time_ns(),
+                "timeout_seconds": timeout,
+            })
+            try:
+                self.checkpoint(f"{label}:after-timeout")
+            except StoppedPollDeadline:
+                raise StoppedPollDeadline("stopped gate probe crossed absolute deadline") from error
+            raise StoppedPollProbeTimeout("stopped gate probe exceeded bounded timeout") from error
+        record["timeout_seconds"] = timeout
+        self.probes.append(record)
+        self.checkpoint(f"{label}:after")
+        return completed, record
+
+    def bounded_call(self, label: str, function: Callable[[], Any]) -> Any:
+        self.checkpoint(f"{label}:before")
+        try:
+            value = function()
+        except Exception:
+            self.checkpoint(f"{label}:after-error")
+            raise
+        self.checkpoint(f"{label}:after")
+        return value
+
+
 class StoppedGateObserver:
-    def __call__(self, old_worker_pid: int, old_service_pid: int, run: Callable[..., subprocess.CompletedProcess[bytes]]) -> dict[str, Any]:
+    def __call__(self, old_worker_pid: int, old_service_pid: int, run: Callable[..., subprocess.CompletedProcess[bytes]], control: StoppedPollControl) -> dict[str, Any]:
+        control.checkpoint("observer:validation-before")
         LAUNCHER.validate_amd_smi_tool()
         for path, digest, label in (
             (LAUNCHER.SYSTEMCTL, LAUNCHER.SYSTEMCTL_SHA, "systemctl"),
@@ -704,19 +815,20 @@ class StoppedGateObserver:
         ):
             if LAUNCHER.sha_file(path, f"stopped poll {label}")[0] != digest:
                 raise HarnessError(f"stopped poll {label} SHA differs")
+        control.checkpoint("observer:validation-after")
         probes: list[dict[str, Any]] = []
         services: list[dict[str, Any]] = []
         for unit in LAUNCHER.SERVICE_UNITS:
             command = [str(LAUNCHER.SYSTEMCTL), "show", unit, "--property=ActiveState", "--property=SubState", "--property=MainPID", "--no-pager"]
-            completed, record = _command(run, command, f"stopped-poll-service-{unit}")
+            completed, record = control.command(run, command, f"stopped-poll-service-{unit}")
             probes.append(record)
             services.append(_poll_service_value(completed, unit))
         worker_command = [str(LAUNCHER.PGREP), "-f", "-x", f"{WORKER}.*"]
-        worker, record = _command(run, worker_command, "stopped-poll-worker")
+        worker, record = control.command(run, worker_command, "stopped-poll-worker")
         probes.append(record)
         worker_pids = _poll_pid_lines(worker, "stopped poll worker")
         process_command = [str(LAUNCHER.AMD_SMI), "process", "--gpu", str(LAUNCHER.AMD_SMI_INDEX), "--general", "--json"]
-        processes, record = _command(run, process_command, "stopped-poll-amd-process")
+        processes, record = control.command(run, process_command, "stopped-poll-amd-process")
         probes.append(record)
         try:
             process_value = json.loads(processes.stdout, object_pairs_hook=LAUNCHER.pairs)
@@ -727,7 +839,7 @@ class StoppedGateObserver:
         if processes.returncode != 0 or processes.stderr or not isinstance(process_value, list) or len(process_value) != 1 or process_value[0].get("gpu") != LAUNCHER.AMD_SMI_INDEX or any(pid <= 0 for pid in amd_smi_owners):
             raise HarnessError("stopped poll AMD process probe differs")
         static_command = [str(LAUNCHER.AMD_SMI), "static", "--gpu", str(LAUNCHER.AMD_SMI_INDEX), "--vram", "--json"]
-        static, record = _command(run, static_command, "stopped-poll-amd-vram")
+        static, record = control.command(run, static_command, "stopped-poll-amd-vram")
         probes.append(record)
         try:
             static_value = LAUNCHER.parse_json(static.stdout, "stopped poll AMD VRAM")
@@ -739,9 +851,10 @@ class StoppedGateObserver:
             raise HarnessError("stopped poll AMD VRAM schema differs") from error
         if static.returncode != 0 or static.stderr or len(gpu_data) != 1 or vram_item.get("gpu") != LAUNCHER.AMD_SMI_INDEX or size.get("unit") != "MB" or total_bytes <= 0:
             raise HarnessError("stopped poll AMD VRAM probe differs")
-        kfd_owners = LAUNCHER._kfd_owners()
-        lock = _poll_lock_observation()
+        kfd_owners = control.bounded_call("stopped-poll-kfd", LAUNCHER._kfd_owners)
+        lock = control.bounded_call("stopped-poll-lock", _poll_lock_observation)
         observed_pids = sorted(set(worker_pids) | set(amd_smi_owners) | set(kfd_owners) | set(lock["holder_pids"]) | {old_worker_pid, old_service_pid})
+        proc_cmdlines = [control.bounded_call(f"stopped-poll-proc-{pid}", lambda pid=pid: _safe_proc_cmdline(pid)) for pid in observed_pids]
         return {
             "captured_unix_ns": time.time_ns(),
             "services": services,
@@ -755,7 +868,7 @@ class StoppedGateObserver:
                 "free_bytes": total_bytes if not amd_smi_owners and not kfd_owners else None,
                 "headroom_bytes": total_bytes if not amd_smi_owners and not kfd_owners else None,
             },
-            "proc_cmdlines": [_safe_proc_cmdline(pid) for pid in observed_pids],
+            "proc_cmdlines": proc_cmdlines,
             "probes": probes,
             "virtual_sources": {
                 "kfd_owners": {"raw_sha256": sha_bytes(canonical(kfd_owners)), "parsed_pids": kfd_owners},
@@ -834,10 +947,16 @@ def poll_stopped_gates(
     old_worker_pid: int,
     old_service_pid: int,
     dependencies: "Dependencies",
-    keepalive: Callable[[int], None],
+    keepalive: Callable[[int, float], None],
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    started = dependencies.monotonic()
-    next_keepalive = started + STOP_POLL_SUDO_KEEPALIVE_SECONDS
+    started_ns = dependencies.monotonic_ns()
+    deadline_ns = started_ns + int(STOP_POLL_TIMEOUT_SECONDS * 1_000_000_000)
+    control = StoppedPollControl(
+        deadline_ns=deadline_ns,
+        monotonic_ns=dependencies.monotonic_ns,
+        keepalive=keepalive,
+        first_keepalive_ns=started_ns + int(STOP_POLL_SUDO_KEEPALIVE_SECONDS * 1_000_000_000),
+    )
     stable_count = 0
     seen_zero = {"worker_pids": False, "amd_smi_owners": False, "kfd_owners": False, "lock": False}
     files: list[dict[str, Any]] = []
@@ -845,16 +964,49 @@ def poll_stopped_gates(
     final_observation: dict[str, Any] | None = None
     failure: dict[str, Any] | None = None
     while True:
-        elapsed = max(0.0, dependencies.monotonic() - started)
+        control.begin_attempt(attempt)
+        observation_started_ns = dependencies.monotonic_ns()
+        elapsed = max(0.0, (observation_started_ns - started_ns) / 1_000_000_000)
         try:
-            observation = dependencies.stopped_observation(old_worker_pid, old_service_pid, dependencies.run)
+            control.checkpoint("observation:start")
+            observation = dependencies.stopped_observation(old_worker_pid, old_service_pid, dependencies.run, control)
+            observation_completed_ns = control.checkpoint("observation:complete")
             decision, reason, classifications = _stopped_observation_decision(observation, old_worker_pid, old_service_pid, seen_zero)
+        except StoppedPollDeadline as error:
+            observation = {
+                "captured_unix_ns": time.time_ns(),
+                "error_type": type(error).__name__,
+                "partial_probes": list(control.probes),
+                "secret_material_recorded": False,
+            }
+            observation_completed_ns = dependencies.monotonic_ns()
+            decision, reason, classifications = "deadline_timeout", "stopped gate absolute deadline reached", {"observer": "deadline_timeout"}
+        except StoppedPollProbeTimeout as error:
+            observation = {
+                "captured_unix_ns": time.time_ns(),
+                "error_type": type(error).__name__,
+                "partial_probes": list(control.probes),
+                "secret_material_recorded": False,
+            }
+            observation_completed_ns = dependencies.monotonic_ns()
+            decision, reason, classifications = "probe_timeout", "stopped gate bounded probe timed out", {"observer": "probe_timeout"}
+        except StoppedPollKeepaliveFailure as error:
+            observation = {
+                "captured_unix_ns": time.time_ns(),
+                "error_type": type(error).__name__,
+                "partial_probes": list(control.probes),
+                "secret_material_recorded": False,
+            }
+            observation_completed_ns = dependencies.monotonic_ns()
+            decision, reason, classifications = "keepalive_failure", "stopped gate sudo keepalive failed", {"observer": "sudo_keepalive"}
         except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
             observation = {
                 "captured_unix_ns": time.time_ns(),
                 "error_type": type(error).__name__,
+                "partial_probes": list(control.probes),
                 "secret_material_recorded": False,
             }
+            observation_completed_ns = dependencies.monotonic_ns()
             decision, reason, classifications = "terminal_failure", "stopped observation failed", {"observer": "error"}
         stable_count = stable_count + 1 if decision == "stable" else 0
         next_interval = min(STOP_POLL_INITIAL_INTERVAL_SECONDS * (2 ** attempt), STOP_POLL_MAX_INTERVAL_SECONDS)
@@ -863,12 +1015,16 @@ def poll_stopped_gates(
             "attempt": attempt,
             "captured_unix_ns": observation["captured_unix_ns"],
             "elapsed_seconds": elapsed,
+            "observation_started_monotonic_ns": observation_started_ns,
+            "observation_completed_monotonic_ns": observation_completed_ns,
+            "absolute_deadline_monotonic_ns": deadline_ns,
             "decision": decision,
             "reason": reason,
             "source_classification": classifications,
             "consecutive_stable": stable_count,
             "required_consecutive_stable": STOP_POLL_STABLE_OBSERVATIONS,
-            "next_interval_seconds": None if decision == "terminal_failure" or stable_count >= STOP_POLL_STABLE_OBSERVATIONS else next_interval,
+            "next_interval_seconds": None if decision in {"terminal_failure", "deadline_timeout", "probe_timeout", "keepalive_failure"} or stable_count >= STOP_POLL_STABLE_OBSERVATIONS else next_interval,
+            "deadline_checkpoints": list(control.checkpoints),
             "observation": observation,
             "secret_material_recorded": False,
         }
@@ -877,24 +1033,26 @@ def poll_stopped_gates(
         LAUNCHER.atomic_write(output, name, raw)
         files.append({"name": name, "sha256": sha_bytes(raw), "decision": decision, "consecutive_stable": stable_count})
         final_observation = observation if set(observation) == {"captured_unix_ns", "services", "worker_pids", "amd_smi_owners", "kfd_owners", "lock", "vram", "proc_cmdlines", "probes", "virtual_sources", "secret_material_recorded"} else None
+        if decision == "deadline_timeout":
+            failure = {"kind": "timeout", "reason": reason, "attempt": attempt}
+            break
+        if decision == "probe_timeout":
+            failure = {"kind": "probe_timeout", "reason": reason, "attempt": attempt}
+            break
+        if decision == "keepalive_failure":
+            failure = {"kind": "sudo_keepalive", "reason": reason, "attempt": attempt}
+            break
         if decision == "terminal_failure":
             failure = {"kind": "terminal", "reason": reason, "attempt": attempt}
             break
         if stable_count >= STOP_POLL_STABLE_OBSERVATIONS:
             break
-        now = dependencies.monotonic()
-        if now - started >= STOP_POLL_TIMEOUT_SECONDS or now - started + next_interval > STOP_POLL_TIMEOUT_SECONDS:
-            failure = {"kind": "timeout", "reason": "stopped gates did not stabilize before deadline", "attempt": attempt}
-            break
-        if now >= next_keepalive:
-            try:
-                keepalive(attempt)
-            except (HarnessError, OSError, subprocess.SubprocessError):
-                failure = {"kind": "sudo_keepalive", "reason": "sudo keepalive failed during stopped gate poll", "attempt": attempt}
-                break
-            while next_keepalive <= now:
-                next_keepalive += STOP_POLL_SUDO_KEEPALIVE_SECONDS
-        dependencies.sleep(next_interval)
+        now_ns = dependencies.monotonic_ns()
+        remaining_seconds = max(0.0, (deadline_ns - now_ns) / 1_000_000_000)
+        if remaining_seconds <= 0:
+            attempt += 1
+            continue
+        dependencies.sleep(min(next_interval, remaining_seconds))
         attempt += 1
     poll_evidence = {
         "schema_version": "ullm.aq4_p2_stopped_gate_poll.v1",
@@ -905,6 +1063,8 @@ def poll_stopped_gates(
             "maximum_interval_seconds": STOP_POLL_MAX_INTERVAL_SECONDS,
             "required_consecutive_stable": STOP_POLL_STABLE_OBSERVATIONS,
             "sudo_keepalive_seconds": STOP_POLL_SUDO_KEEPALIVE_SECONDS,
+            "maximum_probe_timeout_seconds": STOP_POLL_PROBE_TIMEOUT_SECONDS,
+            "absolute_deadline_monotonic_ns": deadline_ns,
             "only_pre_stop_worker_pid_may_drain": old_worker_pid,
             "only_pre_stop_service_pid_may_hold_lock": old_service_pid,
         },
@@ -915,10 +1075,10 @@ def poll_stopped_gates(
         "secret_material_recorded": False,
     }
     # Count from the immutable poll files' source observations without retaining raw output.
-    poll_evidence["probe_command_count"] = sum(
-        len(LAUNCHER.parse_json((output / item["name"]).read_bytes(), "stopped poll evidence")["observation"].get("probes", []))
-        for item in files
-    )
+    for item in files:
+        document = LAUNCHER.parse_json((output / item["name"]).read_bytes(), "stopped poll evidence")
+        source = document["observation"]
+        poll_evidence["probe_command_count"] += len(source.get("probes", source.get("partial_probes", [])))
     if not poll_evidence["passed"] or final_observation is None:
         return None, poll_evidence
     gates = {
@@ -941,7 +1101,7 @@ class Dependencies:
     run: Callable[..., subprocess.CompletedProcess[bytes]]
     http_probe: Callable[[str], dict[str, Any]]
     container_health: Callable[[Callable[..., subprocess.CompletedProcess[bytes]]], dict[str, Any]]
-    stopped_observation: Callable[[int, int, Callable[..., subprocess.CompletedProcess[bytes]]], dict[str, Any]]
+    stopped_observation: Callable[[int, int, Callable[..., subprocess.CompletedProcess[bytes]], StoppedPollControl], dict[str, Any]]
     lock_busy: Callable[[], bool]
     owner_probe: Callable[[Callable[..., subprocess.CompletedProcess[bytes]], int], dict[str, Any]]
     package_hash: Callable[[Path], str]
@@ -949,7 +1109,7 @@ class Dependencies:
     profile_capture: Callable[[dict[str, Any]], dict[str, Any]]
     profile_trust: Callable[[dict[str, Any], str], dict[str, Any]]
     sleep: Callable[[float], None]
-    monotonic: Callable[[], float]
+    monotonic_ns: Callable[[], int]
 
 
 def _host_route_diagnostics(dependencies: Dependencies) -> dict[str, Any]:
@@ -1159,7 +1319,7 @@ def default_dependencies() -> Dependencies:
     trust = ProfileTrustGuard()
     container_health = ContainerHealthGuard()
     stopped_observation = StoppedGateObserver()
-    return Dependencies(subprocess.run, default_http_probe, container_health, stopped_observation, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep, time.monotonic)
+    return Dependencies(subprocess.run, default_http_probe, container_health, stopped_observation, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep, time.monotonic_ns)
 
 
 def profile_launcher_command() -> list[str]:
@@ -1252,9 +1412,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 256, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 190, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "stable2-stopped-gate-poll-and-foreign-owner-rejection", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 260, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 194, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
@@ -1293,6 +1453,8 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
                 "maximum_interval_seconds": STOP_POLL_MAX_INTERVAL_SECONDS,
                 "required_consecutive_stable": STOP_POLL_STABLE_OBSERVATIONS,
                 "sudo_keepalive_seconds": STOP_POLL_SUDO_KEEPALIVE_SECONDS,
+                "maximum_probe_timeout_seconds": STOP_POLL_PROBE_TIMEOUT_SECONDS,
+                "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_observation_and_probe",
                 "transitional_amd_kfd_owner": "pre_stop_worker_pid_only",
                 "transitional_lock_holder": "pre_stop_service_main_pid_only",
                 "foreign_new_or_reappeared_owner": "immediate_fail_closed",
@@ -1508,8 +1670,8 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             raise HarnessError("service stop failed")
         evidence["safety"]["service_stopped"] = True; evidence["sequence"].append("service-stopped")
         stage = "stopped-gates"
-        def stopped_poll_keepalive(attempt: int) -> None:
-            record = _sudo_valid(dependencies.run, f"sudo-stopped-poll-keepalive-{attempt}")
+        def stopped_poll_keepalive(attempt: int, timeout: float) -> None:
+            record = _sudo_valid(dependencies.run, f"sudo-stopped-poll-keepalive-{attempt}", timeout=timeout)
             evidence["commands"].append(record)
             evidence["process_counts"]["sudo"] += 1
             evidence["process_counts"]["sudo_keepalive"] += 1

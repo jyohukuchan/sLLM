@@ -92,9 +92,16 @@ class FakeRuntime:
             },
         }
 
-    def stopped(self, old_worker_pid: int, old_service_pid: int, run) -> dict:
+    def stopped(self, old_worker_pid: int, old_service_pid: int, run, control: HARNESS.StoppedPollControl) -> dict:
         attempt = self.stopped_observation_count
         self.stopped_observation_count += 1
+        if self.fail == "slow-second-stable" and attempt == 1:
+            self.now += HARNESS.STOP_POLL_TIMEOUT_SECONDS
+        if self.fail == "deadline-crossing-probe":
+            def blocked_probe(argv, **kwargs):
+                self.now += HARNESS.STOP_POLL_TIMEOUT_SECONDS
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=b"partial-out", stderr=b"partial-error")
+            control.command(blocked_probe, ["fake-deadline-crossing-probe"], "fake-deadline-crossing-probe")
         amd_smi_owners: list[int] = []
         kfd_owners: list[int] = []
         lock_free = True
@@ -174,7 +181,7 @@ class FakeRuntime:
         return {"stage": stage, "passed": True}
 
     def dependencies(self) -> HARNESS.Dependencies:
-        return HARNESS.Dependencies(self.run, self.http, self.container_health, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, self.sleep, lambda: self.now)
+        return HARNESS.Dependencies(self.run, self.http, self.container_health, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, self.sleep, lambda: int(self.now * 1_000_000_000))
 
 
 class FakeDockerRuntime:
@@ -301,6 +308,8 @@ def test_ready_document_fixes_one_case_live_policy_and_trust() -> None:
         "maximum_interval_seconds": 1.0,
         "required_consecutive_stable": 2,
         "sudo_keepalive_seconds": 10.0,
+        "maximum_probe_timeout_seconds": 2.0,
+        "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_observation_and_probe",
         "transitional_amd_kfd_owner": "pre_stop_worker_pid_only",
         "transitional_lock_holder": "pre_stop_service_main_pid_only",
         "foreign_new_or_reappeared_owner": "immediate_fail_closed",
@@ -354,7 +363,8 @@ def test_stopped_gate_never_release_times_out_with_all_poll_evidence(tmp_path: P
     assert evidence["stopped_gate_poll"]["failure"]["kind"] == "timeout"
     documents = _poll_documents(output, evidence)
     assert len(documents) == evidence["stopped_gate_poll"]["poll_count"]
-    assert documents[-1]["decision"] == "pending"
+    assert documents[-1]["decision"] == "deadline_timeout"
+    assert documents[-1]["observation_completed_monotonic_ns"] >= documents[-1]["absolute_deadline_monotonic_ns"]
     assert evidence["process_counts"]["launcher"] == 0
     assert evidence["process_counts"]["sudo_keepalive"] >= 2
     assert any(command["label"].startswith("sudo-stopped-poll-keepalive-") for command in evidence["commands"])
@@ -394,6 +404,76 @@ def test_stopped_gate_requires_two_consecutive_stable_observations(tmp_path: Pat
     assert [item["consecutive_stable"] for item in documents] == [1, 2]
 
 
+def test_stopped_gate_slow_second_stable_crossing_deadline_fails_closed_and_restores(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="slow-second-stable")
+    output = tmp_path / "slow-second-stable"
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 1 and evidence["status"] == "failed"
+    assert evidence["stopped_gate_poll"]["failure"]["kind"] == "timeout"
+    documents = _poll_documents(output, evidence)
+    assert [item["decision"] for item in documents] == ["stable", "deadline_timeout"]
+    assert documents[-1]["consecutive_stable"] == 0
+    assert documents[-1]["observation_completed_monotonic_ns"] >= documents[-1]["absolute_deadline_monotonic_ns"]
+    assert evidence["process_counts"]["launcher"] == 0
+    assert evidence["restore"]["passed"] is True
+
+
+def test_stopped_gate_deadline_crossing_probe_saves_timeout_evidence_and_restores(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="deadline-crossing-probe")
+    output = tmp_path / "deadline-crossing-probe"
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 1 and evidence["stopped_gate_poll"]["failure"]["kind"] == "timeout"
+    document = _poll_documents(output, evidence)[-1]
+    assert document["decision"] == "deadline_timeout"
+    assert document["deadline_checkpoints"]
+    timeout_probe = document["observation"]["partial_probes"][-1]
+    assert timeout_probe["label"] == "fake-deadline-crossing-probe"
+    assert timeout_probe["exit_code"] == "timeout"
+    assert 0 < timeout_probe["timeout_seconds"] <= HARNESS.STOP_POLL_PROBE_TIMEOUT_SECONDS
+    assert len(timeout_probe["stdout_sha256"]) == len(timeout_probe["stderr_sha256"]) == 64
+    assert evidence["process_counts"]["launcher"] == 0
+    assert evidence["restore"]["passed"] is True
+
+
+def test_stopped_poll_runs_due_keepalive_after_blocked_probe() -> None:
+    now = 0
+    keepalives: list[tuple[int, float, int]] = []
+
+    def monotonic_ns() -> int:
+        return now
+
+    def keepalive(attempt: int, timeout: float) -> None:
+        keepalives.append((attempt, timeout, now))
+
+    control = HARNESS.StoppedPollControl(deadline_ns=30_000_000_000, monotonic_ns=monotonic_ns, keepalive=keepalive, first_keepalive_ns=1_000_000_000)
+    control.begin_attempt(7)
+
+    def blocked_probe(argv, **kwargs):
+        nonlocal now
+        assert kwargs["timeout"] <= HARNESS.STOP_POLL_PROBE_TIMEOUT_SECONDS
+        now += 1_500_000_000
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    control.command(blocked_probe, ["fake-blocked-probe"], "fake-blocked-probe")
+    assert keepalives == [(7, HARNESS.STOP_POLL_PROBE_TIMEOUT_SECONDS, 1_500_000_000)]
+    assert control.checkpoints[-1]["keepalive"] == "passed"
+
+
+def test_stopped_poll_caps_probe_timeout_to_remaining_deadline() -> None:
+    now = 750_000_000
+    observed_timeouts: list[float] = []
+    control = HARNESS.StoppedPollControl(deadline_ns=1_000_000_000, monotonic_ns=lambda: now, keepalive=lambda attempt, timeout: None, first_keepalive_ns=2_000_000_000)
+    control.begin_attempt(0)
+
+    def probe(argv, **kwargs):
+        observed_timeouts.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    control.command(probe, ["fake-near-deadline-probe"], "fake-near-deadline-probe")
+    assert observed_timeouts == [0.25]
+    assert control.probes[-1]["timeout_seconds"] == 0.25
+
+
 def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdline(monkeypatch: pytest.MonkeyPatch) -> None:
     old_worker_pid = 111
     old_service_pid = 222
@@ -417,7 +497,9 @@ def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdli
             return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
         raise AssertionError(argv)
 
-    value = HARNESS.StoppedGateObserver()(old_worker_pid, old_service_pid, run)
+    control = HARNESS.StoppedPollControl(deadline_ns=30_000_000_000, monotonic_ns=lambda: 0, keepalive=lambda attempt, timeout: None, first_keepalive_ns=10_000_000_000)
+    control.begin_attempt(0)
+    value = HARNESS.StoppedGateObserver()(old_worker_pid, old_service_pid, run, control)
     assert value["amd_smi_owners"] == value["kfd_owners"] == [old_worker_pid]
     assert value["lock"]["holder_pids"] == [old_service_pid]
     assert value["vram"] == {"total_bytes": 32_624_000_000, "used_bytes": None, "free_bytes": None, "headroom_bytes": None}
