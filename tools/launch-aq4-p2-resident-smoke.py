@@ -225,14 +225,15 @@ def sha_file(path: Path, label: str) -> tuple[str, tuple[int, ...]]:
 
 class Snapshot:
     def __init__(self) -> None:
-        self.files: dict[Path, tuple[int, ...]] = {}
-        self.directories: dict[Path, tuple[int, ...]] = {}
+        self.files: dict[Path, tuple[tuple[int, ...], str, str]] = {}
+        self.directories: dict[Path, tuple[tuple[int, ...], str]] = {}
+        self.symlinks: dict[Path, tuple[tuple[int, ...], str, str]] = {}
 
     def file(self, path: Path, expected_sha: str, label: str) -> bytes:
         raw, identity = read_regular(path, label, maximum=None)
         if sha_bytes(raw) != expected_sha:
             raise LauncherError(f"{label} SHA differs")
-        self.files[path] = identity
+        self.files[path] = (identity, expected_sha, label)
         return raw
 
     def directory(self, path: Path, device: int, inode: int, label: str) -> None:
@@ -240,15 +241,30 @@ class Snapshot:
         metadata = path.lstat()
         if not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev != device or metadata.st_ino != inode:
             raise LauncherError(f"{label} identity differs")
-        self.directories[path] = file_identity(metadata)
+        self.directories[path] = (file_identity(metadata), label)
+
+    def symlink(self, path: Path, expected_target: str, label: str) -> None:
+        metadata = path.lstat()
+        if not stat.S_ISLNK(metadata.st_mode) or os.readlink(path) != expected_target:
+            raise LauncherError(f"{label} symlink binding differs")
+        self.symlinks[path] = (file_identity(metadata), expected_target, label)
 
     def verify(self) -> None:
-        for path, expected in self.files.items():
-            if file_identity(path.lstat()) != expected:
+        for path, (expected_identity, expected_sha, label) in self.files.items():
+            try:
+                raw, observed_identity = read_regular(path, f"late {label}", maximum=None)
+            except (LauncherError, OSError) as error:
+                raise LauncherError(f"late replacement detected: {path}") from error
+            if observed_identity != expected_identity or sha_bytes(raw) != expected_sha:
                 raise LauncherError(f"late replacement detected: {path}")
-        for path, expected in self.directories.items():
-            if file_identity(path.lstat()) != expected:
-                raise LauncherError(f"late directory replacement detected: {path}")
+        for path, (expected_identity, label) in self.directories.items():
+            metadata = path.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or file_identity(metadata) != expected_identity:
+                raise LauncherError(f"late directory replacement detected: {label}")
+        for path, (expected_identity, expected_target, label) in self.symlinks.items():
+            metadata = path.lstat()
+            if not stat.S_ISLNK(metadata.st_mode) or file_identity(metadata) != expected_identity or os.readlink(path) != expected_target:
+                raise LauncherError(f"late symlink replacement detected: {label}")
 
 
 def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
@@ -328,6 +344,22 @@ def validate_constants(snapshot: Snapshot) -> dict[str, Any]:
     if not isinstance(cases, list) or len(cases) != 1 or cases[0].get("case_id") != CASE_ID or cases[0].get("case_sha256") != CASE_SHA or cases[0].get("device", {}).get("runtime_device_index") != DEVICE_INDEX:
         raise LauncherError("pinned case/device differs")
     return validate_binding_manifest(binding_raw)
+
+
+def validate_execute_constants(snapshot: Snapshot, self_sha: str) -> dict[str, Any]:
+    manifest = validate_constants(snapshot)
+    snapshot.file(Path(__file__).resolve(), self_sha, "launcher self")
+    snapshot.symlink(ROCM_LINK, "/etc/alternatives/rocm", "ROCm root link")
+    snapshot.symlink(ROCM_ALTERNATIVE_LINK, "/opt/rocm-7.2.1", "ROCm alternative link")
+    snapshot.symlink(AMD_SMI, "../libexec/amdsmi_cli/amdsmi_cli.py", "amd-smi invocation link")
+    snapshot.file(AMD_SMI_REAL, AMD_SMI_SHA, "amd-smi resolved tool")
+    snapshot.symlink(ROCMINFO, "/etc/alternatives/rocminfo", "rocminfo invocation link")
+    snapshot.symlink(ROCMINFO_ALTERNATIVE_LINK, str(ROCMINFO_REAL), "rocminfo alternative link")
+    snapshot.file(ROCMINFO_REAL, ROCMINFO_SHA, "rocminfo resolved tool")
+    snapshot.file(SYSTEMCTL, SYSTEMCTL_SHA, "systemctl")
+    snapshot.file(PGREP, PGREP_SHA, "pgrep")
+    snapshot.file(SUDO, SUDO_SHA, "sudo")
+    return manifest
 
 
 def atomic_write(directory: Path, name: str, raw: bytes, mode: int = 0o444) -> None:
@@ -494,7 +526,8 @@ def run_runner_with_sudo_keepalive(
     *,
     sudo_run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     interval: float = SUDO_KEEPALIVE_SECONDS,
-) -> tuple[subprocess.CompletedProcess[bytes], list[dict[str, Any]], bool]:
+    on_started: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     if interval <= 0:
         raise LauncherError("sudo keepalive interval must be positive")
     records: list[dict[str, Any]] = []
@@ -504,6 +537,8 @@ def run_runner_with_sudo_keepalive(
             command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stdout_file, stderr=stderr_file,
             env=dict(environment), shell=False, start_new_session=True,
         )
+        if on_started is not None:
+            on_started()
         next_keepalive = time.monotonic() + interval
         while process.poll() is None:
             now = time.monotonic()
@@ -525,7 +560,10 @@ def run_runner_with_sudo_keepalive(
         stderr_file.seek(0); stderr = stderr_file.read(MAX_BYTES + 1)
     if len(stdout) > MAX_BYTES or len(stderr) > MAX_BYTES:
         raise LauncherError("execute runner output exceeds evidence size bound")
-    return subprocess.CompletedProcess(command, return_code, stdout, stderr), records, failed
+    completed = subprocess.CompletedProcess(command, return_code, stdout, stderr)
+    completed_cleanly = return_code == 0 and not stderr and not failed
+    execution_state: bool | str = True if completed_cleanly else "unknown"
+    return {"completed": completed, "keepalives": records, "keepalive_failed": failed, "gpu_command_executed": execution_state, "model_load_executed": execution_state}
 
 
 def _service_value(raw: bytes, unit: str) -> dict[str, Any]:
@@ -755,7 +793,8 @@ def execute_bound(
     run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     gate_provider: Callable[[], dict[str, Any]] = collect_execute_gates,
     restore_provider: Callable[[], dict[str, Any]] | None = None,
-    runner_executor: Callable[[list[str], dict[str, str]], tuple[subprocess.CompletedProcess[bytes], list[dict[str, Any]], bool]] | None = None,
+    runner_executor: Callable[[list[str], dict[str, str], Callable[[], None]], dict[str, Any]] | None = None,
+    verification_hook: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     validate_execute_binding(binding, permit_test_live_preflight=True)
     if binding.get("actual_eligible") is not True or binding.get("status") != "ready_for_explicit_execute":
@@ -767,10 +806,36 @@ def execute_bound(
         if path.exists() or path.is_symlink():
             raise LauncherError(f"{label} already exists")
     evidence_output.mkdir(mode=0o700)
-    evidence = make_evidence("execute", sha_file(Path(__file__).resolve(), "launcher self")[0])
-    evidence.update({"execute_binding": binding, "gates": None, "restore": None})
-    stage = "validator"
+    self_sha = sha_file(Path(__file__).resolve(), "launcher self")[0]
+    evidence = make_evidence("execute", self_sha)
+    evidence.update({"execute_binding": binding, "gates": None, "restore": None, "trust_verifications": []})
+    evidence["safety"]["execution_state_source"] = "runner_not_started"
+    snapshot = Snapshot()
+    snapshot_ready = False
+    runner_after_verified = False
+    live_preflight: dict[str, Any] | None = None
+    stage = "constants"
+
+    def verify_trust(point: str) -> None:
+        if verification_hook is not None:
+            verification_hook(point)
+        snapshot.verify()
+        evidence["trust_verifications"].append(point)
+
+    def mark_runner_started() -> None:
+        if evidence["process_counts"]["runner"] != 0:
+            raise LauncherError("execute runner start was reported more than once")
+        evidence["process_counts"]["runner"] = 1
+        evidence["sequence"].append("runner")
+        evidence["safety"]["gpu_command_executed"] = "unknown"
+        evidence["safety"]["model_load_executed"] = "unknown"
+        evidence["safety"]["execution_state_source"] = "runner_started_completion_unknown"
+
     try:
+        validate_execute_constants(snapshot, self_sha)
+        snapshot_ready = True
+        verify_trust("validator-before")
+        stage = "validator"
         validator_command = validator_argv()
         validated = run(validator_command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         evidence["process_counts"]["launcher_validator"] = 1; evidence["sequence"].append("validator")
@@ -783,13 +848,38 @@ def execute_bound(
         evidence["sequence"].append("pre-exec-gates")
         live_preflight = make_live_preflight(binding, evidence["gates"], evidence_output)
         evidence["live_preflight"] = {"path": live_preflight["path"], "sha256": live_preflight["sha256"], "identity": list(live_preflight["identity"])}
+        verify_trust("runner-before")
         stage = "runner"
         command = execute_runner_argv(binding)
-        completed, keepalives, keepalive_failed = (
-            run_runner_with_sudo_keepalive(command, EXECUTE_ENV, sudo_run=run)
-            if runner_executor is None else runner_executor(command, EXECUTE_ENV)
-        )
-        evidence["process_counts"]["runner"] = 1; evidence["sequence"].append("runner")
+        try:
+            outcome = (
+                run_runner_with_sudo_keepalive(command, EXECUTE_ENV, sudo_run=run, on_started=mark_runner_started)
+                if runner_executor is None else runner_executor(command, EXECUTE_ENV, mark_runner_started)
+            )
+        except Exception:
+            if evidence["process_counts"]["runner"] == 1:
+                verify_trust("runner-after")
+                runner_after_verified = True
+            raise
+        if evidence["process_counts"]["runner"] != 1:
+            evidence["safety"]["gpu_command_executed"] = "unknown"
+            evidence["safety"]["model_load_executed"] = "unknown"
+            evidence["safety"]["execution_state_source"] = "runner_outcome_without_start_signal"
+            raise LauncherError("execute runner outcome omitted start signal")
+        gpu_state = outcome.get("gpu_command_executed") if isinstance(outcome, dict) else None
+        load_state = outcome.get("model_load_executed") if isinstance(outcome, dict) else None
+        valid_gpu_state = type(gpu_state) is bool or gpu_state == "unknown"
+        valid_load_state = type(load_state) is bool or load_state == "unknown"
+        if not isinstance(outcome, dict) or set(outcome) != {"completed", "keepalives", "keepalive_failed", "gpu_command_executed", "model_load_executed"} or not isinstance(outcome.get("completed"), subprocess.CompletedProcess) or not isinstance(outcome.get("keepalives"), list) or type(outcome.get("keepalive_failed")) is not bool or not valid_gpu_state or not valid_load_state:
+            raise LauncherError("execute runner outcome contract differs")
+        completed = outcome["completed"]
+        keepalives = outcome["keepalives"]
+        keepalive_failed = outcome["keepalive_failed"]
+        evidence["safety"]["gpu_command_executed"] = outcome["gpu_command_executed"]
+        evidence["safety"]["model_load_executed"] = outcome["model_load_executed"]
+        evidence["safety"]["execution_state_source"] = "runner_executor_outcome"
+        verify_trust("runner-after")
+        runner_after_verified = True
         evidence["sudo_keepalive"] = {"interval_seconds": SUDO_KEEPALIVE_SECONDS, "records": keepalives, "failed": keepalive_failed}
         evidence["runner"] = process_record(command, completed, "runner", evidence_output)
         verify_generated_live_preflight(live_preflight)
@@ -797,6 +887,8 @@ def execute_bound(
             raise LauncherError("sudo credential keepalive failed; execute runner was interrupted")
         if completed.returncode != 0 or completed.stderr:
             raise LauncherError("execute runner subprocess failed")
+        if outcome["gpu_command_executed"] is not True or outcome["model_load_executed"] is not True:
+            raise LauncherError("successful execute runner did not prove GPU command and model load")
         evidence["result"] = _result_inventory(runner_output)
         evidence["process_counts"]["runner_internal_validator"] = 1
         evidence["status"] = "passed"
@@ -810,10 +902,25 @@ def execute_bound(
                 pass
         code = 1
     finally:
+        if evidence["process_counts"]["runner"] == 1 and not runner_after_verified and snapshot_ready:
+            try:
+                verify_trust("runner-after")
+                runner_after_verified = True
+            except (LauncherError, OSError, ValueError) as error:
+                evidence["failure"] = {"stage": "runner-after-verification", "reason": str(error), "runner_started": True}
+                evidence["status"] = "failed"; code = 1
         try:
             evidence["restore"] = {"required": False, "service_stop_performed": False, "state_preserved": True} if restore_provider is None else restore_provider()
         except Exception as error:
             evidence["restore"] = {"state_preserved": False, "error": str(error)}
+            evidence["status"] = "failed"; code = 1
+        try:
+            if live_preflight is not None:
+                verify_generated_live_preflight(live_preflight)
+            if snapshot_ready:
+                verify_trust("finalize-before")
+        except (LauncherError, OSError, ValueError) as error:
+            evidence["failure"] = {"stage": "finalize-verification", "reason": str(error), "runner_started": evidence["process_counts"]["runner"] == 1}
             evidence["status"] = "failed"; code = 1
         finalize_output(evidence_output, evidence)
     return code, evidence

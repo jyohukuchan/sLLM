@@ -63,7 +63,7 @@ def test_execute_bound_generates_live_sidecar_and_exact_runner_argv(tmp_path: Pa
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
 
-    def runner(command: list[str], environment: dict[str, str]):
+    def runner(command: list[str], environment: dict[str, str], on_started):
         assert environment == LAUNCHER.EXECUTE_ENV
         assert command == LAUNCHER.execute_runner_argv(binding)
         assert command[-8:] == [
@@ -73,7 +73,8 @@ def test_execute_bound_generates_live_sidecar_and_exact_runner_argv(tmp_path: Pa
         result_path.mkdir()
         (result_path / "case.raw.json").write_text("{}\n")
         (result_path / "resident-batch.summary.json").write_text("{}\n")
-        return subprocess.CompletedProcess(command, 0, b"", b""), [{"label": "sudo-keepalive-1", "argv": [str(LAUNCHER.SUDO), "-n", "-v"], "exit_code": 0}], False
+        on_started()
+        return {"completed": subprocess.CompletedProcess(command, 0, b"", b""), "keepalives": [{"label": "sudo-keepalive-1", "argv": [str(LAUNCHER.SUDO), "-n", "-v"], "exit_code": 0}], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
 
     def restore() -> dict:
         restores.append(True)
@@ -85,6 +86,8 @@ def test_execute_bound_generates_live_sidecar_and_exact_runner_argv(tmp_path: Pa
     assert evidence["status"] == "passed"
     assert evidence["sequence"] == ["validator", "pre-exec-gates", "runner"]
     assert evidence["process_counts"]["runner"] == 1
+    assert evidence["safety"]["gpu_command_executed"] is True
+    assert evidence["safety"]["model_load_executed"] is True
     assert evidence["sudo_keepalive"]["failed"] is False
     live = evidence_path / "live-preflight.json"
     assert live.stat().st_mode & 0o777 == 0o444
@@ -103,8 +106,9 @@ def test_keepalive_failure_interrupts_runner_and_finally_restores(tmp_path: Path
     def validator(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
 
-    def failed_runner(command: list[str], environment: dict[str, str]):
-        return subprocess.CompletedProcess(command, -2, b"partial", b""), [{"label": "sudo-keepalive-1", "argv": [str(LAUNCHER.SUDO), "-n", "-v"], "exit_code": 1}], True
+    def failed_runner(command: list[str], environment: dict[str, str], on_started):
+        on_started()
+        return {"completed": subprocess.CompletedProcess(command, -2, b"partial", b""), "keepalives": [{"label": "sudo-keepalive-1", "argv": [str(LAUNCHER.SUDO), "-n", "-v"], "exit_code": 1}], "keepalive_failed": True, "gpu_command_executed": "unknown", "model_load_executed": "unknown"}
 
     def restore() -> dict:
         nonlocal restored
@@ -117,6 +121,87 @@ def test_keepalive_failure_interrupts_runner_and_finally_restores(tmp_path: Path
     assert evidence["failure"]["runner_started"] is True
     assert "keepalive failed" in evidence["failure"]["reason"]
     assert evidence["restore"]["state_preserved"] is True
+    assert evidence["safety"]["gpu_command_executed"] == "unknown"
+    assert evidence["safety"]["model_load_executed"] == "unknown"
+
+
+def test_fake_runner_start_failure_keeps_gpu_and_model_flags_false(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = _ready_binding(tmp_path)
+
+    def validator(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
+
+    def start_failure(command: list[str], environment: dict[str, str], on_started):
+        raise OSError("synthetic spawn failure")
+
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, runner_executor=start_failure)
+    assert code == 1
+    assert evidence["process_counts"]["runner"] == 0
+    assert evidence["failure"]["runner_started"] is False
+    assert evidence["safety"]["gpu_command_executed"] is False
+    assert evidence["safety"]["model_load_executed"] is False
+    assert evidence["safety"]["execution_state_source"] == "runner_not_started"
+
+
+def test_fake_runner_midway_failure_records_proven_gpu_and_model_activity(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = _ready_binding(tmp_path)
+
+    def validator(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
+
+    def midway_failure(command: list[str], environment: dict[str, str], on_started):
+        on_started()
+        return {"completed": subprocess.CompletedProcess(command, 9, b"partial", b""), "keepalives": [], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
+
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, runner_executor=midway_failure)
+    assert code == 1
+    assert evidence["failure"]["runner_started"] is True
+    assert evidence["safety"]["gpu_command_executed"] is True
+    assert evidence["safety"]["model_load_executed"] is True
+    assert "runner-after" in evidence["trust_verifications"]
+
+
+@pytest.mark.parametrize(
+    ("swap_point", "runner_started", "activity"),
+    [("validator-before", False, False), ("runner-before", False, False), ("runner-after", True, True), ("finalize-before", True, True)],
+)
+def test_execute_snapshot_rejects_stage_specific_toctou_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, swap_point: str, runner_started: bool, activity: bool) -> None:
+    binding, evidence_path, result_path, run_id = _ready_binding(tmp_path)
+    watched = tmp_path / "watched-tool"
+    watched.write_bytes(b"trusted")
+    replacement = tmp_path / "replacement-tool"
+    replacement.write_bytes(b"trusted")
+    original_validate = LAUNCHER.validate_execute_constants
+
+    def validate_with_watched(snapshot, self_sha):
+        value = original_validate(snapshot, self_sha)
+        snapshot.file(watched, LAUNCHER.sha_bytes(b"trusted"), "TOCTOU watched tool")
+        return value
+
+    swapped = False
+
+    def hook(point: str):
+        nonlocal swapped
+        if point == swap_point and not swapped:
+            swapped = True
+            os.replace(replacement, watched)
+
+    def validator(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
+
+    def successful_runner(command: list[str], environment: dict[str, str], on_started):
+        on_started()
+        result_path.mkdir()
+        (result_path / "resident-batch.summary.json").write_text("{}\n")
+        return {"completed": subprocess.CompletedProcess(command, 0, b"", b""), "keepalives": [], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
+
+    monkeypatch.setattr(LAUNCHER, "validate_execute_constants", validate_with_watched)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, runner_executor=successful_runner, verification_hook=hook)
+    assert code == 1 and swapped is True
+    assert evidence["process_counts"]["runner"] == int(runner_started)
+    assert evidence["safety"]["gpu_command_executed"] is activity
+    assert evidence["safety"]["model_load_executed"] is activity
+    assert "replacement" in evidence["failure"]["reason"]
 
 
 def test_real_runner_wrapper_uses_fake_sudo_keepalive_and_interrupts_on_failure() -> None:
@@ -128,25 +213,31 @@ def test_real_runner_wrapper_uses_fake_sudo_keepalive_and_interrupts_on_failure(
         return subprocess.CompletedProcess(argv, 1, b"", b"")
 
     started = time.monotonic()
-    completed, records, failed = LAUNCHER.run_runner_with_sudo_keepalive(
+    outcome = LAUNCHER.run_runner_with_sudo_keepalive(
         [sys.executable, "-c", "import time; time.sleep(10)"], dict(os.environ), sudo_run=fake_sudo, interval=0.02,
     )
+    completed, records, failed = outcome["completed"], outcome["keepalives"], outcome["keepalive_failed"]
     assert time.monotonic() - started < 2
     assert sudo_calls == 1 and len(records) == 1 and failed is True
     assert completed.returncode != 0
     assert records[0]["argv"] == [str(LAUNCHER.SUDO), "-n", "-v"]
+    assert outcome["gpu_command_executed"] == "unknown"
+    assert outcome["model_load_executed"] == "unknown"
 
 
 def test_real_runner_wrapper_keeps_running_with_fake_valid_sudo() -> None:
     def fake_sudo(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
-    completed, records, failed = LAUNCHER.run_runner_with_sudo_keepalive(
+    outcome = LAUNCHER.run_runner_with_sudo_keepalive(
         [sys.executable, "-c", "import time; time.sleep(.08)"], dict(os.environ), sudo_run=fake_sudo, interval=0.02,
     )
+    completed, records, failed = outcome["completed"], outcome["keepalives"], outcome["keepalive_failed"]
     assert completed.returncode == 0 and failed is False
     assert len(records) >= 1
     assert all(record["argv"] == [str(LAUNCHER.SUDO), "-n", "-v"] for record in records)
+    assert outcome["gpu_command_executed"] is True
+    assert outcome["model_load_executed"] is True
 
 
 def test_execute_rejects_output_reuse_before_starting_processes(tmp_path: Path) -> None:
