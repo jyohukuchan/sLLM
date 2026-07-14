@@ -102,6 +102,11 @@ API_KEY_GID = 1000
 API_KEY_MODE = 0o640
 HTTP_STATUS_MARKER = b"\n__ULLM_HTTP_STATUS__"
 DOCKER_INSPECT_FORMAT = '{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks "open-webui-network"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}'
+STOP_POLL_TIMEOUT_SECONDS = 30.0
+STOP_POLL_INITIAL_INTERVAL_SECONDS = 0.25
+STOP_POLL_MAX_INTERVAL_SECONDS = 1.0
+STOP_POLL_STABLE_OBSERVATIONS = 2
+STOP_POLL_SUDO_KEEPALIVE_SECONDS = 10.0
 RUN_ID = LAUNCHER.EXECUTE_RUN_ID
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -573,12 +578,370 @@ def default_owner_probe(run: Callable[..., subprocess.CompletedProcess[bytes]], 
     return {"amd_smi": amd_pids, "kfd": kfd_pids}
 
 
+def _poll_service_value(completed: subprocess.CompletedProcess[bytes], unit: str) -> dict[str, Any]:
+    try:
+        values = dict(line.split("=", 1) for line in completed.stdout.decode().splitlines())
+        main_pid = int(values["MainPID"])
+    except (UnicodeError, ValueError, KeyError) as error:
+        raise HarnessError(f"stopped poll service schema differs: {unit}") from error
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or set(values) != {"ActiveState", "SubState", "MainPID"}
+        or main_pid < 0
+    ):
+        raise HarnessError(f"stopped poll service probe differs: {unit}")
+    return {
+        "unit": unit,
+        "active_state": values["ActiveState"],
+        "sub_state": values["SubState"],
+        "main_pid": main_pid,
+    }
+
+
+def _poll_pid_lines(completed: subprocess.CompletedProcess[bytes], label: str) -> list[int]:
+    if completed.returncode == 1 and not completed.stdout and not completed.stderr:
+        return []
+    try:
+        values = sorted({int(item) for item in completed.stdout.decode().splitlines() if item})
+    except (UnicodeError, ValueError) as error:
+        raise HarnessError(f"{label} PID schema differs") from error
+    if completed.returncode != 0 or completed.stderr or any(value <= 0 for value in values):
+        raise HarnessError(f"{label} PID probe differs")
+    return values
+
+
+def _safe_proc_cmdline(pid: int) -> dict[str, Any]:
+    path = Path(f"/proc/{pid}/cmdline")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            raw = os.read(descriptor, 65537)
+        finally:
+            os.close(descriptor)
+        if len(raw) > 65536:
+            raise OSError("cmdline exceeds bound")
+        argv0 = raw.split(b"\0", 1)[0]
+        try:
+            argv0_name = Path(argv0.decode("utf-8", "strict")).name if argv0 else None
+        except UnicodeError:
+            argv0_name = None
+        return {
+            "pid": pid,
+            "readable": True,
+            "bytes": len(raw),
+            "sha256": sha_bytes(raw),
+            "argv0_basename": argv0_name,
+            "matches_expected_worker": raw.startswith(str(WORKER).encode()),
+            "raw_recorded": False,
+        }
+    except OSError as error:
+        return {
+            "pid": pid,
+            "readable": False,
+            "bytes": None,
+            "sha256": None,
+            "argv0_basename": None,
+            "matches_expected_worker": None,
+            "raw_recorded": False,
+            "error_type": type(error).__name__,
+        }
+
+
+def _poll_lock_observation() -> dict[str, Any]:
+    LAUNCHER.reject_symlink_components(LAUNCHER.LOCK_PATH, "stopped poll device lock")
+    metadata = LAUNCHER.LOCK_PATH.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise HarnessError("stopped poll device lock identity differs")
+    identity = LAUNCHER.file_identity(metadata)
+    descriptor = os.open(LAUNCHER.LOCK_PATH, os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    free = False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            free = True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except BlockingIOError:
+            free = False
+    finally:
+        os.close(descriptor)
+    if LAUNCHER.file_identity(LAUNCHER.LOCK_PATH.lstat()) != identity:
+        raise HarnessError("stopped poll device lock changed")
+    try:
+        locks_raw = Path("/proc/locks").read_bytes()
+    except OSError as error:
+        raise HarnessError("stopped poll lock holder source failed") from error
+    if len(locks_raw) > 4 * 1024 * 1024:
+        raise HarnessError("stopped poll lock holder source exceeds bound")
+    lock_id = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:{metadata.st_ino}"
+    holder_pids: set[int] = set()
+    try:
+        for line in locks_raw.decode("ascii").splitlines():
+            fields = line.split()
+            if len(fields) >= 6 and fields[5].lower() == lock_id.lower():
+                holder_pids.add(int(fields[4]))
+    except (UnicodeError, ValueError) as error:
+        raise HarnessError("stopped poll lock holder schema differs") from error
+    if free and holder_pids:
+        raise HarnessError("stopped poll free lock has a holder")
+    return {
+        "path": str(LAUNCHER.LOCK_PATH),
+        "free": free,
+        "device": identity[0],
+        "inode": identity[1],
+        "holder_pids": sorted(holder_pids),
+        "source_sha256": sha_bytes(locks_raw),
+        "source_bytes": len(locks_raw),
+    }
+
+
+class StoppedGateObserver:
+    def __call__(self, old_worker_pid: int, old_service_pid: int, run: Callable[..., subprocess.CompletedProcess[bytes]]) -> dict[str, Any]:
+        LAUNCHER.validate_amd_smi_tool()
+        for path, digest, label in (
+            (LAUNCHER.SYSTEMCTL, LAUNCHER.SYSTEMCTL_SHA, "systemctl"),
+            (LAUNCHER.PGREP, LAUNCHER.PGREP_SHA, "pgrep"),
+        ):
+            if LAUNCHER.sha_file(path, f"stopped poll {label}")[0] != digest:
+                raise HarnessError(f"stopped poll {label} SHA differs")
+        probes: list[dict[str, Any]] = []
+        services: list[dict[str, Any]] = []
+        for unit in LAUNCHER.SERVICE_UNITS:
+            command = [str(LAUNCHER.SYSTEMCTL), "show", unit, "--property=ActiveState", "--property=SubState", "--property=MainPID", "--no-pager"]
+            completed, record = _command(run, command, f"stopped-poll-service-{unit}")
+            probes.append(record)
+            services.append(_poll_service_value(completed, unit))
+        worker_command = [str(LAUNCHER.PGREP), "-f", "-x", f"{WORKER}.*"]
+        worker, record = _command(run, worker_command, "stopped-poll-worker")
+        probes.append(record)
+        worker_pids = _poll_pid_lines(worker, "stopped poll worker")
+        process_command = [str(LAUNCHER.AMD_SMI), "process", "--gpu", str(LAUNCHER.AMD_SMI_INDEX), "--general", "--json"]
+        processes, record = _command(run, process_command, "stopped-poll-amd-process")
+        probes.append(record)
+        try:
+            process_value = json.loads(processes.stdout, object_pairs_hook=LAUNCHER.pairs)
+            process_list = process_value[0]["process_list"]
+            amd_smi_owners = sorted({int(item["process_info"]["pid"]) for item in process_list})
+        except (UnicodeError, json.JSONDecodeError, LAUNCHER.LauncherError, KeyError, IndexError, TypeError, ValueError) as error:
+            raise HarnessError("stopped poll AMD process schema differs") from error
+        if processes.returncode != 0 or processes.stderr or not isinstance(process_value, list) or len(process_value) != 1 or process_value[0].get("gpu") != LAUNCHER.AMD_SMI_INDEX or any(pid <= 0 for pid in amd_smi_owners):
+            raise HarnessError("stopped poll AMD process probe differs")
+        static_command = [str(LAUNCHER.AMD_SMI), "static", "--gpu", str(LAUNCHER.AMD_SMI_INDEX), "--vram", "--json"]
+        static, record = _command(run, static_command, "stopped-poll-amd-vram")
+        probes.append(record)
+        try:
+            static_value = LAUNCHER.parse_json(static.stdout, "stopped poll AMD VRAM")
+            gpu_data = static_value["gpu_data"]
+            vram_item = gpu_data[0]
+            size = vram_item["vram"]["size"]
+            total_bytes = int(size["value"]) * 1_000_000
+        except (LAUNCHER.LauncherError, KeyError, IndexError, TypeError, ValueError) as error:
+            raise HarnessError("stopped poll AMD VRAM schema differs") from error
+        if static.returncode != 0 or static.stderr or len(gpu_data) != 1 or vram_item.get("gpu") != LAUNCHER.AMD_SMI_INDEX or size.get("unit") != "MB" or total_bytes <= 0:
+            raise HarnessError("stopped poll AMD VRAM probe differs")
+        kfd_owners = LAUNCHER._kfd_owners()
+        lock = _poll_lock_observation()
+        observed_pids = sorted(set(worker_pids) | set(amd_smi_owners) | set(kfd_owners) | set(lock["holder_pids"]) | {old_worker_pid, old_service_pid})
+        return {
+            "captured_unix_ns": time.time_ns(),
+            "services": services,
+            "worker_pids": worker_pids,
+            "amd_smi_owners": amd_smi_owners,
+            "kfd_owners": kfd_owners,
+            "lock": lock,
+            "vram": {
+                "total_bytes": total_bytes,
+                "used_bytes": 0 if not amd_smi_owners and not kfd_owners else None,
+                "free_bytes": total_bytes if not amd_smi_owners and not kfd_owners else None,
+                "headroom_bytes": total_bytes if not amd_smi_owners and not kfd_owners else None,
+            },
+            "proc_cmdlines": [_safe_proc_cmdline(pid) for pid in observed_pids],
+            "probes": probes,
+            "virtual_sources": {
+                "kfd_owners": {"raw_sha256": sha_bytes(canonical(kfd_owners)), "parsed_pids": kfd_owners},
+                "lock_holders": {"raw_sha256": lock["source_sha256"], "raw_bytes": lock["source_bytes"], "parsed_pids": lock["holder_pids"]},
+            },
+            "secret_material_recorded": False,
+        }
+
+
+def _stopped_observation_decision(
+    observation: dict[str, Any],
+    old_worker_pid: int,
+    old_service_pid: int,
+    seen_zero: dict[str, bool],
+) -> tuple[str, str | None, dict[str, str]]:
+    expected_services = [
+        {"unit": unit, "active_state": "inactive", "sub_state": "dead", "main_pid": 0}
+        for unit in LAUNCHER.SERVICE_UNITS
+    ]
+    required = {"captured_unix_ns", "services", "worker_pids", "amd_smi_owners", "kfd_owners", "lock", "vram", "proc_cmdlines", "probes", "virtual_sources", "secret_material_recorded"}
+    classifications: dict[str, str] = {}
+    if not isinstance(observation, dict) or set(observation) != required or observation.get("secret_material_recorded") is not False:
+        return "terminal_failure", "stopped observation schema differs", classifications
+    if any(not isinstance(observation.get(name), list) or any(type(pid) is not int or pid <= 0 for pid in observation[name]) for name in ("worker_pids", "amd_smi_owners", "kfd_owners")):
+        return "terminal_failure", "stopped observation PID schema differs", classifications
+    services_stable = observation.get("services") == expected_services
+    classifications["services"] = "stable" if services_stable else "pending"
+    for name in ("worker_pids", "amd_smi_owners", "kfd_owners"):
+        values = sorted(set(observation[name]))
+        foreign = [pid for pid in values if pid != old_worker_pid]
+        if foreign:
+            classifications[name] = "foreign_or_new"
+            return "terminal_failure", f"foreign or new owner observed in {name}", classifications
+        if values and seen_zero[name]:
+            classifications[name] = "reappeared"
+            return "terminal_failure", f"old owner reappeared in {name}", classifications
+        if not values:
+            seen_zero[name] = True
+            classifications[name] = "stable"
+        else:
+            classifications[name] = "draining_pre_stop_worker"
+    lock = observation.get("lock")
+    if not isinstance(lock, dict) or set(lock) != {"path", "free", "device", "inode", "holder_pids", "source_sha256", "source_bytes"} or lock.get("path") != str(LAUNCHER.LOCK_PATH) or type(lock.get("free")) is not bool or not isinstance(lock.get("holder_pids"), list):
+        return "terminal_failure", "stopped observation lock schema differs", classifications
+    foreign_lock = [pid for pid in lock["holder_pids"] if pid != old_service_pid]
+    if foreign_lock or (lock["free"] is False and not lock["holder_pids"]):
+        classifications["lock"] = "foreign_or_unknown_holder"
+        return "terminal_failure", "foreign or unknown lock holder observed", classifications
+    if not lock["free"] and seen_zero["lock"]:
+        classifications["lock"] = "reappeared"
+        return "terminal_failure", "pre-stop lock holder reappeared", classifications
+    if lock["free"]:
+        seen_zero["lock"] = True
+        classifications["lock"] = "stable"
+    else:
+        classifications["lock"] = "draining_pre_stop_service"
+    vram = observation.get("vram")
+    if not isinstance(vram, dict) or set(vram) != {"total_bytes", "used_bytes", "free_bytes", "headroom_bytes"} or type(vram.get("total_bytes")) is not int or vram["total_bytes"] <= 0:
+        return "terminal_failure", "stopped observation VRAM schema differs", classifications
+    stable = (
+        services_stable
+        and not observation["worker_pids"]
+        and not observation["amd_smi_owners"]
+        and not observation["kfd_owners"]
+        and lock["free"] is True
+        and vram["used_bytes"] == 0
+        and vram["free_bytes"] == vram["total_bytes"]
+        and vram["headroom_bytes"] == vram["total_bytes"]
+    )
+    classifications["vram"] = "stable" if vram["used_bytes"] == 0 and vram["free_bytes"] == vram["total_bytes"] and vram["headroom_bytes"] == vram["total_bytes"] else "pending"
+    return ("stable", None, classifications) if stable else ("pending", None, classifications)
+
+
+def poll_stopped_gates(
+    output: Path,
+    old_worker_pid: int,
+    old_service_pid: int,
+    dependencies: "Dependencies",
+    keepalive: Callable[[int], None],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    started = dependencies.monotonic()
+    next_keepalive = started + STOP_POLL_SUDO_KEEPALIVE_SECONDS
+    stable_count = 0
+    seen_zero = {"worker_pids": False, "amd_smi_owners": False, "kfd_owners": False, "lock": False}
+    files: list[dict[str, Any]] = []
+    attempt = 0
+    final_observation: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    while True:
+        elapsed = max(0.0, dependencies.monotonic() - started)
+        try:
+            observation = dependencies.stopped_observation(old_worker_pid, old_service_pid, dependencies.run)
+            decision, reason, classifications = _stopped_observation_decision(observation, old_worker_pid, old_service_pid, seen_zero)
+        except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
+            observation = {
+                "captured_unix_ns": time.time_ns(),
+                "error_type": type(error).__name__,
+                "secret_material_recorded": False,
+            }
+            decision, reason, classifications = "terminal_failure", "stopped observation failed", {"observer": "error"}
+        stable_count = stable_count + 1 if decision == "stable" else 0
+        next_interval = min(STOP_POLL_INITIAL_INTERVAL_SECONDS * (2 ** attempt), STOP_POLL_MAX_INTERVAL_SECONDS)
+        poll_document = {
+            "schema_version": "ullm.aq4_p2_stopped_gate_poll_observation.v1",
+            "attempt": attempt,
+            "captured_unix_ns": observation["captured_unix_ns"],
+            "elapsed_seconds": elapsed,
+            "decision": decision,
+            "reason": reason,
+            "source_classification": classifications,
+            "consecutive_stable": stable_count,
+            "required_consecutive_stable": STOP_POLL_STABLE_OBSERVATIONS,
+            "next_interval_seconds": None if decision == "terminal_failure" or stable_count >= STOP_POLL_STABLE_OBSERVATIONS else next_interval,
+            "observation": observation,
+            "secret_material_recorded": False,
+        }
+        raw = pretty(poll_document)
+        name = f"stopped-gate-poll-{attempt:04d}.json"
+        LAUNCHER.atomic_write(output, name, raw)
+        files.append({"name": name, "sha256": sha_bytes(raw), "decision": decision, "consecutive_stable": stable_count})
+        final_observation = observation if set(observation) == {"captured_unix_ns", "services", "worker_pids", "amd_smi_owners", "kfd_owners", "lock", "vram", "proc_cmdlines", "probes", "virtual_sources", "secret_material_recorded"} else None
+        if decision == "terminal_failure":
+            failure = {"kind": "terminal", "reason": reason, "attempt": attempt}
+            break
+        if stable_count >= STOP_POLL_STABLE_OBSERVATIONS:
+            break
+        now = dependencies.monotonic()
+        if now - started >= STOP_POLL_TIMEOUT_SECONDS or now - started + next_interval > STOP_POLL_TIMEOUT_SECONDS:
+            failure = {"kind": "timeout", "reason": "stopped gates did not stabilize before deadline", "attempt": attempt}
+            break
+        if now >= next_keepalive:
+            try:
+                keepalive(attempt)
+            except (HarnessError, OSError, subprocess.SubprocessError):
+                failure = {"kind": "sudo_keepalive", "reason": "sudo keepalive failed during stopped gate poll", "attempt": attempt}
+                break
+            while next_keepalive <= now:
+                next_keepalive += STOP_POLL_SUDO_KEEPALIVE_SECONDS
+        dependencies.sleep(next_interval)
+        attempt += 1
+    poll_evidence = {
+        "schema_version": "ullm.aq4_p2_stopped_gate_poll.v1",
+        "passed": failure is None and stable_count >= STOP_POLL_STABLE_OBSERVATIONS,
+        "policy": {
+            "timeout_seconds": STOP_POLL_TIMEOUT_SECONDS,
+            "initial_interval_seconds": STOP_POLL_INITIAL_INTERVAL_SECONDS,
+            "maximum_interval_seconds": STOP_POLL_MAX_INTERVAL_SECONDS,
+            "required_consecutive_stable": STOP_POLL_STABLE_OBSERVATIONS,
+            "sudo_keepalive_seconds": STOP_POLL_SUDO_KEEPALIVE_SECONDS,
+            "only_pre_stop_worker_pid_may_drain": old_worker_pid,
+            "only_pre_stop_service_pid_may_hold_lock": old_service_pid,
+        },
+        "poll_files": files,
+        "poll_count": len(files),
+        "probe_command_count": 0,
+        "failure": failure,
+        "secret_material_recorded": False,
+    }
+    # Count from the immutable poll files' source observations without retaining raw output.
+    poll_evidence["probe_command_count"] = sum(
+        len(LAUNCHER.parse_json((output / item["name"]).read_bytes(), "stopped poll evidence")["observation"].get("probes", []))
+        for item in files
+    )
+    if not poll_evidence["passed"] or final_observation is None:
+        return None, poll_evidence
+    gates = {
+        "passed": True,
+        "environment": dict(LAUNCHER.EXECUTE_ENV),
+        "services": final_observation["services"],
+        "old_worker_pids": final_observation["worker_pids"],
+        "runtime_mapping": {"runtime_device_index": 1, "visible_token": "1", "amd_smi_index": 2, "bdf": LAUNCHER.GPU_BDF, "uuid": LAUNCHER.GPU_UUID, "kfd_id": LAUNCHER.KFD_ID, "node_id": 2},
+        "amd_smi_owners": final_observation["amd_smi_owners"],
+        "kfd_owners": final_observation["kfd_owners"],
+        "lock": {key: final_observation["lock"][key] for key in ("path", "free", "device", "inode")},
+        "vram": final_observation["vram"],
+        "probes": final_observation["probes"],
+    }
+    return gates, poll_evidence
+
+
 @dataclass(frozen=True)
 class Dependencies:
     run: Callable[..., subprocess.CompletedProcess[bytes]]
     http_probe: Callable[[str], dict[str, Any]]
     container_health: Callable[[Callable[..., subprocess.CompletedProcess[bytes]]], dict[str, Any]]
-    stopped_gates: Callable[[], dict[str, Any]]
+    stopped_observation: Callable[[int, int, Callable[..., subprocess.CompletedProcess[bytes]]], dict[str, Any]]
     lock_busy: Callable[[], bool]
     owner_probe: Callable[[Callable[..., subprocess.CompletedProcess[bytes]], int], dict[str, Any]]
     package_hash: Callable[[Path], str]
@@ -586,6 +949,7 @@ class Dependencies:
     profile_capture: Callable[[dict[str, Any]], dict[str, Any]]
     profile_trust: Callable[[dict[str, Any], str], dict[str, Any]]
     sleep: Callable[[float], None]
+    monotonic: Callable[[], float]
 
 
 def _host_route_diagnostics(dependencies: Dependencies) -> dict[str, Any]:
@@ -792,10 +1156,10 @@ def run_profile_capture(contract: dict[str, Any]) -> dict[str, Any]:
 
 
 def default_dependencies() -> Dependencies:
-    stopped_gates = lambda: LAUNCHER.collect_execute_gates(environment=dict(LAUNCHER.EXECUTE_ENV))
     trust = ProfileTrustGuard()
     container_health = ContainerHealthGuard()
-    return Dependencies(subprocess.run, default_http_probe, container_health, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep)
+    stopped_observation = StoppedGateObserver()
+    return Dependencies(subprocess.run, default_http_probe, container_health, stopped_observation, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep, time.monotonic)
 
 
 def profile_launcher_command() -> list[str]:
@@ -888,9 +1252,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 247, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 181, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 256, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 190, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "stable2-stopped-gate-poll-and-foreign-owner-rejection", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
@@ -923,6 +1287,17 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "formal_health_route": "docker-exec-openwebui-container-network-namespace",
             "host_direct_health_is_diagnostic_only": True,
             "authenticated_models_header_transport": "docker-exec-stdin-header-file",
+            "stopped_gate_poll": {
+                "timeout_seconds": STOP_POLL_TIMEOUT_SECONDS,
+                "initial_interval_seconds": STOP_POLL_INITIAL_INTERVAL_SECONDS,
+                "maximum_interval_seconds": STOP_POLL_MAX_INTERVAL_SECONDS,
+                "required_consecutive_stable": STOP_POLL_STABLE_OBSERVATIONS,
+                "sudo_keepalive_seconds": STOP_POLL_SUDO_KEEPALIVE_SECONDS,
+                "transitional_amd_kfd_owner": "pre_stop_worker_pid_only",
+                "transitional_lock_holder": "pre_stop_service_main_pid_only",
+                "foreign_new_or_reappeared_owner": "immediate_fail_closed",
+                "evidence": "atomic_immutable_per_poll_secret_safe_digests_and_parsed_pids",
+            },
         },
         "trust": {
             "launcher": {"commit": LAUNCHER_COMMIT, "tree": LAUNCHER_TREE, "git_blob": LAUNCHER_GIT_BLOB, "sha256": LAUNCHER_SHA},
@@ -1080,7 +1455,7 @@ def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_
     if output.exists() or output.is_symlink():
         raise HarnessError("ready dry-run output already exists")
     output.mkdir(mode=0o700)
-    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
+    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
     if value["execution_mode"] == "profile_diagnostic":
         evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "capture_executed": False, "measurement_eligible": False, "promotion_eligible": False}
     _finalize(output, evidence)
@@ -1117,7 +1492,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     else:
         trust_records = []
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "stopped_gate_poll": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
     stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
@@ -1132,9 +1507,19 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
         if stopped.returncode != 0 or stopped.stdout or stopped.stderr:
             raise HarnessError("service stop failed")
         evidence["safety"]["service_stopped"] = True; evidence["sequence"].append("service-stopped")
-        stage = "stopped-gates"; gates = dependencies.stopped_gates(); evidence["stopped_gates"] = gates
+        stage = "stopped-gates"
+        def stopped_poll_keepalive(attempt: int) -> None:
+            record = _sudo_valid(dependencies.run, f"sudo-stopped-poll-keepalive-{attempt}")
+            evidence["commands"].append(record)
+            evidence["process_counts"]["sudo"] += 1
+            evidence["process_counts"]["sudo_keepalive"] += 1
+        gates, poll_evidence = poll_stopped_gates(output, pre["worker"]["pid"], pre["service"]["main_pid"], dependencies, stopped_poll_keepalive)
+        evidence["stopped_gate_poll"] = poll_evidence
+        evidence["process_counts"]["stopped_gate_polls"] = poll_evidence["poll_count"]
+        evidence["process_counts"]["stopped_gate_probe_commands"] = poll_evidence["probe_command_count"]
+        evidence["stopped_gates"] = gates
         if not isinstance(gates, dict) or gates.get("passed") is not True or gates.get("services") != [{"unit": "ullm-openai.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}, {"unit": "llama-qwen35-udq4.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}] or gates.get("old_worker_pids") != [] or gates.get("amd_smi_owners") != [] or gates.get("kfd_owners") != [] or gates.get("lock", {}).get("free") is not True:
-            raise HarnessError("stopped live gates differ")
+            raise HarnessError("stopped live gates did not reach stable2")
         evidence["sequence"].append("stopped-gates")
         evidence["safety"]["gpu_command_executed"] = "unknown"; evidence["safety"]["model_load_executed"] = "unknown"
         if profile_diagnostic:

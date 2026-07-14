@@ -28,6 +28,8 @@ class FakeRuntime:
         self.calls: list[list[str]] = []
         self.profile_captured = False
         self.trust_stages: list[str] = []
+        self.now = 0.0
+        self.stopped_observation_count = 0
 
     @property
     def gateway_pid(self) -> int:
@@ -90,14 +92,47 @@ class FakeRuntime:
             },
         }
 
-    def stopped(self) -> dict:
-        if self.fail == "stopped-gate":
-            raise HARNESS.HarnessError("synthetic stopped gate failure")
+    def stopped(self, old_worker_pid: int, old_service_pid: int, run) -> dict:
+        attempt = self.stopped_observation_count
+        self.stopped_observation_count += 1
+        amd_smi_owners: list[int] = []
+        kfd_owners: list[int] = []
+        lock_free = True
+        lock_holders: list[int] = []
+        if self.fail == "delayed-release" and attempt == 0:
+            amd_smi_owners = [old_worker_pid]
+        elif self.fail == "never-release":
+            amd_smi_owners = [old_worker_pid]
+        elif self.fail in {"stopped-gate", "foreign-owner"}:
+            amd_smi_owners = [999999]
+        elif self.fail == "owner-reappearance" and attempt > 0:
+            amd_smi_owners = [old_worker_pid]
+        elif self.fail == "lock-delay" and attempt == 0:
+            lock_free = False
+            lock_holders = [old_service_pid]
+        elif self.fail == "foreign-lock":
+            lock_free = False
+            lock_holders = [999998]
+        elif self.fail == "kfd-delay" and attempt == 0:
+            kfd_owners = [old_worker_pid]
+        pids = sorted(set(amd_smi_owners) | set(kfd_owners) | set(lock_holders) | {old_worker_pid, old_service_pid})
+        probe_raw = HARNESS.canonical({"attempt": attempt, "amd": amd_smi_owners, "kfd": kfd_owners})
         return {
-            "passed": True,
+            "captured_unix_ns": 1_000_000_000 + attempt,
             "services": [{"unit": "ullm-openai.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}, {"unit": "llama-qwen35-udq4.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}],
-            "old_worker_pids": [], "amd_smi_owners": [], "kfd_owners": [], "lock": {"free": True},
+            "worker_pids": [],
+            "amd_smi_owners": amd_smi_owners,
+            "kfd_owners": kfd_owners,
+            "lock": {"path": str(HARNESS.LAUNCHER.LOCK_PATH), "free": lock_free, "device": 1, "inode": 2, "holder_pids": lock_holders, "source_sha256": HARNESS.sha_bytes(HARNESS.canonical(lock_holders)), "source_bytes": len(lock_holders)},
+            "vram": {"total_bytes": 32_000_000_000, "used_bytes": 0 if not amd_smi_owners and not kfd_owners else None, "free_bytes": 32_000_000_000 if not amd_smi_owners and not kfd_owners else None, "headroom_bytes": 32_000_000_000 if not amd_smi_owners and not kfd_owners else None},
+            "proc_cmdlines": [{"pid": pid, "readable": True, "bytes": 0, "sha256": HARNESS.sha_bytes(b""), "argv0_basename": "redacted", "matches_expected_worker": pid == old_worker_pid, "raw_recorded": False} for pid in pids],
+            "probes": [{"label": "fake-stopped-observation", "argv": ["fake-stopped-observation", str(attempt)], "exit_code": 0, "stdout_sha256": HARNESS.sha_bytes(probe_raw), "stderr_sha256": HARNESS.sha_bytes(b""), "captured_unix_ns": 1_000_000_000 + attempt}],
+            "virtual_sources": {"kfd_owners": {"raw_sha256": HARNESS.sha_bytes(HARNESS.canonical(kfd_owners)), "parsed_pids": kfd_owners}, "lock_holders": {"raw_sha256": HARNESS.sha_bytes(HARNESS.canonical(lock_holders)), "raw_bytes": len(lock_holders), "parsed_pids": lock_holders}},
+            "secret_material_recorded": False,
         }
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
 
     def owners(self, run, worker_pid: int) -> dict:
         if not self.active or worker_pid != self.worker_pid:
@@ -139,7 +174,7 @@ class FakeRuntime:
         return {"stage": stage, "passed": True}
 
     def dependencies(self) -> HARNESS.Dependencies:
-        return HARNESS.Dependencies(self.run, self.http, self.container_health, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, lambda seconds: None)
+        return HARNESS.Dependencies(self.run, self.http, self.container_health, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, self.sleep, lambda: self.now)
 
 
 class FakeDockerRuntime:
@@ -260,6 +295,17 @@ def test_ready_document_fixes_one_case_live_policy_and_trust() -> None:
     assert value["trust"]["launcher"]["commit"] == HARNESS.LAUNCHER_COMMIT
     assert value["trust"]["runner"]["commit"] == HARNESS.RUNNER_COMMIT
     assert value["trust"]["runner"]["cli_ancestor_commit"] == HARNESS.RUNNER_CLI_ANCESTOR
+    assert value["maintenance"]["stopped_gate_poll"] == {
+        "timeout_seconds": 30.0,
+        "initial_interval_seconds": 0.25,
+        "maximum_interval_seconds": 1.0,
+        "required_consecutive_stable": 2,
+        "sudo_keepalive_seconds": 10.0,
+        "transitional_amd_kfd_owner": "pre_stop_worker_pid_only",
+        "transitional_lock_holder": "pre_stop_service_main_pid_only",
+        "foreign_new_or_reappeared_owner": "immediate_fail_closed",
+        "evidence": "atomic_immutable_per_poll_secret_safe_digests_and_parsed_pids",
+    }
 
 
 def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path) -> None:
@@ -267,12 +313,118 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "maintenance", runtime.dependencies())
     assert code == 0 and evidence["status"] == "passed"
     assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "launcher", "service-start", "service-restored"]
-    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0, "docker": 18, "docker_exec": 12, "container_curl": 12, "container_curl_total": 12, "container_curl_version": 2, "container_curl_endpoint": 10}
+    assert evidence["process_counts"] == {"sudo": 3, "sudo_keepalive": 0, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0, "docker": 18, "docker_exec": 12, "container_curl": 12, "container_curl_total": 12, "container_curl_version": 2, "container_curl_endpoint": 10, "stopped_gate_polls": 2, "stopped_gate_probe_commands": 2}
     assert evidence["safety"] == {"service_touched": True, "service_stopped": True, "gpu_command_executed": True, "model_load_executed": True}
     assert evidence["restore"]["passed"] is True
     assert evidence["restore"]["post_start"]["service"]["main_pid"] != evidence["pre_stop"]["service"]["main_pid"]
     assert (tmp_path / "maintenance/maintenance-marker.json").stat().st_mode & 0o777 == 0o444
     assert evidence["secret_material_recorded"] is False
+
+
+def _poll_documents(output: Path, evidence: dict) -> list[dict]:
+    files = evidence["stopped_gate_poll"]["poll_files"]
+    documents = []
+    for item in files:
+        path = output / item["name"]
+        raw = path.read_bytes()
+        assert HARNESS.sha_bytes(raw) == item["sha256"]
+        assert path.stat().st_mode & 0o777 == 0o444
+        documents.append(json.loads(raw))
+    return documents
+
+
+@pytest.mark.parametrize("failure", ("delayed-release", "lock-delay", "kfd-delay"))
+def test_stopped_gate_delayed_pre_stop_resource_release_reaches_stable2(tmp_path: Path, failure: str) -> None:
+    runtime = FakeRuntime(fail=failure)
+    output = tmp_path / failure
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 0 and evidence["status"] == "passed"
+    assert evidence["stopped_gate_poll"]["passed"] is True
+    documents = _poll_documents(output, evidence)
+    assert [item["decision"] for item in documents] == ["pending", "stable", "stable"]
+    assert [item["consecutive_stable"] for item in documents] == [0, 1, 2]
+    assert evidence["process_counts"]["launcher"] == 1
+
+
+def test_stopped_gate_never_release_times_out_with_all_poll_evidence(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="never-release")
+    output = tmp_path / "never-release"
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 1 and evidence["status"] == "failed"
+    assert evidence["stopped_gate_poll"]["failure"]["kind"] == "timeout"
+    documents = _poll_documents(output, evidence)
+    assert len(documents) == evidence["stopped_gate_poll"]["poll_count"]
+    assert documents[-1]["decision"] == "pending"
+    assert evidence["process_counts"]["launcher"] == 0
+    assert evidence["process_counts"]["sudo_keepalive"] >= 2
+    assert any(command["label"].startswith("sudo-stopped-poll-keepalive-") for command in evidence["commands"])
+    assert evidence["restore"]["passed"] is True
+
+
+@pytest.mark.parametrize(("failure", "source"), (("foreign-owner", "amd_smi_owners"), ("foreign-lock", "lock")))
+def test_stopped_gate_foreign_owner_fails_immediately(tmp_path: Path, failure: str, source: str) -> None:
+    runtime = FakeRuntime(fail=failure)
+    output = tmp_path / failure
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 1 and evidence["stopped_gate_poll"]["failure"]["kind"] == "terminal"
+    documents = _poll_documents(output, evidence)
+    assert len(documents) == 1
+    assert documents[0]["source_classification"][source] in {"foreign_or_new", "foreign_or_unknown_holder"}
+    assert evidence["process_counts"]["launcher"] == 0
+
+
+def test_stopped_gate_owner_reappearance_after_zero_fails_immediately(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="owner-reappearance")
+    output = tmp_path / "owner-reappearance"
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 1
+    documents = _poll_documents(output, evidence)
+    assert [item["decision"] for item in documents] == ["stable", "terminal_failure"]
+    assert documents[-1]["source_classification"]["amd_smi_owners"] == "reappeared"
+    assert evidence["process_counts"]["launcher"] == 0
+
+
+def test_stopped_gate_requires_two_consecutive_stable_observations(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    output = tmp_path / "stable2"
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
+    assert code == 0
+    documents = _poll_documents(output, evidence)
+    assert [item["decision"] for item in documents] == ["stable", "stable"]
+    assert [item["consecutive_stable"] for item in documents] == [1, 2]
+
+
+def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdline(monkeypatch: pytest.MonkeyPatch) -> None:
+    old_worker_pid = 111
+    old_service_pid = 222
+    monkeypatch.setattr(HARNESS.LAUNCHER, "validate_amd_smi_tool", lambda: None)
+    expected_sha = {HARNESS.LAUNCHER.SYSTEMCTL: HARNESS.LAUNCHER.SYSTEMCTL_SHA, HARNESS.LAUNCHER.PGREP: HARNESS.LAUNCHER.PGREP_SHA}
+    monkeypatch.setattr(HARNESS.LAUNCHER, "sha_file", lambda path, label: (expected_sha[path], ()))
+    monkeypatch.setattr(HARNESS.LAUNCHER, "_kfd_owners", lambda: [old_worker_pid])
+    monkeypatch.setattr(HARNESS, "_poll_lock_observation", lambda: {"path": str(HARNESS.LAUNCHER.LOCK_PATH), "free": False, "device": 1, "inode": 2, "holder_pids": [old_service_pid], "source_sha256": "a" * 64, "source_bytes": 12})
+    monkeypatch.setattr(HARNESS, "_safe_proc_cmdline", lambda pid: {"pid": pid, "readable": True, "bytes": 9, "sha256": "b" * 64, "argv0_basename": "worker", "matches_expected_worker": pid == old_worker_pid, "raw_recorded": False})
+
+    def run(argv, **kwargs):
+        if argv[:2] == [str(HARNESS.LAUNCHER.SYSTEMCTL), "show"]:
+            return subprocess.CompletedProcess(argv, 0, b"ActiveState=inactive\nSubState=dead\nMainPID=0\n", b"")
+        if argv[0] == str(HARNESS.LAUNCHER.PGREP):
+            return subprocess.CompletedProcess(argv, 1, b"", b"")
+        if argv[1:3] == ["process", "--gpu"]:
+            value = [{"gpu": HARNESS.LAUNCHER.AMD_SMI_INDEX, "process_list": [{"process_info": {"pid": old_worker_pid}}]}]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+        if argv[1:3] == ["static", "--gpu"]:
+            value = {"gpu_data": [{"gpu": HARNESS.LAUNCHER.AMD_SMI_INDEX, "vram": {"size": {"value": 32624, "unit": "MB"}}}]}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+        raise AssertionError(argv)
+
+    value = HARNESS.StoppedGateObserver()(old_worker_pid, old_service_pid, run)
+    assert value["amd_smi_owners"] == value["kfd_owners"] == [old_worker_pid]
+    assert value["lock"]["holder_pids"] == [old_service_pid]
+    assert value["vram"] == {"total_bytes": 32_624_000_000, "used_bytes": None, "free_bytes": None, "headroom_bytes": None}
+    assert len(value["probes"]) == 5
+    assert all(len(item["stdout_sha256"]) == 64 and len(item["stderr_sha256"]) == 64 for item in value["probes"])
+    assert {item["pid"] for item in value["proc_cmdlines"]} == {old_worker_pid, old_service_pid}
+    assert all(item["raw_recorded"] is False for item in value["proc_cmdlines"])
 
 
 def test_host_route_mismatch_is_diagnostic_and_container_route_remains_formal(tmp_path: Path) -> None:
@@ -398,7 +550,7 @@ def test_dry_run_writes_process_zero_evidence_without_dependencies(tmp_path: Pat
     HARNESS.READY_PATH.write_text("{}\n")
     code, evidence = HARNESS.dry_run_ready(value, tmp_path / "dry")
     assert code == 0 and evidence["status"] == "passed"
-    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}
+    assert evidence["process_counts"] == {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}
     assert evidence["service_touched"] is False and evidence["gpu_command_executed"] is False
 
 
@@ -554,7 +706,7 @@ def test_canonical_dry_run_cli_has_zero_actual_processes(tmp_path: Path) -> None
     code = HARNESS.main(["--mode", "dry-run", "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "sudo_keepalive": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}
     assert evidence["service_touched"] is False
 
 
@@ -567,7 +719,7 @@ def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Pat
     code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "sudo_keepalive": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}
     assert evidence["profile_diagnostic"]["capture_executed"] is False
 
 
