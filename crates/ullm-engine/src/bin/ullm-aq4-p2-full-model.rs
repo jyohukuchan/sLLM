@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ullm_engine::aq4_worker_backend::QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV;
 use ullm_engine::inference_api::{
     CancellationToken, GenerationTimings, InferenceRequest, ReasoningUsage, ReleaseOutcome,
     SamplingParams,
@@ -371,8 +372,15 @@ fn run(args: Args) -> Result<(), String> {
 }
 
 fn validate_model_contract(model: &ServedModel) -> Result<(), String> {
-    if model.format.format_id != "AQ4_0" || model.format.implementation_id.is_empty() {
-        return Err("served-model format is not AQ4_0 with an implementation identity".to_string());
+    if model.format.format_id != "AQ4_0"
+        || model.format.implementation_id != "qwen35_aq4_rdna4_v1"
+        || model.worker.identity.device != "gfx1201"
+        || model.worker.identity.execution_profile != "rdna4_aq4_resident"
+    {
+        return Err(
+            "served-model format, implementation, device, or execution profile is not the AQ4 resident identity"
+                .to_string(),
+        );
     }
     if model.generation.sampling.temperature
         || model.generation.sampling.top_p
@@ -389,6 +397,18 @@ fn validate_model_contract(model: &ServedModel) -> Result<(), String> {
         || model.product.package.manifest_sha256.is_empty()
     {
         return Err("served-model package identity is incomplete".to_string());
+    }
+    let mut actual_environment = model.worker.required_environment.iter().collect::<Vec<_>>();
+    actual_environment.sort_unstable();
+    let mut required_environment = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
+    required_environment.sort_unstable();
+    if actual_environment.len() != required_environment.len()
+        || actual_environment
+            .iter()
+            .zip(&required_environment)
+            .any(|(actual, required)| actual.as_str() != *required)
+    {
+        return Err("served-model AQ4 required-environment contract is incomplete".to_string());
     }
     Ok(())
 }
