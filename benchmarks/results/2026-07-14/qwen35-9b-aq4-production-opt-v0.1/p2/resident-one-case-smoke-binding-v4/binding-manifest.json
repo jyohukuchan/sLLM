@@ -16,7 +16,7 @@
   "input_root": {
     "directory": {
       "device": 66306,
-      "inode": 10512713,
+      "inode": 10517903,
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
     },
     "members": {
@@ -25,7 +25,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/SHA256SUMS",
         "role": "sha256_manifest",
-        "sha256": "ccf4857a0a33e0c669a105fad199ef8ec3caf3483ba49f872f27a4b5ffb1f4f9",
+        "sha256": "a47c47d8ef2a3b6a0cfe14dbd48f1372eb52f848190c52d80c2a55ff30687ba7",
         "type": "regular_file"
       },
       "SUPERSEDED-0fd7993.json": {
@@ -33,7 +33,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/SUPERSEDED-0fd7993.json",
         "role": "historical_non_executable_bundle_record",
-        "sha256": "b3eb5e1c5242830187ce7925185e945c1d210c971ffa129273666e4c7b2bec72",
+        "sha256": "cb8e80cfe41b099ae2a4f7377f197acd44b9bf5326c1cfa529e4a4d0de5cfc6c",
         "type": "regular_file"
       },
       "bundle.json": {
@@ -41,7 +41,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/bundle.json",
         "role": "bundle_manifest",
-        "sha256": "6041c47bb69efc3bb3dd35e8537b02165a34892ccf48192779b9c33af725a748",
+        "sha256": "fcde1a7faaa262fff1fb290e232e330a023719a8d9dbff654f714b8141cfe644",
         "type": "regular_file"
       },
       "case-binding.json": {
@@ -57,7 +57,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/dry-run.json",
         "role": "resident_batch_dry_run",
-        "sha256": "14b147bb2c4bfd1acad7fde09021c82547eab87e8b49adaf05093afd43d6c669",
+        "sha256": "867090f3b7f3b57db87b4f39dc60ee33b619d31c59565c01df790622ba9f5d8d",
         "type": "regular_file"
       },
       "fake-ready.json": {
@@ -65,7 +65,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/fake-ready.json",
         "role": "synthetic_ready_event",
-        "sha256": "a26daf1a51499714e6e484694b2a94c107c02e8a604df3ae86de6ebbb0d7d54d",
+        "sha256": "8c6d3bfaaf14aec4f1c9ad6daa6783818753b8072468af03b224aa1809ee771b",
         "type": "regular_file"
       },
       "fixture-index.json": {
@@ -89,7 +89,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/identity.json",
         "role": "resident_identity",
-        "sha256": "883de9cdb773d83b71e7ea570a84ad9c1c8b93c15b11ef1307ec00e1f94ca741",
+        "sha256": "3ba78aa1dc6d041bfe12b00a81fa5cd02a2623af36df94a1425bc0a71b239429",
         "type": "regular_file"
       },
       "launch-command.json": {
@@ -97,7 +97,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/launch-command.json",
         "role": "exact_resident_launch_command",
-        "sha256": "12a1dc385e4e2dc1ee8910a901766a0b6614208ae60dbdcfc2cf1c1557636958",
+        "sha256": "7d2b98decba380f70228c4a952d5528c4fcdadda1d6a18d5432e1a7f7c3ec53f",
         "type": "regular_file"
       },
       "official-case.json": {
@@ -105,7 +105,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/official-case.json",
         "role": "trusted_official_expansion_case",
-        "sha256": "8f0d27ea03b995cfb26b4e3d5d4424a54a3a563bbcbbb046eb9feb70a1385d5d",
+        "sha256": "7ed38ab1440493045279a6c012070cd7cadbfe5cb922ef958b186dcc6f05ce1d",
         "type": "regular_file"
       },
       "package-manifest.json": {
@@ -137,7 +137,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver",
         "role": "detached_resident_driver",
-        "sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+        "sha256": "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8",
         "type": "regular_file"
       },
       "runner-dry-run-evidence.json": {
@@ -145,7 +145,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/runner-dry-run-evidence.json",
         "role": "trusted_runner_subprocess_evidence",
-        "sha256": "6d791cec5a79171a69540896df0974f3e95fc8297d6e059fa58b41ea81326550",
+        "sha256": "882130916126f7b8d72f2643eb938779cf25e3e27a4e8157b397b0e891a0cb6b",
         "type": "regular_file"
       },
       "served-model.json": {
@@ -161,7 +161,7 @@
         "nlink": 1,
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/trust-roots.json",
         "role": "independent_trust_roots",
-        "sha256": "8159476b86ebda6694963df3c973c01f26edd9f75db1e3c11ecc01958c87189f",
+        "sha256": "1277a3d68525deaff547ea6b499720c7e600ced662e44cbec1029be9c37cf07c",
         "type": "regular_file"
       },
       "trusted-runner.py": {
@@ -173,7 +173,7 @@
         "type": "regular_file"
       }
     },
-    "sha256": "9e2be7a00fb7cb4c085dc1bc3e8892d36bc8187a3f3e37bb802c97e0302a673a"
+    "sha256": "a2814f11fe390e168e7a643f4084a248a921f446a0e2d293e73de56af64e72e6"
   },
   "launch_eligible": false,
   "next_stage": {
@@ -187,8 +187,8 @@
     "required": true
   },
   "outputs": {
-    "runner_evidence_sha256": "733e0a0730bb278860a695d1a7bc35f2f536ed0ef90e3ad3400a40501e03da64",
-    "runner_plan_sha256": "003bc98b07b69c01636df1d40d2e1bd12ee2ad93ef7a476692a9fb3d244b6130",
+    "runner_evidence_sha256": "fd56e60650692ab04f8271386ef8b1b60f6fff95e66484e229e7a84fc76128fa",
+    "runner_plan_sha256": "69f8d620cf27fe9ea6c8c859d0fbd145e58f003ecdb48df7132da871b56295e8",
     "validator_report_canonical_sha256": "e4173764a06cd90a0d5d6faefaabd83a874595c94702549dda19004598a4684a",
     "validator_report_file_sha256": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2"
   },
@@ -203,25 +203,25 @@
   "status": "prepared_not_executed",
   "trust_roots": {
     "resident_driver": {
-      "binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+      "binary_sha256": "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8",
       "blob_unchanged": true,
-      "git_blob_at_binding_commit": "0bed05e56a07807fa1338a80dfba2f72de64d5af",
-      "normative_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
-      "source_sha256": "d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7"
+      "git_blob_at_binding_commit": "807511f74c6681e41874da1d83736869d15fe104",
+      "normative_commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
+      "source_sha256": "9e308b4d4f455517b090e631b9aec682f96caeaedec02766d144f34f3791a8d8"
     },
     "runner": {
       "git_blob": "6af99284b507035957102b9ab79a72d7561942a0",
       "sha256": "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
     },
-    "source_commit": "4005c80e542d7e37cf79e62d2fd053f99c0353c1",
-    "source_tree": "635d72f5b6aa1a5a63a43a3fc4fa005be4d7b213",
+    "source_commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
+    "source_tree": "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b",
     "validator": {
       "archive_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4/trusted-validator.py",
       "execution_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
-      "git_blob": "2d9aa53295f00750676e39d81276d632fd0c7144",
-      "sha256": "84b88ff3b3037675acca52a48c05bbd679d802d92abc482d5649e2be26ed5fb6",
-      "source_commit": "741616fd0a1be897b47b4c94308e5c65290b9749",
-      "source_tree": "9cbe2b015df6edd10e15c19ff406ab7843ff292b"
+      "git_blob": "740f5055b545e7ee091d166f877d2df550c4a1a2",
+      "sha256": "7db55d53c8a20c14eff632bb168f78101f7f7bc580b69a651472426828c5047c",
+      "source_commit": "3b7a8e4603ae79002bd5307ceee877f9dd2d8bfd",
+      "source_tree": "52eeb74093f9ca10bb5a03535a5ce56a711fbedd"
     }
   }
 }
