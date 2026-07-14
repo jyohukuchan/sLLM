@@ -30,6 +30,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SCHEMA = "ullm.aq4_p2_resident_batch.v1"
 DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v2"
+ONE_CASE_BUNDLE_SCHEMA = "ullm.aq4_p2_resident_smoke_binding_bundle.v3"
 WARMUP_RUNS = 2
 MEASURED_RUNS = 10
 READY_IDENTITY_KEYS = {
@@ -270,7 +271,7 @@ def atomic_write(path: Path, value: Any) -> None:
             pass
 
 
-def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any]) -> list[dict[str, Any]]:
+def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any], *, one_case_smoke: bool = False) -> list[dict[str, Any]]:
     if expanded.get("schema_version") != "ullm.aq4_production_p2_expanded.v2":
         raise BatchError("expanded manifest schema differs")
     if fixture_index.get("schema_version") != "ullm.aq4_p2_fixture_index.v1":
@@ -287,8 +288,10 @@ def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any])
         and case.get("device", {}).get("device_id") == "r9700-rdna4"
         and case.get("control_id") == "aq4_0_target"
     ]
-    if len(selected) != 84:
-        raise BatchError(f"representative full_model target profile must contain 84 cases, got {len(selected)}")
+    expected_cases = 1 if one_case_smoke else 84
+    label = "one-case smoke" if one_case_smoke else "representative full_model target profile"
+    if len(selected) != expected_cases:
+        raise BatchError(f"{label} must contain exactly {expected_cases} target cases, got {len(selected)}")
     selected_ids = [case.get("case_id") for case in selected]
     if len(set(selected_ids)) != len(selected_ids):
         raise BatchError("representative target profile contains duplicate case IDs")
@@ -313,6 +316,56 @@ def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any])
         if sha_file(fixture_path, "fixture") != entry.get("fixture_sha256"):
             raise BatchError(f"fixture hash differs: {case_id}")
     return sorted(selected, key=lambda case: case["case_id"])
+
+
+def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str, Any], fixture_index: dict[str, Any], identity: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    root = args.expanded.parent.resolve(strict=True)
+    expected_paths = {
+        "expanded": root / "case-binding.json",
+        "fixture_index": root / "fixture-index.json",
+        "identity": root / "identity.json",
+        "preflight": root / "preflight.json",
+        "policy": root / "policy.json",
+    }
+    for name, expected in expected_paths.items():
+        supplied = getattr(args, name).resolve(strict=True)
+        if supplied != expected:
+            raise BatchError(f"one-case smoke {name} is not the bundle v3 member")
+    bundle_path = root / "bundle.json"
+    fake_ready_path = root / "fake-ready.json"
+    bundle = load(bundle_path, "one-case smoke bundle")
+    fake_ready = load(fake_ready_path, "one-case smoke fake-ready")
+    if bundle.get("schema_version") != ONE_CASE_BUNDLE_SCHEMA or bundle.get("status") != "prepared_not_executed" or bundle.get("promotion") is not False:
+        raise BatchError("one-case smoke bundle v3 status/promotion differs")
+    if len(cases) != 1:
+        raise BatchError("one-case smoke internal case count differs")
+    case = cases[0]
+    bindings = bundle.get("bindings")
+    files = bundle.get("files")
+    case_binding_sha = sha_file(args.expanded, "one-case smoke case binding")
+    if not isinstance(bindings, dict) or bindings.get("case_binding_sha256") != case_binding_sha or bindings.get("case_sha256") != case["case_sha256"]:
+        raise BatchError("one-case smoke bundle case binding/hash differs")
+    case_file = files.get("case-binding.json") if isinstance(files, dict) else None
+    if not isinstance(case_file, dict) or case_file.get("sha256") != case_binding_sha or case_file.get("role") != "runtime_bound_case":
+        raise BatchError("one-case smoke bundle file binding differs")
+    if expanded.get("status") != "bound_one_case_smoke" or expanded.get("case_count") != 1 or expanded.get("canonical_case_sha256") != sha_bytes(canonical(cases)):
+        raise BatchError("one-case smoke case-binding root differs")
+    if fixture_index.get("subset") != "resident_one_case_smoke" or fixture_index.get("case_count") != 1 or fixture_index.get("expanded_manifest_sha256") != case_binding_sha:
+        raise BatchError("one-case smoke fixture index binding differs")
+    if identity.get("expanded_manifest_sha256") != case_binding_sha or identity.get("hash_binding", {}).get("bound_case_manifest_sha256") != case_binding_sha:
+        raise BatchError("one-case smoke identity case binding differs")
+    expected_binary_sha256 = identity.get("resident_driver_identity", {}).get("binary_sha256")
+    if not isinstance(expected_binary_sha256, str) or SHA256_RE.fullmatch(expected_binary_sha256) is None:
+        raise BatchError("one-case smoke resident binary binding is invalid")
+    session_id, driver_identity = validate_ready(fake_ready, identity, cases, expected_binary_sha256)
+    return bundle, {
+        "mode": "validate_only",
+        "bundle": {"path": str(bundle_path), "sha256": sha_file(bundle_path, "one-case smoke bundle")},
+        "fake_ready": {"path": str(fake_ready_path), "sha256": sha_file(fake_ready_path, "one-case smoke fake-ready")},
+        "driver_fake_handshake": "passed",
+        "resident_session_id": session_id,
+        "driver_identity": driver_identity,
+    }
 
 
 def _send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
@@ -491,8 +544,13 @@ def run_batch(args: argparse.Namespace) -> int:
     policy["_path"], policy["_sha256"] = str(args.policy.resolve()), policy_link["sha256"]
     if args.baseline_kind not in {"active-production", "p3-current-head"}:
         raise BatchError("baseline kind must identify one immutable build/run")
-    cases = select_target_cases(expanded, fixture_index)
+    cases = select_target_cases(expanded, fixture_index, one_case_smoke=args.one_case_smoke)
+    smoke_validation = None
+    if args.one_case_smoke:
+        _, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, cases)
     plan = build_plan(cases, args.expanded, args.fixture_index, args.run_id, args.baseline_kind, identity, policy)
+    if args.one_case_smoke:
+        plan.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False, "validation": smoke_validation})
     if args.dry_run:
         atomic_write(args.output_dir / "resident-batch.plan.json", plan)
         return 0
@@ -552,6 +610,8 @@ def run_batch(args: argparse.Namespace) -> int:
                         raise BatchError(f"resident driver case end failed: {case['case_id']}")
                 failure_reason = "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else next((item["terminal"]["reason_code"] for item in runs if item["status"] != "ok"), None)
                 raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, lock_owner, runs, failure_reason)
+                if args.one_case_smoke:
+                    raw.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False})
                 atomic_write(args.output_dir / f"{case['case_id']}.raw.json", raw)
                 completed_cases += 1
                 if reuse_forbidden:
@@ -585,6 +645,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lock-path", type=Path, default=DEFAULT_LOCK_PATH)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--one-case-smoke", action="store_true", help="run the exact bundle-v3 one-case smoke; never promotion eligible")
     args = parser.parse_args(argv)
     try:
         return run_batch(args)
