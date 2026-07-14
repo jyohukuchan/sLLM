@@ -511,6 +511,77 @@ def test_lock_contention_fails_before_spawn_and_exception_releases_lock(tmp_path
         os.close(descriptor)
 
 
+def test_bound_device_lock_reuses_exact_live_preflight_inode(tmp_path: Path) -> None:
+    lock_path = tmp_path / "bound-r9700.lock"
+    lock_path.touch(mode=0o600)
+    metadata = lock_path.lstat()
+    expected = {"device": metadata.st_dev, "inode": metadata.st_ino}
+
+    with BATCH.acquire_device_lock(
+        lock_path,
+        "bound-lock",
+        {"sha256": "a" * 64},
+        expected_identity=expected,
+    ) as owner:
+        assert owner["device"] == expected["device"]
+        assert owner["inode"] == expected["inode"]
+        current = lock_path.lstat()
+        assert (current.st_dev, current.st_ino) == (expected["device"], expected["inode"])
+
+
+def test_bound_device_lock_rejects_missing_and_replaced_inode(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.lock"
+    with pytest.raises(BATCH.BatchError, match="metadata failed"):
+        with BATCH.acquire_device_lock(
+            missing,
+            "missing",
+            {},
+            expected_identity={"device": tmp_path.stat().st_dev, "inode": 1},
+        ):
+            pass
+    assert not missing.exists()
+
+    lock_path = tmp_path / "replaced.lock"
+    lock_path.touch(mode=0o600)
+    original = lock_path.lstat()
+    lock_path.rename(tmp_path / "original.lock")
+    lock_path.touch(mode=0o600)
+    with pytest.raises(BATCH.BatchError, match="identity differs"):
+        with BATCH.acquire_device_lock(
+            lock_path,
+            "replaced",
+            {},
+            expected_identity={"device": original.st_dev, "inode": original.st_ino},
+        ):
+            pass
+
+
+def test_bound_device_lock_rejects_swap_between_lstat_and_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock_path = tmp_path / "raced.lock"
+    lock_path.touch(mode=0o600)
+    original = lock_path.lstat()
+    real_open = os.open
+    swapped = False
+
+    def racing_open(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], flags: int, mode: int = 0o777) -> int:
+        nonlocal swapped
+        if not swapped and Path(path) == lock_path:
+            swapped = True
+            lock_path.rename(tmp_path / "original-raced.lock")
+            lock_path.touch(mode=0o600)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    with pytest.raises(BATCH.BatchError, match="changed while opening"):
+        with BATCH.acquire_device_lock(
+            lock_path,
+            "raced",
+            {},
+            expected_identity={"device": original.st_dev, "inode": original.st_ino},
+        ):
+            pass
+
+
 def test_fixture_index_rejects_relative_and_symlink_parent_paths(tmp_path: Path) -> None:
     for variant in ("relative", "symlink-parent"):
         root = tmp_path / variant
