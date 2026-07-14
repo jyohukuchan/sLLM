@@ -81,6 +81,7 @@ BINDING_FILES = {
     "binding-manifest.json": (0o444, "immutable_binding_manifest"),
 }
 _VALIDATION_HOOK: Callable[[Path], None] | None = None
+_BINDING_VALIDATION_HOOK: Callable[[Path], None] | None = None
 
 
 class BundleError(ValueError):
@@ -859,14 +860,17 @@ def validate_binding(validator_commit: str, validator_sha: str, root: Path = BIN
     reject_symlink_components(root, "binding root")
     if root.is_symlink() or not root.is_dir():
         raise BundleError("binding root must be a non-symlink directory")
+    root_before = fingerprint(root.lstat())
     allowed = set(BINDING_FILES) | {"SHA256SUMS"}
     if {entry.name for entry in root.iterdir()} != allowed:
         raise BundleError("binding sidecar exact member coverage differs")
+    initial: dict[str, tuple[int, ...]] = {}
     for name in sorted(allowed):
         metadata = (root / name).lstat()
         mode = BINDING_FILES.get(name, (0o444, ""))[0]
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != mode:
             raise BundleError(f"binding sidecar member differs: {name}")
+        initial[name] = fingerprint(metadata)
     runner_raw, validator_raw, validator_tree, validator_object = binding_sources(validator_commit, validator_sha)
     if read_stable(root / "trusted-runner.py", "binding runner") != runner_raw or read_stable(root / "trusted-validator.py", "binding validator") != validator_raw:
         raise BundleError("binding trusted source differs")
@@ -890,6 +894,19 @@ def validate_binding(validator_commit: str, validator_sha: str, root: Path = BIN
     expected_sums = "".join(f"{sha_file(root / name, f'binding sum {name}')}  {name}\n" for name in sorted(BINDING_FILES)).encode("ascii")
     if read_stable(root / "SHA256SUMS", "binding SHA256SUMS") != expected_sums:
         raise BundleError("binding SHA256SUMS differs")
+    if _BINDING_VALIDATION_HOOK is not None:
+        _BINDING_VALIDATION_HOOK(root)
+    if {entry.name for entry in root.iterdir()} != allowed or fingerprint(root.lstat()) != root_before:
+        raise BundleError("late binding sidecar directory mutation detected")
+    for name, before in initial.items():
+        path = root / name
+        try:
+            after = path.lstat()
+        except FileNotFoundError as error:
+            raise BundleError(f"late binding sidecar member mutation detected: {name}") from error
+        mode = BINDING_FILES.get(name, (0o444, ""))[0]
+        if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1 or stat.S_IMODE(after.st_mode) != mode or fingerprint(after) != before:
+            raise BundleError(f"late binding sidecar member mutation detected: {name}")
     return manifest
 
 
