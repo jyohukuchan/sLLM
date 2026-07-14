@@ -93,6 +93,54 @@ fn read_runtime_buffer_f32(
     Ok(decode_f32_le_values(&bytes))
 }
 
+fn aq4_invocation_produces_full_logits(top_k: usize, direct_top1_enabled: bool) -> bool {
+    !(top_k == 1 && direct_top1_enabled)
+}
+
+fn begin_logit_generation(
+    generation_epoch: &mut u64,
+    full_logits_epoch: &mut Option<u64>,
+) -> Result<u64, String> {
+    *full_logits_epoch = None;
+    generation_epoch
+        .checked_add(1)
+        .ok_or_else(|| "resident lm_head generation epoch overflows".to_string())
+}
+
+fn finish_logit_generation<T>(
+    result: Result<T, String>,
+    generation_epoch: &mut u64,
+    full_logits_epoch: &mut Option<u64>,
+    next_epoch: u64,
+    produced_full_logits: bool,
+) -> Result<T, String> {
+    let value = result?;
+    *generation_epoch = next_epoch;
+    *full_logits_epoch = produced_full_logits.then_some(next_epoch);
+    Ok(value)
+}
+
+fn validate_full_logits_epoch(
+    generation_epoch: u64,
+    full_logits_epoch: Option<u64>,
+    expected_epoch: u64,
+) -> Result<(), String> {
+    if generation_epoch == 0 {
+        return Err("calibration full logits reject the load-time prewarm buffer".into());
+    }
+    if generation_epoch != expected_epoch {
+        return Err(format!(
+            "calibration generation epoch is stale: current={generation_epoch} expected={expected_epoch}"
+        ));
+    }
+    if full_logits_epoch != Some(expected_epoch) {
+        return Err(format!(
+            "calibration full logits were not materialized for generation epoch {expected_epoch}"
+        ));
+    }
+    Ok(())
+}
+
 fn env_flag_enabled(name: &str) -> bool {
     env::var(name)
         .map(|value| flag_value_enabled(&value))
@@ -122,6 +170,8 @@ pub enum PackageLmHeadRuntime {
         logits_host: Vec<u8>,
         /// Immutable execution policy captured while the resident head is loaded.
         direct_top1_enabled: bool,
+        generation_epoch: u64,
+        full_logits_epoch: Option<u64>,
     },
     GpuResidentF32 {
         dtype: String,
@@ -139,6 +189,8 @@ pub enum PackageLmHeadRuntime {
         top1_partial_indices_host: Vec<u8>,
         logits_host: Vec<u8>,
         matrix_bytes: usize,
+        generation_epoch: u64,
+        full_logits_epoch: Option<u64>,
     },
 }
 
@@ -260,6 +312,8 @@ impl PackageLmHeadRuntime {
                         top1_partial_indices_host,
                         logits_host,
                         direct_top1_enabled,
+                        generation_epoch: 0,
+                        full_logits_epoch: None,
                     });
                 }
                 let bundle = select_passthrough_payload_bundle(path, &selector)
@@ -425,6 +479,8 @@ impl PackageLmHeadRuntime {
                     top1_partial_indices_host,
                     logits_host,
                     matrix_bytes,
+                    generation_epoch: 0,
+                    full_logits_epoch: None,
                 })
             }
         }
@@ -455,8 +511,11 @@ impl PackageLmHeadRuntime {
                 top1_partial_indices_host,
                 logits_host,
                 direct_top1_enabled,
+                generation_epoch,
+                full_logits_epoch,
                 ..
             } => {
+                let next_epoch = begin_logit_generation(generation_epoch, full_logits_epoch)?;
                 if hidden_values.len() != *hidden {
                     return Err(format!(
                         "resident AQ4 lm_head input length mismatch: got {} expected {}",
@@ -467,7 +526,7 @@ impl PackageLmHeadRuntime {
                 input_buffer
                     .copy_from_host(0, &encode_f32_to_bytes(hidden_values), Some(stream))
                     .map_err(|err| format!("failed to copy resident AQ4 lm_head input: {err}"))?;
-                package_gpu_resident_aq4_lm_head_top_logits(
+                let result = package_gpu_resident_aq4_lm_head_top_logits(
                     stream,
                     matrix,
                     input_buffer,
@@ -481,6 +540,13 @@ impl PackageLmHeadRuntime {
                     logits_host,
                     top_k,
                     *direct_top1_enabled,
+                );
+                finish_logit_generation(
+                    result,
+                    generation_epoch,
+                    full_logits_epoch,
+                    next_epoch,
+                    aq4_invocation_produces_full_logits(top_k, *direct_top1_enabled),
                 )
             }
             Self::GpuResidentF32 {
@@ -495,8 +561,11 @@ impl PackageLmHeadRuntime {
                 top1_partial_values_host,
                 top1_partial_indices_host,
                 logits_host,
+                generation_epoch,
+                full_logits_epoch,
                 ..
             } => {
+                let next_epoch = begin_logit_generation(generation_epoch, full_logits_epoch)?;
                 if hidden_values.len() != *hidden {
                     return Err(format!(
                         "resident lm_head input length mismatch: got {} expected {}",
@@ -507,7 +576,7 @@ impl PackageLmHeadRuntime {
                 input_buffer
                     .copy_from_host(0, &encode_f32_to_bytes(hidden_values), Some(stream))
                     .map_err(|err| format!("failed to copy resident lm_head input: {err}"))?;
-                package_gpu_resident_lm_head_top_logits(
+                let result = package_gpu_resident_lm_head_top_logits(
                     stream,
                     matrix_buffer,
                     input_buffer,
@@ -521,6 +590,13 @@ impl PackageLmHeadRuntime {
                     top1_partial_indices_host,
                     logits_host,
                     top_k,
+                );
+                finish_logit_generation(
+                    result,
+                    generation_epoch,
+                    full_logits_epoch,
+                    next_epoch,
+                    true,
                 )
             }
         }
@@ -531,6 +607,49 @@ impl PackageLmHeadRuntime {
             self,
             Self::GpuResidentAq4 { .. } | Self::GpuResidentF32 { .. }
         )
+    }
+
+    /// Returns whether ordinary top-1 generation materializes the complete vocabulary row.
+    pub fn calibration_full_logits_top1_available(&self) -> bool {
+        match self {
+            Self::CpuChunked { .. } => false,
+            Self::GpuResidentAq4 {
+                direct_top1_enabled,
+                ..
+            } => !direct_top1_enabled,
+            Self::GpuResidentF32 { .. } => true,
+        }
+    }
+
+    pub fn last_generation_epoch(&self) -> Option<u64> {
+        match self {
+            Self::CpuChunked { .. } => None,
+            Self::GpuResidentAq4 {
+                generation_epoch, ..
+            }
+            | Self::GpuResidentF32 {
+                generation_epoch, ..
+            } => (*generation_epoch != 0).then_some(*generation_epoch),
+        }
+    }
+
+    pub fn require_full_logits_epoch(&self, expected_epoch: u64) -> Result<(), String> {
+        let (generation_epoch, full_logits_epoch) = match self {
+            Self::CpuChunked { .. } => {
+                return Err("calibration full logits require a resident device LM head".to_string());
+            }
+            Self::GpuResidentAq4 {
+                generation_epoch,
+                full_logits_epoch,
+                ..
+            }
+            | Self::GpuResidentF32 {
+                generation_epoch,
+                full_logits_epoch,
+                ..
+            } => (*generation_epoch, *full_logits_epoch),
+        };
+        validate_full_logits_epoch(generation_epoch, full_logits_epoch, expected_epoch)
     }
 
     pub fn top_logits_from_device_buffer(
@@ -554,22 +673,34 @@ impl PackageLmHeadRuntime {
                 top1_partial_indices_host,
                 logits_host,
                 direct_top1_enabled,
+                generation_epoch,
+                full_logits_epoch,
                 ..
-            } => package_gpu_resident_aq4_lm_head_top_logits(
-                stream,
-                matrix,
-                hidden_buffer,
-                *vocab,
-                *hidden,
-                logits_buffer,
-                top1_partial_values_buffer,
-                top1_partial_indices_buffer,
-                top1_partial_values_host,
-                top1_partial_indices_host,
-                logits_host,
-                top_k,
-                *direct_top1_enabled,
-            ),
+            } => {
+                let next_epoch = begin_logit_generation(generation_epoch, full_logits_epoch)?;
+                let result = package_gpu_resident_aq4_lm_head_top_logits(
+                    stream,
+                    matrix,
+                    hidden_buffer,
+                    *vocab,
+                    *hidden,
+                    logits_buffer,
+                    top1_partial_values_buffer,
+                    top1_partial_indices_buffer,
+                    top1_partial_values_host,
+                    top1_partial_indices_host,
+                    logits_host,
+                    top_k,
+                    *direct_top1_enabled,
+                );
+                finish_logit_generation(
+                    result,
+                    generation_epoch,
+                    full_logits_epoch,
+                    next_epoch,
+                    aq4_invocation_produces_full_logits(top_k, *direct_top1_enabled),
+                )
+            }
             Self::GpuResidentF32 {
                 vocab,
                 hidden,
@@ -581,22 +712,34 @@ impl PackageLmHeadRuntime {
                 top1_partial_values_host,
                 top1_partial_indices_host,
                 logits_host,
+                generation_epoch,
+                full_logits_epoch,
                 ..
-            } => package_gpu_resident_lm_head_top_logits(
-                stream,
-                matrix_buffer,
-                hidden_buffer,
-                *matrix_storage,
-                *vocab,
-                *hidden,
-                logits_buffer,
-                top1_partial_values_buffer,
-                top1_partial_indices_buffer,
-                top1_partial_values_host,
-                top1_partial_indices_host,
-                logits_host,
-                top_k,
-            ),
+            } => {
+                let next_epoch = begin_logit_generation(generation_epoch, full_logits_epoch)?;
+                let result = package_gpu_resident_lm_head_top_logits(
+                    stream,
+                    matrix_buffer,
+                    hidden_buffer,
+                    *matrix_storage,
+                    *vocab,
+                    *hidden,
+                    logits_buffer,
+                    top1_partial_values_buffer,
+                    top1_partial_indices_buffer,
+                    top1_partial_values_host,
+                    top1_partial_indices_host,
+                    logits_host,
+                    top_k,
+                );
+                finish_logit_generation(
+                    result,
+                    generation_epoch,
+                    full_logits_epoch,
+                    next_epoch,
+                    true,
+                )
+            }
         }
     }
 
@@ -609,8 +752,10 @@ impl PackageLmHeadRuntime {
     pub fn visit_last_device_logits(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,
+        expected_epoch: u64,
         visitor: &mut dyn FnMut(usize, &[f32]) -> Result<(), String>,
     ) -> Result<usize, String> {
+        self.require_full_logits_epoch(expected_epoch)?;
         let (vocab, logits_buffer, logits_host) = match self {
             Self::CpuChunked { .. } => {
                 return Err(
@@ -1682,6 +1827,49 @@ mod tests {
         for value in ["", "0", "false", "True", "on"] {
             assert!(!flag_value_enabled(value));
         }
+    }
+
+    #[test]
+    fn direct_aq4_top1_never_claims_a_full_logit_row() {
+        assert!(!aq4_invocation_produces_full_logits(1, true));
+        assert!(aq4_invocation_produces_full_logits(1, false));
+        assert!(aq4_invocation_produces_full_logits(10, true));
+    }
+
+    #[test]
+    fn full_logit_epoch_rejects_prewarm_missing_and_stale_rows() {
+        assert!(validate_full_logits_epoch(0, None, 0).is_err());
+
+        let mut generation_epoch = 0;
+        let mut full_logits_epoch = None;
+        let first = begin_logit_generation(&mut generation_epoch, &mut full_logits_epoch).unwrap();
+        finish_logit_generation(
+            Ok(()),
+            &mut generation_epoch,
+            &mut full_logits_epoch,
+            first,
+            false,
+        )
+        .unwrap();
+        assert_eq!((generation_epoch, full_logits_epoch), (1, None));
+        assert!(validate_full_logits_epoch(generation_epoch, full_logits_epoch, first).is_err());
+
+        let second = begin_logit_generation(&mut generation_epoch, &mut full_logits_epoch).unwrap();
+        finish_logit_generation(
+            Ok(()),
+            &mut generation_epoch,
+            &mut full_logits_epoch,
+            second,
+            true,
+        )
+        .unwrap();
+        assert_eq!((generation_epoch, full_logits_epoch), (2, Some(2)));
+        validate_full_logits_epoch(generation_epoch, full_logits_epoch, second).unwrap();
+        assert!(validate_full_logits_epoch(generation_epoch, full_logits_epoch, first).is_err());
+
+        let _third = begin_logit_generation(&mut generation_epoch, &mut full_logits_epoch).unwrap();
+        assert_eq!(full_logits_epoch, None);
+        assert!(validate_full_logits_epoch(generation_epoch, full_logits_epoch, second).is_err());
     }
 
     #[test]

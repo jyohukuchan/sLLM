@@ -1262,8 +1262,10 @@ impl Qwen35Aq4ModelRuntime {
     /// are performed.
     pub fn visit_last_generation_state(
         &mut self,
+        expected_epoch: u64,
         observer: &mut dyn Qwen35Aq4CalibrationObserver,
     ) -> Result<(), String> {
+        self.lm_head.require_full_logits_epoch(expected_epoch)?;
         let hidden = self.geometry.hidden;
         let vocab = self.geometry.vocab;
         observer.begin(hidden, vocab)?;
@@ -1281,15 +1283,25 @@ impl Qwen35Aq4ModelRuntime {
         }
         let mut logit_visitor =
             |start: usize, values: &[f32]| observer.observe_logit_chunk(start, values);
-        let visited_logits = self
-            .lm_head
-            .visit_last_device_logits(&mut self.stream, &mut logit_visitor)?;
+        let visited_logits = self.lm_head.visit_last_device_logits(
+            &mut self.stream,
+            expected_epoch,
+            &mut logit_visitor,
+        )?;
         if visited_logits != vocab {
             return Err(format!(
                 "Qwen3.5 AQ4 calibration logit length differs: got {visited_logits} expected {vocab}"
             ));
         }
         observer.finish()
+    }
+
+    pub fn calibration_full_logits_top1_available(&self) -> bool {
+        self.lm_head.calibration_full_logits_top1_available()
+    }
+
+    pub fn last_generation_state_epoch(&self) -> Option<u64> {
+        self.lm_head.last_generation_epoch()
     }
 
     pub fn final_norm(&self) -> &PassthroughF32Data {

@@ -502,8 +502,17 @@ pub trait Qwen35Aq4SessionModel {
 
     fn top_token_from_last_layer(&mut self, label: &str) -> Result<usize, String>;
 
+    fn calibration_full_logits_top1_available(&self) -> bool {
+        false
+    }
+
+    fn last_generation_state_epoch(&self) -> Option<u64> {
+        None
+    }
+
     fn visit_last_generation_state(
         &mut self,
+        _expected_epoch: u64,
         _observer: &mut dyn Qwen35Aq4CalibrationObserver,
     ) -> Result<(), String> {
         Err("Qwen3.5 AQ4 session model does not support calibration observation".into())
@@ -622,9 +631,18 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
 
     fn visit_last_generation_state(
         &mut self,
+        expected_epoch: u64,
         observer: &mut dyn Qwen35Aq4CalibrationObserver,
     ) -> Result<(), String> {
-        Qwen35Aq4ModelRuntime::visit_last_generation_state(self, observer)
+        Qwen35Aq4ModelRuntime::visit_last_generation_state(self, expected_epoch, observer)
+    }
+
+    fn calibration_full_logits_top1_available(&self) -> bool {
+        Qwen35Aq4ModelRuntime::calibration_full_logits_top1_available(self)
+    }
+
+    fn last_generation_state_epoch(&self) -> Option<u64> {
+        Qwen35Aq4ModelRuntime::last_generation_state_epoch(self)
     }
 
     fn take_failed_operation_executions(&mut self) -> Vec<[Option<OperationExecutionRecord>; 2]> {
@@ -669,6 +687,7 @@ pub struct Qwen35Aq4PreparedToken {
     reasoning_tokens_before: usize,
     forced_end_tokens_before: usize,
     nonce: u64,
+    generation_state_epoch: Option<u64>,
 }
 
 /// Immutable source-token sequence used only by the calibration replay path.
@@ -1659,6 +1678,12 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
                 self.status
             ));
         }
+        if !self.model.calibration_full_logits_top1_available() {
+            return Err(
+                "Qwen3.5 AQ4 calibration requires top-1 generation to materialize full logits"
+                    .into(),
+            );
+        }
         if request.reasoning.is_some() {
             return Err("Qwen3.5 AQ4 calibration replay does not support reasoning state".into());
         }
@@ -1709,7 +1734,20 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         {
             return self.fail("Qwen3.5 AQ4 calibration observation rejected cancellation");
         }
-        if let Err(error) = self.model.visit_last_generation_state(observer) {
+        if !self.model.calibration_full_logits_top1_available() {
+            return self.fail("Qwen3.5 AQ4 calibration observation has no full-logit top-1 path");
+        }
+        let generation_state_epoch = match prepared.generation_state_epoch {
+            Some(epoch) => epoch,
+            None => {
+                return self
+                    .fail("Qwen3.5 AQ4 calibration prepared token has no generation state epoch");
+            }
+        };
+        if let Err(error) = self
+            .model
+            .visit_last_generation_state(generation_state_epoch, observer)
+        {
             return self.fail(format!(
                 "Qwen3.5 AQ4 calibration observation failed: {error}"
             ));
@@ -2122,6 +2160,11 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
                 Err(error) => return self.fail(format!("{label} top-1 failed: {error}")),
             },
         };
+        let generation_state_epoch = if forced_token.is_none() {
+            self.model.last_generation_state_epoch()
+        } else {
+            None
+        };
         if token_id >= self.model.vocab_size() {
             return self.fail(format!(
                 "{label} top-1 token {token_id} exceeds vocabulary size {}",
@@ -2188,6 +2231,7 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             reasoning_tokens_before,
             forced_end_tokens_before,
             nonce: self.next_nonce,
+            generation_state_epoch,
         };
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
             if let Err(error) = observer.prepare_publication() {
@@ -3215,6 +3259,9 @@ mod tests {
         calibration_hidden: Vec<f32>,
         calibration_logits: Vec<f32>,
         calibration_observations: usize,
+        calibration_full_logits_available: bool,
+        calibration_generation_epoch: u64,
+        calibration_full_logits_epoch: Option<u64>,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -3302,15 +3349,41 @@ mod tests {
         }
 
         fn top_token_from_last_layer(&mut self, _: &str) -> Result<usize, String> {
-            self.logits
+            let token = self
+                .logits
                 .pop_front()
-                .unwrap_or_else(|| Err("script exhausted".to_string()))
+                .unwrap_or_else(|| Err("script exhausted".to_string()))?;
+            self.calibration_generation_epoch = self
+                .calibration_generation_epoch
+                .checked_add(1)
+                .ok_or_else(|| "scripted calibration epoch overflow".to_string())?;
+            self.calibration_full_logits_epoch = self
+                .calibration_full_logits_available
+                .then_some(self.calibration_generation_epoch);
+            Ok(token)
+        }
+
+        fn calibration_full_logits_top1_available(&self) -> bool {
+            self.calibration_full_logits_available
+        }
+
+        fn last_generation_state_epoch(&self) -> Option<u64> {
+            (self.calibration_generation_epoch != 0).then_some(self.calibration_generation_epoch)
         }
 
         fn visit_last_generation_state(
             &mut self,
+            expected_epoch: u64,
             observer: &mut dyn Qwen35Aq4CalibrationObserver,
         ) -> Result<(), String> {
+            if self.calibration_generation_epoch != expected_epoch
+                || self.calibration_full_logits_epoch != Some(expected_epoch)
+            {
+                return Err(format!(
+                    "scripted calibration logits epoch differs: generation={} full={:?} expected={expected_epoch}",
+                    self.calibration_generation_epoch, self.calibration_full_logits_epoch
+                ));
+            }
             self.calibration_observations += 1;
             observer.begin(self.calibration_hidden.len(), self.calibration_logits.len())?;
             for (chunk_index, values) in self.calibration_hidden.chunks(2).enumerate() {
@@ -3474,6 +3547,7 @@ mod tests {
         let mut scripted = model(tokens);
         scripted.calibration_hidden = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         scripted.calibration_logits = vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        scripted.calibration_full_logits_available = true;
         Qwen35Aq4InferenceSession::from_model(scripted, Qwen35Aq4SessionConfig::greedy(8, vec![2]))
             .unwrap()
     }
@@ -3786,6 +3860,7 @@ mod tests {
             reasoning_tokens_before: 0,
             forced_end_tokens_before: 0,
             nonce: 0,
+            generation_state_epoch: Some(1),
         };
         assert!(
             before
@@ -3976,6 +4051,89 @@ mod tests {
         session.publish_prepared(token, |_| Ok(())).unwrap();
         session.finish_and_reset().unwrap();
         assert_eq!(session.model().calibration_observations, 0);
+    }
+
+    #[test]
+    fn calibration_rejects_direct_top1_policy_at_start_and_observe() {
+        let mut unavailable = calibration_session(&[7]);
+        unavailable.model.calibration_full_logits_available = false;
+        assert!(
+            unavailable
+                .start_calibration_request(
+                    request("direct-top1-start", &[4], 1),
+                    CancellationToken::new(),
+                    calibration_replay(&[11]),
+                )
+                .unwrap_err()
+                .contains("materialize full logits")
+        );
+        assert_eq!(unavailable.status(), Qwen35Aq4SessionStatus::Ready);
+
+        let mut changed = calibration_session(&[7]);
+        changed
+            .start_calibration_request(
+                request("direct-top1-observe", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut changed);
+        changed.model.calibration_full_logits_available = false;
+        assert!(
+            changed
+                .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+                .unwrap_err()
+                .contains("no full-logit top-1 path")
+        );
+        assert_eq!(changed.status(), Qwen35Aq4SessionStatus::Failed);
+        changed.abort_and_reset().unwrap();
+    }
+
+    #[test]
+    fn calibration_rejects_missing_and_different_step_logit_epochs() {
+        let mut missing = calibration_session(&[7]);
+        missing
+            .start_calibration_request(
+                request("missing-full-row", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let token = next_prepared(&mut missing);
+        missing.model.calibration_full_logits_epoch = None;
+        assert!(
+            missing
+                .observe_prepared_calibration(&token, &mut CalibrationCollector::default())
+                .unwrap_err()
+                .contains("logits epoch differs")
+        );
+        assert_eq!(missing.status(), Qwen35Aq4SessionStatus::Failed);
+        missing.abort_and_reset().unwrap();
+
+        let mut stale = calibration_session(&[7, 8]);
+        stale
+            .start_calibration_request(
+                request("different-step-row", &[4], 1),
+                CancellationToken::new(),
+                calibration_replay(&[11]),
+            )
+            .unwrap();
+        let first = next_prepared(&mut stale);
+        assert_eq!(
+            stale
+                .model
+                .top_token_from_last_layer("foreign step")
+                .unwrap(),
+            8
+        );
+        assert!(
+            stale
+                .observe_prepared_calibration(&first, &mut CalibrationCollector::default())
+                .unwrap_err()
+                .contains("logits epoch differs")
+        );
+        assert_eq!(stale.status(), Qwen35Aq4SessionStatus::Failed);
+        stale.abort_and_reset().unwrap();
     }
 
     #[test]
