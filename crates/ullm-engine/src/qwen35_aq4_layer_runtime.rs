@@ -3029,6 +3029,65 @@ impl PackageSelfAttnResidentStepLayer {
         workspace: &mut PackageSelfAttnSequenceWorkspace,
         label: &str,
     ) -> Result<[OperationExecutionRecord; 2], String> {
+        self.run_device_sequence_for_phase_with_output(
+            stream,
+            residual,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            cache_start,
+            phase,
+            workspace,
+            None,
+            label,
+        )
+    }
+
+    /// Runs the sequence path with its final `[M, H]` output written directly to a caller-owned
+    /// ping/pong buffer. The caller must provide a buffer that is disjoint from `residual` and
+    /// the shared workspace; the model runtime owns that aliasing invariant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_device_sequence_for_phase_to_buffer(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        rotary_dim: usize,
+        rope_base: f32,
+        cache_start: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageSelfAttnSequenceWorkspace,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], String> {
+        self.run_device_sequence_for_phase_with_output(
+            stream,
+            residual,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            cache_start,
+            phase,
+            workspace,
+            Some(output),
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_device_sequence_for_phase_with_output(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        rotary_dim: usize,
+        rope_base: f32,
+        cache_start: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageSelfAttnSequenceWorkspace,
+        mut direct_output: Option<&mut ullm_runtime_sys::RuntimeBuffer>,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], String> {
         self.request_state.ensure_ready(label)?;
         if !(2..=128).contains(&sequence_len) || sequence_len > workspace.max_width {
             return Err(format!(
@@ -3082,6 +3141,16 @@ impl PackageSelfAttnResidentStepLayer {
             .checked_mul(self.weights.hidden)
             .ok_or_else(|| format!("{label} self-attn sequence hidden elements overflow"))?;
         let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn sequence hidden")?;
+        if let Some(output) = direct_output.as_deref() {
+            let output_bytes = output
+                .size()
+                .map_err(|error| format!("failed to query {label} direct output bytes: {error}"))?;
+            if output_bytes < hidden_bytes {
+                return Err(format!(
+                    "{label} direct output buffer is too small: got {output_bytes} expected at least {hidden_bytes}"
+                ));
+            }
+        }
         let residual_bytes = residual
             .size()
             .map_err(|error| format!("failed to query {label} residual size: {error}"))?;
@@ -3419,7 +3488,9 @@ impl PackageSelfAttnResidentStepLayer {
             &workspace.attention_projection_input,
             &workspace.attention_block_output,
             hidden_elements,
-            &mut workspace.layer_output,
+            direct_output
+                .as_deref_mut()
+                .unwrap_or(&mut workspace.layer_output),
             Some(stream),
         ) {
             return fail(
@@ -3451,7 +3522,7 @@ impl PackageSelfAttnResidentStepLayer {
             };
         if let Err(error) = self.layer_output_buffer.copy_from_buffer(
             0,
-            &workspace.layer_output,
+            direct_output.as_deref().unwrap_or(&workspace.layer_output),
             last_row_offset_bytes,
             one_row_bytes,
             Some(stream),
@@ -4569,7 +4640,76 @@ impl PackageLinearAttnResidentStepLayer {
         self.last_component_step_ms = None;
         self.last_operation_executions = [None, None];
         let result =
-            self.run_device_sequence_inner(stream, residual, sequence_len, workspace, label);
+            self.run_device_sequence_inner(stream, residual, sequence_len, workspace, None, label);
+        if result.is_err() {
+            self.request_state.mark_execution_failed();
+        }
+        result?;
+        let [first, second] = self.take_last_operation_executions();
+        Ok([
+            first.ok_or_else(|| format!("{label} did not record QKV prepare"))?,
+            second.ok_or_else(|| format!("{label} did not record recurrent scan"))?,
+        ])
+    }
+
+    /// Runs the sequence path with its final `[M, H]` output written directly to a caller-owned
+    /// ping/pong buffer. The caller must provide a buffer that is disjoint from `residual` and
+    /// the shared workspace; the model runtime owns that aliasing invariant.
+    pub fn run_device_sequence_for_phase_to_buffer(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageLinearAttnSequenceWorkspace,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], String> {
+        self.request_state.ensure_ready(label)?;
+        if !(2..=workspace.max_width).contains(&sequence_len) || sequence_len > 128 {
+            return Err(format!(
+                "{label} sequence width must be in 2..={}, got {sequence_len}",
+                workspace.max_width.min(128)
+            ));
+        }
+        let geometry = self.sequence_geometry();
+        if geometry != workspace.geometry {
+            return Err(format!(
+                "{label} shared sequence workspace geometry mismatch: layer={geometry:?} workspace={:?}",
+                workspace.geometry
+            ));
+        }
+        let sequence_elements = sequence_len
+            .checked_mul(geometry.hidden)
+            .ok_or_else(|| format!("{label} sequence element count overflows"))?;
+        let required_bytes = checked_f32_byte_len(sequence_elements, label)?;
+        let residual_bytes = residual
+            .size()
+            .map_err(|error| format!("failed to query {label} residual bytes: {error}"))?;
+        if residual_bytes < required_bytes {
+            return Err(format!(
+                "{label} residual buffer is too small: got {residual_bytes} expected at least {required_bytes}"
+            ));
+        }
+        let output_bytes = output
+            .size()
+            .map_err(|error| format!("failed to query {label} direct output bytes: {error}"))?;
+        if output_bytes < required_bytes {
+            return Err(format!(
+                "{label} direct output buffer is too small: got {output_bytes} expected at least {required_bytes}"
+            ));
+        }
+        self.operation_phase = phase;
+        self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
+        let result = self.run_device_sequence_inner(
+            stream,
+            residual,
+            sequence_len,
+            workspace,
+            Some(output),
+            label,
+        );
         if result.is_err() {
             self.request_state.mark_execution_failed();
         }
@@ -4587,6 +4727,7 @@ impl PackageLinearAttnResidentStepLayer {
         residual: &ullm_runtime_sys::RuntimeBuffer,
         sequence_len: usize,
         workspace: &mut PackageLinearAttnSequenceWorkspace,
+        mut direct_output: Option<&mut ullm_runtime_sys::RuntimeBuffer>,
         label: &str,
     ) -> Result<(), String> {
         let weights = self.weights.as_ref();
@@ -4806,11 +4947,12 @@ impl PackageLinearAttnResidentStepLayer {
             self.operation_phase,
             &format!("{label} MLP down projection"),
         )?;
+        let output = direct_output.take().unwrap_or(&mut workspace.layer_output);
         ullm_runtime_sys::add_f32(
             &workspace.mlp_down,
             &workspace.attention_output,
             sequence_elements,
-            &mut workspace.layer_output,
+            output,
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} layer residual: {error}"))
@@ -4837,6 +4979,23 @@ impl PackageLinearAttnResidentStepLayer {
                 Some(stream),
             )
             .map_err(|error| format!("failed to retain {label} final sequence row: {error}"))
+    }
+
+    pub fn retain_last_sequence_row_from_buffer(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        source: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let hidden_bytes = checked_f32_byte_len(self.hidden, label)?;
+        let source_offset = sequence_len
+            .checked_sub(1)
+            .and_then(|row| row.checked_mul(hidden_bytes))
+            .ok_or_else(|| format!("{label} last-row offset overflows"))?;
+        self.layer_output_buffer
+            .copy_from_buffer(0, source, source_offset, hidden_bytes, Some(stream))
+            .map_err(|error| format!("failed to retain {label} direct final sequence row: {error}"))
     }
 
     pub fn take_last_component_step_ms(&mut self) -> Option<PackageLinearAttnComponentStepMs> {
