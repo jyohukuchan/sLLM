@@ -475,6 +475,14 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
     if args.output.exists() or os.path.lexists(args.output):
         raise CalibrationError(f"refusing to overwrite existing output: {args.output}")
     cases = load_cases(args.cases)
+    split_manifest_sha = sha256_file_stable(args.split_root / "split-manifest.json", "split manifest")
+    policy_sha = sha256_file_stable(args.split_root / "policy.json", "policy")
+    calibration_sha = sha256_file_stable(args.split_root / "calibration-cases.jsonl", "calibration cases")
+    if split_manifest_sha != args.expected_split_manifest_sha256 or policy_sha != args.expected_policy_sha256 or calibration_sha != args.expected_calibration_cases_sha256:
+        raise CalibrationError("split/policy/calibration SHA does not match the pinned execution contract")
+    actual_cases_sha = sha256_file_stable(args.cases, "calibration cases")
+    if len(args.expected_cases_sha256) != 64 or any(char not in "0123456789abcdef" for char in args.expected_cases_sha256) or actual_cases_sha != args.expected_cases_sha256:
+        raise CalibrationError("calibration cases SHA does not match the pinned execution contract")
     identity, _inspected = source_identity(args.model_dir)
     memory = memory_preflight(args.model_dir)
     if memory["status"] != "passed":
@@ -531,6 +539,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--legacy-oracle", type=Path, required=True)
+    parser.add_argument("--split-root", type=Path, required=True)
+    parser.add_argument("--expected-split-manifest-sha256", required=True)
+    parser.add_argument("--expected-policy-sha256", required=True)
+    parser.add_argument("--expected-calibration-cases-sha256", required=True)
+    parser.add_argument("--expected-cases-sha256", required=True)
     parser.add_argument("--chunk-elements", type=int, default=DEFAULT_CHUNK_ELEMENTS)
     parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument("--threads", type=int, default=1)

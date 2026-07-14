@@ -144,7 +144,7 @@ def _stream_stats(reference: Iterator[list[float]], candidate: Iterator[list[flo
     }
 
 
-def _load_split(split_root: Path) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], str, str, str]:
+def _load_split(split_root: Path, expected_split_sha: str, expected_policy_sha: str, expected_cases_sha: str) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], str, str, str]:
     try:
         split_info = VALIDATE_SPLIT.validate(split_root)
     except Exception as error:
@@ -172,6 +172,8 @@ def _load_split(split_root: Path) -> tuple[dict[str, Any], dict[str, Any], list[
         rows.append(row)
     if len(rows) != MAX_ROWS:
         raise CaptureError(f"calibration rows must contain exactly {MAX_ROWS} rows")
+    if split_info["split_manifest_sha256"] != expected_split_sha or split_info["policy_sha256"] != expected_policy_sha or _sha(cases_path, "calibration cases") != expected_cases_sha:
+        raise CaptureError("split/policy/calibration SHA does not match the pinned execution contract")
     return split_info, manifest, rows, _sha(split_root / "split-manifest.json", "split manifest"), _sha(split_root / "policy.json", "policy"), _sha(cases_path, "calibration cases")
 
 
@@ -192,10 +194,18 @@ def _row_key(row: dict[str, Any]) -> tuple[str, int]:
     return row.get("case_id"), row.get("step")
 
 
-def capture(split_root: Path, source_root: Path, active_root: Path, output: Path) -> dict[str, Any]:
-    _split_info, split_manifest, split_rows, split_sha, policy_sha, cases_sha = _load_split(split_root)
+def capture(split_root: Path, source_root: Path, active_root: Path, output: Path, *, expected_split_sha: str, expected_policy_sha: str, expected_cases_sha: str, expected_served_sha: str, expected_package_sha: str, expected_worker_sha: str, expected_guard_sha: str, expected_device_architecture: str, expected_quantized_revision: str) -> dict[str, Any]:
+    _split_info, split_manifest, split_rows, split_sha, policy_sha, cases_sha = _load_split(split_root, expected_split_sha, expected_policy_sha, expected_cases_sha)
     source = _artifact(source_root, "independent_source_full")
     active = _artifact(active_root, "aq4_target")
+    active_runtime = active["manifest"].get("runtime", {}).get("runtime", {})
+    expected_active = {"served_model_manifest_sha256": expected_served_sha, "package_manifest_sha256": expected_package_sha, "worker_binary_sha256": expected_worker_sha, "guard_sha256": expected_guard_sha, "device": {"architecture": expected_device_architecture}}
+    if active_runtime.get("served_model_manifest_sha256") != expected_active["served_model_manifest_sha256"] or active_runtime.get("package_manifest_sha256") != expected_active["package_manifest_sha256"] or active_runtime.get("worker_binary_sha256") != expected_active["worker_binary_sha256"] or active_runtime.get("guard_sha256") != expected_active["guard_sha256"] or active_runtime.get("device", {}).get("architecture") != expected_device_architecture or active_runtime.get("quantized_artifact_revision") != expected_quantized_revision:
+        raise CaptureError("active artifact identity differs from the pinned execution contract")
+    if active["manifest"]["identity"].get("model_revision") != source["manifest"]["identity"].get("model_revision") or active_runtime.get("upstream_model_revision") != source["manifest"]["identity"].get("model_revision"):
+        raise CaptureError("source/active upstream revision binding differs")
+    if active_runtime.get("quantized_artifact_revision") == source["manifest"]["identity"].get("model_revision"):
+        raise CaptureError("upstream and quantized artifact revisions must remain distinct")
     expected = {(row["case_id"], 0): row for row in split_rows}
     if set(source["rows"]) != set(expected) or set(active["rows"]) != set(expected):
         raise CaptureError("source/active artifacts must contain exactly the 24 calibration rows")
@@ -250,9 +260,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--active", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--expected-split-manifest-sha256", required=True)
+    parser.add_argument("--expected-policy-sha256", required=True)
+    parser.add_argument("--expected-calibration-cases-sha256", required=True)
+    parser.add_argument("--expected-served-model-manifest-sha256", required=True)
+    parser.add_argument("--expected-package-manifest-sha256", required=True)
+    parser.add_argument("--expected-worker-binary-sha256", required=True)
+    parser.add_argument("--expected-guard-sha256", required=True)
+    parser.add_argument("--expected-device-architecture", required=True)
+    parser.add_argument("--expected-quantized-artifact-revision", required=True)
     args = parser.parse_args(argv)
     try:
-        print(json.dumps(capture(args.split_root, args.source, args.active, args.output), ensure_ascii=True, sort_keys=True))
+        print(json.dumps(capture(args.split_root, args.source, args.active, args.output, expected_split_sha=args.expected_split_manifest_sha256, expected_policy_sha=args.expected_policy_sha256, expected_cases_sha=args.expected_calibration_cases_sha256, expected_served_sha=args.expected_served_model_manifest_sha256, expected_package_sha=args.expected_package_manifest_sha256, expected_worker_sha=args.expected_worker_binary_sha256, expected_guard_sha=args.expected_guard_sha256, expected_device_architecture=args.expected_device_architecture, expected_quantized_revision=args.expected_quantized_artifact_revision), ensure_ascii=True, sort_keys=True))
         return 0
     except (CaptureError, OSError, ValueError) as error:
         print(f"Qwen3.5 AQ4 fidelity capture failed: {error}", file=sys.stderr)

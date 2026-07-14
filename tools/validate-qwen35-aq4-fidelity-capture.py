@@ -50,6 +50,19 @@ def finite(value: Any, label: str) -> None:
         raise ValidationError(f"{label} must be finite")
 
 
+def token_id(value: Any, label: str) -> int:
+    if type(value) is not int or not 0 <= value < 248320:
+        raise ValidationError(f"{label} must be an integer token ID in vocabulary range")
+    return value
+
+
+def binary(value: Any, label: str) -> float:
+    finite(value, label)
+    if type(value) not in (int, float) or float(value) not in (0.0, 1.0):
+        raise ValidationError(f"{label} must be exactly 0 or 1")
+    return float(value)
+
+
 def validate(metrics_path: Path, split_root: Path) -> dict[str, Any]:
     try:
         split_result = SPLIT.validate(split_root)
@@ -96,24 +109,37 @@ def validate(metrics_path: Path, split_root: Path) -> dict[str, Any]:
             raise ValidationError(f"metrics row {case_id} is not step zero")
         greedy = row.get("greedy")
         ordered = row.get("ordered_top10")
-        if not isinstance(greedy, dict) or set(greedy) != {"source", "active", "exact"} or not isinstance(greedy["source"], int) or not isinstance(greedy["active"], int) or greedy["exact"] != (greedy["source"] == greedy["active"]):
+        if not isinstance(greedy, dict) or set(greedy) != {"source", "active", "exact"} or token_id(greedy.get("source"), f"{case_id}.greedy.source") != greedy["source"] or token_id(greedy.get("active"), f"{case_id}.greedy.active") != greedy["active"] or type(greedy["exact"]) is not bool or greedy["exact"] != (greedy["source"] == greedy["active"]):
             raise ValidationError(f"metrics greedy contract differs: {case_id}")
-        if not isinstance(ordered, dict) or set(ordered) != {"source", "active", "exact", "overlap"} or not isinstance(ordered["source"], list) or not isinstance(ordered["active"], list) or len(ordered["source"]) != 10 or len(ordered["active"]) != 10 or ordered["exact"] != (ordered["source"] == ordered["active"]):
+        if not isinstance(ordered, dict) or set(ordered) != {"source", "active", "exact", "overlap"} or not isinstance(ordered["source"], list) or not isinstance(ordered["active"], list) or len(ordered["source"]) != 10 or len(ordered["active"]) != 10:
             raise ValidationError(f"metrics ordered top10 contract differs: {case_id}")
+        for label, values in (("source", ordered["source"]), ("active", ordered["active"])):
+            ids = [token_id(item, f"{case_id}.ordered_top10.{label}[{index}]") for index, item in enumerate(values)]
+            if len(set(ids)) != 10 or ids[0] != greedy[label]:
+                raise ValidationError(f"metrics ordered top10 IDs differ: {case_id}.{label}")
+        if type(ordered["exact"]) is not bool or ordered["exact"] != (ordered["source"] == ordered["active"]):
+            raise ValidationError(f"metrics ordered top10 exact binding differs: {case_id}")
+        expected_overlap = len(set(ordered["source"]) & set(ordered["active"])) / 10.0
         finite(ordered["overlap"], f"{case_id}.overlap")
-        if not 0.0 <= float(ordered["overlap"]) <= 1.0:
-            raise ValidationError(f"{case_id}.overlap is outside [0,1]")
+        if float(ordered["overlap"]) != expected_overlap:
+            raise ValidationError(f"{case_id}.overlap does not match top10 IDs")
         metrics_row = row.get("metrics")
         if not isinstance(metrics_row, dict) or set(metrics_row) != METRICS:
             raise ValidationError(f"metrics set differs: {case_id}")
         for name, metric in metrics_row.items():
             finite(metric, f"{case_id}.{name}")
-            if float(metric) < 0 or name in {"token_agreement_rate", "topk_overlap_rate_k10", "logits_cosine", "hidden_cosine", "bf16_top1_retained_in_aq4_top10_rate"} and float(metric) > 1:
+            if name in {"token_agreement_rate", "topk_overlap_rate_k10", "bf16_top1_retained_in_aq4_top10_rate"}:
+                binary(metric, f"{case_id}.{name}")
+            if float(metric) < 0 or name in {"logits_cosine", "hidden_cosine"} and float(metric) > 1:
                 raise ValidationError(f"{case_id}.{name} is outside domain")
             if name in {"logits_relative_l2", "hidden_relative_l2"} and float(metric) > 1:
                 raise ValidationError(f"{case_id}.{name} exceeds pathological ceiling")
         raw_row = row.get("raw")
-        if not isinstance(raw_row, dict) or set(raw_row) != {"hidden", "logits", "source_top1_retained_in_active_top10"} or raw_row["source_top1_retained_in_active_top10"] != (greedy["source"] in ordered["active"]):
+        expected_agreement = float(greedy["source"] == greedy["active"])
+        expected_retention = float(greedy["source"] in ordered["active"])
+        if float(metrics_row["token_agreement_rate"]) != expected_agreement or float(metrics_row["topk_overlap_rate_k10"]) != expected_overlap or float(metrics_row["bf16_top1_retained_in_aq4_top10_rate"]) != expected_retention:
+            raise ValidationError(f"row-level binary metrics do not match tokens: {case_id}")
+        if not isinstance(raw_row, dict) or set(raw_row) != {"hidden", "logits", "source_top1_retained_in_active_top10"} or raw_row["source_top1_retained_in_active_top10"] != bool(expected_retention):
             raise ValidationError(f"raw sufficient-statistics contract differs: {case_id}")
         for name, elements in (("hidden", 4096), ("logits", 248320)):
             stats = raw_row[name]
