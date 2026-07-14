@@ -73,10 +73,10 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
-BINDING_SOURCE_TREE = "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
-BINDING_RUNNER_GIT_BLOB = "6af99284b507035957102b9ab79a72d7561942a0"
-BINDING_RUNNER_SHA = "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
+BINDING_SOURCE_COMMIT = "e993016f4a62b9970423223db8702f77ee834b12"
+BINDING_SOURCE_TREE = "bf2dd3992bf41a988c71c094cc8412a719a4c6a2"
+BINDING_RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
+BINDING_RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 BINDING_DRIVER_GIT_BLOB = "807511f74c6681e41874da1d83736869d15fe104"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
@@ -872,9 +872,11 @@ def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, b
     normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if current_driver != normative_driver:
         raise BundleError("binding commit changed the normative resident driver blob")
-    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root", b"--live-preflight", b"def validate_live_preflight", b"def verify_live_preflight"):
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root", b"--live-preflight", b"def validate_prepared_preflight_link", b"def require_prepared_preflight_link", b"def validate_live_preflight", b"def require_live_preflight_link", b"def verify_live_preflight", b"prepared_preflight_link = validate_prepared_preflight_link", b"live_preflight_link: LivePreflightLink | None"):
         if contract not in runner:
             raise BundleError("binding runner generic root/validator contract differs")
+    if b"preflight_link = live_preflight_link" in runner:
+        raise BundleError("binding runner prepared/live preflight separation differs")
     return runner, validator, validator_tree, validator_object
 
 
