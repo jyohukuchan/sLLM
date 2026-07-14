@@ -12,11 +12,13 @@ import os
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +41,8 @@ PRODUCER = load_tool("aq4_p3_producer_for_diagnostic_capture", ROOT / "tools/bui
 PROFILER = load_tool("aq4_p2_profiler_for_diagnostic_capture", ROOT / "tools/profile-aq4-p2-family-exclusive.py")
 
 SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
+TARGET_SCHEMA = "ullm.aq4_p3_profile_target_command.v1"
+FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v1"
 MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 MARKER_CLOCK = "rocprofv3_monotonic_ns"
 MAX_ROWS = 500_000
@@ -53,6 +57,183 @@ MEMORY_COPY_KINDS = {
 
 class CaptureError(ValueError):
     pass
+
+
+class SymlinkIdentity(NamedTuple):
+    path: Path
+    identity: tuple[int, ...]
+    target: str
+
+
+class PinnedProfiler:
+    def __init__(
+        self,
+        invocation: Path,
+        resolved: Path,
+        expected_sha256: str,
+        descriptor: int,
+        identity: tuple[int, ...],
+        symlinks: tuple[SymlinkIdentity, ...],
+    ) -> None:
+        self.invocation = invocation
+        self.resolved = resolved
+        self.sha256 = expected_sha256
+        self.descriptor = descriptor
+        self.identity = identity
+        self.symlinks = symlinks
+
+    @property
+    def fd_path(self) -> str:
+        return f"/proc/self/fd/{self.descriptor}"
+
+    @classmethod
+    def open(cls, invocation: Path, expected_sha256: str) -> "PinnedProfiler":
+        if not invocation.is_absolute() or ".." in invocation.parts:
+            raise CaptureError("profiler path must be absolute without parent traversal")
+        if (
+            not isinstance(expected_sha256, str)
+            or PRODUCER.SHA256_RE.fullmatch(expected_sha256) is None
+        ):
+            raise CaptureError("profiler expected SHA-256 is invalid")
+        symlinks: list[SymlinkIdentity] = []
+        current = Path(invocation.anchor)
+        for part in invocation.parts[1:]:
+            current /= part
+            try:
+                metadata = current.lstat()
+            except OSError as error:
+                raise CaptureError(
+                    f"profiler invocation component is unavailable: {current}"
+                ) from error
+            if stat.S_ISLNK(metadata.st_mode):
+                symlinks.append(
+                    SymlinkIdentity(
+                        current, PROFILER._identity(metadata), os.readlink(current)
+                    )
+                )
+        try:
+            resolved = invocation.resolve(strict=True)
+        except OSError as error:
+            raise CaptureError(f"profiler path resolution failed: {error}") from error
+        metadata = resolved.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o111 == 0
+        ):
+            raise CaptureError("resolved profiler must be a single-link executable regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(resolved, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if PROFILER._identity(opened) != PROFILER._identity(metadata):
+                raise CaptureError("profiler changed while opening")
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise CaptureError("profiler SHA-256 differs")
+            if PROFILER._identity(os.fstat(descriptor)) != PROFILER._identity(metadata):
+                raise CaptureError("profiler changed while hashing")
+            value = cls(
+                invocation,
+                resolved,
+                expected_sha256,
+                descriptor,
+                PROFILER._identity(metadata),
+                tuple(symlinks),
+            )
+            value.verify()
+            return value
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def verify(self) -> None:
+        try:
+            for item in self.symlinks:
+                current = item.path.lstat()
+                if (
+                    PROFILER._identity(current) != item.identity
+                    or not stat.S_ISLNK(current.st_mode)
+                    or os.readlink(item.path) != item.target
+                ):
+                    raise CaptureError(
+                        f"profiler invocation symlink changed: {item.path}"
+                    )
+            if self.invocation.resolve(strict=True) != self.resolved:
+                raise CaptureError("profiler resolved target changed")
+            current = self.resolved.lstat()
+            opened = os.fstat(self.descriptor)
+        except OSError as error:
+            raise CaptureError(f"profiler binding is unavailable: {error}") from error
+        if (
+            PROFILER._identity(current) != self.identity
+            or PROFILER._identity(opened) != self.identity
+        ):
+            raise CaptureError("profiler inode identity changed")
+        os.lseek(self.descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(self.descriptor, 1024 * 1024):
+            digest.update(chunk)
+        if digest.hexdigest() != self.sha256:
+            raise CaptureError("profiler bytes changed")
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "tool": "rocprofv3",
+            "invocation_path": str(self.invocation),
+            "resolved_path": str(self.resolved),
+            "executable_sha256": self.sha256,
+            "resolved_identity": list(self.identity),
+            "symlink_chain": [
+                {"path": str(item.path), "identity": list(item.identity), "target": item.target}
+                for item in self.symlinks
+            ],
+        }
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+
+
+def process_group_alive(process_group: int, process: subprocess.Popen[Any]) -> bool:
+    process.poll()
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def terminate_process_group(process: subprocess.Popen[Any]) -> bool:
+    process_group = process.pid
+    for value, wait_seconds in (
+        (signal.SIGINT, 0.5),
+        (signal.SIGTERM, 0.5),
+        (signal.SIGKILL, 5.0),
+    ):
+        if not process_group_alive(process_group, process):
+            break
+        try:
+            os.killpg(process_group, value)
+        except ProcessLookupError:
+            break
+        deadline = time.monotonic() + wait_seconds
+        while (
+            process_group_alive(process_group, process)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.kill()
+        process.wait()
+    return not process_group_alive(process_group, process)
 
 
 def canonical(value: Any) -> bytes:
@@ -71,6 +252,128 @@ def ref(snapshot: Any) -> dict[str, str]:
     return {"path": str(snapshot.path), "sha256": snapshot.sha256}
 
 
+def pinned_profiler_version(profiler: PinnedProfiler) -> dict[str, Any]:
+    profiler.verify()
+    with tempfile.TemporaryFile() as output:
+        profiler.verify()
+        process = subprocess.Popen(
+            [profiler.fd_path, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            pass_fds=(profiler.descriptor,),
+            start_new_session=True,
+        )
+        try:
+            try:
+                return_code = process.wait(timeout=10.0)
+            except subprocess.TimeoutExpired as error:
+                if not terminate_process_group(process):
+                    raise CaptureError(
+                        "profiler version query timed out and process group cleanup failed"
+                    ) from error
+                raise CaptureError("profiler version query timed out") from error
+        finally:
+            profiler.verify()
+        size = output.tell()
+        if return_code != 0 or size > 64 * 1024:
+            raise CaptureError("profiler version query failed")
+        output.seek(0)
+        version_output = output.read(64 * 1024 + 1)
+    text = version_output.decode("utf-8", errors="strict").strip()
+    version = re.search(r"version:\s*([^\s]+)", text)
+    rocm = re.search(r"rocm_version:\s*([^\s]+)", text)
+    if version is None:
+        raise CaptureError("profiler version output schema differs")
+    return {
+        **profiler.evidence(),
+        "version": version.group(1),
+        "rocm_version": rocm.group(1) if rocm else None,
+        "version_output_sha256": hashlib.sha256(version_output).hexdigest(),
+    }
+
+
+def load_target_command_manifest(
+    path: Path, *, allow_existing_outputs: bool = False
+) -> tuple[dict[str, Any], list[Any]]:
+    manifest_snapshot = PRODUCER.capture(path, "target command manifest")
+    value = PRODUCER.parse_json(manifest_snapshot, "target command manifest")
+    fields = {
+        "schema_version", "status", "manifest_sha256", "argv", "input_files", "output_paths"
+    }
+    PRODUCER.exact(value, fields, "target command manifest")
+    if value.get("schema_version") != TARGET_SCHEMA or value.get("status") != "bound":
+        raise CaptureError("target command manifest schema/status differs")
+    declared = PRODUCER.digest(value.get("manifest_sha256"), "target command manifest hash")
+    if declared != self_hash(value, "manifest_sha256"):
+        raise CaptureError("target command manifest self-hash differs")
+    argv = value.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or any(not isinstance(item, str) or not item for item in argv)
+    ):
+        raise CaptureError("target command argv is invalid")
+    inputs = value.get("input_files")
+    outputs = value.get("output_paths")
+    if not isinstance(inputs, list) or not inputs or not isinstance(outputs, list):
+        raise CaptureError("target command path bindings are invalid")
+    snapshots: list[Any] = [manifest_snapshot]
+    classified: set[int] = set()
+    for number, item in enumerate(inputs):
+        if not isinstance(item, dict):
+            raise CaptureError("target input binding must be an object")
+        PRODUCER.exact(
+            item,
+            {"argument_index", "path", "sha256", "executable"},
+            f"target input {number}",
+        )
+        index = PRODUCER.count(item.get("argument_index"), f"target input {number} index")
+        if index >= len(argv) or index in classified or argv[index] != item.get("path"):
+            raise CaptureError("target input index/path binding differs")
+        if type(item.get("executable")) is not bool:
+            raise CaptureError("target input executable flag must be boolean")
+        snapshot = PROFILER.capture(
+            Path(item["path"]),
+            f"target input {number}",
+            require_executable=item["executable"],
+            require_single_link=True,
+        )
+        if snapshot.sha256 != PRODUCER.digest(item.get("sha256"), f"target input {number} hash"):
+            raise CaptureError("target input SHA-256 differs")
+        snapshots.append(snapshot)
+        classified.add(index)
+    if 0 not in classified or not any(
+        item.get("argument_index") == 0 and item.get("executable") is True
+        for item in inputs
+    ):
+        raise CaptureError("target argv[0] executable is not hash-bound")
+    for number, item in enumerate(outputs):
+        if not isinstance(item, dict):
+            raise CaptureError("target output binding must be an object")
+        PRODUCER.exact(item, {"argument_index", "path"}, f"target output {number}")
+        index = PRODUCER.count(item.get("argument_index"), f"target output {number} index")
+        target = item.get("path")
+        if (
+            index >= len(argv)
+            or index in classified
+            or argv[index] != target
+            or not isinstance(target, str)
+            or not Path(target).is_absolute()
+        ):
+            raise CaptureError("target output index/path binding differs")
+        if Path(target).is_symlink():
+            raise CaptureError("target output path must not be a symlink")
+        if not allow_existing_outputs and Path(target).exists():
+            raise CaptureError("target output path already exists")
+        PROFILER.canonical_path(Path(target).parent, f"target output {number} parent")
+        classified.add(index)
+    absolute_indices = {index for index, item in enumerate(argv) if Path(item).is_absolute()}
+    if classified != absolute_indices:
+        raise CaptureError("target absolute argv path coverage differs")
+    return value, snapshots
+
+
 def profiler_command(
     profiler: Any, output_directory: Path, output_name: str, runner_command: list[str]
 ) -> list[str]:
@@ -82,8 +385,9 @@ def profiler_command(
         raise CaptureError("runner command is empty or invalid")
     if not Path(runner_command[0]).is_absolute():
         raise CaptureError("runner executable path must be absolute")
+    executable = profiler.fd_path if isinstance(profiler, PinnedProfiler) else str(profiler.path)
     return [
-        str(profiler.path),
+        executable,
         "--kernel-trace",
         "--hip-runtime-trace",
         "--memory-copy-trace",
@@ -99,7 +403,14 @@ def profiler_command(
     ]
 
 
-def run_profile(command: list[str], output_directory: Path, timeout: float) -> None:
+def _run_profile(
+    command: list[str],
+    output_directory: Path,
+    timeout: float,
+    *,
+    pass_fds: tuple[int, ...] = (),
+    spawn_verifier: Any = None,
+) -> None:
     if timeout <= 0.0:
         raise CaptureError("profile timeout must be positive")
     if not output_directory.is_absolute():
@@ -111,6 +422,8 @@ def run_profile(command: list[str], output_directory: Path, timeout: float) -> N
     stdout_path = output_directory / "rocprof.stdout"
     stderr_path = output_directory / "rocprof.stderr"
     with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
+        if spawn_verifier is not None:
+            spawn_verifier()
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -118,40 +431,12 @@ def run_profile(command: list[str], output_directory: Path, timeout: float) -> N
             stderr=stderr,
             shell=False,
             start_new_session=True,
+            pass_fds=pass_fds,
         )
         try:
             return_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as error:
-            process_group = process.pid
-
-            def group_alive() -> bool:
-                process.poll()
-                try:
-                    os.killpg(process_group, 0)
-                except ProcessLookupError:
-                    return False
-                return True
-
-            def signal_group(value: signal.Signals, wait_seconds: float) -> None:
-                try:
-                    os.killpg(process_group, value)
-                except ProcessLookupError:
-                    return
-                deadline = time.monotonic() + wait_seconds
-                while group_alive() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-
-            signal_group(signal.SIGINT, 0.5)
-            if group_alive():
-                signal_group(signal.SIGTERM, 0.5)
-            if group_alive():
-                signal_group(signal.SIGKILL, 5.0)
-            try:
-                process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            if group_alive():
+            if not terminate_process_group(process):
                 raise CaptureError(
                     "rocprof diagnostic capture timed out and process group cleanup failed"
                 ) from error
@@ -159,6 +444,80 @@ def run_profile(command: list[str], output_directory: Path, timeout: float) -> N
     if return_code != 0:
         suffix = " (possible OOM/SIGKILL)" if return_code in {-9, 9, 137} else ""
         raise CaptureError(f"rocprof diagnostic capture failed with exit {return_code}{suffix}")
+
+
+def write_failure_evidence(
+    output_directory: Path,
+    reason: str,
+    command: list[str],
+    context: dict[str, Any] | None,
+) -> None:
+    path = output_directory / "capture-failure.json"
+    if path.exists() or path.is_symlink():
+        return
+    streams: dict[str, Any] = {}
+    for name in ("rocprof.stdout", "rocprof.stderr"):
+        stream = output_directory / name
+        if stream.is_file() and not stream.is_symlink():
+            snapshot = PROFILER.capture(stream.resolve(), f"failure stream {name}")
+            streams[name] = {
+                "bytes": stream.stat().st_size,
+                "sha256": snapshot.sha256,
+            }
+    value = {
+        "schema_version": FAILURE_SCHEMA,
+        "status": "failed",
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "failure_sha256": None,
+        "reason": reason,
+        "rocprof_child_new_session": True,
+        "outer_harness_signalled": False,
+        "process_group_cleanup_complete": "cleanup failed" not in reason,
+        "command_sha256": hashlib.sha256(canonical(command)).hexdigest(),
+        "context": context or {},
+        "streams": streams,
+    }
+    value["failure_sha256"] = self_hash(value, "failure_sha256")
+    write_json_atomic(path, value)
+    path.chmod(0o444)
+
+
+def run_profile(
+    command: list[str],
+    output_directory: Path,
+    timeout: float,
+    *,
+    pass_fds: tuple[int, ...] = (),
+    verifier: Any = None,
+    failure_context: dict[str, Any] | None = None,
+) -> None:
+    if verifier is not None:
+        verifier()
+    try:
+        _run_profile(
+            command,
+            output_directory,
+            timeout,
+            pass_fds=pass_fds,
+            spawn_verifier=verifier,
+        )
+    except (CaptureError, OSError, subprocess.SubprocessError) as error:
+        reason = (
+            str(error)
+            if isinstance(error, CaptureError)
+            else f"rocprof launch failed: {error}"
+        )
+        if output_directory.is_dir() and not output_directory.is_symlink():
+            write_failure_evidence(
+                output_directory, reason, command, failure_context
+            )
+        if isinstance(error, CaptureError):
+            raise
+        raise CaptureError(reason) from error
+    finally:
+        if verifier is not None:
+            verifier()
 
 
 def discover(output_directory: Path) -> dict[str, Path]:
@@ -585,7 +944,9 @@ def assemble(**kwargs: Any) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("capture", "assemble"))
-    parser.add_argument("--profiler", type=Path, required=True)
+    parser.add_argument("--profiler-path", type=Path, required=True)
+    parser.add_argument("--profiler-sha256", required=True)
+    parser.add_argument("--target-command-manifest", type=Path, required=True)
     parser.add_argument("--profile-output-directory", type=Path, required=True)
     parser.add_argument("--profile-output-name", default="aq4-p3-diagnostic")
     parser.add_argument("--identity", type=Path, required=True)
@@ -593,30 +954,63 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resident-raw", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=1800.0)
-    parser.add_argument("--runner-command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    pinned_profiler: PinnedProfiler | None = None
+    capture_completed = False
+    failure_context: dict[str, Any] | None = None
+    logical_command: list[str] | None = None
     try:
-        profiler_snapshot = PROFILER.capture(
-            args.profiler, "rocprofv3 executable", require_executable=True
+        pinned_profiler = PinnedProfiler.open(
+            args.profiler_path, args.profiler_sha256
         )
-        profiler_value = PROFILER.profiler_version(profiler_snapshot)
-        runner_command = args.runner_command or []
-        if not runner_command:
-            raise CaptureError("runner command is required")
-        runner_snapshot = PROFILER.capture(
-            Path(runner_command[0]), "runner executable", require_executable=True
+        profiler_value = pinned_profiler_version(pinned_profiler)
+        target_value, target_snapshots = load_target_command_manifest(
+            args.target_command_manifest,
+            allow_existing_outputs=args.command == "assemble",
         )
-        profiler_value["runner_executable"] = ref(runner_snapshot)
+        target_command = target_value["argv"]
+        profiler_value["target_command_manifest"] = ref(target_snapshots[0])
         command = profiler_command(
-            profiler_snapshot,
+            pinned_profiler,
             args.profile_output_directory,
             args.profile_output_name,
-            runner_command,
+            target_command,
         )
+        logical_command = [str(pinned_profiler.invocation), *command[1:]]
+        failure_context = {
+            "profiler": pinned_profiler.evidence(),
+            "target_command_manifest": ref(target_snapshots[0]),
+        }
+
+        def verify_launch_inputs() -> None:
+            pinned_profiler.verify()
+            try:
+                for snapshot in target_snapshots:
+                    snapshot.verify()
+            except (PRODUCER.ProducerError, PROFILER.ProfileError) as error:
+                raise CaptureError(f"target command binding changed: {error}") from error
+
         if args.command == "capture":
-            run_profile(command, args.profile_output_directory, args.timeout)
+            run_profile(
+                command,
+                args.profile_output_directory,
+                args.timeout,
+                pass_fds=(pinned_profiler.descriptor,),
+                verifier=verify_launch_inputs,
+                failure_context=failure_context,
+            )
+            capture_completed = True
         elif not args.profile_output_directory.is_dir():
             raise CaptureError("assemble profile output directory is missing")
+        verify_launch_inputs()
+        for item in target_value["output_paths"]:
+            target_output = Path(item["path"])
+            if args.command == "capture" and (
+                not target_output.exists() or target_output.is_symlink()
+            ):
+                raise CaptureError(
+                    "target command did not create a non-symlink bound output path"
+                )
         traces = discover(args.profile_output_directory)
         artifact = assemble(
             traces=traces,
@@ -624,17 +1018,38 @@ def main(argv: list[str] | None = None) -> int:
             summary_path=args.resident_summary,
             raw_path=args.resident_raw,
             profiler_value=profiler_value,
-            command=command,
+            command=logical_command,
             output_directory=args.profile_output_directory,
             artifact_path=args.artifact,
         )
-        profiler_snapshot.verify()
-        runner_snapshot.verify()
+        pinned_profiler.verify()
         print(json.dumps({"status": artifact["status"], "promotion_eligible": False}, sort_keys=True))
         return 0
-    except (CaptureError, PRODUCER.ProducerError, PROFILER.ProfileError, OSError, subprocess.SubprocessError) as error:
+    except (
+        CaptureError,
+        PRODUCER.ProducerError,
+        PROFILER.ProfileError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
+        if (
+            args.command == "capture"
+            and capture_completed
+            and logical_command is not None
+            and args.profile_output_directory.is_dir()
+            and not args.profile_output_directory.is_symlink()
+        ):
+            write_failure_evidence(
+                args.profile_output_directory,
+                str(error),
+                logical_command,
+                failure_context,
+            )
         print(f"AQ4 P3 diagnostic rocprof capture failed: {error}", file=sys.stderr)
         return 1
+    finally:
+        if pinned_profiler is not None:
+            pinned_profiler.close()
 
 
 if __name__ == "__main__":

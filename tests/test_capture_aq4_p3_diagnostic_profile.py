@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -86,6 +89,36 @@ def resident_evidence(tmp_path: Path):
     return identity_path, summary_path, raw_path, case_id, case_sha
 
 
+def write_target_manifest(
+    path: Path,
+    argv: list[str],
+    *,
+    input_indices: tuple[int, ...] = (0,),
+    output_indices: tuple[int, ...] = (),
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": CAPTURE.TARGET_SCHEMA,
+        "status": "bound",
+        "manifest_sha256": None,
+        "argv": argv,
+        "input_files": [
+            {
+                "argument_index": index,
+                "path": argv[index],
+                "sha256": hashlib.sha256(Path(argv[index]).read_bytes()).hexdigest(),
+                "executable": index == 0,
+            }
+            for index in input_indices
+        ],
+        "output_paths": [
+            {"argument_index": index, "path": argv[index]} for index in output_indices
+        ],
+    }
+    value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
+    path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    return value
+
+
 def test_profiler_command_enables_all_required_domains(tmp_path: Path) -> None:
     profiler = tmp_path / "rocprofv3"
     profiler.write_bytes(b"fake")
@@ -125,6 +158,88 @@ def test_fake_rocprof_runs_once_and_discovers_exact_trace_set(tmp_path: Path) ->
         CAPTURE.run_profile(command, output, 10.0)
 
 
+def test_pinned_profiler_uses_verified_fd_and_rejects_sha_or_symlink_swap(
+    tmp_path: Path,
+) -> None:
+    profiler = tmp_path / "rocprofv3-real"
+    profiler.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "if '--version' in sys.argv:\n"
+        "    print('rocprofv3 version: 1.1.0 rocm_version: 7.0.0')\n"
+        "    raise SystemExit(0)\n"
+        "args=sys.argv[1:]\n"
+        "out=pathlib.Path(args[args.index('--output-directory')+1])\n"
+        "name=args[args.index('--output-file')+1]\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "for suffix in ('kernel_trace','hip_api_trace','memory_copy_trace','marker_api_trace'):\n"
+        "    (out/f'{name}_{suffix}.csv').write_text('Name,Start_Timestamp,End_Timestamp\\n')\n",
+        encoding="utf-8",
+    )
+    profiler.chmod(0o555)
+    invocation = tmp_path / "rocprofv3"
+    invocation.symlink_to(profiler.name)
+    digest = hashlib.sha256(profiler.read_bytes()).hexdigest()
+
+    with pytest.raises(CAPTURE.CaptureError, match="SHA-256 differs"):
+        CAPTURE.PinnedProfiler.open(invocation.resolve(strict=False), "0" * 64)
+
+    pinned = CAPTURE.PinnedProfiler.open(invocation, digest)
+    try:
+        version = CAPTURE.pinned_profiler_version(pinned)
+        assert version["version"] == "1.1.0"
+        output = (tmp_path / "pinned-output").resolve()
+        command = CAPTURE.profiler_command(pinned, output, "pinned", ["/bin/true"])
+        assert command[0] == pinned.fd_path
+        CAPTURE.run_profile(
+            command,
+            output,
+            10.0,
+            pass_fds=(pinned.descriptor,),
+            verifier=pinned.verify,
+        )
+        assert set(CAPTURE.discover(output)) == {
+            "kernel",
+            "hip_api",
+            "memory_copy",
+            "marker",
+        }
+
+        replacement = tmp_path / "rocprofv3-replacement"
+        replacement.write_bytes(profiler.read_bytes())
+        replacement.chmod(0o555)
+        invocation.unlink()
+        invocation.symlink_to(replacement.name)
+        with pytest.raises(CAPTURE.CaptureError, match="symlink changed"):
+            pinned.verify()
+    finally:
+        pinned.close()
+
+
+def test_target_command_manifest_binds_exact_argv_and_input_hashes(tmp_path: Path) -> None:
+    executable = tmp_path / "launcher"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o555)
+    output = (tmp_path / "runner-output.json").resolve()
+    manifest = (tmp_path / "target.json").resolve()
+    argv = [str(executable.resolve()), "--output", str(output)]
+    value = write_target_manifest(manifest, argv, output_indices=(2,))
+    loaded, snapshots = CAPTURE.load_target_command_manifest(manifest)
+    assert loaded == value
+    assert loaded["argv"] == argv
+    assert len(snapshots) == 2
+
+    executable.chmod(0o755)
+    with pytest.raises(CAPTURE.PROFILER.ProfileError, match="identity changed"):
+        snapshots[1].verify()
+
+    executable.chmod(0o555)
+    unbound = (tmp_path / "unbound.json").resolve()
+    write_target_manifest(unbound, [str(executable.resolve()), str(output)])
+    with pytest.raises(CAPTURE.CaptureError, match="coverage differs"):
+        CAPTURE.load_target_command_manifest(unbound)
+
+
 def test_profile_timeout_and_oom_exit_fail_closed(tmp_path: Path) -> None:
     sleeper = tmp_path / "sleep-profiler"
     sleeper.write_text(
@@ -142,6 +257,31 @@ def test_profile_timeout_and_oom_exit_fail_closed(tmp_path: Path) -> None:
 
 
 def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> None:
+    sentinel_ready = tmp_path / "outer.ready"
+    restore_request = tmp_path / "outer.restore-request"
+    restored = tmp_path / "outer.restored"
+    outer = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,time;"
+                f"ready=pathlib.Path({str(sentinel_ready)!r});"
+                f"request=pathlib.Path({str(restore_request)!r});"
+                f"restored=pathlib.Path({str(restored)!r});"
+                "ready.write_text('alive');"
+                "\nwhile not request.exists(): time.sleep(0.01)\n"
+                "restored.write_text('complete')"
+            ),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5.0
+    while not sentinel_ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sentinel_ready.exists()
     child_pid = tmp_path / "child.pid"
     profiler = tmp_path / "stubborn-profiler"
     profiler.write_text(
@@ -154,11 +294,32 @@ def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> No
         encoding="utf-8",
     )
     profiler.chmod(0o555)
-    with pytest.raises(CAPTURE.CaptureError, match="timed out"):
-        CAPTURE.run_profile([str(profiler)], (tmp_path / "stubborn").resolve(), 0.1)
-    pid = int(child_pid.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    output = (tmp_path / "stubborn").resolve()
+    try:
+        with pytest.raises(CAPTURE.CaptureError, match="timed out"):
+            CAPTURE.run_profile(
+                [str(profiler)],
+                output,
+                0.1,
+                failure_context={"outer_harness": "fake-sentinel"},
+            )
+        pid = int(child_pid.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert outer.poll() is None
+        failure = json.loads((output / "capture-failure.json").read_text())
+        assert failure["status"] == "failed"
+        assert failure["promotion_eligible"] is False
+        assert failure["outer_harness_signalled"] is False
+        assert failure["process_group_cleanup_complete"] is True
+        assert failure["failure_sha256"] == CAPTURE.self_hash(failure, "failure_sha256")
+        restore_request.write_text("restore", encoding="utf-8")
+        assert outer.wait(timeout=5.0) == 0
+        assert restored.read_text() == "complete"
+    finally:
+        if outer.poll() is None:
+            outer.terminate()
+            outer.wait(timeout=5.0)
 
 
 def test_marker_contract_binds_exact_12_runs_and_rejects_missing(tmp_path: Path) -> None:
