@@ -25,6 +25,7 @@ class FakeRuntime:
         self.fail = fail
         self.launcher_mode = launcher_mode
         self.calls: list[list[str]] = []
+        self.profile_wrapped = False
 
     @property
     def gateway_pid(self) -> int:
@@ -88,8 +89,14 @@ class FakeRuntime:
             return 1, {"status": "failed", "safety": {"gpu_command_executed": "unknown", "model_load_executed": "unknown"}, "failure": {"reason": "synthetic"}}
         return 0, {"status": "passed", "safety": {"gpu_command_executed": True, "model_load_executed": True}, "failure": None}
 
+    def profile_wrapper(self, contract: dict) -> dict:
+        if self.fail == "profile-wrapper":
+            raise HARNESS.HarnessError("synthetic profile wrapper failure")
+        self.profile_wrapped = True
+        return {"validated": True, "command_sha256": contract["command_sha256"]}
+
     def dependencies(self) -> HARNESS.Dependencies:
-        return HARNESS.Dependencies(self.run, self.http, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, lambda seconds: None)
+        return HARNESS.Dependencies(self.run, self.http, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_wrapper, lambda seconds: None)
 
 
 def ready(tmp_path: Path) -> dict:
@@ -101,11 +108,21 @@ def ready(tmp_path: Path) -> dict:
     return value
 
 
+def profile_ready(tmp_path: Path) -> dict:
+    identity = {"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}
+    value = HARNESS.ready_document(identity, profile_diagnostic=True)
+    value["launcher_binding"]["runner_output"] = str(tmp_path / "profile-runner")
+    value["launcher_binding"]["evidence_output"] = str(tmp_path / "profile-launcher-evidence")
+    value["launcher_binding"]["live_preflight"]["path"] = str(tmp_path / "profile-launcher-evidence/live-preflight.json")
+    return value
+
+
 def test_ready_document_fixes_one_case_live_policy_and_trust() -> None:
     value = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64})
     assert value["status"] == "ready_for_one_case" and value["actual_eligible"] is True
     assert value["promotion_eligible"] is False
-    assert value["authorization"] == {"run_id": HARNESS.RUN_ID, "one_case_only": True, "maximum_invocations": 1, "output_no_reuse": True, "external_service_stop_required": True}
+    assert value["execution_mode"] == "one_case"
+    assert value["authorization"] == {"run_id": HARNESS.RUN_ID, "one_case_only": True, "maximum_invocations": 1, "output_no_reuse": True, "external_service_stop_required": True, "rocprof_wrapper_required": False}
     assert value["live_preflight_policy"]["pre_execution_sha256"] is None
     assert value["live_preflight_policy"]["final_evidence_binding"]["path_and_sha256_required"] is True
     assert value["trust"]["launcher"]["commit"] == HARNESS.LAUNCHER_COMMIT
@@ -155,7 +172,7 @@ def test_dry_run_writes_process_zero_evidence_without_dependencies(tmp_path: Pat
     HARNESS.READY_PATH.write_text("{}\n")
     code, evidence = HARNESS.dry_run_ready(value, tmp_path / "dry")
     assert code == 0 and evidence["status"] == "passed"
-    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0}
+    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0}
     assert evidence["service_touched"] is False and evidence["gpu_command_executed"] is False
 
 
@@ -164,6 +181,50 @@ def test_output_reuse_rejected_before_any_fake_command(tmp_path: Path) -> None:
     with pytest.raises(HARNESS.HarnessError, match="already exists"):
         HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
     assert runtime.calls == []
+
+
+def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
+    value = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)
+    profile = value["profile_diagnostic"]
+    command = profile["command"]
+    assert value["execution_mode"] == "profile_diagnostic"
+    assert value["measurement_eligible"] is False and value["promotion_eligible"] is False
+    assert value["authorization"]["run_id"] == HARNESS.LAUNCHER.PROFILE_RUN_ID
+    assert value["authorization"]["maximum_invocations"] == 1
+    assert value["authorization"]["rocprof_wrapper_required"] is True
+    assert command == HARNESS.profile_capture_command()
+    assert command[-len(HARNESS.profile_harness_command()):] == HARNESS.profile_harness_command()
+    assert command[command.index("--runner-command") + 1] == str(HARNESS.LAUNCHER.PYTHON)
+    assert profile["command_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(command))
+    assert profile["output"]["must_not_exist_before_capture"] is True
+    assert profile["resident_evidence"]["run_id"] == HARNESS.LAUNCHER.PROFILE_RUN_ID
+    assert profile["resident_evidence"]["resident_session_id_source"] == "resident_raw.resident.session_id"
+    assert profile["resident_evidence"]["case_id"] == HARNESS.LAUNCHER.CASE_ID
+    assert profile["roctx"]["roctx_library"]["resolved_path"] == str(HARNESS.LAUNCHER.ROCTX_LIBRARY_RESOLVED)
+
+
+def test_profile_fake_maintenance_requires_wrapper_then_restores(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    code, evidence = HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "profile-maintenance", runtime.dependencies())
+    assert code == 0 and evidence["status"] == "passed"
+    assert runtime.profile_wrapped is True
+    assert evidence["execution_mode"] == "profile_diagnostic"
+    assert evidence["profile_wrapper"]["validated"] is True
+    assert evidence["restore"]["passed"] is True and runtime.active is True
+
+
+def test_profile_wrapper_failure_starts_no_commands_or_service_change(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="profile-wrapper")
+    with pytest.raises(HARNESS.HarnessError, match="wrapper"):
+        HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "profile-fail", runtime.dependencies())
+    assert runtime.calls == [] and runtime.active is True
+
+
+def test_base_and_profile_mode_cannot_be_cross_invoked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = FakeRuntime()
+    monkeypatch.setattr(HARNESS, "load_ready_artifact", lambda path: ready(tmp_path))
+    code = HARNESS.main(["--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--mode", "execute", "--confirm-one-case", "--evidence-output", str(tmp_path / "cross")], dependencies=runtime.dependencies())
+    assert code == 1 and runtime.calls == []
 
 
 def test_canonical_ready_artifact_readback_and_harness_pin() -> None:
@@ -180,7 +241,7 @@ def test_canonical_dry_run_cli_has_zero_actual_processes(tmp_path: Path) -> None
     code = HARNESS.main(["--mode", "dry-run", "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0}
     assert evidence["service_touched"] is False
 
 

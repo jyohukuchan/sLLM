@@ -29,15 +29,15 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "bb7a5fb00c453d911cd0ccb9499a47863c6eb07c"
-LAUNCHER_TREE = "fafc6045b024b40749aeae2c526b1aae952806d0"
-LAUNCHER_GIT_BLOB = "cf17c68f4a6fec65c99eb3b32832d7fc193aaf23"
-LAUNCHER_SHA = "4f547d50b4a321196dbb8b2e7703843657c87a4d3d215c0325a6f8d267db5382"
-RUNNER_COMMIT = "774f6ddc10791db8795b37f41c5245d0edfebe42"
-RUNNER_SHA = "f2fbb8f3f219d4dfd99c4cad17cb0dd18ea48d97023b03b953711e81e219616c"
+LAUNCHER_COMMIT = "bdb06083ca3646c8f934fea10dac691a6efd4626"
+LAUNCHER_TREE = "7d7f9f30e90118ade4d0d66f058447b6b7777367"
+LAUNCHER_GIT_BLOB = "5e7a3feebe82de13eeefbb3b99f95ad14244953b"
+LAUNCHER_SHA = "ddd84b5b85dc303f381f44048b03eeb1e542bcf8173dfe506aeb0e7ebd235ee5"
+RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
+RUNNER_SHA = "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "481ae680bc30029a0f3b6805380f6ecaece261df"
-B_COMMIT = "d465ac2593c02a663723578f9f6b5752c5b4ff7a"
+VALIDATOR_COMMIT = "82635456825503c535ce0b662e72a7a233d18c40"
+B_COMMIT = "7e59baee0c1ac93a350da58a4292a84fbfde9f1c"
 RESIDENT_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
@@ -45,6 +45,21 @@ HARNESS_TRUST_PATH = READY_ROOT / "harness-trust.json"
 ATTESTATION_PATH = READY_ROOT / "qa-attestation.json"
 MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v1"
 DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-dry-run-v1"
+PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1"
+PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
+PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
+PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
+PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1"
+PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v1"
+PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
+PROFILE_CAPTURE_COMMIT = "489183abba581332544d0d004338a2cee08a0d89"
+PROFILE_CAPTURE_SHA = "be62caa7eee810cd6b33033eab15418b803ac1cee6559153e0cf7af446fa21f7"
+PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
+PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
+PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1"
+PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
+PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+PROFILE_TIMEOUT_SECONDS = 1800
 SERVICE = "ullm-openai.service"
 WORKER = ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
 WORKER_SHA = "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
@@ -210,6 +225,7 @@ class Dependencies:
     owner_probe: Callable[[Callable[..., subprocess.CompletedProcess[bytes]], int], dict[str, Any]]
     package_hash: Callable[[Path], str]
     launcher_execute: Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
+    profile_wrapper: Callable[[dict[str, Any]], dict[str, Any]]
     sleep: Callable[[float], None]
 
 
@@ -250,17 +266,89 @@ def _default_launcher_execute(binding: dict[str, Any]) -> tuple[int, dict[str, A
     return LAUNCHER.execute_bound(binding, Path(binding["evidence_output"]), Path(binding["runner_output"]), binding["run_id"], trusted_launcher_sha=LAUNCHER_SHA, gate_provider=gate_provider)
 
 
+def validate_profile_wrapper(contract: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "ROCPROF_OUTPUT_PATH": str(PROFILE_OUTPUT_DIRECTORY),
+        "ROCPROF_OUTPUT_FILE_NAME": PROFILE_OUTPUT_NAME,
+        "ROCPROF_KERNEL_TRACE": "1",
+        "ROCPROF_HIP_RUNTIME_API_TRACE": "1",
+        "ROCPROF_MEMORY_COPY_TRACE": "1",
+        "ROCPROF_MARKER_API_TRACE": "1",
+    }
+    observed = {name: os.environ.get(name) for name in expected}
+    if contract.get("command") != profile_capture_command() or observed != expected:
+        raise HarnessError("profile diagnostic must run through the exact rocprof wrapper")
+    formats = os.environ.get("ROCPROF_OUTPUT_FORMAT", "").split(",")
+    if "csv" not in formats or os.environ.get("ROCPROFILER_LIBRARY_CTOR") not in {"1", "true", "True"}:
+        raise HarnessError("rocprof instrumentation environment differs")
+    try:
+        maps = Path("/proc/self/maps").read_text(errors="strict")
+    except (OSError, UnicodeError) as error:
+        raise HarnessError("rocprof process map is unavailable") from error
+    required = ("librocprofiler-sdk-tool.so", "librocprofiler-sdk-roctx.so")
+    if any(name not in maps for name in required):
+        raise HarnessError("rocprof instrumentation libraries are not mapped")
+    return {
+        "validated": True,
+        "profiler": {"path": str(PROFILE_PROFILER), "sha256": PROFILE_PROFILER_SHA},
+        "environment_sha256": sha_bytes(canonical(observed)),
+        "mapped_libraries": list(required),
+    }
+
+
 def default_dependencies() -> Dependencies:
     stopped_gates = lambda: LAUNCHER.collect_execute_gates(environment=dict(LAUNCHER.EXECUTE_ENV))
-    return Dependencies(subprocess.run, default_http_probe, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, time.sleep)
+    return Dependencies(subprocess.run, default_http_probe, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, validate_profile_wrapper, time.sleep)
 
 
-def ready_launcher_binding() -> dict[str, Any]:
-    value = copy.deepcopy(LAUNCHER.execute_binding_document())
+def profile_harness_command() -> list[str]:
+    return [
+        str(LAUNCHER.PYTHON),
+        str(Path(__file__).resolve()),
+        "--mode",
+        "execute",
+        "--profile-diagnostic",
+        "--ready-artifact",
+        str(PROFILE_READY_PATH),
+        "--evidence-output",
+        str(PROFILE_MAINTENANCE_EVIDENCE),
+        "--confirm-one-case",
+    ]
+
+
+def profile_capture_command() -> list[str]:
+    return [
+        str(LAUNCHER.PYTHON),
+        str(PROFILE_CAPTURE_TOOL),
+        "capture",
+        "--profiler",
+        str(PROFILE_PROFILER),
+        "--profile-output-directory",
+        str(PROFILE_OUTPUT_DIRECTORY),
+        "--profile-output-name",
+        PROFILE_OUTPUT_NAME,
+        "--identity",
+        str(LAUNCHER.INPUT_ROOT / "identity.json"),
+        "--resident-summary",
+        str(LAUNCHER.PROFILE_RUN_OUTPUT / "resident-batch.summary.json"),
+        "--resident-raw",
+        str(LAUNCHER.PROFILE_RUN_OUTPUT / f"{LAUNCHER.CASE_ID}.raw.json"),
+        "--artifact",
+        str(PROFILE_ARTIFACT),
+        "--timeout",
+        str(float(PROFILE_TIMEOUT_SECONDS)),
+        "--runner-command",
+        *profile_harness_command(),
+    ]
+
+
+def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
+    value = copy.deepcopy(LAUNCHER.profile_execute_binding_document() if profile_diagnostic else LAUNCHER.execute_binding_document())
     value["status"] = "ready_for_explicit_execute"
     value["actual_eligible"] = True
     value["blocked_reasons"] = []
-    value["live_preflight"] = {"required": True, "path": str(LAUNCHER.LIVE_PREFLIGHT_PATH), "sha256": None, "replaces_synthetic_preflight": True}
+    live_path = LAUNCHER.PROFILE_LIVE_PREFLIGHT_PATH if profile_diagnostic else LAUNCHER.LIVE_PREFLIGHT_PATH
+    value["live_preflight"] = {"required": True, "path": str(live_path), "sha256": None, "replaces_synthetic_preflight": True}
     LAUNCHER.validate_execute_binding(value, permit_test_live_preflight=True)
     return value
 
@@ -273,15 +361,18 @@ QA_ATTESTATION = {
 }
 
 
-def ready_document(harness_identity: dict[str, str]) -> dict[str, Any]:
-    return {
+def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool = False) -> dict[str, Any]:
+    run_id = LAUNCHER.PROFILE_RUN_ID if profile_diagnostic else RUN_ID
+    value = {
         "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1", "status": "ready_for_one_case", "actual_eligible": True, "promotion_eligible": False,
-        "authorization": {"run_id": RUN_ID, "one_case_only": True, "maximum_invocations": 1, "output_no_reuse": True, "external_service_stop_required": True},
-        "launcher_binding": ready_launcher_binding(),
+        "execution_mode": "profile_diagnostic" if profile_diagnostic else "one_case",
+        "measurement_eligible": False if profile_diagnostic else None,
+        "authorization": {"run_id": run_id, "one_case_only": True, "maximum_invocations": 1, "output_no_reuse": True, "external_service_stop_required": True, "rocprof_wrapper_required": profile_diagnostic},
+        "launcher_binding": ready_launcher_binding(profile_diagnostic),
         "live_preflight_policy": {
             "pre_execution_sha256": None, "reason": "generated only after external service stop and all launcher live gates pass",
             "final_evidence_binding": {"path_and_sha256_required": True, "immutable_mode": "0444"},
-            "schema_version": "ullm.aq4_p2_resident_live_preflight.v1", "run_id": RUN_ID,
+            "schema_version": "ullm.aq4_p2_resident_live_preflight.v1", "run_id": run_id,
             "runtime_mapping": {"runtime_device_index": 1, "visible_token": "1", "amd_smi_index": 2, "bdf": LAUNCHER.GPU_BDF, "uuid": LAUNCHER.GPU_UUID, "kfd_id": LAUNCHER.KFD_ID, "node_id": 2},
             "vram": {"minimum_total_bytes": 30_000_000_000, "used_bytes": 0, "free_equals_total": True, "headroom_equals_total": True},
             "gates": ["sudo-n-v", "services-inactive", "worker-absent", "amd-owner-zero", "kfd-owner-zero", "lock-free", "exact-environment", "exact-probe-contract"],
@@ -298,6 +389,34 @@ def ready_document(harness_identity: dict[str, str]) -> dict[str, Any]:
         },
         "qa_attestation_sha256": sha_bytes(pretty(QA_ATTESTATION)),
     }
+    if not profile_diagnostic:
+        value.pop("measurement_eligible")
+    if profile_diagnostic:
+        command = profile_capture_command()
+        value["profile_diagnostic"] = {
+            "schema_version": "ullm.aq4_p3_diagnostic_rocprof_ready.v1",
+            "status": "ready_for_one_profile_diagnostic",
+            "measurement_eligible": False,
+            "promotion_eligible": False,
+            "maximum_invocations": 1,
+            "output_no_reuse": True,
+            "capture_tool": {"path": str(PROFILE_CAPTURE_TOOL), "commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
+            "profiler": {"path": str(PROFILE_PROFILER), "resolved_path": str(PROFILE_PROFILER), "sha256": PROFILE_PROFILER_SHA},
+            "command": command,
+            "command_sha256": sha_bytes(canonical(command)),
+            "output": {"directory": str(PROFILE_OUTPUT_DIRECTORY), "name": PROFILE_OUTPUT_NAME, "artifact": str(PROFILE_ARTIFACT), "must_not_exist_before_capture": True},
+            "resident_evidence": {
+                "identity": str(LAUNCHER.INPUT_ROOT / "identity.json"),
+                "summary": str(LAUNCHER.PROFILE_RUN_OUTPUT / "resident-batch.summary.json"),
+                "raw": str(LAUNCHER.PROFILE_RUN_OUTPUT / f"{LAUNCHER.CASE_ID}.raw.json"),
+                "run_id": run_id,
+                "resident_session_id_source": "resident_raw.resident.session_id",
+                "case_id": LAUNCHER.CASE_ID,
+                "case_sha256": LAUNCHER.CASE_SHA,
+            },
+            "roctx": value["launcher_binding"]["profile_diagnostic"],
+        }
+    return value
 
 
 def _git_identity() -> dict[str, str]:
@@ -314,38 +433,45 @@ def _git_identity() -> dict[str, str]:
     return {"path": str(path), "commit": values[0], "tree": values[1], "git_blob": values[2], "sha256": sha_bytes(raw)}
 
 
-def prepare_ready_artifact() -> dict[str, Any]:
-    LAUNCHER.ensure_directory_chain(READY_ROOT.parent, "ready artifact parent")
-    if READY_ROOT.exists() or READY_ROOT.is_symlink():
+def prepare_ready_artifact(*, profile_diagnostic: bool = False) -> dict[str, Any]:
+    root = PROFILE_READY_ROOT if profile_diagnostic else READY_ROOT
+    LAUNCHER.ensure_directory_chain(root.parent, "ready artifact parent")
+    if root.exists() or root.is_symlink():
         raise HarnessError("ready artifact already exists")
-    READY_ROOT.mkdir(mode=0o700)
+    root.mkdir(mode=0o700)
     harness_identity = _git_identity()
-    value = ready_document(harness_identity)
+    value = ready_document(harness_identity, profile_diagnostic=profile_diagnostic)
     ready_raw = pretty(value); attestation_raw = pretty(QA_ATTESTATION)
-    trust = {"schema_version": "ullm.aq4_p2_resident_maintenance_harness_trust.v1", "status": "ready_for_one_case", "actual_eligible": True, **harness_identity, "ready_binding_sha256": sha_bytes(ready_raw)}
+    trust = {"schema_version": "ullm.aq4_p2_resident_maintenance_harness_trust.v1", "status": "ready_for_one_case", "execution_mode": value["execution_mode"], "actual_eligible": True, **harness_identity, "ready_binding_sha256": sha_bytes(ready_raw)}
     trust_raw = pretty(trust)
     for name, raw in (("ready-binding.json", ready_raw), ("qa-attestation.json", attestation_raw), ("harness-trust.json", trust_raw)):
-        LAUNCHER.atomic_write(READY_ROOT, name, raw)
+        LAUNCHER.atomic_write(root, name, raw)
     sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in (("harness-trust.json", trust_raw), ("qa-attestation.json", attestation_raw), ("ready-binding.json", ready_raw))).encode("ascii")
-    LAUNCHER.atomic_write(READY_ROOT, "SHA256SUMS", sums)
-    os.chmod(READY_ROOT, 0o555)
+    LAUNCHER.atomic_write(root, "SHA256SUMS", sums)
+    os.chmod(root, 0o555)
     return value
 
 
 def load_ready_artifact(path: Path = READY_PATH) -> dict[str, Any]:
-    if path != READY_PATH or {item.name for item in READY_ROOT.iterdir()} != {"ready-binding.json", "qa-attestation.json", "harness-trust.json", "SHA256SUMS"}:
+    if path == READY_PATH:
+        root, trust_path, attestation_path, profile_diagnostic = READY_ROOT, HARNESS_TRUST_PATH, ATTESTATION_PATH, False
+    elif path == PROFILE_READY_PATH:
+        root, trust_path, attestation_path, profile_diagnostic = PROFILE_READY_ROOT, PROFILE_HARNESS_TRUST_PATH, PROFILE_ATTESTATION_PATH, True
+    else:
+        raise HarnessError("ready artifact path differs")
+    if {item.name for item in root.iterdir()} != {"ready-binding.json", "qa-attestation.json", "harness-trust.json", "SHA256SUMS"}:
         raise HarnessError("ready artifact path/coverage differs")
     ready_raw, _ = LAUNCHER.read_regular(path, "ready binding"); value = LAUNCHER.parse_json(ready_raw, "ready binding")
-    trust_raw, _ = LAUNCHER.read_regular(HARNESS_TRUST_PATH, "harness trust"); trust = LAUNCHER.parse_json(trust_raw, "harness trust")
-    attestation_raw, _ = LAUNCHER.read_regular(ATTESTATION_PATH, "QA attestation"); attestation = LAUNCHER.parse_json(attestation_raw, "QA attestation")
-    expected = ready_document({key: trust[key] for key in ("path", "commit", "tree", "git_blob", "sha256")})
-    if value != expected or attestation != QA_ATTESTATION or trust.get("schema_version") != "ullm.aq4_p2_resident_maintenance_harness_trust.v1" or trust.get("status") != "ready_for_one_case" or trust.get("actual_eligible") is not True or trust.get("ready_binding_sha256") != sha_bytes(ready_raw):
+    trust_raw, _ = LAUNCHER.read_regular(trust_path, "harness trust"); trust = LAUNCHER.parse_json(trust_raw, "harness trust")
+    attestation_raw, _ = LAUNCHER.read_regular(attestation_path, "QA attestation"); attestation = LAUNCHER.parse_json(attestation_raw, "QA attestation")
+    expected = ready_document({key: trust[key] for key in ("path", "commit", "tree", "git_blob", "sha256")}, profile_diagnostic=profile_diagnostic)
+    if value != expected or attestation != QA_ATTESTATION or trust.get("schema_version") != "ullm.aq4_p2_resident_maintenance_harness_trust.v1" or trust.get("status") != "ready_for_one_case" or trust.get("execution_mode") != value["execution_mode"] or trust.get("actual_eligible") is not True or trust.get("ready_binding_sha256") != sha_bytes(ready_raw):
         raise HarnessError("ready artifact semantic binding differs")
     self_sha = LAUNCHER.sha_file(Path(__file__).resolve(), "maintenance harness self")[0]
     if trust.get("path") != str(Path(__file__).resolve()) or trust.get("sha256") != self_sha:
         raise HarnessError("maintenance harness self differs")
     expected_sums = "".join(f"{digest}  {name}\n" for name, digest in (("harness-trust.json", sha_bytes(trust_raw)), ("qa-attestation.json", sha_bytes(attestation_raw)), ("ready-binding.json", sha_bytes(ready_raw)))).encode("ascii")
-    sums_raw, _ = LAUNCHER.read_regular(READY_ROOT / "SHA256SUMS", "ready sums")
+    sums_raw, _ = LAUNCHER.read_regular(root / "SHA256SUMS", "ready sums")
     if sums_raw != expected_sums:
         raise HarnessError("ready artifact SHA256SUMS differs")
     return value
@@ -355,30 +481,44 @@ def _finalize(output: Path, evidence: dict[str, Any]) -> None:
     LAUNCHER.finalize_output(output, evidence)
 
 
-def dry_run_ready(value: dict[str, Any], output: Path) -> tuple[int, dict[str, Any]]:
+def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_PATH) -> tuple[int, dict[str, Any]]:
     LAUNCHER.reject_symlink_components(output, "ready dry-run output", allow_missing_leaf=True)
     if output.exists() or output.is_symlink():
         raise HarnessError("ready dry-run output already exists")
     output.mkdir(mode=0o700)
-    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": RUN_ID, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(READY_PATH, "ready binding")[0]}
+    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
+    if value["execution_mode"] == "profile_diagnostic":
+        evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "wrapper_executed": False, "measurement_eligible": False, "promotion_eligible": False}
     _finalize(output, evidence)
     return 0, evidence
 
 
 def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Dependencies) -> tuple[int, dict[str, Any]]:
-    if value.get("status") != "ready_for_one_case" or value.get("actual_eligible") is not True or value.get("promotion_eligible") is not False or value.get("authorization", {}).get("maximum_invocations") != 1:
+    profile_diagnostic = value.get("execution_mode") == "profile_diagnostic"
+    run_id = value.get("authorization", {}).get("run_id")
+    if value.get("status") != "ready_for_one_case" or value.get("actual_eligible") is not True or value.get("promotion_eligible") is not False or value.get("authorization", {}).get("maximum_invocations") != 1 or value.get("execution_mode") not in {"one_case", "profile_diagnostic"} or not isinstance(run_id, str):
         raise HarnessError("ready one-case authorization differs")
+    if profile_diagnostic:
+        if value.get("measurement_eligible") is not False or value.get("authorization", {}).get("rocprof_wrapper_required") is not True or not isinstance(value.get("profile_diagnostic"), dict):
+            raise HarnessError("profile diagnostic authorization differs")
+        wrapper = dependencies.profile_wrapper(value["profile_diagnostic"])
+        if not isinstance(wrapper, dict) or wrapper.get("validated") is not True:
+            raise HarnessError("profile diagnostic rocprof wrapper differs")
+    elif value.get("authorization", {}).get("rocprof_wrapper_required") is not False or "profile_diagnostic" in value:
+        raise HarnessError("normal one-case profile contract differs")
+    else:
+        wrapper = None
     for path, label in ((output, "maintenance evidence"), (Path(value["launcher_binding"]["runner_output"]), "runner output"), (Path(value["launcher_binding"]["evidence_output"]), "launcher evidence")):
         LAUNCHER.reject_symlink_components(path, label, allow_missing_leaf=True)
         if path.exists() or path.is_symlink():
             raise HarnessError(f"{label} already exists")
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "run_id": RUN_ID, "promotion_eligible": False, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_wrapper": wrapper, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
     stop_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
         stage = "pre-stop-snapshot"; pre = capture_running(dependencies); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
-        marker = {"schema_version": "ullm.aq4_p2_resident_maintenance_marker.v1", "run_id": RUN_ID, "restore_required": True, "service": SERVICE, "pre_stop_sha256": sha_bytes(canonical(pre)), "created_unix_ns": time.time_ns()}
+        marker = {"schema_version": "ullm.aq4_p2_resident_maintenance_marker.v1", "run_id": run_id, "restore_required": True, "service": SERVICE, "pre_stop_sha256": sha_bytes(canonical(pre)), "created_unix_ns": time.time_ns()}
         LAUNCHER.atomic_write(output, "maintenance-marker.json", pretty(marker)); evidence["marker"] = {"path": str(output / "maintenance-marker.json"), "sha256": sha_bytes(pretty(marker))}; evidence["sequence"].append("durable-marker")
         stage = "service-stop"; evidence["commands"].append(_sudo_valid(dependencies.run, "sudo-before-stop")); evidence["process_counts"]["sudo"] += 1
         stop_attempted = True; evidence["safety"]["service_touched"] = True
@@ -434,19 +574,28 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
 def main(argv: list[str] | None = None, *, dependencies: Dependencies | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-ready-artifact", action="store_true")
+    parser.add_argument("--prepare-profile-ready-artifact", action="store_true")
     parser.add_argument("--mode", choices=("dry-run", "execute"), default="dry-run")
+    parser.add_argument("--profile-diagnostic", action="store_true")
     parser.add_argument("--ready-artifact", type=Path, default=READY_PATH)
     parser.add_argument("--evidence-output", type=Path)
     parser.add_argument("--confirm-one-case", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.prepare_ready_artifact:
-            value = prepare_ready_artifact(); print(json.dumps({"status": value["status"], "actual_eligible": value["actual_eligible"], "artifact": str(READY_PATH)}, sort_keys=True)); return 0
+        if args.prepare_ready_artifact and args.prepare_profile_ready_artifact:
+            raise HarnessError("ready artifact preparation modes are mutually exclusive")
+        if args.prepare_ready_artifact or args.prepare_profile_ready_artifact:
+            profile = args.prepare_profile_ready_artifact
+            value = prepare_ready_artifact(profile_diagnostic=profile)
+            artifact = PROFILE_READY_PATH if profile else READY_PATH
+            print(json.dumps({"status": value["status"], "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "artifact": str(artifact)}, sort_keys=True)); return 0
         value = load_ready_artifact(args.ready_artifact)
+        if args.profile_diagnostic != (value.get("execution_mode") == "profile_diagnostic"):
+            raise HarnessError("profile diagnostic flag/artifact mode differs")
         if args.evidence_output is None:
             raise HarnessError("--evidence-output is required")
         if args.mode == "dry-run":
-            code, evidence = dry_run_ready(value, args.evidence_output)
+            code, evidence = dry_run_ready(value, args.evidence_output, args.ready_artifact)
         else:
             if not args.confirm_one_case:
                 raise HarnessError("execute requires --confirm-one-case")
