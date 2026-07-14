@@ -44,6 +44,7 @@ const MAX_CASES: usize = 3;
 const MAX_ROWS: usize = 3;
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 96 * 1024;
+const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const EXPECTED_CASES: [(&str, usize, &str, usize, &'static [usize]); 2] = [
     (
         "fixture-prompt-0",
@@ -496,10 +497,51 @@ fn validate_build_git_commit(value: &str) -> Result<String, String> {
 fn required_regular_sha256(path: &Path, label: &str) -> Result<String, String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|error| format!("{label} is unavailable: {error}"))?;
-    if !metadata.file_type().is_file() {
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
         return Err(format!("{label} must be a regular file"));
     }
-    sha256_file(path)
+    if metadata.len() > MAX_IDENTITY_FILE_BYTES {
+        return Err(format!(
+            "{label} exceeds the {MAX_IDENTITY_FILE_BYTES}-byte identity bound"
+        ));
+    }
+    let mut file = File::open(path).map_err(|error| format!("{label} open failed: {error}"))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("{label} opened metadata failed: {error}"))?;
+    if file_identity(&metadata) != file_identity(&opened)
+        || !opened.file_type().is_file()
+        || opened.nlink() != 1
+    {
+        return Err(format!("{label} changed while opening"));
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("{label} read failed: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| format!("{label} byte count overflows"))?;
+        if total > MAX_IDENTITY_FILE_BYTES {
+            return Err(format!(
+                "{label} exceeds the {MAX_IDENTITY_FILE_BYTES}-byte identity bound"
+            ));
+        }
+        digest.update(&buffer[..count]);
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| format!("{label} final metadata failed: {error}"))?;
+    if file_identity(&opened) != file_identity(&after) {
+        return Err(format!("{label} changed while reading"));
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn run(
@@ -550,7 +592,7 @@ fn run(
         .collect::<Result<Vec<_>, String>>()?;
     let tool_binary =
         env::current_exe().map_err(|error| format!("failed to resolve trace binary: {error}"))?;
-    let tool_binary_sha256 = sha256_file(&tool_binary)?;
+    let tool_binary_sha256 = required_regular_sha256(&tool_binary, "trace binary")?;
     let active_manifest_path = env::var("ULLM_SERVED_MODEL_MANIFEST")
         .unwrap_or_else(|_| "/etc/ullm/served-models/active.json".to_string());
     let active_manifest = PathBuf::from(&active_manifest_path);
@@ -1005,6 +1047,15 @@ mod tests {
             )
             .is_err()
         );
+        let path = env::temp_dir().join(format!(
+            "ullm-aq4-differential-trace-identity-{}",
+            std::process::id()
+        ));
+        fs::write(&path, b"identity").expect("identity fixture should write");
+        let digest = required_regular_sha256(&path, "identity fixture")
+            .expect("identity fixture should hash");
+        fs::remove_file(&path).expect("identity fixture should remove");
+        assert_eq!(digest, format!("{:x}", Sha256::digest(b"identity")));
     }
 
     #[test]
