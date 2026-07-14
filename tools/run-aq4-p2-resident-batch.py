@@ -730,7 +730,7 @@ def validate_run(value: dict[str, Any], case: dict[str, Any], session_id: str) -
     return value
 
 
-def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_link: dict[str, str], policy_link: dict[str, str], run_id: str, baseline_kind: str, session_id: str, driver_identity: dict[str, Any], device_lock: dict[str, Any], runs: list[dict[str, Any]], failure_reason: str | None = None) -> dict[str, Any]:
+def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_link: dict[str, str], policy_link: dict[str, str], run_id: str, baseline_kind: str, session_id: str, driver_identity: dict[str, Any], device_lock: dict[str, Any], runs: list[dict[str, Any]], failure_reason: str | None = None, live_preflight: dict[str, Any] | None = None) -> dict[str, Any]:
     status = "ok" if not failure_reason and all(run["status"] == "ok" for run in runs) else "oom" if any(run["status"] == "oom" for run in runs) else "failed"
     terminal = {
         "audit_digests": [run.get("audit", {}).get("deterministic_digest_sha256") for run in runs if isinstance(run.get("audit"), dict)],
@@ -755,7 +755,7 @@ def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_
         "runs": runs,
         "terminal": terminal,
         "failure_reason": failure_reason,
-        "links": {"fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]}, "identity": identity_link, "policy": policy_link},
+        "links": {"fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]}, "identity": identity_link, "policy": policy_link, **({"live_preflight": live_preflight} if live_preflight is not None else {})},
     }
 
 
@@ -783,13 +783,74 @@ def build_plan(cases: list[dict[str, Any]], expanded_path: Path, fixture_index_p
     }
 
 
+def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[str, Any]) -> dict[str, Any]:
+    _require_absolute_nonsymlink_path(path, "live preflight")
+    raw, digest, before = read_regular(path, "live preflight", MAX_JSON_BYTES, absolute=True)
+    if stat.S_IMODE(before.st_mode) != 0o444:
+        raise BatchError("live preflight mode must be 0444")
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite live preflight number: {item}")))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BatchError(f"invalid live preflight: {error}") from error
+    exact = {"schema_version", "status", "run_id", "captured_unix_ns", "prepared_preflight", "runtime_mapping", "services", "worker_pids", "compute_owners", "lock", "environment", "vram", "commands"}
+    if not isinstance(value, dict) or set(value) != exact or value.get("schema_version") != "ullm.aq4_p2_resident_live_preflight.v1" or value.get("status") != "passed" or value.get("run_id") != args.run_id or type(value.get("captured_unix_ns")) is not int or value["captured_unix_ns"] <= 0:
+        raise BatchError("live preflight exact schema/status/run differs")
+    prepared = value.get("prepared_preflight")
+    expected_prepared = {"path": str(args.bundle_root / "preflight.json"), "sha256": sha_file(args.bundle_root / "preflight.json", "prepared synthetic preflight"), "role": "synthetic_bundle_contract_only"}
+    if prepared != expected_prepared:
+        raise BatchError("live preflight does not explicitly replace the synthetic bundle preflight")
+    mapping = value.get("runtime_mapping")
+    expected_device = bundle.get("expected_runtime", {}).get("device", {})
+    if not isinstance(mapping, dict) or mapping.get("runtime_device_index") != expected_device.get("runtime_device_index") or mapping.get("visible_token") != "1" or mapping.get("amd_smi_index") != 2 or mapping.get("bdf") != "0000:47:00.0" or mapping.get("uuid") != "a8ff7551-0000-1000-80e9-ddefa2d60f55" or mapping.get("kfd_id") != 51545:
+        raise BatchError("live preflight runtime mapping differs")
+    services = value.get("services")
+    if services != [{"unit": "ullm-openai.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}, {"unit": "llama-qwen35-udq4.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}]:
+        raise BatchError("live preflight service state differs")
+    owners = value.get("compute_owners")
+    if value.get("worker_pids") != [] or owners != {"amd_smi": [], "kfd": []}:
+        raise BatchError("live preflight compute owners differ")
+    lock = value.get("lock")
+    if not isinstance(lock, dict) or lock.get("path") != str(args.lock_path) or lock.get("free") is not True or type(lock.get("device")) is not int or type(lock.get("inode")) is not int:
+        raise BatchError("live preflight lock binding differs")
+    expected_environment = bundle.get("expected_runtime", {}).get("environment", {}) | bundle.get("expected_runtime", {}).get("required_guards", {}) | {"ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json", "ULLM_BUILD_GIT_COMMIT": bundle.get("resident_driver", {}).get("source_commit")}
+    if value.get("environment") != expected_environment:
+        raise BatchError("live preflight environment differs")
+    vram = value.get("vram")
+    if not isinstance(vram, dict) or set(vram) != {"total_bytes", "used_bytes", "free_bytes", "headroom_bytes"} or any(type(vram.get(name)) is not int or vram[name] < 0 for name in vram) or vram["total_bytes"] <= 0 or vram["free_bytes"] != vram["total_bytes"] - vram["used_bytes"] or vram["headroom_bytes"] != vram["free_bytes"]:
+        raise BatchError("live preflight VRAM/headroom differs")
+    commands = value.get("commands")
+    labels = {"sudo-n", "service-ullm-openai.service", "service-llama-qwen35-udq4.service", "old-worker", "amd-smi-list", "rocminfo", "amd-smi-process", "amd-smi-static-vram"}
+    if not isinstance(commands, list) or any(not isinstance(item, dict) for item in commands) or {item.get("label") for item in commands} != labels or any(set(item) != {"label", "argv", "exit_code", "stdout_sha256", "stderr_sha256", "captured_unix_ns"} or item.get("exit_code") not in {0, 1} for item in commands):
+        raise BatchError("live preflight command evidence differs")
+    if _file_identity(before) != _file_identity(os.lstat(path)) or sha_file(path, "live preflight", absolute=True) != digest:
+        raise BatchError("live preflight changed during validation")
+    return {"path": str(path), "sha256": digest, "device": before.st_dev, "inode": before.st_ino, "captured_unix_ns": value["captured_unix_ns"], "runtime_mapping": mapping, "vram": vram}
+
+
+def verify_live_preflight(path: Path, link: dict[str, Any]) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise BatchError(f"live preflight final metadata failed: {error}") from error
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o444:
+        raise BatchError("live preflight final file contract differs")
+    if metadata.st_dev != link.get("device") or metadata.st_ino != link.get("inode"):
+        raise BatchError("live preflight identity changed after validation")
+    if sha_file(path, "live preflight final", absolute=True) != link.get("sha256"):
+        raise BatchError("live preflight content changed after validation")
+
+
 def run_batch(args: argparse.Namespace) -> int:
-    if not args.one_case_smoke and (args.bundle_root is not None or args.trusted_validator is not None or args.trusted_validator_sha256 is not None):
+    if not args.one_case_smoke and (args.bundle_root is not None or args.trusted_validator is not None or args.trusted_validator_sha256 is not None or args.live_preflight is not None):
         raise BatchError("--bundle-root/--trusted-validator require --one-case-smoke")
     if args.one_case_smoke and args.bundle_root is None:
         raise BatchError("--bundle-root is required with --one-case-smoke")
     if args.one_case_smoke and (args.trusted_validator is None or args.trusted_validator_sha256 is None):
         raise BatchError("--trusted-validator and --trusted-validator-sha256 are required with --one-case-smoke")
+    if args.one_case_smoke and args.dry_run and args.live_preflight is not None:
+        raise BatchError("--live-preflight is forbidden for dry-run")
+    if args.one_case_smoke and not args.dry_run and args.live_preflight is None:
+        raise BatchError("--live-preflight is required for actual one-case smoke")
     expanded = load(args.expanded, "expanded")
     fixture_index = load(args.fixture_index, "fixture index")
     identity = load(args.identity, "identity")
@@ -806,8 +867,14 @@ def run_batch(args: argparse.Namespace) -> int:
         raise BatchError("baseline kind must identify one immutable build/run")
     cases = select_target_cases(expanded, fixture_index, one_case_smoke=args.one_case_smoke)
     smoke_validation = None
+    smoke_bundle = None
     if args.one_case_smoke:
-        _, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, preflight, policy, cases)
+        smoke_bundle, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, preflight, policy, cases)
+    live_preflight_link = None
+    if args.one_case_smoke and not args.dry_run:
+        live_preflight_link = validate_live_preflight(args.live_preflight, args, smoke_bundle)
+        smoke_validation["live_preflight"] = live_preflight_link
+        preflight_link = live_preflight_link
     plan = build_plan(cases, args.expanded, args.fixture_index, args.run_id, args.baseline_kind, identity, policy)
     if args.one_case_smoke:
         plan.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False, "validation": smoke_validation})
@@ -818,6 +885,8 @@ def run_batch(args: argparse.Namespace) -> int:
         raise BatchError("--driver-command is required unless --dry-run is set")
     expected_driver_argv = smoke_validation["resident_driver_argv"] if smoke_validation is not None else None
     driver_executable = validate_driver_command(args.driver_command, identity, expected_argv=expected_driver_argv)
+    if live_preflight_link is not None:
+        verify_live_preflight(args.live_preflight, live_preflight_link)
     completed_cases = 0
     with acquire_device_lock(args.lock_path, args.run_id, driver_executable) as lock_owner:
         args.output_dir.mkdir(parents=True, exist_ok=False)
@@ -828,6 +897,8 @@ def run_batch(args: argparse.Namespace) -> int:
             session_id, driver_identity = validate_ready(_recv(process, args.timeout), identity, cases, driver_executable["sha256"])
             by_id = {entry["case_id"]: entry for entry in fixture_index["cases"]}
             for case in cases:
+                if live_preflight_link is not None:
+                    verify_live_preflight(args.live_preflight, live_preflight_link)
                 fixture_entry = by_id[case["case_id"]]
                 sampling = case.get("sampling")
                 control = case.get("control")
@@ -837,7 +908,7 @@ def run_batch(args: argparse.Namespace) -> int:
                     "command": "case_begin", "schema_version": DRIVER_SCHEMA,
                     "case_id": case["case_id"], "case_sha256": case["case_sha256"],
                     "case_binding": expanded_link, "identity": identity_link,
-                    "preflight": preflight_link, "policy": policy_link,
+                    "preflight": {"path": preflight_link["path"], "sha256": preflight_link["sha256"]}, "policy": policy_link,
                     "fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]},
                     "execution": {
                         "scope": case.get("scope"), "phase": case.get("phase"), "mode": case.get("mode"),
@@ -870,7 +941,7 @@ def run_batch(args: argparse.Namespace) -> int:
                     if set(end) != {"event", "schema_version", "resident_session_id", "case_id", "release"} or end.get("event") != "case_complete" or end.get("schema_version") != DRIVER_SCHEMA or end.get("resident_session_id") != session_id or end.get("case_id") != case["case_id"] or end.get("release") != expected_release:
                         raise BatchError(f"resident driver case end failed: {case['case_id']}")
                 failure_reason = "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else next((item["terminal"]["reason_code"] for item in runs if item["status"] != "ok"), None)
-                raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, lock_owner, runs, failure_reason)
+                raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, lock_owner, runs, failure_reason, live_preflight=live_preflight_link)
                 if args.one_case_smoke:
                     raw.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False})
                 atomic_write(args.output_dir / f"{case['case_id']}.raw.json", raw)
@@ -888,6 +959,8 @@ def run_batch(args: argparse.Namespace) -> int:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+        if live_preflight_link is not None:
+            verify_live_preflight(args.live_preflight, live_preflight_link)
         atomic_write(args.output_dir / "resident-batch.summary.json", {**plan, "status": "complete", "completed_cases": completed_cases, "device_lock": lock_owner})
     return 0
 
@@ -909,6 +982,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bundle-root", type=Path, help="absolute complete 791a20c bundle root; required by --one-case-smoke")
     parser.add_argument("--trusted-validator", type=Path, help="trusted bundle validator Python source required by --one-case-smoke")
     parser.add_argument("--trusted-validator-sha256", help="expected lowercase SHA-256 of --trusted-validator")
+    parser.add_argument("--live-preflight", type=Path, help="immutable live gate sidecar required for actual one-case smoke and forbidden for dry-run")
     parser.add_argument("--driver-command", nargs=argparse.REMAINDER, help="exact resident driver argv; this option and its value must be last")
     return parser.parse_args(argv)
 
