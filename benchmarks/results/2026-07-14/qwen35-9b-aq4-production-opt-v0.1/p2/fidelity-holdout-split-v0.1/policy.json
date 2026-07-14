@@ -1,0 +1,157 @@
+{
+  "attempt2_artifact_ids_forbidden": [
+    "fixture-prompt-0",
+    "fixture-prompt-1"
+  ],
+  "attempt2_context_hashes_forbidden": [
+    "3bca9e0d24c5f880460202136254ac1e81afc6696682f351cceb8df1f2e79e6",
+    "42ea52c2bbdb5aaf75c70220eb41d4b018e85f2eeda3d4e40a8ac130d2e96215",
+    "6af1601e1b18925e5a59b8446901a0afd7e3e3f915646c56ee77b5e77b4d6249"
+  ],
+  "attempt2_threshold_source_forbidden": true,
+  "calibration_subset_only_for_active_bf16_envelope": true,
+  "candidate_active_behavioral_gate": {
+    "mismatch_action": "no-go",
+    "mode": "exact"
+  },
+  "forbidden_threshold_sources": [
+    "attempt2 differential-trace observed values",
+    "attempt2 rows/payload/VRAM/power/producer summaries"
+  ],
+  "holdout_evaluation_allowed_once": true,
+  "metrics": {
+    "bf16_top1_retained_in_aq4_top10_rate": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": null,
+      "aggregation": "wilson_lower_one_sided",
+      "confidence_level": 0.95,
+      "direction": "higher",
+      "formula": "wilson_lower_one_sided(successes=sum(exact 1.0 rows), n=24, confidence_level=0.95); no mean-minus-margin",
+      "margin": null,
+      "observed_domain": "[0,1]",
+      "relative_margin": null,
+      "role": "promotion",
+      "sample_minimum": 24
+    },
+    "hidden_cosine": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": 0.0,
+      "aggregation": "mean",
+      "direction": "higher",
+      "formula": "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))",
+      "margin": 0.01,
+      "observed_domain": "[0,1]",
+      "relative_margin": 0.01,
+      "role": "promotion",
+      "sample_minimum": 24
+    },
+    "hidden_max_abs": {
+      "absolute_ceiling": null,
+      "absolute_floor": null,
+      "aggregation": "max",
+      "confidence_level": null,
+      "direction": "diagnostic",
+      "formula": "diagnostic_max only; no promotion bound and no absolute ceiling",
+      "margin": null,
+      "observed_domain": "[0,+inf)",
+      "relative_margin": null,
+      "role": "diagnostic_only",
+      "sample_minimum": 24
+    },
+    "hidden_relative_l2": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": 0.0,
+      "aggregation": "mean",
+      "direction": "lower",
+      "formula": "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))",
+      "margin": 0.05,
+      "observed_domain": "[0,+inf)",
+      "pathological_rejection_ceiling": 1.0,
+      "relative_margin": 0.05,
+      "role": "promotion",
+      "sample_minimum": 24
+    },
+    "logits_cosine": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": 0.0,
+      "aggregation": "mean",
+      "direction": "higher",
+      "formula": "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))",
+      "margin": 0.01,
+      "observed_domain": "[0,1]",
+      "relative_margin": 0.01,
+      "role": "promotion",
+      "sample_minimum": 24
+    },
+    "logits_relative_l2": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": 0.0,
+      "aggregation": "mean",
+      "direction": "lower",
+      "formula": "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))",
+      "margin": 0.05,
+      "observed_domain": "[0,+inf)",
+      "pathological_rejection_ceiling": 1.0,
+      "relative_margin": 0.05,
+      "role": "promotion",
+      "sample_minimum": 24
+    },
+    "token_agreement_rate": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": null,
+      "aggregation": "wilson_lower_one_sided",
+      "confidence_level": 0.95,
+      "direction": "higher",
+      "formula": "wilson_lower_one_sided(successes=sum(exact 1.0 rows), n=24, confidence_level=0.95); no mean-minus-margin",
+      "margin": null,
+      "observed_domain": "[0,1]",
+      "relative_margin": null,
+      "role": "promotion",
+      "sample_minimum": 24
+    },
+    "topk_overlap_rate_k10": {
+      "absolute_ceiling": 1.0,
+      "absolute_floor": 0.1,
+      "aggregation": "mean",
+      "direction": "higher",
+      "formula": "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))",
+      "margin": 0.01,
+      "observed_domain": "[0,1]",
+      "relative_margin": 0.01,
+      "role": "promotion",
+      "sample_minimum": 24
+    }
+  },
+  "non_vacuity": {
+    "reason": "No Qwen3.5 AQ4 acceptance artifact supplies an absolute token-exact floor; Wilson lower bounds provide finite-sample non-vacuity for binary rates, continuous metrics use fixed absolute+relative margins, and raw hidden max-abs is diagnostic-only because its scale is not dimensionless."
+  },
+  "observed_attempt2_values_forbidden": true,
+  "promotion_eligible": false,
+  "quality_task": {
+    "calculation": "1 when BF16 source greedy token is present in the AQ4 top-10 set, else 0",
+    "kind": "binary_retention_rate",
+    "natural_language_suite": "optional_separate_artifact",
+    "no_regression_against_calibration_bound": true,
+    "score": "bf16_top1_retained_in_aq4_top10",
+    "task_fixture_identity_required": true
+  },
+  "relative_l2_rejection": {
+    "action": "reject any observed relative-L2 > 1 before aggregation",
+    "ceiling": 1.0,
+    "reason": "relative-L2 above 100 percent is a predeclared pathological-drift rejection; this structural check is distinct from raw hidden max-abs, which has no natural scale"
+  },
+  "schema_version": "ullm.aq4_p2_fidelity_policy.v1",
+  "split": {
+    "calibration_cases": 24,
+    "calibration_per_stratum": 3,
+    "holdout_cases": 24,
+    "holdout_per_stratum": 3,
+    "strata_fields": [
+      "prompt_tokens",
+      "baseline_mode"
+    ],
+    "stratum_size": 6,
+    "total_cases": 48
+  },
+  "status": "formula_frozen_unbound"
+}

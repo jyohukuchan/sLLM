@@ -1,0 +1,147 @@
+{
+  "algorithm": "sha256(domain || case_sha256), lexicographic within each prompt_tokens/baseline_mode stratum; first 3 calibration, last 3 holdout",
+  "attempt2_exclusions": {
+    "case_ids": [
+      "fixture-prompt-0",
+      "fixture-prompt-1"
+    ],
+    "context_token_ids_sha256": [
+      "3bca9e0d24c5f880460202136254ac1e81afc6696682f351cceb8df1f2e79e6",
+      "42ea52c2bbdb5aaf75c70220eb41d4b018e85f2eeda3d4e40a8ac130d2e96215",
+      "6af1601e1b18925e5a59b8446901a0afd7e3e3f915646c56ee77b5e77b4d6249"
+    ]
+  },
+  "calibration_case_count": 24,
+  "calibration_sha256": "f9ad1e61c41adcd78c0be77bca0c85d34e3a668efaf728b7f996298f8e6469dc",
+  "expanded_manifest_sha256": "427bd765cc8ce56d95ee3414a2a5cd9a39309929f1c2a5198a4786aeb189ff4c",
+  "fixture_index_sha256": "26d22e4f209c482e0479dba67525149d6a3e38a3897d721c47b3d4b0ed04aec1",
+  "holdout_case_count": 24,
+  "holdout_sha256": "7eace033220e523b41a33d4ec7b10a24294843e03ab63432093b2e3637fb5ad2",
+  "policy_sha256": "302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03",
+  "schema_version": "ullm.aq4_p2_fidelity_split.v1",
+  "selected_case_count": 48,
+  "split_domain": "ullm.aq4_p2_fidelity_split.v1\\0 + case_sha256",
+  "status": "ready_for_calibration",
+  "strata": [
+    {
+      "baseline_mode": "all_m1",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n1011-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1011-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1011-m16-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n1011-m64-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1011-m1-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1011-m128-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 1011
+    },
+    {
+      "baseline_mode": "cold_batched",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n1011-m64-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1011-m128-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1011-m16-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n1011-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1011-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1011-m1-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 1011
+    },
+    {
+      "baseline_mode": "all_m1",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n1024-m64-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1024-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1024-m32-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n1024-m1-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1024-m128-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1024-m16-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 1024
+    },
+    {
+      "baseline_mode": "cold_batched",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n1024-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1024-m128-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1024-m1-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n1024-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1024-m16-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1024-m64-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 1024
+    },
+    {
+      "baseline_mode": "all_m1",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n1339-m64-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1339-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1339-m1-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n1339-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1339-m16-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n1339-m128-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 1339
+    },
+    {
+      "baseline_mode": "cold_batched",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n1339-m1-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1339-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1339-m64-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n1339-m16-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1339-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n1339-m128-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 1339
+    },
+    {
+      "baseline_mode": "all_m1",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n2048-m16-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n2048-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n2048-m64-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-all_m1-n2048-m1-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n2048-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-all_m1-n2048-m128-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 2048
+    },
+    {
+      "baseline_mode": "cold_batched",
+      "calibration_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n2048-m32-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n2048-m8-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n2048-m128-r9700-rdna4-aq4_0_target"
+      ],
+      "case_count": 6,
+      "holdout_case_ids": [
+        "p2-representative-production_server-cold_prefill-cold_batched-n2048-m1-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n2048-m16-r9700-rdna4-aq4_0_target",
+        "p2-representative-production_server-cold_prefill-cold_batched-n2048-m64-r9700-rdna4-aq4_0_target"
+      ],
+      "prompt_tokens": 2048
+    }
+  ]
+}
