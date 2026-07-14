@@ -24,17 +24,18 @@ SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 DRIVER_BUILD_PATH = ROOT / "target/release/ullm-aq4-p2-resident-driver"
 WORKER_HARDLINK_FIXTURE_PATH = ROOT / "tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json"
-SOURCE_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
-SOURCE_TREE = "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
-DRIVER_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
-DRIVER_TREE = "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
-DRIVER_SOURCE_SHA = "9e308b4d4f455517b090e631b9aec682f96caeaedec02766d144f34f3791a8d8"
+SOURCE_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
+SOURCE_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+DRIVER_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
+DRIVER_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+DRIVER_SOURCE_SHA = "6d7ae136c7abc3b9f7f675d27ff8ed05cd82b9b40a492e56f38e7f2282491345"
 RUNNER_COMMIT = "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9"
 RUNNER_TREE = "bd46e713c658878e66fcab6d49ef863e43a06bd8"
 RUNNER_SOURCE_SHA = "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
-EXPECTED_DRIVER_SHA = "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8"
+ACTIVE_CASE_DEVICE_FIXTURE_SHA = "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73"
+EXPECTED_DRIVER_SHA = "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025"
 EXPECTED_SERVED_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 EXPECTED_WORKER_SHA = "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
 EXPECTED_PACKAGE_MANIFEST_SHA = "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
@@ -73,11 +74,11 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "e993016f4a62b9970423223db8702f77ee834b12"
-BINDING_SOURCE_TREE = "bf2dd3992bf41a988c71c094cc8412a719a4c6a2"
+BINDING_SOURCE_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
+BINDING_SOURCE_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
 BINDING_RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
 BINDING_RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
-BINDING_DRIVER_GIT_BLOB = "807511f74c6681e41874da1d83736869d15fe104"
+BINDING_DRIVER_GIT_BLOB = "0223325ea36a5ec6b6a8791d28b4ba5298a22655"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
     "trusted-validator.py": (0o444, "ed67910_bundle_validator_source"),
@@ -475,6 +476,7 @@ def reconstruct() -> Reconstruction:
         b'metadata.nlink() != 1',
         b'WorkerHardlinkGuard::capture(&model.worker.binary, &model.worker.binary_sha256)?',
         b'worker_guard.verify(&model.worker.binary, &model.worker.binary_sha256)?',
+        b'case.device.architecture != identity.runtime_device.architecture',
         b'MAX_WORKER_RELEASE_ENTRIES',
         b'O_NOFOLLOW',
     ):
@@ -486,6 +488,23 @@ def reconstruct() -> Reconstruction:
             raise BundleError("trusted runner launch contract differs")
     expander_source = git_blob("tools/expand-aq4-production-p2.py", EXPANDER_SOURCE_SHA)
     git_blob("tools/generate-aq4-p2-fixtures.py", FIXTURE_SOURCE_SHA)
+    active_case_device_fixture_raw = git_blob(
+        "tests/fixtures/aq4-p2-resident-case-device/active-production.json",
+        ACTIVE_CASE_DEVICE_FIXTURE_SHA,
+    )
+    active_case_device_fixture = parse_json(active_case_device_fixture_raw, "active case device fixture")
+    fixture_case_device = active_case_device_fixture.get("case", {}).get("device", {})
+    fixture_runtime_device = active_case_device_fixture.get("runtime_device", {})
+    fixture_source_device = active_case_device_fixture.get("source_device", {})
+    if (
+        active_case_device_fixture.get("schema_version") != "ullm.aq4_p2_resident_case_device_identity.v1"
+        or fixture_case_device != fixture_runtime_device
+        or fixture_case_device.get("architecture") != "gfx1201"
+        or fixture_source_device.get("architecture") != "RDNA4"
+        or fixture_case_device.get("backend") != "hip"
+        or fixture_source_device.get("backend") != "hip"
+    ):
+        raise BundleError("active case source/runtime device vocabulary differs")
 
     served_raw = read_stable(SERVED_PATH, "active served model", snapshot=snapshot)
     if sha_bytes(served_raw) != EXPECTED_SERVED_SHA:
@@ -579,7 +598,7 @@ def reconstruct() -> Reconstruction:
     fake_ready = {"event": "ready", "schema_version": PROTOCOL, "model_loads": 1, "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": resident_identity}
     trust_roots = {
         "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
-        "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "driver_source_sha256": DRIVER_SOURCE_SHA, "runner_source_commit": RUNNER_COMMIT, "runner_source_tree": RUNNER_TREE, "runner_source_sha256": RUNNER_SOURCE_SHA, "expander_source_sha256": EXPANDER_SOURCE_SHA, "fixture_generator_source_sha256": FIXTURE_SOURCE_SHA, "protocol": PROTOCOL, "one_case_smoke_runner": {"flag": "--one-case-smoke", "normal_case_count": 84, "smoke_case_count": 1, "smoke_transactions": 12, "warmup_runs": 2, "measured_runs": 10, "promotion_eligible": False}, "normative_driver": {"commit": DRIVER_COMMIT, "tree": DRIVER_TREE, "blob_unchanged_at_current_source": True, "clean_build": {"command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver", "provenance": "detached clean Git worktree at normative driver commit", "expected_binary_sha256": EXPECTED_DRIVER_SHA}}, "protocol_path_contract": {"served_model_manifest": "absolute_without_parent_traversal", "case_binding": "absolute_without_parent_traversal", "identity": "absolute_without_parent_traversal", "preflight": "absolute_without_parent_traversal", "policy": "absolute_without_parent_traversal", "fixture": "absolute_without_parent_traversal"}},
+        "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "driver_source_sha256": DRIVER_SOURCE_SHA, "runner_source_commit": RUNNER_COMMIT, "runner_source_tree": RUNNER_TREE, "runner_source_sha256": RUNNER_SOURCE_SHA, "expander_source_sha256": EXPANDER_SOURCE_SHA, "fixture_generator_source_sha256": FIXTURE_SOURCE_SHA, "active_case_device_fixture_sha256": ACTIVE_CASE_DEVICE_FIXTURE_SHA, "protocol": PROTOCOL, "one_case_smoke_runner": {"flag": "--one-case-smoke", "normal_case_count": 84, "smoke_case_count": 1, "smoke_transactions": 12, "warmup_runs": 2, "measured_runs": 10, "promotion_eligible": False}, "normative_driver": {"commit": DRIVER_COMMIT, "tree": DRIVER_TREE, "blob_unchanged_at_current_source": True, "clean_build": {"command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver", "provenance": "detached clean Git worktree at normative driver commit", "expected_binary_sha256": EXPECTED_DRIVER_SHA}}, "protocol_path_contract": {"served_model_manifest": "absolute_without_parent_traversal", "case_binding": "absolute_without_parent_traversal", "identity": "absolute_without_parent_traversal", "preflight": "absolute_without_parent_traversal", "policy": "absolute_without_parent_traversal", "fixture": "absolute_without_parent_traversal"}},
         "external": {"served_model": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "worker": {"path": str(worker_path), "sha256": EXPECTED_WORKER_SHA, "hardlink_set": worker_hardlinks}, "package_manifest": {"path": str(package_manifest_path), "sha256": EXPECTED_PACKAGE_MANIFEST_SHA}, "package_tree": {"path": str(package_manifest_path.parent), "sha256": EXPECTED_PACKAGE_CONTENT_SHA, "file_count": EXPECTED_PACKAGE_FILES}, "case_manifest": {"path": str(CASE_MANIFEST_PATH), "sha256": EXPECTED_CASE_MANIFEST_SHA}, "guard_set_sha256": EXPECTED_GUARD_SHA},
     }
     policy_raw = pretty(policy)
