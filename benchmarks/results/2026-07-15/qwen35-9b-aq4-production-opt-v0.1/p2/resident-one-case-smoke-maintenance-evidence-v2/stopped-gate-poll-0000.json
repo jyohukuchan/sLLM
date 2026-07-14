@@ -1,0 +1,181 @@
+{
+  "absolute_deadline_monotonic_ns": 1306067759671272,
+  "attempt": 0,
+  "captured_unix_ns": 1784059070362722341,
+  "consecutive_stable": 0,
+  "deadline_checkpoints": [
+    {
+      "keepalive": "not_due",
+      "label": "observation:start",
+      "monotonic_ns": 1306037759684852,
+      "remaining_ns": 29999986420
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observer:validation-before",
+      "monotonic_ns": 1306037759689412,
+      "remaining_ns": 29999981860
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observer:validation-after",
+      "monotonic_ns": 1306037762391850,
+      "remaining_ns": 29997279422
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:before",
+      "monotonic_ns": 1306037762396110,
+      "remaining_ns": 29997275162
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:timeout",
+      "monotonic_ns": 1306037762397360,
+      "remaining_ns": 29997273912
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:after",
+      "monotonic_ns": 1306037768174422,
+      "remaining_ns": 29991496850
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:before",
+      "monotonic_ns": 1306037768203152,
+      "remaining_ns": 29991468120
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:timeout",
+      "monotonic_ns": 1306037768204382,
+      "remaining_ns": 29991466890
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:after",
+      "monotonic_ns": 1306037774149937,
+      "remaining_ns": 29985521335
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:before",
+      "monotonic_ns": 1306037774177518,
+      "remaining_ns": 29985493754
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:timeout",
+      "monotonic_ns": 1306037774178598,
+      "remaining_ns": 29985492674
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:after",
+      "monotonic_ns": 1306037973958147,
+      "remaining_ns": 29785713125
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:before",
+      "monotonic_ns": 1306037973965577,
+      "remaining_ns": 29785705695
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:timeout",
+      "monotonic_ns": 1306037973966487,
+      "remaining_ns": 29785704785
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:after",
+      "monotonic_ns": 1306038238567252,
+      "remaining_ns": 29521104020
+    }
+  ],
+  "decision": "terminal_failure",
+  "elapsed_seconds": 1.026e-05,
+  "next_interval_seconds": null,
+  "observation": {
+    "captured_unix_ns": 1784059070362722341,
+    "error_type": "HarnessError",
+    "partial_probes": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "ullm-openai.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784059069892259570,
+        "exit_code": 0,
+        "label": "stopped-poll-service-ullm-openai.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "llama-qwen35-udq4.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784059069898236305,
+        "exit_code": 0,
+        "label": "stopped-poll-service-llama-qwen35-udq4.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/pgrep",
+          "-f",
+          "-x",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+        ],
+        "captured_unix_ns": 1784059070098048795,
+        "exit_code": 1,
+        "label": "stopped-poll-worker",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "process",
+          "--gpu",
+          "2",
+          "--general",
+          "--json"
+        ],
+        "captured_unix_ns": 1784059070362655130,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-process",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "c623fc11440b2bf81199ddefe42cadc330fa31ecde1cd268ff0ab930889e09ca",
+        "timeout_seconds": 2.0
+      }
+    ],
+    "secret_material_recorded": false
+  },
+  "observation_completed_monotonic_ns": 1306038238633603,
+  "observation_started_monotonic_ns": 1306037759681532,
+  "reason": "stopped observation failed",
+  "required_consecutive_stable": 2,
+  "schema_version": "ullm.aq4_p2_stopped_gate_poll_observation.v1",
+  "secret_material_recorded": false,
+  "source_classification": {
+    "observer": "error"
+  }
+}
