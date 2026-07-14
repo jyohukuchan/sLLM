@@ -32,15 +32,15 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "73438ede07e0bc48d300aeb9986742532fbe730b"
-LAUNCHER_TREE = "94b7033f2d5522374e552f5d5cd011e605d4b2df"
-LAUNCHER_GIT_BLOB = "ec7faee66de04b515c6bdd9a8c72d5e84e00348b"
-LAUNCHER_SHA = "56634a890aa18b3e0c8d4ac3b83800a7e1a6dea0a09156dbd1dfbc722388af77"
-RUNNER_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
-RUNNER_SHA = "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
+LAUNCHER_COMMIT = "b89acf82e78fc7e236c649ac7bcbd3bbac91e865"
+LAUNCHER_TREE = "adb9dff37a34d2cadedf8bfd2f64ddded2745997"
+LAUNCHER_GIT_BLOB = "bfc2ab94e08f0836ff0ccf06336962fcd300eeea"
+LAUNCHER_SHA = "35195d815fca42b4705ff0e9001674507a37149b1d70c0bdd183378417e8279c"
+RUNNER_COMMIT = "e993016f4a62b9970423223db8702f77ee834b12"
+RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "3b7a8e4603ae79002bd5307ceee877f9dd2d8bfd"
-B_COMMIT = "2c24b7670b52610f6b1db33633139023778b18e9"
+VALIDATOR_COMMIT = "efc18d0262e4ff18421c57a77b27f67bf56362cc"
+B_COMMIT = "cd764a3ba3ca00d141c2e3aadde162d099a5ce87"
 RESIDENT_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
@@ -1864,18 +1864,18 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 11, "collected": 342, "passed": 342, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 11, "collected": 345, "passed": 345, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 252, "passed": 252, "failed": 0, "deselected": 0,
+                "collected": 255, "passed": 255, "failed": 0, "deselected": 0,
                 "files": [
-                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "2c24b7670b52610f6b1db33633139023778b18e9", "git_blob": "34c25be2a019d52564e4eb2449cb68622b2336f3", "collected": 50, "passed": 50},
-                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "4005c80e542d7e37cf79e62d2fd053f99c0353c1", "git_blob": "61778f9935e2d8bcd469cdf1a8a74495543c1aee", "collected": 37, "passed": 37},
-                    {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "774f6ddc10791db8795b37f41c5245d0edfebe42", "git_blob": "9ca9a777e96c34d308a3ce64354acf62e05f7d2d", "collected": 24, "passed": 24},
+                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "cd764a3ba3ca00d141c2e3aadde162d099a5ce87", "git_blob": "faed4cbd7edd36ae89e543d80144290db994c0f2", "collected": 50, "passed": 50},
+                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "e57f7df362ced2fc6753519772b2e656b530ad7f", "collected": 37, "passed": 37},
+                    {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "3642999bd89bac462330a15da1e114f92204f8b5", "git_blob": "00ebb0291738b373c1bdc3e848da82cc54100291", "collected": 58, "passed": 58},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "438e8637c4bb0333ed321e7c6da63681d05a3a5f", "git_blob": "ea5c71899b096843902da3b237952fef35592dc6", "collected": 58, "passed": 58},
                     {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "9a3de26914fee595466644bc9f47f276ae7337c0", "git_blob": "c6f55e522435c037ee607d3bc661a2954371bd61", "collected": 76, "passed": 76},
                 ],
             },
@@ -1912,7 +1912,7 @@ QA_ATTESTATION = {
         ],
     },
     "manual_checks": {"boundary_count": 15, "status": "passed"},
-    "strict_negative_contract_count": 38,
+    "strict_negative_contract_count": 40,
     "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "worker-exact-two-hardlink-set-pre-open-post-and-rehash", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
