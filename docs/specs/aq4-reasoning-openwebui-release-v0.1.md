@@ -1,12 +1,14 @@
 # AQ4 reasoning and OpenWebUI release contract v0.1
 
-Status: current-source evidence candidate active; final production bundle, formal p95 comparison, and 100-chat stability gate remain open
+Status: current production candidate active with complete core release evidence; OpenWebUI manifest metadata and exact custom-budget UI reconciliation remain
 
 This document defines the release boundary for Qwen3.5 9B AQ4 reasoning on the
 R9700 resident worker. It does not change the OpenWebUI image. The current v2
-candidate is active through an explicit same-worker v2-to-v2 bootstrap evidence
-path. This document does not declare the final complete production bundle or
-the remaining formal performance and stability gates passed.
+candidate was restored through complete bundle-bound activation after the
+identity-matched comparison window. Phase 0, core browser reasoning, 100-chat
+stability, HTTP/SSE accounting, and formal p95 gates are complete. The remaining
+operational follow-up is to reconcile the OpenWebUI managed-model manifest hash
+and prove the exact `thinking_budget_tokens` custom parameter in the live UI.
 
 ## 1. Bound identity
 
@@ -43,8 +45,8 @@ patch. The following behavior is required:
 - the reasoning panel starts and completes when the first answer content arrives;
 - the hidden reasoning is not reinserted into the next turn when the dialect
   policy is `omit`;
-- Stop, browser refresh, multiple turns, and provider switching return the
-  Gateway and worker to ready state;
+- Stop, browser refresh, and multiple turns return the Gateway and worker to
+  ready state;
 - a direct Gateway 429 busy response and `Retry-After` remain unchanged.
 
 The existing OpenWebUI Stop, worker-failure, and 20-chat soak gates retain
@@ -98,7 +100,9 @@ browser, binds the candidate and comparison model IDs, validates the v2 record,
 and atomically publishes only gate-eligible hash-only output.
 Its current evidence schema is
 `ullm.openwebui.reasoning_browser_smoke.v2`; v2 records the model hash for
-each provider request and verifies a uLLM → llama.cpp → uLLM switch cycle.
+each provider request. Existing evidence also contains a uLLM → llama.cpp →
+uLLM switch cycle, but llama.cpp comparison and provider switching are not
+required release gates after the 2026-07-14 user decision.
 The validator retains read compatibility with the earlier v1 hash-only record.
 The `expanded_view` field is a hash and byte count of the expanded assistant
 view; it is required to be larger than the answer-only view without retaining
@@ -144,7 +148,7 @@ The candidate is not eligible for activation until all of these are true:
 3. Non-stream and stream reasoning fields concatenate to the same values,
    usage matches raw committed tokens, and budget overshoot is zero.
 4. OpenWebUI browser tests pass for reasoning display, Stop, refresh, multiple
-   turns, hidden-history omission, and provider switching.
+   turns, and hidden-history omission.
 5. The reasoning-disabled performance regression is within the production
    thresholds in the generic reasoning plan; resource samples show no leak,
    zombie worker, or OOM.
@@ -174,16 +178,23 @@ UI patch is allowed.
 
 The repository has v2 schema, Gateway, worker, and AQ4 session contract tests,
 including synthetic multi-token reasoning. The current service is active/running
-with `NRestarts=0`, using a temporary same-worker v2-to-v2 evidence candidate
-manifest SHA `feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44`
-from source commit `ae8b2bb7c2735f4dc761773957bf45f470dd5a8c`. The current-source
-HTTP/SSE evidence covers 60 cases with 60/60 correctness, zero budget
-overshoot, zero empty answers, and 60/60 lifecycle resets. The Phase 0 HTTP
-artifact is now complete and gate-eligible: resident promotion evidence binds
-the sanitized worker-generated token evidence to the same source, manifest, and
-worker identity. The 10-case current-source release evidence independently
-validates, but it is not yet a final complete production bundle because
-source-bound browser evidence is missing. The normal 100-chat OpenWebUI gate
-still receives HTTP 401 from `/api/v1/auths/` before the first chat case starts.
-The previous active manifest is retained at
-`previous-active-reasoning-v2-v0.1-ae8b2bb.json` for rollback.
+with `NRestarts=0`, manifest SHA
+`feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44`, source
+commit `ae8b2bb7c2735f4dc761773957bf45f470dd5a8c`, and worker SHA
+`177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d`.
+Phase 0, resident promotion, release validator, and browser validator are
+gate-eligible. The normal OpenWebUI soak passed 100/100 chats with 500 lifecycle
+records and zero restarts. Previous-v2 and current-candidate HTTP/SSE populations
+each contain 100 cases with 100/100 correctness, zero empty answers, zero budget
+overshoot, and 100/100 resets; all identity-matched p95 deltas are within the
+plan thresholds. The retained final bundle is
+`release-bundle-ae8b2bb-20260714-final.json`; intermediate restoration records
+are preserved in the external evidence archive.
+
+The live OpenWebUI managed model still needs an operational reconciliation:
+its stored manifest marker predates `feb3190d…`, and its current
+`reasoning_effort=high` maps to 256 tokens without proving the explicit
+`thinking_budget_tokens` custom parameter path. This does not invalidate the
+Gateway/worker evidence, but it remains open before declaring exact-budget UI
+operation complete. llama.cpp performance comparison is explicitly out of
+scope.
