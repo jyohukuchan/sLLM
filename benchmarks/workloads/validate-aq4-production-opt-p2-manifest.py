@@ -546,7 +546,8 @@ def validate_bound_policy(policy: dict[str, Any]) -> None:
     power = policy.get("power_condition", {})
     for field in contract.get("required_power_fields", []):
         value = power.get(field)
-        require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0, f"bound power field is invalid: {field}")
+        require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0, f"bound power field is invalid: {field}")
+    require(power.get("expected_power_limit_watts", 0) > 0 and power.get("maximum_temperature_c", 0) > 0 and power.get("minimum_vram_headroom_bytes", 0) > 0, "bound power limits/headroom must be positive")
     correctness = policy.get("correctness_thresholds", {})
     for field in contract.get("required_correctness_thresholds", []):
         value = correctness.get(field)
