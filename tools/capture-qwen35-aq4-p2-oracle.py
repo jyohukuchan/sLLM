@@ -138,16 +138,33 @@ def _path_identity(args: argparse.Namespace) -> dict[str, Any]:
     if served_path is not None and getattr(args, "evidence_class", "production") == "production":
         served = _json(_regular(Path(served_path), "served-model manifest"))
         try:
+            if served["schema_version"] != "ullm.served_model.v2":
+                raise oracle.OracleError("production served-model schema is not v2")
             product = served["product"]
+            product_root = Path(product["root"])
+            if not product_root.is_absolute():
+                product_root = Path(served_path).parent / product_root
             served_package_sha = product["package"]["manifest_sha256"]
+            served_package_path = oracle.safe_relative(product_root, product["package"]["manifest_path"], "served package manifest")
             served_artifact = product.get("artifact")
         except (KeyError, TypeError) as error:
             raise oracle.OracleError("served-model product package identity is invalid") from error
         oracle.ensure_sha256(served_package_sha, "served-model package manifest hash")
-        if served_package_sha != package_sha:
+        if served_package_path.resolve(strict=True) != package.resolve(strict=True) or served_package_sha != package_sha or _sha(served_package_path) != package_sha:
             raise oracle.OracleError("served-model package manifest hash differs from path package")
         if binding_kind == "package_manifest" and served_artifact is not None:
             raise oracle.OracleError("package-only path binding requires active served-model artifact=null")
+        if binding_kind == "artifact_manifest":
+            if not isinstance(served_artifact, dict):
+                raise oracle.OracleError("artifact path binding requires active served-model artifact")
+            try:
+                served_artifact_path = oracle.safe_relative(product_root, served_artifact["manifest_path"], "served artifact manifest")
+                served_artifact_sha = served_artifact["manifest_sha256"]
+            except (KeyError, TypeError) as error:
+                raise oracle.OracleError("served-model artifact identity is invalid") from error
+            oracle.ensure_sha256(served_artifact_sha, "served-model artifact manifest hash")
+            if served_artifact_path.resolve(strict=True) != artifact.resolve(strict=True) or served_artifact_sha != artifact_sha or _sha(served_artifact_path) != artifact_sha:
+                raise oracle.OracleError("served-model artifact manifest differs from path artifact")
         artifact_identity = {
             "artifact_binding_kind": binding_kind,
             "artifact_manifest_sha256": artifact_sha,
@@ -156,8 +173,8 @@ def _path_identity(args: argparse.Namespace) -> dict[str, Any]:
             "served_model_manifest_sha256": _sha(Path(served_path)),
             "served_package_manifest_sha256": served_package_sha,
         }
-    elif binding_kind == "package_manifest" and getattr(args, "evidence_class", "production") == "production":
-        raise oracle.OracleError("production package-only path capture requires --served-model-manifest")
+    elif getattr(args, "evidence_class", "production") == "production":
+        raise oracle.OracleError("production path capture requires --served-model-manifest")
     else:
         artifact_identity = {
             "artifact_manifest_sha256": artifact_sha,
@@ -278,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--tokenizer-file", action="append", default=list(oracle.TOKENIZER_FILES))
     capture_parser.add_argument("--artifact-manifest", type=Path)
     capture_parser.add_argument("--package-manifest", type=Path)
+    capture_parser.add_argument("--served-model-manifest", type=Path)
     capture_parser.add_argument("--allow-package-only", action="store_true", help="explicitly allow a product with no artifact manifest")
     capture_parser.add_argument("--model-id")
     capture_parser.add_argument("--model-revision")

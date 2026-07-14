@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the dedicated CPU AQ4 all-M=1 path oracle and capture bounded evidence.
+"""Run the dedicated GPU AQ4 all-M=1 path oracle and capture bounded evidence.
 
 The source oracle supplies only the replay token sequence (the source payload is
 never copied into the path payload).  The Rust binary performs one model load,
@@ -12,6 +12,7 @@ package-only identity mode; they remain non-usable for promotion.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -43,6 +44,10 @@ MAX_STDOUT_BYTES = ORACLE.MAX_PAYLOAD_BYTES
 MAX_STDERR_BYTES = 1 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 4 * 60 * 60
 DEFAULT_SERVED_MODEL_MANIFEST = Path("/etc/ullm/served-models/active.json")
+PRODUCTION_DEVICE_INDEX = 1
+PRODUCTION_VISIBLE_DEVICES = "1"
+PRODUCTION_DEVICE_ARCHITECTURE = "gfx1201"
+PRODUCTION_EXECUTION_PROFILE = "rdna4_aq4_resident"
 REQUIRED_HIP_KERNEL_ENV = (
     "ULLM_REQUIRE_HIP_AQ4_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
@@ -77,6 +82,20 @@ REQUIRED_HIP_KERNEL_ENV = (
 )
 
 
+def _replay_sha256(token_ids: list[int]) -> str:
+    """Match Qwen35Aq4CalibrationReplay's domain-separated Rust hash."""
+    if not token_ids:
+        raise ORACLE.OracleError("replay token sequence must not be empty")
+    digest = hashlib.sha256()
+    digest.update(b"ullm.qwen35_aq4.calibration_replay.v1\0")
+    digest.update(len(token_ids).to_bytes(8, "little", signed=False))
+    for index, token_id in enumerate(token_ids):
+        if not isinstance(token_id, int) or token_id < 0:
+            raise ORACLE.OracleError(f"replay token {index} is invalid")
+        digest.update(token_id.to_bytes(8, "little", signed=False))
+    return digest.hexdigest()
+
+
 def _regular(path: Path, label: str) -> Path:
     if path.is_symlink() or not path.is_file():
         raise ORACLE.OracleError(f"{label} must be a regular non-symlink file")
@@ -86,6 +105,15 @@ def _regular(path: Path, label: str) -> Path:
 def _directory(path: Path, label: str) -> Path:
     if path.is_symlink() or not path.is_dir():
         raise ORACLE.OracleError(f"{label} must be a regular non-symlink directory")
+    return path
+
+
+def _served_path(manifest_path: Path, raw: Any, label: str) -> Path:
+    if not isinstance(raw, str) or not raw:
+        raise ORACLE.OracleError(f"{label} path is invalid")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = manifest_path.parent / path
     return path
 
 
@@ -113,11 +141,73 @@ def _load_source(source_root: Path, cases_path: Path) -> tuple[dict[str, Any], l
     return source_manifest, cases, by_case
 
 
-def _guard_environment(manifest_path: Path | None, *, production: bool) -> tuple[dict[str, str], dict[str, Any]]:
+def _prompt_tokens(cases_path: Path) -> dict[str, list[int]]:
+    value = ORACLE.load_json(cases_path)
+    if not isinstance(value, dict) or not isinstance(value.get("cases"), list):
+        raise ORACLE.OracleError("cases JSON has no cases list")
+    prompts: dict[str, list[int]] = {}
+    for case in value["cases"]:
+        if not isinstance(case, dict) or not isinstance(case.get("case_id"), str) or not isinstance(case.get("prompt_token_ids"), list):
+            raise ORACLE.OracleError("cases JSON prompt token identity is invalid")
+        prompts[case["case_id"]] = list(case["prompt_token_ids"])
+    return prompts
+
+
+def _execution_device(
+    *, production: bool, device_kind: str, device_index: int, visible_devices: str | None
+) -> tuple[str, dict[str, str]]:
+    if device_kind not in {"cpu", "gpu"} or device_index < 0:
+        raise ORACLE.OracleError("path execution device is invalid")
+    if visible_devices is not None and (not visible_devices.isdecimal() or str(int(visible_devices)) != visible_devices):
+        raise ORACLE.OracleError("visible device mapping must be one canonical non-negative integer")
+    if production:
+        if device_kind != "gpu":
+            raise ORACLE.OracleError("production path evidence requires device-kind=gpu")
+        if device_index != PRODUCTION_DEVICE_INDEX or visible_devices != PRODUCTION_VISIBLE_DEVICES:
+            raise ORACLE.OracleError(
+                f"production R9700 mapping requires device-index={PRODUCTION_DEVICE_INDEX} "
+                f"and visible-devices={PRODUCTION_VISIBLE_DEVICES}"
+            )
+        return "production_gpu", {
+            "HIP_VISIBLE_DEVICES": visible_devices,
+            "ULLM_HIP_VISIBLE_DEVICES": visible_devices,
+        }
+    if device_kind == "cpu" and (device_index != 0 or visible_devices is not None):
+        raise ORACLE.OracleError("CPU fixture requires device-index=0 and no visible-device mapping")
+    return "fixture_only", (
+        {}
+        if visible_devices is None
+        else {"HIP_VISIBLE_DEVICES": visible_devices, "ULLM_HIP_VISIBLE_DEVICES": visible_devices}
+    )
+
+
+def _guard_environment(
+    manifest_path: Path | None,
+    *,
+    production: bool,
+    evidence_scope: str,
+    visibility_environment: dict[str, str],
+) -> tuple[dict[str, str], dict[str, Any]]:
     if manifest_path is None:
         if production:
             raise ORACLE.OracleError("production path oracle requires --served-model-manifest")
-        return dict(os.environ), {"manifest": None, "manifest_sha256": None, "required_environment": [], "required_environment_sha256": None}
+        child_env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("ULLM_REQUIRE_HIP_")
+            and name not in {"HIP_VISIBLE_DEVICES", "ULLM_HIP_VISIBLE_DEVICES"}
+        }
+        child_env.update(visibility_environment)
+        return child_env, {
+            "evidence_scope": evidence_scope,
+            "manifest": None,
+            "manifest_sha256": None,
+            "package": None,
+            "public": None,
+            "required_environment": [],
+            "required_environment_sha256": ORACLE.canonical_sha256([]),
+            "worker": None,
+        }
     manifest = ORACLE.load_json(_regular(manifest_path, "served-model manifest"))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("worker"), dict):
         raise ORACLE.OracleError("served-model manifest worker object is invalid")
@@ -141,11 +231,57 @@ def _guard_environment(manifest_path: Path | None, *, production: bool) -> tuple
             del child_env[name]
     for name in REQUIRED_HIP_KERNEL_ENV:
         child_env[name] = "1"
+    for name in ("HIP_VISIBLE_DEVICES", "ULLM_HIP_VISIBLE_DEVICES"):
+        child_env.pop(name, None)
+    child_env.update(visibility_environment)
+    worker = manifest["worker"]
+    worker_binding = None
+    package_binding = None
+    public_binding = None
+    if production:
+        if manifest.get("schema_version") != "ullm.served_model.v2":
+            raise ORACLE.OracleError("production served-model schema is not v2")
+        try:
+            worker_path = _regular(_served_path(manifest_path, worker["binary"], "served worker binary"), "served worker binary")
+            worker_sha = ORACLE.ensure_sha256(worker["binary_sha256"], "served worker binary hash")
+            worker_identity = worker["identity"]
+            product = manifest["product"]
+            product_root = _directory(_served_path(manifest_path, product["root"], "served product root"), "served product root")
+            package = product["package"]
+            package_path = _regular(product_root / package["manifest_path"], "served package manifest")
+            package_sha = ORACLE.ensure_sha256(package["manifest_sha256"], "served package manifest hash")
+            public = manifest["public"]
+        except (KeyError, TypeError) as error:
+            raise ORACLE.OracleError("production served-model identity is incomplete") from error
+        if _sha(worker_path) != worker_sha:
+            raise ORACLE.OracleError("served worker binary hash differs")
+        if _sha(package_path) != package_sha:
+            raise ORACLE.OracleError("served package manifest hash differs")
+        if not isinstance(worker_identity, dict) or worker_identity.get("device") != PRODUCTION_DEVICE_ARCHITECTURE or worker_identity.get("execution_profile") != PRODUCTION_EXECUTION_PROFILE:
+            raise ORACLE.OracleError("served worker is not the bound R9700 execution profile")
+        if not isinstance(public, dict) or not isinstance(public.get("upstream_id"), str) or not isinstance(public.get("revision"), str):
+            raise ORACLE.OracleError("served public model identity is invalid")
+        worker_binding = {
+            "binary_path": str(worker_path.resolve(strict=True)),
+            "binary_sha256": worker_sha,
+            "device_architecture": PRODUCTION_DEVICE_ARCHITECTURE,
+            "execution_profile": PRODUCTION_EXECUTION_PROFILE,
+        }
+        package_binding = {
+            "manifest_path": str(package_path.resolve(strict=True)),
+            "manifest_sha256": package_sha,
+            "product_root": str(product_root.resolve(strict=True)),
+        }
+        public_binding = {"model_id": public["upstream_id"], "model_revision": public["revision"]}
     return child_env, {
+        "evidence_scope": evidence_scope,
         "manifest": str(manifest_path.resolve(strict=True)),
         "manifest_sha256": _sha(manifest_path),
+        "package": package_binding,
+        "public": public_binding,
         "required_environment": list(REQUIRED_HIP_KERNEL_ENV),
         "required_environment_sha256": ORACLE.canonical_sha256(list(REQUIRED_HIP_KERNEL_ENV)),
+        "worker": worker_binding,
     }
 
 
@@ -219,11 +355,33 @@ def _canonicalize_payload(raw: bytes, path: Path, cases: list[dict[str, Any]]) -
     return records, digest
 
 
-def _write_runtime(output: Path, *, package_dir: Path, package_manifest: Path, artifact_manifest: Path | None, binary: Path, source_root: Path, source_manifest: dict[str, Any], row_count: int, elapsed_seconds: float, guard_identity: dict[str, Any]) -> None:
+def _write_runtime(
+    output: Path,
+    *,
+    package_dir: Path,
+    package_manifest: Path,
+    artifact_manifest: Path | None,
+    binary: Path,
+    source_root: Path,
+    cases_path: Path,
+    source_manifest: dict[str, Any],
+    row_count: int,
+    elapsed_seconds: float,
+    guard_identity: dict[str, Any],
+    device_kind: str,
+    device_index: int,
+    visible_devices: str | None,
+    evidence_scope: str,
+    execution_environment: dict[str, str],
+    replay_binding: list[dict[str, Any]],
+) -> None:
     runtime = {
         "schema_version": "ullm.qwen35_aq4_path_oracle_runtime.v1",
         "runtime": "ullm-aq4-p2-path-oracle",
-        "device": "cpu",
+        "device_kind": device_kind,
+        "device_index": device_index,
+        "visible_devices": visible_devices,
+        "evidence_scope": evidence_scope,
         "dtype": "f32",
         "all_m1": True,
         "model_loads": 1,
@@ -234,10 +392,17 @@ def _write_runtime(output: Path, *, package_dir: Path, package_manifest: Path, a
         "artifact_manifest_sha256": _sha(artifact_manifest) if artifact_manifest is not None else None,
         "binary": {"path": str(binary.resolve(strict=True)), "sha256": _sha(binary)},
         "source_replay": {
+            "root": str(source_root.resolve(strict=True)),
             "manifest_sha256": _sha(source_root / "manifest.json"),
             "payload_sha256": source_manifest["payload"]["sha256"],
+            "cases_input": {
+                "path": str(cases_path.resolve(strict=True)),
+                "sha256": _sha(cases_path),
+            },
+            "cases": replay_binding,
         },
         "served_model_guard": guard_identity,
+        "execution_environment": execution_environment,
         "run": {"elapsed_seconds": elapsed_seconds, "row_count": row_count},
     }
     path = output / "runtime.json"
@@ -268,8 +433,23 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
         raise ORACLE.OracleError("artifact and package manifests must be distinct files")
     if artifact_manifest is None and not args.allow_package_only:
         raise ORACLE.OracleError("missing artifact manifest; pass --allow-package-only for package-only products")
-    environment, guard_identity = _guard_environment(args.served_model_manifest, production=args.evidence_class == "production")
+    production = args.evidence_class == "production"
+    device_kind = getattr(args, "device_kind", "gpu")
+    visible_devices = getattr(args, "visible_devices", None)
+    evidence_scope, visibility_environment = _execution_device(
+        production=production,
+        device_kind=device_kind,
+        device_index=args.device_index,
+        visible_devices=visible_devices,
+    )
+    environment, guard_identity = _guard_environment(
+        args.served_model_manifest,
+        production=production,
+        evidence_scope=evidence_scope,
+        visibility_environment=visibility_environment,
+    )
     source_manifest, cases, replay_by_case = _load_source(args.source_oracle, args.cases)
+    prompt_tokens_by_case = _prompt_tokens(args.cases)
     with tempfile.TemporaryDirectory(prefix="qwen35-aq4-path-oracle-") as temporary:
         temporary_root = Path(temporary)
         replay_path = temporary_root / "replay.json"
@@ -300,6 +480,7 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
             tokenizer_file=list(ORACLE.TOKENIZER_FILES),
             artifact_manifest=artifact_manifest,
             package_manifest=package_manifest,
+            served_model_manifest=args.served_model_manifest,
             model_id=args.model_id or source_manifest["identity"]["model_id"],
             model_revision=args.model_revision if args.model_revision is not None else source_manifest["identity"]["model_revision"],
         )
@@ -311,10 +492,35 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
             artifact_manifest=artifact_manifest,
             binary=args.binary,
             source_root=args.source_oracle,
+            cases_path=args.cases,
             source_manifest=source_manifest,
             row_count=records,
             elapsed_seconds=elapsed,
             guard_identity=guard_identity,
+            device_kind=device_kind,
+            device_index=args.device_index,
+            visible_devices=visible_devices,
+            evidence_scope=evidence_scope,
+            execution_environment={
+                **{name: "1" for name in guard_identity["required_environment"]},
+                **visibility_environment,
+            },
+            replay_binding=[
+                {
+                    "case_id": case["case_id"],
+                    "length": len(replay_by_case[case["case_id"]]),
+                    "source_sequence_sha256": _replay_sha256(replay_by_case[case["case_id"]]),
+                    "contexts": [
+                        {
+                            "step": step,
+                            "length": len(prompt_tokens_by_case[case["case_id"]]) + step,
+                            "token_ids_sha256": ORACLE.canonical_token_ids_hash(prompt_tokens_by_case[case["case_id"]] + replay_by_case[case["case_id"]][:step]),
+                        }
+                        for step in range(case["step_count"])
+                    ],
+                }
+                for case in cases
+            ],
         )
         _write_sums(args.output)
     report = VALIDATE.validate_oracle(args.output, "path")
@@ -344,6 +550,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-revision")
     parser.add_argument("--evidence-class", choices=("production", "synthetic_fixture"), default="production")
     parser.add_argument("--device-index", type=int, default=0)
+    parser.add_argument(
+        "--device-kind",
+        choices=("cpu", "gpu"),
+        default="gpu",
+        help="execution device kind recorded in runtime.json (the AQ4 package path is GPU-backed)",
+    )
+    parser.add_argument(
+        "--visible-devices",
+        help="optional HIP-visible device mapping recorded in runtime.json",
+    )
     parser.add_argument("--chunk-bytes", type=int, default=1024 * 1024)
     parser.add_argument("--prefill-m", type=int, default=1)
     parser.add_argument("--rotary-dim", type=int, default=64)

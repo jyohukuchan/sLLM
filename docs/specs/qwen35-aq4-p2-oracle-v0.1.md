@@ -14,12 +14,22 @@ P2では、AQ4 packageの同一artifact pathだけでなく、独立したBF16/F
 
 現行 product が独立した artifact manifest を公開していない場合は、path
 manifest の `identity.artifact.artifact_manifest_sha256` を `null` とし、実在する
-package manifest の SHA-256 (`package_manifest_sha256`) だけを束縛してよい。この
-package-only identity は役割の異なる manifest を同一ファイルとして扱わないための
-明示的な状態であり、validator は path/link を valid として再検証できるが、
-`usable_as_path_evidence` と `usable_as_p2_oracle_link` は false のままにする。
+package manifest の SHA-256 (`package_manifest_sha256`) だけを束縛してよい。production
+でこのpackage-only identityを使う場合は、`artifact_binding_kind=package_manifest`、
+active served-model manifestの実path/SHA-256、同manifestが宣言するpackage SHA-256を
+追加で必須とする。validatorはactive manifestを再読し、`product.artifact=null`、
+product root内のpackage manifest、worker binary、gfx1201/
+`rdna4_aq4_resident` identityまで一致した場合だけproduction path evidenceとして扱う。
+legacyまたはfixtureのpackage-only identityはvalidな診断用artifactとして読めるが、
+`usable_as_path_evidence` と `usable_as_p2_oracle_link` はfalseのままとする。
 
-PayloadはJSONLを逐次読み取りし、4 MiB、128 cases、128 steps、256 sample values、top-k 32を上限とする。validatorは重複キー、非有限数、symlink/path escape、順序、coverage、payload hashを再計算する。sourceではconfig、index、全4 shard、tokenizer 5 filesを実pathからstreaming SHA-256で再読し、canonical aggregateを照合する。manifest runtime、runtime.json、CPU/BF16、package version、thread数、preflight、row count、SHA256SUMSも相互照合する。hidden/logitの完全な行列は保存しない。
+PayloadはJSONLを逐次読み取りし、4 MiB、128 cases、128 steps、256 sample values、top-k 32を上限とする。validatorは重複キー、非有限数、symlink/path escape、順序、coverage、payload hashを再計算する。oracle内外のmanifest、payload、runtime、SHA256SUMS、package、worker、binary、cases入力はsingle-link regular fileだけを受け付け、全path componentのsymlinkを拒否する。`O_NOFOLLOW`で開いたfile descriptorとpathのdevice/inode/size/mode/mtime/ctime/nlinkをread前後に照合し、hardlinkと読み取り中の置換を拒否する。
+
+sourceではconfig、index、全4 shard、tokenizer 5 filesを実pathからstreaming SHA-256で再読し、canonical aggregateを照合する。source manifest runtime、runtime.json、CPU/BF16、package version、thread数、preflight、row count、SHA256SUMSも相互照合する。pathでも`runtime.json`と`SHA256SUMS`を必須とし、rootのfile coverageとchecksum順をexactに検証する。hidden/logitの完全な行列は保存しない。
+
+path runtimeは`ullm.qwen35_aq4_path_oracle_runtime.v1`のexact schemaである。productionでは`evidence_scope=production_gpu`、`device_kind=gpu`、runtime device index `1`、`HIP_VISIBLE_DEVICES=1`、`ULLM_HIP_VISIBLE_DEVICES=1`を実際の子process環境へ設定し、そのexact mappingをruntimeへ記録する。served workerはgfx1201と`rdna4_aq4_resident`でなければならない。CPU実行はsynthetic fixtureに限り、device index `0`、visible mappingなし、`evidence_scope=fixture_only`、promotion falseとする。
+
+path runtimeはsource oracle root、manifest/payload SHA-256、元cases JSONのpath/SHA-256、caseごとのsource greedy列のdomain-separated SHA-256、各stepが使うprompt+直前までのsource token context hashを保持する。validatorはsource payloadとcases入力から全値を再構築する。package/artifact、path binary、served manifest、worker、実行環境、replayのunknown field、duplicate key、hash/path差し替えはfail-closedとする。
 
 greedy tokenは全語彙の最大logitとし、同値では最小token IDを選ぶ。top-kは全語彙をlogit降順、同値token ID昇順に並べた先頭kである。実行中に保持できるlogitはfinal tokenの1 vocabulary rowまでで、sequence×vocabulary matrixは保持しない。
 
@@ -44,6 +54,11 @@ python3 tools/capture-qwen35-aq4-p2-oracle.py link \
   --source-oracle SOURCE_ORACLE --path-oracle PATH_ORACLE --output LINK
 python3 tools/validate-qwen35-aq4-p2-oracle.py link LINK \
   --source-oracle SOURCE_ORACLE --path-oracle PATH_ORACLE
+python3 tools/export-qwen35-aq4-path-oracle.py \
+  --allow-package-only --package-dir PACKAGE --package-manifest PACKAGE/manifest.json \
+  --served-model-manifest ACTIVE.json --source-oracle SOURCE_ORACLE \
+  --cases CASES.json --tokenizer-root TOKENIZER --output PATH_ORACLE \
+  --device-kind gpu --device-index 1 --visible-devices 1
 ```
 
-No model runtime is invoked by these commands. `validate-... probe` distinguishes a present checkpoint from the missing independent forward artifact and reports the exact blocker.
+`capture`、`link`、`validate`はmodel runtimeを起動しない。`export-qwen35-aq4-path-oracle.py`だけが専用Rust path binaryを1回起動し、production GPU mappingとserved identityを上記契約へ固定する。`validate-... probe`はpresent checkpointとmissing independent forward artifactを区別し、exact blockerを報告する。

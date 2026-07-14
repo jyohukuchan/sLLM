@@ -79,7 +79,21 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return _file_identity(left) == _file_identity(right)
 
 
+def _reject_symlink_components(path: Path, label: str) -> None:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise OracleError(f"cannot inspect {label} path component: {error}") from error
+        if stat.S_ISLNK(info.st_mode):
+            raise OracleError(f"{label} path contains a symlink component: {current}")
+
+
 def _open_pinned_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
+    _reject_symlink_components(path, label)
     try:
         before = path.lstat()
     except OSError as error:
@@ -177,8 +191,6 @@ def safe_relative(root: Path, raw: Any, label: str) -> Path:
         raise OracleError(f"missing {label}: {error}") from error
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise OracleError(f"{label} must be a regular non-symlink file")
-    if info.st_nlink != 1:
-        raise OracleError(f"{label} must have exactly one hard link")
     try:
         path.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (OSError, ValueError) as error:
@@ -304,39 +316,36 @@ def validate_payload_record(raw: Any, label: str) -> dict[str, Any]:
     }
 
 
-def iter_payload(path: Path) -> Iterator[dict[str, Any]]:
-    try:
-        size = path.stat().st_size
-    except OSError as error:
-        raise OracleError(f"cannot stat payload: {error}") from error
+def _iter_payload_bytes(raw_bytes: bytes) -> Iterator[dict[str, Any]]:
+    size = len(raw_bytes)
     if size <= 0 or size > MAX_PAYLOAD_BYTES:
         raise OracleError(f"payload bytes must be between 1 and {MAX_PAYLOAD_BYTES}")
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                raise OracleError(f"payload line {line_number} is empty")
-            try:
-                raw = json.loads(line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite)
-            except (UnicodeError, json.JSONDecodeError) as error:
-                raise OracleError(f"invalid payload JSON line {line_number}: {error}") from error
-            yield validate_payload_record(raw, f"payload[{line_number}]")
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeError as error:
+        raise OracleError(f"invalid payload UTF-8: {error}") from error
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            raise OracleError(f"payload line {line_number} is empty")
+        try:
+            raw = json.loads(line, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite)
+        except json.JSONDecodeError as error:
+            raise OracleError(f"invalid payload JSON line {line_number}: {error}") from error
+        yield validate_payload_record(raw, f"payload[{line_number}]")
+
+
+def iter_payload(path: Path) -> Iterator[dict[str, Any]]:
+    yield from _iter_payload_bytes(read_regular_bytes(path, "payload", MAX_PAYLOAD_BYTES))
 
 
 def digest_payload(path: Path) -> tuple[str, int, int]:
+    raw = read_regular_bytes(path, "payload", MAX_PAYLOAD_BYTES)
     records = 0
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_PAYLOAD_BYTES:
-                raise OracleError(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes")
-            digest.update(chunk)
-    for _ in iter_payload(path):
+    for _ in _iter_payload_bytes(raw):
         records += 1
         if records > MAX_CASES * MAX_STEPS:
             raise OracleError("payload record count exceeds bounded limit")
-    return digest.hexdigest(), size, records
+    return hashlib.sha256(raw).hexdigest(), len(raw), records
 
 
 def metadata_file(root: Path, name: str) -> dict[str, Any]:
@@ -465,7 +474,6 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
         artifact = _exact_keys(identity["artifact"], base_artifact_keys, "identity.artifact")
         # Legacy records remain readable, but package-only promotion must use the
         # explicit served-model binding fields below.
-        artifact["artifact_binding_kind"] = "artifact_manifest" if artifact["artifact_manifest_sha256"] is not None else "package_manifest"
     elif artifact_keys == package_bound_keys:
         artifact = _exact_keys(identity["artifact"], package_bound_keys, "identity.artifact")
         if artifact["artifact_binding_kind"] not in {"artifact_manifest", "package_manifest"}:

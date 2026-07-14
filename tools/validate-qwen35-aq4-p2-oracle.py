@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import math
+import os
 import platform
 import sys
 from pathlib import Path
@@ -14,6 +16,90 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import qwen35_aq4_p2_oracle as oracle  # noqa: E402
+
+
+PATH_RUNTIME_SCHEMA = "ullm.qwen35_aq4_path_oracle_runtime.v1"
+PRODUCTION_DEVICE_INDEX = 1
+PRODUCTION_VISIBLE_DEVICES = "1"
+PRODUCTION_DEVICE_ARCHITECTURE = "gfx1201"
+PRODUCTION_EXECUTION_PROFILE = "rdna4_aq4_resident"
+REQUIRED_HIP_KERNEL_ENV = (
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+)
+
+
+def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        actual = set(value) if isinstance(value, dict) else set()
+        raise oracle.OracleError(
+            f"{label} keys differ: missing={sorted(fields - actual)} extra={sorted(actual - fields)}"
+        )
+    return value
+
+
+def _absolute_regular(raw: Any, label: str) -> Path:
+    if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
+        raise oracle.OracleError(f"{label} must be an absolute path")
+    path = Path(raw)
+    # sha256_file performs O_NOFOLLOW, single-link, fd/path identity validation.
+    _sha(path)
+    return path.resolve(strict=True)
+
+
+def _absolute_directory(raw: Any, label: str) -> Path:
+    if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
+        raise oracle.OracleError(f"{label} must be an absolute path")
+    path = Path(raw)
+    if path.is_symlink() or not path.is_dir():
+        raise oracle.OracleError(f"{label} must be a non-symlink directory")
+    return path.resolve(strict=True)
+
+
+def _relative_under(root: Path, raw: Any, label: str) -> Path:
+    if not isinstance(raw, str):
+        raise oracle.OracleError(f"{label} must be a relative path")
+    path = oracle.safe_relative(root, raw, label)
+    return path.resolve(strict=True)
+
+
+def _replay_sha256(token_ids: list[int]) -> str:
+    if not token_ids:
+        raise oracle.OracleError("source replay token sequence is empty")
+    digest = hashlib.sha256()
+    digest.update(b"ullm.qwen35_aq4.calibration_replay.v1\0")
+    digest.update(len(token_ids).to_bytes(8, "little", signed=False))
+    for token_id in token_ids:
+        digest.update(oracle.integer(token_id, "source replay token", minimum=0).to_bytes(8, "little", signed=False))
+    return digest.hexdigest()
 
 
 def _sha(path: Path) -> str:
@@ -39,9 +125,17 @@ def _package_version(name: str) -> str | None:
 
 def _validate_sha256s(root: Path, manifest: dict[str, Any]) -> None:
     sums_path = oracle.safe_relative(root, "SHA256SUMS", "SHA256SUMS")
-    expected_names = {"manifest.json", manifest["payload"]["file"], "runtime.json"}
+    expected_order = ["manifest.json", manifest["payload"]["file"], "runtime.json"]
+    expected_names = set(expected_order)
     entries: dict[str, str] = {}
-    for line_number, line in enumerate(sums_path.read_text(encoding="ascii").splitlines(), 1):
+    try:
+        sums_text = oracle.read_regular_bytes(sums_path, "SHA256SUMS", 4096).decode("ascii")
+    except UnicodeError as error:
+        raise oracle.OracleError("SHA256SUMS must be ASCII") from error
+    if not sums_text.endswith("\n") or "\r" in sums_text:
+        raise oracle.OracleError("SHA256SUMS framing differs")
+    lines = sums_text[:-1].split("\n")
+    for line_number, line in enumerate(lines, 1):
         parts = line.split("  ")
         if len(parts) != 2 or parts[1] in entries:
             raise oracle.OracleError(f"SHA256SUMS line {line_number} is invalid or duplicate")
@@ -49,9 +143,12 @@ def _validate_sha256s(root: Path, manifest: dict[str, Any]) -> None:
         entries[parts[1]] = parts[0]
     if set(entries) != expected_names:
         raise oracle.OracleError("SHA256SUMS coverage differs")
+    if list(entries) != expected_order:
+        raise oracle.OracleError("SHA256SUMS order differs")
     actual_names = set()
     for path in root.iterdir():
-        if path.is_symlink() or not path.is_file():
+        info = path.lstat()
+        if path.is_symlink() or not path.is_file() or info.st_nlink != 1:
             raise oracle.OracleError("oracle root contains a non-regular artifact")
         actual_names.add(path.name)
     if actual_names != expected_names | {"SHA256SUMS"}:
@@ -60,6 +157,328 @@ def _validate_sha256s(root: Path, manifest: dict[str, Any]) -> None:
         path = oracle.safe_relative(root, name, f"SHA256SUMS target {name}")
         if _sha(path) != digest:
             raise oracle.OracleError(f"SHA256SUMS digest differs: {name}")
+
+
+def _package_binding_status(artifact: dict[str, Any]) -> tuple[bool, str | None]:
+    """Recognize the extended package-only binding before runtime reconstruction."""
+    if artifact.get("artifact_binding_kind") != "package_manifest":
+        return False, "path oracle artifact binding kind is not package_manifest"
+    required = {"served_model_manifest_path", "served_model_manifest_sha256", "served_package_manifest_sha256"}
+    if not required.issubset(artifact):
+        return False, "path oracle package binding lacks active served-model identity"
+    manifest_path = Path(artifact["served_model_manifest_path"])
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return False, "active served-model manifest is not a regular file"
+    if _sha(manifest_path) != artifact["served_model_manifest_sha256"]:
+        return False, "active served-model manifest SHA-256 differs"
+    active = oracle.load_json(manifest_path)
+    try:
+        product = active["product"]
+        package = product["package"]
+        active_artifact = product.get("artifact")
+        active_package_sha = package["manifest_sha256"]
+    except (KeyError, TypeError) as error:
+        raise oracle.OracleError("active served-model package identity is invalid") from error
+    if active_artifact is not None:
+        return False, "active served-model product exposes an artifact; package-only binding is invalid"
+    if active_package_sha != artifact["package_manifest_sha256"] or active_package_sha != artifact["served_package_manifest_sha256"]:
+        return False, "active served-model package manifest SHA-256 differs"
+    return True, None
+
+
+def _load_cases_input(path: Path) -> tuple[list[dict[str, Any]], dict[str, list[int]]]:
+    value = oracle.load_json(path)
+    if not isinstance(value, dict) or set(value) != {"cases"} or not isinstance(value["cases"], list):
+        raise oracle.OracleError("path runtime cases input schema differs")
+    normalized: list[dict[str, Any]] = []
+    prompts: dict[str, list[int]] = {}
+    seen: set[str] = set()
+    for index, raw in enumerate(value["cases"]):
+        item = _exact(raw, {"case_id", "prompt_token_ids", "step_count"}, f"path runtime cases[{index}]")
+        case_id = item["case_id"]
+        if not isinstance(case_id, str) or not case_id or case_id in seen:
+            raise oracle.OracleError("path runtime case IDs differ")
+        seen.add(case_id)
+        token_ids = item["prompt_token_ids"]
+        if not isinstance(token_ids, list) or not token_ids or len(token_ids) > 4096:
+            raise oracle.OracleError("path runtime prompt token list differs")
+        prompts[case_id] = [oracle.integer(token, "path runtime prompt token", minimum=0) for token in token_ids]
+        step_count = oracle.integer(item["step_count"], "path runtime step count", minimum=1)
+        if step_count > oracle.MAX_STEPS:
+            raise oracle.OracleError("path runtime step count exceeds bound")
+        normalized.append(
+            {
+                "case_id": case_id,
+                "prompt_token_count": len(token_ids),
+                "prompt_token_ids_sha256": oracle.canonical_token_ids_hash(token_ids),
+                "step_count": step_count,
+            }
+        )
+    if not normalized or len(normalized) > oracle.MAX_CASES:
+        raise oracle.OracleError("path runtime cases exceed bound")
+    return normalized, prompts
+
+
+def _validate_source_replay(value: Any, manifest: dict[str, Any], *, production: bool) -> None:
+    replay = _exact(
+        value,
+        {"cases", "cases_input", "manifest_sha256", "payload_sha256", "root"},
+        "path runtime source_replay",
+    )
+    source_root = _absolute_directory(replay["root"], "path runtime source root")
+    source_manifest = oracle.validate_manifest(source_root, expected_kind="source")
+    if production and source_manifest["evidence_class"] != "production":
+        raise oracle.OracleError("production path runtime requires a production source oracle")
+    if _sha(source_root / "manifest.json") != replay["manifest_sha256"]:
+        raise oracle.OracleError("path runtime source manifest hash differs")
+    if source_manifest["payload"]["sha256"] != replay["payload_sha256"]:
+        raise oracle.OracleError("path runtime source payload hash differs")
+    if source_manifest["cases"] != manifest["cases"]:
+        raise oracle.OracleError("path runtime source/path case contract differs")
+    cases_input = _exact(replay["cases_input"], {"path", "sha256"}, "path runtime cases input")
+    cases_path = _absolute_regular(cases_input["path"], "path runtime cases input")
+    if _sha(cases_path) != cases_input["sha256"]:
+        raise oracle.OracleError("path runtime cases input hash differs")
+    normalized_cases, prompts = _load_cases_input(cases_path)
+    if normalized_cases != manifest["cases"]:
+        raise oracle.OracleError("path runtime cases input differs from path manifest")
+    by_case = {case["case_id"]: [] for case in manifest["cases"]}
+    for row in oracle.payload_records(source_root, source_manifest):
+        if row["case_id"] not in by_case:
+            raise oracle.OracleError("path runtime source replay contains an unknown case")
+        by_case[row["case_id"]].append(row["greedy_token_id"])
+    bindings = replay["cases"]
+    if not isinstance(bindings, list) or len(bindings) != len(manifest["cases"]):
+        raise oracle.OracleError("path runtime replay case coverage differs")
+    expected_bindings = []
+    for case in manifest["cases"]:
+        case_id = case["case_id"]
+        tokens = by_case[case_id]
+        if len(tokens) != case["step_count"]:
+            raise oracle.OracleError(f"path runtime replay length differs for {case_id}")
+        prompt = prompts[case_id]
+        expected_bindings.append(
+            {
+                "case_id": case_id,
+                "length": len(tokens),
+                "source_sequence_sha256": _replay_sha256(tokens),
+                "contexts": [
+                    {
+                        "step": step,
+                        "length": len(prompt) + step,
+                        "token_ids_sha256": oracle.canonical_token_ids_hash(prompt + tokens[:step]),
+                    }
+                    for step in range(case["step_count"])
+                ],
+            }
+        )
+    if bindings != expected_bindings:
+        raise oracle.OracleError("path runtime replay case/hash/context binding differs")
+
+
+def _validate_served_guard(
+    guard_value: Any,
+    artifact: dict[str, Any],
+    runtime: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    production: bool,
+) -> None:
+    guard = _exact(
+        guard_value,
+        {
+            "evidence_scope",
+            "manifest",
+            "manifest_sha256",
+            "package",
+            "public",
+            "required_environment",
+            "required_environment_sha256",
+            "worker",
+        },
+        "path runtime served_model_guard",
+    )
+    if guard["evidence_scope"] != runtime["evidence_scope"]:
+        raise oracle.OracleError("path runtime served guard evidence scope differs")
+    required = list(REQUIRED_HIP_KERNEL_ENV) if guard["manifest"] is not None else []
+    if guard["required_environment"] != required or guard["required_environment_sha256"] != oracle.canonical_sha256(required):
+        raise oracle.OracleError("path runtime served guard environment differs")
+    expected_environment = {name: "1" for name in required}
+    if runtime["visible_devices"] is not None:
+        expected_environment |= {
+            "HIP_VISIBLE_DEVICES": runtime["visible_devices"],
+            "ULLM_HIP_VISIBLE_DEVICES": runtime["visible_devices"],
+        }
+    if runtime["execution_environment"] != expected_environment:
+        raise oracle.OracleError("path runtime execution environment differs")
+    if not production:
+        if guard["worker"] is not None or guard["package"] is not None or guard["public"] is not None:
+            raise oracle.OracleError("fixture path runtime must not claim production served identity")
+        if guard["manifest"] is None:
+            if guard["manifest_sha256"] is not None:
+                raise oracle.OracleError("fixture served manifest hash differs")
+        else:
+            served_path = _absolute_regular(guard["manifest"], "fixture served-model manifest")
+            if _sha(served_path) != guard["manifest_sha256"]:
+                raise oracle.OracleError("fixture served-model manifest hash differs")
+        return
+
+    if artifact.get("artifact_binding_kind") not in {"package_manifest", "artifact_manifest"}:
+        raise oracle.OracleError("production path manifest lacks extended served binding")
+    served_path = _absolute_regular(guard["manifest"], "production served-model manifest")
+    served_sha = _sha(served_path)
+    if served_sha != guard["manifest_sha256"] or served_sha != artifact.get("served_model_manifest_sha256"):
+        raise oracle.OracleError("production served-model manifest hash chain differs")
+    if served_path != Path(artifact.get("served_model_manifest_path", "")).resolve(strict=True):
+        raise oracle.OracleError("production served-model manifest path chain differs")
+    served = oracle.load_json(served_path)
+    if not isinstance(served, dict) or served.get("schema_version") != "ullm.served_model.v2":
+        raise oracle.OracleError("production served-model schema is not v2")
+    try:
+        public = served["public"]
+        worker = served["worker"]
+        worker_identity = worker["identity"]
+        product = served["product"]
+        package = product["package"]
+        active_artifact = product.get("artifact")
+    except (KeyError, TypeError) as error:
+        raise oracle.OracleError("production served-model identity is incomplete") from error
+    public_binding = _exact(guard["public"], {"model_id", "model_revision"}, "served public binding")
+    if public_binding != {"model_id": public.get("upstream_id"), "model_revision": public.get("revision")} or public_binding["model_id"] != manifest["identity"]["model_id"]:
+        raise oracle.OracleError("production served public model identity differs")
+    worker_binding = _exact(
+        guard["worker"],
+        {"binary_path", "binary_sha256", "device_architecture", "execution_profile"},
+        "served worker binding",
+    )
+    worker_path = _absolute_regular(worker_binding["binary_path"], "served worker binary")
+    worker_sha = oracle.ensure_sha256(worker_binding["binary_sha256"], "served worker binary hash")
+    if str(worker_path) != worker.get("binary") or worker_sha != worker.get("binary_sha256") or _sha(worker_path) != worker_sha:
+        raise oracle.OracleError("served worker binary identity differs")
+    if (
+        worker_identity.get("device") != PRODUCTION_DEVICE_ARCHITECTURE
+        or worker_identity.get("execution_profile") != PRODUCTION_EXECUTION_PROFILE
+        or worker_binding["device_architecture"] != PRODUCTION_DEVICE_ARCHITECTURE
+        or worker_binding["execution_profile"] != PRODUCTION_EXECUTION_PROFILE
+    ):
+        raise oracle.OracleError("served worker is not the bound R9700 execution profile")
+    if worker.get("required_environment") != list(REQUIRED_HIP_KERNEL_ENV):
+        raise oracle.OracleError("served worker required environment differs")
+    package_binding = _exact(
+        guard["package"],
+        {"manifest_path", "manifest_sha256", "product_root"},
+        "served package binding",
+    )
+    product_root = _absolute_directory(package_binding["product_root"], "served product root")
+    declared_product_root = Path(product.get("root", ""))
+    if not declared_product_root.is_absolute():
+        declared_product_root = served_path.parent / declared_product_root
+    if _absolute_directory(str(declared_product_root), "declared served product root") != product_root:
+        raise oracle.OracleError("served product root binding differs")
+    package_path = _relative_under(product_root, package.get("manifest_path"), "served package manifest")
+    package_sha = oracle.ensure_sha256(package.get("manifest_sha256"), "served package manifest hash")
+    if (
+        package_path != Path(package_binding["manifest_path"]).resolve(strict=True)
+        or package_path != Path(runtime["package_manifest"]).resolve(strict=True)
+        or _sha(package_path) != package_sha
+        or package_binding["manifest_sha256"] != package_sha
+        or runtime["package_manifest_sha256"] != package_sha
+        or artifact["package_manifest_sha256"] != package_sha
+        or artifact.get("served_package_manifest_sha256") != package_sha
+    ):
+        raise oracle.OracleError("served package manifest hash/path chain differs")
+    binding_kind = artifact["artifact_binding_kind"]
+    if binding_kind == "package_manifest":
+        if active_artifact is not None or runtime["artifact_manifest"] is not None or runtime["artifact_manifest_sha256"] is not None:
+            raise oracle.OracleError("package-only served binding exposes an artifact manifest")
+    else:
+        active = _exact(active_artifact, {"content_sha256", "manifest_path", "manifest_sha256"}, "served artifact")
+        artifact_path = _relative_under(product_root, active["manifest_path"], "served artifact manifest")
+        artifact_sha = oracle.ensure_sha256(active["manifest_sha256"], "served artifact manifest hash")
+        if (
+            artifact_path != Path(runtime["artifact_manifest"]).resolve(strict=True)
+            or _sha(artifact_path) != artifact_sha
+            or runtime["artifact_manifest_sha256"] != artifact_sha
+            or artifact["artifact_manifest_sha256"] != artifact_sha
+        ):
+            raise oracle.OracleError("served artifact manifest hash/path chain differs")
+
+
+def _validate_path_runtime(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    runtime_path = oracle.safe_relative(root, "runtime.json", "path runtime")
+    runtime = oracle.load_json(runtime_path)
+    runtime = _exact(
+        runtime,
+        {
+            "all_m1",
+            "artifact_manifest",
+            "artifact_manifest_sha256",
+            "binary",
+            "device_index",
+            "device_kind",
+            "dtype",
+            "evidence_scope",
+            "execution_environment",
+            "model_loads",
+            "package_dir",
+            "package_manifest",
+            "package_manifest_sha256",
+            "run",
+            "runtime",
+            "schema_version",
+            "served_model_guard",
+            "source_replay",
+            "visible_devices",
+        },
+        "path runtime",
+    )
+    production = manifest["evidence_class"] == "production"
+    expected_scope = "production_gpu" if production else "fixture_only"
+    if runtime["schema_version"] != PATH_RUNTIME_SCHEMA or runtime["runtime"] != "ullm-aq4-p2-path-oracle":
+        raise oracle.OracleError("path runtime schema/implementation differs")
+    if runtime["evidence_scope"] != expected_scope:
+        raise oracle.OracleError("path runtime evidence scope differs")
+    if runtime["device_kind"] not in {"cpu", "gpu"} or runtime["dtype"] != "f32" or runtime["all_m1"] is not True or runtime["model_loads"] != 1:
+        raise oracle.OracleError("path runtime execution contract differs")
+    device_index = oracle.integer(runtime["device_index"], "path runtime device index", minimum=0)
+    visible = runtime["visible_devices"]
+    if visible is not None and (not isinstance(visible, str) or not visible.isdecimal() or str(int(visible)) != visible):
+        raise oracle.OracleError("path runtime visible device mapping differs")
+    if production:
+        if runtime["device_kind"] != "gpu" or device_index != PRODUCTION_DEVICE_INDEX or visible != PRODUCTION_VISIBLE_DEVICES:
+            raise oracle.OracleError("production path runtime is not bound to the R9700 GPU mapping")
+    elif runtime["device_kind"] == "cpu" and (device_index != 0 or visible is not None):
+        raise oracle.OracleError("CPU path fixture device mapping differs")
+    package_dir = _absolute_directory(runtime["package_dir"], "path runtime package directory")
+    package_path = _absolute_regular(runtime["package_manifest"], "path runtime package manifest")
+    try:
+        package_path.relative_to(package_dir)
+    except ValueError as error:
+        raise oracle.OracleError("path runtime package manifest escapes package directory") from error
+    package_sha = oracle.ensure_sha256(runtime["package_manifest_sha256"], "path runtime package hash")
+    artifact = manifest["identity"]["artifact"]
+    if _sha(package_path) != package_sha or package_sha != artifact["package_manifest_sha256"]:
+        raise oracle.OracleError("path runtime package manifest identity differs")
+    if runtime["artifact_manifest"] is None:
+        if runtime["artifact_manifest_sha256"] is not None or artifact["artifact_manifest_sha256"] is not None:
+            raise oracle.OracleError("path runtime artifact nullability differs")
+    else:
+        artifact_path = _absolute_regular(runtime["artifact_manifest"], "path runtime artifact manifest")
+        artifact_sha = oracle.ensure_sha256(runtime["artifact_manifest_sha256"], "path runtime artifact hash")
+        if artifact_path == package_path or _sha(artifact_path) != artifact_sha or artifact_sha != artifact["artifact_manifest_sha256"]:
+            raise oracle.OracleError("path runtime artifact manifest identity differs")
+    binary = _exact(runtime["binary"], {"path", "sha256"}, "path runtime binary")
+    binary_path = _absolute_regular(binary["path"], "path runtime binary")
+    if _sha(binary_path) != oracle.ensure_sha256(binary["sha256"], "path runtime binary hash"):
+        raise oracle.OracleError("path runtime binary hash differs")
+    run = _exact(runtime["run"], {"elapsed_seconds", "row_count"}, "path runtime run")
+    elapsed = oracle.finite(run["elapsed_seconds"], "path runtime elapsed_seconds")
+    if elapsed <= 0 or run["row_count"] != manifest["payload"]["record_count"]:
+        raise oracle.OracleError("path runtime run summary differs")
+    _validate_source_replay(runtime["source_replay"], manifest, production=production)
+    _validate_served_guard(runtime["served_model_guard"], artifact, runtime, manifest, production=production)
+    _validate_sha256s(root, manifest)
+    return runtime
 
 
 def _validate_runtime(root: Path, manifest: dict[str, Any]) -> None:
@@ -107,8 +526,18 @@ def validate_oracle(root: Path, kind: str) -> dict[str, Any]:
     if kind == "path":
         if manifest["identity"]["artifact"]["package_manifest_sha256"] is None:
             raise oracle.OracleError("path oracle must bind a package manifest")
-        if manifest["identity"]["artifact"]["artifact_manifest_sha256"] is None:
-            blockers.append("path oracle is package-bound but the active product has no artifact manifest")
+        artifact = manifest["identity"]["artifact"]
+        runtime_path = root / "runtime.json"
+        if runtime_path.exists() or runtime_path.is_symlink():
+            _validate_path_runtime(root, manifest)
+        elif manifest["evidence_class"] == "production":
+            raise oracle.OracleError("production path oracle requires runtime.json")
+        else:
+            blockers.append("synthetic capture has no executable path runtime and is fixture-only")
+        if artifact["artifact_manifest_sha256"] is None:
+            package_ok, package_error = _package_binding_status(artifact)
+            if not package_ok:
+                blockers.append(package_error or "path oracle package binding is invalid")
     tokenizer = manifest["identity"]["tokenizer"]
     if {entry["file"] for entry in tokenizer["files"]} != set(oracle.TOKENIZER_FILES):
         raise oracle.OracleError("tokenizer file coverage differs")
@@ -189,9 +618,13 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
     if link["evidence_class"] == "synthetic_fixture":
         blockers.append("source/path link contains synthetic fixture evidence")
     if path["identity"]["artifact"]["artifact_manifest_sha256"] is None:
-        blockers.append("path oracle is package-bound but the active product has no artifact manifest")
+        package_ok, package_error = _package_binding_status(path["identity"]["artifact"])
+        if not package_ok:
+            blockers.append(package_error or "path oracle package binding is invalid")
     if not agreement["greedy_token_exact"] or not agreement["topk_exact"] or not agreement["hidden_sample_within_atol"] or not agreement["logit_sample_within_atol"]:
         blockers.append("source/path bounded agreement gate failed")
+    if not agreement["hidden_sample_shape_exact"] or not agreement["logit_sample_shape_exact"]:
+        blockers.append("source/path bounded sample shape differs")
     expected_usable = bool(link["evidence_class"] == "production" and source_report["usable_as_source_evidence"] and path_report["usable_as_path_evidence"] and not blockers)
     if link["usable_as_p2_oracle_link"] is not expected_usable:
         raise oracle.OracleError("link usable_as_p2_oracle_link differs from recomputed agreement")
