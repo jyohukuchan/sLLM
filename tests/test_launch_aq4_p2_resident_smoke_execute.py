@@ -263,6 +263,18 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
+def test_execute_binding_parent_chain_creation_rejects_symlink(tmp_path: Path) -> None:
+    nested = tmp_path / "new" / "deep" / "parent"
+    LAUNCHER.ensure_directory_chain(nested, "test parent")
+    assert nested.is_dir()
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    with pytest.raises(LAUNCHER.LauncherError, match="symlink component"):
+        LAUNCHER.ensure_directory_chain(alias / "child", "test parent")
+
+
 def _gate_router(*, duplicate_bdf: bool = False, active_service: bool = False):
     target = {"gpu": 2, "bdf": LAUNCHER.GPU_BDF, "uuid": LAUNCHER.GPU_UUID, "kfd_id": LAUNCHER.KFD_ID, "node_id": 2, "partition_id": 0}
     other = {"gpu": 0, "bdf": "0000:01:00.0", "uuid": "other", "kfd_id": 1, "node_id": 0, "partition_id": 0}

@@ -194,6 +194,25 @@ def reject_symlink_components(path: Path, label: str, *, allow_missing_leaf: boo
             raise LauncherError(f"{label} component is missing: {current}")
 
 
+def ensure_directory_chain(path: Path, label: str) -> None:
+    if not path.is_absolute() or ".." in path.parts:
+        raise LauncherError(f"{label} must be absolute without parent traversal")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            try:
+                current.mkdir(mode=0o755)
+            except FileExistsError:
+                metadata = current.lstat()
+            else:
+                metadata = current.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise LauncherError(f"{label} has a non-directory or symlink component: {current}")
+
+
 def read_regular(path: Path, label: str, *, maximum: int | None = MAX_BYTES) -> tuple[bytes, tuple[int, ...]]:
     reject_symlink_components(path, label)
     before = path.lstat()
@@ -467,6 +486,7 @@ def validate_execute_binding(value: dict[str, Any], *, permit_test_live_prefligh
 def prepare_execute_binding(output: Path = EXECUTE_BINDING_ROOT) -> dict[str, Any]:
     if output.absolute() != EXECUTE_BINDING_ROOT:
         raise LauncherError("execute binding output must be canonical")
+    ensure_directory_chain(output.parent, "execute binding parent")
     reject_symlink_components(output, "execute binding output", allow_missing_leaf=True)
     if output.exists() or output.is_symlink():
         raise LauncherError("execute binding output already exists")
