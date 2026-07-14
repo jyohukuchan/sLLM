@@ -1,0 +1,98 @@
+{
+  "actual_executed": false,
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+    "--mode",
+    "execute",
+    "--ready-artifact",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1/ready-binding.json",
+    "--evidence-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v7",
+    "--confirm-one-case"
+  ],
+  "authorization": {
+    "confirmation_flag": "--confirm-one-case",
+    "confirmation_flag_count": 1,
+    "maximum_invocations": 1,
+    "output_no_reuse": true,
+    "promotion_eligible": false
+  },
+  "command_sha256": "6576afbecfb33ecfd9665aab3fdbc3ddea48c54f747cb074f8a21d83fbee69a5",
+  "execution": {
+    "argument_count": 9,
+    "execution_mode": "one_case",
+    "operator_must_use_manifest_argv_exactly": true,
+    "requires_fresh_output_recheck_immediately_before_execution": true,
+    "requires_same_pty_sudo_cache": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "fresh_outputs": [
+    {
+      "derived_from": "manifest.argv[7]",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v7",
+      "path_sha256": "cb507906188d6564cec28c664df4cc63b7ecbd8e3e956cf1e6ac5cc82d2951ed",
+      "role": "maintenance_evidence"
+    },
+    {
+      "derived_from": "ready_artifact.launcher_binding.evidence_output",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v3",
+      "path_sha256": "4e105fd65accc1f53307cbce0816124da5679d4ffd42668e012c4983d4c73a02",
+      "ready_artifact_sha256": "7dcb5467187c98d815890c8069924a5fe496e367e16772d8273bea3d2f2d250c",
+      "role": "launcher_evidence"
+    },
+    {
+      "derived_from": "ready_artifact.launcher_binding.runner_output",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v3",
+      "path_sha256": "84d5adaee97a650e0b1dd5a92bedc1295227807f1cc0f9b6ad423fd5892150a3",
+      "ready_artifact_sha256": "7dcb5467187c98d815890c8069924a5fe496e367e16772d8273bea3d2f2d250c",
+      "role": "runner_output"
+    }
+  ],
+  "inputs": {
+    "harness": {
+      "commit": "6dd40ac10f4fb009b419329df6977cd4ce7b8634",
+      "git_blob": "6f905dc4ac21ffdecf55907122ac5310b7efc8d3",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+      "sha256": "f4d08593502998915f958d7e83d8ea8d5e621c0d322a9c6b6adc0a340ba1494f",
+      "tree": "db34cda7cf98f0e812b338990acc86c4be1592e6"
+    },
+    "python": {
+      "path": "/usr/bin/python3.12",
+      "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    "ready_artifact": {
+      "artifact_commit": "128ae3dcda528c9ea1a7c9735cfaac94c711bba1",
+      "git_blob": "c30ec8a71352d428bed4c8a4d0cd187eddce0ece",
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1/ready-binding.json",
+      "sha256": "7dcb5467187c98d815890c8069924a5fe496e367e16772d8273bea3d2f2d250c"
+    }
+  },
+  "pre_execution_audit": {
+    "canonical_dry_run": {
+      "all_process_counts_zero": true,
+      "status": "passed"
+    },
+    "implicit_outputs": {
+      "launcher_evidence_absent": true,
+      "runner_output_absent": true
+    },
+    "input_bindings": {
+      "harness_commit_exact": true,
+      "ready_artifact_commit_exact": true,
+      "status": "passed"
+    }
+  },
+  "schema_version": "ullm.aq4_p2_resident_operator_command.v1",
+  "secret_material_embedded": false,
+  "status": "audited_ready_for_single_explicit_execution"
+}
