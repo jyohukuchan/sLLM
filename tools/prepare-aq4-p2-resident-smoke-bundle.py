@@ -67,10 +67,10 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "ee341c019d873f7c250adbb81414d58b5285a454"
-BINDING_SOURCE_TREE = "9014020d0e833d6de38aa28bdefeb949d981e871"
-BINDING_RUNNER_GIT_BLOB = "380efa2f07caa1f5eee6efe94c6c72b6b1b75f40"
-BINDING_RUNNER_SHA = "3258f9a65a8c9c370555469a824b9891c018effd23d97dbad8661015df1f8f03"
+BINDING_SOURCE_COMMIT = "3ba3a56cff9894f773c354737044cd5352fdebf0"
+BINDING_SOURCE_TREE = "456386d8a0725bcb335d897594e13c45c990e460"
+BINDING_RUNNER_GIT_BLOB = "5e02b8a15dd807213e3bc650a2134f16ae3493c3"
+BINDING_RUNNER_SHA = "1e988bc7005cda61bcb0648c0aec72b3ff94f637f8001b0d38c6a81ed8fe2053"
 BINDING_DRIVER_GIT_BLOB = "0bed05e56a07807fa1338a80dfba2f72de64d5af"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
@@ -730,7 +730,7 @@ def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, b
     normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if current_driver != normative_driver:
         raise BundleError("binding commit changed the normative resident driver blob")
-    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root"):
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root", b"--live-preflight", b"def validate_live_preflight", b"def verify_live_preflight"):
         if contract not in runner:
             raise BundleError("binding runner generic root/validator contract differs")
     return runner, validator, validator_tree, validator_object
