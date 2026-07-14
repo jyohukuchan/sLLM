@@ -231,8 +231,8 @@ def test_canonical_ready_artifact_readback_and_harness_pin() -> None:
     value = HARNESS.load_ready_artifact()
     assert value["status"] == "ready_for_one_case" and value["actual_eligible"] is True
     assert value["promotion_eligible"] is False
-    assert value["trust"]["harness"]["commit"] == "fabd520daaa878eca5c93b24d1faf092cafe3448"
-    assert value["trust"]["harness"]["sha256"] == "7b45825e31df363d714880712eb2ea0f15332a9de6707fa404c87eb1d888621b"
+    assert value["trust"]["harness"]["commit"] == "c5f6f2ac0130642f3d5c31204e84e15eecaf1e29"
+    assert value["trust"]["harness"]["sha256"] == "7a04647c50334f3f7df12e4def0272e43e1dcb37db953f680a589f9fe33aebf0"
     assert value["qa_attestation_sha256"] == HARNESS.sha_bytes(HARNESS.pretty(HARNESS.QA_ATTESTATION))
 
 
@@ -243,6 +243,19 @@ def test_canonical_dry_run_cli_has_zero_actual_processes(tmp_path: Path) -> None
     evidence = json.loads((output / "launcher-evidence.json").read_text())
     assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0}
     assert evidence["service_touched"] is False
+
+
+def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Path) -> None:
+    value = HARNESS.load_ready_artifact(HARNESS.PROFILE_READY_PATH)
+    assert value["execution_mode"] == "profile_diagnostic"
+    assert value["actual_eligible"] is True and value["measurement_eligible"] is False and value["promotion_eligible"] is False
+    assert value["profile_diagnostic"]["command"] == HARNESS.profile_capture_command()
+    output = tmp_path / "profile-ready-dry-run"
+    code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--evidence-output", str(output)])
+    assert code == 0
+    evidence = json.loads((output / "launcher-evidence.json").read_text())
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0}
+    assert evidence["profile_diagnostic"]["wrapper_executed"] is False
 
 
 @pytest.mark.parametrize("failure", ("sudo-pre", "sudo-stop", "stop", "stopped-gate", "sudo-restore", "start", "health"))

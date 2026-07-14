@@ -5,10 +5,10 @@
     "maximum_invocations": 1,
     "one_case_only": true,
     "output_no_reuse": true,
-    "rocprof_wrapper_required": false,
-    "run_id": "p2-r9700-resident-one-case-smoke-execute-v1"
+    "rocprof_wrapper_required": true,
+    "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
   },
-  "execution_mode": "one_case",
+  "execution_mode": "profile_diagnostic",
   "launcher_binding": {
     "B": {
       "manifest_sha256": "8302eb03329fd2c14fc5d9faa9ad24be2262a23a72c84d09049e84f7968cb86d",
@@ -69,12 +69,16 @@
       "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
       "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json"
     },
-    "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1",
+    "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1",
     "execution_contract": {
       "case_count": 1,
       "measured_runs": 10,
+      "measurement_eligible": false,
       "oom_reuse_forbidden": true,
+      "profile_diagnostic": true,
+      "promotion_eligible": false,
       "resident_model_loads": 1,
+      "rocprof_wrapper_required": true,
       "sequential": true,
       "warmup_runs": 2
     },
@@ -84,12 +88,57 @@
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
     },
     "live_preflight": {
-      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1/live-preflight.json",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1/live-preflight.json",
       "replaces_synthetic_preflight": true,
       "required": true,
       "sha256": null
     },
     "lock_path": "/run/ullm/r9700.lock",
+    "profile_diagnostic": {
+      "enabled": true,
+      "measurement_eligible": false,
+      "promotion_eligible": false,
+      "range_contract": {
+        "balanced": true,
+        "measured_indices": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "range_count": 12,
+        "same_pid_thread": true,
+        "schema_version": "ullm.aq4_p2_resident_roctx_ranges.v1",
+        "warmup_indices": [
+          0,
+          1
+        ]
+      },
+      "rocprof_wrapper_required": true,
+      "roctx_library": {
+        "invocation_path": "/opt/rocm/lib/libroctx64.so.4",
+        "resolved_path": "/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201",
+        "sha256": "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17",
+        "symbols": [
+          "roctxRangePushA",
+          "roctxRangePop"
+        ]
+      },
+      "runner_arguments": [
+        "--profile-roctx-ranges",
+        "--roctx-library",
+        "/opt/rocm/lib/libroctx64.so.4",
+        "--roctx-library-sha256",
+        "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
+      ],
+      "schema_version": "ullm.aq4_p2_resident_profile_diagnostic.v1"
+    },
     "promotion": false,
     "resident": {
       "commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
@@ -98,8 +147,8 @@
       "served_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
       "sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
     },
-    "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
-    "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v1",
+    "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+    "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1",
     "runtime_mapping": {
       "amd_smi_index": 2,
       "bdf": "0000:47:00.0",
@@ -194,7 +243,7 @@
     ],
     "pre_execution_sha256": null,
     "reason": "generated only after external service stop and all launcher live gates pass",
-    "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
+    "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
     "runtime_mapping": {
       "amd_smi_index": 2,
       "bdf": "0000:47:00.0",
@@ -219,6 +268,118 @@
     "secret_storage_forbidden": true,
     "service": "ullm-openai.service",
     "sudo_keepalive_seconds": 30
+  },
+  "measurement_eligible": false,
+  "profile_diagnostic": {
+    "capture_tool": {
+      "commit": "489183abba581332544d0d004338a2cee08a0d89",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/capture-aq4-p3-diagnostic-profile.py",
+      "sha256": "be62caa7eee810cd6b33033eab15418b803ac1cee6559153e0cf7af446fa21f7"
+    },
+    "command": [
+      "/usr/bin/python3.12",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/capture-aq4-p3-diagnostic-profile.py",
+      "capture",
+      "--profiler",
+      "/opt/rocm-7.2.1/bin/rocprofv3",
+      "--profile-output-directory",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1",
+      "--profile-output-name",
+      "aq4-p3-diagnostic",
+      "--identity",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/identity.json",
+      "--resident-summary",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1/resident-batch.summary.json",
+      "--resident-raw",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+      "--artifact",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1/capture-artifact.json",
+      "--timeout",
+      "1800.0",
+      "--runner-command",
+      "/usr/bin/python3.12",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+      "--mode",
+      "execute",
+      "--profile-diagnostic",
+      "--ready-artifact",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/ready-binding.json",
+      "--evidence-output",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1",
+      "--confirm-one-case"
+    ],
+    "command_sha256": "7cdf634d252d04bc64d0bdb01abe01ed171bf8825b6ba4468bd2d5b5161419c7",
+    "maximum_invocations": 1,
+    "measurement_eligible": false,
+    "output": {
+      "artifact": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1/capture-artifact.json",
+      "directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1",
+      "must_not_exist_before_capture": true,
+      "name": "aq4-p3-diagnostic"
+    },
+    "output_no_reuse": true,
+    "profiler": {
+      "path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "resolved_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
+    },
+    "promotion_eligible": false,
+    "resident_evidence": {
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "identity": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/identity.json",
+      "raw": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+      "resident_session_id_source": "resident_raw.resident.session_id",
+      "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+      "summary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1/resident-batch.summary.json"
+    },
+    "roctx": {
+      "enabled": true,
+      "measurement_eligible": false,
+      "promotion_eligible": false,
+      "range_contract": {
+        "balanced": true,
+        "measured_indices": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "range_count": 12,
+        "same_pid_thread": true,
+        "schema_version": "ullm.aq4_p2_resident_roctx_ranges.v1",
+        "warmup_indices": [
+          0,
+          1
+        ]
+      },
+      "rocprof_wrapper_required": true,
+      "roctx_library": {
+        "invocation_path": "/opt/rocm/lib/libroctx64.so.4",
+        "resolved_path": "/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201",
+        "sha256": "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17",
+        "symbols": [
+          "roctxRangePushA",
+          "roctxRangePop"
+        ]
+      },
+      "runner_arguments": [
+        "--profile-roctx-ranges",
+        "--roctx-library",
+        "/opt/rocm/lib/libroctx64.so.4",
+        "--roctx-library-sha256",
+        "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
+      ],
+      "schema_version": "ullm.aq4_p2_resident_profile_diagnostic.v1"
+    },
+    "schema_version": "ullm.aq4_p3_diagnostic_rocprof_ready.v1",
+    "status": "ready_for_one_profile_diagnostic"
   },
   "promotion_eligible": false,
   "qa_attestation_sha256": "72225d27f773d1e8f2b7f51d1466c19104a505a4bf8612f9bcd6a68a482106ef",
