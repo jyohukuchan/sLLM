@@ -32,16 +32,16 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "4a7c0ed9a5df941661efe17d48c131ffd0215f25"
-LAUNCHER_TREE = "1c24e7b7e695832a686831ebeb654492bcc6f020"
-LAUNCHER_GIT_BLOB = "2fdbd01268dcbe1f451a8e8039617899f4e6eeaf"
-LAUNCHER_SHA = "3d1b67d108585c62ae2ff6ce9e22f3c9b5b0378152c9e65e6230c6027d1f5b96"
-RUNNER_COMMIT = "4005c80e542d7e37cf79e62d2fd053f99c0353c1"
+LAUNCHER_COMMIT = "d30d95fa0bfab5a69bae77f75667118d01346505"
+LAUNCHER_TREE = "75e153be5501864764dd9ee85a2fe69510777653"
+LAUNCHER_GIT_BLOB = "ce794a60b79d2080d6c737c0e53929e79829b951"
+LAUNCHER_SHA = "9200f61d3b92d0fca36c1963f8b14f719ad7473712f8288a4c1bf3dc9314f8a9"
+RUNNER_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
 RUNNER_SHA = "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "741616fd0a1be897b47b4c94308e5c65290b9749"
-B_COMMIT = "1d964602effa01cc3460cee9cec59fda360ab45e"
-RESIDENT_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
+VALIDATOR_COMMIT = "3b7a8e4603ae79002bd5307ceee877f9dd2d8bfd"
+B_COMMIT = "2c24b7670b52610f6b1db33633139023778b18e9"
+RESIDENT_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
 HARNESS_TRUST_PATH = READY_ROOT / "harness-trust.json"
@@ -1862,9 +1862,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 303, "manual_boundary_count": 15, "runner_strict_negative_count": 26,
-    "test_suites": {"existing_and_profile_regression": 237, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 317, "manual_boundary_count": 15, "runner_strict_negative_count": 38,
+    "test_suites": {"existing_and_profile_regression": 251, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "worker-exact-two-hardlink-set-pre-open-post-and-rehash", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
