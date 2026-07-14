@@ -153,6 +153,8 @@ def _validate_components(path: Path, label: str, *, directory: bool) -> Path:
         if leaf:
             expected = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
             require(expected, f"{label} must be a regular {'directory' if directory else 'file'}")
+            if not directory:
+                require(metadata.st_nlink == 1, f"{label} regular file must have exactly one hard link")
     return absolute
 
 
@@ -161,12 +163,14 @@ def _same_identity(before: os.stat_result, after: os.stat_result) -> bool:
         before.st_dev,
         before.st_ino,
         before.st_size,
+        before.st_nlink,
         before.st_mtime_ns,
         before.st_ctime_ns,
     ) == (
         after.st_dev,
         after.st_ino,
         after.st_size,
+        after.st_nlink,
         after.st_mtime_ns,
         after.st_ctime_ns,
     )
@@ -189,6 +193,7 @@ def _stable_read(path: Path, label: str, *, maximum: int) -> bytes:
         before = os.fstat(descriptor)
         path_before = os.stat(absolute, follow_symlinks=False)
         require(stat.S_ISREG(before.st_mode), f"{label} fd is not a regular file")
+        require(before.st_nlink == 1, f"{label} fd must have exactly one hard link")
         require(_same_identity(pre_open, before), f"{label} changed while opening")
         require(_same_identity(before, path_before), f"{label} changed before read")
         require(before.st_size <= maximum, f"{label} exceeds bounded size")
@@ -673,6 +678,7 @@ def _bundle_file_set(output: Path) -> set[str]:
             require(not entry.is_symlink(), f"unexpected symlink in bundle: {entry.name}")
             metadata = entry.stat(follow_symlinks=False)
             require(stat.S_ISREG(metadata.st_mode), f"unexpected non-file in bundle: {entry.name}")
+            require(metadata.st_nlink == 1, f"bundle file must have exactly one hard link: {entry.name}")
             require(entry.name not in names, f"duplicate bundle entry: {entry.name}")
             names.add(entry.name)
     after = os.stat(output, follow_symlinks=False)

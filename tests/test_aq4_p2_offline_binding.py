@@ -253,6 +253,46 @@ class Aq4P2OfflineBindingTests(unittest.TestCase):
             checked = self.run_tool("--validate", "--output-dir", str(alias))
             self.assertNotEqual(checked.returncode, 0)
 
+    def test_validator_rejects_sha256sums_external_hardlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "p2"
+            self.generate(output)
+            os.link(output / "SHA256SUMS", root / "external-sums.txt")
+            checked = self.run_tool("--validate", "--output-dir", str(output))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_validator_rejects_artifact_json_external_hardlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "p2"
+            self.generate(output)
+            os.link(output / "graph.json", root / "external-graph.json")
+            checked = self.run_tool("--validate", "--output-dir", str(output))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_generator_rejects_hardlinked_active_and_p1_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active = root / "active.json"
+            shutil.copy2(ACTIVE, active)
+            os.link(active, root / "active-hardlink.json")
+            completed = self.run_tool(
+                "--output-dir", str(root / "active-output"), "--active-manifest", str(active),
+                "--p0-snapshot", str(P0), "--p1-executor-record", str(P1_RECORD),
+                "--p1-trace", str(P1_TRACE), "--source-oracle", str(SOURCE),
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            record = root / "record.json"
+            shutil.copy2(P1_RECORD, record)
+            os.link(record, root / "record-hardlink.json")
+            completed = self.run_tool(
+                "--output-dir", str(root / "p1-output"), "--p0-snapshot", str(P0),
+                "--p1-executor-record", str(record), "--p1-trace", str(P1_TRACE),
+                "--source-oracle", str(SOURCE),
+            )
+            self.assertNotEqual(completed.returncode, 0)
+
     def test_generator_rejects_input_parent_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
