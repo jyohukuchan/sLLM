@@ -447,6 +447,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValidationError("detached validator report digest/status differs")
         report = validate_trace(trace, manifest, manifest_raw, args.manifest.resolve(), facts, binding, trace_raw, facts_raw)
         if (args.verified_trace is None) != (args.verified_binding is None): raise ValidationError("verified trace and binding must be supplied together")
+        if args.verified_trace is not None and args.output is None:
+            raise ValidationError("verified trace requires --output detached validator report")
         report_raw = (json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("utf-8")
         if args.output: atomic_write(args.output, report_raw)
         report_digest = sha(report_raw)
