@@ -455,6 +455,31 @@ def test_diagnostic_profile_rejects_nested_unknown_field(tmp_path: Path) -> None
         SELECTOR.validate_diagnostic_profile(SELECTOR.parse_json(snapshot), snapshot)
 
 
+@pytest.mark.parametrize(
+    ("target", "replacement", "message"),
+    [
+        ("profiler_runs", True, "subprocess_profile_runs"),
+        ("schedule_bool", 0, "schedule differs"),
+        ("schedule_int", 2.0, "schedule differs"),
+    ],
+)
+def test_diagnostic_profile_rejects_bool_int_float_substitution(
+    tmp_path: Path, target: str, replacement: object, message: str
+) -> None:
+    value = diagnostic_profile()
+    if target == "profiler_runs":
+        value["profiler"]["subprocess_profile_runs"] = replacement
+    elif target == "schedule_bool":
+        value["schedule_separation"]["profile_aggregation_used_for_performance"] = replacement
+    else:
+        value["schedule_separation"]["warmup_runs"] = replacement
+    path = tmp_path / f"profile-type-{target}.json"
+    write_json(path, value)
+    snapshot = SELECTOR.capture(path)
+    with pytest.raises(SELECTOR.SelectionError, match=message):
+        SELECTOR.validate_diagnostic_profile(SELECTOR.parse_json(snapshot), snapshot)
+
+
 def test_large_json_exponent_is_rejected_as_nonfinite(tmp_path: Path) -> None:
     path = tmp_path / "profile-infinite.json"
     path.write_text('{"schema_version":"x","value":1e999}\n', encoding="utf-8")

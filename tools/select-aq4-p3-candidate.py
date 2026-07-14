@@ -581,7 +581,14 @@ def _profile_nonnegative_number(value: Any, label: str, *, integer: bool = False
         if type(value) is not int or value < 0:
             raise SelectionError(f"{label} must be a non-negative integer")
         return
-    require_number(value, label)
+    if type(value) is not float or not math.isfinite(value) or value < 0.0:
+        raise SelectionError(f"{label} must be a non-negative finite float")
+
+
+def _profile_string(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    if type(value) is not str or (not allow_empty and not value):
+        raise SelectionError(f"{label} must be a {'string' if allow_empty else 'non-empty string'}")
+    return value
 
 
 def _validate_profile_timing(value: Any, label: str, *, milliseconds: bool) -> None:
@@ -686,6 +693,17 @@ def validate_diagnostic_profile(value: dict[str, Any], snapshot: Snapshot) -> di
             raise SelectionError(f"diagnostic profile binding.case.{field} must be positive integer")
     if type(device["runtime_device_index"]) is not int or device["runtime_device_index"] < 0:
         raise SelectionError("diagnostic profile device index is invalid")
+    for field in ("case_id",):
+        _profile_string(case[field], f"diagnostic profile binding.case.{field}")
+    for field in ("model_id", "model_revision", "protocol"):
+        _profile_string(identity[field], f"diagnostic profile binding.identity.{field}")
+    build_commit = _profile_string(
+        identity["build_git_commit"], "diagnostic profile binding.identity.build_git_commit"
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", build_commit) is None:
+        raise SelectionError("diagnostic profile build_git_commit must be lowercase 40-hex")
+    for field in ("device_id", "backend", "name", "architecture"):
+        _profile_string(device[field], f"diagnostic profile binding.device.{field}")
 
     profiler = value["profiler"]
     trace = value["trace"]
@@ -701,28 +719,67 @@ def validate_diagnostic_profile(value: dict[str, Any], snapshot: Snapshot) -> di
     if not isinstance(trace_schema, dict):
         raise SelectionError("diagnostic profile trace.schema must be an object")
     exact_fields(trace_schema, PROFILE_TRACE_SCHEMA_FIELDS, "diagnostic profile trace.schema")
+    for field in ("tool", "path", "version"):
+        _profile_string(profiler[field], f"diagnostic profile profiler.{field}")
+    if profiler["rocm_version"] is not None:
+        _profile_string(profiler["rocm_version"], "diagnostic profile profiler.rocm_version")
+    require_digest(profiler["executable_sha256"], "diagnostic profile profiler.executable_sha256")
+    require_digest(
+        profiler["version_output_sha256"],
+        "diagnostic profile profiler.version_output_sha256",
+    )
+    if (
+        type(profiler["subprocess_profile_runs"]) is not int
+        or profiler["subprocess_profile_runs"] != 1
+    ):
+        raise SelectionError("diagnostic profile profiler.subprocess_profile_runs must be integer one")
+    command = profiler["command"]
+    if type(command) is not list or not command or any(type(item) is not str or not item for item in command):
+        raise SelectionError("diagnostic profile profiler.command must be non-empty string array")
+    columns = trace_schema["columns"]
+    if (
+        type(columns) is not list
+        or not columns
+        or any(type(item) is not str or not item for item in columns)
+        or len(columns) != len(set(columns))
+    ):
+        raise SelectionError("diagnostic profile trace.schema.columns differs")
+    for field in ("dispatch_id", "kernel_name", "start_timestamp", "end_timestamp", "clock_unit"):
+        _profile_string(trace_schema[field], f"diagnostic profile trace.schema.{field}")
+    if trace_schema["phase"] is not None:
+        _profile_string(trace_schema["phase"], "diagnostic profile trace.schema.phase")
+    if trace_schema["clock_unit"] != "nanoseconds":
+        raise SelectionError("diagnostic profile trace clock unit differs")
     require_digest(trace["sha256"], "diagnostic profile trace.sha256")
     require_digest(mapping["sha256"], "diagnostic profile mapping.sha256")
     _profile_nonnegative_number(trace["bytes"], "diagnostic profile trace.bytes", integer=True)
     _profile_nonnegative_number(
         trace["kernel_count"], "diagnostic profile trace.kernel_count", integer=True
     )
+    _profile_string(mapping["schema_version"], "diagnostic profile mapping.schema_version")
     for field in ("maximum_unclassified_fraction", "observed_unclassified_fraction"):
-        number = require_number(mapping[field], f"diagnostic profile mapping.{field}")
+        _profile_nonnegative_number(mapping[field], f"diagnostic profile mapping.{field}")
+        number = mapping[field]
         if number > 1.0:
             raise SelectionError(f"diagnostic profile mapping.{field} exceeds one")
-    if not isinstance(mapping["complete"], bool) or not isinstance(mapping["unknown_kernel_names"], list):
+    if type(mapping["complete"]) is not bool or type(mapping["unknown_kernel_names"]) is not list:
         raise SelectionError("diagnostic profile mapping types differ")
-    if not isinstance(value["eligibility_blockers"], list) or any(
-        not isinstance(item, str) for item in value["eligibility_blockers"]
+    if any(type(item) is not str or not item for item in mapping["unknown_kernel_names"]):
+        raise SelectionError("diagnostic profile mapping unknown kernel names differ")
+    if type(value["eligibility_blockers"]) is not list or any(
+        type(item) is not str or not item for item in value["eligibility_blockers"]
     ):
         raise SelectionError("diagnostic profile eligibility_blockers differ")
-    if schedule != {
-        "warmup_runs": 2,
-        "measured_runs": 10,
-        "profile_aggregation_used_for_performance": False,
-        "inclusive_kernel_sum_used_as_gpu_total": False,
-    }:
+    if (
+        type(schedule["warmup_runs"]) is not int
+        or schedule["warmup_runs"] != 2
+        or type(schedule["measured_runs"]) is not int
+        or schedule["measured_runs"] != 10
+        or type(schedule["profile_aggregation_used_for_performance"]) is not bool
+        or schedule["profile_aggregation_used_for_performance"] is not False
+        or type(schedule["inclusive_kernel_sum_used_as_gpu_total"]) is not bool
+        or schedule["inclusive_kernel_sum_used_as_gpu_total"] is not False
+    ):
         raise SelectionError("diagnostic profile schedule differs")
     _validate_profile_timing(value["timing_ns"], "diagnostic profile timing_ns", milliseconds=False)
     _validate_profile_timing(value["timing_ms"], "diagnostic profile timing_ms", milliseconds=True)
