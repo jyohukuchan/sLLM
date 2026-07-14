@@ -73,13 +73,21 @@ class FakeRuntime:
     def container_health(self, run) -> dict:
         if self.fail == "health" and self.epoch > 0:
             raise HARNESS.HarnessError("synthetic container health failure")
+        container_curl = 5 if self.fail == "curl-count-off-by-one" else 6
         return {
             "transport": "docker-exec-container-network-namespace",
             "secret_material_recorded": False,
             "container": {"id": HARNESS.OPENWEBUI_CONTAINER_ID},
             "endpoints": {"gateway_models": {"model_id": HARNESS.GATEWAY_MODEL_ID}},
             "commands": [],
-            "process_counts": {"docker": 9, "docker_exec": 6, "container_curl": 5},
+            "process_counts": {
+                "docker": 9,
+                "docker_exec": 6,
+                "container_curl": container_curl,
+                "container_curl_total": 6,
+                "container_curl_version": 1,
+                "container_curl_endpoint": 5,
+            },
         }
 
     def stopped(self) -> dict:
@@ -207,6 +215,22 @@ def container_guard_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, 
     return HARNESS.ContainerHealthGuard(), runtime, secret
 
 
+def container_health_expected_argv() -> list[list[str]]:
+    inspect = [str(HARNESS.DOCKER), "inspect", "--type", "container", "--format", HARNESS.DOCKER_INSPECT_FORMAT, HARNESS.OPENWEBUI_CONTAINER_NAME]
+    container_id = HARNESS.OPENWEBUI_CONTAINER_ID
+    return [
+        [str(HARNESS.DOCKER), "version", "--format", "{{json .Client}}"],
+        inspect,
+        [str(HARNESS.DOCKER), "exec", container_id, HARNESS.CONTAINER_CURL, "--version"],
+        [str(HARNESS.DOCKER), "exec", container_id, "/usr/bin/sha256sum", HARNESS.CONTAINER_CURL],
+        HARNESS._curl_command(container_id, HARNESS.GATEWAY_HEALTH_URL, authenticated=False),
+        HARNESS._curl_command(container_id, HARNESS.GATEWAY_READY_URL, authenticated=False),
+        HARNESS._curl_command(container_id, HARNESS.OPENWEBUI_CONTAINER_HEALTH_URL, authenticated=False),
+        HARNESS._curl_command(container_id, HARNESS.GATEWAY_MODELS_URL, authenticated=True),
+        inspect,
+    ]
+
+
 def ready(tmp_path: Path) -> dict:
     identity = {"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}
     value = HARNESS.ready_document(identity)
@@ -243,7 +267,7 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "maintenance", runtime.dependencies())
     assert code == 0 and evidence["status"] == "passed"
     assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "launcher", "service-start", "service-restored"]
-    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0, "docker": 18, "docker_exec": 12, "container_curl": 10}
+    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0, "docker": 18, "docker_exec": 12, "container_curl": 12, "container_curl_total": 12, "container_curl_version": 2, "container_curl_endpoint": 10}
     assert evidence["safety"] == {"service_touched": True, "service_stopped": True, "gpu_command_executed": True, "model_load_executed": True}
     assert evidence["restore"]["passed"] is True
     assert evidence["restore"]["post_start"]["service"]["main_pid"] != evidence["pre_stop"]["service"]["main_pid"]
@@ -263,15 +287,33 @@ def test_host_route_mismatch_is_diagnostic_and_container_route_remains_formal(tm
         assert diagnostic["probes"]["gateway_readyz"]["matches_formal_response"] is False
 
 
+def test_container_health_rejects_legacy_curl_count_off_by_one(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="curl-count-off-by-one")
+    with pytest.raises(HARNESS.HarnessError, match="container namespace health contract differs"):
+        HARNESS.capture_running(runtime.dependencies())
+    assert not any(call[0][-2:] == ["stop", HARNESS.SERVICE] for call in runtime.calls)
+
+
 def test_container_health_guard_pins_identity_uses_id_exec_and_keeps_secret_off_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     guard, runtime, secret = container_guard_fixture(tmp_path, monkeypatch)
     before = guard(runtime)
     after = guard(runtime)
     assert before["container"] == after["container"]
     assert before["endpoints"]["gateway_models"]["model_id"] == HARNESS.GATEWAY_MODEL_ID
+    assert before["process_counts"] == {
+        "docker": 9,
+        "docker_exec": 6,
+        "container_curl": 6,
+        "container_curl_total": 6,
+        "container_curl_version": 1,
+        "container_curl_endpoint": 5,
+    }
+    assert HARNESS._container_process_counts(before["commands"]) == before["process_counts"]
     assert before["secret_material_recorded"] is False
     expected_header = b"Authorization: Bearer " + secret + b"\n"
     assert runtime.secret_inputs == [expected_header, expected_header]
+    expected_argv = container_health_expected_argv()
+    assert runtime.commands == [*expected_argv, *expected_argv]
     serialized = HARNESS.canonical([before, after, runtime.commands])
     assert secret not in serialized and expected_header.rstrip(b"\n") not in serialized
     exec_commands = [command for command in runtime.commands if command[1] == "exec"]
@@ -356,7 +398,7 @@ def test_dry_run_writes_process_zero_evidence_without_dependencies(tmp_path: Pat
     HARNESS.READY_PATH.write_text("{}\n")
     code, evidence = HARNESS.dry_run_ready(value, tmp_path / "dry")
     assert code == 0 and evidence["status"] == "passed"
-    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}
+    assert evidence["process_counts"] == {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}
     assert evidence["service_touched"] is False and evidence["gpu_command_executed"] is False
 
 
@@ -512,7 +554,7 @@ def test_canonical_dry_run_cli_has_zero_actual_processes(tmp_path: Path) -> None
     code = HARNESS.main(["--mode", "dry-run", "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}
     assert evidence["service_touched"] is False
 
 
@@ -525,7 +567,7 @@ def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Pat
     code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--evidence-output", str(output)])
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
-    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}
     assert evidence["profile_diagnostic"]["capture_executed"] is False
 
 

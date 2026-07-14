@@ -375,6 +375,37 @@ def _parse_curl_response(
     }
 
 
+def _container_process_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    if any(
+        not isinstance(record, dict)
+        or not isinstance(record.get("argv"), list)
+        or any(not isinstance(item, str) for item in record["argv"])
+        for record in records
+    ):
+        raise HarnessError("container health command count input differs")
+    docker_exec = sum(record["argv"][1:2] == ["exec"] for record in records)
+    container_curl_total = sum(
+        record["argv"][1:2] == ["exec"] and CONTAINER_CURL in record["argv"]
+        for record in records
+    )
+    container_curl_version = sum(
+        record["argv"][1:2] == ["exec"]
+        and record["argv"][-2:] == [CONTAINER_CURL, "--version"]
+        for record in records
+    )
+    container_curl_endpoint = container_curl_total - container_curl_version
+    return {
+        "docker": len(records),
+        "docker_exec": docker_exec,
+        # Compatibility total: this intentionally preserves the historical
+        # argv-membership definition, including `sha256sum /usr/bin/curl`.
+        "container_curl": container_curl_total,
+        "container_curl_total": container_curl_total,
+        "container_curl_version": container_curl_version,
+        "container_curl_endpoint": container_curl_endpoint,
+    }
+
+
 class ContainerHealthGuard:
     def __init__(self) -> None:
         self.snapshot = LAUNCHER.Snapshot()
@@ -506,14 +537,7 @@ class ContainerHealthGuard:
             "curl": {"path": CONTAINER_CURL, "sha256": CONTAINER_CURL_SHA, "version": CONTAINER_CURL_VERSION},
             "endpoints": endpoints,
             "commands": records,
-            "process_counts": {
-                "docker": len(records),
-                "docker_exec": sum(record["argv"][1:2] == ["exec"] for record in records),
-                "container_curl": sum(
-                    record["argv"][1:2] == ["exec"] and CONTAINER_CURL in record["argv"]
-                    for record in records
-                ),
-            },
+            "process_counts": _container_process_counts(records),
             "secret_material_recorded": False,
         }
         serialized = canonical(result)
@@ -614,7 +638,14 @@ def capture_running(dependencies: Dependencies, previous: dict[str, Any] | None 
         not isinstance(container_health, dict)
         or container_health.get("secret_material_recorded") is not False
         or container_health.get("process_counts")
-        != {"docker": 9, "docker_exec": 6, "container_curl": 5}
+        != {
+            "docker": 9,
+            "docker_exec": 6,
+            "container_curl": 6,
+            "container_curl_total": 6,
+            "container_curl_version": 1,
+            "container_curl_endpoint": 5,
+        }
     ):
         raise HarnessError("container namespace health contract differs")
     host_diagnostics = _host_route_diagnostics(dependencies)
@@ -857,8 +888,8 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 246, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 180, "marker_chain": 55, "diagnostic_capture": 11},
+    "test_count": 247, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 181, "marker_chain": 55, "diagnostic_capture": 11},
     "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
@@ -1049,7 +1080,7 @@ def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_
     if output.exists() or output.is_symlink():
         raise HarnessError("ready dry-run output already exists")
     output.mkdir(mode=0o700)
-    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
+    evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
     if value["execution_mode"] == "profile_diagnostic":
         evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "capture_executed": False, "measurement_eligible": False, "promotion_eligible": False}
     _finalize(output, evidence)
@@ -1086,7 +1117,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     else:
         trust_records = []
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
     stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
