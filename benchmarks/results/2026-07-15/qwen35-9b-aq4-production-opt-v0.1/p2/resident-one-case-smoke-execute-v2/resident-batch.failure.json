@@ -1,0 +1,102 @@
+{
+  "cleanup": {
+    "errors": [],
+    "final_returncode": 1,
+    "initial_poll": 1,
+    "passed": true,
+    "process_group_alive_final": false,
+    "reaped": true,
+    "shutdown_attempted": false,
+    "shutdown_send_error": null,
+    "signals": [],
+    "stdin_closed": true,
+    "wait_timed_out": false
+  },
+  "exit": {
+    "exit_code": 1,
+    "kind": "exit",
+    "oom_like_unconfirmed": false,
+    "signal": null
+  },
+  "failure": {
+    "kind": "eof",
+    "reason": "resident driver exited before response",
+    "stage": "ready"
+  },
+  "gpu_owner": {
+    "reason": "runner_has_no_pinned_post_driver_gpu_owner_probe",
+    "status": "not_probed"
+  },
+  "lock": {
+    "after_driver": {
+      "device": 26,
+      "inode": 749085,
+      "present": true,
+      "same_inode": true
+    },
+    "expected": {
+      "device": 26,
+      "inode": 749085,
+      "path": "/run/ullm/r9700.lock"
+    },
+    "held_by_runner_during_capture": true
+  },
+  "protocol": {
+    "case_begin_count": 0,
+    "case_end_count": 0,
+    "last_stage": "ready",
+    "measured_completed": 0,
+    "ready_received": false,
+    "stdout_event_count": 0,
+    "stdout_records": [
+      {
+        "bytes": 0,
+        "line_complete": false,
+        "outcome": "eof",
+        "process_poll": 1,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stage": "ready",
+        "tail_bytes": 0,
+        "tail_omission_reason": null,
+        "tail_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tail_utf8": ""
+      }
+    ],
+    "stdout_records_dropped": 0,
+    "warmup_completed": 0
+  },
+  "schema_version": "ullm.aq4_p2_resident_driver_process.v1",
+  "secret_material_recorded": false,
+  "spawn": {
+    "captured_unix_ns": 1784067128312088630,
+    "pid": 437613,
+    "process_group_id": 437613
+  },
+  "status": "failed",
+  "stderr": {
+    "bytes": 73,
+    "omission_reason": null,
+    "retained_kind": "complete",
+    "retained_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v2/resident-driver.stderr.log",
+    "retained_sha256": "4ede01ba2f794e6dc5b2c64d619c611241fba8d4a413a0fbe4374094738c1444",
+    "retention_bound_bytes": 1048576,
+    "secret_scan": {
+      "detected": false,
+      "markers": [
+        "authorization:",
+        "bearer ",
+        "api_key",
+        "api-key",
+        "x-api-key"
+      ],
+      "performed": true
+    },
+    "sha256": "4ede01ba2f794e6dc5b2c64d619c611241fba8d4a413a0fbe4374094738c1444",
+    "source_identity": {
+      "device": 66306,
+      "inode": 10517845,
+      "mode": 384
+    },
+    "tail_bound_bytes": 65536
+  }
+}
