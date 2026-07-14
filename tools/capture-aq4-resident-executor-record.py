@@ -204,7 +204,7 @@ def layer_graph(package: dict[str, Any], manifest: dict[str, Any]) -> dict[str, 
         "model_graph": {
             "schema_id": "ullm.model_graph.v0.1",
             "schema_version": "0.1",
-            "source": "resident_worker_package_manifest",
+            "source": "adapter_derived",
             "canonical": {
                 "model_id": manifest.get("public", {}).get("id"),
                 "format_id": manifest.get("format", {}).get("format_id"),
@@ -214,13 +214,13 @@ def layer_graph(package: dict[str, Any], manifest: dict[str, Any]) -> dict[str, 
                 "block_size": block_size,
                 "cache_blocks": math.ceil(context / block_size) if context else 0,
                 "layers": ordered,
-                "terminal_components": ["embedding", "decoder_stack", "final_norm", "lm_head"],
+            "terminal_components": ["embedding", "decoder_stack", "final_norm", "lm_head", "sampling"],
             },
         },
         "state_schema": {
             "schema_id": "ullm.state_schema.v0.1",
             "schema_version": "0.1",
-            "source": "resident_worker_session_contract",
+            "source": "adapter_derived",
             "canonical": {
                 "request_state": ["recurrent_state", "paged_kv", "decode_position", "sampling_state"],
                 "transaction": ["prepare", "publish", "commit", "discard", "reset"],
@@ -446,8 +446,19 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     operators, fallback_events = operator_records(load_records, audit)
     if len(operators) == 0 or audit.get("coverage_complete") is not True:
         raise CaptureError("full resident operator graph was not observed")
+    audited_counts = {
+        str(item.get("implementation_id")): int(item.get("count", 0))
+        for item in audit.get("implementation_counts", [])
+        if isinstance(item, dict) and int(item.get("count", 0)) > 0
+    }
+    observed_counts: dict[str, int] = {}
+    for item in operators:
+        implementation = str(item.get("implementation_id", ""))
+        observed_counts[implementation] = observed_counts.get(implementation, 0) + int(item.get("invocation_count", 0))
+    if observed_counts != audited_counts:
+        raise CaptureError("operator invocation counts do not reconcile with request audit")
     timings = released.get("timings", {})
-    width = next((index for index, count in enumerate(audit.get("prefill_width_histogram", [])) if index and count), None)
+    width = max((index for index, count in enumerate(audit.get("prefill_width_histogram", [])) if index and count), default=None)
     if width is None:
         raise CaptureError("actual prefill execution width was not observed")
     memory = {
@@ -508,7 +519,9 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             codebooks.add(key)
             resident_bytes += codebook.stat().st_size
     persistent_bytes = 24 * 2_228_224 + 8 * 33_554_432
-    temporary_bytes = max(workspace_bytes, 1)
+    if workspace_bytes <= 0:
+        raise CaptureError("operator workspace observation was unavailable")
+    temporary_bytes = workspace_bytes
     planned_total = resident_bytes + persistent_bytes + temporary_bytes
     memory.update({
         "resident_bytes": resident_bytes,
@@ -530,7 +543,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             "mode": "graph_lowered",
             "backend": "hip",
             "device": {
-                "runtime_device_index": 0,
+                "runtime_device_index": int(worker.get("identity", {}).get("device_index", 0)),
                 "name": next((x.get("trace", {}).get("device_name") for x in load_records if isinstance(x.get("trace"), dict) and x.get("trace", {}).get("device_name")), None) or "unknown-device",
                 "architecture": str(worker.get("identity", {}).get("device") or "unknown"),
             },

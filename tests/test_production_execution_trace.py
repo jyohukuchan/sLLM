@@ -88,6 +88,40 @@ class ProductionExecutionTraceTests(unittest.TestCase):
             )
             self.assertNotEqual(completed.returncode, 0)
 
+    def test_verified_trace_rejects_report_attesting_final_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / "schema-r1"
+            shutil.copytree(FIXTURE, work)
+            report = json.loads((work / "report.json").read_text())
+            report["trace_sha256"] = hashlib.sha256((work / "verified.json").read_bytes()).hexdigest()
+            (work / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            completed = subprocess.run(
+                ["python3", str(VALIDATOR), "--trace", str(work / "verified.json"), "--manifest", str(work / "manifest.json"), "--executor-record", str(work / "executor-record.json"), "--binding", str(work / "verified-binding.json"), "--report", str(work / "report.json")],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+
+    def test_validator_rejects_phase_context_tamper_after_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / "schema-r1"
+            shutil.copytree(FIXTURE, work)
+            trace = json.loads((work / "trace.json").read_text())
+            trace["phases"][1]["context_tokens_after"] += 7
+            trace_raw = (json.dumps(trace, indent=2, sort_keys=True) + "\n").encode()
+            (work / "trace.json").write_bytes(trace_raw)
+            binding = json.loads((work / "binding.json").read_text())
+            binding["trace_sha256"] = hashlib.sha256(trace_raw).hexdigest()
+            (work / "binding.json").write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+            completed = subprocess.run(
+                ["python3", str(VALIDATOR), "--trace", str(work / "trace.json"), "--manifest", str(work / "manifest.json"), "--executor-record", str(work / "executor-record.json"), "--binding", str(work / "binding.json")],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

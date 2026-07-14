@@ -9,6 +9,7 @@ sidecar and only then permits an independently-finalized report.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -91,6 +92,20 @@ def resolve_manifest_path(value: Any, *, manifest_path: Path, label: str, root: 
 
 def canonical(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def attestation_sha(trace: dict[str, Any]) -> str:
+    """Hash the pre-final trace view, avoiding a report/trace hash cycle."""
+    view = copy.deepcopy(trace)
+    view["verification"]["independent_validation"] = {
+        "status": "not_run",
+        "validator_id": None,
+        "validator_version": None,
+        "report_sha256": None,
+        "failure_codes": [],
+    }
+    raw = (json.dumps(view, ensure_ascii=True, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    return sha(raw)
 
 
 def check_tree(value: Any, path: str = "root", depth: int = 0, nodes: list[int] | None = None) -> None:
@@ -221,11 +236,13 @@ def validate_request(request: Any) -> None:
         raise ValidationError("request summary is invalid or records private content")
 
 
-def validate_phases(phases: Any, request: dict[str, Any], executor: dict[str, Any]) -> None:
+def validate_phases(phases: Any, request: dict[str, Any], executor: dict[str, Any]) -> int:
     if not isinstance(phases, list) or not phases:
         raise ValidationError("phases must be nonempty")
     seen: set[str] = set()
-    total_in = total_out = 0
+    total_in = total_out = cached = 0
+    prefill_input = 0
+    first_decode_context: int | None = None
     previous_after = 0
     for phase in phases:
         exact(phase, {"phase_id", "kind", "executor_id", "executor_version", "prefill_mode", "chunk_width_tokens", "actual_token_batch_width", "actual_request_batch_width", "request_count", "input_token_count", "output_token_count", "cached_prefix_token_count", "context_tokens_before", "context_tokens_after", "wall_time_ms"}, "phase")
@@ -243,15 +260,32 @@ def validate_phases(phases: Any, request: dict[str, Any], executor: dict[str, An
         nonnegative(phase["wall_time_ms"], "phase.wall_time_ms", integer=False)
         if min(phase["chunk_width_tokens"], phase["actual_token_batch_width"], phase["actual_request_batch_width"]) <= 0:
             raise ValidationError("zero-width phase")
+        if phase["request_count"] != request["request_count"] or phase["actual_request_batch_width"] > phase["request_count"]:
+            raise ValidationError("phase request width/count does not reconcile")
         if phase["context_tokens_before"] != previous_after:
             raise ValidationError("phase context transition does not chain")
+        if phase["kind"] == "decode":
+            if first_decode_context is None:
+                first_decode_context = phase["context_tokens_before"]
+            if phase["input_token_count"] != phase["output_token_count"] or phase["context_tokens_after"] != phase["context_tokens_before"] + phase["output_token_count"]:
+                raise ValidationError("decode token/context arithmetic does not reconcile")
+        elif phase["output_token_count"] != 0 or phase["context_tokens_after"] != phase["context_tokens_before"] + phase["input_token_count"]:
+            raise ValidationError("prefill token/context arithmetic does not reconcile")
+        if phase["actual_token_batch_width"] > phase["input_token_count"] and phase["kind"] != "decode":
+            raise ValidationError("actual prefill token width exceeds input tokens")
+        if phase["kind"] != "decode":
+            prefill_input += phase["input_token_count"]
+            cached += phase["cached_prefix_token_count"]
         if phase["context_tokens_after"] < phase["context_tokens_before"] + phase["output_token_count"]:
             raise ValidationError("phase context transition is invalid")
         previous_after = phase["context_tokens_after"]
         total_in += phase["input_token_count"]
         total_out += phase["output_token_count"]
-    if total_out != request["generated_token_count"] or previous_after < request["context_tokens_at_decode_start"]:
+    if total_out != request["generated_token_count"] or prefill_input + cached != request["prompt_token_count"] or (first_decode_context is not None and first_decode_context != request["context_tokens_at_decode_start"]):
         raise ValidationError("phase/request counters do not reconcile")
+    if cached != request["cached_prefix_token_count"]:
+        raise ValidationError("phase cached-prefix counters do not reconcile")
+    return len(phases)
 
 
 def validate_operator(operator: Any, phase_kinds: set[str]) -> None:
@@ -343,7 +377,7 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
     for name in ("manifest_sha256", "content_sha256"):
         if identity["artifact"][name] != manifest_artifact.get(name): raise ValidationError(f"artifact identity differs at {name}")
     validate_graph(trace["graph"], facts.get("graph"))
-    validate_executor(trace["executor"]); validate_request(trace["request_summary"]); validate_phases(trace["phases"], trace["request_summary"], trace["executor"])
+    validate_executor(trace["executor"]); validate_request(trace["request_summary"]); phase_count = validate_phases(trace["phases"], trace["request_summary"], trace["executor"])
     phase_kinds = {item["kind"] for item in trace["phases"]}
     if not isinstance(trace["operator_resolutions"], list) or not trace["operator_resolutions"]: raise ValidationError("operator_resolutions must be nonempty")
     for operator in trace["operator_resolutions"]: validate_operator(operator, phase_kinds)
@@ -383,6 +417,7 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
     for name in state["reset"]:
         if not isinstance(state["reset"][name], bool): raise ValidationError("state reset flag is invalid")
     if state["prepared_batch_count"] != state["committed_batch_count"] + state["discarded_batch_count"]: raise ValidationError("state batch counters do not reconcile")
+    if state["prepared_batch_count"] != phase_count: raise ValidationError("prepared batch count does not reconcile with recorded phases")
     if state["reset"]["required"] and (not state["reset"]["attempted"] or not state["reset"]["complete"] or state["reset"]["failed"]): raise ValidationError("required reset is incomplete")
     aggregation = exact(trace["aggregation"], {"is_aggregated", "source_trace_sha256s", "component_trace_count", "full_model_trace_count", "coverage"}, "aggregation")
     if not isinstance(aggregation["is_aggregated"], bool) or not isinstance(aggregation["source_trace_sha256s"], list) or len(set(aggregation["source_trace_sha256s"])) != len(aggregation["source_trace_sha256s"]): raise ValidationError("aggregation sources are invalid or duplicated")
@@ -449,7 +484,9 @@ def main(argv: list[str] | None = None) -> int:
             check_tree(detached); reject_forbidden(detached)
             exact(detached, {"schema_version", "status", "trace_sha256", "executor_record_sha256", "scope", "promotion_eligible"}, "detached validator report")
             expected_report_sha = trace["verification"]["independent_validation"].get("report_sha256")
-            if sha(detached_raw) != expected_report_sha or detached.get("status") != "valid":
+            expected_trace_sha = attestation_sha(trace)
+            expected_promotion = trace["scope"] == "production_server" and trace["status"] == "ok" and not trace["fallback"]["unexpected_fallback_count"] and not trace["fallback"]["unsupported_count"] and not trace["fallback"]["fail_closed_count"]
+            if sha(detached_raw) != expected_report_sha or detached.get("status") != "valid" or detached.get("trace_sha256") != expected_trace_sha or detached.get("executor_record_sha256") != sha(facts_raw) or detached.get("scope") != trace["scope"] or detached.get("promotion_eligible") is not expected_promotion:
                 raise ValidationError("detached validator report digest/status differs")
         report = validate_trace(trace, manifest, manifest_raw, args.manifest.resolve(), facts, binding, trace_raw, facts_raw)
         if (args.verified_trace is None) != (args.verified_binding is None): raise ValidationError("verified trace and binding must be supplied together")
