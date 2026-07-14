@@ -845,7 +845,7 @@ def _kfd_lstat(path: Path, stage: str, pid: int, *, directory: bool) -> os.stat_
     return metadata
 
 
-def _read_kfd_gpuid(path: Path, pid: int) -> tuple[int, dict[str, Any]]:
+def _read_kfd_gpuid(path: Path, pid: int, queue: int) -> tuple[int, dict[str, Any]]:
     before = _kfd_lstat(path, "gpuid_lstat_before", pid, directory=False)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -858,33 +858,33 @@ def _read_kfd_gpuid(path: Path, pid: int) -> tuple[int, dict[str, Any]]:
     try:
         opened = os.fstat(descriptor)
         if _kfd_entry_identity(opened) != _kfd_entry_identity(before) or not stat.S_ISREG(opened.st_mode):
-            raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "gpuid_open", "pid": pid})
+            raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "gpuid_open", "pid": pid, "queue": queue})
         try:
             raw = os.read(descriptor, 65)
             trailing = os.read(descriptor, 1)
         except FileNotFoundError:
             if raw:
-                raise KfdOwnerScanError({"reason_code": "source_disappeared_after_partial_read", "stage": "gpuid_read", "pid": pid}) from None
+                    raise KfdOwnerScanError({"reason_code": "source_disappeared_after_partial_read", "stage": "gpuid_read", "pid": pid, "queue": queue}) from None
             raise _KfdEntryDisappeared("gpuid_read", pid) from None
         except OSError as error:
-            raise KfdOwnerScanError({"reason_code": "source_os_error", "stage": "gpuid_read", "pid": pid, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+            raise KfdOwnerScanError({"reason_code": "source_os_error", "stage": "gpuid_read", "pid": pid, "queue": queue, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
     finally:
         os.close(descriptor)
     if trailing or len(raw) > 64:
-        raise KfdOwnerScanError({"reason_code": "gpuid_source_exceeds_bound", "stage": "gpuid_read", "pid": pid})
+        raise KfdOwnerScanError({"reason_code": "gpuid_source_exceeds_bound", "stage": "gpuid_read", "pid": pid, "queue": queue})
     after = _kfd_lstat(path, "gpuid_lstat_after", pid, directory=False)
     if _kfd_entry_identity(after) != _kfd_entry_identity(before):
-        raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "gpuid_lstat_after", "pid": pid})
+        raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "gpuid_lstat_after", "pid": pid, "queue": queue})
+    payload = raw[:-1] if raw.endswith(b"\n") else raw
     try:
-        text = raw.decode("ascii")
-        if not text.endswith("\n") or not text[:-1].isdigit():
+        if re.fullmatch(rb"[0-9]+\n?", raw) is None or payload.startswith(b"0"):
             raise ValueError
-        gpuid = int(text[:-1])
+        gpuid = int(payload.decode("ascii"))
     except (UnicodeError, ValueError):
-        raise KfdOwnerScanError({"reason_code": "gpuid_schema_differs", "stage": "gpuid_parse", "pid": pid, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw)}) from None
+        raise KfdOwnerScanError({"reason_code": "gpuid_schema_differs", "stage": "gpuid_parse", "pid": pid, "queue": queue, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw)}) from None
     if gpuid <= 0:
-        raise KfdOwnerScanError({"reason_code": "gpuid_schema_differs", "stage": "gpuid_parse", "pid": pid, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw)})
-    return gpuid, {"pid": pid, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw), "parsed_gpuid": gpuid}
+        raise KfdOwnerScanError({"reason_code": "gpuid_schema_differs", "stage": "gpuid_parse", "pid": pid, "queue": queue, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw)})
+    return gpuid, {"pid": pid, "queue": queue, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw), "line_ending": "lf" if raw.endswith(b"\n") else "none", "parsed_gpuid": gpuid}
 
 
 def _scan_kfd_owners_once(root: Path, allowed_owners: set[int] | None) -> dict[str, Any]:
@@ -916,7 +916,7 @@ def _scan_kfd_owners_once(root: Path, allowed_owners: set[int] | None) -> dict[s
         for queue in queue_names:
             queue_path = queues / queue
             _kfd_lstat(queue_path, "queue_lstat", pid, directory=True)
-            gpuid, source = _read_kfd_gpuid(queue_path / "gpuid", pid)
+            gpuid, source = _read_kfd_gpuid(queue_path / "gpuid", pid, int(queue))
             sources.append(source)
             if gpuid == KFD_ID:
                 if allowed_owners is not None and pid not in allowed_owners:

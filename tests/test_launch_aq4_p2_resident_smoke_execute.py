@@ -559,7 +559,7 @@ def test_collect_execute_gates_rejects_active_service_duplicate_mapping_and_kfd_
         LAUNCHER.collect_execute_gates(run=_gate_router(), environment=dict(LAUNCHER.EXECUTE_ENV), kfd_owner_provider=lambda: [123], lock_provider=lambda: {})
 
 
-def _kfd_fixture(root: Path, pid: int = 123, gpuid: bytes = b"51545\n") -> Path:
+def _kfd_fixture(root: Path, pid: int = 123, gpuid: bytes = b"51545") -> Path:
     queue = root / str(pid) / "queues" / "0"
     queue.mkdir(parents=True)
     source = queue / "gpuid"
@@ -568,13 +568,13 @@ def _kfd_fixture(root: Path, pid: int = 123, gpuid: bytes = b"51545\n") -> Path:
 
 
 def test_kfd_owner_snapshot_records_stable_raw_sources(tmp_path: Path) -> None:
-    raw = b"51545\n"
+    raw = b"51545"
     _kfd_fixture(tmp_path, gpuid=raw)
     snapshot = LAUNCHER._kfd_owner_snapshot(tmp_path, allowed_owners={123})
     assert snapshot["classification"] == "stable"
     assert snapshot["attempt_count"] == 1
     assert snapshot["owners"] == [123]
-    assert snapshot["sources"] == [{"pid": 123, "raw_sha256": LAUNCHER.sha_bytes(raw), "raw_bytes": len(raw), "parsed_gpuid": LAUNCHER.KFD_ID}]
+    assert snapshot["sources"] == [{"pid": 123, "queue": 0, "raw_sha256": LAUNCHER.sha_bytes(raw), "raw_bytes": len(raw), "line_ending": "none", "parsed_gpuid": LAUNCHER.KFD_ID}]
     assert snapshot["secret_material_recorded"] is False
 
 
@@ -603,9 +603,28 @@ def test_kfd_owner_snapshot_rescans_followup_enoent_as_disappearance(tmp_path: P
     assert snapshot["owners"] == []
 
 
+def test_kfd_owner_snapshot_accepts_single_lf_compatibility_form(tmp_path: Path) -> None:
+    raw = b"51545\n"
+    _kfd_fixture(tmp_path, gpuid=raw)
+    snapshot = LAUNCHER._kfd_owner_snapshot(tmp_path, allowed_owners={123})
+    assert snapshot["owners"] == [123]
+    assert snapshot["sources"][0]["line_ending"] == "lf"
+    assert snapshot["sources"][0]["raw_sha256"] == LAUNCHER.sha_bytes(raw)
+
+
 @pytest.mark.parametrize(
     ("gpuid", "reason_code"),
-    ((b"not-a-gpuid\n", "gpuid_schema_differs"), (b"0\n", "gpuid_schema_differs")),
+    (
+        (b"not-a-gpuid", "gpuid_schema_differs"),
+        (b"0", "gpuid_schema_differs"),
+        (b"051545", "gpuid_schema_differs"),
+        (b" 51545", "gpuid_schema_differs"),
+        (b"+51545", "gpuid_schema_differs"),
+        (b"-51545", "gpuid_schema_differs"),
+        (b"51545\r\n", "gpuid_schema_differs"),
+        (b"51545\n\n", "gpuid_schema_differs"),
+        (b"", "gpuid_schema_differs"),
+    ),
 )
 def test_kfd_owner_snapshot_rejects_malformed_gpuid(tmp_path: Path, gpuid: bytes, reason_code: str) -> None:
     _kfd_fixture(tmp_path, gpuid=gpuid)
@@ -622,7 +641,7 @@ def test_kfd_owner_snapshot_rejects_symlink_eacces_and_foreign_owner(tmp_path: P
         LAUNCHER._kfd_owner_snapshot(tmp_path)
     assert symlink.value.diagnostic["reason_code"] == "source_type_or_symlink"
     source.unlink()
-    source.write_bytes(b"51545\n")
+    source.write_bytes(b"51545")
     original_open = LAUNCHER.os.open
 
     def denied_open(path, flags, *args, **kwargs):
