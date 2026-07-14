@@ -127,12 +127,10 @@ def _bundle(tmp_path: Path, driver_sha256: str | None = None) -> tuple[Path, Pat
     return expanded_path, fixture_index_path, identity_path, preflight_path, policy_path
 
 
-def _one_case_command(output: Path, *, bundle_root: Path = TRUSTED_ONE_CASE_ROOT, validator: bool = False) -> list[str]:
+def _one_case_command(output: Path, *, bundle_root: Path = TRUSTED_ONE_CASE_ROOT) -> list[str]:
     expanded, index, identity, preflight, policy = tuple(bundle_root / name for name in ("case-binding.json", "fixture-index.json", "identity.json", "preflight.json", "policy.json"))
-    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--bundle-root", str(bundle_root), "--output-dir", str(output), "--run-id", "one-case", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
-    if validator:
-        command.extend(("--bundle-validator", str(TRUSTED_BUNDLE_VALIDATOR)))
-    return command
+    validator_sha256 = BATCH.sha_file(TRUSTED_BUNDLE_VALIDATOR, "trusted bundle validator", absolute=True)
+    return [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--bundle-root", str(bundle_root), "--trusted-validator", str(TRUSTED_BUNDLE_VALIDATOR), "--trusted-validator-sha256", validator_sha256, "--output-dir", str(output), "--run-id", "one-case", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
 
 
 def _rewrite_json(path: Path, value: dict) -> None:
@@ -252,7 +250,7 @@ def test_dry_run_selects_exact_84_target_cases_and_separates_baseline(tmp_path: 
 
 def test_one_case_smoke_dry_run_validates_exact_root_and_subprocesses(tmp_path: Path) -> None:
     output = tmp_path / "one-case-dry-run"
-    completed = subprocess.run(_one_case_command(output, validator=True), text=True, capture_output=True)
+    completed = subprocess.run(_one_case_command(output), text=True, capture_output=True)
     assert completed.returncode == 0, completed.stderr
     plan = json.loads((output / "resident-batch.plan.json").read_text())
     assert plan["case_count"] == 1
@@ -284,6 +282,25 @@ def test_one_case_smoke_requires_explicit_bundle_root(tmp_path: Path) -> None:
     assert "--bundle-root is required" in completed.stderr
 
 
+@pytest.mark.parametrize("option", ("--trusted-validator", "--trusted-validator-sha256"))
+def test_one_case_smoke_requires_trusted_validator_and_expected_sha(tmp_path: Path, option: str) -> None:
+    command = _one_case_command(tmp_path / "missing-validator")
+    index = command.index(option)
+    del command[index:index + 2]
+    completed = subprocess.run(command, text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert "are required with --one-case-smoke" in completed.stderr
+
+
+def test_one_case_smoke_rejects_trusted_validator_sha_swap(tmp_path: Path) -> None:
+    command = _one_case_command(tmp_path / "validator-sha-swap")
+    index = command.index("--trusted-validator-sha256")
+    command[index + 1] = "0" * 64
+    completed = subprocess.run(command, text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert "source differs from expected SHA" in completed.stderr
+
+
 def test_one_case_smoke_rejects_handcrafted_partial_root(tmp_path: Path) -> None:
     handcrafted = tmp_path / "handcrafted"
     shutil.copytree(TRUSTED_ONE_CASE_ROOT, handcrafted)
@@ -305,8 +322,9 @@ def test_one_case_smoke_rejects_rebound_case_identity_and_fake_ready(tmp_path: P
 def test_one_case_binding_is_not_accepted_by_normal_84_case_mode(tmp_path: Path) -> None:
     command = _one_case_command(tmp_path / "ordinary")
     command.remove("--one-case-smoke")
-    root_index = command.index("--bundle-root")
-    del command[root_index:root_index + 2]
+    for option in ("--bundle-root", "--trusted-validator", "--trusted-validator-sha256"):
+        index = command.index(option)
+        del command[index:index + 2]
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
     assert "must contain exactly 84 target cases" in completed.stderr

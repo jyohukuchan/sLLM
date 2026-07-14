@@ -14,6 +14,7 @@ prepared bundle v3はone-case planを保持していたが、実runnerは84 targ
 - independent QA followupでone-case入口を必須`--bundle-root`へ変更した。791a20c形式のexact member/role/path/SHA/type/nlink/mode、`SHA256SUMS`、trusted case ID/bound/official SHA、fixture、identity self/file、preflight/policy、prepared dry-run/evidenceをgenericに相互検証する。
 - fake-readyはrunnerから直接loadせずchild processを1回通す。任意のtrusted validatorは同一source blob SHAを前後確認してsubprocess実行し、report SHAまでplanへbindする。
 - 特定bundle全体のSHAはrunnerへhardcodeせず、R→B→Lの信頼連鎖で自己参照cycleを避ける。通常84件経路は変更していない。
+- normative one-caseでは`--trusted-validator`と期待source SHAを必須にした。validator省略またはvalidator SHA swapはbundle内部が自己整合していても拒否する。
 
 ## 次の行動
 

@@ -387,8 +387,12 @@ def _run_fake_ready_handshake(path: Path, timeout: float) -> dict[str, Any]:
     return value
 
 
-def _run_bundle_validator(path: Path, root: Path, timeout: float) -> dict[str, Any]:
+def _run_bundle_validator(path: Path, expected_sha256: str, root: Path, timeout: float) -> dict[str, Any]:
+    if SHA256_RE.fullmatch(expected_sha256) is None:
+        raise BatchError("trusted bundle validator expected SHA is invalid")
     source_raw, source_sha, source_before = read_regular(path, "trusted bundle validator", MAX_JSON_BYTES, absolute=True)
+    if source_sha != expected_sha256:
+        raise BatchError("trusted bundle validator source differs from expected SHA")
     if not source_raw.startswith(b"#!") and path.suffix != ".py":
         raise BatchError("trusted bundle validator is not a Python source file")
     completed = subprocess.run(
@@ -564,10 +568,8 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         or prepared_evidence.get("plan") != {"path": str(root / "dry-run.json"), "sha256": observed_sums["dry-run.json"]}
     ):
         raise BatchError("one-case smoke prepared runner evidence binding differs")
-    validator = None
-    if args.bundle_validator is not None:
-        validator_path = args.bundle_validator.resolve(strict=True)
-        validator = _run_bundle_validator(validator_path, root, args.timeout)
+    validator_path = args.trusted_validator.resolve(strict=True)
+    validator = _run_bundle_validator(validator_path, args.trusted_validator_sha256, root, args.timeout)
     if {entry.name for entry in root.iterdir()} != ONE_CASE_ROOT_MEMBERS or _file_identity(os.lstat(root)) != _file_identity(root_metadata):
         raise BatchError("one-case smoke bundle root changed during validation")
     for name, before in initial.items():
@@ -750,10 +752,12 @@ def build_plan(cases: list[dict[str, Any]], expanded_path: Path, fixture_index_p
 
 
 def run_batch(args: argparse.Namespace) -> int:
-    if not args.one_case_smoke and (args.bundle_root is not None or args.bundle_validator is not None):
-        raise BatchError("--bundle-root/--bundle-validator require --one-case-smoke")
+    if not args.one_case_smoke and (args.bundle_root is not None or args.trusted_validator is not None or args.trusted_validator_sha256 is not None):
+        raise BatchError("--bundle-root/--trusted-validator require --one-case-smoke")
     if args.one_case_smoke and args.bundle_root is None:
         raise BatchError("--bundle-root is required with --one-case-smoke")
+    if args.one_case_smoke and (args.trusted_validator is None or args.trusted_validator_sha256 is None):
+        raise BatchError("--trusted-validator and --trusted-validator-sha256 are required with --one-case-smoke")
     expanded = load(args.expanded, "expanded")
     fixture_index = load(args.fixture_index, "fixture index")
     identity = load(args.identity, "identity")
@@ -871,7 +875,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--one-case-smoke", action="store_true", help="run the exact bundle-v3 one-case smoke; never promotion eligible")
     parser.add_argument("--bundle-root", type=Path, help="absolute complete 791a20c bundle root; required by --one-case-smoke")
-    parser.add_argument("--bundle-validator", type=Path, help="optional trusted bundle validator Python source to run and hash-bind")
+    parser.add_argument("--trusted-validator", type=Path, help="trusted bundle validator Python source required by --one-case-smoke")
+    parser.add_argument("--trusted-validator-sha256", help="expected lowercase SHA-256 of --trusted-validator")
     args = parser.parse_args(argv)
     try:
         return run_batch(args)
