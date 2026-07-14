@@ -34,8 +34,8 @@ RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
 EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v1"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
-EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v3"
-EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v3"
+EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v4"
+EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v4"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_REAL = Path("/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py")
@@ -54,17 +54,17 @@ INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10517903
 INPUT_FINGERPRINT_SHA = "a2814f11fe390e168e7a643f4084a248a921f446a0e2d293e73de56af64e72e6"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10512880
-BINDING_MANIFEST_SHA = "cecdaedf645af680e196b144f613da357bd667a312b1887b6aa9d950ce947b31"
-BINDING_PLAN_SHA = "69f8d620cf27fe9ea6c8c859d0fbd145e58f003ecdb48df7132da871b56295e8"
-RUNNER_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
-RUNNER_TREE = "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
-RUNNER_GIT_BLOB = "6af99284b507035957102b9ab79a72d7561942a0"
-RUNNER_SHA = "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
-VALIDATOR_COMMIT = "3b7a8e4603ae79002bd5307ceee877f9dd2d8bfd"
-VALIDATOR_TREE = "52eeb74093f9ca10bb5a03535a5ce56a711fbedd"
-VALIDATOR_GIT_BLOB = "740f5055b545e7ee091d166f877d2df550c4a1a2"
-VALIDATOR_SHA = "7db55d53c8a20c14eff632bb168f78101f7f7bc580b69a651472426828c5047c"
+BINDING_ROOT_INODE = 10490105
+BINDING_MANIFEST_SHA = "449d0c51eed65ed5faaf1ca4d5664497e0c56c0671466509bfd6ea5de774d161"
+BINDING_PLAN_SHA = "d469a7718d6b13970257fc4850d0edfeb952a32b7218aaef148ff4a8265dae6c"
+RUNNER_COMMIT = "e993016f4a62b9970423223db8702f77ee834b12"
+RUNNER_TREE = "bf2dd3992bf41a988c71c094cc8412a719a4c6a2"
+RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
+RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
+VALIDATOR_COMMIT = "efc18d0262e4ff18421c57a77b27f67bf56362cc"
+VALIDATOR_TREE = "7c1c3e038609e3895bbbffc24aafdfff86c9249b"
+VALIDATOR_GIT_BLOB = "f4b7d180e229b1160a873c43057949dca0e48ca1"
+VALIDATOR_SHA = "3d08e3e82d8a61c67c04b66871e9fe142753da1ce5f8e66d0d676ec658c68b41"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
 RESIDENT_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
 RESIDENT_SHA = "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8"
@@ -85,7 +85,7 @@ ROCMINFO_SHA = "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed
 SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
-EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v3"
+EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v4"
 PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
 PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1"
 PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1"
@@ -136,11 +136,11 @@ INPUT_MEMBER_SHA = {
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "fd56e60650692ab04f8271386ef8b1b60f6fff95e66484e229e7a84fc76128fa",
+    "runner-subprocess-evidence.json": "ee91217aaed1eb9eb91b94fde0c8382ed61157db459b9d53b77bd1319f94b506",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "979c31e6819d7a813045d488402cf61fe3578a186c10be00b42875ca3487d47b",
+    "SHA256SUMS": "063bbb5890a15cf5523a5666b98f1332873d2251f6daf49721d1602e42358827",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
