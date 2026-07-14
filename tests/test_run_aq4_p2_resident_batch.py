@@ -14,6 +14,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TRUSTED_ONE_CASE_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
+TRUSTED_BUNDLE_VALIDATOR = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
 DRIVER_IDENTITY = {
     "binary_sha256": "d" * 64,
     "build_git_commit": "e" * 40,
@@ -125,47 +127,70 @@ def _bundle(tmp_path: Path, driver_sha256: str | None = None) -> tuple[Path, Pat
     return expanded_path, fixture_index_path, identity_path, preflight_path, policy_path
 
 
-def _one_case_bundle(tmp_path: Path, driver_sha256: str | None = None, *, case_count: int = 1) -> tuple[Path, Path, Path, Path, Path]:
-    expanded, fixture_index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
-    expanded_value = json.loads(expanded.read_text())
-    selected = expanded_value["cases"][:case_count]
-    case_binding = tmp_path / "case-binding.json"
-    case_binding_value = {
-        "schema_version": "ullm.aq4_production_p2_expanded.v2",
-        "status": "bound_one_case_smoke",
-        "source_manifest_sha256": "9" * 64,
-        "official_case_sha256": "8" * 64,
-        "runtime_binding": {"schema_version": "fixture.v1"},
-        "case_count": len(selected),
-        "canonical_case_sha256": BATCH.sha_bytes(BATCH.canonical(selected)),
-        "cases": selected,
-    }
-    case_binding.write_text(json.dumps(case_binding_value), encoding="utf-8")
-    binding_sha = BATCH.sha_file(case_binding, "case binding")
-    index_value = json.loads(fixture_index.read_text())
-    selected_ids = {case["case_id"] for case in selected}
-    index_value.update({"expanded_manifest_sha256": binding_sha, "served_model_manifest_sha256": "b" * 64, "subset": "resident_one_case_smoke", "case_count": len(selected)})
-    index_value["cases"] = [entry for entry in index_value["cases"] if entry["case_id"] in selected_ids]
-    fixture_index.write_text(json.dumps(index_value), encoding="utf-8")
-    identity_value = json.loads(identity.read_text())
-    identity_value["expanded_manifest_sha256"] = binding_sha
-    identity_value["hash_binding"]["bound_case_manifest_sha256"] = binding_sha
-    identity_value["identity_sha256"] = None
-    identity_value["identity_sha256"] = BATCH.sha_bytes(BATCH.canonical(identity_value))
-    identity.write_text(json.dumps(identity_value), encoding="utf-8")
-    case_sha = selected[0]["case_sha256"] if len(selected) == 1 else "0" * 64
-    bundle = {
-        "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v3",
-        "status": "prepared_not_executed",
-        "promotion": False,
-        "bindings": {"case_binding_sha256": binding_sha, "case_sha256": case_sha},
-        "files": {"case-binding.json": {"sha256": binding_sha, "role": "runtime_bound_case"}},
-    }
-    (tmp_path / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
-    resident_identity = identity_value["resident_driver_identity"]
-    fake_ready = {"event": "ready", "schema_version": "ullm.aq4_p2_resident_driver.v2", "model_loads": 1, "resident_session_id": "fake-validate-only", "driver_identity": resident_identity}
-    (tmp_path / "fake-ready.json").write_text(json.dumps(fake_ready), encoding="utf-8")
-    return case_binding, fixture_index, identity, preflight, policy
+def _one_case_command(output: Path, *, bundle_root: Path = TRUSTED_ONE_CASE_ROOT, validator: bool = False) -> list[str]:
+    expanded, index, identity, preflight, policy = tuple(bundle_root / name for name in ("case-binding.json", "fixture-index.json", "identity.json", "preflight.json", "policy.json"))
+    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--bundle-root", str(bundle_root), "--output-dir", str(output), "--run-id", "one-case", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
+    if validator:
+        command.extend(("--bundle-validator", str(TRUSTED_BUNDLE_VALIDATOR)))
+    return command
+
+
+def _rewrite_json(path: Path, value: dict) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def _rebound_bundle(tmp_path: Path, variant: str) -> Path:
+    root = tmp_path / variant
+    shutil.copytree(TRUSTED_ONE_CASE_ROOT, root)
+    for path in root.iterdir():
+        path.chmod(0o755 if path.name == "resident-driver" else 0o644)
+    case_binding = json.loads((root / "case-binding.json").read_text())
+    fixture_index = json.loads((root / "fixture-index.json").read_text())
+    identity = json.loads((root / "identity.json").read_text())
+    fake_ready = json.loads((root / "fake-ready.json").read_text())
+    fixture_index["cases"][0]["fixture_path"] = str(root / "fixture.json")
+    if variant == "case":
+        case = case_binding["cases"][0]
+        case["case_id"] += "-rebound"
+        case["fixture_id"] = case["case_id"]
+        case["case_sha256"] = BATCH.case_hash(case)
+        case_binding["canonical_case_sha256"] = BATCH.sha_bytes(BATCH.canonical(case_binding["cases"]))
+        fixture_index["cases"][0]["case_id"] = case["case_id"]
+        fixture_index["cases"][0]["case_sha256"] = case["case_sha256"]
+    if variant == "identity":
+        identity["resident_driver_identity"]["model_revision"] = "rebound-identity"
+        fake_ready["driver_identity"] = identity["resident_driver_identity"]
+    if variant == "fake_ready":
+        fake_ready["resident_session_id"] = "swapped-session"
+    _rewrite_json(root / "case-binding.json", case_binding)
+    case_binding_sha = BATCH.sha_file(root / "case-binding.json", "rebound case binding")
+    fixture_index["expanded_manifest_sha256"] = case_binding_sha
+    _rewrite_json(root / "fixture-index.json", fixture_index)
+    identity["expanded_manifest_sha256"] = case_binding_sha
+    identity["hash_binding"]["bound_case_manifest_sha256"] = case_binding_sha
+    identity["identity_sha256"] = None
+    identity["identity_sha256"] = BATCH.sha_bytes(BATCH.canonical(identity))
+    _rewrite_json(root / "identity.json", identity)
+    _rewrite_json(root / "fake-ready.json", fake_ready)
+    bundle = json.loads((root / "bundle.json").read_text())
+    bundle["canonical_root"] = str(root)
+    bundle["bindings"].update({
+        "case_binding_sha256": case_binding_sha,
+        "case_sha256": case_binding["cases"][0]["case_sha256"],
+        "fixture_sha256": BATCH.sha_file(root / "fixture.json", "rebound fixture"),
+        "identity_file_sha256": BATCH.sha_file(root / "identity.json", "rebound identity"),
+        "identity_self_sha256": identity["identity_sha256"],
+    })
+    for name in bundle["files"]:
+        bundle["files"][name]["sha256"] = BATCH.sha_file(root / name, f"rebound {name}")
+    _rewrite_json(root / "bundle.json", bundle)
+    lines = []
+    for name in sorted(set(BATCH.ONE_CASE_MEMBER_CONTRACT) | {"bundle.json"}):
+        lines.append(f"{BATCH.sha_file(root / name, f'rebound sum {name}')}  {name}\n")
+    (root / "SHA256SUMS").write_text("".join(lines), encoding="ascii")
+    for path in root.iterdir():
+        path.chmod(0o555 if path.name == "resident-driver" else 0o444)
+    return root
 
 
 def _driver(tmp_path: Path, driver_sha256: str, oom: bool = False, reset_bad: bool = False, drift: str | None = None) -> Path:
@@ -225,11 +250,9 @@ def test_dry_run_selects_exact_84_target_cases_and_separates_baseline(tmp_path: 
     assert plan["baseline_identity"]["kind"] == "active-production"
 
 
-def test_one_case_smoke_dry_run_executes_bundle_v3_fake_handshake(tmp_path: Path) -> None:
-    expanded, index, identity, preflight, policy = _one_case_bundle(tmp_path)
+def test_one_case_smoke_dry_run_validates_exact_root_and_subprocesses(tmp_path: Path) -> None:
     output = tmp_path / "one-case-dry-run"
-    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", "one-case", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
-    completed = subprocess.run(command, text=True, capture_output=True)
+    completed = subprocess.run(_one_case_command(output, validator=True), text=True, capture_output=True)
     assert completed.returncode == 0, completed.stderr
     plan = json.loads((output / "resident-batch.plan.json").read_text())
     assert plan["case_count"] == 1
@@ -240,56 +263,53 @@ def test_one_case_smoke_dry_run_executes_bundle_v3_fake_handshake(tmp_path: Path
     assert plan["smoke_only"] is True
     assert plan["promotion_eligible"] is False
     assert plan["validation"]["mode"] == "validate_only"
+    assert plan["validation"]["root_contract"] == "ullm.aq4_p2_resident_smoke_bundle_root.v4"
+    assert set(plan["validation"]["members"]) == BATCH.ONE_CASE_ROOT_MEMBERS
+    assert all(item["type"] == "regular_file" and item["nlink"] == 1 for item in plan["validation"]["members"].values())
+    assert plan["validation"]["fake_driver_subprocess_count"] == 1
     assert plan["validation"]["driver_fake_handshake"] == "passed"
-    assert plan["validation"]["resident_session_id"] == "fake-validate-only"
+    assert plan["validation"]["resident_session_id"] == "offline-fake-ready-not-executed"
+    validator = plan["validation"]["trusted_bundle_validator"]
+    assert validator["subprocess_count"] == 1
+    assert len(validator["source"]["sha256"]) == 64
+    assert len(validator["report_sha256"]) == 64
 
 
-@pytest.mark.parametrize("case_count", (0, 2))
-def test_one_case_smoke_rejects_zero_or_two_target_cases(tmp_path: Path, case_count: int) -> None:
-    expanded, index, identity, preflight, policy = _one_case_bundle(tmp_path, case_count=case_count)
-    output = tmp_path / "invalid-count"
-    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", "invalid", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
+def test_one_case_smoke_requires_explicit_bundle_root(tmp_path: Path) -> None:
+    command = _one_case_command(tmp_path / "missing-root")
+    root_index = command.index("--bundle-root")
+    del command[root_index:root_index + 2]
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
-    assert "must contain exactly 1 target cases" in completed.stderr
-    assert not output.exists()
+    assert "--bundle-root is required" in completed.stderr
 
 
-def test_one_case_smoke_rejects_bundle_case_swap_and_normal_mode_still_requires_84(tmp_path: Path) -> None:
-    expanded, index, identity, preflight, policy = _one_case_bundle(tmp_path)
-    bundle_path = tmp_path / "bundle.json"
-    bundle = json.loads(bundle_path.read_text())
-    bundle["bindings"]["case_sha256"] = "0" * 64
-    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
-    base = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--run-id", "case-swap", "--baseline-kind", "active-production", "--dry-run"]
-    swapped = subprocess.run([*base, "--output-dir", str(tmp_path / "swapped"), "--one-case-smoke"], text=True, capture_output=True)
-    assert swapped.returncode != 0
-    assert "case binding/hash differs" in swapped.stderr
-    ordinary = subprocess.run([*base, "--output-dir", str(tmp_path / "ordinary")], text=True, capture_output=True)
-    assert ordinary.returncode != 0
-    assert "must contain exactly 84 target cases" in ordinary.stderr
+def test_one_case_smoke_rejects_handcrafted_partial_root(tmp_path: Path) -> None:
+    handcrafted = tmp_path / "handcrafted"
+    shutil.copytree(TRUSTED_ONE_CASE_ROOT, handcrafted)
+    (handcrafted / "trust-roots.json").unlink()
+    completed = subprocess.run(_one_case_command(tmp_path / "partial-out", bundle_root=handcrafted), text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert "exact member coverage differs" in completed.stderr
 
 
-def test_one_case_smoke_fake_driver_runs_exact_two_plus_ten_and_stays_nonpromotion(tmp_path: Path) -> None:
-    python, driver_sha256 = _detached_python(tmp_path)
-    expanded, index, identity, preflight, policy = _one_case_bundle(tmp_path, driver_sha256)
-    output = tmp_path / "one-case-run"
-    driver = _driver(tmp_path, driver_sha256)
-    command = [*_live_command(tmp_path, output, expanded, index, identity, preflight, policy, python, driver, "one-case-live"), "--one-case-smoke"]
+@pytest.mark.parametrize("variant", ("case", "identity", "fake_ready"))
+def test_one_case_smoke_rejects_rebound_case_identity_and_fake_ready(tmp_path: Path, variant: str) -> None:
+    rebound = _rebound_bundle(tmp_path, variant)
+    completed = subprocess.run(_one_case_command(tmp_path / f"{variant}-out", bundle_root=rebound), text=True, capture_output=True)
+    assert completed.returncode != 0
+    expected = "trusted case ID/hash differs" if variant == "case" else "prepared dry-run identity/handshake binding differs"
+    assert expected in completed.stderr
+
+
+def test_one_case_binding_is_not_accepted_by_normal_84_case_mode(tmp_path: Path) -> None:
+    command = _one_case_command(tmp_path / "ordinary")
+    command.remove("--one-case-smoke")
+    root_index = command.index("--bundle-root")
+    del command[root_index:root_index + 2]
     completed = subprocess.run(command, text=True, capture_output=True)
-    assert completed.returncode == 0, completed.stderr
-    raws = list(output.glob("*.raw.json"))
-    assert len(raws) == 1
-    raw = json.loads(raws[0].read_text())
-    assert raw["schedule"] == {"warmup_runs": 2, "measured_runs": 10, "completed_runs": 12}
-    assert raw["execution_mode"] == "one_case_smoke"
-    assert raw["smoke_only"] is True
-    assert raw["promotion_eligible"] is False
-    summary = json.loads((output / "resident-batch.summary.json").read_text())
-    assert summary["completed_cases"] == 1
-    assert summary["transaction_count"] == 12
-    assert summary["smoke_only"] is True
-    assert summary["promotion_eligible"] is False
+    assert completed.returncode != 0
+    assert "must contain exactly 84 target cases" in completed.stderr
 
 
 def test_fake_resident_driver_writes_one_atomic_raw_per_case(tmp_path: Path) -> None:

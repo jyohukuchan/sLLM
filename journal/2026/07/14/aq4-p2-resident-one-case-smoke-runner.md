@@ -11,7 +11,10 @@ prepared bundle v3はone-case planを保持していたが、実runnerは84 targ
 - 0件、2件、case swapを拒否し、通常84件modeを維持した。
 - dry-runでもbundleのfake-readyを実ready validatorへ通し、validate-only handshakeをartifactへ記録するようにした。
 - one-case artifactは常に`smoke_only=true`、`promotion_eligible=false`である。
+- independent QA followupでone-case入口を必須`--bundle-root`へ変更した。791a20c形式のexact member/role/path/SHA/type/nlink/mode、`SHA256SUMS`、trusted case ID/bound/official SHA、fixture、identity self/file、preflight/policy、prepared dry-run/evidenceをgenericに相互検証する。
+- fake-readyはrunnerから直接loadせずchild processを1回通す。任意のtrusted validatorは同一source blob SHAを前後確認してsubprocess実行し、report SHAまでplanへbindする。
+- 特定bundle全体のSHAはrunnerへhardcodeせず、R→B→Lの信頼連鎖で自己参照cycleを避ける。通常84件経路は変更していない。
 
 ## 次の行動
 
-CPU fake driverで2+10とcase bindingを確認した後、別途許可されたR9700 one-case smokeだけに使用する。この作業ではGPU/liveを実行しない。
+R=generic runner、B=R blob/実dry-runをpinするbundle、L=B manifest/R/validator SHAをpinするimmutable launcherに分離する。今回のcommitはRのみであり、B/L更新後にsanctioned one-caseを実行する。この作業ではGPU/liveを実行しない。

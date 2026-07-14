@@ -6,12 +6,14 @@
 
 ## 今回の変更点
 
-`--one-case-smoke` は `ullm.aq4_p2_resident_smoke_binding_bundle.v3` 専用の明示modeである。`case-binding.json`、`fixture-index.json`、`identity.json`、`preflight.json`、`policy.json` は同じbundle rootの固定memberでなければならない。case-bindingはtarget caseをexactly 1件だけ含み、bundle、case-binding、fixture index、identityのcase ID、case SHA-256、case-binding SHA-256が一致しなければならない。
+`--one-case-smoke` は `ullm.aq4_p2_resident_smoke_binding_bundle.v3` を `ullm.aq4_p2_resident_smoke_bundle_root.v4` 境界で読む明示modeである。`--bundle-root` は必須で、`case-binding.json`、`fixture-index.json`、`identity.json`、`preflight.json`、`policy.json` の各引数は同rootの固定memberに一致しなければならない。rootは791a20c形式の19 memberをexactに持ち、各memberのrole、相対path、SHA-256、regular-file type、nlink=1、mode、`SHA256SUMS`完全coverageを検証する。
+
+runnerは特定bundle全体のSHA-256をhardcodeしない。case-bindingはtrusted case ID、runtime-bound case SHA-256、official case SHA-256をexactに1件だけ含む。fixture index/fixture SHA、identity self/file SHA、preflight/policy、served/package/worker/guard binding、prepared dry-run/evidence、fake-ready session/driver identityを相互照合する。これにより欠落member、handcrafted partial root、別case rebound、identity/fake-readyの単純swapを拒否する。
 
 one-case smokeも2 warmup + 10 measuredを固定し、`smoke_only=true`、`promotion_eligible=false`である。0件、2件以上、別caseへの差し替えを拒否する。通常modeの84件境界と出力schemaは変更しない。
 
-one-case dry-runはplannerだけを通さない。bundle v3の`fake-ready.json`を実runnerのready identity validatorへ入力し、driver binary、protocol、runtime device、served worker/package/guard bindingのfake handshakeを実行する。plan artifactはbundle/fake-ready hashと`driver_fake_handshake=passed`を保持する。これはvalidate-only evidenceであり、model load、GPU、service操作を証明しない。
+one-case dry-runはplannerだけを通さない。`fake-ready.json`はrunner本体から直接JSON readせず、分離したchild processをexactly 1回起動してstdout handshakeとして実runnerのready identity validatorへ入力する。plan artifactはroot member inventory、bundle/fake-ready hash、session/driver identity、`fake_driver_subprocess_count=1`、`driver_fake_handshake=passed`を保持する。`--bundle-validator`を指定した場合は、そのsource blobを実行前後で同一SHAと確認してsubprocess実行し、source/stdout/report SHAをplanへbindする。これはvalidate-only evidenceであり、model load、GPU、service操作を証明しない。
 
 ## 次の行動
 
-sanctioned実行では同じbundle rootとdetached resident driverを使用する。one-case smokeの成功を84件または完全matrixのpromotion evidenceへ転用しない。
+信頼連鎖は自己参照cycleを避けて3段に分離する。Rはこのgeneric runner validation commit、BはR blobと実dry-runをpinする更新bundle、LはB manifest SHAとR blob/validator SHAをpinしてvalidator→runnerの順に起動する最後のimmutable launcherである。この変更はRだけを完成させるため、B/L更新が次に必要である。sanctioned実行ではLが選んだbundle rootとdetached resident driverを使用し、one-case smokeの成功を84件または完全matrixのpromotion evidenceへ転用しない。

@@ -31,6 +31,32 @@ GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SCHEMA = "ullm.aq4_p2_resident_batch.v1"
 DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v2"
 ONE_CASE_BUNDLE_SCHEMA = "ullm.aq4_p2_resident_smoke_binding_bundle.v3"
+ONE_CASE_ROOT_CONTRACT = "ullm.aq4_p2_resident_smoke_bundle_root.v4"
+TRUSTED_ONE_CASE_ID = "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target"
+TRUSTED_ONE_CASE_SHA256 = "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7"
+TRUSTED_OFFICIAL_CASE_SHA256 = "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a"
+TRUSTED_SOURCE_MANIFEST_SHA256 = "1fa264c6a7a485e36b1119ca13732ad88e052a8bd502c2addacdff14ff41cbea"
+ONE_CASE_MEMBER_CONTRACT = {
+    "SUPERSEDED-0fd7993.json": (0o444, "historical_non_executable_bundle_record"),
+    "case-binding.json": (0o444, "runtime_bound_case"),
+    "dry-run.json": (0o444, "resident_batch_dry_run"),
+    "fake-ready.json": (0o444, "synthetic_ready_event"),
+    "fixture-index.json": (0o444, "fixture_index"),
+    "fixture.json": (0o444, "fixture"),
+    "identity.json": (0o444, "resident_identity"),
+    "launch-command.json": (0o444, "exact_resident_launch_command"),
+    "official-case.json": (0o444, "trusted_official_expansion_case"),
+    "package-manifest.json": (0o444, "package_manifest_snapshot"),
+    "policy.json": (0o444, "threshold_policy"),
+    "preflight.json": (0o444, "synthetic_preflight"),
+    "resident-driver": (0o555, "detached_resident_driver"),
+    "runner-dry-run-evidence.json": (0o444, "trusted_runner_subprocess_evidence"),
+    "served-model.json": (0o444, "served_model_snapshot"),
+    "trust-roots.json": (0o444, "independent_trust_roots"),
+    "trusted-runner.py": (0o444, "trusted_one_case_smoke_runner"),
+}
+ONE_CASE_BUNDLE_FILE_MEMBERS = set(ONE_CASE_MEMBER_CONTRACT) - {"dry-run.json", "runner-dry-run-evidence.json"}
+ONE_CASE_ROOT_MEMBERS = set(ONE_CASE_MEMBER_CONTRACT) | {"bundle.json", "SHA256SUMS"}
 WARMUP_RUNS = 2
 MEASURED_RUNS = 10
 READY_IDENTITY_KEYS = {
@@ -318,8 +344,101 @@ def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any],
     return sorted(selected, key=lambda case: case["case_id"])
 
 
-def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str, Any], fixture_index: dict[str, Any], identity: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
-    root = args.expanded.parent.resolve(strict=True)
+def _identity_self_sha256(identity: dict[str, Any]) -> str:
+    value = json.loads(json.dumps(identity))
+    value.pop("_path", None)
+    value.pop("_sha256", None)
+    value["identity_sha256"] = None
+    return sha_bytes(canonical(value))
+
+
+def _run_fake_ready_handshake(path: Path, timeout: float) -> dict[str, Any]:
+    child = (
+        "import os,sys\n"
+        "p=sys.argv[1]\n"
+        "f=os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_CLOEXEC',0))\n"
+        "try:\n"
+        " d=os.read(f,67108865)\n"
+        " if len(d)>67108864 or os.read(f,1): raise SystemExit(91)\n"
+        "finally: os.close(f)\n"
+        "sys.stdout.buffer.write(d)\n"
+        "sys.stdout.buffer.flush()\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child, str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise BatchError("one-case smoke fake-ready subprocess handshake failed")
+    try:
+        value = json.loads(
+            completed.stdout.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite fake-ready number: {item}")),
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BatchError(f"invalid one-case smoke fake-ready subprocess response: {error}") from error
+    if not isinstance(value, dict):
+        raise BatchError("one-case smoke fake-ready subprocess response is not an object")
+    return value
+
+
+def _run_bundle_validator(path: Path, root: Path, timeout: float) -> dict[str, Any]:
+    source_raw, source_sha, source_before = read_regular(path, "trusted bundle validator", MAX_JSON_BYTES, absolute=True)
+    if not source_raw.startswith(b"#!") and path.suffix != ".py":
+        raise BatchError("trusted bundle validator is not a Python source file")
+    completed = subprocess.run(
+        [sys.executable, str(path), "validate", "--bundle", str(root)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise BatchError("trusted bundle validator subprocess rejected the bundle")
+    if _file_identity(source_before) != _file_identity(os.lstat(path)) or sha_file(path, "trusted bundle validator", absolute=True) != source_sha:
+        raise BatchError("trusted bundle validator source changed during subprocess validation")
+    try:
+        report = json.loads(completed.stdout.decode("utf-8"), object_pairs_hook=pairs)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BatchError(f"trusted bundle validator report is invalid: {error}") from error
+    if (
+        not isinstance(report, dict)
+        or set(report) != {"status", "promotion", "run_id"}
+        or report.get("status") != "prepared_not_executed"
+        or report.get("promotion") is not False
+        or not isinstance(report.get("run_id"), str)
+        or not report["run_id"]
+    ):
+        raise BatchError("trusted bundle validator report fields differ")
+    return {
+        "subprocess_count": 1,
+        "source": {"path": str(path), "sha256": source_sha},
+        "stdout_sha256": sha_bytes(completed.stdout),
+        "report_sha256": sha_bytes(canonical(report)),
+        "report": report,
+    }
+
+
+def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str, Any], fixture_index: dict[str, Any], identity: dict[str, Any], preflight: dict[str, Any], policy: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if args.bundle_root is None:
+        raise BatchError("--bundle-root is required with --one-case-smoke")
+    _require_absolute_nonsymlink_path(args.bundle_root, "one-case smoke bundle root")
+    try:
+        root = args.bundle_root.resolve(strict=True)
+    except OSError as error:
+        raise BatchError(f"one-case smoke bundle root resolution failed: {error}") from error
+    root_metadata = os.lstat(root)
+    if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
+        raise BatchError("one-case smoke bundle root must be a non-symlink directory")
+    names = {entry.name for entry in root.iterdir()}
+    if names != ONE_CASE_ROOT_MEMBERS:
+        raise BatchError("one-case smoke bundle root exact member coverage differs")
     expected_paths = {
         "expanded": root / "case-binding.json",
         "fixture_index": root / "fixture-index.json",
@@ -330,41 +449,142 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
     for name, expected in expected_paths.items():
         supplied = getattr(args, name).resolve(strict=True)
         if supplied != expected:
-            raise BatchError(f"one-case smoke {name} is not the bundle v3 member")
+            raise BatchError(f"one-case smoke {name} is not the bundle root v4 member")
     bundle_path = root / "bundle.json"
     fake_ready_path = root / "fake-ready.json"
+    initial: dict[str, tuple[int, ...]] = {}
+    member_inventory: dict[str, dict[str, Any]] = {}
+    for name in sorted(ONE_CASE_ROOT_MEMBERS):
+        metadata = os.lstat(root / name)
+        expected_mode = 0o444 if name in {"bundle.json", "SHA256SUMS"} else ONE_CASE_MEMBER_CONTRACT[name][0]
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != expected_mode:
+            raise BatchError(f"one-case smoke bundle member type/link/mode differs: {name}")
+        initial[name] = _file_identity(metadata)
+        role = {"bundle.json": "bundle_manifest", "SHA256SUMS": "sha256_manifest"}[name] if name in {"bundle.json", "SHA256SUMS"} else ONE_CASE_MEMBER_CONTRACT[name][1]
+        member_inventory[name] = {"path": str(root / name), "sha256": sha_file(root / name, f"one-case smoke {name}"), "role": role, "type": "regular_file", "nlink": metadata.st_nlink, "mode": f"{expected_mode:04o}"}
     bundle = load(bundle_path, "one-case smoke bundle")
-    fake_ready = load(fake_ready_path, "one-case smoke fake-ready")
     if bundle.get("schema_version") != ONE_CASE_BUNDLE_SCHEMA or bundle.get("status") != "prepared_not_executed" or bundle.get("promotion") is not False:
         raise BatchError("one-case smoke bundle v3 status/promotion differs")
+    if bundle.get("canonical_root") != str(root):
+        raise BatchError("one-case smoke bundle/root identity differs")
     if len(cases) != 1:
         raise BatchError("one-case smoke internal case count differs")
     case = cases[0]
+    if case.get("case_id") != TRUSTED_ONE_CASE_ID or case.get("case_sha256") != TRUSTED_ONE_CASE_SHA256:
+        raise BatchError("one-case smoke trusted case ID/hash differs")
     bindings = bundle.get("bindings")
     files = bundle.get("files")
+    if not isinstance(files, dict) or set(files) != ONE_CASE_BUNDLE_FILE_MEMBERS:
+        raise BatchError("one-case smoke bundle file role/path coverage differs")
+    for name in sorted(ONE_CASE_BUNDLE_FILE_MEMBERS):
+        mode, role = ONE_CASE_MEMBER_CONTRACT[name]
+        record = files.get(name)
+        if not isinstance(record, dict) or set(record) != {"mode", "role", "sha256"} or record.get("mode") != f"{mode:04o}" or record.get("role") != role or not isinstance(record.get("sha256"), str) or SHA256_RE.fullmatch(record["sha256"]) is None:
+            raise BatchError(f"one-case smoke bundle file contract differs: {name}")
+        if sha_file(root / name, f"one-case smoke {name}") != record["sha256"]:
+            raise BatchError(f"one-case smoke bundle file SHA differs: {name}")
+    sums_raw, _, _ = read_regular(root / "SHA256SUMS", "one-case smoke SHA256SUMS", MAX_JSON_BYTES)
+    try:
+        sum_lines = sums_raw.decode("ascii").splitlines()
+    except UnicodeError as error:
+        raise BatchError("one-case smoke SHA256SUMS is not ASCII") from error
+    expected_sum_names = set(ONE_CASE_MEMBER_CONTRACT) | {"bundle.json"}
+    observed_sums: dict[str, str] = {}
+    for line in sum_lines:
+        if line.count("  ") != 1:
+            raise BatchError("one-case smoke SHA256SUMS syntax differs")
+        digest, name = line.split("  ", 1)
+        if name in observed_sums or name not in expected_sum_names or SHA256_RE.fullmatch(digest) is None:
+            raise BatchError("one-case smoke SHA256SUMS coverage differs")
+        observed_sums[name] = digest
+    if set(observed_sums) != expected_sum_names:
+        raise BatchError("one-case smoke SHA256SUMS exact coverage differs")
+    for name, digest in observed_sums.items():
+        if sha_file(root / name, f"one-case smoke SHA256SUMS {name}") != digest:
+            raise BatchError(f"one-case smoke SHA256SUMS differs: {name}")
     case_binding_sha = sha_file(args.expanded, "one-case smoke case binding")
-    if not isinstance(bindings, dict) or bindings.get("case_binding_sha256") != case_binding_sha or bindings.get("case_sha256") != case["case_sha256"]:
+    expected_binding_keys = {"case_binding_sha256", "case_sha256", "fixture_sha256", "guard_set_sha256", "identity_file_sha256", "identity_self_sha256", "official_case_sha256", "package_content_sha256", "package_manifest_sha256", "policy_sha256", "preflight_sha256", "served_model_manifest_sha256", "worker_binary_sha256"}
+    if not isinstance(bindings, dict) or set(bindings) != expected_binding_keys or bindings.get("case_binding_sha256") != case_binding_sha or bindings.get("case_sha256") != TRUSTED_ONE_CASE_SHA256 or bindings.get("official_case_sha256") != TRUSTED_OFFICIAL_CASE_SHA256:
         raise BatchError("one-case smoke bundle case binding/hash differs")
-    case_file = files.get("case-binding.json") if isinstance(files, dict) else None
-    if not isinstance(case_file, dict) or case_file.get("sha256") != case_binding_sha or case_file.get("role") != "runtime_bound_case":
+    if files["case-binding.json"]["sha256"] != case_binding_sha:
         raise BatchError("one-case smoke bundle file binding differs")
-    if expanded.get("status") != "bound_one_case_smoke" or expanded.get("case_count") != 1 or expanded.get("canonical_case_sha256") != sha_bytes(canonical(cases)):
+    if expanded.get("status") != "bound_one_case_smoke" or expanded.get("case_count") != 1 or expanded.get("canonical_case_sha256") != sha_bytes(canonical(cases)) or expanded.get("source_manifest_sha256") != TRUSTED_SOURCE_MANIFEST_SHA256 or expanded.get("official_case_sha256") != TRUSTED_OFFICIAL_CASE_SHA256:
         raise BatchError("one-case smoke case-binding root differs")
-    if fixture_index.get("subset") != "resident_one_case_smoke" or fixture_index.get("case_count") != 1 or fixture_index.get("expanded_manifest_sha256") != case_binding_sha:
+    official = load(root / "official-case.json", "one-case smoke official case")
+    official_case = official.get("case")
+    if official.get("schema_version") != "ullm.aq4_p2_official_case.v1" or official.get("manifest_sha256") != TRUSTED_SOURCE_MANIFEST_SHA256 or not isinstance(official_case, dict) or official_case.get("case_id") != TRUSTED_ONE_CASE_ID or official_case.get("case_sha256") != TRUSTED_OFFICIAL_CASE_SHA256 or case_hash(official_case) != TRUSTED_OFFICIAL_CASE_SHA256:
+        raise BatchError("one-case smoke trusted official case differs")
+    index_cases = fixture_index.get("cases")
+    fixture_entry = index_cases[0] if isinstance(index_cases, list) and len(index_cases) == 1 else None
+    fixture_sha = sha_file(root / "fixture.json", "one-case smoke fixture")
+    if fixture_index.get("subset") != "resident_one_case_smoke" or fixture_index.get("case_count") != 1 or fixture_index.get("expanded_manifest_sha256") != case_binding_sha or fixture_index.get("served_model_manifest_sha256") != identity.get("hash_binding", {}).get("served_model_manifest_sha256") or not isinstance(fixture_entry, dict) or fixture_entry.get("case_id") != TRUSTED_ONE_CASE_ID or fixture_entry.get("case_sha256") != TRUSTED_ONE_CASE_SHA256 or Path(fixture_entry.get("fixture_path", "")) != root / "fixture.json" or fixture_entry.get("fixture_sha256") != fixture_sha or bindings.get("fixture_sha256") != fixture_sha:
         raise BatchError("one-case smoke fixture index binding differs")
-    if identity.get("expanded_manifest_sha256") != case_binding_sha or identity.get("hash_binding", {}).get("bound_case_manifest_sha256") != case_binding_sha:
+    identity_file_sha = sha_file(root / "identity.json", "one-case smoke identity")
+    identity_self_sha = _identity_self_sha256(identity)
+    if identity.get("schema_version") != "ullm.aq4_production_p2_identity.v2" or identity.get("status") != "bound" or identity.get("expanded_manifest_sha256") != case_binding_sha or identity.get("hash_binding", {}).get("bound_case_manifest_sha256") != case_binding_sha or identity.get("identity_sha256") != identity_self_sha or bindings.get("identity_file_sha256") != identity_file_sha or bindings.get("identity_self_sha256") != identity_self_sha:
         raise BatchError("one-case smoke identity case binding differs")
+    if bindings.get("preflight_sha256") != sha_file(root / "preflight.json", "one-case smoke preflight") or not isinstance(preflight.get("gpu_process_snapshot"), list):
+        raise BatchError("one-case smoke preflight binding differs")
+    if bindings.get("policy_sha256") != sha_file(root / "policy.json", "one-case smoke policy") or policy.get("schema_version") != "ullm.aq4_production_p2_threshold_policy.v1" or policy.get("status") != "bound":
+        raise BatchError("one-case smoke policy binding differs")
+    resident_identity = identity.get("resident_driver_identity", {})
+    hash_binding = identity.get("hash_binding", {})
+    for field in ("guard_set_sha256", "package_content_sha256", "package_manifest_sha256", "served_model_manifest_sha256", "worker_binary_sha256"):
+        expected = resident_identity.get(field)
+        if bindings.get(field) != expected or (field != "guard_set_sha256" and hash_binding.get(field) != expected):
+            raise BatchError(f"one-case smoke {field} binding differs")
+    if bindings.get("served_model_manifest_sha256") != files["served-model.json"]["sha256"] or bindings.get("package_manifest_sha256") != files["package-manifest.json"]["sha256"]:
+        raise BatchError("one-case smoke served/package snapshot binding differs")
     expected_binary_sha256 = identity.get("resident_driver_identity", {}).get("binary_sha256")
-    if not isinstance(expected_binary_sha256, str) or SHA256_RE.fullmatch(expected_binary_sha256) is None:
+    if not isinstance(expected_binary_sha256, str) or SHA256_RE.fullmatch(expected_binary_sha256) is None or files["resident-driver"]["sha256"] != expected_binary_sha256:
         raise BatchError("one-case smoke resident binary binding is invalid")
+    fake_ready = _run_fake_ready_handshake(fake_ready_path, args.timeout)
     session_id, driver_identity = validate_ready(fake_ready, identity, cases, expected_binary_sha256)
+    prepared_plan = load(root / "dry-run.json", "one-case smoke prepared dry-run")
+    prepared_validation = prepared_plan.get("validation")
+    prepared_baseline = prepared_plan.get("baseline_identity")
+    if (
+        prepared_plan.get("case_count") != 1
+        or prepared_plan.get("transaction_count") != WARMUP_RUNS + MEASURED_RUNS
+        or prepared_plan.get("smoke_only") is not True
+        or prepared_plan.get("promotion_eligible") is not False
+        or not isinstance(prepared_validation, dict)
+        or prepared_validation.get("fake_ready") != {"path": str(fake_ready_path), "sha256": files["fake-ready.json"]["sha256"]}
+        or prepared_validation.get("resident_session_id") != session_id
+        or prepared_validation.get("driver_identity") != driver_identity
+        or not isinstance(prepared_baseline, dict)
+        or prepared_baseline.get("identity_file") != {"path": str(root / "identity.json"), "sha256": identity_file_sha}
+    ):
+        raise BatchError("one-case smoke prepared dry-run identity/handshake binding differs")
+    prepared_evidence = load(root / "runner-dry-run-evidence.json", "one-case smoke prepared runner evidence")
+    if (
+        prepared_evidence.get("schema_version") != "ullm.aq4_p2_resident_runner_subprocess_evidence.v1"
+        or prepared_evidence.get("runner_subprocess_count") != 1
+        or prepared_evidence.get("runner_source_sha256") != files["trusted-runner.py"]["sha256"]
+        or prepared_evidence.get("plan") != {"path": str(root / "dry-run.json"), "sha256": observed_sums["dry-run.json"]}
+    ):
+        raise BatchError("one-case smoke prepared runner evidence binding differs")
+    validator = None
+    if args.bundle_validator is not None:
+        validator_path = args.bundle_validator.resolve(strict=True)
+        validator = _run_bundle_validator(validator_path, root, args.timeout)
+    if {entry.name for entry in root.iterdir()} != ONE_CASE_ROOT_MEMBERS or _file_identity(os.lstat(root)) != _file_identity(root_metadata):
+        raise BatchError("one-case smoke bundle root changed during validation")
+    for name, before in initial.items():
+        if _file_identity(os.lstat(root / name)) != before:
+            raise BatchError(f"one-case smoke bundle member changed during validation: {name}")
     return bundle, {
         "mode": "validate_only",
+        "root_contract": ONE_CASE_ROOT_CONTRACT,
+        "bundle_root": {"path": str(root), "device": root_metadata.st_dev, "inode": root_metadata.st_ino},
+        "members": member_inventory,
         "bundle": {"path": str(bundle_path), "sha256": sha_file(bundle_path, "one-case smoke bundle")},
         "fake_ready": {"path": str(fake_ready_path), "sha256": sha_file(fake_ready_path, "one-case smoke fake-ready")},
+        "fake_driver_subprocess_count": 1,
         "driver_fake_handshake": "passed",
         "resident_session_id": session_id,
         "driver_identity": driver_identity,
+        "trusted_bundle_validator": validator,
     }
 
 
@@ -530,6 +750,10 @@ def build_plan(cases: list[dict[str, Any]], expanded_path: Path, fixture_index_p
 
 
 def run_batch(args: argparse.Namespace) -> int:
+    if not args.one_case_smoke and (args.bundle_root is not None or args.bundle_validator is not None):
+        raise BatchError("--bundle-root/--bundle-validator require --one-case-smoke")
+    if args.one_case_smoke and args.bundle_root is None:
+        raise BatchError("--bundle-root is required with --one-case-smoke")
     expanded = load(args.expanded, "expanded")
     fixture_index = load(args.fixture_index, "fixture index")
     identity = load(args.identity, "identity")
@@ -547,7 +771,7 @@ def run_batch(args: argparse.Namespace) -> int:
     cases = select_target_cases(expanded, fixture_index, one_case_smoke=args.one_case_smoke)
     smoke_validation = None
     if args.one_case_smoke:
-        _, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, cases)
+        _, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, preflight, policy, cases)
     plan = build_plan(cases, args.expanded, args.fixture_index, args.run_id, args.baseline_kind, identity, policy)
     if args.one_case_smoke:
         plan.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False, "validation": smoke_validation})
@@ -646,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--one-case-smoke", action="store_true", help="run the exact bundle-v3 one-case smoke; never promotion eligible")
+    parser.add_argument("--bundle-root", type=Path, help="absolute complete 791a20c bundle root; required by --one-case-smoke")
+    parser.add_argument("--bundle-validator", type=Path, help="optional trusted bundle validator Python source to run and hash-bind")
     args = parser.parse_args(argv)
     try:
         return run_batch(args)
