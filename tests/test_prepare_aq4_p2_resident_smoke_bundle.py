@@ -13,8 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
 BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "b9c5878b1aabfca42986f4797810acfadc820382"
-VALIDATOR_SHA = "0759cd83307a53fd728fb5f271be1f817b24d10fd959ef356b8f03a78030e7d5"
+VALIDATOR_COMMIT = "2e39b7851b856ab067686249ce2d6284484c53d4"
+VALIDATOR_SHA = "43de32a5a9533c2714085303f80446b6a2f96f191c59830a30ecc73adef95597"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -367,3 +367,29 @@ def test_v4_binding_rejects_report_replacement(tmp_path: Path) -> None:
     rewrite_json(report, value)
     with pytest.raises(BUNDLE.BundleError, match="validator report differs"):
         BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
+
+
+@pytest.mark.parametrize("variant", ("late_unknown", "late_missing", "late_replace"))
+def test_v4_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
+    root = tmp_path / "binding"
+    shutil.copytree(BINDING, root)
+    replacement = tmp_path / "replacement-report.json"
+    shutil.copyfile(root / "validator-report.json", replacement)
+    replacement.chmod(0o444)
+
+    def mutate(binding_root: Path) -> None:
+        if variant == "late_unknown":
+            (binding_root / "late-unknown.json").write_text("{}\n", encoding="utf-8")
+        elif variant == "late_missing":
+            (binding_root / "validator-report.json").unlink()
+        else:
+            (binding_root / "validator-report.json").unlink()
+            shutil.copyfile(replacement, binding_root / "validator-report.json")
+            (binding_root / "validator-report.json").chmod(0o444)
+
+    BUNDLE._BINDING_VALIDATION_HOOK = mutate
+    try:
+        with pytest.raises(BUNDLE.BundleError, match="late binding sidecar"):
+            BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
+    finally:
+        BUNDLE._BINDING_VALIDATION_HOOK = None
