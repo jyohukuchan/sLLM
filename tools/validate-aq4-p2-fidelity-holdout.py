@@ -112,8 +112,14 @@ def validate(root: Path, receipt_path: Path | None = None) -> dict[str, Any]:
         raise ValidationError("policy metric set differs")
     for name, expected in protocol.METRICS.items():
         actual = policy["metrics"].get(name)
-        if not isinstance(actual, dict) or any(actual.get(field) != expected.get(field) for field in ("direction", "aggregation", "margin", "absolute_floor", "absolute_ceiling", "sample_minimum")):
+        if not isinstance(actual, dict) or any(actual.get(field) != expected.get(field) for field in ("role", "direction", "aggregation", "confidence_level", "margin", "relative_margin", "absolute_floor", "absolute_ceiling", "pathological_rejection_ceiling", "sample_minimum")):
             raise ValidationError(f"policy metric contract differs: {name}")
+    quality = policy.get("quality_task")
+    if not isinstance(quality, dict) or quality.get("kind") != "binary_retention_rate" or quality.get("score") != "bf16_top1_retained_in_aq4_top10":
+        raise ValidationError("quality task is not fixture-computable BF16 top1 retention")
+    l2_rejection = policy.get("relative_l2_rejection")
+    if not isinstance(l2_rejection, dict) or l2_rejection.get("ceiling") != 1.0 or l2_rejection.get("action") != "reject any observed relative-L2 > 1 before aggregation":
+        raise ValidationError("relative-L2 pathological rejection policy differs")
     result = {"status": "ok", "calibration": 24, "holdout": 24, "split_manifest_sha256": protocol.sha_bytes(manifest_raw), "policy_sha256": protocol.sha_bytes(policy_raw)}
     if receipt_path is not None:
         receipt, receipt_raw = protocol.load(receipt_path, "freeze receipt")
@@ -128,12 +134,28 @@ def validate(root: Path, receipt_path: Path | None = None) -> dict[str, Any]:
             item = bounds[name]
             if not isinstance(item, dict) or item.get("direction") != spec["direction"] or item.get("sample_count") != 24:
                 raise ValidationError(f"freeze bound identity differs: {name}")
-            for field in ("calibration_mean", "margin", "bound"):
+            if spec["role"] == "diagnostic_only":
+                finite(item.get("diagnostic_max"), f"freeze {name}.diagnostic_max")
+                if item.get("bound") is not None:
+                    raise ValidationError(f"diagnostic metric has promotion bound: {name}")
+                continue
+            if name in protocol.BINARY_RATE_METRICS:
+                if type(item.get("successes")) is not int or not 0 <= item["successes"] <= 24:
+                    raise ValidationError(f"Wilson successes invalid: {name}")
+                finite(item.get("calibration_mean"), f"freeze {name}.calibration_mean")
+                finite(item.get("confidence_level"), f"freeze {name}.confidence_level")
+                finite(item.get("wilson_z"), f"freeze {name}.wilson_z")
+                finite(item.get("bound"), f"freeze {name}.bound")
+                expected_bound = protocol.wilson_lower_one_sided(item["successes"], 24)
+                if abs(float(item["bound"]) - expected_bound) > 1e-12:
+                    raise ValidationError(f"Wilson bound differs: {name}")
+                continue
+            for field in ("calibration_mean", "absolute_margin", "relative_margin", "effective_margin", "bound"):
                 finite(item.get(field), f"freeze {name}.{field}")
             bound = float(item["bound"])
-            if bound < spec["absolute_floor"] if spec["absolute_floor"] is not None else False:
+            if spec["absolute_floor"] is not None and bound < spec["absolute_floor"]:
                 raise ValidationError(f"freeze bound below floor: {name}")
-            if bound > spec["absolute_ceiling"]:
+            if spec["absolute_ceiling"] is not None and bound > spec["absolute_ceiling"]:
                 raise ValidationError(f"freeze bound above ceiling: {name}")
         result["receipt_sha256"] = protocol.sha_bytes(receipt_raw)
     return result

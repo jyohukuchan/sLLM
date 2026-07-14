@@ -91,7 +91,7 @@ class FidelityProtocolTests(unittest.TestCase):
             for line in (split / "calibration-cases.jsonl").read_text().splitlines():
                 row = json.loads(line)
                 item = {field: row[field] for field in ("case_id", "case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "context_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count")}
-                item["metrics"] = {name: 0.8 for name in generator.METRICS}
+                item["metrics"] = {name: (1.0 if name in generator.BINARY_RATE_METRICS else 0.8) for name in generator.METRICS}
                 metric_rows.append(item)
             metrics = {"schema_version": generator.METRICS_SCHEMA, "split_manifest_sha256": hashlib.sha256((split / "split-manifest.json").read_bytes()).hexdigest(), "subset": "calibration", "rows": metric_rows}
             metrics_path = root / "metrics.json"
@@ -101,10 +101,34 @@ class FidelityProtocolTests(unittest.TestCase):
             self.assertEqual(frozen.returncode, 0, frozen.stderr)
             check = subprocess.run([sys.executable, str(ROOT / "tools" / "validate-aq4-p2-fidelity-holdout.py"), "--split-root", str(split), "--receipt", str(receipt)], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(check.returncode, 0, check.stderr)
+            receipt_value = json.loads(receipt.read_text())
+            self.assertAlmostEqual(receipt_value["derived_bounds"]["token_agreement_rate"]["bound"], generator.wilson_lower_one_sided(24, 24), places=12)
+            self.assertIsNone(receipt_value["derived_bounds"]["hidden_max_abs"]["bound"])
             metrics["rows"][0]["metrics"].pop("logits_cosine")
             bad = root / "bad-metrics.json"
             bad.write_text(json.dumps(metrics, sort_keys=True) + "\n")
             rejected = self.run_cli("freeze", "--split-root", str(split), "--metrics", str(bad), "--output", str(root / "bad-receipt.json"))
+            self.assertNotEqual(rejected.returncode, 0)
+
+    def test_relative_l2_over_one_is_pathological_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expanded, index = self.make_inputs(root)
+            split = root / "split"
+            result = self.run_cli("split", "--expanded", str(expanded), "--fixture-index", str(index), "--output", str(split))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = []
+            for line in (split / "calibration-cases.jsonl").read_text().splitlines():
+                row = json.loads(line)
+                item = {field: row[field] for field in ("case_id", "case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "context_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count")}
+                item["metrics"] = {name: (1.0 if name in generator.BINARY_RATE_METRICS else 0.8) for name in generator.METRICS}
+                item["metrics"]["hidden_max_abs"] = 100.0
+                item["metrics"]["logits_relative_l2"] = 1.01
+                rows.append(item)
+            metrics = {"schema_version": generator.METRICS_SCHEMA, "split_manifest_sha256": hashlib.sha256((split / "split-manifest.json").read_bytes()).hexdigest(), "subset": "calibration", "rows": rows}
+            metrics_path = root / "metrics.json"
+            metrics_path.write_text(json.dumps(metrics) + "\n")
+            rejected = self.run_cli("freeze", "--split-root", str(split), "--metrics", str(metrics_path), "--output", str(root / "receipt.json"))
             self.assertNotEqual(rejected.returncode, 0)
 
     def test_attempt2_marker_is_rejected(self) -> None:
@@ -132,7 +156,7 @@ class FidelityProtocolTests(unittest.TestCase):
                 row = json.loads(line)
                 item = {field: row[field] for field in ("case_id", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "context_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count")}
                 item["case_sha256"] = "0" * 64
-                item["metrics"] = {name: 0.8 for name in generator.METRICS}
+                item["metrics"] = {name: (1.0 if name in generator.BINARY_RATE_METRICS else 0.8) for name in generator.METRICS}
                 rows.append(item)
             metrics = {"schema_version": generator.METRICS_SCHEMA, "split_manifest_sha256": hashlib.sha256((split / "split-manifest.json").read_bytes()).hexdigest(), "subset": "calibration", "rows": rows, "source": "attempt2 observed"}
             metrics_path = root / "bad-metrics.json"

@@ -37,16 +37,18 @@ ATTEMPT2_CONTEXT_HASHES = {
 }
 STRATA_FIELDS = ("prompt_tokens", "baseline_mode")
 METRICS = {
-    "token_agreement_rate": {"direction": "higher", "aggregation": "mean", "margin": 0.01, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "topk_overlap_rate_k10": {"direction": "higher", "aggregation": "mean", "margin": 0.01, "absolute_floor": 0.1, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "logits_cosine": {"direction": "higher", "aggregation": "mean", "margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "logits_relative_l2": {"direction": "lower", "aggregation": "mean", "margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "hidden_cosine": {"direction": "higher", "aggregation": "mean", "margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "hidden_relative_l2": {"direction": "lower", "aggregation": "mean", "margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "hidden_max_abs": {"direction": "lower", "aggregation": "mean", "margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
-    "quality_proxy_score": {"direction": "higher", "aggregation": "mean", "margin": 0.01, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "token_agreement_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "confidence_level": 0.95, "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "topk_overlap_rate_k10": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.1, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "logits_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "logits_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "pathological_rejection_ceiling": 1.0, "sample_minimum": 24},
+    "hidden_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "hidden_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "pathological_rejection_ceiling": 1.0, "sample_minimum": 24},
+    "hidden_max_abs": {"role": "diagnostic_only", "direction": "diagnostic", "aggregation": "max", "confidence_level": None, "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": None, "sample_minimum": 24},
+    "bf16_top1_retained_in_aq4_top10_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "confidence_level": 0.95, "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
 }
-BOUNDED_UNIT_METRICS = {"token_agreement_rate", "topk_overlap_rate_k10", "logits_cosine", "hidden_cosine", "quality_proxy_score"}
+BOUNDED_UNIT_METRICS = {"token_agreement_rate", "topk_overlap_rate_k10", "logits_cosine", "hidden_cosine", "bf16_top1_retained_in_aq4_top10_rate"}
+BINARY_RATE_METRICS = {"token_agreement_rate", "bf16_top1_retained_in_aq4_top10_rate"}
+WILSON_Z_95_ONE_SIDED = 1.6448536269514722
 
 
 class ProtocolError(ValueError):
@@ -212,14 +214,25 @@ def row(item: dict[str, Any], subset: str) -> dict[str, Any]:
 
 
 def policy() -> dict[str, Any]:
+    metric_policy: dict[str, Any] = {}
+    for name, spec in METRICS.items():
+        item = {**spec, "observed_domain": "[0,1]" if name in BOUNDED_UNIT_METRICS else "[0,+inf)"}
+        if name in BINARY_RATE_METRICS:
+            item["formula"] = "wilson_lower_one_sided(successes=sum(exact 1.0 rows), n=24, confidence_level=0.95); no mean-minus-margin"
+        elif spec["role"] == "diagnostic_only":
+            item["formula"] = "diagnostic_max only; no promotion bound and no absolute ceiling"
+        else:
+            item["formula"] = "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))"
+        metric_policy[name] = item
     return {
         "schema_version": POLICY_SCHEMA, "status": "formula_frozen_unbound", "promotion_eligible": False,
         "attempt2_threshold_source_forbidden": True, "observed_attempt2_values_forbidden": True, "attempt2_artifact_ids_forbidden": sorted(ATTEMPT2_CASE_IDS), "attempt2_context_hashes_forbidden": sorted(ATTEMPT2_CONTEXT_HASHES),
         "calibration_subset_only_for_active_bf16_envelope": True, "holdout_evaluation_allowed_once": True, "candidate_active_behavioral_gate": {"mode": "exact", "mismatch_action": "no-go"},
         "split": {"strata_fields": list(STRATA_FIELDS), "stratum_size": 6, "calibration_per_stratum": 3, "holdout_per_stratum": 3, "total_cases": 48, "calibration_cases": 24, "holdout_cases": 24},
-        "metrics": {name: {**spec, "observed_domain": "[0,1]" if name in BOUNDED_UNIT_METRICS else "[0,+inf)", "formula": ("bound=max(absolute_floor, calibration_mean-margin); null floor means no invented token floor" if spec["direction"] == "higher" else "bound=min(absolute_ceiling, calibration_mean+margin)")} for name, spec in METRICS.items()},
-        "quality_task": {"kind": "teacher_forced_proxy", "score": "normalized_source_token_logit_or_rank_score", "task_fixture_identity_required": True, "natural_language_suite": "optional_separate_artifact", "no_regression_against_calibration_bound": True},
-        "non_vacuity": {"reason": "No Qwen3.5 AQ4 acceptance artifact supplies an absolute token-exact floor; structural floors/ceilings are fixed for continuous fidelity metrics, while token/quality floors remain calibration-derived."},
+        "metrics": metric_policy,
+        "quality_task": {"kind": "binary_retention_rate", "score": "bf16_top1_retained_in_aq4_top10", "calculation": "1 when BF16 source greedy token is present in the AQ4 top-10 set, else 0", "task_fixture_identity_required": True, "natural_language_suite": "optional_separate_artifact", "no_regression_against_calibration_bound": True},
+        "relative_l2_rejection": {"ceiling": 1.0, "action": "reject any observed relative-L2 > 1 before aggregation", "reason": "relative-L2 above 100 percent is a predeclared pathological-drift rejection; this structural check is distinct from raw hidden max-abs, which has no natural scale"},
+        "non_vacuity": {"reason": "No Qwen3.5 AQ4 acceptance artifact supplies an absolute token-exact floor; Wilson lower bounds provide finite-sample non-vacuity for binary rates, continuous metrics use fixed absolute+relative margins, and raw hidden max-abs is diagnostic-only because its scale is not dimensionless."},
         "forbidden_threshold_sources": ["attempt2 differential-trace observed values", "attempt2 rows/payload/VRAM/power/producer summaries"],
     }
 
@@ -282,6 +295,17 @@ def finite_number(value: Any, label: str) -> float:
     return float(value)
 
 
+def wilson_lower_one_sided(successes: int, samples: int, z: float = WILSON_Z_95_ONE_SIDED) -> float:
+    if not 0 <= successes <= samples or samples <= 0:
+        raise ProtocolError("Wilson input count is invalid")
+    p = successes / samples
+    z2 = z * z
+    denominator = 1.0 + z2 / samples
+    center = p + z2 / (2.0 * samples)
+    radius = z * math.sqrt((p * (1.0 - p) + z2 / (4.0 * samples)) / samples)
+    return max(0.0, (center - radius) / denominator)
+
+
 def reject_attempt2_reference(value: Any) -> None:
     """Calibration metrics must not carry an attempt2 observation as a provenance/source."""
     if isinstance(value, dict):
@@ -323,25 +347,34 @@ def freeze(args: argparse.Namespace) -> None:
             raise ProtocolError("calibration row metrics are missing")
         for name in METRICS:
             number = finite_number(values.get(name), f"{item['case_id']}.{name}")
-            if number < 0 or (name in BOUNDED_UNIT_METRICS and number > 1):
+            if number < 0 or (name in BOUNDED_UNIT_METRICS and number > 1) or (name in {"logits_relative_l2", "hidden_relative_l2"} and number > 1):
                 raise ProtocolError(f"{item['case_id']}.{name} is outside its frozen domain")
+            if name in BINARY_RATE_METRICS and number not in (0.0, 1.0):
+                raise ProtocolError(f"{item['case_id']}.{name} must be binary 0 or 1")
             aggregate[name].append(number)
     derived: dict[str, Any] = {}
     for name, spec in METRICS.items():
         if len(aggregate[name]) < spec["sample_minimum"]:
             raise ProtocolError(f"sample minimum not met: {name}")
         mean = sum(aggregate[name]) / len(aggregate[name])
-        if spec["direction"] == "higher":
-            bound = mean - spec["margin"]
-            if spec["absolute_floor"] is not None:
-                bound = max(spec["absolute_floor"], bound)
-            bound = min(spec["absolute_ceiling"], bound)
+        if name in BINARY_RATE_METRICS:
+            successes = sum(value == 1.0 for value in aggregate[name])
+            bound = wilson_lower_one_sided(successes, len(aggregate[name]))
+            derived[name] = {"calibration_mean": mean, "successes": successes, "confidence_level": spec["confidence_level"], "wilson_z": WILSON_Z_95_ONE_SIDED, "bound": bound, "direction": spec["direction"], "sample_count": len(aggregate[name])}
+        elif spec["role"] == "diagnostic_only":
+            derived[name] = {"diagnostic_max": max(aggregate[name]), "bound": None, "direction": spec["direction"], "sample_count": len(aggregate[name])}
         else:
-            bound = mean + spec["margin"]
-            if spec["absolute_floor"] is not None:
-                bound = max(spec["absolute_floor"], bound)
+            margin = max(float(spec["margin"]), float(spec["relative_margin"]) * abs(mean))
+            if spec["direction"] == "higher":
+                bound = mean - margin
+                if spec["absolute_floor"] is not None:
+                    bound = max(spec["absolute_floor"], bound)
+            else:
+                bound = mean + margin
+                if spec["absolute_floor"] is not None:
+                    bound = max(spec["absolute_floor"], bound)
             bound = min(spec["absolute_ceiling"], bound)
-        derived[name] = {"calibration_mean": mean, "margin": spec["margin"], "bound": bound, "direction": spec["direction"], "sample_count": len(aggregate[name])}
+            derived[name] = {"calibration_mean": mean, "absolute_margin": spec["margin"], "relative_margin": spec["relative_margin"], "effective_margin": margin, "bound": bound, "direction": spec["direction"], "sample_count": len(aggregate[name])}
     receipt = {"schema_version": RECEIPT_SCHEMA, "status": "frozen_calibration_envelope", "split_manifest_sha256": sha_bytes(manifest_raw), "policy_sha256": sha_bytes(policy_raw), "metrics_sha256": sha_bytes(metrics_raw), "calibration_case_count": 24, "holdout_status": "not_started", "holdout_evaluations_remaining": 1, "derived_bounds": derived, "candidate_active_behavioral_gate": "exact; any context/token/greedy/top-k/KV/state/scheduler/reset mismatch is no-go", "attempt2_threshold_source_forbidden": True}
     atomic_json(args.output, receipt)
     print(json.dumps({"status": "ok", "receipt": str(args.output), "holdout_status": "not_started"}, sort_keys=True))
