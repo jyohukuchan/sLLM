@@ -1,0 +1,59 @@
+{
+  "status": "passed",
+  "input": {
+    "cases_sha256": "53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8",
+    "plan_sha256": "1b4f8c244e922ab73c0bb026216d8333a9cfe57c23e6695c4141554d117693c0",
+    "run_script_sha256": "353f2287c703d2234e43ec6efce5d8b5bfe83bca0e4455f910109714640306c9"
+  },
+  "identity": {
+    "legacy_case_ids": [
+      "fixture-prompt-0",
+      "fixture-prompt-1"
+    ],
+    "excluded_case_ids": [
+      "fixture-prompt-0",
+      "fixture-prompt-1"
+    ],
+    "legacy_ids_subset_of_exclusions": true
+  },
+  "gpu": {
+    "cuda_visible_devices": "",
+    "hip_visible_devices": "",
+    "rocr_visible_devices": "",
+    "torch_cuda_available": false,
+    "torch_cuda_device_count": 0,
+    "rocminfo_visible_agent": "CPU only"
+  },
+  "threads": {
+    "requested": 32,
+    "omp_num_threads": "32",
+    "mkl_num_threads": "32"
+  },
+  "checkpoint": {
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "shards": 4,
+    "bytes": 19306310880
+  },
+  "memory": {
+    "mem_total_bytes": 117933965312,
+    "mem_available_bytes": 79938424832,
+    "required_headroom_bytes": 38612621760,
+    "headroom_factor": 2.0,
+    "passed": true
+  },
+  "disk": {
+    "expected_vector_bytes": 24231936,
+    "required_free_bytes": 29078324,
+    "free_bytes": 2577684742144,
+    "passed": true
+  },
+  "attempt_paths": {
+    "source_output": "source-full",
+    "stdout_log": "source.stdout.log",
+    "stderr_log": "source.stderr.log",
+    "time_log": "time-v.txt",
+    "vmstat_log": "vmstat.log",
+    "all_output_and_logs_lexists": false
+  },
+  "service_operation": "none"
+}

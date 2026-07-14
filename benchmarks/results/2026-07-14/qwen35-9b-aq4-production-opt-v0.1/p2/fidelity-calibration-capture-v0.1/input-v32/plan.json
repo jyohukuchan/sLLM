@@ -1,0 +1,56 @@
+{
+  "active": {
+    "cases": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input-v32/cases.json",
+    "command_template": "target/release/ullm-aq4-fidelity-capture --served-model-manifest ACTIVE_MANIFEST --split-root SPLIT_ROOT --source SOURCE_ARTIFACT --cases CASES_JSON --output ACTIVE_ARTIFACT --device-index DEVICE_INDEX --expected-split-manifest-sha256 EXPECTED_SPLIT_MANIFEST_SHA256 --expected-policy-sha256 EXPECTED_POLICY_SHA256 --expected-calibration-cases-sha256 EXPECTED_CALIBRATION_CASES_SHA256 --expected-served-model-manifest-sha256 EXPECTED_SERVED_MODEL_MANIFEST_SHA256 --expected-package-manifest-sha256 EXPECTED_PACKAGE_MANIFEST_SHA256 --expected-worker-binary-sha256 EXPECTED_WORKER_BINARY_SHA256 --expected-guard-sha256 EXPECTED_GUARD_SHA256 --expected-device-architecture EXPECTED_DEVICE_ARCHITECTURE --expected-quantized-artifact-revision EXPECTED_QUANTIZED_ARTIFACT_REVISION",
+    "expected_schema": "ullm.qwen35_aq4_target_calibration.v1",
+    "tool": "target/release/ullm-aq4-fidelity-capture"
+  },
+  "bounds": {
+    "host_resident_vector_rows": 1,
+    "max_hidden_sidecar_bytes": 393216,
+    "max_logits_sidecar_bytes": 23838720,
+    "max_row_bytes": 65536,
+    "max_rows": 24,
+    "max_vector_elements_per_row": 252416,
+    "streaming": true
+  },
+  "calibration_cases_sha256": "20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f",
+  "execution_contract": {
+    "all_m1": {
+      "effective_m": 1,
+      "requested_m_is_label_only": true
+    },
+    "cold_batched": {
+      "effective_m": "requested_m",
+      "requested_m_is_execution_width": true
+    },
+    "context_reset_between_rows": true,
+    "semantic_output": "every row is the final hidden/logit result at the same full prompt context and step=0; M changes dispatch partition only",
+    "source_torch_threads": 32
+  },
+  "expected_active_identity": {
+    "device_architecture": "gfx1201",
+    "guard_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "quantized_artifact_revision": "aq4-reasoning-v0.1-candidate",
+    "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "full_context_step": 0,
+  "one_active_model_load": true,
+  "one_source_model_load": true,
+  "policy_sha256": "302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03",
+  "promotion_eligible": false,
+  "row_count": 24,
+  "schema_version": "ullm.aq4_p2_fidelity_capture_plan.v1",
+  "source": {
+    "cases": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input-v32/cases.json",
+    "command_template": "python3 tools/export-qwen35-aq4-source-calibration.py --model-dir BF16_MODEL_DIR --split-root SPLIT_ROOT --cases CASES_JSON --output SOURCE_ARTIFACT --legacy-oracle LEGACY_SOURCE_ORACLE --expected-split-manifest-sha256 EXPECTED_SPLIT_MANIFEST_SHA256 --expected-policy-sha256 EXPECTED_POLICY_SHA256 --expected-calibration-cases-sha256 EXPECTED_CALIBRATION_CASES_SHA256 --expected-cases-sha256 EXPECTED_SOURCE_CASES_SHA256 --threads 32",
+    "expected_schema": "ullm.qwen35_aq4_source_calibration.v1",
+    "threads": 32,
+    "tool": "tools/export-qwen35-aq4-source-calibration.py"
+  },
+  "source_cases_sha256": "53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8",
+  "split_manifest_sha256": "966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887",
+  "status": "ready_for_source_and_active_capture"
+}

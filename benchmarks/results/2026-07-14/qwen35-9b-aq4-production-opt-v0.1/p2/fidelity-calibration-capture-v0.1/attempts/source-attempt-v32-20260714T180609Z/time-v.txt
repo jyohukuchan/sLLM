@@ -1,0 +1,23 @@
+	Command being timed: "timeout --signal=TERM --kill-after=60s 2h python3 /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/export-qwen35-aq4-source-calibration.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --split-root /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-holdout-split-v0.1 --cases /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input-v32/cases.json --output /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-v32-20260714T180609Z/source-full --legacy-oracle /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-oracle-v2 --expected-split-manifest-sha256 966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887 --expected-policy-sha256 302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03 --expected-calibration-cases-sha256 20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f --expected-cases-sha256 53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8 --chunk-elements 65536 --top-k 10 --threads 32"
+	User time (seconds): 69944.73
+	System time (seconds): 1189.81
+	Percent of CPU this job got: 2770%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 42:47.64
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 16870968
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 123796065
+	Voluntary context switches: 282989
+	Involuntary context switches: 559041
+	Swaps: 0
+	File system inputs: 116992
+	File system outputs: 47720
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
