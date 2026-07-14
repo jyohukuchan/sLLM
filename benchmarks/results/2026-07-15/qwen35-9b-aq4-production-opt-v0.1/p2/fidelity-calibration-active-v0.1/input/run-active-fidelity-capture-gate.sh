@@ -3,14 +3,14 @@ set -Eeuo pipefail
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
-# This is a template only.  It is deliberately fail-closed until the source capture has been
-# completed and the three artifact/build placeholders below have been replaced and reviewed.
+# This gate is fixed to the v32 source artifact and a clean-build capture binary.  It remains
+# deliberately read-only until the explicit service/GPU run branch is entered.
 REPO="/home/homelab1/coding-local/ultimateLLM/uLLM-project"
 BASE="$REPO/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-active-v0.1"
-INPUT_DIR="$BASE/input"
+INPUT_DIR="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input-v32"
 SPLIT_ROOT="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-holdout-split-v0.1"
 PLAN="$INPUT_DIR/plan.json"
-CASES="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/cases.json"
+CASES="$INPUT_DIR/cases.json"
 
 OUTPUT="$BASE/output"
 METRICS="$BASE/metrics.json"
@@ -22,16 +22,21 @@ OBSERVER_FAIL_MARKER="$BASE/observer-failed.marker"
 OBSERVER_SAMPLE_MARKER="$BASE/observer-sample.marker"
 RUN_STARTED_MARKER="$BASE/run-started.marker"
 
-# Do not change SOURCE_ARTIFACT or either source digest until the source exporter has finished.
-SOURCE_ARTIFACT="$BASE/SOURCE_ARTIFACT_ROOT_PLACEHOLDER"
-EXPECTED_SOURCE_ARTIFACT_SHA256="__SOURCE_ARTIFACT_SHA256__"
-EXPECTED_SOURCE_MANIFEST_SHA256="__SOURCE_MANIFEST_SHA256__"
-EXPECTED_CAPTURE_BINARY_SHA256="__CAPTURE_BINARY_SHA256__"
+SOURCE_ARTIFACT="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-v32-20260714T180609Z/source-full"
+EXPECTED_SOURCE_ARTIFACT_SHA256="6d27caef27dabf02dcc56b0b298290f9811355ba36c34e6c9d23939baf50edde"
+EXPECTED_SOURCE_MANIFEST_SHA256="78a6de7d2cae4c2ff31952cfe345fefbce55dfd67db7a4904ba10f4e5f7438bc"
+CAPTURE_BINARY_ROOT="$BASE/input/capture-binary-v0.1"
+EXPECTED_CAPTURE_BINARY_SHA256="82c878a4974cdbc442458c6b3366b0eae20d355896d8b18d5d76fe311c0b083e"
+EXPECTED_BUILD_RECEIPT_SHA256="3d09df92aa2bef098c8c64ef7bcd63ed0b23dd2160a44dfa3799421477440ede"
+EXPECTED_BUILD_COMMIT="05a8ab661b8e56559353f5a530ec8abac08b9a68"
+EXPECTED_BUILD_TREE_SHA256="12e6d777f37d648ede369263296cd5606676a441"
+EXPECTED_CARGO_LOCK_SHA256="10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"
 
 # Fixed contract pins.  The binary must be built from this committed fidelity producer baseline,
 # rather than from a P3 candidate or from the production worker.
-REQUIRED_BUILD_COMMIT="b1755da2a8ed188e3afac52dc1303ebaec3d09f5"
-FIDELITY_BIN="$REPO/target/release/ullm-aq4-fidelity-capture"
+FIDELITY_BIN="$CAPTURE_BINARY_ROOT/ullm-aq4-fidelity-capture"
+BINARY_RECEIPT="$CAPTURE_BINARY_ROOT/build-receipt.json"
+BINARY_SHA256SUMS="$CAPTURE_BINARY_ROOT/SHA256SUMS"
 ACTIVE="/etc/ullm/served-models/active.json"
 PACKAGE_ROOT="/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1"
 PACKAGE_MANIFEST="$PACKAGE_ROOT/package/manifest.json"
@@ -42,7 +47,7 @@ QUANTIZED_ARTIFACT_REVISION="aq4-reasoning-v0.1-candidate"
 EXPECTED_SERVED_SHA256="feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 EXPECTED_PACKAGE_SHA256="a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
 EXPECTED_WORKER_SHA256="177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
-EXPECTED_PLAN_SHA256="03e921b050d64ae75206ff561b19ba563c1fac69ccf40dfab15176dee2b63854"
+EXPECTED_PLAN_SHA256="1b4f8c244e922ab73c0bb026216d8333a9cfe57c23e6695c4141554d117693c0"
 EXPECTED_CASES_SHA256="53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8"
 EXPECTED_SPLIT_SHA256="966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887"
 EXPECTED_POLICY_SHA256="302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03"
@@ -120,12 +125,12 @@ assert plan["promotion_eligible"] is False and plan["row_count"] == 24 and plan[
 assert plan["one_source_model_load"] is True and plan["one_active_model_load"] is True
 assert plan["split_manifest_sha256"] == split_sha and plan["policy_sha256"] == policy_sha and plan["calibration_cases_sha256"] == calibration_sha
 assert plan["source_cases_sha256"] == hashlib.sha256(pathlib.Path(cases_path).read_bytes()).hexdigest()
-assert plan["execution_contract"]["source_torch_threads"] == 16
+assert plan["execution_contract"]["source_torch_threads"] == 32
 assert plan["expected_active_identity"] == {"served_model_manifest_sha256": served_sha, "package_manifest_sha256": package_sha, "worker_binary_sha256": worker_sha, "guard_sha256": guard_sha, "device_architecture": arch, "quantized_artifact_revision": quant_rev}
 cases = json.loads(pathlib.Path(cases_path).read_text(encoding="utf-8"))
 assert cases["schema_version"] == "ullm.qwen35_aq4_source_calibration_cases.v1" and len(cases["cases"]) == 24
 assert len({row["case_id"] for row in cases["cases"]}) == 24
-print("plan_cases=24 one_source_load=1 one_active_load=1 source_threads=16")
+print("plan_cases=24 one_source_load=1 one_active_load=1 source_threads=32")
 PY
 }
 
@@ -145,8 +150,8 @@ assert m["format"] == {"format_id": "AQ4_0", "implementation_id": "qwen35_aq4_rd
 assert m["public"]["revision"] == quant_rev and m["worker"]["identity"]["device"] == arch
 assert m["worker"]["binary_sha256"] == worker_sha and m["product"]["package"]["manifest_sha256"] == package_sha
 required = m["worker"]["required_environment"]
-digest = hashlib.sha256(b"ullm-aq4-p2-resident-guards-v1\\0")
-for name in sorted(required): digest.update(f"{name}=1\\n".encode())
+digest = hashlib.sha256(b"ullm-aq4-p2-resident-guards-v1\0")
+for name in sorted(required): digest.update(f"{name}=1\n".encode())
 assert digest.hexdigest() == guard_sha and len(required) == 30
 assert hashlib.sha256(pathlib.Path(active).read_bytes()).hexdigest() == served_sha
 assert hashlib.sha256(pathlib.Path(package).read_bytes()).hexdigest() == package_sha
@@ -171,8 +176,25 @@ validate_source_identity() {
 
 validate_binary_and_bounds() {
   require_regular "$FIDELITY_BIN" fidelity_binary
+  require_regular "$BINARY_RECEIPT" binary_build_receipt
+  require_regular "$BINARY_SHA256SUMS" binary_sha256sums
+  [[ "$(sha256_file "$BINARY_RECEIPT")" = "$EXPECTED_BUILD_RECEIPT_SHA256" ]] || fail "binary build receipt SHA differs"
+  (cd "$CAPTURE_BINARY_ROOT" && sha256sum -c SHA256SUMS >/dev/null) || fail "binary SHA256SUMS verification failed"
   [[ "$(sha256_file "$FIDELITY_BIN")" = "$EXPECTED_CAPTURE_BINARY_SHA256" ]] || fail "fidelity binary SHA differs"
-  strings -a "$FIDELITY_BIN" | grep -Fq "$REQUIRED_BUILD_COMMIT" || fail "fidelity binary build commit differs"
+  [[ "$(stat -Lc '%F:%h' "$FIDELITY_BIN")" = "regular file:1" ]] || fail "fidelity binary identity differs"
+  "$PYTHON" - "$BINARY_RECEIPT" "$FIDELITY_BIN" "$EXPECTED_CAPTURE_BINARY_SHA256" "$EXPECTED_BUILD_COMMIT" "$EXPECTED_BUILD_TREE_SHA256" "$EXPECTED_CARGO_LOCK_SHA256" <<'PY'
+import hashlib, json, pathlib, sys
+receipt_path, binary_path, binary_sha, commit, tree_sha, cargo_lock_sha = sys.argv[1:]
+receipt = json.loads(pathlib.Path(receipt_path).read_text(encoding="utf-8"))
+assert receipt["schema_version"] == "ullm.aq4_fidelity_capture_build_receipt.v1"
+assert receipt["status"] == "ready"
+assert receipt["source"] == {"commit": commit, "tree_sha256": tree_sha, "tree_clean": True, "cargo_lock_sha256": cargo_lock_sha}
+assert receipt["build"]["exit_status"] == 0 and receipt["build"]["command"] == "CARGO_BUILD_JOBS=1 cargo build -p ullm-engine --release --bin ullm-aq4-fidelity-capture"
+assert receipt["binary"]["path"] == "ullm-aq4-fidelity-capture" and receipt["binary"]["sha256"] == binary_sha
+assert receipt["binary"]["bytes"] == pathlib.Path(binary_path).stat().st_size and receipt["binary"]["nlink"] == 1
+assert hashlib.sha256(pathlib.Path(binary_path).read_bytes()).hexdigest() == binary_sha
+print("capture_binary=clean_commit receipt_sha binary_sha nlink1")
+PY
   [[ "$PACKAGE_ROOT/package" != "$PACKAGE_ROOT" ]] || fail "package argument is not the package directory"
   require_regular "$PACKAGE_MANIFEST" package_manifest
   require_absent "$OUTPUT"; require_absent "$METRICS"; require_absent "$GATE_LOG"; require_absent "$MONITOR_LOG"; require_absent "$RUN_LOG"
@@ -328,7 +350,7 @@ exec {LOCK_FD}>"$LOCK"
 flock -n "$LOCK_FD" || fail "runtime lock acquisition failed"
 printf 'runtime_lock_acquired_at=%s\n' "$(date --iso-8601=seconds)" >>"$STOP_MARKER"
 touch "$RUN_STARTED_MARKER"
-guard_env=("ULLM_BUILD_GIT_COMMIT=$REQUIRED_BUILD_COMMIT" "ULLM_SERVED_MODEL_MANIFEST=$ACTIVE" "ULLM_HIP_VISIBLE_DEVICES=1" "HIP_VISIBLE_DEVICES=1")
+guard_env=("ULLM_BUILD_GIT_COMMIT=$EXPECTED_BUILD_COMMIT" "ULLM_SERVED_MODEL_MANIFEST=$ACTIVE" "ULLM_HIP_VISIBLE_DEVICES=1" "HIP_VISIBLE_DEVICES=1")
 for guard_name in "${REQUIRED_GUARDS[@]}"; do guard_env+=("$guard_name=1"); done
 env "${guard_env[@]}" \
   runuser -u homelab1 -- timeout --signal=TERM --kill-after=30s 1200s "$FIDELITY_BIN" \

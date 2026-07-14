@@ -13,15 +13,15 @@ GATE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p
 
 
 class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
-    def test_template_is_syntax_checked_and_fails_on_unresolved_source_identity(self) -> None:
+    def test_gate_is_syntax_checked_and_mock_preflight_is_read_only(self) -> None:
         syntax = subprocess.run(["bash", "-n", str(GATE)], cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(syntax.returncode, 0, syntax.stderr)
         with tempfile.TemporaryDirectory(prefix="ullm-aq4-active-gate-") as directory:
             env = os.environ.copy()
             env.update(MOCK_PREFLIGHT="1", PREFLIGHT_ONLY="1")
             completed = subprocess.run([str(GATE)], cwd=ROOT, env=env, capture_output=True, text=True, check=False)
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("unresolved placeholder", completed.stderr)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("mock_preflight=1 service_stop=0 gpu_run=0", completed.stdout)
             self.assertNotIn("systemctl", completed.stdout + completed.stderr)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
@@ -40,17 +40,26 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             'GATE_LOG="$BASE/gate.log"',
             'MONITOR_LOG="$BASE/monitor.log"',
             'RUN_LOG="$BASE/run.log"',
-            'SOURCE_ARTIFACT="$BASE/SOURCE_ARTIFACT_ROOT_PLACEHOLDER"',
-            'EXPECTED_SOURCE_ARTIFACT_SHA256="__SOURCE_ARTIFACT_SHA256__"',
-            'EXPECTED_SOURCE_MANIFEST_SHA256="__SOURCE_MANIFEST_SHA256__"',
-            'EXPECTED_CAPTURE_BINARY_SHA256="__CAPTURE_BINARY_SHA256__"',
+            'INPUT_DIR="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input-v32"',
+            'CASES="$INPUT_DIR/cases.json"',
+            'SOURCE_ARTIFACT="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-v32-20260714T180609Z/source-full"',
+            'EXPECTED_SOURCE_ARTIFACT_SHA256="6d27caef27dabf02dcc56b0b298290f9811355ba36c34e6c9d23939baf50edde"',
+            'EXPECTED_SOURCE_MANIFEST_SHA256="78a6de7d2cae4c2ff31952cfe345fefbce55dfd67db7a4904ba10f4e5f7438bc"',
+            'CAPTURE_BINARY_ROOT="$BASE/input/capture-binary-v0.1"',
+            'EXPECTED_CAPTURE_BINARY_SHA256="82c878a4974cdbc442458c6b3366b0eae20d355896d8b18d5d76fe311c0b083e"',
+            'EXPECTED_BUILD_RECEIPT_SHA256="3d09df92aa2bef098c8c64ef7bcd63ed0b23dd2160a44dfa3799421477440ede"',
+            'EXPECTED_BUILD_COMMIT="05a8ab661b8e56559353f5a530ec8abac08b9a68"',
+            'EXPECTED_BUILD_TREE_SHA256="12e6d777f37d648ede369263296cd5606676a441"',
+            'EXPECTED_CARGO_LOCK_SHA256="10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"',
             'PACKAGE_MANIFEST="$PACKAGE_ROOT/package/manifest.json"',
-            'EXPECTED_PLAN_SHA256="03e921b050d64ae75206ff561b19ba563c1fac69ccf40dfab15176dee2b63854"',
+            'EXPECTED_PLAN_SHA256="1b4f8c244e922ab73c0bb026216d8333a9cfe57c23e6695c4141554d117693c0"',
             'EXPECTED_CASES_SHA256="53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8"',
             'EXPECTED_SPLIT_SHA256="966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887"',
             'EXPECTED_POLICY_SHA256="302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03"',
             'EXPECTED_CALIBRATION_SHA256="20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f"',
-            'REQUIRED_BUILD_COMMIT="b1755da2a8ed188e3afac52dc1303ebaec3d09f5"',
+            'assert plan["execution_contract"]["source_torch_threads"] == 32',
+            'assert receipt["schema_version"] == "ullm.aq4_fidelity_capture_build_receipt.v1"',
+            '[[ "$(stat -Lc \'%F:%h\' "$FIDELITY_BIN")" = "regular file:1" ]]',
             '--served-model-manifest "$ACTIVE"',
             '--split-root "$SPLIT_ROOT"',
             '--source "$SOURCE_ARTIFACT"',

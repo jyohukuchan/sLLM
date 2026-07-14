@@ -1,0 +1,23 @@
+{
+  "schema_version": "ullm.aq4_fidelity_capture_build_receipt.v1",
+  "status": "ready",
+  "source": {
+    "commit": "05a8ab661b8e56559353f5a530ec8abac08b9a68",
+    "tree_sha256": "12e6d777f37d648ede369263296cd5606676a441",
+    "tree_clean": true,
+    "cargo_lock_sha256": "10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"
+  },
+  "build": {
+    "worktree": "/tmp/ullm-aq4-fidelity-build-v32",
+    "command": "CARGO_BUILD_JOBS=1 cargo build -p ullm-engine --release --bin ullm-aq4-fidelity-capture",
+    "exit_status": 0,
+    "log": "build.log"
+  },
+  "binary": {
+    "path": "ullm-aq4-fidelity-capture",
+    "sha256": "82c878a4974cdbc442458c6b3366b0eae20d355896d8b18d5d76fe311c0b083e",
+    "bytes": 3200896,
+    "nlink": 1,
+    "mode": "0755"
+  }
+}

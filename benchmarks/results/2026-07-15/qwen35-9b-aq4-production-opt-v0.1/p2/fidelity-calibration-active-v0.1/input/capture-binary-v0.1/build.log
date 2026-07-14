@@ -1,0 +1,40 @@
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling typenum v1.20.1
+   Compiling unicode-ident v1.0.24
+   Compiling shlex v2.0.1
+   Compiling serde_core v1.0.228
+   Compiling zerocopy v0.8.54
+   Compiling find-msvc-tools v0.1.9
+   Compiling cc v1.2.65
+   Compiling zmij v1.0.21
+   Compiling syn v2.0.118
+   Compiling ullm-runtime-sys v0.1.0 (/tmp/ullm-aq4-fidelity-build-v32/crates/ullm-runtime-sys)
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling digest v0.10.7
+warning: ullm-runtime-sys@0.1.0: In file included from /tmp/ullm-aq4-fidelity-build-v32/runtime/src/ullm_runtime.cpp:5:
+warning: ullm-runtime-sys@0.1.0: /tmp/ullm-aq4-fidelity-build-v32/runtime/src/ullm_runtime_parts/part_00.inc:1518:8: warning: 'ullm_runtime_context' has a field '{anonymous}::BackendKind ullm_runtime_context::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1518 | struct ullm_runtime_context {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /tmp/ullm-aq4-fidelity-build-v32/runtime/src/ullm_runtime_parts/part_00.inc:1524:8: warning: 'ullm_runtime_buffer' has a field '{anonymous}::BackendKind ullm_runtime_buffer::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1524 | struct ullm_runtime_buffer {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /tmp/ullm-aq4-fidelity-build-v32/runtime/src/ullm_runtime_parts/part_00.inc:1531:8: warning: 'ullm_runtime_stream' has a field '{anonymous}::BackendKind ullm_runtime_stream::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1531 | struct ullm_runtime_stream {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+   Compiling ppv-lite86 v0.2.21
+   Compiling serde_derive v1.0.228
+   Compiling itoa v1.0.18
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.2
+   Compiling rand_core v0.6.4
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling rand_chacha v0.3.1
+   Compiling ullm-engine v0.1.0 (/tmp/ullm-aq4-fidelity-build-v32/crates/ullm-engine)
+    Finished `release` profile [optimized] target(s) in 1m 26s
