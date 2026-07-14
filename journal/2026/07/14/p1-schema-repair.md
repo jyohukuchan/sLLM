@@ -33,7 +33,7 @@ evidenceであり、production-server claimを含まない。これはP2 handoff
 
 ## 検証
 
-- `python3 -m unittest tests/test_production_execution_trace.py -v`: 3 passed
+- `python3 -m unittest tests/test_production_execution_trace.py -v`: 5 passed, including final-byte report attestation and phase-context tamper negatives
 - 対象Python tools `py_compile`: passed
 - `cargo fmt --all --check`: passed
 - `cargo test -p ullm-engine execution_trace -- --test-threads=1`: 3 passed
