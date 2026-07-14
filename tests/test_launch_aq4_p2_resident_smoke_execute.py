@@ -34,6 +34,53 @@ def _ready_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
     return value, evidence, result, run_id
 
 
+def _profile_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
+    evidence = tmp_path / "profile-execute-evidence"
+    result = tmp_path / "profile-execute-result"
+    run_id = "profile-execute-test-run"
+    value = json.loads(json.dumps(LAUNCHER.profile_execute_binding_document()))
+    value.update(status="ready_for_explicit_execute", actual_eligible=True, blocked_reasons=[], evidence_output=str(evidence), runner_output=str(result), run_id=run_id)
+    value["live_preflight"] = {"required": True, "path": str(evidence / "live-preflight.json"), "sha256": None, "replaces_synthetic_preflight": True}
+    return value, evidence, result, run_id
+
+
+def _write_profile_result(root: Path, binding: dict) -> None:
+    session_id = "profile-session-test"
+    root.mkdir()
+    raw = {
+        "case_id": LAUNCHER.CASE_ID,
+        "case_sha256": LAUNCHER.CASE_SHA,
+        "baseline_identity": {"run_id": binding["run_id"]},
+        "resident": {"session_id": session_id},
+        "execution_mode": "one_case_smoke",
+        "promotion_eligible": False,
+    }
+    (root / f"{LAUNCHER.CASE_ID}.raw.json").write_text(json.dumps(raw) + "\n")
+    (root / "resident-batch.summary.json").write_text("{}\n")
+    ranges = []
+    for index in range(12):
+        kind = "warmup" if index < 2 else "measured"
+        name = (
+            f"ullm.aq4_p2.run.v1/run_id={binding['run_id']}/session_id={session_id}/"
+            f"case_id={LAUNCHER.CASE_ID}/case_sha256={LAUNCHER.CASE_SHA}/"
+            f"run_index={index}/run_kind={kind}"
+        )
+        ranges.append({"name": name, "run_index": index, "run_kind": kind, "push_result": 0, "pop_result": 0})
+    sidecar = {
+        "schema_version": "ullm.aq4_p2_resident_roctx_ranges.v1",
+        "status": "complete_diagnostic",
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "audit_sha256": None,
+        "pid": 123,
+        "thread_id": 456,
+        "library": {**binding["profile_diagnostic"]["roctx_library"], "components": []},
+        "ranges": ranges,
+    }
+    sidecar["audit_sha256"] = LAUNCHER.sha_bytes(LAUNCHER.canonical(sidecar))
+    (root / "resident-batch.roctx-ranges.json").write_text(json.dumps(sidecar, sort_keys=True) + "\n")
+
+
 def _gates() -> dict:
     commands = LAUNCHER.expected_live_probe_contracts()
     return {
@@ -98,6 +145,73 @@ def test_execute_bound_generates_live_sidecar_and_exact_runner_argv(tmp_path: Pa
     assert value["compute_owners"] == {"amd_smi": [], "kfd": []}
     assert value["environment"] == LAUNCHER.EXECUTE_ENV
     assert evidence["result"]["files"] == {"case.raw.json": LAUNCHER.sha_bytes(b"{}\n"), "resident-batch.summary.json": LAUNCHER.sha_bytes(b"{}\n")}
+
+
+def test_profile_diagnostic_runner_argv_is_exact_and_normal_argv_is_unchanged(tmp_path: Path) -> None:
+    normal, _, _, _ = _ready_binding(tmp_path / "normal")
+    profile, _, _, _ = _profile_binding(tmp_path / "profile")
+    normal_argv = LAUNCHER.execute_runner_argv(normal)
+    profile_argv = LAUNCHER.execute_runner_argv(profile)
+    assert "--profile-roctx-ranges" not in normal_argv
+    assert "--roctx-library" not in normal_argv
+    driver_index = profile_argv.index("--driver-command")
+    assert profile_argv[driver_index - 5:driver_index] == [
+        "--profile-roctx-ranges",
+        "--roctx-library",
+        str(LAUNCHER.ROCTX_LIBRARY),
+        "--roctx-library-sha256",
+        LAUNCHER.ROCTX_LIBRARY_SHA,
+    ]
+    stripped = profile_argv[:driver_index - 5] + profile_argv[driver_index:]
+    expected = list(normal_argv)
+    expected[expected.index(normal["runner_output"])] = profile["runner_output"]
+    expected[expected.index(normal["run_id"])] = profile["run_id"]
+    expected[expected.index(str(Path(normal["evidence_output"]) / "live-preflight.json"))] = str(Path(profile["evidence_output"]) / "live-preflight.json")
+    assert stripped == expected
+
+
+def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
+
+    def validator(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
+
+    def runner(command: list[str], environment: dict[str, str], on_started):
+        assert command == LAUNCHER.execute_runner_argv(binding)
+        _write_profile_result(result_path, binding)
+        on_started()
+        return {"completed": subprocess.CompletedProcess(command, 0, b"", b""), "keepalives": [], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
+
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, runner_executor=runner)
+    assert code == 0
+    assert evidence["status"] == "passed"
+    assert evidence["profile_diagnostic"]["run_id"] == run_id
+    assert evidence["profile_diagnostic"]["resident_session_id"] == "profile-session-test"
+    assert evidence["profile_diagnostic"]["ranges"]["count"] == 12
+    assert evidence["profile_diagnostic"]["promotion_eligible"] is False
+
+
+@pytest.mark.parametrize("mutation", ("missing", "audit", "run-id", "library", "range"))
+def test_profile_diagnostic_roctx_evidence_fail_closed(tmp_path: Path, mutation: str) -> None:
+    binding, _, result_path, _ = _profile_binding(tmp_path)
+    _write_profile_result(result_path, binding)
+    sidecar_path = result_path / "resident-batch.roctx-ranges.json"
+    if mutation == "missing":
+        sidecar_path.unlink()
+    elif mutation == "run-id":
+        raw_path = result_path / f"{LAUNCHER.CASE_ID}.raw.json"
+        raw = json.loads(raw_path.read_text()); raw["baseline_identity"]["run_id"] = "wrong"; raw_path.write_text(json.dumps(raw))
+    else:
+        sidecar = json.loads(sidecar_path.read_text())
+        if mutation == "audit":
+            sidecar["audit_sha256"] = "0" * 64
+        elif mutation == "library":
+            sidecar["library"]["sha256"] = "0" * 64
+        else:
+            sidecar["ranges"][2]["run_kind"] = "warmup"
+        sidecar_path.write_text(json.dumps(sidecar))
+    with pytest.raises((LAUNCHER.LauncherError, FileNotFoundError)):
+        LAUNCHER.validate_profile_result(result_path, binding)
 
 
 def test_keepalive_failure_interrupts_runner_and_finally_restores(tmp_path: Path) -> None:

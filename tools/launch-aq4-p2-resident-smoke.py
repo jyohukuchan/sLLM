@@ -53,17 +53,17 @@ INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10512713
 INPUT_FINGERPRINT_SHA = "9e2be7a00fb7cb4c085dc1bc3e8892d36bc8187a3f3e37bb802c97e0302a673a"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10512954
-BINDING_MANIFEST_SHA = "883e9ec4b70ede75bca48d58a889ea59e6bf2a34ccf7e5210ae048226cdd8a97"
-BINDING_PLAN_SHA = "0aa7c76fcbc761d7cb836480cb7a50e096d5e686d6597171608668e58dc4e833"
-RUNNER_COMMIT = "774f6ddc10791db8795b37f41c5245d0edfebe42"
-RUNNER_TREE = "33ac35ec31b5f2efe89676571ff448f57c1fb63e"
-RUNNER_GIT_BLOB = "5d025ee6c2083c115d68041a991d7a80f40755e3"
-RUNNER_SHA = "f2fbb8f3f219d4dfd99c4cad17cb0dd18ea48d97023b03b953711e81e219616c"
-VALIDATOR_COMMIT = "481ae680bc30029a0f3b6805380f6ecaece261df"
-VALIDATOR_TREE = "affc017933759a7c564a18fd6b93e76bf032129d"
-VALIDATOR_GIT_BLOB = "a1ae6ea2a9e90556e446b89d26f28e5582f97109"
-VALIDATOR_SHA = "00c931a5a15bc135fc2f1973012703b2a57f2a487735a6d38d5a78a3b3d550d3"
+BINDING_ROOT_INODE = 10495612
+BINDING_MANIFEST_SHA = "8302eb03329fd2c14fc5d9faa9ad24be2262a23a72c84d09049e84f7968cb86d"
+BINDING_PLAN_SHA = "4b80723caee35273a273c41de82e19dc03323530d38bb8b7436c583fbddf0ee1"
+RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
+RUNNER_TREE = "65ac07cac2f025a6cde6eae153435e6ff86e679d"
+RUNNER_GIT_BLOB = "a4b0ea2bbae805441715a40b9c4ded406ede4414"
+RUNNER_SHA = "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
+VALIDATOR_COMMIT = "82635456825503c535ce0b662e72a7a233d18c40"
+VALIDATOR_TREE = "41300fac90b6ce821e24edd5f3b3cc479e35a6cb"
+VALIDATOR_GIT_BLOB = "51fd64a33fe8cbb7d2573d2c6c61abfad238ff4a"
+VALIDATOR_SHA = "02367c9369e2e25f2a768d4cd81812b82dc58973ad0882d938c283ddf7793ab7"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
 RESIDENT_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
 RESIDENT_SHA = "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
@@ -85,6 +85,13 @@ SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
 EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v1"
+PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
+PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1"
+PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1"
+PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
+ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
+ROCTX_LIBRARY_RESOLVED = Path("/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201")
+ROCTX_LIBRARY_SHA = "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
 SUDO_KEEPALIVE_SECONDS = 30.0
 SERVICE_UNITS = ("ullm-openai.service", "llama-qwen35-udq4.service")
 GUARD_NAMES = (
@@ -128,11 +135,11 @@ INPUT_MEMBER_SHA = {
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "d7baaad155f88dbea0e83b9f15c271efc196d488cddb2c5b4c2027fe23062a24",
+    "runner-subprocess-evidence.json": "f92734a1729066a4b88a86cf818a17122d156cb33a7d44ecec98021d6378106b",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "9f1bc5a883590896d0546884219d458e3effb4629c3fc3e480852d4fb4303b76",
+    "SHA256SUMS": "4ea77d00eddb753506f3d01b5759b32d7b073326432212ef9356657d5fe1e9e1",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -462,8 +469,57 @@ def execute_binding_document() -> dict[str, Any]:
     }
 
 
+def profile_execute_binding_document() -> dict[str, Any]:
+    value = execute_binding_document()
+    value["run_id"] = PROFILE_RUN_ID
+    value["runner_output"] = str(PROFILE_RUN_OUTPUT)
+    value["evidence_output"] = str(PROFILE_EVIDENCE_OUTPUT)
+    value["live_preflight"] = {
+        "required": True,
+        "path": str(PROFILE_LIVE_PREFLIGHT_PATH),
+        "sha256": None,
+        "replaces_synthetic_preflight": False,
+    }
+    value["execution_contract"] = {
+        **value["execution_contract"],
+        "profile_diagnostic": True,
+        "rocprof_wrapper_required": True,
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+    }
+    value["profile_diagnostic"] = {
+        "schema_version": "ullm.aq4_p2_resident_profile_diagnostic.v1",
+        "enabled": True,
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "rocprof_wrapper_required": True,
+        "roctx_library": {
+            "invocation_path": str(ROCTX_LIBRARY),
+            "resolved_path": str(ROCTX_LIBRARY_RESOLVED),
+            "sha256": ROCTX_LIBRARY_SHA,
+            "symbols": ["roctxRangePushA", "roctxRangePop"],
+        },
+        "runner_arguments": [
+            "--profile-roctx-ranges",
+            "--roctx-library",
+            str(ROCTX_LIBRARY),
+            "--roctx-library-sha256",
+            ROCTX_LIBRARY_SHA,
+        ],
+        "range_contract": {
+            "schema_version": "ullm.aq4_p2_resident_roctx_ranges.v1",
+            "range_count": 12,
+            "warmup_indices": [0, 1],
+            "measured_indices": list(range(2, 12)),
+            "same_pid_thread": True,
+            "balanced": True,
+        },
+    }
+    return value
+
+
 def validate_execute_binding(value: dict[str, Any], *, permit_test_live_preflight: bool = False) -> dict[str, Any]:
-    expected = execute_binding_document()
+    expected = profile_execute_binding_document() if "profile_diagnostic" in value else execute_binding_document()
     live = value.get("live_preflight")
     if permit_test_live_preflight:
         clone = json.loads(json.dumps(value))
@@ -545,13 +601,16 @@ def load_execute_binding(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def execute_runner_argv(binding: dict[str, Any]) -> list[str]:
     driver = [str(RESIDENT_DRIVER), "--served-model-manifest", str(SERVED_MANIFEST), "--device-index", str(DEVICE_INDEX), "--build-git-commit", RESIDENT_COMMIT]
-    return [
+    command = [
         str(PYTHON), str(RUNNER), "--expanded", str(INPUT_ROOT / "case-binding.json"), "--fixture-index", str(INPUT_ROOT / "fixture-index.json"),
         "--identity", str(INPUT_ROOT / "identity.json"), "--preflight", str(INPUT_ROOT / "preflight.json"), "--policy", str(INPUT_ROOT / "policy.json"),
         "--bundle-root", str(INPUT_ROOT), "--trusted-validator", str(VALIDATOR), "--trusted-validator-sha256", VALIDATOR_SHA,
         "--output-dir", binding["runner_output"], "--run-id", binding["run_id"], "--baseline-kind", "active-production", "--lock-path", str(LOCK_PATH),
-        "--one-case-smoke", "--live-preflight", str(Path(binding["evidence_output"]) / "live-preflight.json"), "--driver-command", *driver,
+        "--one-case-smoke", "--live-preflight", str(Path(binding["evidence_output"]) / "live-preflight.json"),
     ]
+    if "profile_diagnostic" in binding:
+        command.extend(binding["profile_diagnostic"]["runner_arguments"])
+    return [*command, "--driver-command", *driver]
 
 
 def _probe(command: list[str], label: str, run: Callable[..., subprocess.CompletedProcess[bytes]]) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
@@ -769,6 +828,74 @@ def _result_inventory(root: Path) -> dict[str, Any]:
     return {"path": str(root), "files": files, "tree_sha256": sha_bytes(canonical(files))}
 
 
+def validate_profile_constants(snapshot: Snapshot, binding: dict[str, Any]) -> None:
+    expected = profile_execute_binding_document()["profile_diagnostic"]
+    if binding.get("profile_diagnostic") != expected:
+        raise LauncherError("profile diagnostic binding differs")
+    try:
+        resolved = ROCTX_LIBRARY.resolve(strict=True)
+    except OSError as error:
+        raise LauncherError(f"ROCTx invocation path resolution failed: {error}") from error
+    if resolved != ROCTX_LIBRARY_RESOLVED:
+        raise LauncherError("ROCTx invocation resolved path differs")
+    snapshot.file(ROCTX_LIBRARY_RESOLVED, ROCTX_LIBRARY_SHA, "ROCTx resolved library")
+
+
+def validate_profile_result(root: Path, binding: dict[str, Any]) -> dict[str, Any]:
+    sidecar_path = root / "resident-batch.roctx-ranges.json"
+    raw_path = root / f"{CASE_ID}.raw.json"
+    sidecar_raw, _ = read_regular(sidecar_path, "ROCTx range evidence")
+    raw_bytes, _ = read_regular(raw_path, "profile resident raw")
+    sidecar = parse_json(sidecar_raw, "ROCTx range evidence")
+    raw = parse_json(raw_bytes, "profile resident raw")
+    exact = {
+        "schema_version", "status", "measurement_eligible", "promotion_eligible",
+        "audit_sha256", "pid", "thread_id", "library", "ranges",
+    }
+    if set(sidecar) != exact or sidecar.get("schema_version") != "ullm.aq4_p2_resident_roctx_ranges.v1" or sidecar.get("status") != "complete_diagnostic" or sidecar.get("measurement_eligible") is not False or sidecar.get("promotion_eligible") is not False:
+        raise LauncherError("ROCTx range evidence top-level contract differs")
+    audit = sidecar.get("audit_sha256")
+    clone = json.loads(json.dumps(sidecar)); clone["audit_sha256"] = None
+    if not isinstance(audit, str) or not SHA_RE.fullmatch(audit) or audit != sha_bytes(canonical(clone)):
+        raise LauncherError("ROCTx range evidence audit SHA differs")
+    if type(sidecar.get("pid")) is not int or sidecar["pid"] <= 0 or type(sidecar.get("thread_id")) is not int or sidecar["thread_id"] <= 0:
+        raise LauncherError("ROCTx range PID/thread differs")
+    library = sidecar.get("library")
+    expected_library = binding["profile_diagnostic"]["roctx_library"]
+    if not isinstance(library, dict) or set(library) != {"invocation_path", "resolved_path", "sha256", "symbols", "components"} or any(library.get(key) != expected_library[key] for key in ("invocation_path", "resolved_path", "sha256", "symbols")) or not isinstance(library.get("components"), list):
+        raise LauncherError("ROCTx range library binding differs")
+    try:
+        session_id = raw["resident"]["session_id"]
+        raw_run_id = raw["baseline_identity"]["run_id"]
+    except (KeyError, TypeError) as error:
+        raise LauncherError("profile resident raw identity differs") from error
+    if not isinstance(session_id, str) or not session_id or "/" in session_id or "=" in session_id or raw_run_id != binding["run_id"] or raw.get("case_id") != CASE_ID or raw.get("case_sha256") != CASE_SHA or raw.get("promotion_eligible") is not False or raw.get("execution_mode") != "one_case_smoke":
+        raise LauncherError("profile resident raw run/session/case binding differs")
+    ranges = sidecar.get("ranges")
+    if not isinstance(ranges, list) or len(ranges) != 12:
+        raise LauncherError("ROCTx range count differs")
+    for index, item in enumerate(ranges):
+        kind = "warmup" if index < 2 else "measured"
+        expected_name = (
+            f"ullm.aq4_p2.run.v1/run_id={binding['run_id']}/session_id={session_id}/"
+            f"case_id={CASE_ID}/case_sha256={CASE_SHA}/run_index={index}/run_kind={kind}"
+        )
+        if not isinstance(item, dict) or set(item) != {"name", "run_index", "run_kind", "push_result", "pop_result"} or item.get("name") != expected_name or item.get("run_index") != index or item.get("run_kind") != kind or type(item.get("push_result")) is not int or item["push_result"] < 0 or type(item.get("pop_result")) is not int or item["pop_result"] < 0:
+            raise LauncherError("ROCTx range order/name/balance differs")
+    return {
+        "mode": "profile_diagnostic",
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "run_id": binding["run_id"],
+        "resident_session_id": session_id,
+        "case_id": CASE_ID,
+        "case_sha256": CASE_SHA,
+        "ranges": {"path": str(sidecar_path), "sha256": sha_bytes(sidecar_raw), "audit_sha256": audit, "count": 12},
+        "resident_raw": {"path": str(raw_path), "sha256": sha_bytes(raw_bytes)},
+        "library": expected_library,
+    }
+
+
 def expected_live_probe_contracts() -> dict[str, tuple[list[str], int]]:
     return {
         "sudo-n": ([str(SUDO), "-n", "-v"], 0),
@@ -869,7 +996,8 @@ def execute_bound(
     evidence_output.mkdir(mode=0o700)
     self_sha = observed_self_sha
     evidence = make_evidence("execute", self_sha)
-    evidence.update({"execute_binding": binding, "gates": None, "restore": None, "trust_verifications": []})
+    profile_enabled = "profile_diagnostic" in binding
+    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "gates": None, "restore": None, "trust_verifications": []})
     evidence["safety"]["execution_state_source"] = "runner_not_started"
     snapshot = Snapshot()
     snapshot_ready = False
@@ -894,6 +1022,8 @@ def execute_bound(
 
     try:
         validate_execute_constants(snapshot, self_sha)
+        if profile_enabled:
+            validate_profile_constants(snapshot, binding)
         snapshot_ready = True
         verify_trust("validator-before")
         stage = "validator"
@@ -951,6 +1081,11 @@ def execute_bound(
         if outcome["gpu_command_executed"] is not True or outcome["model_load_executed"] is not True:
             raise LauncherError("successful execute runner did not prove GPU command and model load")
         evidence["result"] = _result_inventory(runner_output)
+        roctx_path = runner_output / "resident-batch.roctx-ranges.json"
+        if profile_enabled:
+            evidence["profile_diagnostic"] = validate_profile_result(runner_output, binding)
+        elif roctx_path.exists() or roctx_path.is_symlink():
+            raise LauncherError("non-profile one-case emitted unexpected ROCTx evidence")
         evidence["process_counts"]["runner_internal_validator"] = 1
         evidence["status"] = "passed"
         code = 0
