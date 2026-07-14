@@ -55,10 +55,10 @@ PROFILE_TARGET_COMMAND_MANIFEST = PROFILE_READY_ROOT / "target-command-manifest.
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v1"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "2b5545d83d8be06ffac86dbe04742af3acabf6a9"
-PROFILE_CAPTURE_TREE = "534e66e16b0f9a2fed41dfb817930b26c5d1ca10"
-PROFILE_CAPTURE_GIT_BLOB = "880404abf5f6f4bf8411c71824f9984ad6e9ef3a"
-PROFILE_CAPTURE_SHA = "3903966e32c809e7f0253f8398e63eea6311367dbf140b7d0bbcc6904b2ba73f"
+PROFILE_CAPTURE_COMMIT = "b4d515f9908136fa773f957775beab79edc3065d"
+PROFILE_CAPTURE_TREE = "228bbbd0d05b8055640bd47dd3ed95952e504eef"
+PROFILE_CAPTURE_GIT_BLOB = "5197f7a2607da2ec281ab8a013ce1476178bf1b1"
+PROFILE_CAPTURE_SHA = "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1"
@@ -281,19 +281,19 @@ class ProfileTrustGuard:
         allowed = {"before-start", "capture-before", "capture-after", "finalize-before"}
         if stage not in allowed:
             raise HarnessError("profile trust stage differs")
+        manifest = profile_target_command_manifest()
+        manifest_ref = {
+            "path": str(PROFILE_TARGET_COMMAND_MANIFEST),
+            "sha256": sha_bytes(pretty(manifest)),
+            "manifest_sha256": manifest["manifest_sha256"],
+        }
+        if contract.get("command") != profile_capture_command() or contract.get("target_launcher", {}).get("command") != profile_launcher_command():
+            raise HarnessError("profile capture/launcher command manifest differs")
+        if contract.get("target_launcher", {}).get("manifest") != manifest_ref:
+            raise HarnessError("profile target command manifest binding differs")
         if not self.initialized:
             if stage != "before-start":
                 raise HarnessError("profile trust was not initialized before capture")
-            if contract.get("command") != profile_capture_command() or contract.get("target_launcher", {}).get("command") != profile_launcher_command():
-                raise HarnessError("profile capture/launcher command manifest differs")
-            manifest = profile_target_command_manifest()
-            manifest_ref = {
-                "path": str(PROFILE_TARGET_COMMAND_MANIFEST),
-                "sha256": sha_bytes(pretty(manifest)),
-                "manifest_sha256": manifest["manifest_sha256"],
-            }
-            if contract.get("target_launcher", {}).get("manifest") != manifest_ref:
-                raise HarnessError("profile target command manifest binding differs")
             self.snapshot.file(PROFILE_CAPTURE_TOOL, PROFILE_CAPTURE_SHA, "profile capture tool")
             self.snapshot.file(PROFILE_PROFILER, PROFILE_PROFILER_SHA, "profile profiler")
             self.snapshot.file(LAUNCHER.PYTHON, LAUNCHER.PYTHON_SHA, "profile target Python")
@@ -463,6 +463,8 @@ def profile_capture_command() -> list[str]:
         PROFILE_PROFILER_SHA,
         "--target-command-manifest",
         str(PROFILE_TARGET_COMMAND_MANIFEST),
+        "--target-command-manifest-sha256",
+        sha_bytes(pretty(profile_target_command_manifest())),
         "--profile-output-directory",
         str(PROFILE_OUTPUT_DIRECTORY),
         "--profile-output-name",
@@ -493,8 +495,8 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 222, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 157, "marker_chain": 55, "diagnostic_capture": 10},
+    "test_count": 224, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 158, "marker_chain": 55, "diagnostic_capture": 11},
     "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},

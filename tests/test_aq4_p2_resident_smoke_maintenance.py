@@ -219,6 +219,7 @@ def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
     assert command[command.index("--profiler-path") + 1] == str(HARNESS.PROFILE_PROFILER)
     assert command[command.index("--profiler-sha256") + 1] == HARNESS.PROFILE_PROFILER_SHA
     assert command[command.index("--target-command-manifest") + 1] == str(HARNESS.PROFILE_TARGET_COMMAND_MANIFEST)
+    assert command[command.index("--target-command-manifest-sha256") + 1] == HARNESS.sha_bytes(HARNESS.pretty(HARNESS.profile_target_command_manifest()))
     assert profile["command_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(command))
     assert profile["output"]["must_not_exist_before_capture"] is True
     assert profile["resident_evidence"]["run_id"] == HARNESS.LAUNCHER.PROFILE_RUN_ID
@@ -285,6 +286,27 @@ def test_profile_trust_rejects_same_path_hash_swap(tmp_path: Path, monkeypatch: 
         replacement.chmod(0o755)
     replacement.replace(watched)
     with pytest.raises(HARNESS.LAUNCHER.LauncherError, match="replacement"):
+        guard(contract, "capture-before")
+
+
+def test_profile_trust_rechecks_exact_command_at_each_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = tmp_path / "capture.py"; capture.write_bytes(b"capture-trusted")
+    profiler = tmp_path / "rocprofv3"; profiler.write_bytes(b"profiler-trusted"); profiler.chmod(0o755)
+    launcher = tmp_path / "launcher.py"; launcher.write_bytes(b"launcher-trusted")
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_TOOL", capture)
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_SHA", HARNESS.sha_bytes(capture.read_bytes()))
+    monkeypatch.setattr(HARNESS, "PROFILE_PROFILER", profiler)
+    monkeypatch.setattr(HARNESS, "PROFILE_PROFILER_SHA", HARNESS.sha_bytes(profiler.read_bytes()))
+    monkeypatch.setattr(HARNESS, "LAUNCHER_PATH", launcher)
+    monkeypatch.setattr(HARNESS, "LAUNCHER_SHA", HARNESS.sha_bytes(launcher.read_bytes()))
+    manifest = tmp_path / "target-command-manifest.json"
+    monkeypatch.setattr(HARNESS, "PROFILE_TARGET_COMMAND_MANIFEST", manifest)
+    manifest.write_bytes(HARNESS.pretty(HARNESS.profile_target_command_manifest()))
+    contract = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)["profile_diagnostic"]
+    guard = HARNESS.ProfileTrustGuard()
+    assert guard(contract, "before-start")["passed"] is True
+    contract["command"] = [*contract["command"], "--unexpected"]
+    with pytest.raises(HARNESS.HarnessError, match="command manifest differs"):
         guard(contract, "capture-before")
 
 
