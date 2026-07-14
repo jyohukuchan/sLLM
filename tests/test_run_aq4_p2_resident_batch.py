@@ -240,6 +240,52 @@ def _live_command(tmp_path: Path, output: Path, expanded: Path, index: Path, ide
     return [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", run_id, "--baseline-kind", "p3-current-head", "--lock-path", str(tmp_path / "r9700.lock"), "--driver-command", str(driver), "--served-model-manifest", str(tmp_path / "served-model.json"), "--device-index", "1", "--build-git-commit", "e" * 40]
 
 
+def _fault_driver(tmp_path: Path, python: Path, fault: str) -> tuple[Path, str]:
+    path = tmp_path / f"fake-{fault}-driver.py"
+    path.write_text(
+        """#!%s
+import hashlib,json,os,signal,sys,time
+fault = %r
+identity = %r
+identity['binary_sha256'] = hashlib.sha256(open(sys.argv[0], 'rb').read()).hexdigest()
+if fault == 'early_exit':
+    os.write(2, b'early-boom\\n'); raise SystemExit(23)
+if fault == 'large_stderr':
+    chunk = b'bounded-large-stderr-' * 4096
+    remaining = 2 * 1024 * 1024
+    while remaining:
+        part = chunk[:remaining]; os.write(2, part); remaining -= len(part)
+    raise SystemExit(24)
+if fault == 'secret_stderr':
+    os.write(2, b'Authorization: Bearer must-not-be-retained\\n'); raise SystemExit(27)
+if fault == 'signal':
+    os.kill(os.getpid(), signal.SIGTERM)
+if fault == 'hang':
+    time.sleep(60)
+if fault == 'descendant_hang':
+    if os.fork() == 0:
+        time.sleep(60); raise SystemExit(0)
+    raise SystemExit(28)
+if fault == 'invalid_json':
+    os.write(1, b'not-json\\n'); raise SystemExit(26)
+session = 'fault-session'
+print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':1,'resident_session_id':session,'driver_identity':identity}), flush=True)
+for line in sys.stdin:
+    message = json.loads(line)
+    if message['command'] == 'case_begin':
+        case_id = message['case_id']
+        print(json.dumps({'event':'case_ready','schema_version':'ullm.aq4_p2_resident_driver.v2','resident_session_id':session,'case_id':case_id,'requested_m':message['execution']['requested_m'],'resolved_m':message['execution']['resolved_m'],'baseline_clean':True}), flush=True)
+    elif message['command'] == 'run':
+        os.write(2, b'midrun-boom\\n'); raise SystemExit(25)
+    elif message['command'] == 'shutdown':
+        break
+""" % (python, fault, _identity("0" * 64)),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path, BATCH.sha_file(path, "fault resident driver", absolute=True)
+
+
 def test_dry_run_selects_exact_84_target_cases_and_separates_baseline(tmp_path: Path) -> None:
     expanded, index, identity, preflight, policy = _bundle(tmp_path)
     output = tmp_path / "dry-run"
@@ -427,6 +473,127 @@ def test_resident_oom_is_immutable_and_aborts_remaining_cases(tmp_path: Path) ->
     raws = list(output.glob("*.raw.json"))
     assert len(raws) == 1
     assert json.loads(raws[0].read_text())["status"] == "oom"
+    failure = json.loads((output / "resident-batch.failure.json").read_text())
+    assert failure["protocol"]["ready_received"] is True
+    assert failure["protocol"]["case_begin_count"] == 1
+    assert failure["protocol"]["warmup_completed"] == 2
+    assert failure["protocol"]["measured_completed"] == 1
+    assert failure["cleanup"]["reaped"] is True
+
+
+@pytest.mark.parametrize(
+    ("fault", "failure_kind", "exit_kind", "exit_value"),
+    (
+        ("early_exit", "eof", "exit", 23),
+        ("signal", "eof", "signal", 15),
+        ("hang", "timeout", "signal", 15),
+        ("invalid_json", "invalid_json", "exit", 26),
+        ("descendant_hang", "timeout", "exit", 28),
+    ),
+)
+def test_pre_ready_failures_preserve_bounded_process_evidence(
+    tmp_path: Path,
+    fault: str,
+    failure_kind: str,
+    exit_kind: str,
+    exit_value: int,
+) -> None:
+    case_root = tmp_path / fault
+    python, _ = _detached_python(case_root)
+    driver, driver_sha256 = _fault_driver(case_root, python, fault)
+    expanded, index, identity, preflight, policy = _bundle(case_root, driver_sha256)
+    output = case_root / "failure-output"
+    command = _live_command(case_root, output, expanded, index, identity, preflight, policy, driver, fault)
+    command[command.index("--driver-command"):command.index("--driver-command")] = ["--timeout", "0.15"]
+    completed = subprocess.run(command, text=True, capture_output=True, timeout=10)
+    assert completed.returncode != 0
+    evidence_path = output / "resident-batch.failure.json"
+    assert evidence_path.stat().st_mode & 0o777 == 0o444
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["failure"]["kind"] == failure_kind
+    assert evidence["failure"]["stage"] == "ready"
+    assert evidence["protocol"]["ready_received"] is False
+    assert evidence["protocol"]["case_begin_count"] == 0
+    assert evidence["protocol"]["warmup_completed"] == 0
+    assert evidence["protocol"]["measured_completed"] == 0
+    assert evidence["exit"]["kind"] == exit_kind
+    key = "signal" if exit_kind == "signal" else "exit_code"
+    assert evidence["exit"][key] == exit_value
+    assert evidence["cleanup"]["reaped"] is True
+    assert evidence["cleanup"]["process_group_alive_final"] is False
+    assert evidence["lock"]["after_driver"]["same_inode"] is True
+    assert evidence["gpu_owner"]["status"] == "not_probed"
+    stdout = evidence["protocol"]["stdout_records"][-1]
+    assert stdout["bytes"] <= BATCH.MAX_DRIVER_STDOUT_LINE_BYTES
+    assert len(stdout["sha256"]) == 64
+    if fault == "invalid_json":
+        assert stdout["outcome"] == "invalid_json"
+        assert stdout["sha256"] == hashlib.sha256(b"not-json\n").hexdigest()
+    if fault == "hang":
+        assert evidence["cleanup"]["wait_timed_out"] is True
+    if fault == "descendant_hang":
+        assert evidence["cleanup"]["signals"]
+
+
+def test_large_stderr_streams_without_pipe_deadlock_and_retains_only_bounded_tail(tmp_path: Path) -> None:
+    python, _ = _detached_python(tmp_path)
+    driver, driver_sha256 = _fault_driver(tmp_path, python, "large_stderr")
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
+    output = tmp_path / "large-output"
+    completed = subprocess.run(
+        _live_command(tmp_path, output, expanded, index, identity, preflight, policy, driver, "large"),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert completed.returncode != 0
+    evidence = json.loads((output / "resident-batch.failure.json").read_text())
+    stderr = evidence["stderr"]
+    assert stderr["bytes"] == 2 * 1024 * 1024
+    assert len(stderr["sha256"]) == 64
+    assert stderr["retained_kind"] == "bounded_tail"
+    tail = Path(stderr["retained_path"])
+    assert tail.stat().st_size == BATCH.MAX_DRIVER_TAIL_BYTES
+    assert tail.stat().st_mode & 0o777 == 0o444
+    assert not (output / ".resident-driver.stderr.incomplete").exists()
+
+
+def test_secret_stderr_is_hashed_but_never_retained(tmp_path: Path) -> None:
+    python, _ = _detached_python(tmp_path)
+    driver, driver_sha256 = _fault_driver(tmp_path, python, "secret_stderr")
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
+    output = tmp_path / "secret-output"
+    completed = subprocess.run(
+        _live_command(tmp_path, output, expanded, index, identity, preflight, policy, driver, "secret"),
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    stderr = json.loads((output / "resident-batch.failure.json").read_text())["stderr"]
+    assert stderr["bytes"] > 0 and len(stderr["sha256"]) == 64
+    assert stderr["secret_scan"]["detected"] is True
+    assert stderr["retained_path"] is None
+    assert list(output.glob("resident-driver.stderr*")) == []
+
+
+def test_midrun_exit_records_ready_and_exact_completion_stage(tmp_path: Path) -> None:
+    python, _ = _detached_python(tmp_path)
+    driver, driver_sha256 = _fault_driver(tmp_path, python, "midrun")
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
+    output = tmp_path / "midrun-output"
+    completed = subprocess.run(
+        _live_command(tmp_path, output, expanded, index, identity, preflight, policy, driver, "midrun"),
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    evidence = json.loads((output / "resident-batch.failure.json").read_text())
+    assert evidence["failure"]["kind"] == "eof"
+    assert evidence["failure"]["stage"].startswith("run:")
+    assert evidence["protocol"]["ready_received"] is True
+    assert evidence["protocol"]["case_begin_count"] == 1
+    assert evidence["protocol"]["warmup_completed"] == 0
+    assert evidence["exit"] == {"kind": "exit", "exit_code": 25, "signal": None, "oom_like_unconfirmed": False}
 
 
 def test_incomplete_reset_is_immutable_and_aborts_process_reuse(tmp_path: Path) -> None:
