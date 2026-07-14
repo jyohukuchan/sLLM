@@ -1,0 +1,272 @@
+{
+  "aggregation": {
+    "component_trace_count": 0,
+    "coverage": "full_model",
+    "full_model_trace_count": 0,
+    "is_aggregated": false,
+    "source_trace_sha256s": []
+  },
+  "created_at": "2026-07-14T08:41:30Z",
+  "executor": {
+    "backend": "cpu",
+    "device": {
+      "architecture": "x86_64",
+      "name": "CPU fixture",
+      "runtime_device_index": 0
+    },
+    "id": "generic_model_executor",
+    "mode": "graph_lowered",
+    "version": "0.2.0"
+  },
+  "failure": null,
+  "fallback": {
+    "events": [],
+    "fail_closed_count": 0,
+    "fallback_count": 0,
+    "unexpected_fallback_count": 0,
+    "unsupported_count": 0
+  },
+  "graph": {
+    "compatibility_key_sha256": "a0802ad504171686034d41f2159c0e0638af805d6a132fa07ea1caad034b3ed0",
+    "model_graph": {
+      "schema_id": "ullm.model_graph.v0.1",
+      "schema_version": "0.1",
+      "sha256": "5598c41387a7435b69b801adae0902442752a765a34b899023bca3efb1399fd4",
+      "source": "serialized"
+    },
+    "state_schema": {
+      "schema_id": "ullm.state_schema.v0.1",
+      "schema_version": "0.1",
+      "sha256": "471b5d413cad30f1e3b0a533feb19330da509228fd3162e515569bb1182939b8",
+      "source": "serialized"
+    }
+  },
+  "identity": {
+    "artifact": {
+      "content_sha256": null,
+      "manifest_sha256": null
+    },
+    "model": {
+      "format_id": "AQ4_0",
+      "id": "cpu-fixture",
+      "implementation_id": "cpu_fixture_v1",
+      "revision": "r1"
+    },
+    "package": {
+      "manifest_sha256": "c1dd519e83a136e23f819f8e0f6fa000c99c9fbb365a566c99001e790b55c249"
+    },
+    "product": {
+      "id": "cpu-fixture",
+      "identity_sha256": "823de8749654fb30d8f55482b15d594fead399f6449703bfbb58b415e1728257",
+      "promotion_receipt_sha256": "3d5ec363ea5fad7b21db4fa641e3487bf476708ecfece2ad7821e124dc51ceea",
+      "revision": "r1"
+    },
+    "served_model_manifest_sha256": "64ef871b1bb80b18a3eec8ec05aea4e48852c30c14ad40f329d6784e97a58e73",
+    "worker": {
+      "binary_sha256": "bb0d0762b36f014fca48ba335d3f58c5347081f5db0fe0b16ff363f337ea991d",
+      "protocol": "ullm.worker.v1"
+    }
+  },
+  "memory": {
+    "observed_headroom_bytes": 1043576,
+    "observed_peak_bytes": 5000,
+    "observer": {
+      "complete": true,
+      "kind": "cpu_rss_fixture",
+      "sample_count": 3
+    },
+    "oom": null,
+    "persistent_state_bytes": 1024,
+    "planned_headroom_bytes": 1043328,
+    "planned_temporary_bytes": 128,
+    "planned_total_bytes": 5248,
+    "resident_bytes": 4096,
+    "vram_capacity_bytes": 1048576
+  },
+  "operator_resolutions": [
+    {
+      "architecture_constraint": {
+        "gpu_arch": "cpu",
+        "gpu_name": "CPU fixture",
+        "model_arch": "fixture"
+      },
+      "backend": "cpu",
+      "device": "CPU fixture",
+      "formats": {
+        "activation": "F32",
+        "layout": "row_major_grouped",
+        "state": null,
+        "weight": "AQ4_0"
+      },
+      "implementation_id": "cpu.embedding.v1",
+      "implementation_version": "1",
+      "invocation_count": 1,
+      "op_kind": "embedding",
+      "operator_instance_id": "embedding-0",
+      "phase_kind": "cold_prefill",
+      "resolution_status": "selected",
+      "selection_reason": {
+        "candidate_count": 1,
+        "kind": "exact_match",
+        "matched_constraints": [
+          "backend"
+        ],
+        "priority": 1,
+        "score": 1
+      },
+      "shape_bucket": {
+        "dimensions": [
+          {
+            "name": "m",
+            "value": 4
+          },
+          {
+            "name": "k",
+            "value": 4
+          },
+          {
+            "name": "n",
+            "value": 4
+          }
+        ],
+        "id": "m4-k4-n4"
+      },
+      "workspace": {
+        "observed_peak_bytes": 64,
+        "planned_bytes": 64
+      }
+    },
+    {
+      "architecture_constraint": {
+        "gpu_arch": "cpu",
+        "gpu_name": "CPU fixture",
+        "model_arch": "fixture"
+      },
+      "backend": "cpu",
+      "device": "CPU fixture",
+      "formats": {
+        "activation": "F32",
+        "layout": "row_major_grouped",
+        "state": null,
+        "weight": "AQ4_0"
+      },
+      "implementation_id": "cpu.lm_head.v1",
+      "implementation_version": "1",
+      "invocation_count": 1,
+      "op_kind": "lm_head",
+      "operator_instance_id": "lm-head-0",
+      "phase_kind": "decode",
+      "resolution_status": "selected",
+      "selection_reason": {
+        "candidate_count": 1,
+        "kind": "exact_match",
+        "matched_constraints": [
+          "backend"
+        ],
+        "priority": 1,
+        "score": 1
+      },
+      "shape_bucket": {
+        "dimensions": [
+          {
+            "name": "m",
+            "value": 1
+          },
+          {
+            "name": "k",
+            "value": 4
+          },
+          {
+            "name": "n",
+            "value": 4
+          }
+        ],
+        "id": "m1-k4-n4"
+      },
+      "workspace": {
+        "observed_peak_bytes": 64,
+        "planned_bytes": 64
+      }
+    }
+  ],
+  "phases": [
+    {
+      "actual_request_batch_width": 1,
+      "actual_token_batch_width": 4,
+      "cached_prefix_token_count": 0,
+      "chunk_width_tokens": 4,
+      "context_tokens_after": 4,
+      "context_tokens_before": 0,
+      "executor_id": "generic_model_executor",
+      "executor_version": "0.2.0",
+      "input_token_count": 4,
+      "kind": "cold_prefill",
+      "output_token_count": 0,
+      "phase_id": "cold-prefill-0",
+      "prefill_mode": "cold",
+      "request_count": 1,
+      "wall_time_ms": 0.1
+    },
+    {
+      "actual_request_batch_width": 1,
+      "actual_token_batch_width": 1,
+      "cached_prefix_token_count": 0,
+      "chunk_width_tokens": 1,
+      "context_tokens_after": 5,
+      "context_tokens_before": 4,
+      "executor_id": "generic_model_executor",
+      "executor_version": "0.2.0",
+      "input_token_count": 1,
+      "kind": "decode",
+      "output_token_count": 1,
+      "phase_id": "decode-0",
+      "prefill_mode": null,
+      "request_count": 1,
+      "wall_time_ms": 0.2
+    }
+  ],
+  "producer": {
+    "binary_sha256": "bb0d0762b36f014fca48ba335d3f58c5347081f5db0fe0b16ff363f337ea991d",
+    "id": "ullm-aq4-production-trace-producer",
+    "verified": true,
+    "version": "0.2.0"
+  },
+  "request_summary": {
+    "cached_prefix_token_count": 0,
+    "context_tokens_at_decode_start": 4,
+    "fixture_id": "cpu-production-trace-r1",
+    "generated_token_count": 1,
+    "prompt_or_token_content_recorded": false,
+    "prompt_token_count": 4,
+    "request_count": 1
+  },
+  "schema_version": "ullm.production_execution_trace.v1",
+  "scope": "full_model",
+  "server": null,
+  "state_commit": {
+    "cancelled_batch_count": 0,
+    "committed_batch_count": 2,
+    "discarded_batch_count": 0,
+    "error_batch_count": 0,
+    "prepared_batch_count": 2,
+    "reset": {
+      "attempted": true,
+      "complete": true,
+      "failed": false,
+      "required": true
+    },
+    "stale_nonce_count": 0
+  },
+  "status": "ok",
+  "trace_id": "cpu-fixture-r1",
+  "verification": {
+    "independent_validation": {
+      "failure_codes": [],
+      "report_sha256": null,
+      "status": "not_run",
+      "validator_id": null,
+      "validator_version": null
+    },
+    "producer_verified": true
+  }
+}

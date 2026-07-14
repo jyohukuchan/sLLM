@@ -237,6 +237,13 @@ package mixed request-state smoke:package-token-ids-mixed-request-state-smokeで
 SQ8 canonical artifact:source checkpointのFP8 weight payloadとblock scale payloadを再量子化せずbyte-exactに保持するSQ8_0 artifact。GPU固有prepackとは分離し、source tensor名、shape、dtype、block shape、復元式、payload hashを固定する
 SQ8 block-2D scale:weightの行blockと列blockの2軸で共有するscale layout。weight座標`[row,col]`には`scale[row/block_rows,col/block_cols]`をdequant multiplierとして掛ける
 SQ8 reference W8A16 profile:canonical SQ8 artifactのFP8 weightを固定上限のbufferで読み、compact BF16 block-2D scaleを使い、F64 accumulatorからF32出力を作る正しさ確認用profile。payload全体やF32 weight matrixは展開せず、R9700向けoptimized性能を意味しない
+production executor record:production execution trace producerと独立validatorの間で使う、promptやtoken IDを含まないbounded sanitized実行事実sidecar。phase幅、resolved operator、workspace、memory、fallback、state commit/resetを記録する
+production trace binding:production execution traceとbounded executor recordを両方のSHA-256で結ぶsidecar。producer summaryやverifiedフラグを信頼境界の外から補完しない
+production trace schema r1:production execution trace v0.1のexact nested field set、graph/state/compatibility digest、memory.oom null|object、独立validator report digestを固定したP1 schema revision
+detached validator report:trace本体に循環ハッシュを作らず、trace/factsのdigestと検証結果を別regular fileへ保存し、そのfileのSHA-256をindependent_validation.report_sha256へ結ぶ検証報告
+P1 mechanics smoke:P1のCPU fixtureでschema、privacy、identity、counter、binding、atomic publishだけを確認する実行。性能証拠またはproduction-server boundary証拠ではない
+AQ4 production bottleneck audit:production traceとexecutor recordからwall time、kernel launch、transfer、同期、workspace、fallback、実Mを読み取り、最適化候補を順位付けする診断。promotion判定ではない
+resident worker production smoke:active manifestと同じresident worker binary/packageを別プロセスで一件実行し、wire protocolを変更せずに実行境界のfacts sidecarを取得するP1検証
 SQ8 correctness report:canonical artifact hash、tensor名、F32-LE input hash、reference implementation profile、execution path、fallback状態、nonfinite数、MSE、最大絶対誤差、relative L2、cosine similarity、固定閾値の判定結果を保持する型付きJSON report
 mixed request-state manifest smoke:package-token-ids-mixed-request-state-smokeをmanifest-allで実行し、full mixed-attention packageのlayer order全体をrequest-state dispatchで通すsmoke。throughput rowではなく、shared-weight real batch runnerへ進む前のfull-order guardとして扱う
 slot AQ4 payload registry sharing:同一resident batch layer内の複数request slotが同じWeightRegistryを使い、同名AQ4 tensorのindex/scale/codebook runtime bufferを共有する中間段階。完全なshared resident weightsではなく、scale_values、passthrough weights、workspace、state/cacheはまだslotごとに残る

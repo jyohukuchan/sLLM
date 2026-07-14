@@ -12,6 +12,7 @@ pub mod cpu_reference_executor;
 pub mod decode_runner;
 pub mod decoder;
 pub mod execution_batch;
+pub mod execution_trace;
 pub mod format_id;
 pub mod golden;
 pub mod host_bytes;

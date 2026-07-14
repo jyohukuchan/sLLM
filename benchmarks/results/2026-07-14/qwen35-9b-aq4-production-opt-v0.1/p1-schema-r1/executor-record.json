@@ -1,0 +1,26 @@
+{
+  "schema_version": "ullm.production_executor_record.v1",
+  "trace_id": "cpu-fixture-r1",
+  "status": "ok",
+  "scope": "full_model",
+  "graph": {
+    "model_graph": {"schema_id": "ullm.model_graph.v0.1", "schema_version": "0.1", "source": "serialized", "canonical": {"nodes": ["embedding", "decoder", "lm_head"]}},
+    "state_schema": {"schema_id": "ullm.state_schema.v0.1", "schema_version": "0.1", "source": "serialized", "canonical": {"state": ["kv", "decode_position"]}},
+    "compatibility_inputs": {"backend": "cpu", "format_id": "AQ4_0", "layout": "row_major_grouped"}
+  },
+  "executor": {"id": "generic_model_executor", "version": "0.2.0", "mode": "graph_lowered", "backend": "cpu", "device": {"runtime_device_index": 0, "name": "CPU fixture", "architecture": "x86_64"}},
+  "request_summary": {"fixture_id": "cpu-production-trace-r1", "request_count": 1, "prompt_token_count": 4, "cached_prefix_token_count": 0, "generated_token_count": 1, "context_tokens_at_decode_start": 4, "prompt_or_token_content_recorded": false},
+  "phases": [
+    {"phase_id": "cold-prefill-0", "kind": "cold_prefill", "executor_id": "generic_model_executor", "executor_version": "0.2.0", "prefill_mode": "cold", "chunk_width_tokens": 4, "actual_token_batch_width": 4, "actual_request_batch_width": 1, "request_count": 1, "input_token_count": 4, "output_token_count": 0, "cached_prefix_token_count": 0, "context_tokens_before": 0, "context_tokens_after": 4, "wall_time_ms": 0.1},
+    {"phase_id": "decode-0", "kind": "decode", "executor_id": "generic_model_executor", "executor_version": "0.2.0", "prefill_mode": null, "chunk_width_tokens": 1, "actual_token_batch_width": 1, "actual_request_batch_width": 1, "request_count": 1, "input_token_count": 1, "output_token_count": 1, "cached_prefix_token_count": 0, "context_tokens_before": 4, "context_tokens_after": 5, "wall_time_ms": 0.2}
+  ],
+  "operator_resolutions": [
+    {"phase_kind": "cold_prefill", "operator_instance_id": "embedding-0", "op_kind": "embedding", "implementation_id": "cpu.embedding.v1", "implementation_version": "1", "resolution_status": "selected", "backend": "cpu", "device": "CPU fixture", "formats": {"weight": "AQ4_0", "activation": "F32", "state": null, "layout": "row_major_grouped"}, "shape_bucket": {"id": "m4-k4-n4", "dimensions": [{"name": "m", "value": 4}, {"name": "k", "value": 4}, {"name": "n", "value": 4}]}, "selection_reason": {"kind": "exact_match", "candidate_count": 1, "score": 1, "priority": 1, "matched_constraints": ["backend"]}, "architecture_constraint": {"model_arch": "fixture", "gpu_arch": "cpu", "gpu_name": "CPU fixture"}, "workspace": {"planned_bytes": 64, "observed_peak_bytes": 64}, "invocation_count": 1},
+    {"phase_kind": "decode", "operator_instance_id": "lm-head-0", "op_kind": "lm_head", "implementation_id": "cpu.lm_head.v1", "implementation_version": "1", "resolution_status": "selected", "backend": "cpu", "device": "CPU fixture", "formats": {"weight": "AQ4_0", "activation": "F32", "state": null, "layout": "row_major_grouped"}, "shape_bucket": {"id": "m1-k4-n4", "dimensions": [{"name": "m", "value": 1}, {"name": "k", "value": 4}, {"name": "n", "value": 4}]}, "selection_reason": {"kind": "exact_match", "candidate_count": 1, "score": 1, "priority": 1, "matched_constraints": ["backend"]}, "architecture_constraint": {"model_arch": "fixture", "gpu_arch": "cpu", "gpu_name": "CPU fixture"}, "workspace": {"planned_bytes": 64, "observed_peak_bytes": 64}, "invocation_count": 1}
+  ],
+  "fallback": {"fallback_count": 0, "unexpected_fallback_count": 0, "unsupported_count": 0, "fail_closed_count": 0, "events": []},
+  "memory": {"vram_capacity_bytes": 1048576, "resident_bytes": 4096, "persistent_state_bytes": 1024, "planned_temporary_bytes": 128, "planned_total_bytes": 5248, "planned_headroom_bytes": 1043328, "observed_peak_bytes": 5000, "observed_headroom_bytes": 1043576, "observer": {"kind": "cpu_rss_fixture", "sample_count": 3, "complete": true}, "oom": null},
+  "state_commit": {"prepared_batch_count": 2, "committed_batch_count": 2, "discarded_batch_count": 0, "stale_nonce_count": 0, "cancelled_batch_count": 0, "error_batch_count": 0, "reset": {"required": true, "attempted": true, "complete": true, "failed": false}},
+  "server": null,
+  "failure": null
+}

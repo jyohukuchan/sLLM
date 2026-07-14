@@ -1,0 +1,7 @@
+{
+  "schema_version": "ullm.aq4_production_matrix.v1",
+  "cases": [
+    {"case_id": "full_model-cold_prefill-p128-m128-hip-r9700", "scope": "full_model", "phase": "cold_prefill", "prompt_tokens": 128, "requested_m": 128},
+    {"case_id": "full_model-decode-c128-m1-hip-r9700", "scope": "full_model", "phase": "decode", "context_tokens": 128, "requested_m": 1}
+  ]
+}

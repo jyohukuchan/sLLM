@@ -1,13 +1,13 @@
 # AQ4 production prefill/decode optimization plan v0.1
 
-Status: planned; acceptance-driven; active product remains unchanged until P6 unless the explicit P4 prefill-only exception is approved
+Status: P0 complete; P1 schema/mechanics gate complete; P1-D and real production performance are handed off to P2; active product remains unchanged until P6 unless the explicit P4 prefill-only exception is approved
 
 ## 前回の要点
 
 - Qwen3.5-9B AQ4_0 reasoning v2は、R9700上のresident worker、Gateway、OpenWebUI、HTTP/SSE、停止・障害復旧、100-chat soakまでrelease gateを通過している。
 - production decodeはtyped backend registryとpaged split pathへ接続済みで、context 1339から64 tokenを生成する測定はprefill約129.33 tok/s、decode約66.53 tok/sだった。`cache_len < 256`と対応外条件はcanonical pathへfail-closedする。
 - production prefillは約117–129 tok/sであり、`docs/specs/prefill-validation-v0.1.md`がQwen3.5 AQ4/R9700向けに定めるprompt 1011の最低318.19 tok/s、prompt 2048の旧tokenwise比5倍、prompt 1024の目標1000 tok/sには達していない。
-- adapter fixtureとtyped executable registryの一部は実装済みだが、fixtureは完全なproduction package adapterではない。GenericModelExecutor、production execution traceの生成、generic M>1 prefillのresident worker接続も未完である。
+- adapter fixtureとtyped executable registryの一部は実装済みだが、fixtureは完全なproduction package adapterではない。P1のtrace producer/validatorはCPU mechanics fixtureを通過するが、GenericModelExecutorとgeneric M>1 prefillのresident worker接続はP2 handoffである。
 - 最終release bundleに記録されたrollback environment hashと現在の`/etc/ullm/openai-gateway-manifest.env`のhashが異なる。次のactivationやrollbackより前に理由を確認し、現状態へbindingし直す必要がある。
 
 ## 今回の変更点
@@ -20,7 +20,15 @@ Status: planned; acceptance-driven; active product remains unchanged until P6 un
 
 ## 次の行動
 
-P0でrollback environment hashの差分理由と現在のservice topologyを確認し、active製品を変更せずにidentity snapshotと再生成可能なrollback bindingを固定する。その後、P1-Aのproduction execution trace producerとP1-Bの独立validatorを並列着手する。
+P0とP1 schema/mechanicsの基盤実装とcurrent identityの固定を完了した。次はP2で現active identityのbaselineを取得し、同一identityで比較可能なprefill/decode測定へ進む。P1 CPU fixtureは独立validatorへbinding済みだが、direct workerは`full_model`であり、`production_server`の実boundary証拠はP2で再取得する。
+
+### 2026-07-14 実装状況
+
+- P0: active manifest、worker、package、tokenizer、Git、systemd、Gateway、worker、OpenWebUI、GPU/driver/power conditionの非秘密snapshotと、現在のmanifest-mode environmentへ再bindingしたrollback artifactを保存した。旧bundleのenvironment hashとの差はlegacy environmentからmanifest-mode environmentへのsystemd drop-in切替として説明した。
+- P1-A/B: engine-side bounded trace primitive、production executor record契約、strict trace producer、duplicate/privacy/path/hash/算術を再計算する独立validatorを追加した。wire protocolは変更していない。CPU fixture `tests/fixtures/production-execution-trace-p1/schema-r1/` は detached validator report SHAを含む独立検証を通過する。
+- P1-C: 2 warmup + 10 measuredのatomic matrix runnerとappend-only evidence validatorを追加した。runnerの既定`mechanics_smoke`は性能証拠ではなく、P2の実commandは`--mode production`で明示する。
+- P1-D: wall time・launch・workspace・fallback・実Mのread-only auditを診断専用として追加した。P2で実際のproduction-server traceから再監査するまで、候補昇格や性能比較には使わない。
+- 既存のlive evidenceは保持する。旧traceのproduction claimはschema-r1へ再検証されるまでpromotion根拠にしない。サービスの再起動・設定変更・active manifestの変更は行っていない。
 
 ## 1. 目的と適用範囲
 
