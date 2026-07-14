@@ -52,7 +52,7 @@ def finite(value: Any, label: str) -> None:
 
 def validate(metrics_path: Path, split_root: Path) -> dict[str, Any]:
     try:
-        SPLIT.validate(split_root)
+        split_result = SPLIT.validate(split_root)
     except Exception as error:
         raise ValidationError(f"split validation failed: {error}") from error
     raw = metrics_path.read_bytes()
@@ -65,6 +65,14 @@ def validate(metrics_path: Path, split_root: Path) -> dict[str, Any]:
     for field in SHA_FIELDS:
         if not isinstance(value[field], str) or len(value[field]) != 64 or any(char not in "0123456789abcdef" for char in value[field]):
             raise ValidationError(f"{field} is not a SHA-256 digest")
+    expected_bindings = {
+        "split_manifest_sha256": split_result["split_manifest_sha256"],
+        "policy_sha256": split_result["policy_sha256"],
+        "calibration_cases_sha256": sha(split_root / "calibration-cases.jsonl", "calibration cases"),
+    }
+    for field, expected in expected_bindings.items():
+        if value[field] != expected:
+            raise ValidationError(f"metrics {field} does not match validated split")
     expected_rows = {}
     for line in (split_root / "calibration-cases.jsonl").read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
