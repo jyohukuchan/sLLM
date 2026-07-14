@@ -22,7 +22,7 @@ rocprofv3
 -- EXACT_RUNNER_COMMAND...
 ```
 
-profilerとrunner executableはabsolute、ancestor symlinkなし、executable regular fileとして読み、path/inode metadata/SHA-256を固定する。command全体のcanonical SHA-256もartifactへ保存する。captureはprocess groupを分離し、timeout時はSIGINT後にSIGKILLする。nonzero、signal、OOM候補の137/-9を成功扱いしない。
+profilerとrunner executableはabsolute、ancestor symlinkなし、executable regular fileとして読み、path/inode metadata/SHA-256を固定する。command全体のcanonical SHA-256もartifactへ保存する。captureはprocess groupを分離する。timeout時はSIGINT後にgroup生存を確認し、親だけが終了して子が残る場合もSIGTERM、SIGKILLの順でgroup全体を終了させる。親をwaitし、process group消失を確認できなければcleanup失敗として拒否する。nonzero、signal、OOM候補の137/-9を成功扱いしない。
 
 ## marker hook契約
 
@@ -50,7 +50,9 @@ runner sourceを変更すると、prepared one-case bundleの`trusted-runner.py`
 
 全source rowのstart/endをmarker containmentで分類する。marker境界を横断するrowは拒否する。0,1のrowは保持せず、2..11だけをrun別CSVへ書く。kernel CSVにはmarkerが証明した`Phase=prefill`を付加する。
 
-各measured runはnon-empty kernel/HIP API traceを必要とする。kernelは保守的family mappingでunknownまたは複数family一致を拒否する。HIP APIは方向不明のmemcpyとunknown synchronizeを拒否する。memory copyは明示的D2H/H2D/D2D/H2H/peer種だけを受理する。
+各measured runはnon-empty kernel/HIP API traceを必要とする。分類検証はsplit後のmeasured rowだけでなく、warmupとmarker外を含む全source rowへ先に適用する。kernelは保守的family mappingでunknownまたは複数family一致を拒否する。HIP APIは方向不明のmemcpyとunknown synchronizeを拒否する。memory copyは明示的D2H/H2D/D2D/H2H/peer種だけを受理する。集計とproducer bindingだけをmeasured 2..11に限定し、warmup内のunknownを無視しない。
+
+assemble中にunknown、marker不整合、hash不一致などが判明した場合は、今回生成した`measured-runs/`、`capture-capabilities.json`、未発行artifactをcleanupする。source traceを保持した同じprofile output directoryへ、原因を修正した後に`assemble`を再実行できる。既存のsplit/capability/artifactが開始時から存在する場合は上書きも削除もせず拒否する。artifactとcapabilityはtemporary file、fsync、atomic renameで発行する。
 
 ## capabilityとhash binding
 

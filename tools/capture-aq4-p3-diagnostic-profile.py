@@ -11,8 +11,10 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -120,15 +122,39 @@ def run_profile(command: list[str], output_directory: Path, timeout: float) -> N
         try:
             return_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as error:
-            try:
-                os.killpg(process.pid, signal.SIGINT)
-                process.wait(timeout=10.0)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+            process_group = process.pid
+
+            def group_alive() -> bool:
+                process.poll()
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    os.killpg(process_group, 0)
                 except ProcessLookupError:
-                    pass
+                    return False
+                return True
+
+            def signal_group(value: signal.Signals, wait_seconds: float) -> None:
+                try:
+                    os.killpg(process_group, value)
+                except ProcessLookupError:
+                    return
+                deadline = time.monotonic() + wait_seconds
+                while group_alive() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+
+            signal_group(signal.SIGINT, 0.5)
+            if group_alive():
+                signal_group(signal.SIGTERM, 0.5)
+            if group_alive():
+                signal_group(signal.SIGKILL, 5.0)
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
                 process.wait()
+            if group_alive():
+                raise CaptureError(
+                    "rocprof diagnostic capture timed out and process group cleanup failed"
+                ) from error
             raise CaptureError("rocprof diagnostic capture timed out") from error
     if return_code != 0:
         suffix = " (possible OOM/SIGKILL)" if return_code in {-9, 9, 137} else ""
@@ -275,6 +301,55 @@ def validate_memory_copy_rows(fields: list[str], rows: list[dict[str, str]]) -> 
             raise CaptureError(f"unknown memory copy operation: {row[name_column]}")
 
 
+def validate_all_kernel_names(fields: list[str], rows: list[dict[str, str]]) -> None:
+    name_column = one_column(
+        fields, ("Kernel_Name", "KernelName", "Name", "kernel_name"), "kernel name"
+    )
+    for row in rows:
+        name = row[name_column].strip()
+        try:
+            family = PROFILER.classify_kernel(name)
+        except PROFILER.ProfileError as error:
+            raise CaptureError(f"kernel family classification failed: {error}") from error
+        if family is None:
+            raise CaptureError(f"unknown kernel family in source trace: {name}")
+
+
+def validate_all_hip_api_names(fields: list[str], rows: list[dict[str, str]]) -> None:
+    name_column = one_column(
+        fields, ("Function", "Api_Name", "API_Name", "Name", "function"), "HIP API name"
+    )
+    known = (
+        PRODUCER.D2H_APIS
+        | PRODUCER.SYNC_APIS
+        | PRODUCER.KNOWN_OTHER_MEMCPY_APIS
+        | PRODUCER.KNOWN_OTHER_SYNC_APIS
+    )
+    for row in rows:
+        raw_name = row[name_column].strip()
+        name = PRODUCER.normalized_api_name(raw_name)
+        if name in known:
+            continue
+        if "memcpy" in name or "synchron" in name:
+            raise CaptureError(f"unknown transfer/synchronization HIP API: {raw_name}")
+
+
+def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(
+                json.dumps(value, sort_keys=True, indent=2, allow_nan=False).encode("ascii")
+                + b"\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> Any:
     if path.exists() or path.is_symlink():
         raise CaptureError(f"refusing to overwrite split trace: {path}")
@@ -339,7 +414,7 @@ def validate_resident_evidence(
     return identity, summary_value, raw_value, snapshots, run_id
 
 
-def assemble(
+def _assemble(
     *,
     traces: dict[str, Path],
     identity_path: Path,
@@ -367,7 +442,11 @@ def assemble(
     parsed: dict[str, tuple[list[str], dict[int, list[dict[str, str]]]]] = {}
     for kind in ("kernel", "hip_api", "memory_copy"):
         fields, rows = csv_rows(trace_snapshots[kind], f"{kind} trace")
-        if kind == "memory_copy":
+        if kind == "kernel":
+            validate_all_kernel_names(fields, rows)
+        elif kind == "hip_api":
+            validate_all_hip_api_names(fields, rows)
+        else:
             validate_memory_copy_rows(fields, rows)
         parsed[kind] = (fields, rows_by_marker(fields, rows, ranges, f"{kind} trace"))
     split_directory.mkdir(mode=0o700)
@@ -375,10 +454,7 @@ def assemble(
     capability_path = output_directory / "capture-capabilities.json"
     if capability_path.exists() or capability_path.is_symlink():
         raise CaptureError("capture capability output already exists")
-    capability_path.write_bytes(
-        json.dumps(capability_value, sort_keys=True, indent=2, allow_nan=False).encode("ascii")
-        + b"\n"
-    )
+    write_json_atomic(capability_path, capability_value)
     capability_snapshot = PRODUCER.capture(capability_path.resolve(), "capture capabilities")
     PRODUCER.validate_capture_capabilities(capability_value, "diagnostic")
     profile_runs: list[dict[str, Any]] = []
@@ -482,10 +558,28 @@ def assemble(
     artifact["artifact_sha256"] = self_hash(artifact, "artifact_sha256")
     for snapshot in [*evidence_snapshots, *trace_snapshots.values(), *split_snapshots, capability_snapshot]:
         snapshot.verify()
-    artifact_path.write_bytes(
-        json.dumps(artifact, sort_keys=True, indent=2, allow_nan=False).encode("ascii") + b"\n"
-    )
+    write_json_atomic(artifact_path, artifact)
     return artifact
+
+
+def assemble(**kwargs: Any) -> dict[str, Any]:
+    output_directory = kwargs["output_directory"]
+    artifact_path = kwargs["artifact_path"]
+    split_directory = output_directory / "measured-runs"
+    capability_path = output_directory / "capture-capabilities.json"
+    split_existed = split_directory.exists() or split_directory.is_symlink()
+    capability_existed = capability_path.exists() or capability_path.is_symlink()
+    artifact_existed = artifact_path.exists() or artifact_path.is_symlink()
+    try:
+        return _assemble(**kwargs)
+    except Exception:
+        if not split_existed and split_directory.exists() and not split_directory.is_symlink():
+            shutil.rmtree(split_directory)
+        if not capability_existed and capability_path.exists() and not capability_path.is_symlink():
+            capability_path.unlink()
+        if not artifact_existed and artifact_path.exists() and not artifact_path.is_symlink():
+            artifact_path.unlink()
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -15,12 +15,15 @@
 - unknown kernel/API/memory、marker crossing/missing、trace再利用、output overwrite、timeout/OOMをfail-closedにした。
 - producer diagnostic modeは1件またはmarker済みexact10件のprofile bindingを受理する。いずれもpromotion不可である。
 - fake rocprof、marker欠落、timeout/OOM、no-reuse、10-run split、producer diagnostic buildのtestsを追加した。
+- 独立QAを受け、warmup/marker外を含む全source kernel/API/memoryをsplit前に分類するよう修正した。
+- timeout cleanupをprocess-group生存確認、SIGINT、SIGTERM、SIGKILL、parent wait、全子消失確認へ強化した。
+- assemble失敗時は今回生成したsplit/capability/artifactだけをcleanupし、sourceを保持して再assemble可能にした。
 
 ## 検証
 
 - GPU、service、model loadは実行していない。
-- `tests/test_capture_aq4_p3_diagnostic_profile.py`: 5 passed
-- capture + producer + profiler + selector: 79 passed
+- `tests/test_capture_aq4_p3_diagnostic_profile.py`: 8 passed
+- capture + producer + profiler + selector: 82 passed
 - py_compile: passed
 
 ## 残課題

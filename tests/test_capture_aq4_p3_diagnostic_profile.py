@@ -66,6 +66,26 @@ def write_source_traces(root: Path, run_id: str, case_id: str, case_sha: str) ->
     return {"kernel": kernel, "hip_api": api, "memory_copy": memory, "marker": marker}
 
 
+def resident_evidence(tmp_path: Path):
+    identity_path, identity = FIXTURES.identity_fixture(tmp_path)
+    summary_path = FIXTURES.summary_fixture(
+        tmp_path / "summary.json", identity_path, "diag-run", diagnostic=True
+    )
+    case_id, case_sha = "diag-case", "8" * 64
+    raw_path = FIXTURES.raw_fixture(
+        tmp_path / "raw.json",
+        identity_path,
+        identity,
+        "diag-run",
+        case_id,
+        case_sha,
+        128,
+        100.0,
+        diagnostic=True,
+    )
+    return identity_path, summary_path, raw_path, case_id, case_sha
+
+
 def test_profiler_command_enables_all_required_domains(tmp_path: Path) -> None:
     profiler = tmp_path / "rocprofv3"
     profiler.write_bytes(b"fake")
@@ -121,6 +141,26 @@ def test_profile_timeout_and_oom_exit_fail_closed(tmp_path: Path) -> None:
         CAPTURE.run_profile([str(oom)], (tmp_path / "oom").resolve(), 10.0)
 
 
+def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> None:
+    child_pid = tmp_path / "child.pid"
+    profiler = tmp_path / "stubborn-profiler"
+    profiler.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, signal, subprocess, sys, time\n"
+        "child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGINT, signal.SIG_IGN); time.sleep(30)'])\n"
+        f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "signal.signal(signal.SIGINT, lambda *_: None)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    profiler.chmod(0o555)
+    with pytest.raises(CAPTURE.CaptureError, match="timed out"):
+        CAPTURE.run_profile([str(profiler)], (tmp_path / "stubborn").resolve(), 0.1)
+    pid = int(child_pid.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def test_marker_contract_binds_exact_12_runs_and_rejects_missing(tmp_path: Path) -> None:
     case_sha = "8" * 64
     marker = tmp_path / "marker.csv"
@@ -141,22 +181,7 @@ def test_marker_contract_binds_exact_12_runs_and_rejects_missing(tmp_path: Path)
 def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
     tmp_path: Path,
 ) -> None:
-    identity_path, identity = FIXTURES.identity_fixture(tmp_path)
-    summary_path = FIXTURES.summary_fixture(
-        tmp_path / "summary.json", identity_path, "diag-run", diagnostic=True
-    )
-    case_id, case_sha = "diag-case", "8" * 64
-    raw_path = FIXTURES.raw_fixture(
-        tmp_path / "raw.json",
-        identity_path,
-        identity,
-        "diag-run",
-        case_id,
-        case_sha,
-        128,
-        100.0,
-        diagnostic=True,
-    )
+    identity_path, summary_path, raw_path, case_id, case_sha = resident_evidence(tmp_path)
     output = tmp_path / "profile"
     output.mkdir()
     traces = write_source_traces(output, "diag-run", case_id, case_sha)
@@ -223,3 +248,38 @@ def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
             output_directory=output,
             artifact_path=artifact_path,
         )
+
+
+@pytest.mark.parametrize(
+    ("trace_kind", "old", "new", "message"),
+    [
+        ("kernel", "hip_paged_kv_write_kernel", "unknown_warmup_kernel", "unknown kernel"),
+        ("hip_api", "hipMemcpyDtoHAsync", "hipMemcpyAsync", "unknown transfer"),
+    ],
+)
+def test_warmup_unknown_source_rows_fail_and_partial_outputs_are_cleaned(
+    tmp_path: Path, trace_kind: str, old: str, new: str, message: str
+) -> None:
+    identity_path, summary_path, raw_path, case_id, case_sha = resident_evidence(tmp_path)
+    output = tmp_path / "profile"
+    output.mkdir()
+    traces = write_source_traces(output, "diag-run", case_id, case_sha)
+    path = traces[trace_kind]
+    rows = path.read_text().splitlines()
+    rows[1] = rows[1].replace(old, new)
+    path.write_text("\n".join(rows) + "\n")
+    artifact_path = tmp_path / "capture.json"
+    with pytest.raises((CAPTURE.CaptureError, CAPTURE.PRODUCER.ProducerError), match=message):
+        CAPTURE.assemble(
+            traces=traces,
+            identity_path=identity_path,
+            summary_path=summary_path,
+            raw_path=raw_path,
+            profiler_value={"tool": "rocprofv3", "version": "1.1.0"},
+            command=["rocprofv3", "--", "runner"],
+            output_directory=output,
+            artifact_path=artifact_path,
+        )
+    assert not (output / "measured-runs").exists()
+    assert not (output / "capture-capabilities.json").exists()
+    assert not artifact_path.exists()
