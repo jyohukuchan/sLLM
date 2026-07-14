@@ -1,0 +1,104 @@
+{
+  "actual_execution": {
+    "attempted": false,
+    "confirm_one_case_invoked": false,
+    "service_stop_attempted": false,
+    "sudo_prime_attempted": false
+  },
+  "artifact": {
+    "head_commit": "949d5c5d0a2506e76c07543557ec03151d2e12b5",
+    "harness_sha256": "f2d8e67db466770b19024ea296288f899d7d2c7f3712659abc673041643ff90e",
+    "launcher_sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835",
+    "ready_binding_sha256": "b71a67a240668626c1c5d9c35cbd9b5b658d282265120aa7721f75516ba67c69",
+    "ready_checksums_passed": true,
+    "target_paths_clean": true,
+    "output_paths_unused": true
+  },
+  "blocker": {
+    "category": "route_network_namespace_mismatch",
+    "detail": "The host-side maintenance health probe cannot reach the gateway bound to the Docker bridge gateway, while the OpenWebUI container can reach the same endpoint.",
+    "failed_gate": "pre_stop.gateway.readyz",
+    "harness_url": "http://172.20.0.1:8000/readyz",
+    "result": "timeout_after_5_seconds"
+  },
+  "captured_unix_ns": 1784052304314617616,
+  "diagnosis": {
+    "endpoint_healthy": true,
+    "load_issue": false,
+    "production_recovery_required": false,
+    "route_issue": true,
+    "separate_harness_change_required": true
+  },
+  "network": {
+    "gateway_listener": "172.20.0.1:8000",
+    "openwebui_container_ipv4": "172.20.0.2/16",
+    "openwebui_gateway": "172.20.0.1",
+    "openwebui_network": "open-webui-network",
+    "openwebui_network_driver": "bridge",
+    "openwebui_network_subnet": "172.20.0.0/16"
+  },
+  "probes": {
+    "container_gateway_healthz": {
+      "body_bytes": 15,
+      "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+      "elapsed_ms": 3.04,
+      "status": 200
+    },
+    "container_gateway_readyz": {
+      "body_bytes": 18,
+      "body_sha256": "31bf75f4c0a97cc1f7b60df824fa390b3be9ba014f29b63c87c698ba63d9a9fd",
+      "elapsed_ms": 0.618,
+      "status": 200
+    },
+    "container_gateway_v1_models_authenticated": {
+      "body_bytes": 90,
+      "body_sha256": "ccfc5786e5d0928931111c7a2d272ab62e202abd9978b1490a531aa0b6133c20",
+      "elapsed_ms": 2.768,
+      "model_count": 1,
+      "status": 200
+    },
+    "container_openwebui_health": {
+      "body_bytes": 15,
+      "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+      "elapsed_ms": 3.67,
+      "status": 200
+    },
+    "host_gateway_healthz": {
+      "curl_exit_code": 28,
+      "http_status": 0,
+      "result": "timeout_after_5_seconds"
+    },
+    "host_gateway_localhost_healthz": {
+      "curl_exit_code": 7,
+      "http_status": 0,
+      "result": "connection_refused"
+    },
+    "host_gateway_localhost_readyz": {
+      "curl_exit_code": 7,
+      "http_status": 0,
+      "result": "connection_refused"
+    },
+    "host_gateway_readyz": {
+      "curl_exit_code": 28,
+      "http_status": 0,
+      "result": "timeout_after_5_seconds"
+    }
+  },
+  "production_post_diagnosis": {
+    "control_group": "/system.slice/ullm-openai.service",
+    "gateway_main_pid": 3090367,
+    "gateway_service_active_state": "active",
+    "gateway_service_sub_state": "running",
+    "nrestarts": 0,
+    "openwebui_container_health": "healthy",
+    "openwebui_container_state": "running",
+    "target_gpu_bdf": "0000:47:00.0",
+    "target_gpu_kfd_id": 51545,
+    "target_gpu_owner_pid": 3090924,
+    "target_gpu_uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+    "target_lock_held": true,
+    "worker_pid": 3090924
+  },
+  "schema_version": "ullm.aq4_p2_resident_smoke_preflight_no_go.v1",
+  "status": "no_go"
+}
