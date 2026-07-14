@@ -65,3 +65,15 @@
 - `SHA256SUMS`: `bundle.json`と全required membersを含むexact coverage passed
 - `python3 -m pytest -q tests/test_prepare_aq4_p2_resident_smoke_bundle.py tests/test_run_aq4_p2_resident_batch.py`: 43 passed
 - GPU command、resident driver、worker、model load、live service operationは実行していない。
+
+## final R / B v4 sidecar更新
+
+- final Rをcommit `e9065925d7b5af0352cb8dfd454a7e106abd7172`、tree `9f2ff38d06d5ea5724a6e84af1c00d2b8147f241`、runner blob `9c097d1a97af3e15ca695c6da08b1e2928d08df7`、SHA-256 `3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc`へ更新した。
+- checked-in validatorをcommit `b9c5878b1aabfca42986f4797810acfadc820382`、tree `a8d3c5ed47cea977f16184b1d01e94192b4dd0f2`、blob `14754f7727eb34670d53be32ad06701103e07b99`、SHA-256 `0759cd83307a53fd728fb5f271be1f817b24d10fd959ef356b8f03a78030e7d5`へ固定した。
+- final Rを`--trusted-validator`と`--trusted-validator-sha256`必須でsubprocessとして1回実行した。R内部のvalidator subprocess 1回、fake-ready subprocess 1回をplanへ記録した。
+- 791a20c input rootは事前・事後で同じpath/device/inode、19-member inventory/SHAであり、root内plan/evidenceは置換していない。実R plan、outer subprocess evidence、validator report、source archives、binding manifestをroot外sidecarへ収録した。
+- sidecar manifestは旧791a20cを`SUPERSEDED`、`execution_eligible=false`、B自身を`launch_eligible=false`として記録した。
+- e906592のresident driver Git blobはnormative 319d618から不変であり、clean binary SHA-256 `62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1`を継続した。
+- bundle validator、sidecar validator、`SHA256SUMS`を再検証し、bundle preparation/runner testsは54件通過した。
+- GPU command、resident driver、worker、model load、live service operationは実行していない。
+- 次段ではL immutable launcherがinput root、B manifest、R、validator SHAを固定し、validator→runner順序を強制する必要がある。

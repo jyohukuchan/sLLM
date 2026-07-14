@@ -12,6 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
+BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
+VALIDATOR_COMMIT = "b9c5878b1aabfca42986f4797810acfadc820382"
+VALIDATOR_SHA = "0759cd83307a53fd728fb5f271be1f817b24d10fd959ef356b8f03a78030e7d5"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -299,3 +302,68 @@ def test_rejects_rebound_runner_plan_or_normal_profile(tmp_path: Path, trusted_r
     rebind_transport(root)
     with pytest.raises(BUNDLE.BundleError, match="trusted runner"):
         BUNDLE.validate(root, trusted_reconstruction)
+
+
+def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
+    value = BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, BINDING)
+    assert value["status"] == "prepared_not_executed"
+    assert value["promotion"] is False
+    assert value["launch_eligible"] is False
+    assert value["requires_immutable_launcher"] is True
+    assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
+    roots = value["trust_roots"]
+    assert roots["source_commit"] == "e9065925d7b5af0352cb8dfd454a7e106abd7172"
+    assert roots["source_tree"] == "9f2ff38d06d5ea5724a6e84af1c00d2b8147f241"
+    assert roots["runner"] == {"git_blob": "9c097d1a97af3e15ca695c6da08b1e2928d08df7", "sha256": "3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc"}
+    assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
+    assert roots["validator"]["sha256"] == VALIDATOR_SHA
+    assert roots["resident_driver"]["blob_unchanged"] is True
+    assert roots["resident_driver"]["binary_sha256"] == BUNDLE.EXPECTED_DRIVER_SHA
+
+
+def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
+    plan_raw = (BINDING / "runner-plan.json").read_bytes()
+    plan = json.loads(plan_raw)
+    evidence = json.loads((BINDING / "runner-subprocess-evidence.json").read_text())
+    report_raw = (BINDING / "validator-report.json").read_bytes()
+    validator = plan["validation"]["trusted_bundle_validator"]
+    assert (plan["case_count"], plan["transaction_count"], plan["warmup_runs"], plan["measured_runs"]) == (1, 12, 2, 10)
+    assert plan["smoke_only"] is True and plan["promotion_eligible"] is False
+    assert plan["validation"]["root_contract"] == "ullm.aq4_p2_resident_smoke_bundle_root.v4"
+    assert set(plan["validation"]["members"]) == set(BUNDLE.REQUIRED_FILES) | {"bundle.json", "SHA256SUMS"}
+    assert plan["validation"]["fake_driver_subprocess_count"] == 1
+    assert validator["subprocess_count"] == 1
+    assert validator["source"] == {"path": str(BUNDLE.BINDING_VALIDATOR_EXEC), "sha256": VALIDATOR_SHA}
+    assert validator["report_sha256"] == hashlib.sha256(BUNDLE.canonical(validator["report"])).hexdigest()
+    assert evidence["runner_subprocess_count"] == 1
+    assert evidence["exit_code"] == 0
+    assert evidence["stdout"] == {"sha256": hashlib.sha256(b"").hexdigest(), "utf8": ""}
+    assert evidence["stderr"] == {"sha256": hashlib.sha256(b"").hexdigest(), "utf8": ""}
+    assert evidence["plan"]["sha256"] == hashlib.sha256(plan_raw).hexdigest()
+    assert evidence["trusted_validator"]["report_file_sha256"] == hashlib.sha256(report_raw).hexdigest()
+
+
+def test_v4_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
+    manifest = json.loads((BINDING / "binding-manifest.json").read_text())
+    assert manifest["cycle_control"] == {
+        "input_root_unchanged_after_runner": True,
+        "generated_outputs_outside_input_root": True,
+        "input_root_dry_run_not_replaced": True,
+        "generic_runner_schema_not_embedded_back_into_input_root": True,
+    }
+    assert manifest["input_root"]["members"]["dry-run.json"]["sha256"] == hashlib.sha256((ARTIFACT / "dry-run.json").read_bytes()).hexdigest()
+    assert manifest["outputs"]["runner_plan_sha256"] == hashlib.sha256((BINDING / "runner-plan.json").read_bytes()).hexdigest()
+    assert manifest["next_stage"]["name"] == "L immutable launcher"
+    assert manifest["next_stage"]["required"] is True
+
+
+def test_v4_binding_rejects_report_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "binding"
+    shutil.copytree(BINDING, root)
+    report = root / "validator-report.json"
+    report.chmod(0o644)
+    value = json.loads(report.read_text())
+    value["promotion"] = True
+    rewrite_json(report, value)
+    with pytest.raises(BUNDLE.BundleError, match="validator report differs"):
+        BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
