@@ -36,6 +36,124 @@ def rewrite_json(path: Path, value: dict) -> None:
     path.chmod(0o444)
 
 
+def worker_hardlink_fixture(tmp_path: Path) -> tuple[Path, dict]:
+    release = tmp_path / "release"
+    deps = release / "deps"
+    deps.mkdir(parents=True)
+    primary = release / "ullm-aq4-worker"
+    alias = deps / "ullm_aq4_worker-03e49ec754c21dc7"
+    primary.write_bytes(b"worker-hardlink-fixture")
+    primary.chmod(0o755)
+    os.link(primary, alias)
+    metadata = primary.lstat()
+    value = {
+        "schema_version": "ullm.aq4_p2_resident_worker_hardlink_identity.v1",
+        "release_root": str(release),
+        "deps_root": str(deps),
+        "primary_path": str(primary),
+        "alias_path": str(alias),
+        "sha256": hashlib.sha256(primary.read_bytes()).hexdigest(),
+        "expected": {
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": metadata.st_mode,
+            "size": metadata.st_size,
+            "nlink": metadata.st_nlink,
+            "mtime_ns": metadata.st_mtime_ns,
+            "ctime_ns": metadata.st_ctime_ns,
+        },
+    }
+    fixture = tmp_path / "worker-hardlinks.json"
+    fixture.write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    fixture.chmod(0o644)
+    return fixture, value
+
+
+def validate_worker_fixture(path: Path, *, hook=None) -> dict:
+    return BUNDLE.validate_worker_hardlink_fixture(
+        hook=hook,
+        fixture_path=path,
+        expected_fixture_sha=hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+
+
+def test_active_worker_hardlink_fixture_matches_read_only_production() -> None:
+    value = BUNDLE.validate_worker_hardlink_fixture()
+    assert value["exact_path_count"] == 2
+    assert value["unknown_hardlinks_possible"] is False
+    assert value["sha256"] == BUNDLE.EXPECTED_WORKER_SHA
+
+
+def test_worker_hardlink_fixture_accepts_only_exact_two_paths(tmp_path: Path) -> None:
+    fixture, value = worker_hardlink_fixture(tmp_path)
+    observed = validate_worker_fixture(fixture)
+    assert observed["paths"] == [value["primary_path"], value["alias_path"]]
+    assert observed["expected"]["nlink"] == 2
+
+
+@pytest.mark.parametrize("mutation", ("add", "remove", "different_inode", "content", "mode", "alias_name", "root_escape"))
+def test_worker_hardlink_fixture_rejects_initial_mutations(tmp_path: Path, mutation: str) -> None:
+    fixture, value = worker_hardlink_fixture(tmp_path)
+    primary = Path(value["primary_path"])
+    alias = Path(value["alias_path"])
+    if mutation == "add":
+        os.link(primary, primary.parent / "third-worker-link")
+    elif mutation == "remove":
+        alias.unlink()
+    elif mutation == "different_inode":
+        alias.unlink()
+        shutil.copy2(primary, alias)
+    elif mutation == "content":
+        alias.write_bytes(b"changed-worker-content")
+    elif mutation == "mode":
+        primary.chmod(0o777)
+    elif mutation == "alias_name":
+        alias.rename(alias.with_name("unexpected-worker-name"))
+    else:
+        escaped = tmp_path / "escaped-worker"
+        alias.rename(escaped)
+        value["alias_path"] = str(escaped)
+        rewrite_json(fixture, value)
+    with pytest.raises(BUNDLE.BundleError, match="worker hardlink"):
+        validate_worker_fixture(fixture)
+
+
+@pytest.mark.parametrize("mutation", ("add", "remove", "content", "primary_swap"))
+def test_worker_hardlink_fixture_rejects_late_mutations(tmp_path: Path, mutation: str) -> None:
+    fixture, value = worker_hardlink_fixture(tmp_path)
+    primary = Path(value["primary_path"])
+    alias = Path(value["alias_path"])
+
+    def mutate() -> None:
+        if mutation == "add":
+            os.link(primary, primary.parent / "late-third-worker-link")
+        elif mutation == "remove":
+            alias.unlink()
+        elif mutation == "content":
+            alias.write_bytes(b"late-content-change")
+        else:
+            moved = primary.with_name("moved-original-worker")
+            primary.rename(moved)
+            shutil.copy2(moved, primary)
+
+    with pytest.raises((BUNDLE.BundleError, FileNotFoundError), match="worker hardlink|No such file"):
+        validate_worker_fixture(fixture, hook=mutate)
+
+
+def test_worker_hardlink_fixture_rejects_symlinked_deps_root(tmp_path: Path) -> None:
+    fixture, value = worker_hardlink_fixture(tmp_path)
+    deps = Path(value["deps_root"])
+    alias = Path(value["alias_path"])
+    real_deps = deps.with_name("real-deps")
+    deps.rename(real_deps)
+    deps.symlink_to(real_deps, target_is_directory=True)
+    assert (real_deps / alias.name).exists()
+    with pytest.raises(BUNDLE.BundleError, match="symlink"):
+        validate_worker_fixture(fixture)
+
+
 @pytest.fixture(scope="module")
 def trusted_reconstruction():
     return BUNDLE.reconstruct()
@@ -75,7 +193,7 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["actual_live_observations"]["power"] is None
     assert value["actual_live_observations"]["vram"] is None
     assert value["resident_driver"]["source_commit"] == BUNDLE.DRIVER_COMMIT
-    assert value["runner"]["source_commit"] == BUNDLE.SOURCE_COMMIT
+    assert value["runner"]["source_commit"] == BUNDLE.RUNNER_COMMIT
     assert value["historical_predecessor"] == {
         "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
         "status": "superseded_historical_prepared",
