@@ -68,7 +68,9 @@ package_content_sha256
 ```text
 family_exclusive_timing
 d2h_count
+d2h_time_ms
 stream_sync_count
+stream_sync_time_ms
 ```
 
 同じ候補を複数raw inputへ分ける場合、その候補のmeasurementを含む全inputが必要capabilityをtrueにしなければならない。別候補のcapabilityを流用しない。
@@ -94,7 +96,7 @@ stream_sync_count
 
 `baseline_cv`は比率であり、例えば2%は`0.02`とする。`ci95_halfwidth_ms`はbaseline p50と同じmillisecond単位である。`recoverable_family_exclusive_ms`は、同じ測定契約で得た非重複のfamily exclusive時間でなければならない。diagnostic profileの1回実行値と、別の2 warmup + 10 measured p50を混ぜて作らない。
 
-`d2h_count`と`stream_sync_count`は、候補が不要とする場合だけnullを許す。paged KV候補では両方を非負整数として実測し、少なくともいずれかが1件以上の代表promptで正値でなければならない。
+`d2h_count`、`d2h_time_ms`、`stream_sync_count`、`stream_sync_time_ms`は、候補が不要とする場合だけnullを許す。paged KV候補では回数を非負整数、時間を非負のmillisecondとして一次traceから実測し、少なくともいずれかの回数が1件以上の代表promptで正値でなければならない。API traceが方向や同期種別を証明できない場合は0にせず証拠不足として扱う。
 
 固定候補とfamilyの対応は次の通りである。
 

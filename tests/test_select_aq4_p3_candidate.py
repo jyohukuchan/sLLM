@@ -49,7 +49,13 @@ def raw_fixture(candidate_id: str = "paged-kv-table-validation-v1") -> dict[str,
                 "ci95_halfwidth_ms": 1.0,
                 "recoverable_family_exclusive_ms": 10.0,
                 "d2h_count": 2 if candidate_id == "paged-kv-table-validation-v1" else None,
+                "d2h_time_ms": 0.2
+                if candidate_id == "paged-kv-table-validation-v1"
+                else None,
                 "stream_sync_count": 2
+                if candidate_id == "paged-kv-table-validation-v1"
+                else None,
+                "stream_sync_time_ms": 0.3
                 if candidate_id == "paged-kv-table-validation-v1"
                 else None,
             }
@@ -528,6 +534,7 @@ def test_paged_kv_requires_counts_and_observed_transfer_or_sync(tmp_path: Path) 
     missing["capabilities"]["d2h_count"] = False
     for row in missing["measurements"]:
         row["d2h_count"] = None
+        row["d2h_time_ms"] = None
     seal(missing)
     item = candidate(select_raw(tmp_path, missing), "paged-kv-table-validation-v1")
     assert "paged_kv_d2h_count_missing" in item["reason_codes"]

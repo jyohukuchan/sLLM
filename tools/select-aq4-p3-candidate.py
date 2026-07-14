@@ -84,7 +84,9 @@ MEASUREMENT_FIELDS = {
     "ci95_halfwidth_ms",
     "recoverable_family_exclusive_ms",
     "d2h_count",
+    "d2h_time_ms",
     "stream_sync_count",
+    "stream_sync_time_ms",
 }
 PAIR_FIELDS = {
     "candidate_id",
@@ -521,10 +523,18 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
                 "d2h_count": require_count(
                     row["d2h_count"], f"{label}.d2h_count", allow_none=True
                 ),
+                "d2h_time_ms": None
+                if row["d2h_time_ms"] is None
+                else require_number(row["d2h_time_ms"], f"{label}.d2h_time_ms"),
                 "stream_sync_count": require_count(
                     row["stream_sync_count"],
                     f"{label}.stream_sync_count",
                     allow_none=True,
+                ),
+                "stream_sync_time_ms": None
+                if row["stream_sync_time_ms"] is None
+                else require_number(
+                    row["stream_sync_time_ms"], f"{label}.stream_sync_time_ms"
                 ),
             }
         )
@@ -917,7 +927,9 @@ def evaluate_candidate(
                 "noise_floor_n": stable_float(noise_floor),
                 "e_above_n": above_strict(recoverable_share, noise_floor),
                 "d2h_count": row["d2h_count"],
+                "d2h_time_ms": row["d2h_time_ms"],
                 "stream_sync_count": row["stream_sync_count"],
+                "stream_sync_time_ms": row["stream_sync_time_ms"],
             }
         )
     recoverable_e = median(item["recoverable_share_e"] for item in prompt_results) if prompt_results else None
@@ -947,11 +959,13 @@ def evaluate_candidate(
 
     if policy["requires_d2h_count"]:
         if not capabilities.get("d2h_count", False) or any(
-            item["d2h_count"] is None for item in prompt_results
+            item["d2h_count"] is None or item["d2h_time_ms"] is None
+            for item in prompt_results
         ):
             reasons.append("paged_kv_d2h_count_missing")
         if not capabilities.get("stream_sync_count", False) or any(
-            item["stream_sync_count"] is None for item in prompt_results
+            item["stream_sync_count"] is None or item["stream_sync_time_ms"] is None
+            for item in prompt_results
         ):
             reasons.append("paged_kv_stream_sync_count_missing")
         observed = any(
