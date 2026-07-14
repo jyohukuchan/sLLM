@@ -61,6 +61,9 @@ pub trait Qwen35Aq4IntermediateTraceObserver {
     fn observe_decoder_layer(&mut self, layer_index: usize, values: &[f32]) -> Result<(), String>;
 }
 
+/// Upper bound for one reusable f32 row plus its byte decode scratch in the diagnostic visitor.
+pub const QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES: usize = 32 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen35Aq4PrefillInvocation {
     pub layer_index: usize,
@@ -623,33 +626,28 @@ fn read_intermediate_trace_row(
     values: &mut [f32],
     label: &str,
 ) -> Result<(), String> {
-    {
-        // RuntimeBuffer exposes bytes while the reusable scratch row is typed as f32.  The
-        // allocation is exactly `values.len() * 4` bytes and remains live for the copy.
-        let raw = unsafe {
-            std::slice::from_raw_parts_mut(
-                values.as_mut_ptr().cast::<u8>(),
-                std::mem::size_of_val(values),
-            )
-        };
-        buffer
-            .copy_to_host(0, raw, Some(stream))
-            .map_err(|error| format!("failed to copy differential trace {label}: {error}"))?;
-    }
+    let byte_len = std::mem::size_of_val(values);
+    let mut raw = vec![0_u8; byte_len];
+    buffer
+        .copy_to_host(0, &mut raw, Some(stream))
+        .map_err(|error| format!("failed to copy differential trace {label}: {error}"))?;
     stream
         .synchronize()
         .map_err(|error| format!("failed to synchronize differential trace {label}: {error}"))?;
-    if cfg!(target_endian = "big") {
-        for value in values.iter_mut() {
-            *value = f32::from_bits(value.to_bits().swap_bytes());
-        }
-    }
-    for value in values.iter() {
+    let mut chunks = raw.chunks_exact(std::mem::size_of::<f32>());
+    for value in values.iter_mut() {
+        let bytes = chunks
+            .next()
+            .ok_or_else(|| format!("differential trace {label} row is truncated"))?;
+        *value = f32::from_le_bytes(bytes.try_into().expect("f32 row width is fixed"));
         if !value.is_finite() {
             return Err(format!(
                 "differential trace {label} row contains non-finite data"
             ));
         }
+    }
+    if !chunks.remainder().is_empty() {
+        return Err(format!("differential trace {label} row has trailing bytes"));
     }
     Ok(())
 }
@@ -1313,6 +1311,15 @@ impl Qwen35Aq4ModelRuntime {
         observer: &mut dyn Qwen35Aq4IntermediateTraceObserver,
     ) -> Result<(), String> {
         let hidden = self.geometry.hidden;
+        let scratch_bytes = hidden
+            .checked_mul(std::mem::size_of::<f32>() * 2)
+            .ok_or_else(|| "Qwen3.5 AQ4 differential trace scratch size overflows".to_string())?;
+        if scratch_bytes > QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES {
+            return Err(format!(
+                "Qwen3.5 AQ4 differential trace scratch exceeds {} bytes",
+                QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES
+            ));
+        }
         let mut values = vec![0_f32; hidden];
         let embedding = self.embedding.as_ref().ok_or_else(|| {
             "Qwen3.5 AQ4 differential trace has no resident embedding".to_string()

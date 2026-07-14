@@ -21,8 +21,9 @@ use std::process::ExitCode;
 use ullm_engine::inference_api::{CancellationToken, InferenceRequest, SamplingParams};
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{
-    QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4CalibrationObserver,
-    Qwen35Aq4IntermediateTraceObserver, Qwen35Aq4ModelLoadConfig,
+    QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES,
+    QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4CalibrationObserver, Qwen35Aq4IntermediateTraceObserver,
+    Qwen35Aq4ModelLoadConfig,
 };
 use ullm_engine::qwen35_aq4_session::{
     Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
@@ -38,6 +39,26 @@ const LOGIT_COORDINATES: [usize; 32] = [
 ];
 const EOS_TOKEN_IDS: [usize; 2] = [248044, 248046];
 const MAX_ROW_BYTES: usize = 32 * 1024;
+const MAX_CASES: usize = 3;
+const MAX_ROWS: usize = 3;
+const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+const MAX_OUTPUT_BYTES: u64 = 96 * 1024;
+const EXPECTED_CASES: [(&str, usize, &str, usize, &'static [usize]); 2] = [
+    (
+        "fixture-prompt-0",
+        3,
+        "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        2,
+        &[220, 16],
+    ),
+    (
+        "fixture-prompt-1",
+        2,
+        "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        1,
+        &[15],
+    ),
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -294,9 +315,139 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn read_bounded_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("failed to stat {label}: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{label} must be a regular file"));
+    }
+    if metadata.len() > MAX_INPUT_BYTES {
+        return Err(format!(
+            "{label} exceeds the {MAX_INPUT_BYTES}-byte input bound"
+        ));
+    }
+    let file = File::open(path).map_err(|error| format!("failed to read {label}: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {label}: {error}"))?;
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return Err(format!(
+            "{label} exceeds the {MAX_INPUT_BYTES}-byte input bound"
+        ));
+    }
+    Ok(bytes)
+}
+
 fn load_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T, String> {
-    let bytes = fs::read(path).map_err(|error| format!("failed to read {label}: {error}"))?;
+    let bytes = read_bounded_file(path, label)?;
     serde_json::from_slice(&bytes).map_err(|error| format!("failed to decode {label}: {error}"))
+}
+
+fn validate_inputs(
+    cases: &CasesFile,
+    replay: &ReplayFile,
+) -> Result<(BTreeMap<String, Vec<usize>>, usize), String> {
+    if cases.cases.is_empty() || cases.cases.len() > MAX_CASES {
+        return Err(format!("cases must contain 1..={MAX_CASES} entries"));
+    }
+    let mut case_by_id = BTreeMap::new();
+    for case in &cases.cases {
+        if case_by_id.insert(case.case_id.clone(), case).is_some() {
+            return Err(format!("duplicate case_id {}", case.case_id));
+        }
+    }
+    if case_by_id.len() != EXPECTED_CASES.len() {
+        return Err(format!(
+            "cases must contain exactly the {} hash-bound fixture IDs",
+            EXPECTED_CASES.len()
+        ));
+    }
+    let mut rows = 0usize;
+    for (case_id, prompt_len, prompt_hash, step_count, _) in EXPECTED_CASES {
+        let case = case_by_id
+            .get(case_id)
+            .ok_or_else(|| format!("cases is missing expected case_id {case_id}"))?;
+        if case.prompt_token_ids.len() != prompt_len
+            || canonical_token_hash(&case.prompt_token_ids)? != prompt_hash
+        {
+            return Err(format!("prompt hash/count differs for {case_id}"));
+        }
+        if case.step_count != step_count {
+            return Err(format!(
+                "step_count differs for {case_id}: got {} expected {step_count}",
+                case.step_count
+            ));
+        }
+        rows = rows
+            .checked_add(case.step_count)
+            .ok_or_else(|| "total trace row count overflows".to_string())?;
+    }
+    if rows != MAX_ROWS {
+        return Err(format!(
+            "hash-bound fixture must emit exactly {MAX_ROWS} rows, got {rows}"
+        ));
+    }
+
+    let mut replay_by_id = BTreeMap::new();
+    for replay_case in &replay.cases {
+        if replay_by_id
+            .insert(replay_case.case_id.clone(), replay_case.token_ids.clone())
+            .is_some()
+        {
+            return Err(format!("duplicate replay case_id {}", replay_case.case_id));
+        }
+    }
+    if replay_by_id.len() != EXPECTED_CASES.len() {
+        return Err(format!(
+            "replay must contain exactly the {} hash-bound fixture IDs",
+            EXPECTED_CASES.len()
+        ));
+    }
+    for (case_id, _, _, _, expected_tokens) in EXPECTED_CASES {
+        let actual = replay_by_id
+            .get(case_id)
+            .ok_or_else(|| format!("replay is missing expected case_id {case_id}"))?;
+        if actual.as_slice() != expected_tokens {
+            return Err(format!("replay token coverage differs for {case_id}"));
+        }
+    }
+    Ok((replay_by_id, rows))
+}
+
+fn expected_case_bindings() -> Result<Vec<Value>, String> {
+    EXPECTED_CASES
+        .iter()
+        .map(
+            |(case_id, prompt_len, prompt_hash, step_count, replay_tokens)| {
+                Ok(json!({
+                    "case_id": case_id,
+                    "prompt_token_count": prompt_len,
+                    "prompt_token_ids_sha256": prompt_hash,
+                    "step_count": step_count,
+                    "replay_token_ids_sha256": canonical_token_hash(replay_tokens)?,
+                    "replay_source_sequence_sha256":
+                        Qwen35Aq4CalibrationReplay::source_sequence_sha256_for_tokens(replay_tokens)?,
+                }))
+            },
+        )
+        .collect()
+}
+
+fn total_output_bytes(root: &Path) -> Result<u64, String> {
+    let mut total = 0_u64;
+    for entry in fs::read_dir(root).map_err(|error| format!("failed to list output: {error}"))? {
+        let entry = entry.map_err(|error| format!("failed to inspect output: {error}"))?;
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| format!("failed to stat output entry: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err("trace output contains a non-regular entry".to_string());
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| "trace output byte count overflows".to_string())?;
+    }
+    Ok(total)
 }
 
 fn run(
@@ -318,27 +469,46 @@ fn run(
     }
     let cases: CasesFile = load_json(&cases_path, "cases")?;
     let replay: ReplayFile = load_json(&replay_path, "replay")?;
-    let replay_by_id = replay
-        .cases
-        .into_iter()
-        .map(|case| (case.case_id, case.token_ids))
-        .collect::<BTreeMap<_, _>>();
-    if cases.cases.is_empty()
-        || cases
-            .cases
-            .iter()
-            .any(|case| case.step_count == 0 || case.step_count > 128)
-    {
-        return Err("cases must contain bounded positive step counts".to_string());
-    }
-    for case in &cases.cases {
-        let replay_tokens = replay_by_id
-            .get(&case.case_id)
-            .ok_or_else(|| format!("replay is missing {}", case.case_id))?;
-        if replay_tokens.len() != case.step_count {
-            return Err(format!("replay length differs for {}", case.case_id));
-        }
-    }
+    let (replay_by_id, total_rows) = validate_inputs(&cases, &replay)?;
+    let cases_sha256 = sha256_file(&cases_path)?;
+    let replay_sha256 = sha256_file(&replay_path)?;
+    let expected_bindings = expected_case_bindings()?;
+    let actual_replay_bindings = replay_by_id
+        .iter()
+        .map(|(case_id, token_ids)| {
+            Ok(json!({
+                "case_id": case_id,
+                "token_ids_sha256": canonical_token_hash(token_ids)?,
+                "source_sequence_sha256":
+                    Qwen35Aq4CalibrationReplay::source_sequence_sha256_for_tokens(token_ids)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let tool_binary =
+        env::current_exe().map_err(|error| format!("failed to resolve trace binary: {error}"))?;
+    let tool_binary_sha256 = sha256_file(&tool_binary)?;
+    let active_manifest_path = env::var("ULLM_SERVED_MODEL_MANIFEST")
+        .unwrap_or_else(|_| "/etc/ullm/served-models/active.json".to_string());
+    let active_manifest = PathBuf::from(&active_manifest_path);
+    let active_manifest_sha256 = if active_manifest.is_file() {
+        Some(sha256_file(&active_manifest)?)
+    } else {
+        None
+    };
+    let package_manifest = package_dir.join("manifest.json");
+    let package_manifest_sha256 = sha256_file(&package_manifest)?;
+    let guard_set = json!({
+        "explicit_flag": "--enable-intermediate-trace",
+        "max_cases": MAX_CASES,
+        "max_rows": MAX_ROWS,
+        "max_row_bytes": MAX_ROW_BYTES,
+        "max_output_bytes": MAX_OUTPUT_BYTES,
+        "scratch_bytes": ullm_engine::qwen35_aq4_model_runtime::QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES,
+    });
+    let guard_set_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&guard_set).map_err(|error| error.to_string())?)
+    );
     let max_steps = cases
         .cases
         .iter()
@@ -361,6 +531,12 @@ fn run(
     session_config.rotary_dim = 64;
     session_config.rope_base = 10_000_000.0;
     let mut session = Qwen35Aq4InferenceSession::load(model_config, session_config)?;
+    let device_identity = json!({
+        "index": device_index,
+        "name": session.model().device_name(),
+        "backend": session.model().backend(),
+        "total_global_mem": session.model().device_total_global_mem(),
+    });
     let temporary = output.with_extension(format!("incomplete-{}", std::process::id()));
     fs::create_dir_all(&temporary)
         .map_err(|error| format!("failed to create trace temporary root: {error}"))?;
@@ -373,6 +549,7 @@ fn run(
                 .open(&payload_path)
                 .map_err(|error| format!("failed to create payload: {error}"))?,
         );
+        let mut payload_bytes = 0_u64;
         for case in &cases.cases {
             let replay_tokens = replay_by_id
                 .get(&case.case_id)
@@ -400,11 +577,8 @@ fn run(
                             .model_mut()
                             .visit_intermediate_trace(&mut collector)?;
                         session.observe_prepared_calibration(&prepared, &mut collector)?;
-                        let context_tokens = if step == 0 {
-                            case.prompt_token_ids.clone()
-                        } else {
-                            vec![replay_tokens[step - 1]]
-                        };
+                        let mut context_tokens = case.prompt_token_ids.clone();
+                        context_tokens.extend_from_slice(&replay_tokens[..step]);
                         let record = collector.finish_record(
                             &case.case_id,
                             step,
@@ -412,11 +586,23 @@ fn run(
                             canonical_token_hash(&context_tokens)?,
                             token_id,
                         )?;
-                        serde_json::to_writer(&mut payload, &record)
+                        let encoded =
+                            serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+                        let next_payload_bytes = payload_bytes
+                            .checked_add(encoded.len() as u64 + 1)
+                            .ok_or_else(|| "trace payload byte count overflows".to_string())?;
+                        if next_payload_bytes > MAX_OUTPUT_BYTES {
+                            return Err(format!(
+                                "trace output exceeds {MAX_OUTPUT_BYTES} bytes before publication"
+                            ));
+                        }
+                        payload
+                            .write_all(&encoded)
                             .map_err(|error| error.to_string())?;
                         payload
                             .write_all(b"\n")
                             .map_err(|error| error.to_string())?;
+                        payload_bytes = next_payload_bytes;
                         session.publish_calibration_prepared(prepared, |_| Ok(()))?;
                         step += 1;
                         if session.status() == Qwen35Aq4SessionStatus::Terminal {
@@ -444,7 +630,23 @@ fn run(
             "cases_path": cases_path,
             "replay_path": replay_path,
             "device_index": device_index,
-            "rows": cases.cases.iter().map(|case| case.step_count).sum::<usize>(),
+            "rows": total_rows,
+            "input_binding": {
+                "cases_sha256": cases_sha256,
+                "replay_sha256": replay_sha256,
+                "expected_cases": expected_bindings,
+                "actual_replay_sequences": actual_replay_bindings,
+            },
+            "identity": {
+                "tool_binary": tool_binary,
+                "tool_binary_sha256": tool_binary_sha256,
+                "build_git_commit": env::var("ULLM_BUILD_GIT_COMMIT").unwrap_or_else(|_| "unknown".to_string()),
+                "active_manifest_path": active_manifest_path,
+                "active_manifest_sha256": active_manifest_sha256,
+                "package_manifest_sha256": package_manifest_sha256,
+                "guard_set_sha256": guard_set_sha256,
+                "device": device_identity,
+            },
             "stage_contract": {"embedding": true, "decoder_layers": 32, "final_norm": true, "lm_head": true, "hidden_coordinates": HIDDEN_COORDINATES, "logit_coordinates": LOGIT_COORDINATES},
             "production_worker_unchanged": true,
         });
@@ -466,6 +668,12 @@ fn run(
             .map(|name| Ok(format!("{}  {name}\n", sha256_file(&temporary.join(name))?)))
             .collect::<Result<String, String>>()?;
         fs::write(temporary.join("SHA256SUMS"), sums).map_err(|error| error.to_string())?;
+        let total_bytes = total_output_bytes(&temporary)?;
+        if total_bytes > MAX_OUTPUT_BYTES {
+            return Err(format!(
+                "trace output total {total_bytes} exceeds {MAX_OUTPUT_BYTES} bytes"
+            ));
+        }
         fs::rename(&temporary, &output)
             .map_err(|error| format!("failed to publish trace root: {error}"))
     })();
@@ -508,6 +716,37 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_inputs() -> (CasesFile, ReplayFile) {
+        (
+            CasesFile {
+                cases: vec![
+                    Case {
+                        case_id: "fixture-prompt-0".to_string(),
+                        prompt_token_ids: vec![11, 12, 13],
+                        step_count: 2,
+                    },
+                    Case {
+                        case_id: "fixture-prompt-1".to_string(),
+                        prompt_token_ids: vec![21, 22],
+                        step_count: 1,
+                    },
+                ],
+            },
+            ReplayFile {
+                cases: vec![
+                    ReplayCase {
+                        case_id: "fixture-prompt-0".to_string(),
+                        token_ids: vec![220, 16],
+                    },
+                    ReplayCase {
+                        case_id: "fixture-prompt-1".to_string(),
+                        token_ids: vec![15],
+                    },
+                ],
+            },
+        )
+    }
 
     #[test]
     fn intermediate_trace_is_explicitly_opt_in() {
@@ -562,5 +801,120 @@ mod tests {
         assert_eq!(row["context_length"], 3);
         assert_eq!(row["stages"][33]["stage"], "final_norm");
         assert_eq!(row["stages"][34]["stage"], "lm_head");
+    }
+
+    #[test]
+    fn three_row_fixture_and_full_context_hashes_are_bound() {
+        let (cases, replay) = valid_inputs();
+        let (replay_by_id, rows) = validate_inputs(&cases, &replay).expect("fixture is valid");
+        assert_eq!(rows, MAX_ROWS);
+        assert_eq!(
+            canonical_token_hash(&cases.cases[0].prompt_token_ids).unwrap(),
+            "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c"
+        );
+        let mut context = cases.cases[0].prompt_token_ids.clone();
+        context.extend_from_slice(&replay_by_id["fixture-prompt-0"][..1]);
+        assert_eq!(context.len(), 4);
+        assert_eq!(
+            canonical_token_hash(&context).unwrap(),
+            "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249"
+        );
+        assert_eq!(
+            canonical_token_hash(&cases.cases[1].prompt_token_ids).unwrap(),
+            "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6"
+        );
+        assert_eq!(expected_case_bindings().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn input_guard_rejects_overlimit_duplicate_missing_and_extra_cases() {
+        let (mut cases, replay) = valid_inputs();
+        cases.cases.push(Case {
+            case_id: "overflow".to_string(),
+            prompt_token_ids: vec![1],
+            step_count: 1,
+        });
+        cases.cases.push(Case {
+            case_id: "overflow-2".to_string(),
+            prompt_token_ids: vec![2],
+            step_count: 1,
+        });
+        assert!(validate_inputs(&cases, &replay).is_err());
+
+        let (mut duplicate_cases, replay) = valid_inputs();
+        duplicate_cases.cases[1].case_id = duplicate_cases.cases[0].case_id.clone();
+        assert!(
+            validate_inputs(&duplicate_cases, &replay)
+                .expect_err("duplicate IDs must reject")
+                .contains("duplicate case_id")
+        );
+
+        let (mut missing_cases, replay) = valid_inputs();
+        missing_cases.cases.pop();
+        assert!(
+            validate_inputs(&missing_cases, &replay)
+                .expect_err("missing ID must reject")
+                .contains("exactly")
+        );
+
+        let (mut extra_cases, replay) = valid_inputs();
+        extra_cases.cases[1].case_id = "unexpected".to_string();
+        assert!(
+            validate_inputs(&extra_cases, &replay)
+                .expect_err("extra ID must reject")
+                .contains("missing expected")
+        );
+    }
+
+    #[test]
+    fn input_guard_rejects_duplicate_replay_and_oversized_file() {
+        let (cases, mut replay) = valid_inputs();
+        replay.cases.push(ReplayCase {
+            case_id: "fixture-prompt-0".to_string(),
+            token_ids: vec![220, 16],
+        });
+        assert!(
+            validate_inputs(&cases, &replay)
+                .expect_err("duplicate replay IDs must reject")
+                .contains("duplicate replay")
+        );
+
+        let path = env::temp_dir().join(format!(
+            "ullm-aq4-differential-trace-oversized-{}",
+            std::process::id()
+        ));
+        fs::write(&path, vec![b'x'; (MAX_INPUT_BYTES + 1) as usize])
+            .expect("oversized test input should write");
+        let result = read_bounded_file(&path, "oversized test");
+        let run_result = run(
+            PathBuf::from("missing-package"),
+            path.clone(),
+            PathBuf::from("missing-replay"),
+            PathBuf::from(format!("missing-output-{}", std::process::id())),
+            0,
+            true,
+        );
+        fs::remove_file(&path).expect("oversized test input should remove");
+        assert!(
+            result
+                .expect_err("oversized input must reject")
+                .contains("input bound")
+        );
+        assert!(
+            run_result
+                .expect_err("run must reject oversized input before model load")
+                .contains("input bound")
+        );
+    }
+
+    #[test]
+    fn scratch_and_output_limits_are_explicit() {
+        assert_eq!(QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES, 32 * 1024);
+        assert!(
+            4096 * std::mem::size_of::<f32>() * 2 <= QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES
+        );
+        assert_eq!(MAX_ROWS, 3);
+        assert_eq!(MAX_ROW_BYTES, 32 * 1024);
+        assert_eq!(MAX_OUTPUT_BYTES, 96 * 1024);
     }
 }
