@@ -1862,9 +1862,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 270, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 204, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 287, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 221, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
