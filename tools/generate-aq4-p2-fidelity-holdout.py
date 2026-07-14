@@ -46,6 +46,7 @@ METRICS = {
     "hidden_max_abs": {"direction": "lower", "aggregation": "mean", "margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
     "quality_proxy_score": {"direction": "higher", "aggregation": "mean", "margin": 0.01, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
 }
+BOUNDED_UNIT_METRICS = {"token_agreement_rate", "topk_overlap_rate_k10", "logits_cosine", "hidden_cosine", "quality_proxy_score"}
 
 
 class ProtocolError(ValueError):
@@ -216,7 +217,7 @@ def policy() -> dict[str, Any]:
         "attempt2_threshold_source_forbidden": True, "observed_attempt2_values_forbidden": True, "attempt2_artifact_ids_forbidden": sorted(ATTEMPT2_CASE_IDS), "attempt2_context_hashes_forbidden": sorted(ATTEMPT2_CONTEXT_HASHES),
         "calibration_subset_only_for_active_bf16_envelope": True, "holdout_evaluation_allowed_once": True, "candidate_active_behavioral_gate": {"mode": "exact", "mismatch_action": "no-go"},
         "split": {"strata_fields": list(STRATA_FIELDS), "stratum_size": 6, "calibration_per_stratum": 3, "holdout_per_stratum": 3, "total_cases": 48, "calibration_cases": 24, "holdout_cases": 24},
-        "metrics": {name: {**spec, "formula": ("bound=max(absolute_floor, calibration_mean-margin); null floor means no invented token floor" if spec["direction"] == "higher" else "bound=min(absolute_ceiling, calibration_mean+margin)")} for name, spec in METRICS.items()},
+        "metrics": {name: {**spec, "observed_domain": "[0,1]" if name in BOUNDED_UNIT_METRICS else "[0,+inf)", "formula": ("bound=max(absolute_floor, calibration_mean-margin); null floor means no invented token floor" if spec["direction"] == "higher" else "bound=min(absolute_ceiling, calibration_mean+margin)")} for name, spec in METRICS.items()},
         "quality_task": {"kind": "teacher_forced_proxy", "score": "normalized_source_token_logit_or_rank_score", "task_fixture_identity_required": True, "natural_language_suite": "optional_separate_artifact", "no_regression_against_calibration_bound": True},
         "non_vacuity": {"reason": "No Qwen3.5 AQ4 acceptance artifact supplies an absolute token-exact floor; structural floors/ceilings are fixed for continuous fidelity metrics, while token/quality floors remain calibration-derived."},
         "forbidden_threshold_sources": ["attempt2 differential-trace observed values", "attempt2 rows/payload/VRAM/power/producer summaries"],
@@ -321,7 +322,10 @@ def freeze(args: argparse.Namespace) -> None:
         if not isinstance(values, dict):
             raise ProtocolError("calibration row metrics are missing")
         for name in METRICS:
-            aggregate[name].append(finite_number(values.get(name), f"{item['case_id']}.{name}"))
+            number = finite_number(values.get(name), f"{item['case_id']}.{name}")
+            if number < 0 or (name in BOUNDED_UNIT_METRICS and number > 1):
+                raise ProtocolError(f"{item['case_id']}.{name} is outside its frozen domain")
+            aggregate[name].append(number)
     derived: dict[str, Any] = {}
     for name, spec in METRICS.items():
         if len(aggregate[name]) < spec["sample_minimum"]:
