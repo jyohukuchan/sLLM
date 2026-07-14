@@ -1,0 +1,64 @@
+{
+  "schema_version": "ullm.aq4_served_worker_detach_result.v1",
+  "operation": "production_worker_single_link_detach",
+  "worker_path": "target/reasoning-v2/release/ullm-aq4-worker",
+  "hardlink_alias": "target/reasoning-v2/release/deps/ullm_aq4_worker-03e49ec754c21dc7",
+  "pre_detach": {
+    "worker_device": 66306,
+    "worker_inode": 10506405,
+    "worker_nlink": 2,
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "owner_uid": 1000,
+    "owner_gid": 1000,
+    "mode": "0775",
+    "bytes": 3729520,
+    "alias_same_inode": true
+  },
+  "post_detach": {
+    "worker_device": 66306,
+    "worker_inode": 10490132,
+    "worker_nlink": 1,
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "owner_uid": 1000,
+    "owner_gid": 1000,
+    "mode": "0775",
+    "bytes": 3729520,
+    "alias_device": 66306,
+    "alias_inode": 10506405,
+    "alias_nlink": 1,
+    "alias_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "service_postcheck": {
+    "unit": "ullm-openai.service",
+    "active_state": "active",
+    "sub_state": "running",
+    "main_pid": 782385,
+    "n_restarts": 0,
+    "runtime_dir": {
+      "path": "/run/ullm",
+      "mode": "0750",
+      "uid": 1000,
+      "gid": 1000,
+      "type": "directory"
+    },
+    "runtime_lock": {
+      "path": "/run/ullm/r9700.lock",
+      "inode": 752751,
+      "nlink": 1,
+      "mode": "0600",
+      "uid": 1000,
+      "gid": 1000,
+      "size": 0,
+      "type": "regular empty file"
+    }
+  },
+  "identity_postcheck": {
+    "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "rollback_executed": false,
+  "service_stop_or_restart": false,
+  "gpu_capture_executed": false,
+  "next_gate_state": "unexecuted"
+}

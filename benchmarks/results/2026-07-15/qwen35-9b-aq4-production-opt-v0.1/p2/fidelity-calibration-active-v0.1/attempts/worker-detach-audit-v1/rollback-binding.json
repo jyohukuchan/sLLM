@@ -1,6 +1,6 @@
 {
   "schema_version": "ullm.aq4_served_worker_detach_audit.v1",
-  "status": "not_executed",
+  "status": "completed",
   "worker_path": "target/reasoning-v2/release/ullm-aq4-worker",
   "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
   "worker_stat": {
@@ -21,8 +21,42 @@
     "owner_gid": 1000,
     "mode": "0775"
   },
+  "post_detach": {
+    "worker_regular": true,
+    "worker_device": 66306,
+    "worker_inode": 10490132,
+    "worker_nlink": 1,
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "owner_uid": 1000,
+    "owner_gid": 1000,
+    "mode": "0775",
+    "bytes": 3729520,
+    "alias_regular": true,
+    "alias_device": 66306,
+    "alias_inode": 10506405,
+    "alias_nlink": 1,
+    "alias_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "service_active_state": "active",
+    "service_sub_state": "running",
+    "service_main_pid": 782385,
+    "service_n_restarts": 0,
+    "runtime_dir_mode": "0750",
+    "runtime_dir_uid": 1000,
+    "runtime_dir_gid": 1000,
+    "runtime_lock_inode": 752751,
+    "runtime_lock_nlink": 1,
+    "runtime_lock_mode": "0600",
+    "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+  },
   "detach_procedure": "same-directory temp copy; preserve owner/mode; verify SHA, regular-file, and nlink=1; atomic mv -T to worker_path",
   "rollback_procedure": "copy hardlink_alias to same-directory temp; verify SHA, owner/mode, and nlink=1; atomic mv -T to worker_path",
   "process_boundary": "running process retains old inode; next service start reads worker_path new inode",
-  "production_change_performed": false
+  "production_change_performed": true,
+  "operation": {
+    "method": "same-directory temp copy with preserved mode/owner, SHA/regular-file/nlink verification, and atomic mv -T",
+    "rollback_executed": false,
+    "service_stop_or_restart": false,
+    "gpu_capture_executed": false
+  }
 }
