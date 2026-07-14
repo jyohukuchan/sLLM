@@ -186,8 +186,9 @@ def test_execute_run_marker_surrounds_send_receive_and_validation(monkeypatch) -
     monkeypatch.setattr(BATCH, "_recv", receive)
     monkeypatch.setattr(BATCH, "validate_run", validate)
     case = {"case_id": "case-a", "case_sha256": "a" * 64}
+    audit = type("Audit", (), {"warmup_completed": 0, "measured_completed": 0})()
     value = BATCH.execute_resident_run(
-        object(), case, "resident-session", 2, "measured", 1.0, Recorder(), "profile-run"
+        object(), audit, case, "resident-session", 2, "measured", 1.0, Recorder(), "profile-run"
     )
     assert value["run_index"] == 2
     assert events == ["push", "send", "receive", "validate", "pop"]
@@ -200,7 +201,7 @@ def test_execute_run_marker_surrounds_send_receive_and_validation(monkeypatch) -
     )
     with pytest.raises(BATCH.BatchError, match="OOM"):
         BATCH.execute_resident_run(
-            object(), case, "resident-session", 2, "measured", 1.0, Recorder(), "profile-run"
+            object(), audit, case, "resident-session", 2, "measured", 1.0, Recorder(), "profile-run"
         )
     assert events == ["push", "send", "receive", "pop"]
 
