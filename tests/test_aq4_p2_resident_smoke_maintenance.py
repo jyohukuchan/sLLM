@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -435,6 +436,37 @@ def test_stopped_gate_deadline_crossing_probe_saves_timeout_evidence_and_restore
     assert evidence["restore"]["passed"] is True
 
 
+def test_stopped_gate_malformed_amd_schema_saves_secret_free_shape_and_raw_sha(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    raw = b'[{"gpu":2,"process_list":[{"process_info":"N/A"}]}]'
+
+    def malformed_observation(old_worker_pid, old_service_pid, run, control):
+        completed, _ = control.command(
+            lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, raw, b""),
+            ["fake-malformed-amd-process"],
+            "stopped-poll-amd-process",
+        )
+        HARNESS.LAUNCHER.parse_amd_process_owners(completed.stdout)
+        raise AssertionError("strict parser unexpectedly accepted malformed sentinel")
+
+    dependencies = replace(runtime.dependencies(), stopped_observation=malformed_observation)
+    output = tmp_path / "malformed-amd-process"
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), output, dependencies)
+    assert code == 1 and evidence["status"] == "failed"
+    document = _poll_documents(output, evidence)[-1]
+    assert document["decision"] == "terminal_failure"
+    assert document["source_classification"] == {"observer": "amd_process_schema"}
+    diagnostic = document["observation"]["parse_diagnostic"]
+    probe = document["observation"]["partial_probes"][-1]
+    assert diagnostic["reason_code"] == "sentinel_mixed_or_unknown"
+    assert diagnostic["top_level_type"] == "list"
+    assert diagnostic["root_keys"] == ["gpu", "process_list"]
+    assert diagnostic["raw_sha256"] == probe["stdout_sha256"] == HARNESS.sha_bytes(raw)
+    assert raw not in HARNESS.pretty(document)
+    assert evidence["process_counts"]["launcher"] == 0
+    assert evidence["restore"]["passed"] is True
+
+
 def test_stopped_poll_runs_due_keepalive_after_blocked_probe() -> None:
     now = 0
     keepalives: list[tuple[int, float, int]] = []
@@ -490,7 +522,13 @@ def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdli
         if argv[0] == str(HARNESS.LAUNCHER.PGREP):
             return subprocess.CompletedProcess(argv, 1, b"", b"")
         if argv[1:3] == ["process", "--gpu"]:
-            value = [{"gpu": HARNESS.LAUNCHER.AMD_SMI_INDEX, "process_list": [{"process_info": {"pid": old_worker_pid}}]}]
+            value = [{"gpu": HARNESS.LAUNCHER.AMD_SMI_INDEX, "process_list": [{"process_info": {
+                "name": str(HARNESS.WORKER),
+                "pid": old_worker_pid,
+                "mem_usage": {"value": 7_351_832_576, "unit": "B"},
+                "cu_occupancy": "N/A",
+                "evicted_time": {"value": 682, "unit": "ms"},
+            }}]}]
             return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
         if argv[1:3] == ["static", "--gpu"]:
             value = {"gpu_data": [{"gpu": HARNESS.LAUNCHER.AMD_SMI_INDEX, "vram": {"size": {"value": 32624, "unit": "MB"}}}]}
@@ -505,6 +543,8 @@ def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdli
     assert value["vram"] == {"total_bytes": 32_624_000_000, "used_bytes": None, "free_bytes": None, "headroom_bytes": None}
     assert len(value["probes"]) == 5
     assert all(len(item["stdout_sha256"]) == 64 and len(item["stderr_sha256"]) == 64 for item in value["probes"])
+    assert value["virtual_sources"]["amd_smi_owners"]["reason_code"] == "accepted_owner_records"
+    assert len(value["virtual_sources"]["amd_smi_owners"]["raw_sha256"]) == 64
     assert {item["pid"] for item in value["proc_cmdlines"]} == {old_worker_pid, old_service_pid}
     assert all(item["raw_recorded"] is False for item in value["proc_cmdlines"])
 

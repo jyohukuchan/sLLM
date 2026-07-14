@@ -31,10 +31,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "eec6922fa9c90267213d2749c5dc816be54de527"
-LAUNCHER_TREE = "f6cef14d1e2a75dc1a12371d2a8e2a754d506482"
-LAUNCHER_GIT_BLOB = "c422e4235a2ee6595cf43656c573b7e863489f9e"
-LAUNCHER_SHA = "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
+LAUNCHER_COMMIT = "0994367b08534909ff42771ee5b080ec56ca4d01"
+LAUNCHER_TREE = "602605dafde92876ceffcb8f79c825934509b549"
+LAUNCHER_GIT_BLOB = "c60a80299a8ac281875fe45b763e52dfed7c9a29"
+LAUNCHER_SHA = "9e1e7ddd3ec9911326aa7eb81702219766ff1422494fef22cc6a2be87154c036"
 RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
 RUNNER_SHA = "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -566,17 +566,15 @@ def default_lock_busy() -> bool:
 
 
 def default_owner_probe(run: Callable[..., subprocess.CompletedProcess[bytes]], worker_pid: int) -> dict[str, Any]:
-    completed, _ = _command(run, [str(LAUNCHER.AMD_SMI), "process", "--gpu", "2", "--general", "--json"], "gpu-owner")
-    try:
-        value = json.loads(completed.stdout)
-        process_list = value[0]["process_list"]
-        amd_pids = sorted(item["process_info"]["pid"] for item in process_list)
-    except (UnicodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as error:
-        raise HarnessError("GPU owner schema differs") from error
+    completed, record = _command(run, [str(LAUNCHER.AMD_SMI), "process", "--gpu", "2", "--general", "--json"], "gpu-owner")
+    if completed.returncode != 0 or completed.stderr:
+        raise HarnessError("GPU owner probe failed")
+    parsed = LAUNCHER.parse_amd_process_owners(completed.stdout)
+    amd_pids = parsed["owners"]
     kfd_pids = LAUNCHER._kfd_owners()
-    if completed.returncode != 0 or completed.stderr or amd_pids != [worker_pid] or kfd_pids != [worker_pid]:
+    if amd_pids != [worker_pid] or kfd_pids != [worker_pid]:
         raise HarnessError("restored worker does not uniquely own target GPU")
-    return {"amd_smi": amd_pids, "kfd": kfd_pids}
+    return {"amd_smi": amd_pids, "amd_smi_process": parsed["diagnostic"], "amd_smi_probe": record, "kfd": kfd_pids}
 
 
 def _poll_service_value(completed: subprocess.CompletedProcess[bytes], unit: str) -> dict[str, Any]:
@@ -830,14 +828,10 @@ class StoppedGateObserver:
         process_command = [str(LAUNCHER.AMD_SMI), "process", "--gpu", str(LAUNCHER.AMD_SMI_INDEX), "--general", "--json"]
         processes, record = control.command(run, process_command, "stopped-poll-amd-process")
         probes.append(record)
-        try:
-            process_value = json.loads(processes.stdout, object_pairs_hook=LAUNCHER.pairs)
-            process_list = process_value[0]["process_list"]
-            amd_smi_owners = sorted({int(item["process_info"]["pid"]) for item in process_list})
-        except (UnicodeError, json.JSONDecodeError, LAUNCHER.LauncherError, KeyError, IndexError, TypeError, ValueError) as error:
-            raise HarnessError("stopped poll AMD process schema differs") from error
-        if processes.returncode != 0 or processes.stderr or not isinstance(process_value, list) or len(process_value) != 1 or process_value[0].get("gpu") != LAUNCHER.AMD_SMI_INDEX or any(pid <= 0 for pid in amd_smi_owners):
-            raise HarnessError("stopped poll AMD process probe differs")
+        if processes.returncode != 0 or processes.stderr:
+            raise HarnessError("stopped poll AMD process probe failed")
+        parsed_processes = LAUNCHER.parse_amd_process_owners(processes.stdout)
+        amd_smi_owners = parsed_processes["owners"]
         static_command = [str(LAUNCHER.AMD_SMI), "static", "--gpu", str(LAUNCHER.AMD_SMI_INDEX), "--vram", "--json"]
         static, record = control.command(run, static_command, "stopped-poll-amd-vram")
         probes.append(record)
@@ -871,6 +865,7 @@ class StoppedGateObserver:
             "proc_cmdlines": proc_cmdlines,
             "probes": probes,
             "virtual_sources": {
+                "amd_smi_owners": parsed_processes["diagnostic"],
                 "kfd_owners": {"raw_sha256": sha_bytes(canonical(kfd_owners)), "parsed_pids": kfd_owners},
                 "lock_holders": {"raw_sha256": lock["source_sha256"], "raw_bytes": lock["source_bytes"], "parsed_pids": lock["holder_pids"]},
             },
@@ -999,6 +994,16 @@ def poll_stopped_gates(
             }
             observation_completed_ns = dependencies.monotonic_ns()
             decision, reason, classifications = "keepalive_failure", "stopped gate sudo keepalive failed", {"observer": "sudo_keepalive"}
+        except LAUNCHER.AmdProcessSchemaError as error:
+            observation = {
+                "captured_unix_ns": time.time_ns(),
+                "error_type": type(error).__name__,
+                "parse_diagnostic": error.diagnostic,
+                "partial_probes": list(control.probes),
+                "secret_material_recorded": False,
+            }
+            observation_completed_ns = dependencies.monotonic_ns()
+            decision, reason, classifications = "terminal_failure", f"stopped AMD process schema rejected: {error.diagnostic['reason_code']}", {"observer": "amd_process_schema"}
         except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
             observation = {
                 "captured_unix_ns": time.time_ns(),
@@ -1412,9 +1417,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 260, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 194, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 270, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 204, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
