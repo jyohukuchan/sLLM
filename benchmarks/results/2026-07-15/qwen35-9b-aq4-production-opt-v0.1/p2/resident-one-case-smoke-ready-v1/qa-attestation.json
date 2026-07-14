@@ -8,6 +8,8 @@
     "safety-success-start-failure-partial",
     "validator-runner-finalize-toctou",
     "identity-and-hash-bindings",
+    "strict-amd-process-active-owner-and-zero-sentinel-schema",
+    "secret-free-amd-process-rejection-shape-and-raw-sha",
     "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection",
     "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive",
     "immutable-streamed-stop-poll-evidence",
@@ -18,8 +20,8 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "eec6922fa9c90267213d2749c5dc816be54de527",
-    "sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
+    "commit": "0994367b08534909ff42771ee5b080ec56ca4d01",
+    "sha256": "9e1e7ddd3ec9911326aa7eb81702219766ff1422494fef22cc6a2be87154c036"
   },
   "manual_boundary_count": 15,
   "runner": {
@@ -29,10 +31,10 @@
   "runner_strict_negative_count": 18,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 260,
+  "test_count": 270,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 194,
+    "existing_and_profile_regression": 204,
     "marker_chain": 55
   }
 }

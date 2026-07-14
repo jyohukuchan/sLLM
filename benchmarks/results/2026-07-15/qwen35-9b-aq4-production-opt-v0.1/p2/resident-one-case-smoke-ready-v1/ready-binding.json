@@ -237,7 +237,7 @@
     "sudo_keepalive_seconds": 30
   },
   "promotion_eligible": false,
-  "qa_attestation_sha256": "bac8dcc71368d5463bc9e6d6589236014560129292d0b69700c4246bb68cf15c",
+  "qa_attestation_sha256": "2bf196ab4df74aac1104e559c66c22ba9ebad3e4e3cb84818dfa039fad2812ae",
   "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1",
   "status": "ready_for_one_case",
   "trust": {
@@ -280,17 +280,17 @@
       }
     },
     "harness": {
-      "commit": "7f1ad5c1785c50d99e0952afa7ce018a0204d29c",
-      "git_blob": "5b4f54f120fcd25429d7d2c8050a33080bb00c0c",
+      "commit": "ffbb9cc33d662aac1d5b52480323cd3a9c5b801b",
+      "git_blob": "5305b471b6432d10d91df4dd44e31f18238b81cb",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "sha256": "7a0a3d48453eec49821c78e9a99f11cfc9973112b63cce29dee4c80c1bbe0468",
-      "tree": "0740198f8b02c5171856b0044613f2b1654f888e"
+      "sha256": "a3d8c77015e8af7952dc5027205d7a4cc59bb955f0728467ba071fe76eb6b34f",
+      "tree": "3580d2fe7934353adb7059ffe16f9339ffcf8024"
     },
     "launcher": {
-      "commit": "eec6922fa9c90267213d2749c5dc816be54de527",
-      "git_blob": "c422e4235a2ee6595cf43656c573b7e863489f9e",
-      "sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835",
-      "tree": "f6cef14d1e2a75dc1a12371d2a8e2a754d506482"
+      "commit": "0994367b08534909ff42771ee5b080ec56ca4d01",
+      "git_blob": "c60a80299a8ac281875fe45b763e52dfed7c9a29",
+      "sha256": "9e1e7ddd3ec9911326aa7eb81702219766ff1422494fef22cc6a2be87154c036",
+      "tree": "602605dafde92876ceffcb8f79c825934509b549"
     },
     "production": {
       "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",

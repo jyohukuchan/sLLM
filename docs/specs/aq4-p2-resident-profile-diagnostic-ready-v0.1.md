@@ -6,9 +6,9 @@
 
 ## 今回の変更点
 
-runner `e93a2c162eb059cb2db883953d331f7a158d3a16`、validator `82635456825503c535ce0b662e72a7a233d18c40`、B `7e59baee0c1ac93a350da58a4292a84fbfde9f1c`、launcher `eec6922fa9c90267213d2749c5dc816be54de527`、harness `7f1ad5c1785c50d99e0952afa7ce018a0204d29c`の順に再固定した。停止資源pollは開始時に固定した30秒のmonotonic absolute deadlineを使い、観測・probe前後の期限確認、2秒と残時間の小さい方へのsubprocess timeout制限、probe間の期限付きsudo keepaliveをbase/profile共通で適用する。
+runner `e93a2c162eb059cb2db883953d331f7a158d3a16`、validator `82635456825503c535ce0b662e72a7a233d18c40`、B `7e59baee0c1ac93a350da58a4292a84fbfde9f1c`、launcher `0994367b08534909ff42771ee5b080ec56ca4d01`、harness `ffbb9cc33d662aac1d5b52480323cd3a9c5b801b`の順に再固定した。停止資源pollは開始時に固定した30秒のmonotonic absolute deadlineを使い、観測・probe前後の期限確認、2秒と残時間の小さい方へのsubprocess timeout制限、probe間の期限付きsudo keepaliveをbase/profile共通で適用する。AMD processのowner-zero sentinelとactive owner schemaもbaseと同じ共通strict parserで検査する。
 
-profile-ready artifactは`resident-one-case-smoke-profile-ready-v1`である。`ready-binding.json` SHA-256は`b1f2fff89a123fd6bc88ac5a35d61df0eeda116e0137d83d1e9e3bdfafe3e2ed`、`harness-trust.json`は`06aa87641e605897b74f0931b37b464236f23007376e2366bbb9238650233f76`、`qa-attestation.json`は`bac8dcc71368d5463bc9e6d6589236014560129292d0b69700c4246bb68cf15c`、target manifestは`61d6db729023e2cbf62737c25c7c9042fda8431ac7b108606ce577998d3d58f4`、`SHA256SUMS`は`73d7dcba5fe2c62a609afaaa175a6be627e5b8c96b5724ba1a82db0d0464671a`である。
+profile-ready artifactは`resident-one-case-smoke-profile-ready-v1`である。`ready-binding.json` SHA-256は`d1455512ac59eca455c2b8fd4f5412acec6d438133eeec8e47163bf33f310e00`、`harness-trust.json`は`9bb08bdd142ae260586369a302fc63a29887b5117b80fd88c8d7f5258c1eefca`、`qa-attestation.json`は`2bf196ab4df74aac1104e559c66c22ba9ebad3e4e3cb84818dfa039fad2812ae`、target manifestは`a86a349f3e0d7c14e5cecb438e722be06ce537f47dad021d539b64e13296cb98`、`SHA256SUMS`は`7374fad1b0209327f19eabae84dc353c3cccaa2d70af0411aba43af2ee9c67ad`である。
 
 profile modeの事前・復旧確認もbase modeと同じcontainer名前空間の正式health gateを使う。固定済みDocker、OpenWebUI container/image/network、container curlを検証し、認証済み`/v1/models`のAuthorization headerはstdinだけで渡す。host直結HTTPは診断に限定する。
 
@@ -22,9 +22,9 @@ launcherはrunnerへ`--profile-roctx-ranges --roctx-library /opt/rocm/lib/libroc
 
 capture outputは`p3/aq4-p3-diagnostic-rocprof-capture-v1`、resident summary/rawはprofile専用runner outputへ固定した。capture toolはrawのsession IDとmarkerのsession ID、run ID、case ID/SHAを照合し、warmup 0–1を除外してmeasured 2–11を分割する。
 
-canonical dry-runは`resident-one-case-smoke-profile-ready-dry-run-v1`である。evidence SHA-256は`c13b18dac2eeebce48eb09533f21162e73de8f7be58068c214698b4f7022c822`、`SHA256SUMS`は`7b97ce657de200300eaaafeedf789a65a9ff22c91fcc2973da4c6898b649d689`である。sudo/keepalive、stop/start、launcher、rocprof、capture tool、docker、docker exec、container curl total/version/endpoint、stopped-gate poll/probeのprocess countsは全て0で、service/GPU/modelは未操作である。
+canonical dry-runは`resident-one-case-smoke-profile-ready-dry-run-v1`である。evidence SHA-256は`ae2965a0167f7af46b29d66a6deb379771d2043022ad076013954e76623ce9ad`、`SHA256SUMS`は`6c51062ced5ce007ec78e95fe493bac0f673d0c6ee4bc8be5cacce7806a36cff`である。sudo/keepalive、stop/start、launcher、rocprof、capture tool、docker、docker exec、container curl total/version/endpoint、stopped-gate poll/probeのprocess countsは全て0で、service/GPU/modelは未操作である。
 
-回帰は主要セット194 tests、marker chain 55 tests（25 subtests）、diagnostic capture 11 testsが通過した。capture関連集合85 testsと独立marker QAの手動境界15件も通過している。
+回帰は主要セット204 tests、marker chain 55 tests（25 subtests）、diagnostic capture 11 testsが通過した。capture関連集合85 testsと独立marker QAの手動境界15件も通過している。
 
 ## 次の行動
 

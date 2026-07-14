@@ -15,9 +15,10 @@
 - launcher/model load/warmup/measuredは未開始で`0/0`、runner raw/summaryとlauncher outputはABSENT。outer restoreはattempted/passedし、新service main PID `4101742`、worker PID `4101820`、`NRestarts=0`で復帰した。post formal healthは`9/6/6`、全endpoint 200、GPU/KFD ownerは新workerだけ、lockとproduction hashesも正常で、actual関連childは残っていない。
 - immutable evidence `resident-one-case-smoke-maintenance-evidence-v2/`はdirectory `0555`、files `0444`、SHA256SUMS PASS。SHA-256はlauncher evidence `5a532a37cd48d688f7f54808431035597552b2e2f6744f29d218266b051b7d36`、poll `dda93fe8c9e8b1101fe986ba635f49a01f452de93036558acf85be59c3d4b67c`、marker `0d5826adccff776fea1f00d10c5efe73c9f9fb7400563a0127c332214f2da034`、SUMS `35cbfcd675dadcfe280ed51518e5de4d88f4538f1cfd990a4f50c6ec4b516151`。
 - 追加read-only診断としてproduction active状態で同じAMD-SMI argvを1回実行した。raw SHA-256は`247105d398f2b1087a29330e4ce1085d7c277da8d2ddf47ba02bf6b2f5b4bc3f`、631 bytes、return code 0、stderr empty。top-levelはlist length 1、root keysは`gpu/process_list`、entry keyは`process_info`、process_info fieldsは`cu_occupancy/evicted_time/mem_usage/name/pid`、pidは正のintだった。新observer parserとの差分はなくacceptされる形であるため、恒常的なAMD-SMI version/schema差ではなくstop直後の一時的な出力形状がv2 failureの対象だと絞り込めた。rawと構造要約は`resident-one-case-amd-smi-active-diagnostic-v1/`へsecret-free、`0555`/`0444`で保存した。
+- installed ROCm 7.2.1 CLI sourceをread-only確認し、owner zeroではempty listではなくexact `[{"process_info":"No running processes detected"}]` sentinelを生成することを特定した。v2 observerはこの文字列をPID objectとして整数化しようとしてterminal errorになり、旧launcherのempty-list exact比較も次段で拒否する契約差だった。launcher `0994367b`とharness `ffbb9cc3`は共通strict parserへ更新し、このexact sentinelだけをzeroへ正規化する。active ownerはknown fieldsと正のinteger PIDだけを受理し、malformed/mixed schemaはraw SHA-256とsecret-free reason/type/keysを保存してfail-closedにする。actualは再実行していない。
 
 ## 次の行動
 
 - v2のsingle-use outputは再利用せず、actualも再試行しない。
-- 次版ではAMD process rawをサイズ制限・secret検査後にimmutable保存するか、少なくともJSON top-level type/root keys/entry fieldsと内側exception messageを保存する。
-- 消滅中processの非標準entryはforeign ownerと区別し、PIDを安全に抽出できない場合も同一attemptのterminal failureにせず、deadline内の次pollへ進める契約を検討する。
+- 次版artifactはraw本文を保存せず、probe raw SHA-256、byte数、JSON top-level type、root/entry keys、process_info type、reason codeをimmutable evidenceへ保存する。
+- exact zero sentinelはstable候補、known active ownerは旧ownerのdrainまたはforeign/new ownerとして分類し、PIDを安全に抽出できないmalformed/mixed entryはterminal fail-closedを維持する。

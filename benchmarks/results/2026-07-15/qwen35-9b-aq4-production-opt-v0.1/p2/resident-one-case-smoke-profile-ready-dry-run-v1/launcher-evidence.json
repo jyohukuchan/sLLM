@@ -34,7 +34,7 @@
       "--target-command-manifest",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/target-command-manifest.json",
       "--target-command-manifest-sha256",
-      "61d6db729023e2cbf62737c25c7c9042fda8431ac7b108606ce577998d3d58f4",
+      "a86a349f3e0d7c14e5cecb438e722be06ce537f47dad021d539b64e13296cb98",
       "--profile-output-directory",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1",
       "--profile-output-name",
@@ -50,12 +50,12 @@
       "--timeout",
       "1800.0"
     ],
-    "command_sha256": "73a8e5195a2871c74b89a2f1c8ebd546008bf14f32e3dd792691643b43e1bc97",
+    "command_sha256": "8717b656c02b76e79186ac8bc55e62adcdc1cd7c56708043e86568bee8d9156f",
     "measurement_eligible": false,
     "promotion_eligible": false
   },
   "promotion_eligible": false,
-  "ready_binding_sha256": "b1f2fff89a123fd6bc88ac5a35d61df0eeda116e0137d83d1e9e3bdfafe3e2ed",
+  "ready_binding_sha256": "d1455512ac59eca455c2b8fd4f5412acec6d438133eeec8e47163bf33f310e00",
   "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
   "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
   "service_touched": false,
