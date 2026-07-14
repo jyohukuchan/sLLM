@@ -8,8 +8,7 @@
 //! prepared token; a vocabulary or sequence-by-vocabulary matrix is never retained.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -18,12 +17,12 @@ use std::process::ExitCode;
 use ullm_engine::inference_api::{CancellationToken, InferenceRequest, SamplingParams};
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{
-    QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4CalibrationObserver,
-    Qwen35Aq4ModelLoadConfig,
+    Qwen35Aq4CalibrationObserver, Qwen35Aq4ModelLoadConfig, QWEN35_AQ4_CONTEXT_LENGTH,
+    QWEN35_AQ4_KV_BLOCK_SIZE,
 };
 use ullm_engine::qwen35_aq4_session::{
-    QWEN35_AQ4_PREFILL_CHUNK_GRID, Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession,
-    Qwen35Aq4SessionConfig, Qwen35Aq4SessionStatus,
+    Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
+    Qwen35Aq4SessionStatus, QWEN35_AQ4_PREFILL_CHUNK_GRID,
 };
 use ullm_engine::worker_driver::{InferenceSession, SessionAdvance};
 
@@ -223,19 +222,6 @@ impl Qwen35Aq4CalibrationObserver for RowCollector {
     }
 }
 
-fn sha256_tokens(token_ids: &[usize]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"[");
-    for (index, token_id) in token_ids.iter().copied().enumerate() {
-        if index != 0 {
-            digest.update(b",");
-        }
-        digest.update(token_id.to_string().as_bytes());
-    }
-    digest.update(b"]\n");
-    format!("{:x}", digest.finalize())
-}
-
 fn parse_usize(raw: Option<&String>, default: usize, label: &str) -> Result<usize, String> {
     let value = raw.map_or(Ok(default), |value| {
         value
@@ -349,8 +335,9 @@ fn run(
             EOS_TOKEN_IDS.to_vec(),
             SamplingParams::greedy_with_top_k(0, 1),
         );
-        let replay =
-            Qwen35Aq4CalibrationReplay::new(sha256_tokens(replay_tokens), replay_tokens.clone())?;
+        let replay_sha =
+            Qwen35Aq4CalibrationReplay::source_sequence_sha256_for_tokens(replay_tokens)?;
+        let replay = Qwen35Aq4CalibrationReplay::new(replay_sha, replay_tokens.clone())?;
         session.start_calibration_request(request, CancellationToken::new(), replay)?;
         let mut step = 0usize;
         loop {
