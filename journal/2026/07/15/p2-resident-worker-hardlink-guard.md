@@ -39,3 +39,17 @@
 
 - explicit actualを行う場合だけ、ready artifactに固定されたv4 outputを一度使用する。
 - actualが失敗しても証拠を保持し、再試行時は新しいversionへ進める。
+
+## v8 device vocabulary failure後の変更点
+
+- source manifestのdevice family語彙は`RDNA4`、prepared caseとdriver runtime identityのarchitecture語彙は`gfx1201`であることをschema監査した。
+- resident driverがruntime `gfx1201`を`RDNA4`へ変換していた処理を削除し、case/runtimeに共通するdevice 5 fieldを変換なしでexact比較するよう修正した。`P2Device` schemaにはfieldを追加していない。
+- active production fixtureにsource `RDNA4`とbound/runtime `gfx1201`を別field集合として固定し、正常系、gfx/RDNA語彙交換、case identity不一致、runtime identity不一致をRust testへ追加した。resident driver testは16/16 passedである。
+- release driver、prepared bundle、strict B、launcher、execute bindingを再固定し、fresh output/evidence/run-idをv5へ進めた。offline launcher dry-runはpassedで、actual/GPU/service操作は行っていない。
+- exact QAのうちdevice修正に直接対応するRust 16件と、独立した既存pytest 90件はpassedである。
+
+## 現在の阻害要因
+
+- 並行するfidelity作業がproduction workerを旧exact-two hardlink inodeからsingle-linkの別inodeへdetachした。resident側の既存exact-two fixture/guardは意図どおりこれを拒否する。
+- このためprimary trust-chain pytestはdevice bindingへ到達する前にworker trust rootで拒否され、最終exact QAとmaintenance ready artifact再生成は未完了である。
+- 「無関係guard維持」に従い、resident guardをsingle-linkへ変更せず、production workerも変更していない。exact-twoを復元してfixtureごと再固定するか、resident guardをsingle-linkへ変更するかの明示判断が必要である。
