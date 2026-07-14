@@ -32,6 +32,7 @@ LOCK_PATH = Path("/run/ullm/r9700.lock")
 RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
 EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v1"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
+EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
 EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v1"
 EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
@@ -493,19 +494,53 @@ def prepare_execute_binding(output: Path = EXECUTE_BINDING_ROOT) -> dict[str, An
     output.mkdir(parents=True, mode=0o700)
     document = execute_binding_document()
     raw = pretty(document)
+    launcher_path = Path(__file__).resolve()
+    launcher_raw, _ = read_regular(launcher_path, "execute launcher source")
+    relative = launcher_path.relative_to(ROOT)
+    git_values = []
+    for revision in ("HEAD", "HEAD^{tree}", f"HEAD:{relative}"):
+        completed = subprocess.run(["git", "rev-parse", revision], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if completed.returncode != 0 or completed.stderr:
+            raise LauncherError("execute launcher Git identity lookup failed")
+        git_values.append(completed.stdout.decode("ascii").strip())
+    committed = subprocess.run(["git", "show", f"HEAD:{relative}"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if committed.returncode != 0 or committed.stderr or committed.stdout != launcher_raw:
+        raise LauncherError("execute launcher source is not the exact committed HEAD blob")
+    launcher_trust = {
+        "schema_version": "ullm.aq4_p2_resident_execute_launcher_trust.v1", "status": "qa_pending", "actual_eligible": False,
+        "path": str(launcher_path), "commit": git_values[0], "tree": git_values[1], "git_blob": git_values[2], "sha256": sha_bytes(launcher_raw),
+        "execute_binding": {"path": str(EXECUTE_BINDING_PATH), "sha256": sha_bytes(raw)},
+    }
+    trust_raw = pretty(launcher_trust)
     atomic_write(output, "execute-binding.json", raw)
-    atomic_write(output, "SHA256SUMS", f"{sha_bytes(raw)}  execute-binding.json\n".encode("ascii"))
+    atomic_write(output, "launcher-trust.json", trust_raw)
+    sums = f"{sha_bytes(raw)}  execute-binding.json\n{sha_bytes(trust_raw)}  launcher-trust.json\n".encode("ascii")
+    atomic_write(output, "SHA256SUMS", sums)
     os.chmod(output, 0o555)
     return document
 
 
-def load_execute_binding(path: Path) -> dict[str, Any]:
+def load_execute_binding(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     if path != EXECUTE_BINDING_PATH:
         raise LauncherError("execute binding path differs")
+    if {item.name for item in EXECUTE_BINDING_ROOT.iterdir()} != {"execute-binding.json", "launcher-trust.json", "SHA256SUMS"}:
+        raise LauncherError("execute binding artifact coverage differs")
     raw, _ = read_regular(path, "execute binding")
     value = parse_json(raw, "execute binding")
     validate_execute_binding(value)
-    return value
+    trust_raw, _ = read_regular(EXECUTE_LAUNCHER_TRUST_PATH, "execute launcher trust")
+    trust = parse_json(trust_raw, "execute launcher trust")
+    expected_keys = {"schema_version", "status", "actual_eligible", "path", "commit", "tree", "git_blob", "sha256", "execute_binding"}
+    if set(trust) != expected_keys or trust.get("schema_version") != "ullm.aq4_p2_resident_execute_launcher_trust.v1" or trust.get("status") != "qa_pending" or trust.get("actual_eligible") is not False or trust.get("path") != str(Path(__file__).resolve()) or not isinstance(trust.get("commit"), str) or not re.fullmatch(r"[0-9a-f]{40}", trust["commit"]) or not isinstance(trust.get("tree"), str) or not re.fullmatch(r"[0-9a-f]{40}", trust["tree"]) or not isinstance(trust.get("git_blob"), str) or not re.fullmatch(r"[0-9a-f]{40}", trust["git_blob"]) or not isinstance(trust.get("sha256"), str) or not SHA_RE.fullmatch(trust["sha256"]) or trust.get("execute_binding") != {"path": str(path), "sha256": sha_bytes(raw)}:
+        raise LauncherError("execute launcher trust contract differs")
+    launcher_raw, _ = read_regular(Path(__file__).resolve(), "execute launcher trusted self")
+    if sha_bytes(launcher_raw) != trust["sha256"]:
+        raise LauncherError("execute launcher self differs from artifact trust")
+    expected_sums = f"{sha_bytes(raw)}  execute-binding.json\n{sha_bytes(trust_raw)}  launcher-trust.json\n".encode("ascii")
+    sums_raw, _ = read_regular(EXECUTE_BINDING_ROOT / "SHA256SUMS", "execute binding sums")
+    if sums_raw != expected_sums:
+        raise LauncherError("execute binding SHA256SUMS differs")
+    return value, trust
 
 
 def execute_runner_argv(binding: dict[str, Any]) -> list[str]:
@@ -810,6 +845,7 @@ def verify_generated_live_preflight(link: dict[str, Any]) -> None:
 
 def execute_bound(
     binding: dict[str, Any], evidence_output: Path, runner_output: Path, run_id: str, *,
+    trusted_launcher_sha: str,
     run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     gate_provider: Callable[[], dict[str, Any]] = collect_execute_gates,
     restore_provider: Callable[[], dict[str, Any]] | None = None,
@@ -819,6 +855,11 @@ def execute_bound(
     validate_execute_binding(binding, permit_test_live_preflight=True)
     if binding.get("actual_eligible") is not True or binding.get("status") != "ready_for_explicit_execute":
         raise LauncherError("execute binding is not actual eligible")
+    if not isinstance(trusted_launcher_sha, str) or not SHA_RE.fullmatch(trusted_launcher_sha):
+        raise LauncherError("trusted execute launcher SHA differs")
+    observed_self_sha = sha_file(Path(__file__).resolve(), "launcher self before execute")[0]
+    if observed_self_sha != trusted_launcher_sha:
+        raise LauncherError("execute launcher self differs from trusted artifact")
     if binding["runner_output"] != str(runner_output) or binding["evidence_output"] != str(evidence_output) or binding["run_id"] != run_id:
         raise LauncherError("execute output/run-id differs from binding")
     for path, label in ((evidence_output, "execute evidence"), (runner_output, "execute runner output")):
@@ -826,7 +867,7 @@ def execute_bound(
         if path.exists() or path.is_symlink():
             raise LauncherError(f"{label} already exists")
     evidence_output.mkdir(mode=0o700)
-    self_sha = sha_file(Path(__file__).resolve(), "launcher self")[0]
+    self_sha = observed_self_sha
     evidence = make_evidence("execute", self_sha)
     evidence.update({"execute_binding": binding, "gates": None, "restore": None, "trust_verifications": []})
     evidence["safety"]["execution_state_source"] = "runner_not_started"
@@ -1057,7 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "execute":
             if args.execute_binding is None or args.runner_output is None or args.run_id is None:
                 raise LauncherError("execute requires --execute-binding, --runner-output, and --run-id")
-            binding = load_execute_binding(args.execute_binding)
+            binding, launcher_trust = load_execute_binding(args.execute_binding)
             if binding.get("actual_eligible") is not True:
                 reject_symlink_components(args.evidence_output, "execute evidence", allow_missing_leaf=True)
                 if args.evidence_output.exists() or args.evidence_output.is_symlink():
@@ -1069,7 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
                 finalize_output(args.evidence_output, evidence)
                 code = 1
             else:
-                code, evidence = execute_bound(binding, args.evidence_output, args.runner_output, args.run_id)
+                code, evidence = execute_bound(binding, args.evidence_output, args.runner_output, args.run_id, trusted_launcher_sha=launcher_trust["sha256"])
         else:
             code, evidence = launch(args.mode, args.evidence_output)
         print(json.dumps({"status": evidence["status"], "mode": evidence["mode"], "evidence": str(args.evidence_output / "launcher-evidence.json")}, sort_keys=True))

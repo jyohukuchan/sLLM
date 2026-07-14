@@ -17,6 +17,7 @@ SPEC = importlib.util.spec_from_file_location("aq4_p2_execute_launcher", SCRIPT)
 assert SPEC and SPEC.loader
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
+TRUSTED_LAUNCHER_SHA = LAUNCHER.sha_bytes(SCRIPT.read_bytes())
 
 
 def _validator_success() -> bytes:
@@ -80,7 +81,7 @@ def test_execute_bound_generates_live_sidecar_and_exact_runner_argv(tmp_path: Pa
         restores.append(True)
         return {"required": False, "service_stop_performed": False, "state_preserved": True}
 
-    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, restore_provider=restore, runner_executor=runner)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, restore_provider=restore, runner_executor=runner)
     assert code == 0
     assert len(calls) == 1 and restores == [True]
     assert evidence["status"] == "passed"
@@ -115,7 +116,7 @@ def test_keepalive_failure_interrupts_runner_and_finally_restores(tmp_path: Path
         restored = True
         return {"required": True, "service_stop_performed": False, "state_preserved": True, "priority": "restore_before_reporting"}
 
-    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, restore_provider=restore, runner_executor=failed_runner)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, restore_provider=restore, runner_executor=failed_runner)
     assert code == 1 and restored is True
     assert evidence["failure"]["stage"] == "runner"
     assert evidence["failure"]["runner_started"] is True
@@ -134,7 +135,7 @@ def test_fake_runner_start_failure_keeps_gpu_and_model_flags_false(tmp_path: Pat
     def start_failure(command: list[str], environment: dict[str, str], on_started):
         raise OSError("synthetic spawn failure")
 
-    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, runner_executor=start_failure)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, runner_executor=start_failure)
     assert code == 1
     assert evidence["process_counts"]["runner"] == 0
     assert evidence["failure"]["runner_started"] is False
@@ -153,7 +154,7 @@ def test_fake_runner_midway_failure_records_proven_gpu_and_model_activity(tmp_pa
         on_started()
         return {"completed": subprocess.CompletedProcess(command, 9, b"partial", b""), "keepalives": [], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
 
-    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, runner_executor=midway_failure)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, runner_executor=midway_failure)
     assert code == 1
     assert evidence["failure"]["runner_started"] is True
     assert evidence["safety"]["gpu_command_executed"] is True
@@ -196,7 +197,7 @@ def test_execute_snapshot_rejects_stage_specific_toctou_swap(tmp_path: Path, mon
         return {"completed": subprocess.CompletedProcess(command, 0, b"", b""), "keepalives": [], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
 
     monkeypatch.setattr(LAUNCHER, "validate_execute_constants", validate_with_watched)
-    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=validator, gate_provider=_gates, runner_executor=successful_runner, verification_hook=hook)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, runner_executor=successful_runner, verification_hook=hook)
     assert code == 1 and swapped is True
     assert evidence["process_counts"]["runner"] == int(runner_started)
     assert evidence["safety"]["gpu_command_executed"] is activity
@@ -251,7 +252,7 @@ def test_execute_rejects_output_reuse_before_starting_processes(tmp_path: Path) 
         raise AssertionError("no process may start")
 
     with pytest.raises(LAUNCHER.LauncherError, match="already exists"):
-        LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, run=forbidden, gate_provider=_gates)
+        LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=forbidden, gate_provider=_gates)
     assert calls == 0
 
 
