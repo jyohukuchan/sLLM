@@ -10,6 +10,8 @@ P2 fidelity split は `ullm.aq4_p2_fidelity_split.v1` として 24 calibration /
 - `ullm-aq4-fidelity-capture` は active package を一度だけロードし、`all_m1` は requested-M をラベルとして M=1 dispatch、`cold_batched` は requested-M dispatch とする。いずれも同じ全 prompt を処理し、final hidden/full logits の step=0 row を sidecar へストリームする。
 - `capture-qwen35-aq4-fidelity.py` は source/active full-vector sidecar を同じ row identity で走査し、greedy、順序付きtop10、retention、cosine、relative-L2、max-abs、bounded sufficient statistics を metrics JSON に出力する。`validate-qwen35-aq4-fidelity-capture.py` は 24件、split/policy/cases SHA、重複・欠落・余分、有限値、shape、top10、統計の境界を検証する。
 - sidecar は hidden 24×4096×F32、logits 24×248320×F32（合計約24.2 MiB）を上限とし、Rust observer は一回につき最大 chunk 1,048,576 elements の小さいバッファだけを保持する。モデル側の GPU 観測、source exporter の CPU 時間、実測 GPU 時間はこの段階では未実施。
+- `b457ef2` で active manifest の `created_utc` を source manifest から継承し、required HIP guard 集合を完全一致で拘束した。metrics validator は split validator の戻り値と calibration JSONL の実 SHA を再計算し、root binding の一致を要求する。最新 split は manifest `966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887`、policy `302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03`、calibration `20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f` である。
+- source checkpoint index の既存実体は 19,306,393,663 B（17.98 GiB）で、CPU exporter の 2.0 倍 memory preflight は 38,612,787,326 B（35.96 GiB）以上の available memory を要求する。source/active の新しい実測時間・RSS・VRAM はまだ取得していない。
 
 ## 次の行動
 
