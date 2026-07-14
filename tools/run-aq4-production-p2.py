@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -323,6 +324,34 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def write_trace_sidecar(args: argparse.Namespace, raw: dict[str, Any]) -> bool:
+    if args.trace_sidecar is None:
+        return True
+    contained(args.run_root, args.trace_sidecar, "trace sidecar", existing=False)
+    if args.production_trace is not None:
+        contained(args.run_root, args.production_trace, "production trace")
+    if args.resource_observation is not None:
+        contained(args.run_root, args.resource_observation, "resource observation")
+    module_path = Path(__file__).resolve().parent / "prefill_validation/aq4_p2_trace_binding.py"
+    spec = importlib.util.spec_from_file_location("aq4_p2_trace_binding_for_runner", module_path)
+    if spec is None or spec.loader is None:
+        raise RunnerError("P2 trace binder is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sidecar = module.build_trace_sidecar(
+        args.run_root,
+        args.case,
+        args.identity,
+        args.policy,
+        args.output,
+        args.resource_observation,
+        args.production_trace,
+        raw,
+    )
+    module.write_atomic(args.trace_sidecar, sidecar)
+    return sidecar["status"] == "valid"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("run_root", "case", "expanded", "identity", "policy", "preflight", "measurement", "state", "executable", "package_root", "output"):
@@ -330,11 +359,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--benchmark-driver", type=Path)
     parser.add_argument("--served-model-manifest", type=Path)
     parser.add_argument("--fixture", type=Path)
+    parser.add_argument("--trace-sidecar", type=Path)
+    parser.add_argument("--production-trace", type=Path)
+    parser.add_argument("--resource-observation", type=Path)
     parser.add_argument("--mode", choices=("cpu_synthetic", "production"), default="cpu_synthetic"); parser.add_argument("--trace", type=Path); parser.add_argument("--lock", type=Path); parser.add_argument("--timeout", type=float, default=300.0); parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_OUTPUT_LIMIT)
     args = parser.parse_args(argv)
     if args.max_output_bytes <= 0 or args.max_output_bytes > 64 * 1024 * 1024: parser.error("--max-output-bytes is out of range")
     try:
-        raw, code = run(args); atomic_write(args.output, raw); print(json.dumps({"status": raw["status"], "case_id": raw["case_id"]}, sort_keys=True)); return code
+        raw, code = run(args); atomic_write(args.output, raw)
+        trace_valid = write_trace_sidecar(args, raw)
+        if args.trace_sidecar is not None and not trace_valid:
+            code = 1
+        print(json.dumps({"status": raw["status"], "case_id": raw["case_id"], "trace_sidecar": "valid" if trace_valid and args.trace_sidecar else "not_requested"}, sort_keys=True)); return code
     except (RunnerError, OSError, ValueError) as error:
         print(f"P2 case run failed closed: {error}", file=sys.stderr); return 1
 
