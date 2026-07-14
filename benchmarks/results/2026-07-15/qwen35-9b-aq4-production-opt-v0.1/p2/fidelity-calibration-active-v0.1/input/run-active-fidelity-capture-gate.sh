@@ -60,6 +60,7 @@ MAX_LOGITS_BYTES=23838720
 MAX_VECTOR_BYTES=24231936
 PYTHON="/usr/bin/python3.12"
 SERVICE="ullm-openai.service"
+SYSTEMCTL=(sudo -n -- systemctl)
 LOCK="/run/ullm/r9700.lock"
 RUNTIME_DIR="${LOCK%/*}"
 ROCM_SMI="/opt/rocm/bin/rocm-smi"
@@ -216,8 +217,8 @@ validate_service_identity() {
   uid="$(id -u homelab1)"; gid="$(id -g homelab1)"
   [[ ! -L "$RUNTIME_DIR" && "$(stat -Lc '%F:%a:%u:%g:%h' "$RUNTIME_DIR")" = "directory:750:$uid:$gid:2" ]] || fail "RuntimeDirectory identity differs"
   [[ ! -L "$LOCK" && "$(stat -Lc '%F:%a:%u:%g:%h:%s' "$LOCK")" = "regular empty file:600:$uid:$gid:1:0" ]] || fail "runtime lock identity differs"
-  [[ "$(systemctl is-active "$SERVICE")" = active ]] || fail "service is not active"
-  mainpid="$(systemctl show "$SERVICE" -p MainPID --value)"
+  [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE")" = active ]] || fail "service is not active"
+  mainpid="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)"
   owner="$(lslocks -o PID,PATH 2>/dev/null | awk -v path="$LOCK" '$2 == path {print $1; exit}')"
   owner_command="$(ps -p "$owner" -o comm= 2>/dev/null || true)"
   [[ "$owner" = "$mainpid" && "$owner" =~ ^[1-9][0-9]*$ && "$owner_command" == ullm-openai-gat* ]] || fail "runtime lock owner differs from service MainPID"
@@ -253,17 +254,17 @@ if [[ "$MOCK_PREFLIGHT" = 1 ]]; then
   exit 0
 fi
 if [[ "$PREFLIGHT_ONLY" = 1 ]]; then
-  systemctl is-active --quiet "$SERVICE" || fail "service is not active"
+  "${SYSTEMCTL[@]}" is-active --quiet "$SERVICE" || fail "service is not active"
   echo "preflight_only=1 service_stop=0 gpu_run=0"
   exit 0
 fi
 
 # Locked preflight is read-only and never arms a restore trap or starts/stops the service.
 if [[ "$PREFLIGHT_LOCKED_ONLY" = 1 ]]; then
-  systemctl is-active --quiet "$SERVICE" || fail "service is not active"
+  "${SYSTEMCTL[@]}" is-active --quiet "$SERVICE" || fail "service is not active"
   [[ -f "$LOCK" && ! -L "$LOCK" ]] || fail "runtime lock is missing"
   owner="$(lslocks -o PID,PATH 2>/dev/null | awk -v path="$LOCK" '$2 == path {print $1; exit}')"
-  mainpid="$(systemctl show "$SERVICE" -p MainPID --value)"
+  mainpid="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)"
   [[ "$owner" = "$mainpid" && "$owner" =~ ^[1-9][0-9]*$ ]] || fail "runtime lock owner differs from service MainPID"
   echo "locked_preflight_systemctl_mutations=0 lock_owner=$owner observer=not_started"
   exit 0
@@ -272,9 +273,9 @@ fi
 [[ "$PREFLIGHT_ONLY" = 0 && "$PREFLIGHT_LOCKED_ONLY" = 0 ]] || fail "unknown preflight mode"
 [[ "$MOCK_PREFLIGHT" = 0 ]] || fail "mock mode cannot enter the service stop path"
 
-NRESTARTS_BEFORE="$(systemctl show "$SERVICE" -p NRestarts --value)"
-SERVICE_MAINPID="$(systemctl show "$SERVICE" -p MainPID --value)"
-[[ "$(systemctl is-active "$SERVICE")" = active ]] || fail "service is not active"
+NRESTARTS_BEFORE="$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value)"
+SERVICE_MAINPID="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)"
+[[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE")" = active ]] || fail "service is not active"
 RESTORE_NEEDED=0
 LOCK_FD=""
 OBSERVER_PID=""
@@ -294,21 +295,21 @@ cleanup() {
   if (( LOCK_CREATED )) && [[ -f "$LOCK" && ! -L "$LOCK" && -z "$(lslocks -o PID,PATH 2>/dev/null | awk -v path="$LOCK" '$2 == path {print $1; exit}')" ]]; then rm -f "$LOCK"; fi
   if (( RUNTIME_DIR_CREATED )) && [[ -d "$RUNTIME_DIR" && -z "$(find "$RUNTIME_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then rmdir "$RUNTIME_DIR"; fi
   if (( RESTORE_NEEDED )); then
-    timeout --signal=TERM --kill-after=5s 60s systemctl start "$SERVICE" || RESTORE_RC=1
+    timeout --signal=TERM --kill-after=5s 60s "${SYSTEMCTL[@]}" start "$SERVICE" || RESTORE_RC=1
     deadline=$((SECONDS + 60))
     while (( SECONDS < deadline )); do
-      [[ "$(systemctl is-active "$SERVICE" 2>/dev/null)" = active && "$(systemctl show "$SERVICE" -p SubState --value 2>/dev/null)" = running ]] && break
+      [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active && "$("${SYSTEMCTL[@]}" show "$SERVICE" -p SubState --value 2>/dev/null)" = running ]] && break
       sleep 1
     done
-    [[ "$(systemctl is-active "$SERVICE" 2>/dev/null)" = active ]] || RESTORE_RC=1
-    [[ "$(systemctl show "$SERVICE" -p NRestarts --value 2>/dev/null)" = "$NRESTARTS_BEFORE" ]] || RESTORE_RC=1
+    [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active ]] || RESTORE_RC=1
+    [[ "$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value 2>/dev/null)" = "$NRESTARTS_BEFORE" ]] || RESTORE_RC=1
     [[ "$(sha256_file "$ACTIVE" 2>/dev/null)" = "$EXPECTED_SERVED_SHA256" ]] || RESTORE_RC=1
     [[ "$(sha256_file "$PACKAGE_MANIFEST" 2>/dev/null)" = "$EXPECTED_PACKAGE_SHA256" ]] || RESTORE_RC=1
     [[ "$(sha256_file "$WORKER" 2>/dev/null)" = "$EXPECTED_WORKER_SHA256" ]] || RESTORE_RC=1
     restore_uid="$(id -u homelab1)"; restore_gid="$(id -g homelab1)"
     [[ ! -L "$RUNTIME_DIR" && "$(stat -Lc '%F:%a:%u:%g:%h' "$RUNTIME_DIR" 2>/dev/null || true)" = "directory:750:$restore_uid:$restore_gid:2" ]] || RESTORE_RC=1
     [[ ! -L "$LOCK" && "$(stat -Lc '%F:%a:%u:%g:%h:%s' "$LOCK" 2>/dev/null || true)" = "regular empty file:600:$restore_uid:$restore_gid:1:0" ]] || RESTORE_RC=1
-    restore_mainpid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+    restore_mainpid="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
     restore_owner="$(lslocks -o PID,PATH 2>/dev/null | awk -v path="$LOCK" '$2 == path {print $1; exit}')"
     [[ "$restore_owner" = "$restore_mainpid" ]] || RESTORE_RC=1
   fi
@@ -335,10 +336,10 @@ observer_sample_ts="$(cat "$OBSERVER_SAMPLE_MARKER")"
 observer_now_ts="$(date +%s%N)"
 [[ "$observer_sample_ts" =~ ^[0-9]+$ && "$observer_now_ts" -ge "$observer_sample_ts" && $((observer_now_ts - observer_sample_ts)) -le 5000000000 ]] || fail "resource observer sample is stale"
 printf 'service_stop_attempt_at=%s\n' "$(date --iso-8601=seconds)" >>"$STOP_MARKER"
-systemctl stop "$SERVICE" || fail "service stop failed"
+"${SYSTEMCTL[@]}" stop "$SERVICE" || fail "service stop failed"
 printf 'service_stop_returned_at=%s\n' "$(date --iso-8601=seconds)" >>"$STOP_MARKER"
-for _ in $(seq 1 30); do [[ "$(systemctl is-active "$SERVICE" || true)" = inactive ]] && break; sleep 1; done
-[[ "$(systemctl is-active "$SERVICE" || true)" = inactive ]] || fail "service did not stop"
+for _ in $(seq 1 30); do [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" || true)" = inactive ]] && break; sleep 1; done
+[[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" || true)" = inactive ]] || fail "service did not stop"
 [[ ! -e "$RUNTIME_DIR" && ! -L "$RUNTIME_DIR" ]] || fail "RuntimeDirectory remained after service stop"
 (umask 077; mkdir "$RUNTIME_DIR") || fail "runtime directory create failed"
 RUNTIME_DIR_CREATED=1
