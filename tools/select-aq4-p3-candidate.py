@@ -108,6 +108,99 @@ PROFILE_ROOT_FIELDS = {
     "eligibility_blockers",
     "schedule_separation",
 }
+PROFILE_BINDING_FIELDS = {
+    "case",
+    "identity",
+    "device",
+    "resident_binary_sha256",
+    "package_manifest_sha256",
+    "package_content_sha256",
+    "policy_sha256",
+    "served_model_manifest_sha256",
+    "worker_binary_sha256",
+}
+PROFILE_CASE_FIELDS = {
+    "case_id",
+    "case_sha256",
+    "case_binding_sha256",
+    "prefill_requested_m",
+    "resolved_m",
+}
+PROFILE_IDENTITY_FIELDS = {
+    "identity_file_sha256",
+    "identity_sha256",
+    "model_id",
+    "model_revision",
+    "worker_binary_sha256",
+    "served_model_manifest_sha256",
+    "guard_set_sha256",
+    "build_git_commit",
+    "protocol",
+}
+PROFILE_DEVICE_FIELDS = {
+    "runtime_device_index",
+    "device_id",
+    "backend",
+    "name",
+    "architecture",
+}
+PROFILE_PROFILER_FIELDS = {
+    "tool",
+    "path",
+    "executable_sha256",
+    "version",
+    "rocm_version",
+    "version_output_sha256",
+    "command",
+    "subprocess_profile_runs",
+}
+PROFILE_TRACE_FIELDS = {"sha256", "bytes", "schema", "kernel_count"}
+PROFILE_TRACE_SCHEMA_FIELDS = {
+    "columns",
+    "dispatch_id",
+    "kernel_name",
+    "start_timestamp",
+    "end_timestamp",
+    "phase",
+    "clock_unit",
+}
+PROFILE_MAPPING_FIELDS = {
+    "schema_version",
+    "sha256",
+    "maximum_unclassified_fraction",
+    "observed_unclassified_fraction",
+    "unknown_kernel_names",
+    "complete",
+}
+PROFILE_TIMING_ROOT_FIELDS = {"total", "prefill", "decode", "unclassified_phase"}
+PROFILE_TIMING_NS_FIELDS = {
+    "kernel_count",
+    "inclusive_sum_ns",
+    "gpu_total_union_ns",
+    "inclusive_overcount_ns",
+    "overlap_union_ns",
+    "cross_family_overlap_ns",
+    "unclassified_ns",
+    "families",
+}
+PROFILE_TIMING_MS_FIELDS = {
+    "kernel_count",
+    "inclusive_sum_ms",
+    "gpu_total_union_ms",
+    "inclusive_overcount_ms",
+    "overlap_union_ms",
+    "cross_family_overlap_ms",
+    "unclassified_ms",
+    "families",
+}
+PROFILE_FAMILY_NS_FIELDS = {"exclusive_ns", "non_overlap_ns", "active_union_ns"}
+PROFILE_FAMILY_MS_FIELDS = {"exclusive_ms", "non_overlap_ms", "active_union_ms"}
+PROFILE_SCHEDULE_FIELDS = {
+    "warmup_runs",
+    "measured_runs",
+    "profile_aggregation_used_for_performance",
+    "inclusive_kernel_sum_used_as_gpu_total",
+}
 
 # Two-sided Student t, 97.5th percentile. P2 uses at most 30 paired runs.
 T_CRITICAL_975 = (
@@ -250,7 +343,20 @@ def parse_json(snapshot: Snapshot) -> dict[str, Any]:
         raise SelectionError(f"invalid JSON evidence {snapshot.path}: {error}") from error
     if not isinstance(value, dict):
         raise SelectionError(f"evidence root must be an object: {snapshot.path}")
+    ensure_finite_tree(value, f"evidence {snapshot.path}")
     return value
+
+
+def ensure_finite_tree(value: Any, label: str) -> None:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise SelectionError(f"{label} contains a non-finite number")
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            ensure_finite_tree(child, f"{label}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            ensure_finite_tree(child, f"{label}[{index}]")
 
 
 def exact_fields(value: dict[str, Any], expected: set[str], label: str) -> None:
@@ -274,7 +380,10 @@ def require_bool(value: Any, expected: bool, label: str) -> None:
 def require_number(value: Any, label: str, *, positive: bool = False) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SelectionError(f"{label} must be a finite number")
-    result = float(value)
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as error:
+        raise SelectionError(f"{label} must be a finite number") from error
     if not math.isfinite(result):
         raise SelectionError(f"{label} must be a finite number")
     if positive and result <= 0.0:
@@ -336,7 +445,10 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
     require_bool(value["measurement_eligible"], True, "raw measurement_eligible")
     require_bool(value["smoke_only"], False, "raw smoke_only")
     require_bool(value["promotion_eligible"], True, "raw promotion_eligible")
-    if value["representative_prompt_count"] != REPRESENTATIVE_PROMPTS:
+    if (
+        type(value["representative_prompt_count"]) is not int
+        or value["representative_prompt_count"] != REPRESENTATIVE_PROMPTS
+    ):
         raise SelectionError(
             f"raw representative_prompt_count must be {REPRESENTATIVE_PROMPTS}"
         )
@@ -464,6 +576,74 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
     )
 
 
+def _profile_nonnegative_number(value: Any, label: str, *, integer: bool = False) -> None:
+    if integer:
+        if type(value) is not int or value < 0:
+            raise SelectionError(f"{label} must be a non-negative integer")
+        return
+    require_number(value, label)
+
+
+def _validate_profile_timing(value: Any, label: str, *, milliseconds: bool) -> None:
+    if not isinstance(value, dict):
+        raise SelectionError(f"{label} must be an object")
+    exact_fields(value, PROFILE_TIMING_ROOT_FIELDS, label)
+    aggregate_fields = PROFILE_TIMING_MS_FIELDS if milliseconds else PROFILE_TIMING_NS_FIELDS
+    family_fields = PROFILE_FAMILY_MS_FIELDS if milliseconds else PROFILE_FAMILY_NS_FIELDS
+    suffix = "ms" if milliseconds else "ns"
+    for phase in sorted(PROFILE_TIMING_ROOT_FIELDS):
+        aggregate = value[phase]
+        if not isinstance(aggregate, dict):
+            raise SelectionError(f"{label}.{phase} must be an object")
+        exact_fields(aggregate, aggregate_fields, f"{label}.{phase}")
+        _profile_nonnegative_number(
+            aggregate["kernel_count"], f"{label}.{phase}.kernel_count", integer=True
+        )
+        for field in sorted(aggregate_fields - {"kernel_count", "families"}):
+            _profile_nonnegative_number(
+                aggregate[field],
+                f"{label}.{phase}.{field}",
+                integer=not milliseconds,
+            )
+        families = aggregate["families"]
+        if not isinstance(families, dict):
+            raise SelectionError(f"{label}.{phase}.families must be an object")
+        if set(families) != set(CANDIDATES[item]["family"] for item in CANDIDATES) - {"attention_recurrent"} | {"attention", "recurrent", "head"}:
+            # The canonical profiler owns six concrete kernel families.
+            expected = {
+                "paged_validation",
+                "aq4_projection",
+                "attention",
+                "recurrent",
+                "normalization",
+                "head",
+            }
+            if set(families) != expected:
+                raise SelectionError(
+                    f"{label}.{phase}.families fields differ: "
+                    f"missing={sorted(expected - set(families))}, "
+                    f"unknown={sorted(set(families) - expected)}"
+                )
+        for family, metrics in families.items():
+            if not isinstance(metrics, dict):
+                raise SelectionError(f"{label}.{phase}.families.{family} must be an object")
+            exact_fields(metrics, family_fields, f"{label}.{phase}.families.{family}")
+            for field in sorted(family_fields):
+                _profile_nonnegative_number(
+                    metrics[field],
+                    f"{label}.{phase}.families.{family}.{field}",
+                    integer=not milliseconds,
+                )
+        if suffix == "ns":
+            partition = (
+                sum(metrics["exclusive_ns"] for metrics in families.values())
+                + aggregate["cross_family_overlap_ns"]
+                + aggregate["unclassified_ns"]
+            )
+            if partition != aggregate["gpu_total_union_ns"]:
+                raise SelectionError(f"{label}.{phase} partition does not conserve GPU time")
+
+
 def validate_diagnostic_profile(value: dict[str, Any], snapshot: Snapshot) -> dict[str, str]:
     if value.get("schema_version") != PROFILE_SCHEMA:
         raise SelectionError(f"unsupported evidence schema: {value.get('schema_version')!r}")
@@ -472,30 +652,119 @@ def validate_diagnostic_profile(value: dict[str, Any], snapshot: Snapshot) -> di
         raise SelectionError("diagnostic profile status differs")
     require_bool(value.get("measurement_eligible"), False, "profile measurement_eligible")
     require_bool(value.get("promotion"), False, "profile promotion")
-    timing = value.get("timing_ns")
-    if not isinstance(timing, dict) or not isinstance(timing.get("prefill"), dict):
-        raise SelectionError("diagnostic profile family timing is missing")
-    families = timing["prefill"].get("families")
-    if not isinstance(families, dict):
-        raise SelectionError("diagnostic profile prefill families are missing")
     binding = value.get("binding")
-    identity_sha = None
-    if isinstance(binding, dict) and isinstance(binding.get("identity"), dict):
-        identity_sha = binding["identity"].get("identity_sha256")
-    if identity_sha is not None:
-        require_digest(identity_sha, "diagnostic profile identity_sha256")
-    return {"sha256": snapshot.sha256, "identity_sha256": identity_sha or ""}
+    if not isinstance(binding, dict):
+        raise SelectionError("diagnostic profile binding must be an object")
+    exact_fields(binding, PROFILE_BINDING_FIELDS, "diagnostic profile binding")
+    case = binding["case"]
+    identity = binding["identity"]
+    device = binding["device"]
+    if not all(isinstance(item, dict) for item in (case, identity, device)):
+        raise SelectionError("diagnostic profile binding objects are incomplete")
+    exact_fields(case, PROFILE_CASE_FIELDS, "diagnostic profile binding.case")
+    exact_fields(identity, PROFILE_IDENTITY_FIELDS, "diagnostic profile binding.identity")
+    exact_fields(device, PROFILE_DEVICE_FIELDS, "diagnostic profile binding.device")
+    for field in (
+        "case_sha256",
+        "case_binding_sha256",
+        "identity_file_sha256",
+        "identity_sha256",
+        "worker_binary_sha256",
+        "served_model_manifest_sha256",
+        "guard_set_sha256",
+        "resident_binary_sha256",
+        "package_manifest_sha256",
+        "package_content_sha256",
+        "policy_sha256",
+        "served_model_manifest_sha256",
+        "worker_binary_sha256",
+    ):
+        source = case if field in case else identity if field in identity else binding
+        require_digest(source[field], f"diagnostic profile {field}")
+    for field in ("prefill_requested_m", "resolved_m"):
+        if type(case[field]) is not int or case[field] <= 0:
+            raise SelectionError(f"diagnostic profile binding.case.{field} must be positive integer")
+    if type(device["runtime_device_index"]) is not int or device["runtime_device_index"] < 0:
+        raise SelectionError("diagnostic profile device index is invalid")
+
+    profiler = value["profiler"]
+    trace = value["trace"]
+    mapping = value["mapping"]
+    schedule = value["schedule_separation"]
+    if not all(isinstance(item, dict) for item in (profiler, trace, mapping, schedule)):
+        raise SelectionError("diagnostic profile nested objects are incomplete")
+    exact_fields(profiler, PROFILE_PROFILER_FIELDS, "diagnostic profile profiler")
+    exact_fields(trace, PROFILE_TRACE_FIELDS, "diagnostic profile trace")
+    exact_fields(mapping, PROFILE_MAPPING_FIELDS, "diagnostic profile mapping")
+    exact_fields(schedule, PROFILE_SCHEDULE_FIELDS, "diagnostic profile schedule")
+    trace_schema = trace["schema"]
+    if not isinstance(trace_schema, dict):
+        raise SelectionError("diagnostic profile trace.schema must be an object")
+    exact_fields(trace_schema, PROFILE_TRACE_SCHEMA_FIELDS, "diagnostic profile trace.schema")
+    require_digest(trace["sha256"], "diagnostic profile trace.sha256")
+    require_digest(mapping["sha256"], "diagnostic profile mapping.sha256")
+    _profile_nonnegative_number(trace["bytes"], "diagnostic profile trace.bytes", integer=True)
+    _profile_nonnegative_number(
+        trace["kernel_count"], "diagnostic profile trace.kernel_count", integer=True
+    )
+    for field in ("maximum_unclassified_fraction", "observed_unclassified_fraction"):
+        number = require_number(mapping[field], f"diagnostic profile mapping.{field}")
+        if number > 1.0:
+            raise SelectionError(f"diagnostic profile mapping.{field} exceeds one")
+    if not isinstance(mapping["complete"], bool) or not isinstance(mapping["unknown_kernel_names"], list):
+        raise SelectionError("diagnostic profile mapping types differ")
+    if not isinstance(value["eligibility_blockers"], list) or any(
+        not isinstance(item, str) for item in value["eligibility_blockers"]
+    ):
+        raise SelectionError("diagnostic profile eligibility_blockers differ")
+    if schedule != {
+        "warmup_runs": 2,
+        "measured_runs": 10,
+        "profile_aggregation_used_for_performance": False,
+        "inclusive_kernel_sum_used_as_gpu_total": False,
+    }:
+        raise SelectionError("diagnostic profile schedule differs")
+    _validate_profile_timing(value["timing_ns"], "diagnostic profile timing_ns", milliseconds=False)
+    _validate_profile_timing(value["timing_ms"], "diagnostic profile timing_ms", milliseconds=True)
+    return {"sha256": snapshot.sha256, "identity_sha256": identity["identity_sha256"]}
 
 
 def stable_float(value: float) -> float:
+    if not math.isfinite(value):
+        raise SelectionError("derived value is non-finite")
     if value == 0.0:
         return 0.0
-    return float(f"{value:.15g}")
+    result = float(f"{value:.15g}")
+    if not math.isfinite(result):
+        raise SelectionError("rounded derived value is non-finite")
+    return result
+
+
+def finite_derived(value: float, label: str) -> float:
+    if not math.isfinite(value):
+        raise SelectionError(f"{label} is non-finite")
+    return value
+
+
+def safe_fsum(values: Iterable[float], label: str) -> float:
+    try:
+        result = math.fsum(sorted(values))
+    except (OverflowError, ValueError) as error:
+        raise SelectionError(f"{label} overflowed") from error
+    return finite_derived(result, label)
+
+
+def safe_squared_difference(value: float, center: float, label: str) -> float:
+    try:
+        result = (value - center) ** 2
+    except OverflowError as error:
+        raise SelectionError(f"{label} overflowed") from error
+    return finite_derived(result, label)
 
 
 def stable_mean(values: Iterable[float]) -> float:
-    ordered = sorted(values)
-    return math.fsum(ordered) / len(ordered)
+    ordered = list(values)
+    return finite_derived(safe_fsum(ordered, "mean sum") / len(ordered), "mean")
 
 
 def median(values: Iterable[float]) -> float:
@@ -506,7 +775,10 @@ def median(values: Iterable[float]) -> float:
     middle = count // 2
     if count % 2:
         return ordered[middle]
-    return math.fsum((ordered[middle - 1], ordered[middle])) / 2.0
+    return finite_derived(
+        safe_fsum((ordered[middle - 1], ordered[middle]), "median sum") / 2.0,
+        "median",
+    )
 
 
 def above_strict(value: float, threshold: float) -> bool:
@@ -527,12 +799,27 @@ def paired_ci(pairs: list[dict[str, Any]]) -> dict[str, Any]:
         }
     if count > 30:
         raise SelectionError("full-model paired sample count exceeds 30")
-    improvements = sorted(row["baseline_ms"] - row["candidate_ms"] for row in pairs)
+    improvements = sorted(
+        finite_derived(
+            row["baseline_ms"] - row["candidate_ms"], "paired improvement"
+        )
+        for row in pairs
+    )
     mean = stable_mean(improvements)
-    squared = sorted((value - mean) ** 2 for value in improvements)
-    sample_variance = math.fsum(squared) / (count - 1)
-    standard_error = math.sqrt(sample_variance / count)
-    halfwidth = T_CRITICAL_975[count - 1] * standard_error
+    squared = sorted(
+        safe_squared_difference(value, mean, "paired squared deviation")
+        for value in improvements
+    )
+    sample_variance = finite_derived(
+        safe_fsum(squared, "paired variance sum") / (count - 1),
+        "paired sample variance",
+    )
+    standard_error = finite_derived(
+        math.sqrt(sample_variance / count), "paired standard error"
+    )
+    halfwidth = finite_derived(
+        T_CRITICAL_975[count - 1] * standard_error, "paired CI halfwidth"
+    )
     return {
         "pair_count": count,
         "mean_improvement_ms": stable_float(mean),
@@ -554,12 +841,16 @@ def evaluate_candidate(
     prompt_results: list[dict[str, Any]] = []
     for row in rows:
         baseline = row["baseline_p50_ms"]
-        recoverable_share = row["recoverable_family_exclusive_ms"] / baseline
-        noise_floor = max(
-            0.05,
-            3.0 * row["baseline_cv"],
-            2.0 * row["ci95_halfwidth_ms"] / baseline,
+        recoverable_share = finite_derived(
+            row["recoverable_family_exclusive_ms"] / baseline,
+            "recoverable share E",
         )
+        cv_term = finite_derived(3.0 * row["baseline_cv"], "noise floor CV term")
+        ci_numerator = finite_derived(
+            2.0 * row["ci95_halfwidth_ms"], "noise floor CI numerator"
+        )
+        ci_term = finite_derived(ci_numerator / baseline, "noise floor CI term")
+        noise_floor = finite_derived(max(0.05, cv_term, ci_term), "noise floor N")
         prompt_results.append(
             {
                 "prompt_id": row["prompt_id"],
@@ -620,7 +911,9 @@ def evaluate_candidate(
         "reason_codes": sorted(set(reasons)),
         "recoverable_share_e": stable_float(recoverable_e) if recoverable_e is not None else None,
         "noise_floor_n": stable_float(noise_n) if noise_n is not None else None,
-        "e_minus_n": stable_float(recoverable_e - noise_n)
+        "e_minus_n": stable_float(
+            finite_derived(recoverable_e - noise_n, "candidate E minus N")
+        )
         if recoverable_e is not None and noise_n is not None
         else None,
         "representative": {
@@ -705,7 +998,7 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
             candidate["candidate_id"],
         ),
     )
-    return {
+    result = {
         "schema_version": OUTPUT_SCHEMA,
         "status": "selected" if ranked else "no_eligible_candidate",
         "selected_candidate_id": ranked[0]["candidate_id"] if ranked else None,
@@ -736,12 +1029,15 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
         ),
         "candidates": candidates,
     }
+    ensure_finite_tree(result, "selection output")
+    return result
 
 
 def write_output(path: Path, value: dict[str, Any]) -> None:
     if path.exists() or path.is_symlink():
         raise SelectionError(f"refusing to overwrite output: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_finite_tree(value, "selection output")
     raw = json.dumps(
         value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False
     ).encode("ascii") + b"\n"

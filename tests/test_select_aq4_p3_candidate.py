@@ -112,6 +112,158 @@ def candidate(result: dict[str, object], candidate_id: str) -> dict[str, object]
     )
 
 
+def diagnostic_profile() -> dict[str, object]:
+    families_ns = {
+        family: {"exclusive_ns": 0, "non_overlap_ns": 0, "active_union_ns": 0}
+        for family in (
+            "paged_validation",
+            "aq4_projection",
+            "attention",
+            "recurrent",
+            "normalization",
+            "head",
+        )
+    }
+    families_ns["paged_validation"] = {
+        "exclusive_ns": 1_000_000,
+        "non_overlap_ns": 1_000_000,
+        "active_union_ns": 1_000_000,
+    }
+
+    def aggregate_ns(active: bool) -> dict[str, object]:
+        return {
+            "kernel_count": 1 if active else 0,
+            "inclusive_sum_ns": 1_000_000 if active else 0,
+            "gpu_total_union_ns": 1_000_000 if active else 0,
+            "inclusive_overcount_ns": 0,
+            "overlap_union_ns": 0,
+            "cross_family_overlap_ns": 0,
+            "unclassified_ns": 0,
+            "families": json.loads(json.dumps(families_ns))
+            if active
+            else {
+                family: {
+                    "exclusive_ns": 0,
+                    "non_overlap_ns": 0,
+                    "active_union_ns": 0,
+                }
+                for family in families_ns
+            },
+        }
+
+    def aggregate_ms(value: dict[str, object]) -> dict[str, object]:
+        return {
+            "kernel_count": value["kernel_count"],
+            "inclusive_sum_ms": value["inclusive_sum_ns"] / 1_000_000,
+            "gpu_total_union_ms": value["gpu_total_union_ns"] / 1_000_000,
+            "inclusive_overcount_ms": value["inclusive_overcount_ns"] / 1_000_000,
+            "overlap_union_ms": value["overlap_union_ns"] / 1_000_000,
+            "cross_family_overlap_ms": value["cross_family_overlap_ns"] / 1_000_000,
+            "unclassified_ms": value["unclassified_ns"] / 1_000_000,
+            "families": {
+                family: {
+                    "exclusive_ms": metrics["exclusive_ns"] / 1_000_000,
+                    "non_overlap_ms": metrics["non_overlap_ns"] / 1_000_000,
+                    "active_union_ms": metrics["active_union_ns"] / 1_000_000,
+                }
+                for family, metrics in value["families"].items()
+            },
+        }
+
+    timing_ns = {
+        "total": aggregate_ns(True),
+        "prefill": aggregate_ns(True),
+        "decode": aggregate_ns(False),
+        "unclassified_phase": aggregate_ns(False),
+    }
+    return {
+        "schema_version": SELECTOR.PROFILE_SCHEMA,
+        "status": "profiled_diagnostic",
+        "measurement_eligible": False,
+        "promotion": False,
+        "binding": {
+            "case": {
+                "case_id": "case-1",
+                "case_sha256": "2" * 64,
+                "case_binding_sha256": "3" * 64,
+                "prefill_requested_m": 128,
+                "resolved_m": 128,
+            },
+            "identity": {
+                "identity_file_sha256": "4" * 64,
+                "identity_sha256": IDENTITY_SHA,
+                "model_id": "model",
+                "model_revision": "revision",
+                "worker_binary_sha256": "5" * 64,
+                "served_model_manifest_sha256": "6" * 64,
+                "guard_set_sha256": "7" * 64,
+                "build_git_commit": "8" * 40,
+                "protocol": "ullm.aq4_p2_resident_driver.v2",
+            },
+            "device": {
+                "runtime_device_index": 1,
+                "device_id": "r9700-rdna4",
+                "backend": "hip",
+                "name": "AMD Radeon Graphics",
+                "architecture": "gfx1201",
+            },
+            "resident_binary_sha256": "9" * 64,
+            "package_manifest_sha256": "a" * 64,
+            "package_content_sha256": "b" * 64,
+            "policy_sha256": "c" * 64,
+            "served_model_manifest_sha256": "6" * 64,
+            "worker_binary_sha256": "5" * 64,
+        },
+        "profiler": {
+            "tool": "rocprofv3",
+            "path": "/opt/rocm/bin/rocprofv3",
+            "executable_sha256": "d" * 64,
+            "version": "1.1.0",
+            "rocm_version": "7.2.1",
+            "version_output_sha256": "e" * 64,
+            "command": ["rocprofv3", "--", "resident"],
+            "subprocess_profile_runs": 1,
+        },
+        "trace": {
+            "sha256": "f" * 64,
+            "bytes": 100,
+            "schema": {
+                "columns": [
+                    "Dispatch_Id",
+                    "Kernel_Name",
+                    "Start_Timestamp",
+                    "End_Timestamp",
+                    "Phase",
+                ],
+                "dispatch_id": "Dispatch_Id",
+                "kernel_name": "Kernel_Name",
+                "start_timestamp": "Start_Timestamp",
+                "end_timestamp": "End_Timestamp",
+                "phase": "Phase",
+                "clock_unit": "nanoseconds",
+            },
+            "kernel_count": 1,
+        },
+        "mapping": {
+            "schema_version": "ullm.aq4_p2_kernel_family_mapping.v1",
+            "sha256": "0" * 64,
+            "maximum_unclassified_fraction": 0.0,
+            "observed_unclassified_fraction": 0.0,
+            "unknown_kernel_names": [],
+            "complete": True,
+        },
+        "timing_ns": timing_ns,
+        "timing_ms": {phase: aggregate_ms(value) for phase, value in timing_ns.items()},
+        "eligibility_blockers": ["diagnostic only"],
+        "schedule_separation": {
+            "warmup_runs": 2,
+            "measured_runs": 10,
+            "profile_aggregation_used_for_performance": False,
+            "inclusive_kernel_sum_used_as_gpu_total": False,
+        },
+    }
+
+
 def test_eligible_fixture_selects_paged_kv_and_recomputes_all_gates(
     tmp_path: Path,
 ) -> None:
@@ -269,30 +421,7 @@ def test_nonfinite_json_is_rejected_before_selection(tmp_path: Path) -> None:
 
 
 def test_current_diagnostic_profile_cannot_qualify_paged_kv(tmp_path: Path) -> None:
-    profile = {
-        "schema_version": SELECTOR.PROFILE_SCHEMA,
-        "status": "profiled_diagnostic",
-        "measurement_eligible": False,
-        "promotion": False,
-        "binding": {"identity": {"identity_sha256": IDENTITY_SHA}},
-        "profiler": {},
-        "trace": {},
-        "mapping": {},
-        "timing_ns": {
-            "prefill": {
-                "families": {
-                    "paged_validation": {
-                        "exclusive_ns": 1_000_000,
-                        "non_overlap_ns": 1_000_000,
-                        "active_union_ns": 1_000_000,
-                    }
-                }
-            }
-        },
-        "timing_ms": {},
-        "eligibility_blockers": ["diagnostic only"],
-        "schedule_separation": {},
-    }
+    profile = diagnostic_profile()
     path = tmp_path / "profile.json"
     write_json(path, profile)
     snapshot = SELECTOR.capture(path)
@@ -306,6 +435,52 @@ def test_current_diagnostic_profile_cannot_qualify_paged_kv(tmp_path: Path) -> N
     assert result["input_warnings"] == [
         "diagnostic family-exclusive profiles are not measurement eligible and do not provide D2H/stream-sync counts"
     ]
+
+
+def test_representative_prompt_count_rejects_float_seven() -> None:
+    value = raw_fixture()
+    value["representative_prompt_count"] = 7.0
+    seal(value)
+    with pytest.raises(SELECTOR.SelectionError, match="representative_prompt_count"):
+        SELECTOR.validate_raw(value)
+
+
+def test_diagnostic_profile_rejects_nested_unknown_field(tmp_path: Path) -> None:
+    value = diagnostic_profile()
+    value["timing_ns"]["prefill"]["unknown"] = 0
+    path = tmp_path / "profile-unknown.json"
+    write_json(path, value)
+    snapshot = SELECTOR.capture(path)
+    with pytest.raises(SELECTOR.SelectionError, match="fields differ"):
+        SELECTOR.validate_diagnostic_profile(SELECTOR.parse_json(snapshot), snapshot)
+
+
+def test_large_json_exponent_is_rejected_as_nonfinite(tmp_path: Path) -> None:
+    path = tmp_path / "profile-infinite.json"
+    path.write_text('{"schema_version":"x","value":1e999}\n', encoding="utf-8")
+    snapshot = SELECTOR.capture(path)
+    with pytest.raises(SELECTOR.SelectionError, match="non-finite"):
+        SELECTOR.parse_json(snapshot)
+
+
+def test_finite_extremes_cannot_overflow_derived_e_or_ci(tmp_path: Path) -> None:
+    value = raw_fixture()
+    value["measurements"][0]["baseline_p50_ms"] = 1e-308
+    value["measurements"][0]["recoverable_family_exclusive_ms"] = 1e308
+    seal(value)
+    with pytest.raises(SELECTOR.SelectionError, match="recoverable share E"):
+        select_raw(tmp_path, value)
+
+    paired = raw_fixture()
+    paired["full_model_pairs"][0]["baseline_ms"] = 1e308
+    paired["full_model_pairs"][0]["candidate_ms"] = 1.0
+    paired["full_model_pairs"][1]["baseline_ms"] = 1.0
+    paired["full_model_pairs"][1]["candidate_ms"] = 1e308
+    seal(paired)
+    other = tmp_path / "paired"
+    other.mkdir()
+    with pytest.raises(SELECTOR.SelectionError, match="paired squared deviation"):
+        select_raw(other, paired)
 
 
 def test_cli_writes_deterministic_json_and_refuses_overwrite(tmp_path: Path) -> None:
