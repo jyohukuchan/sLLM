@@ -1,0 +1,28 @@
+{
+  "schema_version": "ullm.aq4_served_worker_detach_audit.v1",
+  "status": "not_executed",
+  "worker_path": "target/reasoning-v2/release/ullm-aq4-worker",
+  "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+  "worker_stat": {
+    "owner_uid": 1000,
+    "owner_gid": 1000,
+    "mode": "0775",
+    "device": 66306,
+    "inode": 10506405,
+    "nlink": 2,
+    "bytes": 3729520
+  },
+  "hardlink_alias": "target/reasoning-v2/release/deps/ullm_aq4_worker-03e49ec754c21dc7",
+  "expected_post_detach": {
+    "worker_regular": true,
+    "worker_nlink": 1,
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "owner_uid": 1000,
+    "owner_gid": 1000,
+    "mode": "0775"
+  },
+  "detach_procedure": "same-directory temp copy; preserve owner/mode; verify SHA, regular-file, and nlink=1; atomic mv -T to worker_path",
+  "rollback_procedure": "copy hardlink_alias to same-directory temp; verify SHA, owner/mode, and nlink=1; atomic mv -T to worker_path",
+  "process_boundary": "running process retains old inode; next service start reads worker_path new inode",
+  "production_change_performed": false
+}

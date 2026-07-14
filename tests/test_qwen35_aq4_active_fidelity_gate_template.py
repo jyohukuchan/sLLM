@@ -20,8 +20,13 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             env = os.environ.copy()
             env.update(MOCK_PREFLIGHT="1", PREFLIGHT_ONLY="1")
             completed = subprocess.run([str(GATE)], cwd=ROOT, env=env, capture_output=True, text=True, check=False)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertIn("mock_preflight=1 service_stop=0 gpu_run=0", completed.stdout)
+            worker = ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
+            if worker.stat().st_nlink == 1:
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("mock_preflight=1 service_stop=0 gpu_run=0", completed.stdout)
+            else:
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("worker identity differs", completed.stderr)
             self.assertNotIn("systemctl", completed.stdout + completed.stderr)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
@@ -65,6 +70,7 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             'assert plan["execution_contract"]["source_torch_threads"] == 32',
             'assert receipt["schema_version"] == "ullm.aq4_fidelity_capture_build_receipt.v1"',
             '[[ "$(stat -Lc \'%F:%h\' "$FIDELITY_BIN")" = "regular file:1" ]]',
+            '[[ "$(stat -Lc \'%F:%h\' "$WORKER")" = "regular file:1" ]] || fail "worker identity differs"',
             '--served-model-manifest "$ACTIVE"',
             '--split-root "$SPLIT_ROOT"',
             '--source "$SOURCE_ARTIFACT"',

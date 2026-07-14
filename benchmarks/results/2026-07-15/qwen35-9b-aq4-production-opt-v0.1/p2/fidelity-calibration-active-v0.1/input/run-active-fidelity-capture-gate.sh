@@ -141,6 +141,7 @@ validate_active_identity() {
   require_regular "$ACTIVE" active_manifest
   require_regular "$PACKAGE_MANIFEST" package_manifest
   require_regular "$WORKER" worker
+  [[ "$(stat -Lc '%F:%h' "$WORKER")" = "regular file:1" ]] || fail "worker identity differs"
   [[ "$(sha256_file "$ACTIVE")" = "$EXPECTED_SERVED_SHA256" ]] || fail "served manifest SHA differs"
   [[ "$(sha256_file "$PACKAGE_MANIFEST")" = "$EXPECTED_PACKAGE_SHA256" ]] || fail "package manifest SHA differs"
   [[ "$(sha256_file "$WORKER")" = "$EXPECTED_WORKER_SHA256" ]] || fail "worker SHA differs"
