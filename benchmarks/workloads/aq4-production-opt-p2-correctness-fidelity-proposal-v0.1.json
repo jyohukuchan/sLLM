@@ -1,0 +1,184 @@
+{
+  "schema_version": "ullm.aq4_p2_correctness_fidelity_proposal.v1",
+  "proposal_id": "aq4-production-opt-p2-correctness-fidelity-amendment-v0.1",
+  "status": "proposed",
+  "normative_status": "non_binding_review",
+  "promotion_eligible": false,
+  "effective_at": null,
+  "scope": {
+    "model_family": "Qwen3.5",
+    "model_name": "Qwen3.5-9B",
+    "format_id": "AQ4_0",
+    "backend": "hip",
+    "production_profile": "Radeon AI PRO R9700 / RDNA4",
+    "active_path_oracle": "same_artifact_all_m1"
+  },
+  "audit_basis": {
+    "normative_sources": [
+      {
+        "path": "docs/specs/prefill-validation-v0.1.md",
+        "clauses": ["8.2", "8.3", "9"]
+      },
+      {
+        "path": "docs/specs/qwen35-aq4-p2-oracle-v0.1.md",
+        "clauses": ["source oracle exact greedy/top-k", "same_artifact_all_m1"]
+      },
+      {
+        "path": "docs/specs/qwen35-aq4-p2-full-source-calibration-v0.1.md",
+        "clauses": ["source_gate", "path_gate", "observed-values-only"]
+      },
+      {
+        "path": "docs/specs/aq4-p2-calibration-evidence-binding-v0.1.md",
+        "clauses": ["greedy mismatch rows", "five bound metrics", "policy before calibration"]
+      }
+    ],
+    "current_threshold_audit": {
+      "path": "benchmarks/aq4-production-prefill-decode/p2/correctness-threshold-audit.json",
+      "status": "blocked",
+      "values": null,
+      "reason": "no approved numerical AQ4 thresholds"
+    },
+    "attempt2_role": "diagnostic_only",
+    "attempt2_threshold_use": "forbidden"
+  },
+  "contract_split": {
+    "bf16_source_vs_lossy_aq4": {
+      "current_contract": {
+        "exact_greedy_token_sequence_required": true,
+        "exact_top_k_ranking_or_policy_overlap_required": true,
+        "source_gate_is_correctness_gate": true
+      },
+      "proposed_contract": {
+        "status": "requires_separate_spec_amendment",
+        "compatibility_canary": {
+          "exact_greedy_token_sequence_required": true,
+          "exact_top_k_ranking_required": true,
+          "promotion_eligible": false
+        },
+        "independent_holdout": {
+          "exact_row_greedy_required": false,
+          "exact_row_top_k_required": false,
+          "fidelity_metrics_required": [
+            "token_agreement_rate",
+            "top_k_overlap",
+            "logits_cosine_similarity",
+            "logits_relative_l2",
+            "hidden_cosine_similarity",
+            "hidden_relative_l2",
+            "hidden_max_abs",
+            "quality_task_score"
+          ],
+          "thresholds_must_be_frozen_before_candidate_run": true,
+          "holdout_must_be_disjoint_from_tuning_cases": true
+        }
+      }
+    },
+    "candidate_vs_active_path": {
+      "oracle_kind": "same_artifact_all_m1",
+      "exact_behavior_required": true,
+      "exact_fields": [
+        "case_id",
+        "step",
+        "context_token_ids_sha256",
+        "greedy_token_id",
+        "top_k_token_ids_and_order",
+        "kv_cache_lengths",
+        "absolute_positions",
+        "scheduler_request_ownership",
+        "generated_token_counters",
+        "block_table_and_state_commit",
+        "terminal_outcome_and_reset"
+      ],
+      "candidate_may_differ_only_in": [
+        "declared_prefill_implementation",
+        "resolved_chunk_plan",
+        "declared_workspace"
+      ],
+      "numeric_vector_metrics": "record_for_diagnostics; do_not_derive_thresholds_from_attempt2"
+    }
+  },
+  "threshold_derivation": {
+    "frozen_before_candidate_execution": true,
+    "observed_attempt2_must_not_change_policy": true,
+    "permitted_bases": [
+      {
+        "basis": "approved_p0_p1_policy",
+        "condition": "reuse only when model, format, backend, artifact, binary, and metric identity hashes match exactly"
+      },
+      {
+        "basis": "independent_calibration_holdout",
+        "condition": "capture source-vs-existing-active-AQ4 baseline before candidate execution; freeze quantiles and safety margin in policy"
+      },
+      {
+        "basis": "quantization_design_upper_bound",
+        "condition": "derive from predeclared weight/dequantization error analysis; never fit to candidate rows"
+      },
+      {
+        "basis": "predeclared_active_aq4_baseline",
+        "condition": "candidate must not exceed the frozen active-AQ4-vs-BF16 envelope on the disjoint holdout"
+      }
+    ],
+    "forbidden_bases": [
+      "attempt2 observed rows or VRAM/power samples",
+      "candidate-selected rows, prompts, or M values",
+      "post-run threshold relaxation after a mismatch",
+      "historical values with a different identity",
+      "producer summary without independently validated payload"
+    ],
+    "freeze_order": [
+      "hash source checkpoint/tokenizer/cases and holdout split",
+      "capture and validate independent BF16 source plus existing active AQ4 baseline",
+      "choose metric definitions, aggregation, quantile, margin, and quality tasks",
+      "write and self-hash the bound policy",
+      "execute candidate and active-path comparisons",
+      "evaluate only against the frozen policy"
+    ],
+    "no_threshold_values_in_proposal": true
+  },
+  "minimum_p2_spec_amendment": {
+    "required_evidence": [
+      "hash-bound disjoint tuning and evaluation holdouts",
+      "independent BF16 source full-vector calibration",
+      "existing active AQ4 all-M=1 source baseline",
+      "candidate same-artifact all-M=1 path result",
+      "candidate optimized result and source/path comparison artifacts",
+      "frozen policy with model/source/path/case/power/binary hashes",
+      "quality-task evaluation with fixed prompts, tokenizer, sampling, and scoring"
+    ],
+    "validator_tests": [
+      "reject policy if any threshold is null, changed after candidate run, or not hash-bound",
+      "reject source holdout overlap with tuning cases",
+      "reject candidate/path greedy, top-k, context, or state mismatch",
+      "reject source/path/candidate identity or case swap",
+      "reject missing full-vector metrics, nonfinite rows, and partial matrices",
+      "reject attempt2 digest or producer summary as a threshold source",
+      "accept diagnostic attempt2 artifact only as observed-values-only evidence"
+    ],
+    "rejection_criteria": [
+      "any exact active-path behavioral mismatch",
+      "any unexpected fallback, OOM, state reset failure, or lifecycle mismatch",
+      "source fidelity metric beyond frozen threshold",
+      "quality task regression beyond frozen non-regression rule",
+      "missing or changed identity, holdout, power, or policy hash",
+      "attempt2-only or post-hoc threshold justification"
+    ]
+  },
+  "p3_candidate_requirements": {
+    "active_path_exact_no_regression": [
+      "all-M=1 exact greedy sequence and ordered top-k at every committed step",
+      "exact context/input hash, KV/cache lengths, positions, scheduler ownership, and reset",
+      "no new fallback/OOM and no production worker contract change"
+    ],
+    "source_fidelity": [
+      "meet frozen holdout token-agreement and top-k-overlap policy",
+      "meet frozen hidden/logit cosine and relative-L2 drift policy",
+      "meet frozen quality-task non-regression policy"
+    ],
+    "performance": [
+      "compare only same identity and power condition",
+      "retain existing P2 2-warmup/10-measured schedule",
+      "do not trade correctness or exact path behavior for throughput"
+    ],
+    "promotion": "blocked until the amended policy and independent validator are reviewed and bound"
+  }
+}
