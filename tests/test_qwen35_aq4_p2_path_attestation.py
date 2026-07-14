@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import sys
 import tempfile
+import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -42,8 +44,10 @@ class Qwen35Aq4P2PathAttestationTests(unittest.TestCase):
             broken = tools / "broken.py"
             broken.write_text("partial = True\nraise RuntimeError('broken import')\n", encoding="utf-8")
             replaced = tools / "replaced.py"
+            replacement_hook_name = "aq4_attestation_loader_replacement_hook"
             replaced.write_text(
-                "import sys\nsys.modules[__name__] = object()\n",
+                "import sys\n"
+                f"sys.modules[__name__] = sys.modules[{replacement_hook_name!r}].sentinel\n",
                 encoding="utf-8",
             )
             with mock.patch.object(ATTEST, "ROOT", root):
@@ -68,9 +72,80 @@ class Qwen35Aq4P2PathAttestationTests(unittest.TestCase):
                 self.assertNotIn(failure_name, sys.modules)
 
                 replacement_name = "aq4_attestation_loader_replacement"
-                with self.assertRaisesRegex(RuntimeError, "registration changed"):
-                    ATTEST._load(replacement_name, replaced.name)
-                self.assertNotIn(replacement_name, sys.modules)
+                replacement_hook = type("ReplacementHook", (), {})()
+                replacement_hook.sentinel = object()
+                sys.modules[replacement_hook_name] = replacement_hook
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "registration changed"):
+                        ATTEST._load(replacement_name, replaced.name)
+                    self.assertIs(sys.modules[replacement_name], replacement_hook.sentinel)
+                finally:
+                    sys.modules.pop(replacement_name, None)
+                    sys.modules.pop(replacement_hook_name, None)
+
+    def test_dynamic_loader_same_name_concurrency_executes_once(self) -> None:
+        class ExecutionHook:
+            def __init__(self) -> None:
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.lock = threading.Lock()
+                self.calls = 0
+
+            def enter(self) -> None:
+                with self.lock:
+                    self.calls += 1
+                self.entered.set()
+                if not self.release.wait(timeout=5):
+                    raise RuntimeError("test hook timed out")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            hook_name = "aq4_attestation_loader_concurrent_hook"
+            module_name = "aq4_attestation_loader_concurrent"
+            source = tools / "concurrent.py"
+            source.write_text(
+                "import sys\n"
+                f"sys.modules[{hook_name!r}].enter()\n"
+                "executed = True\n",
+                encoding="utf-8",
+            )
+            hook = ExecutionHook()
+            start = threading.Barrier(3)
+
+            def load_after_barrier():
+                start.wait(timeout=5)
+                return ATTEST._load(module_name, source.name)
+
+            sys.modules[hook_name] = hook
+            try:
+                with mock.patch.object(ATTEST, "ROOT", root):
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                        futures = [executor.submit(load_after_barrier) for _ in range(2)]
+                        start.wait(timeout=5)
+                        self.assertTrue(hook.entered.wait(timeout=5))
+                        done, pending = concurrent.futures.wait(
+                            futures,
+                            timeout=5,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        self.assertEqual(len(done), 1)
+                        failed = done.pop()
+                        with self.assertRaisesRegex(RuntimeError, "already registered"):
+                            failed.result()
+                        self.assertEqual(hook.calls, 1)
+                        self.assertIn(module_name, sys.modules)
+                        hook.release.set()
+                        self.assertEqual(len(pending), 1)
+                        loaded = pending.pop().result(timeout=5)
+                        self.assertTrue(loaded.executed)
+                self.assertEqual(hook.calls, 1)
+                self.assertNotIn(module_name, sys.modules)
+            finally:
+                hook.release.set()
+                sys.modules.pop(module_name, None)
+                sys.modules.pop(hook_name, None)
 
     def test_production_attestation_binds_detached_path_and_worker_copies(self) -> None:
         report = ATTEST.validate(

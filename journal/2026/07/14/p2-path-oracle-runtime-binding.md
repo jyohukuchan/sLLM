@@ -15,9 +15,11 @@
 - 決定的test hookにより、checksum後のrename、same-size rewrite+mtime復元、semantic後のruntime差替え+SHA256SUMS更新を発生させ、いずれもsnapshot identity/digest不一致として拒否した。
 - 外部binary/package/artifact/workerをJSON bytes上限から分離し、single-link pinned fdのstreaming digestとidentityをvalidation contextへ登録した。product/package directoryは全entryの相対path、種別、size、identity、same-fd file digestを固定し、完了時にtreeとfile identityを再照合する。
 - path semantics後のbinary同一size rewrite/rename、worker/package/artifact置換を決定的に発生させる負例と、4 MiBを超えるbinary/workerを受理する正例を追加した。
-- Python 3.12でcommon oracleの`dataclass`を動的loadするとき、moduleを`sys.modules`へ登録しないloaderがcollection時に失敗する回帰を閉じた。attestation loaderは固有名の既存登録を拒否し、module-level codeの実行中だけ登録し、成功、例外、registry差替えのすべてで登録を除去する。
+- Python 3.12でcommon oracleの`dataclass`を動的loadするとき、moduleを`sys.modules`へ登録しないloaderがcollection時に失敗する回帰を閉じた。attestation loaderは固有名の既存登録を拒否し、module-level codeの実行中だけ登録し、成功と例外のcleanupで自分のmoduleだけを除去する。
 - loaderの正例では動的module内の`dataclass`構築を確認し、既存module衝突、module-level例外によるpartial import、実行中のregistry差替えをfail-closeする負例を追加した。
+- 同名動的loadのcheck/register競合を`sys.modules.setdefault`の1操作で所有権判定するよう修正した。同時実行testは一方だけがmodule-level codeへ入り、もう一方が実行前に衝突することをbarrierで固定する。
+- cleanupは自分が登録したmodule objectと現在値が一致する場合だけ行う。module-level codeがregistryをsentinelへ差し替えた場合はfail-closeしつつsentinelを保持し、既存objectも上書き・削除しない。
 
 ## 次の行動
 
-このcommitではGPU/live/model loadと既存evidence rootの書換えを行わない。loader回帰を含むCPU suiteを再検証し、既存のdetached GPU attestationは履歴として保持する。次のsanctioned runがある場合だけ新しいruntime schemaをexporterから直接発行する。
+このcommitではGPU/live/model loadと既存evidence rootの書換えを行わない。loaderの同名同時実行とcleanup回帰を含むCPU suiteを再検証し、既存のdetached GPU attestationは履歴として保持する。次のsanctioned runがある場合だけ新しいruntime schemaをexporterから直接発行する。

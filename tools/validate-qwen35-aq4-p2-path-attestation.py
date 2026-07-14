@@ -21,13 +21,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load(name: str, filename: str):
-    if not name or name in sys.modules:
-        raise RuntimeError(f"dynamic module name is empty or already registered: {name!r}")
+    if not name:
+        raise RuntimeError("dynamic module name is empty")
     spec = importlib.util.spec_from_file_location(name, ROOT / "tools" / filename)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {filename}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
+    registered = sys.modules.setdefault(name, module)
+    if registered is not module:
+        raise RuntimeError(f"dynamic module name is already registered: {name!r}")
     try:
         spec.loader.exec_module(module)
         if sys.modules.get(name) is not module:
@@ -35,8 +37,10 @@ def _load(name: str, filename: str):
         return module
     finally:
         # The registration exists only while module-level code (including dataclass
-        # decoration) executes.  Never retain a successful or partial dynamic import.
-        sys.modules.pop(name, None)
+        # decoration) executes.  Remove only the object installed by this call;
+        # a replacement belongs to its writer and must remain registered.
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
 
 
 ORACLE = _load("qwen35_aq4_p2_oracle_attestation", "qwen35_aq4_p2_oracle.py")
