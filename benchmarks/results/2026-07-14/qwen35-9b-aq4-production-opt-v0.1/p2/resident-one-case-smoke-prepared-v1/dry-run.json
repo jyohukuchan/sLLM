@@ -1,9 +1,9 @@
 {
   "baseline_identity": {
-    "build_git_commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
+    "build_git_commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
     "identity_file": {
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/identity.json",
-      "sha256": "3ba78aa1dc6d041bfe12b00a81fa5cd02a2623af36df94a1425bc0a71b239429"
+      "sha256": "94f64c56e70adce2e5d3174bc319f19f9bb228d07923ce1ab42f7918edc58196"
     },
     "kind": "active-production",
     "run_id": "p2-r9700-resident-one-case-smoke-runner-validate-v3",
@@ -38,12 +38,12 @@
   "validation": {
     "bundle": {
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/bundle.json",
-      "sha256": "fcde1a7faaa262fff1fb290e232e330a023719a8d9dbff654f714b8141cfe644"
+      "sha256": "10f2bf38fb4dc247821bb4d5a7d7457af19665c517dd3709249556e4a2729826"
     },
     "driver_fake_handshake": "passed",
     "driver_identity": {
-      "binary_sha256": "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8",
-      "build_git_commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
+      "binary_sha256": "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025",
+      "build_git_commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
       "format_id": "AQ4_0",
       "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
       "implementation_id": "qwen35_aq4_rdna4_v1",
@@ -64,7 +64,7 @@
     },
     "fake_ready": {
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/fake-ready.json",
-      "sha256": "8c6d3bfaaf14aec4f1c9ad6daa6783818753b8072468af03b224aa1809ee771b"
+      "sha256": "84d995992bc9110e61f7f68a7af783c0263e488db77dbad29aec0b3b7c6139d5"
     },
     "mode": "validate_only",
     "resident_session_id": "offline-fake-ready-not-executed"

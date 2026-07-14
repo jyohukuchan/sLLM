@@ -51,19 +51,20 @@
   },
   "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
   "source": {
-    "commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
-    "driver_source_sha256": "9e308b4d4f455517b090e631b9aec682f96caeaedec02766d144f34f3791a8d8",
+    "active_case_device_fixture_sha256": "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73",
+    "commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
+    "driver_source_sha256": "6d7ae136c7abc3b9f7f675d27ff8ed05cd82b9b40a492e56f38e7f2282491345",
     "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
     "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
     "normative_driver": {
       "blob_unchanged_at_current_source": true,
       "clean_build": {
         "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
-        "expected_binary_sha256": "6dc82558b79194b8d690d20213a48e4206cd8bc25a3f37a5b6ade26521ee22b8",
+        "expected_binary_sha256": "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025",
         "provenance": "detached clean Git worktree at normative driver commit"
       },
-      "commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
-      "tree": "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
+      "commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
+      "tree": "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
     },
     "one_case_smoke_runner": {
       "flag": "--one-case-smoke",
@@ -86,6 +87,6 @@
     "runner_source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
     "runner_source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
     "runner_source_tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8",
-    "tree": "0bbd69f4fda93d4f7043dfcb6783fdfb21ce4c8b"
+    "tree": "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
   }
 }
