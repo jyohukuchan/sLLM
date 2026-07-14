@@ -801,7 +801,8 @@ def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[s
         raise BatchError("live preflight does not explicitly replace the synthetic bundle preflight")
     mapping = value.get("runtime_mapping")
     expected_device = bundle.get("expected_runtime", {}).get("device", {})
-    if not isinstance(mapping, dict) or mapping.get("runtime_device_index") != expected_device.get("runtime_device_index") or mapping.get("visible_token") != "1" or mapping.get("amd_smi_index") != 2 or mapping.get("bdf") != "0000:47:00.0" or mapping.get("uuid") != "a8ff7551-0000-1000-80e9-ddefa2d60f55" or mapping.get("kfd_id") != 51545:
+    expected_mapping = {"runtime_device_index": expected_device.get("runtime_device_index"), "visible_token": "1", "amd_smi_index": 2, "bdf": "0000:47:00.0", "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55", "kfd_id": 51545, "node_id": 2}
+    if mapping != expected_mapping:
         raise BatchError("live preflight runtime mapping differs")
     services = value.get("services")
     if services != [{"unit": "ullm-openai.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}, {"unit": "llama-qwen35-udq4.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}]:
@@ -810,17 +811,38 @@ def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[s
     if value.get("worker_pids") != [] or owners != {"amd_smi": [], "kfd": []}:
         raise BatchError("live preflight compute owners differ")
     lock = value.get("lock")
-    if not isinstance(lock, dict) or lock.get("path") != str(args.lock_path) or lock.get("free") is not True or type(lock.get("device")) is not int or type(lock.get("inode")) is not int:
+    if not isinstance(lock, dict) or set(lock) != {"path", "free", "device", "inode"} or lock.get("path") != str(args.lock_path) or lock.get("free") is not True or type(lock.get("device")) is not int or lock["device"] < 0 or type(lock.get("inode")) is not int or lock["inode"] < 0:
         raise BatchError("live preflight lock binding differs")
     expected_environment = bundle.get("expected_runtime", {}).get("environment", {}) | bundle.get("expected_runtime", {}).get("required_guards", {}) | {"ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json", "ULLM_BUILD_GIT_COMMIT": bundle.get("resident_driver", {}).get("source_commit")}
     if value.get("environment") != expected_environment:
         raise BatchError("live preflight environment differs")
     vram = value.get("vram")
-    if not isinstance(vram, dict) or set(vram) != {"total_bytes", "used_bytes", "free_bytes", "headroom_bytes"} or any(type(vram.get(name)) is not int or vram[name] < 0 for name in vram) or vram["total_bytes"] <= 0 or vram["free_bytes"] != vram["total_bytes"] - vram["used_bytes"] or vram["headroom_bytes"] != vram["free_bytes"]:
+    if not isinstance(vram, dict) or set(vram) != {"total_bytes", "used_bytes", "free_bytes", "headroom_bytes"} or any(type(vram.get(name)) is not int or vram[name] < 0 for name in vram) or vram["total_bytes"] < 30_000_000_000 or vram["used_bytes"] != 0 or vram["free_bytes"] != vram["total_bytes"] or vram["headroom_bytes"] != vram["total_bytes"]:
         raise BatchError("live preflight VRAM/headroom differs")
     commands = value.get("commands")
-    labels = {"sudo-n", "service-ullm-openai.service", "service-llama-qwen35-udq4.service", "old-worker", "amd-smi-list", "rocminfo", "amd-smi-process", "amd-smi-static-vram"}
-    if not isinstance(commands, list) or any(not isinstance(item, dict) for item in commands) or {item.get("label") for item in commands} != labels or any(set(item) != {"label", "argv", "exit_code", "stdout_sha256", "stderr_sha256", "captured_unix_ns"} or item.get("exit_code") not in {0, 1} for item in commands):
+    project_root = args.bundle_root.parents[5]
+    expected_commands = {
+        "sudo-n": (["/usr/bin/sudo", "-n", "-v"], 0),
+        "service-ullm-openai.service": (["/usr/bin/systemctl", "show", "ullm-openai.service", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--no-pager"], 0),
+        "service-llama-qwen35-udq4.service": (["/usr/bin/systemctl", "show", "llama-qwen35-udq4.service", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--no-pager"], 0),
+        "old-worker": (["/usr/bin/pgrep", "-f", "-x", f"{project_root / 'target/reasoning-v2/release/ullm-aq4-worker'}.*"], 1),
+        "amd-smi-list": (["/opt/rocm/bin/amd-smi", "list", "--json"], 0),
+        "rocminfo": (["/usr/bin/rocminfo"], 0),
+        "amd-smi-process": (["/opt/rocm/bin/amd-smi", "process", "--gpu", "2", "--general", "--json"], 0),
+        "amd-smi-static-vram": (["/opt/rocm/bin/amd-smi", "static", "--gpu", "2", "--vram", "--json"], 0),
+    }
+    if not isinstance(commands, list) or len(commands) != len(expected_commands) or any(not isinstance(item, dict) for item in commands):
+        raise BatchError("live preflight command evidence differs")
+    observed_labels: set[str] = set()
+    for item in commands:
+        label = item.get("label")
+        if set(item) != {"label", "argv", "exit_code", "stdout_sha256", "stderr_sha256", "captured_unix_ns"} or label not in expected_commands or label in observed_labels:
+            raise BatchError("live preflight command evidence differs")
+        expected_argv, expected_exit = expected_commands[label]
+        if item.get("argv") != expected_argv or item.get("exit_code") != expected_exit or not isinstance(item.get("stdout_sha256"), str) or not SHA256_RE.fullmatch(item["stdout_sha256"]) or not isinstance(item.get("stderr_sha256"), str) or not SHA256_RE.fullmatch(item["stderr_sha256"]) or type(item.get("captured_unix_ns")) is not int or item["captured_unix_ns"] < 0:
+            raise BatchError("live preflight command evidence differs")
+        observed_labels.add(label)
+    if observed_labels != set(expected_commands):
         raise BatchError("live preflight command evidence differs")
     if _file_identity(before) != _file_identity(os.lstat(path)) or sha_file(path, "live preflight", absolute=True) != digest:
         raise BatchError("live preflight changed during validation")

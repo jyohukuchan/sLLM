@@ -31,16 +31,16 @@ def _document(run_id: str = "live-run") -> dict:
             "ULLM_BUILD_GIT_COMMIT": bundle["resident_driver"]["source_commit"],
         }
     )
-    labels = (
-        "sudo-n",
-        "service-ullm-openai.service",
-        "service-llama-qwen35-udq4.service",
-        "old-worker",
-        "amd-smi-list",
-        "rocminfo",
-        "amd-smi-process",
-        "amd-smi-static-vram",
-    )
+    commands = {
+        "sudo-n": (["/usr/bin/sudo", "-n", "-v"], 0),
+        "service-ullm-openai.service": (["/usr/bin/systemctl", "show", "ullm-openai.service", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--no-pager"], 0),
+        "service-llama-qwen35-udq4.service": (["/usr/bin/systemctl", "show", "llama-qwen35-udq4.service", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--no-pager"], 0),
+        "old-worker": (["/usr/bin/pgrep", "-f", "-x", f"{ROOT / 'target/reasoning-v2/release/ullm-aq4-worker'}.*"], 1),
+        "amd-smi-list": (["/opt/rocm/bin/amd-smi", "list", "--json"], 0),
+        "rocminfo": (["/usr/bin/rocminfo"], 0),
+        "amd-smi-process": (["/opt/rocm/bin/amd-smi", "process", "--gpu", "2", "--general", "--json"], 0),
+        "amd-smi-static-vram": (["/opt/rocm/bin/amd-smi", "static", "--gpu", "2", "--vram", "--json"], 0),
+    }
     return {
         "schema_version": "ullm.aq4_p2_resident_live_preflight.v1",
         "status": "passed",
@@ -70,8 +70,8 @@ def _document(run_id: str = "live-run") -> dict:
         "environment": environment,
         "vram": {"total_bytes": 32_624_000_000, "used_bytes": 0, "free_bytes": 32_624_000_000, "headroom_bytes": 32_624_000_000},
         "commands": [
-            {"label": label, "argv": [label], "exit_code": 1 if label == "old-worker" else 0, "stdout_sha256": "0" * 64, "stderr_sha256": "0" * 64, "captured_unix_ns": index + 1}
-            for index, label in enumerate(labels)
+            {"label": label, "argv": argv, "exit_code": exit_code, "stdout_sha256": "0" * 64, "stderr_sha256": "0" * 64, "captured_unix_ns": index}
+            for index, (label, (argv, exit_code)) in enumerate(commands.items())
         ],
     }
 
@@ -151,3 +151,31 @@ def test_live_preflight_rejects_late_replacement(tmp_path: Path) -> None:
     os.replace(replacement, path)
     with pytest.raises(BATCH.BatchError, match="identity changed"):
         BATCH.verify_live_preflight(path, link)
+
+
+@pytest.mark.parametrize(
+    ("variant", "mutate"),
+    [
+        ("mapping-unknown", lambda value: value["runtime_mapping"].update(unknown=1)),
+        ("mapping-node", lambda value: value["runtime_mapping"].update(node_id=3)),
+        ("lock-unknown", lambda value: value["lock"].update(unknown=1)),
+        ("lock-negative-device", lambda value: value["lock"].update(device=-1)),
+        ("lock-negative-inode", lambda value: value["lock"].update(inode=-1)),
+        ("vram-unknown", lambda value: value["vram"].update(unknown=1)),
+        ("vram-too-small", lambda value: value["vram"].update(total_bytes=1, free_bytes=1, headroom_bytes=1)),
+        ("vram-used", lambda value: value["vram"].update(used_bytes=1, free_bytes=value["vram"]["total_bytes"] - 1, headroom_bytes=value["vram"]["total_bytes"] - 1)),
+        ("probe-unknown-field", lambda value: value["commands"][0].update(unknown=1)),
+        ("probe-unknown-label", lambda value: value["commands"][0].update(label="unknown")),
+        ("probe-duplicate-label", lambda value: value["commands"][1].update(label="sudo-n", argv=["/usr/bin/sudo", "-n", "-v"])),
+        ("probe-argv", lambda value: value["commands"][0].update(argv=["/usr/bin/sudo", "-v"])),
+        ("probe-success-exit", lambda value: value["commands"][0].update(exit_code=1)),
+        ("probe-sha", lambda value: value["commands"][0].update(stdout_sha256="A" * 64)),
+        ("probe-time", lambda value: value["commands"][0].update(captured_unix_ns=-1)),
+    ],
+)
+def test_live_preflight_rejects_qa_nested_schema_negatives(tmp_path: Path, variant: str, mutate) -> None:
+    value = _document()
+    mutate(value)
+    path = _write(tmp_path / f"{variant}.json", value)
+    with pytest.raises(BATCH.BatchError):
+        BATCH.validate_live_preflight(path, _args(), json.loads((BUNDLE_ROOT / "bundle.json").read_text()))
