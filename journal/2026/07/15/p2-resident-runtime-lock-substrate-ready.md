@@ -10,8 +10,9 @@ actual v3 は KFD 停止確認を通過した後、`RuntimeDirectory=ullm` が s
 - 停止 poll は作成した substrate と同じ device/inode の lock だけを stable 候補にする。launcher の live preflight から runner まで同じ lock inode を拘束し、one-case actual の runner は lock を新規作成しない。
 - outer finally は runner child と lock holder が 0 であることを確認し、同じ inode だけを unlink する。SHA-256 固定済み `/usr/bin/rmdir` で空 directory を削除し、cleanup が失敗しても service start と復旧検証を必ず試行する。cleanup failure 自体は run failure として保持する。
 - KFD owner scanner は PID/queue/gpuid follow-up の ENOENT だけを bounded rescan し、EACCES、I/O error、不正 schema、symlink、identity 変更、許可集合外 owner を fail-closed にした。raw gpuid は保存せず、SHA-256、byte 数、source classification、root identity、retry diagnostic を evidence に残す。停止中は旧 worker PID、復旧後は新 worker PID だけを許可する。
+- v4 preflight の active snapshot で、queue `gpuid` の実形式が5 bytes ASCII `51545`、改行なしであることを確認した。installed amdgpu sourceでもqueue attributeは`snprintf("%u")`、topology `gpu_id`だけが`%u\n`だった。parserは両kernel互換として末尾LF 0または1だけを許可し、空、符号、空白、CRLF、複数LF、先頭ゼロを拒否する。数値はdevice KFD ID `51545`へexact照合し、raw SHA/bytes、line ending、queue、inode identityを維持する。
 - runner `c0480d1d`、validator pin `82c77957`、binding-v4 `9a98c67b`、launcher `180ab1be`、execute binding `0b88e5f8`、maintenance `9a3de269`/`c4c3d9f3`、base/profile ready と両 dry-run `0bb6d016` へ依存順に固定し直した。
-- core trust-chain 198 tests、diagnostic capture 11 tests、capture 関連 93 testsが通過した。全6 artifact の `SHA256SUMS` と4 Python source の `py_compile` も通過し、両 canonical dry-run の全 process count は 0 だった。
+- gpuid修正後のlauncher `da268391`、execute binding `0b1abe45`、maintenance `74ac7559`、base/profile readyと両dry-run `e5d30b47`まで再固定した。core trust-chain 206 tests、capture 関連 93 testsが通過した。全6 artifact の `SHA256SUMS` と対象 Python source の `py_compile` も通過し、両 canonical dry-run の全 process count は 0 だった。
 - actual、sudo、service stop/start、GPU command、HTTP probe、model load、profiler capture は実行していない。unit test の旧 monkeypatch 名を見落とした初回回帰1件だけが KFD proc を読み、schema failure で終了したため、詳細 snapshot fake に修正して再発を防いだ。
 
 ## 次の行動
