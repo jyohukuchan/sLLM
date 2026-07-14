@@ -1,0 +1,6 @@
+{
+  "device": "cpu",
+  "dtype": "bfloat16",
+  "elapsed_seconds": 42.65960725909099,
+  "model_loads": 1
+}

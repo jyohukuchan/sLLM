@@ -1,0 +1,7 @@
+{
+  "status": "invalid_superseded",
+  "superseded_by": "../source-differential-trace-v2",
+  "reason": "The step-1 context binding hashed only [220] instead of the full prompt plus replay prefix [11,12,13,220].",
+  "replacement_context_length": 4,
+  "replacement_context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249"
+}
