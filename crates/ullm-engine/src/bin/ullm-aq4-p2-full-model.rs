@@ -9,6 +9,7 @@
 //! counters, but no prompt, token id, or generated text.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -451,6 +452,12 @@ fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, 
     if fixture.cases.is_empty() || fixture.cases.len() > 128 {
         return Err("fixture must contain 1..=128 cases".to_string());
     }
+    let mut case_ids = BTreeSet::new();
+    for case in &fixture.cases {
+        if !case_ids.insert(case.case_id.as_str()) {
+            return Err("fixture contains duplicate case_id".to_string());
+        }
+    }
     let raw = match case_id {
         Some(id) => fixture
             .cases
@@ -624,6 +631,12 @@ mod tests {
         let case = load_fixture_case(&fixture, Some("public-0")).unwrap();
         assert_eq!(case.case_id, "public-0");
         assert_eq!(case.step_count, 2);
+        fs::write(
+            &fixture,
+            br#"{"cases":[{"case_id":"public-0","prompt_token_ids":[1],"step_count":1},{"case_id":"public-0","prompt_token_ids":[2],"step_count":1}]}"#,
+        )
+        .unwrap();
+        assert!(load_fixture_case(&fixture, None).is_err());
         let link = root.join("link.json");
         std::os::unix::fs::symlink(&fixture, &link).unwrap();
         assert!(load_fixture_case(&link, None).is_err());
