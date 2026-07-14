@@ -1,0 +1,78 @@
+{
+  "artifact": {
+    "head_commit": "da5dd3725e4094d81390694b3fa4d31508c60767",
+    "harness_sha256": "3db750fb5ceea47c8b9173e652d480207605fd7bd300a7eb063e96d5d459036a",
+    "launcher_sha256": "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835",
+    "ready_binding_sha256": "48b8e251cc71cfd14ad4be2418cfdccbe9fcab7a6199303859b1fe92483bb7bb",
+    "ready_sums_sha256": "c39a8f1cfc78149608de89f4df33f082ebdd25d941450497fc645e8738f87001"
+  },
+  "captured_unix_ns": 1784055431973841292,
+  "failure": {
+    "category": "operator_invocation_path_identity",
+    "detail": "A relative ready artifact path was passed where the immutable harness requires its exact absolute path.",
+    "harness_message": "ready artifact path differs",
+    "stage": "load_ready_artifact"
+  },
+  "invocation": {
+    "actual_execution_started": false,
+    "evidence_output_created": false,
+    "gpu_command_count": 0,
+    "harness_invocation_count": 1,
+    "launcher_count": 0,
+    "model_load_count": 0,
+    "runner_count": 0,
+    "service_stop_count": 0,
+    "sudo_cache_invalidated_after_failure": true,
+    "sudo_prime_count": 1,
+    "systemctl_start_count": 0
+  },
+  "output_paths": {
+    "launcher_evidence": {
+      "exists": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v1"
+    },
+    "maintenance_evidence": {
+      "exists": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v1"
+    },
+    "runner_output": {
+      "exists": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v1"
+    }
+  },
+  "post_check": {
+    "container_health": "healthy",
+    "formal_health_process_counts": {
+      "container_curl_endpoint": 5,
+      "container_curl_total": 6,
+      "container_curl_version": 1,
+      "docker": 9,
+      "docker_exec": 6
+    },
+    "gateway_healthz_status": 200,
+    "gateway_models_count": 1,
+    "gateway_models_status": 200,
+    "gateway_readyz_status": 200,
+    "gpu_owner_pids": [
+      3090924
+    ],
+    "kfd_owner_pids": [
+      3090924
+    ],
+    "lock_held": true,
+    "openwebui_health_status": 200,
+    "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "service_active_state": "active",
+    "service_control_group": "/system.slice/ullm-openai.service",
+    "service_main_pid": 3090367,
+    "service_nrestarts": 0,
+    "service_sub_state": "running",
+    "worker_pid": 3090924,
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "retry_performed": false,
+  "schema_version": "ullm.aq4_p2_resident_smoke_invocation_no_go.v1",
+  "status": "no_go"
+}
