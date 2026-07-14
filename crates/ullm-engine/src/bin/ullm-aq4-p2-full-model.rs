@@ -189,7 +189,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<Args>, 
     let mut output = None;
     let mut requested_m = None;
     let mut case_id = None;
-    let mut device_index = 0_u32;
+    // Match the resident production worker's isolated HIP device default. CPU callers can pass
+    // --device-index 0 explicitly for contract-only experiments.
+    let mut device_index = 1_u32;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help") | Some("-h") => {
