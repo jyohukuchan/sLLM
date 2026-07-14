@@ -12,6 +12,8 @@ P2 fidelity split は `ullm.aq4_p2_fidelity_split.v1` として 24 calibration /
 - sidecar は hidden 24×4096×F32、logits 24×248320×F32（合計約24.2 MiB）を上限とし、Rust observer は一回につき最大 chunk 1,048,576 elements の小さいバッファだけを保持する。モデル側の GPU 観測、source exporter の CPU 時間、実測 GPU 時間はこの段階では未実施。
 - `b457ef2` で active manifest の `created_utc` を source manifest から継承し、required HIP guard 集合を完全一致で拘束した。metrics validator は split validator の戻り値と calibration JSONL の実 SHA を再計算し、root binding の一致を要求する。最新 split は manifest `966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887`、policy `302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03`、calibration `20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f` である。
 - source checkpoint index の既存実体は 19,306,393,663 B（17.98 GiB）で、CPU exporter の 2.0 倍 memory preflight は 38,612,787,326 B（35.96 GiB）以上の available memory を要求する。source/active の新しい実測時間・RSS・VRAM はまだ取得していない。
+- `8be3d37` で実行CLIの split/policy/calibration SHA と served/package/worker/guard/device/quantized-revision を必須引数として固定し、plan template と `validate_plan` に伝播した。Rust は package manifest の `source_model_dir` から upstream revision、checkpoint aggregate、tokenizer aggregate を再計算し、source artifact と一致する場合だけ active capture を許可する。upstream revision と quantized artifact revision は別々に記録し、同値を拒否する。policy schema、metric role/aggregation/formula、relative-L2 rejection もRust側で再検証する。
+- Rust observer は hidden/logit non-finite を検出した時点で中断する。strict duplicate-key JSON、canonical package tree hash（既存 production runner と同じ `relative\0 + raw file SHA + newline`）、renameat2 `NOREPLACE` 出力公開、dangling symlink/duplicate/nonfinite/provenance のnegative testsを追加した。
 
 ## 次の行動
 
@@ -19,4 +21,4 @@ P2 fidelity split は `ullm.aq4_p2_fidelity_split.v1` として 24 calibration /
 2. `ullm-aq4-fidelity-capture` を独立 review 後に一度だけ active AQ4 上で実行する（現時点では GPU/service 実行禁止）。
 3. source/active artifact を `capture-qwen35-aq4-fidelity.py` で結合し、metrics validator と既存 freeze validator へ渡す。
 
-検証済み: `CARGO_BUILD_JOBS=1 cargo check --bin ullm-aq4-fidelity-capture`、`cargo test --bin ullm-aq4-fidelity-capture`（2件）、Python fidelity tests（5件）、Python compile、`git diff --check`。GPU/service 実行は未実施。
+検証済み: `CARGO_BUILD_JOBS=1 cargo check --bin ullm-aq4-fidelity-capture`、`cargo test --bin ullm-aq4-fidelity-capture`（7件）、Python fidelity tests（6件）、full calibration/path tests（30件+15 subtests）、Python compile、`git diff --check`。実在splitのexpected SHA付きprepare smokeも24行で成功した。GPU/service 実行は未実施。
