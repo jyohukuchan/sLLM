@@ -36,6 +36,8 @@ EXPECTED_DEVICE = {
     "name": "AMD Radeon Graphics",
     "architecture": "gfx1201",
 }
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 # Patterns are deliberately conservative.  An unknown production kernel is
 # unclassified and fails the default zero threshold instead of being guessed.
@@ -125,13 +127,44 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def capture(path: Path, label: str, maximum: int | None = None) -> Snapshot:
+def reject_symlink_components(path: Path, label: str) -> None:
+    if not path.is_absolute():
+        raise ProfileError(f"{label} path must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise ProfileError(f"cannot inspect {label} path component: {error}") from error
+        if stat.S_ISLNK(info.st_mode):
+            raise ProfileError(f"{label} path contains a symlink component: {current}")
+
+
+def canonical_path(path: Path, label: str) -> Path:
+    reject_symlink_components(path, label)
+    return path.resolve(strict=True)
+
+
+def capture(
+    path: Path,
+    label: str,
+    maximum: int | None = None,
+    *,
+    require_executable: bool = False,
+    require_single_link: bool = True,
+) -> Snapshot:
+    path = canonical_path(path, label)
     try:
         before = path.lstat()
     except OSError as error:
         raise ProfileError(f"cannot stat {label}: {error}") from error
-    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    if not stat.S_ISREG(before.st_mode):
+        raise ProfileError(f"{label} must be a regular file")
+    if require_single_link and before.st_nlink != 1:
         raise ProfileError(f"{label} must be a single-link regular file")
+    if require_executable and stat.S_IMODE(before.st_mode) & 0o111 == 0:
+        raise ProfileError(f"{label} must be executable")
     if maximum is not None and before.st_size > maximum:
         raise ProfileError(f"{label} exceeds {maximum} bytes")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -204,6 +237,17 @@ def self_sha256(value: dict[str, Any], field: str) -> str:
         raise ProfileError(f"self-hash field is missing: {field}")
     clone[field] = None
     return canonical_sha256(clone)
+
+
+def guard_set_sha256(names: list[str]) -> str:
+    if not names or any(not isinstance(name, str) or not name for name in names):
+        raise ProfileError("served worker guard set is invalid")
+    if len(names) != len(set(names)):
+        raise ProfileError("served worker guard set contains duplicates")
+    digest = hashlib.sha256(b"ullm-aq4-p2-resident-guards-v1\0")
+    for name in sorted(names):
+        digest.update(f"{name}=1\n".encode("ascii"))
+    return digest.hexdigest()
 
 
 def mapping_sha256() -> str:
@@ -427,10 +471,12 @@ def binding(
     binary_snapshot: Snapshot,
     package_snapshot: Snapshot,
     policy_snapshot: Snapshot,
-) -> dict[str, Any]:
+    served_snapshot: Snapshot,
+) -> tuple[dict[str, Any], list[Snapshot]]:
     cases = parse_json(case_snapshot, "case binding")
     identity = parse_json(identity_snapshot, "identity")
     policy = parse_json(policy_snapshot, "policy")
+    served = parse_json(served_snapshot, "served model")
     rows = cases.get("cases")
     if (
         cases.get("schema_version") != "ullm.aq4_production_p2_expanded.v2"
@@ -456,6 +502,25 @@ def binding(
     resident = identity.get("resident_driver_identity")
     if not isinstance(resident, dict) or resident.get("runtime_device") != EXPECTED_DEVICE:
         raise ProfileError("resident identity device differs")
+    for field in (
+        "binary_sha256",
+        "package_manifest_sha256",
+        "package_content_sha256",
+        "worker_binary_sha256",
+        "served_model_manifest_sha256",
+        "guard_set_sha256",
+    ):
+        digest = resident.get(field)
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            raise ProfileError(f"resident {field} is not a SHA-256 digest")
+    build_commit = identity.get("build_git_commit")
+    if (
+        not isinstance(build_commit, str)
+        or GIT_SHA_RE.fullmatch(build_commit) is None
+        or resident.get("build_git_commit") != build_commit
+        or resident.get("protocol") != "ullm.aq4_p2_resident_driver.v2"
+    ):
+        raise ProfileError("resident build commit/protocol differs")
     if resident.get("binary_sha256") != binary_snapshot.sha256:
         raise ProfileError("resident binary hash differs from identity")
     if resident.get("package_manifest_sha256") != package_snapshot.sha256:
@@ -477,7 +542,66 @@ def binding(
             raise ProfileError(f"identity {field} binding differs")
     if policy != {"schema_version": "ullm.aq4_production_p2_threshold_policy.v1", "status": "bound"}:
         raise ProfileError("threshold policy differs")
-    return {
+    if served.get("schema_version") != "ullm.served_model.v2":
+        raise ProfileError("served model schema differs")
+    worker = served.get("worker")
+    product = served.get("product")
+    public = served.get("public")
+    format_value = served.get("format")
+    if not all(isinstance(item, dict) for item in (worker, product, public, format_value)):
+        raise ProfileError("served model binding is incomplete")
+    if served_snapshot.sha256 != resident.get("served_model_manifest_sha256"):
+        raise ProfileError("served model hash differs from identity")
+    worker_path_raw = worker.get("binary")
+    if not isinstance(worker_path_raw, str):
+        raise ProfileError("served worker path is invalid")
+    # Cargo's release binary is normally a hard link to its deps entry.  It is
+    # not command[0], but its complete inode identity and digest remain pinned.
+    worker_snapshot = capture(
+        Path(worker_path_raw),
+        "served worker",
+        require_executable=True,
+        require_single_link=False,
+    )
+    if (
+        worker_snapshot.sha256 != worker.get("binary_sha256")
+        or worker_snapshot.sha256 != resident.get("worker_binary_sha256")
+    ):
+        raise ProfileError("served worker hash differs from identity")
+    required_environment = worker.get("required_environment")
+    if not isinstance(required_environment, list) or guard_set_sha256(required_environment) != resident.get("guard_set_sha256"):
+        raise ProfileError("served guard set differs from identity")
+    if (
+        public.get("id") != resident.get("model_id")
+        or public.get("revision") != resident.get("model_revision")
+        or format_value.get("format_id") != resident.get("format_id")
+        or format_value.get("implementation_id") != resident.get("implementation_id")
+    ):
+        raise ProfileError("served model/format identity differs")
+    product_root_raw = product.get("root")
+    package_value = product.get("package")
+    if not isinstance(product_root_raw, str) or not isinstance(package_value, dict):
+        raise ProfileError("served package binding is incomplete")
+    product_root = canonical_path(Path(product_root_raw), "served product root")
+    if not product_root.is_dir():
+        raise ProfileError("served product root must be a directory")
+    relative = package_value.get("manifest_path")
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+    ):
+        raise ProfileError("served package manifest path is unsafe")
+    derived_package = capture(product_root / relative, "served package manifest")
+    if derived_package.path != package_snapshot.path or derived_package.identity != package_snapshot.identity:
+        raise ProfileError("package input is not the exact served package manifest")
+    if (
+        derived_package.sha256 != package_value.get("manifest_sha256")
+        or derived_package.sha256 != resident.get("package_manifest_sha256")
+    ):
+        raise ProfileError("served package manifest hash differs")
+    value = {
         "case": {
             "case_id": case.get("case_id"),
             "case_sha256": case["case_sha256"],
@@ -493,18 +617,48 @@ def binding(
             "worker_binary_sha256": resident.get("worker_binary_sha256"),
             "served_model_manifest_sha256": resident.get("served_model_manifest_sha256"),
             "guard_set_sha256": resident.get("guard_set_sha256"),
+            "build_git_commit": build_commit,
+            "protocol": resident.get("protocol"),
         },
         "device": EXPECTED_DEVICE,
         "resident_binary_sha256": binary_snapshot.sha256,
         "package_manifest_sha256": package_snapshot.sha256,
         "package_content_sha256": resident.get("package_content_sha256"),
         "policy_sha256": policy_snapshot.sha256,
+        "served_model_manifest_sha256": served_snapshot.sha256,
+        "worker_binary_sha256": worker_snapshot.sha256,
     }
+    return value, [worker_snapshot, derived_package]
 
 
-def profiler_version(profiler: Path) -> dict[str, Any]:
+def validate_resident_command(
+    command: list[str],
+    resident_binary: Snapshot,
+    served_model: Snapshot,
+    build_git_commit: str,
+) -> list[str]:
+    expected = [
+        os.fspath(resident_binary.path),
+        "--served-model-manifest",
+        os.fspath(served_model.path),
+        "--device-index",
+        "1",
+        "--build-git-commit",
+        build_git_commit,
+    ]
+    if command != expected:
+        raise ProfileError(
+            "resident command must exactly match detached binary and allowed argument schema"
+        )
+    resident_binary.verify()
+    served_model.verify()
+    return expected
+
+
+def profiler_version(profiler: Snapshot) -> dict[str, Any]:
+    profiler.verify()
     result = subprocess.run(
-        [os.fspath(profiler), "--version"],
+        [os.fspath(profiler.path), "--version"],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -512,6 +666,7 @@ def profiler_version(profiler: Path) -> dict[str, Any]:
     )
     if result.returncode != 0 or len(result.stdout) > 64 * 1024:
         raise ProfileError("rocprofv3 version query failed")
+    profiler.verify()
     text = result.stdout.decode("utf-8", errors="strict").strip()
     match = re.search(r"version:\s*([^\s]+)", text)
     rocm = re.search(r"rocm_version:\s*([^\s]+)", text)
@@ -519,7 +674,8 @@ def profiler_version(profiler: Path) -> dict[str, Any]:
         raise ProfileError("rocprofv3 version output schema differs")
     return {
         "tool": "rocprofv3",
-        "path": os.fspath(profiler.resolve(strict=True)),
+        "path": os.fspath(profiler.path),
+        "executable_sha256": profiler.sha256,
         "version": match.group(1),
         "rocm_version": rocm.group(1) if rocm else None,
         "version_output_sha256": hashlib.sha256(result.stdout).hexdigest(),
@@ -527,14 +683,14 @@ def profiler_version(profiler: Path) -> dict[str, Any]:
 
 
 def profiler_command(
-    profiler: Path, output_directory: Path, output_name: str, resident_command: list[str]
+    profiler: Snapshot, output_directory: Path, output_name: str, resident_command: list[str]
 ) -> list[str]:
     if not resident_command or any(not item for item in resident_command):
         raise ProfileError("resident command must not be empty")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", output_name):
         raise ProfileError("profiler output name is unsafe")
     return [
-        os.fspath(profiler),
+        os.fspath(profiler.path),
         "--kernel-trace",
         "--output-format",
         "csv",
@@ -548,6 +704,10 @@ def profiler_command(
 
 
 def run_profile(command: list[str], output_directory: Path, timeout: float) -> Path:
+    if not output_directory.is_absolute():
+        raise ProfileError("profile output directory must be absolute")
+    parent = output_directory.parent
+    canonical_path(parent, "profile output parent")
     if output_directory.exists() or output_directory.is_symlink():
         raise ProfileError(f"profile output directory already exists: {output_directory}")
     output_directory.mkdir(parents=True)
@@ -659,12 +819,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace", type=Path)
     parser.add_argument("--profile-output-directory", type=Path)
     parser.add_argument("--profile-output-name", default="aq4-p2-family-exclusive")
-    parser.add_argument("--profiler", type=Path, default=Path("/opt/rocm/bin/rocprofv3"))
+    parser.add_argument(
+        "--profiler", type=Path, default=Path("/opt/rocm-7.2.1/bin/rocprofv3")
+    )
     parser.add_argument("--case-binding", type=Path, required=True)
     parser.add_argument("--identity", type=Path, required=True)
     parser.add_argument("--resident-binary", type=Path, required=True)
     parser.add_argument("--package-manifest", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument("--served-model-manifest", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--maximum-unclassified-fraction", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=1800.0)
@@ -674,17 +837,27 @@ def main(argv: list[str] | None = None) -> int:
         snapshots = [
             capture(args.case_binding, "case binding", MAX_JSON_BYTES),
             capture(args.identity, "identity", MAX_JSON_BYTES),
-            capture(args.resident_binary, "resident binary"),
+            capture(args.resident_binary, "resident binary", require_executable=True),
             capture(args.package_manifest, "package manifest"),
             capture(args.policy, "policy", MAX_JSON_BYTES),
+            capture(args.served_model_manifest, "served model", MAX_JSON_BYTES),
         ]
-        binding_value = binding(*snapshots)
-        version = profiler_version(args.profiler)
+        binding_value, derived_snapshots = binding(*snapshots)
+        profiler_snapshot = capture(
+            args.profiler, "rocprofv3 executable", require_executable=True
+        )
+        version = profiler_version(profiler_snapshot)
+        resident_command = validate_resident_command(
+            args.resident_command or [],
+            snapshots[2],
+            snapshots[5],
+            binding_value["identity"]["build_git_commit"],
+        )
         command = profiler_command(
-            args.profiler,
+            profiler_snapshot,
             args.profile_output_directory or Path("profile-output"),
             args.profile_output_name,
-            args.resident_command or [],
+            resident_command,
         )
         if args.command == "profile":
             if args.trace is not None or args.profile_output_directory is None:
@@ -709,7 +882,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ProfileError("unclassified GPU time exceeds configured threshold")
         if _TEST_HOOK is not None:
             _TEST_HOOK()
-        for snapshot in [*snapshots, trace_snapshot]:
+        for snapshot in [
+            *snapshots,
+            *derived_snapshots,
+            profiler_snapshot,
+            trace_snapshot,
+        ]:
             snapshot.verify()
         write_artifact(args.artifact, artifact)
         print(json.dumps({"status": artifact["status"], "measurement_eligible": False}, sort_keys=True))

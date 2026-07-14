@@ -67,11 +67,40 @@ def interval(
     )
 
 
-def bound_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
+def bound_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, Path]:
     binary = tmp_path / "resident-driver"
-    package = tmp_path / "package-manifest.json"
+    worker = tmp_path / "worker"
+    product = tmp_path / "product"
+    package = product / "package" / "manifest.json"
+    package.parent.mkdir(parents=True)
     binary.write_bytes(b"resident-driver")
+    binary.chmod(0o555)
+    worker.write_bytes(b"worker")
+    worker.chmod(0o555)
+    os.link(worker, tmp_path / "worker-deps-hardlink")
     package.write_bytes(b"package-manifest")
+    served = tmp_path / "served-model.json"
+    guards = ["ULLM_REQUIRE_HIP_AQ4_KERNEL", "ULLM_REQUIRE_HIP_TOP1_KERNEL"]
+    write_json(
+        served,
+        {
+            "schema_version": "ullm.served_model.v2",
+            "worker": {
+                "binary": str(worker),
+                "binary_sha256": sha256(worker),
+                "required_environment": guards,
+            },
+            "product": {
+                "root": str(product),
+                "package": {
+                    "manifest_path": "package/manifest.json",
+                    "manifest_sha256": sha256(package),
+                },
+            },
+            "public": {"id": "ullm-qwen3.5-9b-aq4", "revision": "candidate"},
+            "format": {"format_id": "AQ4_0", "implementation_id": "rdna4-v1"},
+        },
+    )
     case = {
         "case_id": "representative-cold-prefill-m128",
         "case_sha256": None,
@@ -94,19 +123,24 @@ def bound_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     identity = tmp_path / "identity.json"
     resident = {
         "binary_sha256": sha256(binary),
+        "build_git_commit": "f" * 40,
+        "protocol": "ullm.aq4_p2_resident_driver.v2",
         "package_manifest_sha256": sha256(package),
         "package_content_sha256": "b" * 64,
-        "worker_binary_sha256": "c" * 64,
-        "served_model_manifest_sha256": "d" * 64,
-        "guard_set_sha256": "e" * 64,
+        "worker_binary_sha256": sha256(worker),
+        "served_model_manifest_sha256": sha256(served),
+        "guard_set_sha256": PROFILE.guard_set_sha256(guards),
         "model_id": "ullm-qwen3.5-9b-aq4",
         "model_revision": "candidate",
+        "format_id": "AQ4_0",
+        "implementation_id": "rdna4-v1",
         "runtime_device": PROFILE.EXPECTED_DEVICE,
     }
     identity_value = {
         "schema_version": "ullm.aq4_production_p2_identity.v2",
         "status": "bound",
         "identity_sha256": None,
+        "build_git_commit": "f" * 40,
         "expanded_manifest_sha256": sha256(cases),
         "resident_driver_identity": resident,
         "hash_binding": {
@@ -129,16 +163,17 @@ def bound_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
             "status": "bound",
         },
     )
-    return cases, identity, binary, package, policy
+    return cases, identity, binary, package, policy, served
 
 
-def snapshots(paths: tuple[Path, Path, Path, Path, Path]) -> list[object]:
+def snapshots(paths: tuple[Path, Path, Path, Path, Path, Path]) -> list[object]:
     return [
         PROFILE.capture(paths[0], "case", PROFILE.MAX_JSON_BYTES),
         PROFILE.capture(paths[1], "identity", PROFILE.MAX_JSON_BYTES),
         PROFILE.capture(paths[2], "binary"),
         PROFILE.capture(paths[3], "package"),
         PROFILE.capture(paths[4], "policy", PROFILE.MAX_JSON_BYTES),
+        PROFILE.capture(paths[5], "served", PROFILE.MAX_JSON_BYTES),
     ]
 
 
@@ -329,9 +364,21 @@ def test_missing_phase_is_isolated_and_blocks_exact_phase_attribution(tmp_path: 
 def test_binding_accepts_exact_hash_chain(tmp_path: Path) -> None:
     paths = bound_inputs(tmp_path)
     values = snapshots(paths)
-    result = PROFILE.binding(*values)
+    result, derived = PROFILE.binding(*values)
     assert result["case"]["prefill_requested_m"] == 128
     assert result["device"] == PROFILE.EXPECTED_DEVICE
+    assert len(derived) == 2
+
+
+def test_binding_rejects_malformed_bound_digest(tmp_path: Path) -> None:
+    paths = bound_inputs(tmp_path)
+    value = json.loads(paths[1].read_text(encoding="utf-8"))
+    value["resident_driver_identity"]["package_content_sha256"] = "not-a-digest"
+    value["hash_binding"]["package_content_sha256"] = "not-a-digest"
+    value["identity_sha256"] = PROFILE.self_sha256(value, "identity_sha256")
+    write_json(paths[1], value)
+    with pytest.raises(PROFILE.ProfileError, match="not a SHA-256 digest"):
+        PROFILE.binding(*snapshots(paths))
 
 
 @pytest.mark.parametrize(
@@ -349,7 +396,9 @@ def test_binding_rejects_binary_package_case_device_and_policy_drift(
 ) -> None:
     paths = bound_inputs(tmp_path)
     if variant == "binary":
+        paths[2].chmod(0o644)
         paths[2].write_bytes(b"different-binary")
+        paths[2].chmod(0o555)
     elif variant == "package":
         paths[3].write_bytes(b"different-package")
     elif variant in {"case", "device"}:
@@ -388,7 +437,79 @@ def test_snapshot_rejects_same_size_rewrite_and_rename(tmp_path: Path) -> None:
         snapshot.verify()
 
 
-def test_main_rejects_trace_toctou_after_attribution(tmp_path: Path) -> None:
+def test_capture_rejects_file_and_ancestor_symlinks(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    path = real / "tool"
+    path.write_bytes(b"tool")
+    path.chmod(0o555)
+    direct = tmp_path / "direct-link"
+    direct.symlink_to(path)
+    ancestor = tmp_path / "ancestor-link"
+    ancestor.symlink_to(real, target_is_directory=True)
+    with pytest.raises(PROFILE.ProfileError, match="symlink component"):
+        PROFILE.capture(direct, "direct")
+    with pytest.raises(PROFILE.ProfileError, match="symlink component"):
+        PROFILE.capture(ancestor / "tool", "ancestor")
+
+
+def test_resident_command_is_exact_and_rejects_substitution_or_argument_swap(
+    tmp_path: Path,
+) -> None:
+    paths = bound_inputs(tmp_path)
+    values = snapshots(paths)
+    binding_value, _ = PROFILE.binding(*values)
+    expected = [
+        str(paths[2]),
+        "--served-model-manifest",
+        str(paths[5]),
+        "--device-index",
+        "1",
+        "--build-git-commit",
+        "f" * 40,
+    ]
+    assert PROFILE.validate_resident_command(
+        expected, values[2], values[5], binding_value["identity"]["build_git_commit"]
+    ) == expected
+    other = tmp_path / "other-driver"
+    other.write_bytes(paths[2].read_bytes())
+    other.chmod(0o555)
+    with pytest.raises(PROFILE.ProfileError, match="exactly match"):
+        PROFILE.validate_resident_command(
+            [str(other), *expected[1:]], values[2], values[5], "f" * 40
+        )
+    swapped = [expected[0], *expected[3:5], *expected[1:3], *expected[5:]]
+    with pytest.raises(PROFILE.ProfileError, match="allowed argument schema"):
+        PROFILE.validate_resident_command(swapped, values[2], values[5], "f" * 40)
+
+
+def test_profiler_version_rejects_executable_swap(tmp_path: Path) -> None:
+    profiler = tmp_path / "rocprofv3"
+    profiler.write_bytes(b"original-profiler")
+    profiler.chmod(0o555)
+    snapshot = PROFILE.capture(profiler, "profiler", require_executable=True)
+
+    def run(*_: object, **__: object) -> object:
+        replacement = tmp_path / "replacement-profiler"
+        replacement.write_bytes(b"replacement-tool!")
+        replacement.chmod(0o555)
+        os.replace(replacement, profiler)
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": b"version: 1.1.0\nrocm_version: 7.2.1\n",
+            },
+        )()
+
+    with mock.patch.object(PROFILE.subprocess, "run", side_effect=run):
+        with pytest.raises(PROFILE.ProfileError, match="identity changed"):
+            PROFILE.profiler_version(snapshot)
+
+
+@pytest.mark.parametrize("target", ["trace", "resident", "package", "case", "policy", "served"])
+def test_main_rejects_input_toctou_after_attribution(tmp_path: Path, target: str) -> None:
     paths = bound_inputs(tmp_path)
     trace = tmp_path / "trace.csv"
     write_trace(
@@ -397,11 +518,22 @@ def test_main_rejects_trace_toctou_after_attribution(tmp_path: Path) -> None:
     )
     artifact = tmp_path / "artifact.json"
 
+    targets = {
+        "trace": trace,
+        "resident": paths[2],
+        "package": paths[3],
+        "case": paths[0],
+        "policy": paths[4],
+        "served": paths[5],
+    }
+
     def mutate() -> None:
-        before = trace.stat()
-        raw = trace.read_bytes()
-        trace.write_bytes(raw.replace(b"hip_top1", b"hip_argm"))
-        os.utime(trace, ns=(before.st_atime_ns, before.st_mtime_ns))
+        path = targets[target]
+        before = path.stat()
+        raw = path.read_bytes()
+        path.write_bytes(bytes([raw[0] ^ 1]) + raw[1:])
+        path.chmod(stat.S_IMODE(before.st_mode))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     PROFILE._TEST_HOOK = mutate
     try:
@@ -425,10 +557,18 @@ def test_main_rejects_trace_toctou_after_attribution(tmp_path: Path) -> None:
                     str(paths[3]),
                     "--policy",
                     str(paths[4]),
+                    "--served-model-manifest",
+                    str(paths[5]),
                     "--artifact",
                     str(artifact),
                     "--resident-command",
-                    "resident-runner",
+                    str(paths[2]),
+                    "--served-model-manifest",
+                    str(paths[5]),
+                    "--device-index",
+                    "1",
+                    "--build-git-commit",
+                    "f" * 40,
                 ]
             )
     finally:
@@ -439,8 +579,12 @@ def test_main_rejects_trace_toctou_after_attribution(tmp_path: Path) -> None:
 
 def test_profiler_wrapper_launches_resident_command_once(tmp_path: Path) -> None:
     output = tmp_path / "profile"
+    profiler = tmp_path / "rocprofv3"
+    profiler.write_bytes(b"profiler")
+    profiler.chmod(0o555)
+    profiler_snapshot = PROFILE.capture(profiler, "profiler", require_executable=True)
     command = PROFILE.profiler_command(
-        Path("/opt/rocm/bin/rocprofv3"), output, "one-case", ["resident-runner", "--one-case"]
+        profiler_snapshot, output, "one-case", ["resident-runner", "--one-case"]
     )
     calls: list[list[str]] = []
 

@@ -6,7 +6,20 @@ P2 resident one-case smokeは、R9700、requested/resolved M=128、2 warmup + 10
 
 ## 今回の変更点
 
-`profile-aq4-p2-family-exclusive.py`は、resident one-case command全体を`rocprofv3`の1 subprocessで1回だけprofileする。2026-07-14のWRX80には`/opt/rocm/bin/rocprofv3` 1.1.0、ROCm 7.2.1があり、`--kernel-trace --output-format csv --output-directory DIR --output-file NAME -- COMMAND`を使用できる。parserはrocprofv3の`Dispatch_Id`、`Kernel_Name`、`Start_Timestamp`、`End_Timestamp`と、legacy互換の`Index`、`KernelName`、`BeginNs`、`EndNs`を受理する。timestampの単位はnanosecondsである。
+`profile-aq4-p2-family-exclusive.py`は、resident one-case command全体を`rocprofv3`の1 subprocessで1回だけprofileする。2026-07-14のWRX80にはcanonical path `/opt/rocm-7.2.1/bin/rocprofv3` 1.1.0、ROCm 7.2.1があり、`--kernel-trace --output-format csv --output-directory DIR --output-file NAME -- COMMAND`を使用できる。`/opt/rocm`はalternatives symlinkを含むため、実行pathには使わない。parserはrocprofv3の`Dispatch_Id`、`Kernel_Name`、`Start_Timestamp`、`End_Timestamp`と、legacy互換の`Index`、`KernelName`、`BeginNs`、`EndNs`を受理する。timestampの単位はnanosecondsである。
+
+実行commandは次の7要素とexactに一致しなければならず、順序変更、追加引数、同一内容の別binary、shellや別commandへの置換を拒否する。
+
+```text
+DETACHED_RESIDENT_BINARY
+--served-model-manifest ABSOLUTE_HASH_BOUND_SERVED_MANIFEST
+--device-index 1
+--build-git-commit IDENTITY_BOUND_40_HEX_COMMIT
+```
+
+resident binary、case binding、identity、package manifest、policy、served-model manifest、served-modelから導出するworkerとpackage manifest、trace、profiler executableは、読み込み時にabsolute path、ancestorを含むsymlink不在、regular file、file descriptorとpathのinode identity、SHA-256を固定する。resident binaryとprofiler executableはsingle-linkかつexecutableを必須とする。Cargoが生成するserved workerは`deps` entryとのhard linkを許可するが、link countを含むinode identityとSHA-256を固定する。全入力はartifact書き出し直前に再検証する。
+
+served-model manifestはv2、worker binary/hash/guard set、public model/revision、format/implementation、absolute product root、safe relative package manifest pathをidentityへ連鎖させる。CLIのpackage manifestはserved-modelから導出した同じpath/inodeでなければならない。profilerはversion取得の前後とprofile実行後に同じinode identityとSHA-256であることを再検証する。
 
 artifactは次をhashで束縛する。
 
