@@ -110,7 +110,11 @@ def manifest_identity(manifest: dict[str, Any], path: Path) -> dict[str, Any]:
         if digest(artifact_manifest) != artifact.get("manifest_sha256"):
             raise ProducerError("manifest artifact digest differs")
     if artifact.get("content_sha256") is not None:
-        content_path = artifact.get("content_path") or artifact.get("payload_path")
+        artifact_doc = load_json(artifact_manifest, "artifact manifest") if artifact.get("manifest_sha256") is not None else {}
+        integrity = artifact_doc.get("integrity", {}) if isinstance(artifact_doc, dict) else {}
+        content_path = artifact.get("content_path") or (integrity.get("content_path") if isinstance(integrity, dict) else None) or artifact_doc.get("content_path")
+        if not content_path:
+            raise ProducerError("artifact content digest has no declared content path")
         artifact_content = resolve_manifest_path(content_path, manifest_path=path, root=product_root, label="artifact content")
         if digest(artifact_content) != artifact.get("content_sha256"):
             raise ProducerError("artifact content digest differs")

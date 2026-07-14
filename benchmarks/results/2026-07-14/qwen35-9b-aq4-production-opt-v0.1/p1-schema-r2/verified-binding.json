@@ -1,0 +1,6 @@
+{
+  "executor_record_sha256": "7cffa3d394284fc7930c94feb49a6de73683569e8ac23c0bdd123d4d58b9854b",
+  "schema_version": "ullm.production_executor_trace_binding.v1",
+  "trace_id": "cpu-fixture-r1",
+  "trace_sha256": "46cb902324780078ece801f3aa7138b3729118e118352b77d98a3f4f8a47ade5"
+}

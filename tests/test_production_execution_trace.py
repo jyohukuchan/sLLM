@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -16,6 +17,17 @@ VALIDATOR = ROOT / "tools/validate-production-execution-trace.py"
 
 
 class ProductionExecutionTraceTests(unittest.TestCase):
+    def test_capture_graph_uses_normative_sources_and_sampling(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_aq4", ROOT / "tools/capture-aq4-resident-executor-record.py")
+        self.assertIsNotNone(spec and spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        graph = module.layer_graph({"passthrough_tensors": [{"name": "model.language_model.embed_tokens.weight", "shape": [8, 4]}], "tensors": []}, {"public": {"id": "fixture", "context_length": 16}, "format": {"format_id": "AQ4_0"}})
+        self.assertEqual(graph["model_graph"]["source"], "adapter_derived")
+        self.assertEqual(graph["state_schema"]["source"], "adapter_derived")
+        self.assertIn("sampling", graph["model_graph"]["canonical"]["terminal_components"])
+
     def test_cpu_fixture_has_detached_valid_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory) / "schema-r1"

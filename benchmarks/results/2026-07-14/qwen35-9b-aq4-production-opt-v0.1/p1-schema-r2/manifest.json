@@ -1,0 +1,7 @@
+{
+  "public": {"id": "cpu-fixture", "revision": "r1"},
+  "format": {"format_id": "AQ4_0", "implementation_id": "cpu_fixture_v1"},
+  "worker": {"protocol": "ullm.worker.v1", "binary": "worker.bin", "identity": {"device": "cpu"}},
+  "product": {"root": ".", "package": {"manifest_path": "package.json"}},
+  "promotion": {"receipt": "receipt.json"}
+}

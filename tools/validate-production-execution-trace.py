@@ -393,7 +393,13 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
         artifact_manifest = resolve_manifest_path(manifest_artifact.get("manifest_path", ""), manifest_path=manifest_path, root=product_root, label="artifact manifest")
         if file_sha(artifact_manifest) != identity["artifact"]["manifest_sha256"]: raise ValidationError("artifact manifest binding differs")
     if identity["artifact"]["content_sha256"] is not None:
-        content_path = manifest_artifact.get("content_path") or manifest_artifact.get("payload_path")
+        artifact_doc = {}
+        if identity["artifact"]["manifest_sha256"] is not None:
+            artifact_manifest = resolve_manifest_path(manifest_artifact.get("manifest_path", ""), manifest_path=manifest_path, root=product_root, label="artifact manifest")
+            artifact_doc, _ = load(artifact_manifest, "artifact manifest")
+        integrity = artifact_doc.get("integrity", {}) if isinstance(artifact_doc, dict) else {}
+        content_path = manifest_artifact.get("content_path") or (integrity.get("content_path") if isinstance(integrity, dict) else None) or artifact_doc.get("content_path")
+        if not content_path: raise ValidationError("artifact content digest has no declared content path")
         artifact_content = resolve_manifest_path(content_path, manifest_path=manifest_path, root=product_root, label="artifact content")
         if file_sha(artifact_content) != identity["artifact"]["content_sha256"]: raise ValidationError("artifact content binding differs")
     validate_graph(trace["graph"], facts.get("graph"))
@@ -453,12 +459,18 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
     for source in aggregation["source_trace_sha256s"]: digest(source, "aggregation.source_trace_sha256")
     for name in ("component_trace_count", "full_model_trace_count"): nonnegative(aggregation[name], f"aggregation.{name}")
     if aggregation["coverage"] != trace["scope"]: raise ValidationError("aggregation coverage differs from scope")
+    if not aggregation["is_aggregated"] and (aggregation["source_trace_sha256s"] or aggregation["component_trace_count"] != 0 or aggregation["full_model_trace_count"] != 0):
+        raise ValidationError("non-aggregated trace has source traces or aggregate counts")
+    if aggregation["is_aggregated"] and not aggregation["source_trace_sha256s"]:
+        raise ValidationError("aggregated trace has no source traces")
     if trace["scope"] == "production_server":
         server = exact(trace["server"], {"transport", "protocol", "observation", "request_trace_count", "request_count", "ready_observed", "release_observed", "gateway", "openwebui_observed"}, "server")
         for name in ("transport", "protocol", "gateway"): string(server[name], f"server.{name}", identifier=True)
         if server["observation"] not in {"per_request", "run_summary"}: raise ValidationError("server observation is invalid")
         for name in ("request_trace_count", "request_count"): nonnegative(server[name], f"server.{name}")
         if server["observation"] == "per_request" and (server["request_trace_count"] != 1 or server["request_count"] != 1): raise ValidationError("per-request server counts differ")
+        if server["observation"] == "run_summary" and (server["request_trace_count"] == 0 or server["request_trace_count"] != server["request_count"]): raise ValidationError("run-summary server counts differ")
+        if server["protocol"] != identity["worker"]["protocol"]: raise ValidationError("server protocol differs from manifest worker protocol")
         if server["ready_observed"] is not True or server["release_observed"] is not True: raise ValidationError("server boundary was not observed")
         if not isinstance(server["openwebui_observed"], bool): raise ValidationError("server observation flag invalid")
     elif trace["server"] is not None: raise ValidationError("non-server trace has server object")
