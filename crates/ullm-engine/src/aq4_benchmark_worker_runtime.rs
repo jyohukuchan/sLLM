@@ -161,13 +161,17 @@ fn session_failure_evidence<M: Qwen35Aq4SessionModel>(
     } else {
         "execution_failed"
     };
-    session_evidence(
+    let mut evidence = session_evidence(
         command,
         session,
         Aq4BenchmarkTerminalStatus::Failed,
         Aq4BenchmarkReuse::Forbidden,
         Some(code.into()),
-    )
+    );
+    if evidence.reset.failed == 1 {
+        evidence.failure_code = Some("reset_failed".into());
+    }
+    evidence
 }
 
 fn session_evidence<M: Qwen35Aq4SessionModel>(
@@ -595,9 +599,11 @@ fn validate_terminal_evidence(
     processed_prompt_tokens: usize,
     evidence: &Aq4BenchmarkExecutionEvidence,
 ) -> Result<(), String> {
+    let fallback_used = command.requested_m != command.resolved_m;
     if evidence.requested_m != command.requested_m
         || evidence.resolved_m != command.resolved_m
-        || evidence.fallback.used != (command.requested_m != command.resolved_m)
+        || evidence.fallback.used != fallback_used
+        || evidence.fallback.reason != fallback_used.then_some("all_m1")
         || evidence.links.fixture_sha256 != command.fixture_sha256
         || evidence.links.input_sha256 != command.input_sha256
         || evidence.links.resource_observation_key != command.request_id
@@ -605,21 +611,146 @@ fn validate_terminal_evidence(
     {
         return Err("AQ4 benchmark terminal evidence identity differs from its command".into());
     }
-    let reset_complete =
-        evidence.reset.attempted == 1 && evidence.reset.complete == 1 && evidence.reset.failed == 0;
+    validate_sanitized_audit(evidence)?;
+    let reset_complete = evidence.reset
+        == (crate::aq4_benchmark_worker_protocol::Aq4BenchmarkResetEvidence {
+            attempted: 1,
+            complete: 1,
+            failed: 0,
+        });
+    let reset_failed = evidence.reset
+        == (crate::aq4_benchmark_worker_protocol::Aq4BenchmarkResetEvidence {
+            attempted: 1,
+            complete: 0,
+            failed: 1,
+        });
+    let reset_not_attempted = evidence.reset
+        == (crate::aq4_benchmark_worker_protocol::Aq4BenchmarkResetEvidence {
+            attempted: 0,
+            complete: 0,
+            failed: 0,
+        });
+    if !reset_complete && !reset_failed && !reset_not_attempted {
+        return Err("AQ4 benchmark terminal reset counts are inconsistent".into());
+    }
     match evidence.status {
         Aq4BenchmarkTerminalStatus::Ok
             if processed_prompt_tokens == command.prompt_token_ids.len()
                 && evidence.failure_code.is_none()
                 && evidence.actual_m == Some(command.resolved_m)
+                && evidence.actual_token_batch_width == Some(command.resolved_m)
+                && evidence.actual_request_batch_width == Some(1)
+                && evidence.links.operation_audit_sha256.is_some()
                 && reset_complete
                 && evidence.reuse == Aq4BenchmarkReuse::Allowed => {}
         Aq4BenchmarkTerminalStatus::Cancelled
-            if evidence.failure_code.is_none() && reset_complete => {}
-        Aq4BenchmarkTerminalStatus::Failed if evidence.failure_code.is_some() => {}
+            if evidence.failure_code.is_none()
+                && reset_complete
+                && evidence.reuse == Aq4BenchmarkReuse::Allowed => {}
+        Aq4BenchmarkTerminalStatus::Failed
+            if evidence.reuse == Aq4BenchmarkReuse::Forbidden
+                && evidence.failure_code.as_deref().is_some_and(|code| {
+                    matches!(
+                        code,
+                        "runtime_out_of_memory"
+                            | "hip_fault"
+                            | "reset_failed"
+                            | "publish_failed"
+                            | "execution_failed"
+                    )
+                })
+                && (evidence.failure_code.as_deref() == Some("reset_failed")) == reset_failed => {}
         _ => {
             return Err("AQ4 benchmark terminal status, reset, or actual M is inconsistent".into());
         }
+    }
+    Ok(())
+}
+
+fn validate_sanitized_audit(evidence: &Aq4BenchmarkExecutionEvidence) -> Result<(), String> {
+    use crate::aq4_benchmark_worker_protocol::{sha256_json, validate_sha256};
+
+    let Some(audit) = evidence.sanitized_audit.as_ref() else {
+        if evidence.actual_m.is_some()
+            || evidence.actual_token_batch_width.is_some()
+            || evidence.actual_request_batch_width.is_some()
+            || evidence.links.operation_audit_sha256.is_some()
+            || evidence.lifecycle != serde_json::json!({})
+            || evidence.reset.attempted != 0
+            || evidence.reset.complete != 0
+            || evidence.reset.failed != 0
+        {
+            return Err("AQ4 benchmark evidence cannot claim audit facts without an audit".into());
+        }
+        return Ok(());
+    };
+    let object = audit
+        .as_object()
+        .ok_or_else(|| "AQ4 benchmark sanitized audit is not an object".to_string())?;
+    let requested_m = object
+        .get("requested_m")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let resolved_m = object
+        .get("resolved_m")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let token_width = object
+        .get("actual_token_batch_width")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let request_width = object
+        .get("actual_request_batch_width")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    if requested_m.is_some_and(|value| value != evidence.requested_m)
+        || resolved_m != evidence.actual_m
+        || token_width != evidence.actual_token_batch_width
+        || request_width != evidence.actual_request_batch_width
+    {
+        return Err("AQ4 benchmark widths do not reconstruct from sanitized audit".into());
+    }
+    let lifecycle = object
+        .get("lifecycle")
+        .ok_or_else(|| "AQ4 benchmark sanitized audit lacks lifecycle".to_string())?;
+    if lifecycle != &evidence.lifecycle {
+        return Err("AQ4 benchmark lifecycle does not reconstruct from sanitized audit".into());
+    }
+    let reset = lifecycle
+        .get("reset")
+        .ok_or_else(|| "AQ4 benchmark sanitized audit lacks reset lifecycle".to_string())?;
+    let reconstructed_reset = crate::aq4_benchmark_worker_protocol::Aq4BenchmarkResetEvidence {
+        attempted: reset
+            .get("attempted")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "AQ4 benchmark reset.attempted is invalid".to_string())?,
+        complete: reset
+            .get("complete")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "AQ4 benchmark reset.complete is invalid".to_string())?,
+        failed: reset
+            .get("failed")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "AQ4 benchmark reset.failed is invalid".to_string())?,
+    };
+    if reconstructed_reset != evidence.reset {
+        return Err("AQ4 benchmark reset does not reconstruct from sanitized audit".into());
+    }
+    let operation_audit = object
+        .get("operation_audit")
+        .filter(|value| !value.is_null());
+    match (
+        operation_audit,
+        evidence.links.operation_audit_sha256.as_deref(),
+    ) {
+        (Some(operation_audit), Some(observed)) => {
+            validate_sha256(observed, "operation_audit_sha256")?;
+            if sha256_json(operation_audit)? != observed {
+                return Err("AQ4 benchmark operation audit SHA does not reconstruct".into());
+            }
+        }
+        (None, None) => {}
+        _ => return Err("AQ4 benchmark operation audit link differs from sanitized audit".into()),
     }
     Ok(())
 }
@@ -644,7 +775,7 @@ mod tests {
     use super::*;
     use crate::aq4_benchmark_worker_protocol::{
         Aq4BenchmarkEvidenceLinks, Aq4BenchmarkFallbackEvidence, Aq4BenchmarkResetEvidence,
-        aq4_benchmark_input_sha256,
+        aq4_benchmark_case_sha256, aq4_benchmark_input_sha256, sha256_json,
     };
     use std::io::Cursor;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -669,6 +800,48 @@ mod tests {
         honor_cancel: bool,
     }
 
+    #[derive(Clone, Copy)]
+    enum InvalidEvidence {
+        Width999,
+        AuditNonSha,
+        FailedReuseAllowed,
+    }
+
+    struct InvalidBackend(InvalidEvidence);
+
+    impl Aq4BenchmarkInferenceBackend for InvalidBackend {
+        fn execute_benchmark_prefill(
+            &mut self,
+            command: &Aq4BenchmarkPrefillCommand,
+            cancel: CancellationToken,
+            progress: &mut dyn Aq4BenchmarkProgressPublisher,
+        ) -> Aq4BenchmarkExecutionEvidence {
+            let reset_failed = matches!(self.0, InvalidEvidence::FailedReuseAllowed);
+            let mut evidence = MockBackend {
+                cancel_seen: Default::default(),
+                reset_failed,
+                honor_cancel: false,
+            }
+            .execute_benchmark_prefill(command, cancel, progress);
+            match self.0 {
+                InvalidEvidence::Width999 => {
+                    evidence.actual_m = Some(999);
+                    evidence.actual_token_batch_width = Some(999);
+                    let audit = evidence.sanitized_audit.as_mut().unwrap();
+                    audit["resolved_m"] = 999.into();
+                    audit["actual_token_batch_width"] = 999.into();
+                }
+                InvalidEvidence::AuditNonSha => {
+                    evidence.links.operation_audit_sha256 = Some("not-a-sha".into());
+                }
+                InvalidEvidence::FailedReuseAllowed => {
+                    evidence.reuse = Aq4BenchmarkReuse::Allowed;
+                }
+            }
+            evidence
+        }
+    }
+
     impl Aq4BenchmarkInferenceBackend for MockBackend {
         fn execute_benchmark_prefill(
             &mut self,
@@ -691,6 +864,24 @@ mod tests {
             } else {
                 Aq4BenchmarkTerminalStatus::Ok
             };
+            let success = !cancelled && !self.reset_failed;
+            let lifecycle = serde_json::json!({"reset": {"attempted": 1, "complete": usize::from(!self.reset_failed), "failed": usize::from(self.reset_failed)}});
+            let operation_audit = success.then(
+                || serde_json::json!({"schema_version": "mock-operation.v1", "operation_count": 1}),
+            );
+            let audit = serde_json::json!({
+                "schema_version": "mock.v1",
+                "requested_m": command.requested_m,
+                "resolved_m": success.then_some(command.resolved_m),
+                "actual_token_batch_width": success.then_some(command.resolved_m),
+                "actual_request_batch_width": success.then_some(1),
+                "lifecycle": lifecycle,
+                "operation_audit": operation_audit,
+            });
+            let operation_audit_sha256 = audit
+                .get("operation_audit")
+                .filter(|value| !value.is_null())
+                .map(|value| sha256_json(value).unwrap());
             Aq4BenchmarkExecutionEvidence {
                 status,
                 reuse: if self.reset_failed {
@@ -701,25 +892,24 @@ mod tests {
                 failure_code: self.reset_failed.then(|| "reset_failed".into()),
                 requested_m: command.requested_m,
                 resolved_m: command.resolved_m,
-                actual_m: (!cancelled && !self.reset_failed).then_some(command.resolved_m),
-                actual_token_batch_width: (!cancelled && !self.reset_failed)
-                    .then_some(command.resolved_m),
-                actual_request_batch_width: (!cancelled && !self.reset_failed).then_some(1),
+                actual_m: success.then_some(command.resolved_m),
+                actual_token_batch_width: success.then_some(command.resolved_m),
+                actual_request_batch_width: success.then_some(1),
                 fallback: Aq4BenchmarkFallbackEvidence {
                     used: command.requested_m != command.resolved_m,
                     reason: (command.requested_m != command.resolved_m).then_some("all_m1"),
                 },
-                lifecycle: serde_json::json!({"reset": {"attempted": 1, "complete": usize::from(!self.reset_failed), "failed": usize::from(self.reset_failed)}}),
+                lifecycle,
                 reset: Aq4BenchmarkResetEvidence {
                     attempted: 1,
                     complete: u64::from(!self.reset_failed),
                     failed: u64::from(self.reset_failed),
                 },
-                sanitized_audit: Some(serde_json::json!({"schema_version": "mock.v1"})),
+                sanitized_audit: Some(audit),
                 links: Aq4BenchmarkEvidenceLinks {
                     fixture_sha256: command.fixture_sha256.clone(),
                     input_sha256: command.input_sha256.clone(),
-                    operation_audit_sha256: Some("d".repeat(64)),
+                    operation_audit_sha256,
                     resource_observation_key: command.request_id.clone(),
                     resource_samples_embedded: false,
                 },
@@ -736,12 +926,43 @@ mod tests {
 
     fn prefill(request_id: &str, requested_m: usize, resolved_m: usize) -> String {
         let tokens = [1, 2, 3, 4];
+        let mut case_binding = serde_json::json!({
+            "baseline_mode": if resolved_m == 1 && requested_m != 1 { "all_m1" } else { "cold_batched" },
+            "cached_prefix_tokens": 0,
+            "case_id": "case-1",
+            "case_sha256": null,
+            "context_tokens": tokens.len(),
+            "control": {"control_id": "aq4_0_target", "role": "target", "format_id": "AQ4_0", "implementation_id": "qwen35_aq4_rdna4_v1", "promotion_eligible": true},
+            "control_id": "aq4_0_target",
+            "decode_request_count": 0,
+            "decode_start_tokens": 0,
+            "device": {"device_id": "r9700-rdna4", "runtime_device_index": 1, "backend": "hip", "name": "AMD Radeon Graphics", "architecture": "gfx1201"},
+            "fixture_id": "case-1",
+            "format_id": "AQ4_0",
+            "generated_tokens": 0,
+            "implementation_id": "qwen35_aq4_rdna4_v1",
+            "mode": if resolved_m == 1 && requested_m != 1 { "all_m1" } else { "cold_batched" },
+            "path_oracle_case_id": null,
+            "path_oracle_result_sha256": null,
+            "phase": "cold_prefill",
+            "prefill_requested_m": requested_m,
+            "prompt_tokens": tokens.len(),
+            "request_count": 1,
+            "resolved_m": resolved_m,
+            "sampling": {"mode": "greedy", "temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
+            "scope": "full_model",
+            "stage_id": "representative",
+            "stage_order": 1,
+        });
+        let case_sha256 = aq4_benchmark_case_sha256(&case_binding).unwrap();
+        case_binding["case_sha256"] = case_sha256.clone().into();
         serde_json::json!({
             "schema_version": AQ4_BENCHMARK_WORKER_SCHEMA_VERSION,
             "type": "benchmark_prefill",
             "request_id": request_id,
             "case_id": "case-1",
-            "case_sha256": "a".repeat(64),
+            "case_sha256": case_sha256,
+            "case_binding": case_binding,
             "run_kind": "measured",
             "run_index": 2,
             "requested_m": requested_m,
@@ -827,22 +1048,56 @@ mod tests {
         assert!(events.contains("\"status\":\"cancelled\""));
 
         let input = format!(
-            "{}\n{{\"schema_version\":\"{}\",\"type\":\"shutdown\"}}\n",
+            "{}\n{}\n{{\"schema_version\":\"{}\",\"type\":\"shutdown\"}}\n",
             prefill("req-reset", 1, 1),
+            prefill("req-after-failure", 1, 1),
             AQ4_BENCHMARK_WORKER_SCHEMA_VERSION,
         );
-        let result = run_aq4_benchmark_worker_process(
-            Cursor::new(input),
-            Output::default(),
-            profile(),
-            || {
+        let output = Output::default();
+        let captured = output.clone();
+        let result =
+            run_aq4_benchmark_worker_process(Cursor::new(input), output, profile(), || {
                 Ok(MockBackend {
                     cancel_seen: Default::default(),
                     reset_failed: true,
                     honor_cancel: false,
                 })
-            },
+            });
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("reuse") || error.contains("reusable"),
+            "{error}"
         );
-        assert!(result.unwrap_err().contains("forbids worker reuse"));
+        let events = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(events.matches("\"type\":\"started\"").count(), 1);
+        assert!(!events.contains("\"request_id\":\"req-after-failure\",\"case_id\""));
+    }
+
+    #[test]
+    fn malformed_width_audit_and_failed_reuse_fail_closed_before_terminal_publish() {
+        for invalid in [
+            InvalidEvidence::Width999,
+            InvalidEvidence::AuditNonSha,
+            InvalidEvidence::FailedReuseAllowed,
+        ] {
+            let input = format!(
+                "{}\n{{\"schema_version\":\"{}\",\"type\":\"shutdown\"}}\n",
+                prefill("req-invalid", 64, 64),
+                AQ4_BENCHMARK_WORKER_SCHEMA_VERSION,
+            );
+            let output = Output::default();
+            let captured = output.clone();
+            let result = run_aq4_benchmark_worker_process(
+                Cursor::new(input),
+                output,
+                profile(),
+                move || Ok(InvalidBackend(invalid)),
+            );
+            assert!(result.is_err());
+            let events = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(events.contains("\"type\":\"started\""));
+            assert!(!events.contains("\"type\":\"terminal_evidence\""));
+            assert!(!events.contains("\"type\":\"released\""));
+        }
     }
 }

@@ -13,6 +13,9 @@
 - sanitized audit、lifecycle/reset、actual width、fallback、operation/resource linkを出力する。
 - cancel/reset failure/reuse禁止、unknown/duplicate/hash drift、M grid、event orderingをCPU test化した。
 - stderrの通常audit logと通常worker wireは維持した。
+- independent QA followupでcommandへcanonical full case objectを追加し、case ID/SHAをobjectから再計算してouter commandと意味的に結合した。
+- status okのactual M/token width/request width/operation audit SHAとlifecycle/resetをsanitized auditからexact再構築する。failedは常にreuse禁止とし、failure code/reset整合、後続case/process fail-closeを検証する。
+- case ID swap、width=999、operation audit non-SHA、failed reuse allowedの負例をCPU testへ追加した。
 
 ## 次の行動
 

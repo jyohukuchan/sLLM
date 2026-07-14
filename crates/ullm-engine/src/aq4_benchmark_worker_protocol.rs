@@ -19,6 +19,34 @@ pub const AQ4_BENCHMARK_INPUT_HASH_ALGORITHM: &str = "sha256-u64le-token-ids-v1"
 pub const AQ4_BENCHMARK_PREFILL_M_GRID: &[usize] = &[1, 2, 4, 8, 16, 32, 64, 128];
 const MAX_CASE_ID_BYTES: usize = 256;
 const MAX_RUN_INDEX: u32 = 4095;
+const CASE_BINDING_KEYS: &[&str] = &[
+    "baseline_mode",
+    "cached_prefix_tokens",
+    "case_id",
+    "case_sha256",
+    "context_tokens",
+    "control",
+    "control_id",
+    "decode_request_count",
+    "decode_start_tokens",
+    "device",
+    "fixture_id",
+    "format_id",
+    "generated_tokens",
+    "implementation_id",
+    "mode",
+    "path_oracle_case_id",
+    "path_oracle_result_sha256",
+    "phase",
+    "prefill_requested_m",
+    "prompt_tokens",
+    "request_count",
+    "resolved_m",
+    "sampling",
+    "scope",
+    "stage_id",
+    "stage_order",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +60,7 @@ pub struct Aq4BenchmarkPrefillCommand {
     pub request_id: String,
     pub case_id: String,
     pub case_sha256: String,
+    pub case_binding: serde_json::Value,
     pub run_kind: Aq4BenchmarkRunKind,
     pub run_index: u32,
     pub requested_m: usize,
@@ -74,6 +103,7 @@ enum RawCommand {
         request_id: String,
         case_id: String,
         case_sha256: String,
+        case_binding: serde_json::Value,
         run_kind: Aq4BenchmarkRunKind,
         run_index: u32,
         requested_m: u64,
@@ -109,6 +139,7 @@ pub fn decode_aq4_benchmark_worker_command(
             request_id,
             case_id,
             case_sha256,
+            case_binding,
             run_kind,
             run_index,
             requested_m,
@@ -165,11 +196,21 @@ pub fn decode_aq4_benchmark_worker_command(
             if aq4_benchmark_input_sha256(&prompt_token_ids) != input_sha256 {
                 return Err("AQ4 benchmark input_sha256 does not bind prompt_token_ids".into());
             }
+            validate_case_binding(
+                &case_binding,
+                &case_id,
+                &case_sha256,
+                requested_m,
+                resolved_m,
+                generated_tokens,
+                prompt_token_ids.len(),
+            )?;
             Ok(Aq4BenchmarkWorkerCommand::Prefill(
                 Aq4BenchmarkPrefillCommand {
                     request_id,
                     case_id,
                     case_sha256,
+                    case_binding,
                     run_kind,
                     run_index,
                     requested_m,
@@ -204,6 +245,73 @@ pub fn aq4_benchmark_input_sha256(prompt_token_ids: &[usize]) -> String {
         digest.update(u64::try_from(token_id).unwrap_or(u64::MAX).to_le_bytes());
     }
     encode_sha256(digest.finalize().as_slice())
+}
+
+pub fn aq4_benchmark_case_sha256(case_binding: &serde_json::Value) -> Result<String, String> {
+    let mut value = case_binding.clone();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "AQ4 benchmark case_binding must be an object".to_string())?;
+    if !object.contains_key("case_sha256") {
+        return Err("AQ4 benchmark case_binding lacks case_sha256".into());
+    }
+    object.insert("case_sha256".into(), serde_json::Value::Null);
+    sha256_json(&value)
+}
+
+fn validate_case_binding(
+    value: &serde_json::Value,
+    case_id: &str,
+    case_sha256: &str,
+    requested_m: usize,
+    resolved_m: usize,
+    generated_tokens: usize,
+    prompt_tokens: usize,
+) -> Result<(), String> {
+    let case = value
+        .as_object()
+        .ok_or_else(|| "AQ4 benchmark case_binding must be an object".to_string())?;
+    if case.len() != CASE_BINDING_KEYS.len()
+        || CASE_BINDING_KEYS.iter().any(|key| !case.contains_key(*key))
+    {
+        return Err("AQ4 benchmark case_binding does not contain the canonical full case".into());
+    }
+    if case.get("case_id").and_then(serde_json::Value::as_str) != Some(case_id)
+        || case.get("fixture_id").and_then(serde_json::Value::as_str) != Some(case_id)
+        || case.get("case_sha256").and_then(serde_json::Value::as_str) != Some(case_sha256)
+        || aq4_benchmark_case_sha256(value)? != case_sha256
+    {
+        return Err("AQ4 benchmark case ID/SHA binding differs".into());
+    }
+    let expected_numbers = [
+        ("prefill_requested_m", requested_m),
+        ("resolved_m", resolved_m),
+        ("generated_tokens", generated_tokens),
+        ("prompt_tokens", prompt_tokens),
+        ("context_tokens", prompt_tokens),
+        ("request_count", 1),
+        ("decode_request_count", 0),
+        ("decode_start_tokens", 0),
+        ("cached_prefix_tokens", 0),
+    ];
+    for (key, expected) in expected_numbers {
+        if case.get(key).and_then(serde_json::Value::as_u64) != u64::try_from(expected).ok() {
+            return Err(format!("AQ4 benchmark case_binding.{key} differs"));
+        }
+    }
+    if case.get("scope").and_then(serde_json::Value::as_str) != Some("full_model")
+        || case.get("phase").and_then(serde_json::Value::as_str) != Some("cold_prefill")
+        || case.get("stage_id").and_then(serde_json::Value::as_str) != Some("representative")
+        || case.get("control_id").and_then(serde_json::Value::as_str) != Some("aq4_0_target")
+        || case.get("format_id").and_then(serde_json::Value::as_str) != Some("AQ4_0")
+        || case
+            .get("implementation_id")
+            .and_then(serde_json::Value::as_str)
+            != Some("qwen35_aq4_rdna4_v1")
+    {
+        return Err("AQ4 benchmark case_binding production identity differs".into());
+    }
+    Ok(())
 }
 
 pub fn sha256_json(value: &serde_json::Value) -> Result<String, String> {
@@ -243,7 +351,7 @@ fn validate_case_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_sha256(value: &str, label: &str) -> Result<(), String> {
+pub(crate) fn validate_sha256(value: &str, label: &str) -> Result<(), String> {
     if value.len() != 64
         || value
             .as_bytes()
@@ -408,14 +516,65 @@ mod tests {
         value
     }
 
+    fn case_binding() -> serde_json::Value {
+        let mut case = serde_json::json!({
+            "baseline_mode": "all_m1",
+            "cached_prefix_tokens": 0,
+            "case_id": "case-1",
+            "case_sha256": null,
+            "context_tokens": 3,
+            "control": {"control_id": "aq4_0_target", "role": "target", "format_id": "AQ4_0", "implementation_id": "qwen35_aq4_rdna4_v1", "promotion_eligible": true},
+            "control_id": "aq4_0_target",
+            "decode_request_count": 0,
+            "decode_start_tokens": 0,
+            "device": {"device_id": "r9700-rdna4", "runtime_device_index": 1, "backend": "hip", "name": "AMD Radeon Graphics", "architecture": "gfx1201"},
+            "fixture_id": "case-1",
+            "format_id": "AQ4_0",
+            "generated_tokens": 0,
+            "implementation_id": "qwen35_aq4_rdna4_v1",
+            "mode": "all_m1",
+            "path_oracle_case_id": null,
+            "path_oracle_result_sha256": null,
+            "phase": "cold_prefill",
+            "prefill_requested_m": 64,
+            "prompt_tokens": 3,
+            "request_count": 1,
+            "resolved_m": 1,
+            "sampling": {"mode": "greedy", "temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
+            "scope": "full_model",
+            "stage_id": "representative",
+            "stage_order": 1,
+        });
+        let digest = aq4_benchmark_case_sha256(&case).unwrap();
+        case["case_sha256"] = digest.into();
+        case
+    }
+
     fn command(extra: &str) -> Vec<u8> {
         let input = aq4_benchmark_input_sha256(&[1, 2, 3]);
-        format!(
-            "{{\"schema_version\":\"{AQ4_BENCHMARK_WORKER_SCHEMA_VERSION}\",\"type\":\"benchmark_prefill\",\"request_id\":\"req-1\",\"case_id\":\"case-1\",\"case_sha256\":\"{}\",\"run_kind\":\"measured\",\"run_index\":2,\"requested_m\":64,\"resolved_m\":1,\"generated_tokens\":0,\"fixture_sha256\":\"{}\",\"input_sha256\":\"{input}\",\"prompt_token_ids\":[1,2,3]{extra}}}",
-            "a".repeat(64),
-            "b".repeat(64),
-        )
-        .into_bytes()
+        let binding = case_binding();
+        let case_sha256 = binding["case_sha256"].as_str().unwrap();
+        let mut encoded = serde_json::to_string(&serde_json::json!({
+            "schema_version": AQ4_BENCHMARK_WORKER_SCHEMA_VERSION,
+            "type": "benchmark_prefill",
+            "request_id": "req-1",
+            "case_id": "case-1",
+            "case_sha256": case_sha256,
+            "case_binding": binding,
+            "run_kind": "measured",
+            "run_index": 2,
+            "requested_m": 64,
+            "resolved_m": 1,
+            "generated_tokens": 0,
+            "fixture_sha256": "b".repeat(64),
+            "input_sha256": input,
+            "prompt_token_ids": [1, 2, 3],
+        }))
+        .unwrap();
+        encoded.pop();
+        encoded.push_str(extra);
+        encoded.push('}');
+        encoded.into_bytes()
     }
 
     #[test]
@@ -443,6 +602,12 @@ mod tests {
         value["prompt_token_ids"] = serde_json::json!([1, 2, 4]);
         assert!(
             decode_aq4_benchmark_worker_command(&serde_json::to_vec(&value).unwrap(), &profile())
+                .is_err()
+        );
+        let mut swapped: serde_json::Value = serde_json::from_slice(&command("")).unwrap();
+        swapped["case_id"] = "case-swapped".into();
+        assert!(
+            decode_aq4_benchmark_worker_command(&serde_json::to_vec(&swapped).unwrap(), &profile())
                 .is_err()
         );
     }
