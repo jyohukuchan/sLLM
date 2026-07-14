@@ -58,10 +58,12 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
             outcome: None,
             error_code: None,
             operation_execution_audit: None,
+            request_execution_audit: None,
         });
 
         let result =
             drive_worker_request(&mut self.session, request, admission.cancel, publications);
+        let request_execution_audit = self.session.terminal_sanitized_execution_audit();
         match result {
             Ok(outcome) => {
                 write_backend_log(BackendLog {
@@ -76,6 +78,7 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
                     outcome: Some(release_outcome_name(outcome)),
                     error_code: None,
                     operation_execution_audit: self.session.terminal_operation_execution_audit(),
+                    request_execution_audit: request_execution_audit.as_ref(),
                 });
                 Ok(())
             }
@@ -92,6 +95,7 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
                     outcome: None,
                     error_code: Some("runtime_failed"),
                     operation_execution_audit: self.session.terminal_operation_execution_audit(),
+                    request_execution_audit: request_execution_audit.as_ref(),
                 });
                 Err(error)
             }
@@ -184,6 +188,8 @@ struct BackendLog<'a> {
     error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_execution_audit: Option<&'a OperationExecutionAudit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_execution_audit: Option<&'a serde_json::Value>,
 }
 
 fn write_backend_log(record: BackendLog<'_>) {
@@ -291,6 +297,21 @@ mod tests {
             failed_execution_width: None,
             failed_operation: None,
         };
+        let request_audit = serde_json::json!({
+            "schema_version": "ullm.qwen35_aq4.request_execution.v1",
+            "requested_m": 64,
+            "resolved_m": 1,
+            "actual_token_batch_width": 1,
+            "actual_request_batch_width": 1,
+            "lifecycle": {
+                "prepare": 2,
+                "commit": 2,
+                "discard": 0,
+                "error": 0,
+                "cancel": 0,
+                "reset": {"attempted": 1, "complete": 1, "failed": 0}
+            }
+        });
         let value = serde_json::to_value(BackendLog {
             schema_version: "ullm.worker.log.v1",
             level: "info",
@@ -303,6 +324,7 @@ mod tests {
             outcome: Some("stop"),
             error_code: None,
             operation_execution_audit: Some(&audit),
+            request_execution_audit: Some(&request_audit),
         })
         .unwrap();
         assert_eq!(value["schema_version"], "ullm.worker.log.v1");
@@ -341,6 +363,12 @@ mod tests {
         assert_eq!(
             value["operation_execution_audit"]["coverage_complete"],
             true
+        );
+        assert_eq!(value["request_execution_audit"]["requested_m"], 64);
+        assert_eq!(value["request_execution_audit"]["resolved_m"], 1);
+        assert_eq!(
+            value["request_execution_audit"]["lifecycle"]["reset"]["complete"],
+            1
         );
         assert!(value.get("prompt_token_ids").is_none());
         assert!(value.get("token_id").is_none());

@@ -2387,6 +2387,11 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
     fn terminal_operation_execution_audit(&self) -> Option<&OperationExecutionAudit> {
         self.last_terminal_operation_audit()
     }
+
+    fn terminal_sanitized_execution_audit(&self) -> Option<serde_json::Value> {
+        self.last_terminal_request_execution_audit()
+            .and_then(|audit| serde_json::to_value(audit).ok())
+    }
 }
 
 fn validate_config<M: Qwen35Aq4SessionModel>(
@@ -3686,6 +3691,11 @@ mod tests {
                 decode: 0,
             })
         );
+        let terminal_facts = session.terminal_sanitized_execution_audit().unwrap();
+        assert_eq!(terminal_facts["requested_m"], 128);
+        assert_eq!(terminal_facts["resolved_m"], 128);
+        assert_eq!(terminal_facts["actual_token_batch_width"], 128);
+        assert_eq!(terminal_facts["lifecycle"]["reset"]["complete"], 1);
     }
 
     #[test]

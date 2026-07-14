@@ -10,3 +10,4 @@
 - Resolved M and actual widths now come only from registry-validated physical prefill steps whose complete per-layer batch sequences agree; unproven widths remain null and inconsistent layers fail closed.
 - Prefill-state and token-publication transactions are counted separately. Terminal snapshots enforce `prepare = commit + discard`, reject open transactions, do not treat cleanup abort as observed cancellation, and split reset attempted/complete/failed.
 - CPU session coverage now includes physical M1 fallback versus native M, cross-layer mismatch rejection, pre-dispatch cancellation, cleanup abort, publish failure, and reset failure.
+- The generic session trait now exposes optional sanitized terminal facts. The session worker adds them only to the bounded structured stderr record; the worker JSONL wire protocol remains unchanged.

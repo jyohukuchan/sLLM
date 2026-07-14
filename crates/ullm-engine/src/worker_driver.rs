@@ -72,6 +72,14 @@ pub trait InferenceSession {
     fn terminal_operation_execution_audit(&self) -> Option<&OperationExecutionAudit> {
         None
     }
+
+    /// Optional privacy-safe model-specific terminal facts for bounded local diagnostics.
+    ///
+    /// The session worker writes this value only to its structured stderr log. It is never part
+    /// of the worker JSONL wire protocol.
+    fn terminal_sanitized_execution_audit(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 pub trait RequestPublications {
