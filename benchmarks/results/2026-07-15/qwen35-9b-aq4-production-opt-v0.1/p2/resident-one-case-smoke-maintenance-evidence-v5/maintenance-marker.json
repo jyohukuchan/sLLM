@@ -1,0 +1,8 @@
+{
+  "created_unix_ns": 1784064398628440401,
+  "pre_stop_sha256": "c30a3091a9dca782d0bf66ddba7bf110915642dbaf83a2104aa818397a68945b",
+  "restore_required": true,
+  "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
+  "schema_version": "ullm.aq4_p2_resident_maintenance_marker.v1",
+  "service": "ullm-openai.service"
+}
