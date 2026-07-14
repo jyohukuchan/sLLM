@@ -8,6 +8,8 @@
     "safety-success-start-failure-partial",
     "validator-runner-finalize-toctou",
     "identity-and-hash-bindings",
+    "bounded-driver-stdout-and-streamed-stderr-failure-evidence",
+    "driver-process-group-descendant-cleanup-and-secret-redaction",
     "strict-amd-process-active-owner-and-zero-sentinel-schema",
     "secret-free-amd-process-rejection-shape-and-raw-sha",
     "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics",
@@ -22,21 +24,21 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "da26839109ebb0a09bc8f194926d9de513095f83",
-    "sha256": "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891"
+    "commit": "79ce2aa199413323da6fee10ddfa06fbb530b750",
+    "sha256": "90f5e43a68b438bdf5f4421d2e5651073fd14ae52158be2ae5d66d607014d783"
   },
   "manual_boundary_count": 15,
   "runner": {
-    "commit": "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db",
-    "sha256": "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"
+    "commit": "4005c80e542d7e37cf79e62d2fd053f99c0353c1",
+    "sha256": "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
   },
-  "runner_strict_negative_count": 18,
+  "runner_strict_negative_count": 26,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 295,
+  "test_count": 303,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 229,
+    "existing_and_profile_regression": 237,
     "marker_chain": 55
   }
 }
