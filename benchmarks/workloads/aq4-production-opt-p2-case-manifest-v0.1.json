@@ -1,0 +1,269 @@
+{
+  "schema_version": "ullm.aq4_production_p2_case_manifest.v1",
+  "manifest_id": "aq4-production-opt-p2-v0.1",
+  "status": "planning_only",
+  "created_at": "2026-07-14T00:00:00Z",
+  "purpose": "Hash-bound CPU and R9700 baseline matrix for Qwen3.5-9B AQ4_0 prefill/decode optimization.",
+  "run_root_template": "benchmarks/results/YYYY-MM-DD/qwen35-9b-aq4-production-opt-p2-v0.1",
+  "identity_binding": {
+    "model_family": "Qwen3.5",
+    "model_name": "Qwen3.5-9B",
+    "format_id": "AQ4_0",
+    "tokenizer_sha256": null,
+    "served_model_manifest_sha256": null,
+    "worker_binary_sha256": null,
+    "package_manifest_sha256": null,
+    "source_oracle_sha256": null,
+    "path_oracle_identity": "same-artifact-all-m1",
+    "build_git_commit": null,
+    "context_limit_tokens": 4096,
+    "sampling": {
+      "mode": "greedy",
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "top_k": 1,
+      "seed": 0
+    }
+  },
+  "execution_safety": {
+    "gpu_processes_at_once": 1,
+    "r9700_exclusive": true,
+    "r9700_queue_lock": "ullm-r9700-p2-exclusive",
+    "preflight_required": true,
+    "preflight_fields": [
+      "weights_bytes",
+      "persistent_state_bytes",
+      "kv_cache_bytes",
+      "workspace_bytes",
+      "temporary_bytes",
+      "vram_headroom_bytes",
+      "gpu_process_snapshot"
+    ],
+    "stream_tensors_and_logits": true,
+    "retain_full_logit_matrix": false,
+    "retain_full_attention_matrix": false,
+    "case_cleanup_required": true,
+    "oom_is_immutable_result": true,
+    "live_requests_allowed_during_preparation": false
+  },
+  "axes": {
+    "prefill_prompt_tokens": [
+      1,
+      8,
+      32,
+      128,
+      512,
+      1011,
+      1024,
+      1339,
+      2048,
+      3584,
+      4096
+    ],
+    "prefill_requested_m": [1, 8, 16, 32, 64, 128],
+    "prefill_modes": [
+      "all_m1",
+      "cold_batched",
+      "cached_prefix_chunked"
+    ],
+    "decode_start_context_tokens": [16, 128, 512, 1024, 1339, 2048, 3584],
+    "decode_requested_m": 1,
+    "decode_generated_tokens": 64,
+    "scopes": ["component", "full_model", "production_server"],
+    "devices": [
+      {
+        "device_id": "cpu-reference",
+        "backend": "cpu",
+        "gpu_architecture": null,
+        "gpu_name": null,
+        "required": true
+      },
+      {
+        "device_id": "r9700-rdna4",
+        "backend": "hip",
+        "gpu_architecture": "RDNA4",
+        "gpu_name": "Radeon AI PRO R9700",
+        "required": true
+      }
+    ],
+    "controls": [
+      {
+        "control_id": "aq4_0_target",
+        "role": "target",
+        "format_id": "AQ4_0",
+        "promotion_eligible": true
+      },
+      {
+        "control_id": "sq8_0_cross_format",
+        "role": "cross_format_control",
+        "format_id": "SQ8_0",
+        "promotion_eligible": false,
+        "required_for_aq4_comparison": true
+      },
+      {
+        "control_id": "reference_source_oracle",
+        "role": "independent_reference",
+        "format_id": "REFERENCE",
+        "promotion_eligible": false,
+        "required_for_aq4_comparison": true
+      }
+    ]
+  },
+  "control_dependencies": {
+    "target_control_id": "aq4_0_target",
+    "required_control_ids": [
+      "sq8_0_cross_format",
+      "reference_source_oracle"
+    ],
+    "matching_case_fields": [
+      "model_identity",
+      "tokenizer_identity",
+      "prompt_tokens",
+      "context_tokens",
+      "requested_m",
+      "sampling",
+      "scope",
+      "power_condition_identity"
+    ],
+    "sq8_0_policy": "reference_control_only_until_sq8_oracle_and_builder_gate",
+    "missing_control_action": "ineligible",
+    "control_hashes_must_be_bound_before_r9700_promotion": true
+  },
+  "command_adapter_requirements": {
+    "p1_runner_ownership": "tools/run-aq4-production-performance-matrix.py",
+    "adapter_must_be_real": true,
+    "adapter_must_execute_declared_binary": true,
+    "adapter_must_execute_declared_package": true,
+    "adapter_must_record_requested_and_resolved_m": true,
+    "adapter_must_record_actual_token_and_request_batch_width": true,
+    "adapter_must_record_fallback_and_reason": true,
+    "adapter_must_record_preflight_and_peak_memory": true,
+    "adapter_must_record_prepare_commit_discard_reset": true,
+    "adapter_must_publish_atomic_incomplete_suffix": true,
+    "adapter_must_not_claim_component_as_full_model": true,
+    "adapter_must_not_modify_wire_protocol": true,
+    "adapter_must_not_reuse_historical_identity": true,
+    "adapter_must_fail_closed_when_live_request_or_gpu_queue_is_busy": true,
+    "adapter_must_keep_user_content_out_of_evidence": true
+  },
+  "stages": [
+    {
+      "stage_id": "smoke",
+      "order": 1,
+      "purpose": "CPU-only schema, command-adapter, oracle-linkage, and bounded-workload smoke.",
+      "requires_parent_gate": "P1_gate_not_yet_confirmed",
+      "execution_allowed_now": false,
+      "devices": ["cpu-reference"],
+      "controls": ["aq4_0_target", "sq8_0_cross_format", "reference_source_oracle"],
+      "prefill": {
+        "prompt_tokens": [128, 1011],
+        "requested_m": [1, 16, 128],
+        "modes": ["all_m1", "cold_batched"],
+        "scopes": ["component", "full_model"]
+      },
+      "decode": {
+        "start_context_tokens": [16, 1339],
+        "requested_m": 1,
+        "generated_tokens": 64,
+        "scopes": ["component", "full_model"]
+      },
+      "expected_case_count": {
+        "prefill": 72,
+        "decode": 12,
+        "total": 84
+      }
+    },
+    {
+      "stage_id": "representative",
+      "order": 2,
+      "purpose": "CPU and R9700 baseline/profile points that distinguish component, full-model, and production-server paths.",
+      "requires_parent_gate": "P1_gate_confirmed_and_identity_frozen",
+      "execution_allowed_now": false,
+      "devices": ["cpu-reference", "r9700-rdna4"],
+      "controls_by_device": {
+        "cpu-reference": ["aq4_0_target", "sq8_0_cross_format", "reference_source_oracle"],
+        "r9700-rdna4": ["aq4_0_target", "reference_source_oracle"]
+      },
+      "prefill": {
+        "prompt_tokens": [128, 512, 1011, 1024, 1339, 2048, 3584],
+        "requested_m": [1, 8, 16, 32, 64, 128],
+        "modes": ["all_m1", "cold_batched", "cached_prefix_chunked"],
+        "scopes": ["component", "full_model", "production_server"],
+        "production_server_prompt_tokens": [1011, 1024, 1339, 2048]
+      },
+      "decode": {
+        "start_context_tokens": [16, 128, 512, 1024, 1339, 2048, 3584],
+        "requested_m": 1,
+        "generated_tokens": 64,
+        "scopes": ["component", "full_model", "production_server"],
+        "production_server_start_context_tokens": [128, 1339, 2048]
+      },
+      "expected_case_count": {
+        "prefill_cpu_non_server": 756,
+        "prefill_cpu_production_server": 216,
+        "prefill_r9700_non_server": 504,
+        "prefill_r9700_production_server": 144,
+        "decode_cpu_non_server": 42,
+        "decode_cpu_production_server": 9,
+        "decode_r9700_non_server": 28,
+        "decode_r9700_production_server": 6,
+        "total": 1705
+      }
+    },
+    {
+      "stage_id": "full",
+      "order": 3,
+      "purpose": "Complete required matrix, including context edge and all scopes, after representative variance and memory headroom are accepted.",
+      "requires_parent_gate": "representative_cpu_and_r9700_baseline_accepted",
+      "execution_allowed_now": false,
+      "devices": ["cpu-reference", "r9700-rdna4"],
+      "controls_by_device": {
+        "cpu-reference": ["aq4_0_target", "sq8_0_cross_format", "reference_source_oracle"],
+        "r9700-rdna4": ["aq4_0_target", "reference_source_oracle"]
+      },
+      "prefill": {
+        "prompt_tokens": [1, 8, 32, 128, 512, 1011, 1024, 1339, 2048, 3584, 4096],
+        "requested_m": [1, 8, 16, 32, 64, 128],
+        "modes": ["all_m1", "cold_batched", "cached_prefix_chunked"],
+        "scopes": ["component", "full_model", "production_server"],
+        "production_server_prompt_tokens": [1, 8, 32, 128, 512, 1011, 1024, 1339, 2048, 3584, 4096]
+      },
+      "decode": {
+        "start_context_tokens": [16, 128, 512, 1024, 1339, 2048, 3584],
+        "requested_m": 1,
+        "generated_tokens": 64,
+        "scopes": ["component", "full_model", "production_server"],
+        "production_server_start_context_tokens": [16, 128, 512, 1024, 1339, 2048, 3584]
+      },
+      "context_edge_rule": "prefill prompt 4096 is prefill-only; decode starts plus 64 generated tokens must remain <= 4096",
+      "expected_case_count": {
+        "prefill_cpu": 1782,
+        "prefill_r9700": 1188,
+        "decode_cpu": 63,
+        "decode_r9700": 42,
+        "total": 3075
+      }
+    }
+  ],
+  "r9700_queue": {
+    "queue_id": "r9700-exclusive-p2-v0.1",
+    "device_id": "r9700-rdna4",
+    "max_concurrent_cases": 1,
+    "order": ["preflight", "smoke", "representative", "full"],
+    "within_stage_order": ["control_reference", "aq4_target", "production_server"],
+    "between_cases": ["drain_streams", "reset_executor_state", "capture_power_and_vram", "release_case_buffers"],
+    "positive_vram_processes_allowed": ["ullm-aq4-worker"],
+    "other_positive_vram_process_action": "skip_and_record_busy",
+    "lock_release_on_failure": true
+  },
+  "case_id_template": "p2-{stage}-{scope}-{phase}-{mode_or_decode}-n{prompt_or_context}-m{requested_m}-{device}-{control}",
+  "publication": {
+    "result_schema": "inference-benchmark-result-v0.1",
+    "validation_schema": "ullm.prefill_validation.v1",
+    "trace_schema": "ullm.production_execution_trace.v1",
+    "temporary_suffix": ".incomplete",
+    "atomic_publish": true,
+    "never_overwrite_existing_evidence": true,
+    "failure_rows_are_immutable": true
+  }
+}

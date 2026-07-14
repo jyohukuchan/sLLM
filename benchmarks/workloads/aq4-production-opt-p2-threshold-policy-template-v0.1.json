@@ -1,0 +1,178 @@
+{
+  "schema_version": "ullm.aq4_production_p2_threshold_policy.v1",
+  "policy_id": "aq4-production-opt-p2-threshold-template-v0.1",
+  "status": "unbound_template",
+  "created_at": "2026-07-14T00:00:00Z",
+  "effective_at": null,
+  "scope": "planning_only",
+  "applies_to": {
+    "model_family": "Qwen3.5",
+    "model_name": "Qwen3.5-9B",
+    "target_format_id": "AQ4_0",
+    "target_gpu_architecture": "RDNA4",
+    "target_gpu_name": "Radeon AI PRO R9700",
+    "backend": "hip",
+    "context_limit_tokens": 4096,
+    "quantization_control_ids": [
+      "sq8_0_cross_format",
+      "reference_source_oracle"
+    ]
+  },
+  "hash_binding": {
+    "binding_required_before_measurement": true,
+    "model_identity_sha256": null,
+    "tokenizer_sha256": null,
+    "served_model_manifest_sha256": null,
+    "worker_binary_sha256": null,
+    "package_manifest_sha256": null,
+    "package_content_sha256": null,
+    "graph_identity_sha256": null,
+    "state_schema_sha256": null,
+    "source_oracle_sha256": null,
+    "path_oracle_identity_sha256": null,
+    "baseline_result_sha256": null,
+    "power_capture_sha256": null,
+    "policy_sha256": null,
+    "bound_case_manifest_sha256": null,
+    "binding_note": "Replace every null with a lowercase SHA-256 from the same run root before any R9700 execution or promotion decision. Template hash is not evidence."
+  },
+  "power_condition": {
+    "policy_id": "r9700-exclusive-power-template-v0.1",
+    "binding_required": true,
+    "device": "Radeon AI PRO R9700",
+    "architecture": "RDNA4",
+    "exclusive_queue_id": "r9700-exclusive-p2-v0.1",
+    "max_concurrent_gpu_cases": 1,
+    "allowed_positive_vram_processes": ["ullm-aq4-worker"],
+    "forbidden_positive_vram_process_action": "skip_and_record_busy",
+    "capture_required": [
+      "rocm_smi_device_identity",
+      "rocm_smi_temperature_c",
+      "rocm_smi_power_watts",
+      "rocm_smi_power_limit_watts",
+      "rocm_smi_vram_used_bytes",
+      "rocm_smi_process_snapshot",
+      "driver_version",
+      "runtime_version",
+      "host_identity"
+    ],
+    "capture_path_template": "raw/environment/r9700-power-condition.json",
+    "expected_power_limit_watts": null,
+    "allowed_power_tolerance_watts": null,
+    "maximum_temperature_c": null,
+    "minimum_vram_headroom_bytes": null,
+    "require_stable_power_profile": true,
+    "stable_profile_definition": "Bind explicit values and tolerance before execution; do not infer a power condition from producer summary."
+  },
+  "correctness_thresholds": {
+    "finite_outputs_required": true,
+    "shape_and_dtype_contract_required": true,
+    "path_oracle_all_m1_required": true,
+    "source_oracle_required": true,
+    "greedy_token_exact_required": true,
+    "kv_cache_and_state_snapshot_required": true,
+    "chunk_boundary_equivalence_required": true,
+    "cancel_publish_failure_reset_required": true,
+    "max_hidden_relative_l2": null,
+    "max_hidden_max_abs": null,
+    "max_logits_relative_l2": null,
+    "max_logits_max_abs": null,
+    "top_k": 10,
+    "minimum_top_k_overlap": null,
+    "threshold_values_must_be_bound_to_artifact": true
+  },
+  "performance_thresholds": {
+    "measurement_schedule": {
+      "warmup_runs": 2,
+      "measured_runs": 10,
+      "percentiles": ["p50", "p95"],
+      "r9700_queue_serial": true
+    },
+    "prefill": {
+      "prompt_1011_min_tokens_per_second": 318.19,
+      "prompt_1011_gate_type": "production_server_absolute_minimum",
+      "prompt_2048_tokenwise_baseline_ratio_min": 5.0,
+      "prompt_2048_gate_type": "hash_bound_baseline_ratio_without_oom",
+      "prompt_1024_target_tokens_per_second": 1000.0,
+      "prompt_1024_gate_type": "reported_target_not_substitute_for_minimum_gates",
+      "p50_regression_stop_fraction": 0.05,
+      "p95_regression_stop_fraction": 0.10,
+      "short_context_ttft_regression_stop_fraction": 0.05,
+      "actual_token_batch_width_must_match_requested": false,
+      "actual_token_batch_width_must_be_recorded": true,
+      "unexpected_fallback_is_failure": true,
+      "oom_is_failure": true
+    },
+    "decode": {
+      "generated_tokens_per_case": 64,
+      "requested_m": 1,
+      "context_1339_min_tokens_per_second": 53.3,
+      "context_1339_improvement_fraction_min": 0.25,
+      "context_1339_prefill_only_regression_fraction_max": 0.05,
+      "short_context_p50_regression_fraction_max": 0.05,
+      "decode_baseline_identity_required": true,
+      "historical_value_is_not_current_baseline": true,
+      "unexpected_fallback_is_failure": true,
+      "oom_is_failure": true
+    },
+    "memory": {
+      "vram_peak_must_be_recorded": true,
+      "workspace_peak_must_be_recorded": true,
+      "preflight_headroom_must_be_positive": true,
+      "new_oom_allowed": false,
+      "new_unbounded_allocation_allowed": false
+    }
+  },
+  "control_dependency": {
+    "target_control_id": "aq4_0_target",
+    "required_before_target_comparison": [
+      {
+        "control_id": "reference_source_oracle",
+        "format_id": "REFERENCE",
+        "role": "independent source oracle",
+        "promotion_eligible": false,
+        "required_scopes": ["component", "full_model", "production_server"],
+        "required_devices": ["cpu-reference"]
+      },
+      {
+        "control_id": "sq8_0_cross_format",
+        "format_id": "SQ8_0",
+        "role": "cross-format implementation control",
+        "promotion_eligible": false,
+        "required_scopes": ["component", "full_model"],
+        "required_devices": ["cpu-reference"],
+        "note": "Use only as a control dependency; do not promote SQ8_0 from this AQ4 P2 run."
+      }
+    ],
+    "matching_identity_fields": [
+      "model_identity_sha256",
+      "tokenizer_sha256",
+      "package_manifest_sha256",
+      "prompt_tokens",
+      "context_tokens",
+      "requested_m",
+      "sampling",
+      "power_capture_sha256"
+    ],
+    "missing_or_mismatched_control_action": "ineligible",
+    "producer_summary_is_not_authoritative": true
+  },
+  "promotion_rules": {
+    "component_scope_can_promote": false,
+    "full_model_scope_can_promote": false,
+    "production_server_trace_required": true,
+    "independent_validator_required": true,
+    "same_candidate_identity_across_scopes_required": true,
+    "activation_allowed_from_template": false,
+    "rollback_binding_required": true,
+    "live_requests_before_parent_p1_gate": false
+  },
+  "failure_policy": {
+    "immutable_statuses": ["oom", "failed", "unsupported", "skipped"],
+    "unexpected_fallback_action": "fail_closed",
+    "identity_mismatch_action": "quarantine_and_stop_comparison",
+    "power_mismatch_action": "quarantine_and_stop_comparison",
+    "partial_matrix_action": "ineligible_until_all_scheduled_rows_present",
+    "incomplete_suffix": ".incomplete"
+  }
+}
