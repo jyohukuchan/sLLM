@@ -6,8 +6,8 @@
 use crate::aq4_benchmark_worker_protocol::{
     AQ4_BENCHMARK_TERMINAL_EVIDENCE_SCHEMA_VERSION, AQ4_BENCHMARK_WORKER_SCHEMA_VERSION,
     Aq4BenchmarkExecutionEvidence, Aq4BenchmarkPrefillCommand, Aq4BenchmarkReuse,
-    Aq4BenchmarkTerminalStatus, Aq4BenchmarkWorkerCommand, Aq4BenchmarkWorkerEvent,
-    decode_aq4_benchmark_worker_command,
+    Aq4BenchmarkTerminalStatus, Aq4BenchmarkTrustedCaseRegistry, Aq4BenchmarkWorkerCommand,
+    Aq4BenchmarkWorkerEvent, decode_aq4_benchmark_worker_command,
 };
 use crate::inference_api::CancellationToken;
 use crate::qwen35_aq4_session::{Qwen35Aq4InferenceSession, Qwen35Aq4SessionModel};
@@ -321,6 +321,7 @@ pub fn run_aq4_benchmark_worker_process<R, W, B, F>(
     input: R,
     output: W,
     profile: Sq8WorkerProfile,
+    registry: Aq4BenchmarkTrustedCaseRegistry,
     build_backend: F,
 ) -> Result<Aq4BenchmarkCommandReaderExit, String>
 where
@@ -353,7 +354,7 @@ where
         .spawn(move || run_inference(receiver, inference_writer, inference_state, build_backend))
         .map_err(|_| "failed to spawn AQ4 benchmark inference thread".to_string())?;
 
-    let reader_result = run_reader(input, &profile, &writer, &state, &sender);
+    let reader_result = run_reader(input, &profile, &registry, &writer, &state, &sender);
     drop(sender);
     let inference_result = inference
         .join()
@@ -382,6 +383,7 @@ where
 fn run_reader<R: BufRead, W: Write>(
     input: R,
     profile: &Sq8WorkerProfile,
+    registry: &Aq4BenchmarkTrustedCaseRegistry,
     writer: &SharedWriter<W>,
     state: &Mutex<RuntimeState>,
     inference: &SyncSender<InferenceCommand>,
@@ -402,7 +404,7 @@ fn run_reader<R: BufRead, W: Write>(
             Ok(Sq8JsonlRead::Eof) => return begin_shutdown(state, inference),
             Err(_) => return Err("AQ4 benchmark stdin framing failed".into()),
         };
-        let command = match decode_aq4_benchmark_worker_command(&payload, profile) {
+        let command = match decode_aq4_benchmark_worker_command(&payload, profile, registry) {
             Ok(command) => command,
             Err(_) => {
                 publish_error(
@@ -703,7 +705,7 @@ fn validate_sanitized_audit(evidence: &Aq4BenchmarkExecutionEvidence) -> Result<
         .get("actual_request_batch_width")
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok());
-    if requested_m.is_some_and(|value| value != evidence.requested_m)
+    if requested_m != Some(evidence.requested_m)
         || resolved_m != evidence.actual_m
         || token_width != evidence.actual_token_batch_width
         || request_width != evidence.actual_request_batch_width
@@ -774,8 +776,10 @@ fn publish_error<W: Write>(
 mod tests {
     use super::*;
     use crate::aq4_benchmark_worker_protocol::{
+        AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION, Aq4BenchmarkCaseBinding,
         Aq4BenchmarkEvidenceLinks, Aq4BenchmarkFallbackEvidence, Aq4BenchmarkResetEvidence,
-        aq4_benchmark_case_sha256, aq4_benchmark_input_sha256, sha256_json,
+        aq4_benchmark_case_sha256, aq4_benchmark_input_sha256, decode_aq4_benchmark_case_registry,
+        sha256_json,
     };
     use std::io::Cursor;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -805,6 +809,7 @@ mod tests {
         Width999,
         AuditNonSha,
         FailedReuseAllowed,
+        MissingRequestedM,
     }
 
     struct InvalidBackend(InvalidEvidence);
@@ -836,6 +841,15 @@ mod tests {
                 }
                 InvalidEvidence::FailedReuseAllowed => {
                     evidence.reuse = Aq4BenchmarkReuse::Allowed;
+                }
+                InvalidEvidence::MissingRequestedM => {
+                    evidence
+                        .sanitized_audit
+                        .as_mut()
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("requested_m");
                 }
             }
             evidence
@@ -924,9 +938,9 @@ mod tests {
         profile
     }
 
-    fn prefill(request_id: &str, requested_m: usize, resolved_m: usize) -> String {
+    fn case_binding(requested_m: usize, resolved_m: usize) -> Aq4BenchmarkCaseBinding {
         let tokens = [1, 2, 3, 4];
-        let mut case_binding = serde_json::json!({
+        let value = serde_json::json!({
             "baseline_mode": if resolved_m == 1 && requested_m != 1 { "all_m1" } else { "cold_batched" },
             "cached_prefix_tokens": 0,
             "case_id": "case-1",
@@ -954,8 +968,26 @@ mod tests {
             "stage_id": "representative",
             "stage_order": 1,
         });
-        let case_sha256 = aq4_benchmark_case_sha256(&case_binding).unwrap();
-        case_binding["case_sha256"] = case_sha256.clone().into();
+        let mut binding: Aq4BenchmarkCaseBinding = serde_json::from_value(value).unwrap();
+        binding.case_sha256 = Some(aq4_benchmark_case_sha256(&binding).unwrap());
+        binding
+    }
+
+    fn registry(requested_m: usize, resolved_m: usize) -> Aq4BenchmarkTrustedCaseRegistry {
+        decode_aq4_benchmark_case_registry(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION,
+                "cases": [case_binding(requested_m, resolved_m)],
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn prefill(request_id: &str, requested_m: usize, resolved_m: usize) -> String {
+        let tokens = [1, 2, 3, 4];
+        let case_binding = case_binding(requested_m, resolved_m);
+        let case_sha256 = case_binding.case_sha256.clone().unwrap();
         serde_json::json!({
             "schema_version": AQ4_BENCHMARK_WORKER_SCHEMA_VERSION,
             "type": "benchmark_prefill",
@@ -985,14 +1017,19 @@ mod tests {
             );
             let output = Output::default();
             let captured = output.clone();
-            let result =
-                run_aq4_benchmark_worker_process(Cursor::new(input), output, profile(), || {
+            let result = run_aq4_benchmark_worker_process(
+                Cursor::new(input),
+                output,
+                profile(),
+                registry(m, m),
+                || {
                     Ok(MockBackend {
                         cancel_seen: Default::default(),
                         reset_failed: false,
                         honor_cancel: false,
                     })
-                });
+                },
+            );
             assert!(matches!(
                 result,
                 Ok(Aq4BenchmarkCommandReaderExit::ActiveShutdown)
@@ -1032,7 +1069,7 @@ mod tests {
         );
         let output = Output::default();
         let captured = output.clone();
-        run_aq4_benchmark_worker_process(Cursor::new(input), output, profile(), {
+        run_aq4_benchmark_worker_process(Cursor::new(input), output, profile(), registry(64, 1), {
             let cancel_seen = Arc::clone(&cancel_seen);
             move || {
                 Ok(MockBackend {
@@ -1055,14 +1092,19 @@ mod tests {
         );
         let output = Output::default();
         let captured = output.clone();
-        let result =
-            run_aq4_benchmark_worker_process(Cursor::new(input), output, profile(), || {
+        let result = run_aq4_benchmark_worker_process(
+            Cursor::new(input),
+            output,
+            profile(),
+            registry(1, 1),
+            || {
                 Ok(MockBackend {
                     cancel_seen: Default::default(),
                     reset_failed: true,
                     honor_cancel: false,
                 })
-            });
+            },
+        );
         let error = result.unwrap_err();
         assert!(
             error.contains("reuse") || error.contains("reusable"),
@@ -1079,6 +1121,7 @@ mod tests {
             InvalidEvidence::Width999,
             InvalidEvidence::AuditNonSha,
             InvalidEvidence::FailedReuseAllowed,
+            InvalidEvidence::MissingRequestedM,
         ] {
             let input = format!(
                 "{}\n{{\"schema_version\":\"{}\",\"type\":\"shutdown\"}}\n",
@@ -1091,6 +1134,7 @@ mod tests {
                 Cursor::new(input),
                 output,
                 profile(),
+                registry(64, 64),
                 move || Ok(InvalidBackend(invalid)),
             );
             assert!(result.is_err());

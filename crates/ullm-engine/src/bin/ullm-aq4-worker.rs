@@ -4,9 +4,13 @@
 use serde::Serialize;
 use std::env;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use ullm_engine::aq4_benchmark_worker_protocol::{
+    Aq4BenchmarkTrustedCaseRegistry, decode_aq4_benchmark_case_registry,
+};
 use ullm_engine::aq4_benchmark_worker_runtime::run_aq4_benchmark_worker_process;
 use ullm_engine::aq4_worker_backend::{
     QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV, Qwen35Aq4WorkerBackend, Qwen35Aq4WorkerBackendConfig,
@@ -38,7 +42,10 @@ struct WorkerArgs {
 enum WorkerSource {
     Legacy(WorkerArgs),
     ServedModelManifest(PathBuf),
-    BenchmarkServedModelManifest(PathBuf),
+    BenchmarkServedModelManifest {
+        served_model: PathBuf,
+        case_registry: PathBuf,
+    },
 }
 
 enum CliAction {
@@ -66,6 +73,7 @@ enum LoadedWorker {
     BenchmarkResident {
         config: ResidentWorkerConfig,
         profile: Sq8WorkerProfile,
+        registry: Aq4BenchmarkTrustedCaseRegistry,
     },
 }
 
@@ -76,7 +84,7 @@ fn main() -> ExitCode {
                 "Usage: ullm-aq4-worker [--engine PATH] --package PATH [--device-index N] [--layers all|CSV]\n\
                  Gateway form: --artifact AQ4_PACKAGE --package COMPAT_PATH [extra options]\n\
                  Manifest mode: ullm-aq4-worker --served-model-manifest PATH\n\
-                 Benchmark mode: ullm-aq4-worker --served-model-manifest PATH --benchmark-wire\n\
+                 Benchmark mode: ullm-aq4-worker --served-model-manifest PATH --benchmark-wire --benchmark-case-manifest PATH\n\
                  Reads ullm.worker.v1/v2 commands from stdin and writes matching events to stdout.\n\
                  Compatibility mode invokes the AQ4 engine CLI once per request.\n\
                  Manifest mode loads one resident AQ4 model and never invokes a sibling engine."
@@ -106,12 +114,14 @@ fn run_worker(source: WorkerSource) -> ExitCode {
     let input = BufReader::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdin());
     let output = BufWriter::with_capacity(PROCESS_IO_BUFFER_BYTES, std::io::stdout());
     let result = match loaded {
-        LoadedWorker::BenchmarkResident { config, profile } => {
-            run_aq4_benchmark_worker_process(input, output, profile, move || {
-                load_resident_backend(config)
-            })
-            .map(|_| ())
-        }
+        LoadedWorker::BenchmarkResident {
+            config,
+            profile,
+            registry,
+        } => run_aq4_benchmark_worker_process(input, output, profile, registry, move || {
+            load_resident_backend(config)
+        })
+        .map(|_| ()),
         loaded => run_loaded_worker(
             loaded,
             input,
@@ -156,20 +166,102 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
                 env::current_exe().map_err(|error| ServedModelError(error.to_string()))?;
             load_resident_worker(&model, &current_exe)
         }
-        WorkerSource::BenchmarkServedModelManifest(path) => {
-            let model = load_served_model(path)?;
+        WorkerSource::BenchmarkServedModelManifest {
+            served_model,
+            case_registry,
+        } => {
+            let model = load_served_model(served_model)?;
+            let registry = load_benchmark_case_registry(&case_registry)?;
             let current_exe =
                 env::current_exe().map_err(|error| ServedModelError(error.to_string()))?;
             match load_resident_worker(&model, &current_exe)? {
-                LoadedWorker::Resident { config, profile } => {
-                    Ok(LoadedWorker::BenchmarkResident { config, profile })
-                }
+                LoadedWorker::Resident { config, profile } => Ok(LoadedWorker::BenchmarkResident {
+                    config,
+                    profile,
+                    registry,
+                }),
                 _ => Err(ServedModelError(
                     "AQ4 benchmark wire requires a resident served model".into(),
                 )),
             }
         }
     }
+}
+
+fn load_benchmark_case_registry(
+    path: &PathBuf,
+) -> Result<Aq4BenchmarkTrustedCaseRegistry, ServedModelError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry path must be absolute without parent traversal".into(),
+        ));
+    }
+    let before = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
+    if !before.file_type().is_file() || before.nlink() != 1 {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry must be a single-link regular file".into(),
+        ));
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry open failed".into()))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
+    if (
+        before.dev(),
+        before.ino(),
+        before.len(),
+        before.mtime_nsec(),
+        before.ctime_nsec(),
+    ) != (
+        opened.dev(),
+        opened.ino(),
+        opened.len(),
+        opened.mtime_nsec(),
+        opened.ctime_nsec(),
+    ) {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry changed while opening".into(),
+        ));
+    }
+    let maximum = ullm_engine::worker_protocol::WORKER_MAX_RECORD_BYTES;
+    if before.len() > u64::try_from(maximum).unwrap_or(u64::MAX) {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry exceeds the record bound".into(),
+        ));
+    }
+    let mut payload = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(maximum));
+    Read::by_ref(&mut file)
+        .take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut payload)
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry read failed".into()))?;
+    let after = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
+    if payload.len() > maximum
+        || (
+            before.dev(),
+            before.ino(),
+            before.len(),
+            before.mtime_nsec(),
+            before.ctime_nsec(),
+        ) != (
+            after.dev(),
+            after.ino(),
+            after.len(),
+            after.mtime_nsec(),
+            after.ctime_nsec(),
+        )
+    {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry changed while reading".into(),
+        ));
+    }
+    decode_aq4_benchmark_case_registry(&payload).map_err(ServedModelError)
 }
 
 fn load_resident_worker(
@@ -318,19 +410,24 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
         return Ok(CliAction::Version);
     }
     if args.iter().any(|value| value == "--served-model-manifest") {
-        let benchmark = args.len() == 3 && args[2] == "--benchmark-wire";
-        if !matches!(args.len(), 2 | 3)
-            || args[0] != "--served-model-manifest"
-            || args[1].is_empty()
-            || (args.len() == 3 && !benchmark)
-        {
+        let ordinary =
+            args.len() == 2 && args[0] == "--served-model-manifest" && !args[1].is_empty();
+        let benchmark = args.len() == 5
+            && args[0] == "--served-model-manifest"
+            && !args[1].is_empty()
+            && args[2] == "--benchmark-wire"
+            && args[3] == "--benchmark-case-manifest"
+            && !args[4].is_empty();
+        if !ordinary && !benchmark {
             return Err("manifest mode and legacy options are mutually exclusive".into());
         }
-        let path = PathBuf::from(&args[1]);
         return Ok(CliAction::Run(if benchmark {
-            WorkerSource::BenchmarkServedModelManifest(path)
+            WorkerSource::BenchmarkServedModelManifest {
+                served_model: PathBuf::from(&args[1]),
+                case_registry: PathBuf::from(&args[4]),
+            }
         } else {
-            WorkerSource::ServedModelManifest(path)
+            WorkerSource::ServedModelManifest(PathBuf::from(&args[1]))
         }));
     }
     let mut engine = None;
@@ -543,15 +640,30 @@ mod tests {
 
     #[test]
     fn cli_accepts_explicit_benchmark_wire_only_with_manifest() {
-        let CliAction::Run(WorkerSource::BenchmarkServedModelManifest(path)) = parse_cli(args(&[
+        let CliAction::Run(WorkerSource::BenchmarkServedModelManifest {
+            served_model,
+            case_registry,
+        }) = parse_cli(args(&[
             "--served-model-manifest",
             "/served-model.json",
             "--benchmark-wire",
+            "--benchmark-case-manifest",
+            "/cases.json",
         ]))
-        .unwrap() else {
+        .unwrap()
+        else {
             panic!("expected benchmark manifest mode");
         };
-        assert_eq!(path, PathBuf::from("/served-model.json"));
+        assert_eq!(served_model, PathBuf::from("/served-model.json"));
+        assert_eq!(case_registry, PathBuf::from("/cases.json"));
+        assert!(
+            parse_cli(args(&[
+                "--served-model-manifest",
+                "/served-model.json",
+                "--benchmark-wire",
+            ]))
+            .is_err()
+        );
         assert!(parse_cli(args(&["--package", "/package", "--benchmark-wire"])).is_err());
     }
 

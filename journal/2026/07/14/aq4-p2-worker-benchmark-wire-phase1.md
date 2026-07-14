@@ -16,6 +16,8 @@
 - independent QA followupでcommandへcanonical full case objectを追加し、case ID/SHAをobjectから再計算してouter commandと意味的に結合した。
 - status okのactual M/token width/request width/operation audit SHAとlifecycle/resetをsanitized auditからexact再構築する。failedは常にreuse禁止とし、failure code/reset整合、後続case/process fail-closeを検証する。
 - case ID swap、width=999、operation audit non-SHA、failed reuse allowedの負例をCPU testへ追加した。
+- case bindingを全nested strict typed schemaへ変更し、startup trusted case manifestのID↔SHA registry照合を必須にした。self-rehashした別case、gfx9999、baseline/mode、sampling/control改変、nested unknown/duplicateを拒否する。
+- sanitized auditの`requested_m`はSome必須かつcommandとexactにした。benchmark専用CLIは`--benchmark-case-manifest`を要求し、通常CLI/wireは維持する。
 
 ## 次の行動
 
