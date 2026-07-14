@@ -13,6 +13,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from aq4_p2_resource_observer import load as load_resource_observation
+    from aq4_p2_resource_observer import validate as validate_resource_observation
+except ImportError:  # pragma: no cover - sibling import is available for normal source execution
+    load_resource_observation = None
+    validate_resource_observation = None
+
 ROOT_FIELDS = {"schema_version", "raw_target_schema_version", "scope", "status", "immutable_status", "case_id", "case_sha256", "identity", "requested_m", "resolved_m", "actual_token_batch_width", "actual_request_batch_width", "timing", "audit", "lifecycle", "reset", "outcome", "oom", "fallback", "preflight", "failure", "links", "adapter"}
 IDENTITY_FIELDS = {"served_model_manifest_sha256", "model_id", "model_revision", "format_id", "implementation_id", "manifest_worker_binary_path", "manifest_worker_binary_sha256", "benchmark_binary_path", "benchmark_binary_sha256", "benchmark_worker_roles_distinct", "package_root", "package_content_sha256", "package_manifest_sha256", "package_file_count", "package_bytes", "manifest_device_architecture", "runtime_device", "execution_profile"}
 RUNTIME_FIELDS = {"requested_device_index", "observed_device_id", "observed_backend", "observed_name", "observed_architecture"}
@@ -220,11 +227,21 @@ def write_atomic(path: Path, value: dict[str, Any]) -> None:
 def run(args: argparse.Namespace) -> int:
     root = args.run_root.resolve(strict=True)
     for path, label in ((args.case, "case"), (args.identity, "identity"), (args.policy, "policy"), (args.preflight, "preflight"), (args.driver, "driver"), (args.served_model_manifest, "served manifest"), (args.fixture, "fixture")): contained(root, path, label)
+    if args.require_resource_observation and args.resource_observation is None:
+        raise AdapterError("resource observation is required for this measurement")
+    if args.resource_observation is not None:
+        contained(root, args.resource_observation, "resource observation")
     for path in (args.output, args.measurement, args.state, args.trace_input): contained(root, path, "output", existing=False)
     raw_dir = contained(root, args.raw_dir, "raw directory", existing=False); raw_dir.mkdir(parents=True, exist_ok=False)
     case = load(args.case, "case"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy"); preflight = load(args.preflight, "preflight")
     validate_policy_binding(policy, identity)
     validate_preflight(preflight)
+    resource_observation = None
+    if args.resource_observation is not None:
+        if load_resource_observation is None or validate_resource_observation is None:
+            raise AdapterError("resource observer validator is unavailable")
+        resource_observation = load_resource_observation(args.resource_observation, "resource observation")
+        validate_resource_observation(resource_observation, expected_case_id=case.get("case_id"), expected_case_sha256=case.get("case_sha256"))
     case["_path"] = str(args.case.resolve()); identity["_path"] = str(args.identity.resolve())
     worker = Path(identity.get("artifacts", {}).get("worker", ""))
     if worker.resolve() == args.driver.resolve() or sha_file(worker) == sha_file(args.driver): raise AdapterError("benchmark driver and served worker roles must be distinct")
@@ -241,14 +258,15 @@ def run(args: argparse.Namespace) -> int:
         if completed.returncode != 0 or artifact["status"] != "ok": failure = f"driver_run_{index}_{artifact['status']}"; break
     status = "ok" if failure is None and len(artifacts) == 12 else artifacts[-1]["status"] if artifacts and artifacts[-1]["status"] in {"failed", "oom"} else "failed"
     expanded_path = Path(identity.get("artifacts", {}).get("expanded_manifest", "")); contained(root, expanded_path, "expanded manifest")
-    links = {"expanded": {"path": str(expanded_path.resolve()), "sha256": sha_file(expanded_path)}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity)}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy)}, "measurement": None, "state": None, "trace": None, "driver_runs": [{"path": str((raw_dir / f"run-{index:02d}.driver.json").resolve()), "sha256": sha_file(raw_dir / f"run-{index:02d}.driver.json"), "run_index": index} for index in range(len(artifacts))]}
+    links = {"expanded": {"path": str(expanded_path.resolve()), "sha256": sha_file(expanded_path)}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity)}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy)}, "measurement": None, "state": None, "trace": None, "resource_observation": {"path": str(args.resource_observation.resolve()), "sha256": sha_file(args.resource_observation)} if args.resource_observation else None, "driver_runs": [{"path": str((raw_dir / f"run-{index:02d}.driver.json").resolve()), "sha256": sha_file(raw_dir / f"run-{index:02d}.driver.json"), "run_index": index} for index in range(len(artifacts))]}
     raw = {"schema_version": "ullm.aq4_production_p2_raw_result.v2", "case_id": case["case_id"], "case_sha256": case["case_sha256"], "status": status, "immutable_status": status != "ok", "mode": "cpu_synthetic" if args.cpu_fixture else "production", "device_id": case.get("device", {}).get("device_id"), "case_contract": {key: case.get(key) for key in ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "request_count", "decode_request_count", "sampling", "control", "control_id", "format_id", "implementation_id", "device")}, "started_at_unix": None, "finished_at_unix": None, "execution": {"status": status, "returncode": 0 if status == "ok" else 1, "elapsed_ms": sum(float(item["timing"]["request_elapsed_ms"]) for item in artifacts), "timed_out": False, "output_overflow": False, "stdout_sha256": hashlib.sha256(b"").hexdigest(), "stderr_sha256": hashlib.sha256((failure or "").encode()).hexdigest(), "stdout_bytes": 0, "stderr_bytes": len((failure or "").encode())}, "declared_execution": {"executable": str(worker.resolve()), "executable_sha256": identity["hash_binding"]["worker_binary_sha256"], "package_root": identity["artifacts"]["package_root"], "package_content_sha256": identity["hash_binding"]["package_content_sha256"], "argv_sha256": None, "argv_count": 0, "argv_values_recorded": False}, "executed_benchmark_driver": {"path": str(args.driver.resolve()), "sha256": sha_file(args.driver), "role": "executed_benchmark_driver"}, "served_identity_reference": {"worker_path": str(worker.resolve()), "worker_sha256": sha_file(worker), "role": "served_identity_reference"}, "links": links, "preflight": preflight, "failure_reason": failure, "capture_contract": {"bounded_streaming": True, "shell": False, "max_output_bytes_per_stream": 0, "command_arguments_stored": False}}
     if status == "ok":
         def row(item: dict[str, Any]) -> dict[str, Any]:
             generation = item["timing"]["generation"]
-            return {"prefill_ms": generation["prompt_ms"], "ttft_ms": generation["prompt_ms"] + generation["predicted_per_token_ms"], "decode_ms": generation["predicted_ms"], "inter_token_latency_ms": generation["predicted_per_token_ms"], "end_to_end_ms": item["timing"]["request_elapsed_ms"], "vram_peak_bytes": 0, "workspace_peak_bytes": 0, "actual_token_batch_width": item["actual_token_batch_width"], "actual_request_batch_width": item["actual_request_batch_width"]}
+            peak = resource_observation["peak"] if resource_observation else None
+            return {"prefill_ms": generation["prompt_ms"], "ttft_ms": generation["prompt_ms"] + generation["predicted_per_token_ms"], "decode_ms": generation["predicted_ms"], "inter_token_latency_ms": generation["predicted_per_token_ms"], "end_to_end_ms": item["timing"]["request_elapsed_ms"], "vram_peak_bytes": peak["vram_used_bytes"] if peak else 0, "workspace_peak_bytes": peak["workspace_bytes"] if peak else 0, "actual_token_batch_width": item["actual_token_batch_width"], "actual_request_batch_width": item["actual_request_batch_width"]}
         measurement = {"schema_version": "ullm.aq4_p2_measurements.v1", "case_id": case["case_id"], "warmup_runs": [row(item) for item in artifacts[:2]], "measured_runs": [row(item) for item in artifacts[2:]]}
-        terminal = artifacts[-1]; state = {"schema_version": "ullm.aq4_p2_state_evidence.v1", "case_id": case["case_id"], "status": "valid", "checks": {field: True for field in ("finite_outputs", "shape_contract_passed", "kv_state_cache_passed", "scheduler_progress_passed", "chunk_equivalence_passed", "cancel_reset_passed", "publish_failure_reset_passed")}, "reset": {"attempted": True, "complete": True, "failed": False}, "fallback": {"unexpected_count": 0, "fail_closed_count": 0, "unsupported_count": 0, "reasons": terminal["fallback"]["reasons"]}, "memory": {"oom": None, "headroom_bytes": preflight["vram_headroom_bytes"], "observed_peak_bytes": 0, "workspace_peak_bytes": 0}}
+        terminal = artifacts[-1]; peak = resource_observation["peak"] if resource_observation else None; state = {"schema_version": "ullm.aq4_p2_state_evidence.v1", "case_id": case["case_id"], "status": "valid", "checks": {field: True for field in ("finite_outputs", "shape_contract_passed", "kv_state_cache_passed", "scheduler_progress_passed", "chunk_equivalence_passed", "cancel_reset_passed", "publish_failure_reset_passed")}, "reset": {"attempted": True, "complete": True, "failed": False}, "fallback": {"unexpected_count": 0, "fail_closed_count": 0, "unsupported_count": 0, "reasons": terminal["fallback"]["reasons"]}, "memory": {"oom": None, "headroom_bytes": preflight["vram_headroom_bytes"], "observed_peak_bytes": peak["vram_used_bytes"] if peak else 0, "workspace_peak_bytes": peak["workspace_bytes"] if peak else 0, "observation_status": "complete" if peak else "not_captured"}}
         trace_input = {"schema_version": "ullm.aq4_p2_driver_lifecycle_input.v1", "not_a_production_execution_trace": True, "case_id": case["case_id"], "case_sha256": case["case_sha256"], "runs": [{"run_index": index, "audit": item["audit"], "lifecycle": item["lifecycle"], "reset": item["reset"], "outcome": item["outcome"], "fallback": item["fallback"], "driver_sha256": sha_file(raw_dir / f"run-{index:02d}.driver.json")} for index, item in enumerate(artifacts)]}
         write_atomic(args.measurement, measurement); write_atomic(args.state, state); write_atomic(args.trace_input, trace_input)
         links["measurement"] = {"path": str(args.measurement.resolve()), "sha256": sha_file(args.measurement)}; links["state"] = {"path": str(args.state.resolve()), "sha256": sha_file(args.state)}; links["driver_lifecycle_input"] = {"path": str(args.trace_input.resolve()), "sha256": sha_file(args.trace_input)}
@@ -260,6 +278,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("run_root", "case", "identity", "policy", "preflight", "driver", "served_model_manifest", "fixture", "raw_dir", "output", "measurement", "state"): parser.add_argument(f"--{name.replace('_', '-')}", dest=name, type=Path, required=True)
     parser.add_argument("--driver-lifecycle-input", dest="trace_input", type=Path, required=True)
+    parser.add_argument("--resource-observation", type=Path)
+    parser.add_argument("--require-resource-observation", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0); parser.add_argument("--cpu-fixture", action="store_true")
     try: return run(parser.parse_args(argv))
     except (AdapterError, OSError, subprocess.TimeoutExpired, ValueError) as error:

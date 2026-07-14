@@ -87,6 +87,91 @@ def case_hash(case: dict[str, Any]) -> str:
     return sha_bytes(canonical(value))
 
 
+def build_full_model_driver_argv(
+    driver: Path,
+    served_model_manifest: Path,
+    fixture: Path,
+    case_path: Path,
+    identity: Path,
+    preflight: Path,
+    output: Path,
+    case: dict[str, Any],
+) -> list[str]:
+    """Build a fixed argv for the P2 full-model driver.
+
+    The legacy worker-only mode remains available for compatibility tests, but a real P2 request
+    must use this argv shape.  In particular, no host default may silently select a GPU ordinal:
+    the ordinal is copied from the bound case.
+    """
+    device = case.get("device")
+    if not isinstance(device, dict):
+        raise RunnerError("case device is missing")
+    device_index = device.get("runtime_device_index")
+    if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
+        raise RunnerError("case runtime device index is invalid")
+    case_id = case.get("case_id")
+    requested_m = case.get("prefill_requested_m")
+    if not isinstance(case_id, str) or not case_id:
+        raise RunnerError("case_id is missing")
+    if not isinstance(requested_m, int) or isinstance(requested_m, bool) or requested_m <= 0:
+        raise RunnerError("case requested M is invalid")
+    return [
+        str(driver),
+        "--served-model-manifest", str(served_model_manifest),
+        "--fixture", str(fixture),
+        "--case", str(case_path),
+        "--identity", str(identity),
+        "--preflight", str(preflight),
+        "--m", str(requested_m),
+        "--case-id", case_id,
+        "--device-index", str(device_index),
+        "--output", str(output),
+    ]
+
+
+def cpu_resident_unsupported(case: dict[str, Any], served_manifest: dict[str, Any]) -> bool:
+    """Return true when a CPU case is paired with a HIP-only served worker.
+
+    This is a static contract gate.  It does not probe or load the runtime and therefore lets CPU
+    preparation record an immutable ``unsupported`` row without accidentally touching a GPU.
+    """
+    device = case.get("device", {})
+    if device.get("backend") != "cpu":
+        return False
+    worker = served_manifest.get("worker", {})
+    identity = worker.get("identity", {}) if isinstance(worker, dict) else {}
+    architecture = identity.get("device")
+    return architecture not in {None, "", "cpu", "host"}
+
+
+def validate_driver_terminal(value: dict[str, Any], case: dict[str, Any]) -> None:
+    if value.get("schema_version") != "ullm.qwen35_aq4_p2.full_model_driver.v2":
+        raise RunnerError("full-model driver schema differs")
+    if value.get("case_id") != case.get("case_id") or value.get("case_sha256") != case.get("case_sha256"):
+        raise RunnerError("full-model driver case binding differs")
+    status = value.get("status")
+    if status not in {"ok", "failed", "oom"} or value.get("immutable_status") is not (status != "ok"):
+        raise RunnerError("full-model driver status is invalid")
+    if status != "ok":
+        return
+    expected = {
+        "requested_m": case.get("prefill_requested_m"),
+        "resolved_m": case.get("resolved_m"),
+        "actual_token_batch_width": case.get("resolved_m"),
+        "actual_request_batch_width": case.get("request_count"),
+    }
+    if any(value.get(field) != wanted for field, wanted in expected.items()):
+        raise RunnerError("full-model driver terminal widths differ")
+    audit = value.get("audit")
+    reset = value.get("reset")
+    lifecycle = value.get("lifecycle")
+    if not isinstance(audit, dict) or audit.get("coverage_complete") is not True or not isinstance(lifecycle, dict) or reset != {"attempted": 1, "complete": 1, "failed": 0}:
+        raise RunnerError("full-model driver terminal audit/reset is incomplete")
+    fallback = value.get("fallback")
+    if not isinstance(fallback, dict) or fallback.get("unexpected_count") != 0:
+        raise RunnerError("full-model driver fallback is unexpected")
+
+
 def validate_preflight(value: dict[str, Any]) -> dict[str, Any]:
     if set(value) != PREFLIGHT_FIELDS: raise RunnerError("preflight fields differ")
     for field in PREFLIGHT_FIELDS - {"gpu_process_snapshot"}:
@@ -128,6 +213,12 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     root = args.run_root.resolve(strict=True)
     for path, label in ((args.case, "case"), (args.expanded, "expanded"), (args.identity, "identity"), (args.policy, "policy"), (args.preflight, "preflight"), (args.measurement, "measurement"), (args.state, "state"), (args.executable, "executable")):
         contained(root, path, label)
+    if args.benchmark_driver is not None:
+        if args.served_model_manifest is None or args.fixture is None:
+            raise RunnerError("benchmark-driver mode requires served-model-manifest and fixture")
+        contained(root, args.benchmark_driver, "benchmark driver")
+        contained(root, args.served_model_manifest, "served model manifest")
+        contained(root, args.fixture, "fixture")
     contained(root, args.package_root, "package root")
     contained(root, args.output, "output", existing=False)
     case = load(args.case, "case"); expanded = load(args.expanded, "expanded"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy")
@@ -145,10 +236,30 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     package_manifest = Path(identity.get("artifacts", {}).get("package_manifest", ""))
     contained(root, package_manifest, "package manifest")
     if sha_file(package_manifest, "package manifest") != identity.get("hash_binding", {}).get("package_manifest_sha256"): raise RunnerError("package manifest differs from declared identity")
-    argv = [str(executable)]
-    if identity.get("execution_contract", {}).get("worker_argv") != argv: raise RunnerError("worker argv contract differs")
+    driver_artifact = None
+    driver_value = None
+    failure_reason = None
+    failure_status = "skipped"
+    if args.benchmark_driver is None:
+        argv = [str(executable)]
+        if identity.get("execution_contract", {}).get("worker_argv") != argv: raise RunnerError("worker argv contract differs")
+    else:
+        driver = args.benchmark_driver.resolve(strict=True)
+        if not os.access(driver, os.X_OK):
+            raise RunnerError("benchmark driver is not executable")
+        if driver == executable or sha_file(driver, "benchmark driver") == sha_file(executable, "worker"):
+            raise RunnerError("benchmark driver and served worker roles must be distinct")
+        served_manifest = load(args.served_model_manifest, "served model manifest")
+        driver_artifact = args.output.with_name(f".{args.output.name}.driver.json")
+        contained(root, driver_artifact, "benchmark driver output", existing=False)
+        if cpu_resident_unsupported(case, served_manifest):
+            argv = []
+            failure_reason = "cpu_reference_unsupported_by_hip_resident_worker"
+            failure_status = "unsupported"
+        else:
+            argv = build_full_model_driver_argv(driver, args.served_model_manifest, args.fixture, args.case, args.identity, args.preflight, driver_artifact, case)
     device_id = case.get("device", {}).get("device_id")
-    failure_reason = None; lock_handle = None
+    lock_handle = None
     if args.mode == "production" and (case.get("scope") != "production_server" or args.trace is None): failure_reason = "production_scope_or_trace_missing"
     trace_value = None
     if args.trace is not None:
@@ -169,9 +280,22 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         if not isinstance(minimum, (int, float)) or preflight["vram_headroom_bytes"] < minimum: failure_reason = failure_reason or "insufficient_vram_headroom"
     started = time.time()
     if failure_reason:
-        execution = {"status": "skipped", "returncode": None, "elapsed_ms": 0.0, "timed_out": False, "output_overflow": False, "stdout_sha256": sha_bytes(b""), "stderr_sha256": sha_bytes(failure_reason.encode()), "stdout_bytes": 0, "stderr_bytes": 0}
+        execution = {"status": failure_status, "returncode": None, "elapsed_ms": 0.0, "timed_out": False, "output_overflow": False, "stdout_sha256": sha_bytes(b""), "stderr_sha256": sha_bytes(failure_reason.encode()), "stdout_bytes": 0, "stderr_bytes": 0}
     else:
         execution = capture(argv, args.timeout, args.max_output_bytes)
+        if args.benchmark_driver is not None:
+            if not driver_artifact.is_file():
+                failure_reason = "benchmark_driver_did_not_publish_result"
+                execution["status"] = "failed"
+            else:
+                driver_value = load(driver_artifact, "benchmark driver result")
+                try:
+                    validate_driver_terminal(driver_value, case)
+                except RunnerError as error:
+                    failure_reason = str(error)
+                    execution["status"] = "failed"
+                else:
+                    execution["status"] = driver_value["status"]
     if lock_handle:
         try: fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         finally: lock_handle.close()
@@ -180,9 +304,13 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "schema_version": "ullm.aq4_production_p2_raw_result.v2", "case_id": case["case_id"], "case_sha256": case["case_sha256"],
         "status": status, "immutable_status": status != "ok", "mode": args.mode, "device_id": device_id,
         "case_contract": {key: case.get(key) for key in ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "request_count", "decode_request_count", "sampling", "control", "control_id", "format_id", "implementation_id", "device")},
+        "requested_m": case.get("prefill_requested_m"), "resolved_m": driver_value.get("resolved_m") if driver_value else None,
+        "actual_token_batch_width": driver_value.get("actual_token_batch_width") if driver_value else None,
+        "actual_request_batch_width": driver_value.get("actual_request_batch_width") if driver_value else None,
         "started_at_unix": started, "finished_at_unix": time.time(), "execution": execution,
         "declared_execution": {"executable": str(executable), "executable_sha256": sha_file(executable, "worker"), "package_root": str(package_root), "package_content_sha256": tree_hash(package_root), "argv_sha256": sha_bytes(canonical(argv)), "argv_count": len(argv), "argv_values_recorded": False},
-        "links": {"expanded": {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}, "measurement": {"path": str(args.measurement.resolve()), "sha256": sha_file(args.measurement, "measurement")}, "state": {"path": str(args.state.resolve()), "sha256": sha_file(args.state, "state")}, "trace": {"path": str(args.trace.resolve()), "sha256": sha_file(args.trace, "trace"), "trace_id": trace_value["trace_id"]} if args.trace else None},
+        "executed_benchmark_driver": {"path": str(args.benchmark_driver.resolve()), "sha256": sha_file(args.benchmark_driver, "benchmark driver"), "role": "executed_benchmark_driver"} if args.benchmark_driver else None,
+        "links": {"expanded": {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}, "measurement": {"path": str(args.measurement.resolve()), "sha256": sha_file(args.measurement, "measurement")}, "state": {"path": str(args.state.resolve()), "sha256": sha_file(args.state, "state")}, "trace": {"path": str(args.trace.resolve()), "sha256": sha_file(args.trace, "trace"), "trace_id": trace_value["trace_id"]} if args.trace else None, "driver_result": {"path": str(driver_artifact.resolve()), "sha256": sha_file(driver_artifact, "benchmark driver result")} if driver_artifact is not None and driver_artifact.is_file() else None},
         "preflight": preflight, "failure_reason": failure_reason, "capture_contract": {"bounded_streaming": True, "shell": False, "max_output_bytes_per_stream": args.max_output_bytes, "command_arguments_stored": False},
     }
     return raw, 0 if status == "ok" else 1
@@ -199,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("run_root", "case", "expanded", "identity", "policy", "preflight", "measurement", "state", "executable", "package_root", "output"):
         parser.add_argument(f"--{name.replace('_', '-')}", dest=name, type=Path, required=True)
+    parser.add_argument("--benchmark-driver", type=Path)
+    parser.add_argument("--served-model-manifest", type=Path)
+    parser.add_argument("--fixture", type=Path)
     parser.add_argument("--mode", choices=("cpu_synthetic", "production"), default="cpu_synthetic"); parser.add_argument("--trace", type=Path); parser.add_argument("--lock", type=Path); parser.add_argument("--timeout", type=float, default=300.0); parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_OUTPUT_LIMIT)
     args = parser.parse_args(argv)
     if args.max_output_bytes <= 0 or args.max_output_bytes > 64 * 1024 * 1024: parser.error("--max-output-bytes is out of range")
