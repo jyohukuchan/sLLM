@@ -96,10 +96,11 @@ pub struct Aq4BenchmarkTrustedCaseRegistry {
     cases: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCaseRegistry {
     schema_version: String,
+    registry_sha256: Option<String>,
     cases: Vec<Aq4BenchmarkCaseBinding>,
 }
 
@@ -312,6 +313,19 @@ pub fn aq4_benchmark_case_sha256(case_binding: &Aq4BenchmarkCaseBinding) -> Resu
     sha256_json(&value)
 }
 
+pub fn aq4_benchmark_case_registry_sha256(
+    cases: &[Aq4BenchmarkCaseBinding],
+) -> Result<String, String> {
+    let raw = RawCaseRegistry {
+        schema_version: AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION.into(),
+        registry_sha256: None,
+        cases: cases.to_vec(),
+    };
+    let value = serde_json::to_value(raw)
+        .map_err(|error| format!("failed to encode AQ4 benchmark case registry: {error}"))?;
+    sha256_json(&value)
+}
+
 pub fn decode_aq4_benchmark_case_registry(
     payload: &[u8],
 ) -> Result<Aq4BenchmarkTrustedCaseRegistry, String> {
@@ -324,6 +338,14 @@ pub fn decode_aq4_benchmark_case_registry(
         .map_err(|_| "AQ4 benchmark case registry does not match the exact schema".to_string())?;
     if raw.schema_version != AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION {
         return Err("AQ4 benchmark case registry schema differs".into());
+    }
+    let declared_registry_sha256 = raw
+        .registry_sha256
+        .as_deref()
+        .ok_or_else(|| "AQ4 benchmark case registry lacks its self-hash".to_string())?;
+    validate_sha256(declared_registry_sha256, "case registry self-hash")?;
+    if aq4_benchmark_case_registry_sha256(&raw.cases)? != declared_registry_sha256 {
+        return Err("AQ4 benchmark case registry self-hash differs".into());
     }
     if raw.cases.is_empty() || raw.cases.len() > MAX_TRUSTED_CASES {
         return Err("AQ4 benchmark case registry count is out of range".into());
@@ -677,9 +699,12 @@ mod tests {
     }
 
     fn registry(case: &Aq4BenchmarkCaseBinding) -> Aq4BenchmarkTrustedCaseRegistry {
+        let registry_sha256 =
+            aq4_benchmark_case_registry_sha256(std::slice::from_ref(case)).unwrap();
         decode_aq4_benchmark_case_registry(
             &serde_json::to_vec(&serde_json::json!({
                 "schema_version": AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION,
+                "registry_sha256": registry_sha256,
                 "cases": [case],
             }))
             .unwrap(),
@@ -801,6 +826,7 @@ mod tests {
         nested_unknown["sampling"]["unknown"] = 1.into();
         let unknown_registry = serde_json::to_vec(&serde_json::json!({
             "schema_version": AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION,
+            "registry_sha256": "0".repeat(64),
             "cases": [nested_unknown],
         }))
         .unwrap();
@@ -816,8 +842,11 @@ mod tests {
                 _ => unreachable!(),
             }
             rebound.case_sha256 = Some(aq4_benchmark_case_sha256(&rebound).unwrap());
+            let registry_sha256 =
+                aq4_benchmark_case_registry_sha256(std::slice::from_ref(&rebound)).unwrap();
             let raw = serde_json::to_vec(&serde_json::json!({
                 "schema_version": AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION,
+                "registry_sha256": registry_sha256,
                 "cases": [rebound],
             }))
             .unwrap();

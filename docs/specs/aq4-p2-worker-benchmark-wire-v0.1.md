@@ -6,7 +6,9 @@
 
 ## 今回の変更点
 
-AQ4 manifest workerを`--benchmark-wire --benchmark-case-manifest PATH`付きで起動した場合だけ、`ullm.aq4_p2.worker_benchmark.v1`へ切り替える。case manifestはstartup時に`ullm.aq4_p2.worker_case_registry.v1`としてstrict decodeし、trusted case ID↔SHA registryをmodel load前に固定する。readyはcommand/evidence/registry schema、prefill-only、configurable M、M grid、input hash algorithmをcapabilityとして明示する。通常modeのready、generate、released schemaは変えない。
+AQ4 manifest workerを`--benchmark-wire --benchmark-case-manifest PATH --benchmark-case-manifest-sha256 SHA256`付きで起動した場合だけ、`ullm.aq4_p2.worker_benchmark.v1`へ切り替える。case manifestはstartup時に`ullm.aq4_p2.worker_case_registry.v1`としてstrict decodeし、trusted case ID↔SHA registryをmodel load前に固定する。manifest自身は`registry_sha256` self-hashを必須とし、CLIのSHA-256はfile bytes全体を独立にbindする。readyはcommand/evidence/registry schema、prefill-only、configurable M、M grid、input hash algorithmをcapabilityとして明示する。通常modeのready、generate、released schemaは変えない。
+
+case manifest pathはabsoluteかつparent traversalと全ancestor/leaf symlinkを許可しない。single-link regular fileを`O_NOFOLLOW`で1回だけopenし、device、inode、mode、size、mtime秒/nsec、ctime秒/nsec、link countをopen前path、open後FD/path、read後FD/pathで完全一致させる。raw bytes SHAの計算とstrict parse/self-hash検証は同じFDから得た同じbyte列だけを使い、hash後の再openを行わない。rename置換、同一size rewriteとmtime復元、hardlink、symlink、read中のpath swapはfail-closeする。
 
 `benchmark_prefill`はrequest/case ID、case SHA-256、canonical full `case_binding` object、warmup/measured、run index、requested/resolved M、`generated_tokens=0`、fixture SHA-256、input SHA-256、token IDsをexactに受理する。case/control/device/samplingは全nested `deny_unknown` typed schemaで、unknown/duplicate fieldをdecode段階で拒否する。workerはcase object内のcase IDとouter case IDを照合し、`case_sha256=null`のcanonical objectからSHA-256を再計算したうえでstartup registryのID↔SHAと照合する。self-hash単独では受理しない。M、prompt/context、generated/request/decode counts、mode/baseline、R9700/gfx1201 device、greedy sampling、AQ4 product/control/implementationもexact検証する。input hashはtoken IDをunsigned 64-bit little-endianで連結したSHA-256である。resolved Mはrequested Mまたはall-M1の1だけを許可する。
 

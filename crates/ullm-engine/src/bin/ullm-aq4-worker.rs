@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsString;
+use std::fs::{Metadata, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use ullm_engine::aq4_benchmark_worker_protocol::{
     Aq4BenchmarkTrustedCaseRegistry, decode_aq4_benchmark_case_registry,
@@ -45,6 +47,7 @@ enum WorkerSource {
     BenchmarkServedModelManifest {
         served_model: PathBuf,
         case_registry: PathBuf,
+        case_registry_sha256: String,
     },
 }
 
@@ -84,7 +87,7 @@ fn main() -> ExitCode {
                 "Usage: ullm-aq4-worker [--engine PATH] --package PATH [--device-index N] [--layers all|CSV]\n\
                  Gateway form: --artifact AQ4_PACKAGE --package COMPAT_PATH [extra options]\n\
                  Manifest mode: ullm-aq4-worker --served-model-manifest PATH\n\
-                 Benchmark mode: ullm-aq4-worker --served-model-manifest PATH --benchmark-wire --benchmark-case-manifest PATH\n\
+                 Benchmark mode: ullm-aq4-worker --served-model-manifest PATH --benchmark-wire --benchmark-case-manifest PATH --benchmark-case-manifest-sha256 SHA256\n\
                  Reads ullm.worker.v1/v2 commands from stdin and writes matching events to stdout.\n\
                  Compatibility mode invokes the AQ4 engine CLI once per request.\n\
                  Manifest mode loads one resident AQ4 model and never invokes a sibling engine."
@@ -169,9 +172,10 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
         WorkerSource::BenchmarkServedModelManifest {
             served_model,
             case_registry,
+            case_registry_sha256,
         } => {
             let model = load_served_model(served_model)?;
-            let registry = load_benchmark_case_registry(&case_registry)?;
+            let registry = load_benchmark_case_registry(&case_registry, &case_registry_sha256)?;
             let current_exe =
                 env::current_exe().map_err(|error| ServedModelError(error.to_string()))?;
             match load_resident_worker(&model, &current_exe)? {
@@ -189,8 +193,55 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
 }
 
 fn load_benchmark_case_registry(
-    path: &PathBuf,
+    path: &Path,
+    expected_bytes_sha256: &str,
 ) -> Result<Aq4BenchmarkTrustedCaseRegistry, ServedModelError> {
+    load_benchmark_case_registry_with_hook(path, expected_bytes_sha256, |_| {})
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegistryFileIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    size: u64,
+    mtime_seconds: i64,
+    mtime_nanoseconds: i64,
+    ctime_seconds: i64,
+    ctime_nanoseconds: i64,
+    links: u64,
+}
+
+impl From<&Metadata> for RegistryFileIdentity {
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+            size: metadata.size(),
+            mtime_seconds: metadata.mtime(),
+            mtime_nanoseconds: metadata.mtime_nsec(),
+            ctime_seconds: metadata.ctime(),
+            ctime_nanoseconds: metadata.ctime_nsec(),
+            links: metadata.nlink(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrySnapshotPoint {
+    AfterOpen,
+    AfterRead,
+}
+
+fn load_benchmark_case_registry_with_hook<F>(
+    path: &Path,
+    expected_bytes_sha256: &str,
+    mut hook: F,
+) -> Result<Aq4BenchmarkTrustedCaseRegistry, ServedModelError>
+where
+    F: FnMut(RegistrySnapshotPoint),
+{
     if !path.is_absolute()
         || path
             .components()
@@ -200,6 +251,12 @@ fn load_benchmark_case_registry(
             "AQ4 benchmark case registry path must be absolute without parent traversal".into(),
         ));
     }
+    if !is_lowercase_sha256(expected_bytes_sha256) {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry expected bytes SHA-256 is invalid".into(),
+        ));
+    }
+    reject_registry_symlink_components(path)?;
     let before = std::fs::symlink_metadata(path)
         .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
     if !before.file_type().is_file() || before.nlink() != 1 {
@@ -207,61 +264,98 @@ fn load_benchmark_case_registry(
             "AQ4 benchmark case registry must be a single-link regular file".into(),
         ));
     }
-    let mut file = std::fs::File::open(path)
+    const O_NOFOLLOW: i32 = 0o400000;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
         .map_err(|_| ServedModelError("AQ4 benchmark case registry open failed".into()))?;
     let opened = file
         .metadata()
         .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
-    if (
-        before.dev(),
-        before.ino(),
-        before.len(),
-        before.mtime_nsec(),
-        before.ctime_nsec(),
-    ) != (
-        opened.dev(),
-        opened.ino(),
-        opened.len(),
-        opened.mtime_nsec(),
-        opened.ctime_nsec(),
-    ) {
+    let opened_path = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
+    let identity = RegistryFileIdentity::from(&before);
+    if !opened.file_type().is_file()
+        || opened.nlink() != 1
+        || RegistryFileIdentity::from(&opened) != identity
+        || RegistryFileIdentity::from(&opened_path) != identity
+    {
         return Err(ServedModelError(
             "AQ4 benchmark case registry changed while opening".into(),
         ));
     }
+    hook(RegistrySnapshotPoint::AfterOpen);
     let maximum = ullm_engine::worker_protocol::WORKER_MAX_RECORD_BYTES;
-    if before.len() > u64::try_from(maximum).unwrap_or(u64::MAX) {
+    if identity.size > u64::try_from(maximum).unwrap_or(u64::MAX) {
         return Err(ServedModelError(
             "AQ4 benchmark case registry exceeds the record bound".into(),
         ));
     }
-    let mut payload = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(maximum));
-    Read::by_ref(&mut file)
-        .take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
-        .read_to_end(&mut payload)
-        .map_err(|_| ServedModelError("AQ4 benchmark case registry read failed".into()))?;
-    let after = std::fs::symlink_metadata(path)
+    let mut payload = Vec::with_capacity(usize::try_from(identity.size).unwrap_or(maximum));
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| ServedModelError("AQ4 benchmark case registry read failed".into()))?;
+        if count == 0 {
+            break;
+        }
+        if payload
+            .len()
+            .checked_add(count)
+            .is_none_or(|total| total > maximum)
+        {
+            return Err(ServedModelError(
+                "AQ4 benchmark case registry exceeds the record bound".into(),
+            ));
+        }
+        digest.update(&buffer[..count]);
+        payload.extend_from_slice(&buffer[..count]);
+    }
+    hook(RegistrySnapshotPoint::AfterRead);
+    reject_registry_symlink_components(path)?;
+    let after_fd = file
+        .metadata()
         .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
-    if payload.len() > maximum
-        || (
-            before.dev(),
-            before.ino(),
-            before.len(),
-            before.mtime_nsec(),
-            before.ctime_nsec(),
-        ) != (
-            after.dev(),
-            after.ino(),
-            after.len(),
-            after.mtime_nsec(),
-            after.ctime_nsec(),
-        )
+    let after_path = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 benchmark case registry metadata failed".into()))?;
+    if RegistryFileIdentity::from(&after_fd) != identity
+        || RegistryFileIdentity::from(&after_path) != identity
     {
         return Err(ServedModelError(
             "AQ4 benchmark case registry changed while reading".into(),
         ));
     }
+    let actual_bytes_sha256 = format!("{:x}", digest.finalize());
+    if actual_bytes_sha256 != expected_bytes_sha256 {
+        return Err(ServedModelError(
+            "AQ4 benchmark case registry bytes SHA-256 differs".into(),
+        ));
+    }
     decode_aq4_benchmark_case_registry(&payload).map_err(ServedModelError)
+}
+
+fn reject_registry_symlink_components(path: &Path) -> Result<(), ServedModelError> {
+    for component in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(component).map_err(|_| {
+            ServedModelError("AQ4 benchmark case registry path metadata failed".into())
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(ServedModelError(
+                "AQ4 benchmark case registry path must not contain symlinks".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn load_resident_worker(
@@ -412,12 +506,14 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
     if args.iter().any(|value| value == "--served-model-manifest") {
         let ordinary =
             args.len() == 2 && args[0] == "--served-model-manifest" && !args[1].is_empty();
-        let benchmark = args.len() == 5
+        let benchmark = args.len() == 7
             && args[0] == "--served-model-manifest"
             && !args[1].is_empty()
             && args[2] == "--benchmark-wire"
             && args[3] == "--benchmark-case-manifest"
-            && !args[4].is_empty();
+            && !args[4].is_empty()
+            && args[5] == "--benchmark-case-manifest-sha256"
+            && !args[6].is_empty();
         if !ordinary && !benchmark {
             return Err("manifest mode and legacy options are mutually exclusive".into());
         }
@@ -425,6 +521,15 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
             WorkerSource::BenchmarkServedModelManifest {
                 served_model: PathBuf::from(&args[1]),
                 case_registry: PathBuf::from(&args[4]),
+                case_registry_sha256: args[6]
+                    .clone()
+                    .into_string()
+                    .map_err(|_| "benchmark case manifest SHA-256 must be UTF-8".to_string())
+                    .and_then(|value| {
+                        is_lowercase_sha256(&value).then_some(value).ok_or_else(|| {
+                            "benchmark case manifest SHA-256 must be lowercase SHA-256".to_string()
+                        })
+                    })?,
             }
         } else {
             WorkerSource::ServedModelManifest(PathBuf::from(&args[1]))
@@ -540,16 +645,79 @@ fn write_process_log(
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::fs::FileTimes;
+    use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
+    use ullm_engine::aq4_benchmark_worker_protocol::{
+        AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION, Aq4BenchmarkCaseBinding,
+        aq4_benchmark_case_registry_sha256, aq4_benchmark_case_sha256,
+    };
     use ullm_engine::qwen35_aq4_session::Qwen35Aq4SessionModel;
     use ullm_engine::served_model::WorkerProfileSnapshot;
 
+    static REGISTRY_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    fn registry_test_root(label: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "ullm-aq4-worker-registry-{}-{label}-{}",
+            std::process::id(),
+            REGISTRY_TEST_ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn registry_bytes() -> Vec<u8> {
+        let value = serde_json::json!({
+            "baseline_mode": "all_m1",
+            "cached_prefix_tokens": 0,
+            "case_id": "case-1",
+            "case_sha256": null,
+            "context_tokens": 3,
+            "control": {"control_id": "aq4_0_target", "role": "target", "format_id": "AQ4_0", "implementation_id": "qwen35_aq4_rdna4_v1", "promotion_eligible": true},
+            "control_id": "aq4_0_target",
+            "decode_request_count": 0,
+            "decode_start_tokens": 0,
+            "device": {"device_id": "r9700-rdna4", "runtime_device_index": 1, "backend": "hip", "name": "AMD Radeon Graphics", "architecture": "gfx1201"},
+            "fixture_id": "case-1",
+            "format_id": "AQ4_0",
+            "generated_tokens": 0,
+            "implementation_id": "qwen35_aq4_rdna4_v1",
+            "mode": "all_m1",
+            "path_oracle_case_id": null,
+            "path_oracle_result_sha256": null,
+            "phase": "cold_prefill",
+            "prefill_requested_m": 64,
+            "prompt_tokens": 3,
+            "request_count": 1,
+            "resolved_m": 1,
+            "sampling": {"mode": "greedy", "temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
+            "scope": "full_model",
+            "stage_id": "representative",
+            "stage_order": 1,
+        });
+        let mut case: Aq4BenchmarkCaseBinding = serde_json::from_value(value).unwrap();
+        case.case_sha256 = Some(aq4_benchmark_case_sha256(&case).unwrap());
+        let registry_sha256 =
+            aq4_benchmark_case_registry_sha256(std::slice::from_ref(&case)).unwrap();
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION,
+            "registry_sha256": registry_sha256,
+            "cases": [case],
+        }))
+        .unwrap()
+    }
+
+    fn bytes_sha256(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
     }
 
     #[test]
@@ -643,12 +811,15 @@ mod tests {
         let CliAction::Run(WorkerSource::BenchmarkServedModelManifest {
             served_model,
             case_registry,
+            case_registry_sha256,
         }) = parse_cli(args(&[
             "--served-model-manifest",
             "/served-model.json",
             "--benchmark-wire",
             "--benchmark-case-manifest",
             "/cases.json",
+            "--benchmark-case-manifest-sha256",
+            &"a".repeat(64),
         ]))
         .unwrap()
         else {
@@ -656,6 +827,7 @@ mod tests {
         };
         assert_eq!(served_model, PathBuf::from("/served-model.json"));
         assert_eq!(case_registry, PathBuf::from("/cases.json"));
+        assert_eq!(case_registry_sha256, "a".repeat(64));
         assert!(
             parse_cli(args(&[
                 "--served-model-manifest",
@@ -664,7 +836,106 @@ mod tests {
             ]))
             .is_err()
         );
+        assert!(
+            parse_cli(args(&[
+                "--served-model-manifest",
+                "/served-model.json",
+                "--benchmark-wire",
+                "--benchmark-case-manifest",
+                "/cases.json",
+                "--benchmark-case-manifest-sha256",
+                "not-a-sha",
+            ]))
+            .is_err()
+        );
         assert!(parse_cli(args(&["--package", "/package", "--benchmark-wire"])).is_err());
+    }
+
+    #[test]
+    fn benchmark_registry_snapshot_binds_same_fd_bytes_and_self_hash() {
+        let root = registry_test_root("valid");
+        let path = root.join("registry.json");
+        let bytes = registry_bytes();
+        std::fs::write(&path, &bytes).unwrap();
+        load_benchmark_case_registry(&path, &bytes_sha256(&bytes)).unwrap();
+        assert!(load_benchmark_case_registry(&path, &"0".repeat(64)).is_err());
+
+        let mut rebound: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        rebound["registry_sha256"] = "0".repeat(64).into();
+        let rebound = serde_json::to_vec(&rebound).unwrap();
+        std::fs::write(&path, &rebound).unwrap();
+        assert!(load_benchmark_case_registry(&path, &bytes_sha256(&rebound)).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn benchmark_registry_snapshot_rejects_symlink_and_hardlink_paths() {
+        let root = registry_test_root("links");
+        let bytes = registry_bytes();
+        let target = root.join("target.json");
+        std::fs::write(&target, &bytes).unwrap();
+        let digest = bytes_sha256(&bytes);
+
+        let leaf_link = root.join("leaf.json");
+        symlink(&target, &leaf_link).unwrap();
+        assert!(load_benchmark_case_registry(&leaf_link, &digest).is_err());
+
+        let real_parent = root.join("real");
+        std::fs::create_dir(&real_parent).unwrap();
+        let ancestor_target = real_parent.join("registry.json");
+        std::fs::write(&ancestor_target, &bytes).unwrap();
+        let linked_parent = root.join("linked-parent");
+        symlink(&real_parent, &linked_parent).unwrap();
+        assert!(
+            load_benchmark_case_registry(&linked_parent.join("registry.json"), &digest).is_err()
+        );
+
+        let hardlink = root.join("hardlink.json");
+        std::fs::hard_link(&target, &hardlink).unwrap();
+        assert!(load_benchmark_case_registry(&target, &digest).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn benchmark_registry_snapshot_rejects_rename_and_same_size_rewrite() {
+        let bytes = registry_bytes();
+        let digest = bytes_sha256(&bytes);
+
+        let rename_root = registry_test_root("rename");
+        let rename_path = rename_root.join("registry.json");
+        let displaced = rename_root.join("displaced.json");
+        std::fs::write(&rename_path, &bytes).unwrap();
+        let result = load_benchmark_case_registry_with_hook(&rename_path, &digest, |point| {
+            if point == RegistrySnapshotPoint::AfterOpen {
+                std::fs::rename(&rename_path, &displaced).unwrap();
+                std::fs::write(&rename_path, &bytes).unwrap();
+            }
+        });
+        assert!(result.is_err());
+        std::fs::remove_dir_all(rename_root).unwrap();
+
+        let rewrite_root = registry_test_root("rewrite");
+        let rewrite_path = rewrite_root.join("registry.json");
+        std::fs::write(&rewrite_path, &bytes).unwrap();
+        let original_mtime = std::fs::metadata(&rewrite_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let result = load_benchmark_case_registry_with_hook(&rewrite_path, &digest, |point| {
+            if point == RegistrySnapshotPoint::AfterRead {
+                let mut changed = bytes.clone();
+                changed[0] ^= 1;
+                std::fs::write(&rewrite_path, changed).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&rewrite_path)
+                    .unwrap()
+                    .set_times(FileTimes::new().set_modified(original_mtime))
+                    .unwrap();
+            }
+        });
+        assert!(result.is_err());
+        std::fs::remove_dir_all(rewrite_root).unwrap();
     }
 
     #[test]

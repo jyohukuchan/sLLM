@@ -778,8 +778,8 @@ mod tests {
     use crate::aq4_benchmark_worker_protocol::{
         AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION, Aq4BenchmarkCaseBinding,
         Aq4BenchmarkEvidenceLinks, Aq4BenchmarkFallbackEvidence, Aq4BenchmarkResetEvidence,
-        aq4_benchmark_case_sha256, aq4_benchmark_input_sha256, decode_aq4_benchmark_case_registry,
-        sha256_json,
+        aq4_benchmark_case_registry_sha256, aq4_benchmark_case_sha256, aq4_benchmark_input_sha256,
+        decode_aq4_benchmark_case_registry, sha256_json,
     };
     use std::io::Cursor;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -974,10 +974,14 @@ mod tests {
     }
 
     fn registry(requested_m: usize, resolved_m: usize) -> Aq4BenchmarkTrustedCaseRegistry {
+        let case = case_binding(requested_m, resolved_m);
+        let registry_sha256 =
+            aq4_benchmark_case_registry_sha256(std::slice::from_ref(&case)).unwrap();
         decode_aq4_benchmark_case_registry(
             &serde_json::to_vec(&serde_json::json!({
                 "schema_version": AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION,
-                "cases": [case_binding(requested_m, resolved_m)],
+                "registry_sha256": registry_sha256,
+                "cases": [case],
             }))
             .unwrap(),
         )
