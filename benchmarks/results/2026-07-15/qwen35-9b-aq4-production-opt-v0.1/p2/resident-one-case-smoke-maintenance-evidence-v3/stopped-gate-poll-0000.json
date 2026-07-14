@@ -1,0 +1,239 @@
+{
+  "absolute_deadline_monotonic_ns": 1307819147821755,
+  "attempt": 0,
+  "captured_unix_ns": 1784060821974426981,
+  "consecutive_stable": 0,
+  "deadline_checkpoints": [
+    {
+      "keepalive": "not_due",
+      "label": "observation:start",
+      "monotonic_ns": 1307789147832716,
+      "remaining_ns": 29999989039
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observer:validation-before",
+      "monotonic_ns": 1307789147835796,
+      "remaining_ns": 29999985959
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observer:validation-after",
+      "monotonic_ns": 1307789150449577,
+      "remaining_ns": 29997372178
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:before",
+      "monotonic_ns": 1307789150453207,
+      "remaining_ns": 29997368548
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:timeout",
+      "monotonic_ns": 1307789150454297,
+      "remaining_ns": 29997367458
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:after",
+      "monotonic_ns": 1307789156447668,
+      "remaining_ns": 29991374087
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:before",
+      "monotonic_ns": 1307789156481059,
+      "remaining_ns": 29991340696
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:timeout",
+      "monotonic_ns": 1307789156482689,
+      "remaining_ns": 29991339066
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:after",
+      "monotonic_ns": 1307789162473170,
+      "remaining_ns": 29985348585
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:before",
+      "monotonic_ns": 1307789162501771,
+      "remaining_ns": 29985319984
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:timeout",
+      "monotonic_ns": 1307789162502901,
+      "remaining_ns": 29985318854
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:after",
+      "monotonic_ns": 1307789359434164,
+      "remaining_ns": 29788387591
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:before",
+      "monotonic_ns": 1307789359440834,
+      "remaining_ns": 29788380921
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:timeout",
+      "monotonic_ns": 1307789359441554,
+      "remaining_ns": 29788380201
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:after",
+      "monotonic_ns": 1307789606710381,
+      "remaining_ns": 29541111374
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-vram:before",
+      "monotonic_ns": 1307789606796163,
+      "remaining_ns": 29541025592
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-vram:timeout",
+      "monotonic_ns": 1307789606797923,
+      "remaining_ns": 29541023832
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-vram:after",
+      "monotonic_ns": 1307789850146568,
+      "remaining_ns": 29297675187
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-kfd:before",
+      "monotonic_ns": 1307789850196370,
+      "remaining_ns": 29297625385
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-kfd:after",
+      "monotonic_ns": 1307789850248891,
+      "remaining_ns": 29297572864
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-lock:before",
+      "monotonic_ns": 1307789850250581,
+      "remaining_ns": 29297571174
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-lock:after-error",
+      "monotonic_ns": 1307789850327703,
+      "remaining_ns": 29297494052
+    }
+  ],
+  "decision": "terminal_failure",
+  "elapsed_seconds": 8.661e-06,
+  "next_interval_seconds": null,
+  "observation": {
+    "captured_unix_ns": 1784060821974426981,
+    "error_type": "LauncherError",
+    "partial_probes": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "ullm-openai.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784060821280532656,
+        "exit_code": 0,
+        "label": "stopped-poll-service-ullm-openai.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "llama-qwen35-udq4.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784060821286559838,
+        "exit_code": 0,
+        "label": "stopped-poll-service-llama-qwen35-udq4.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/pgrep",
+          "-f",
+          "-x",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+        ],
+        "captured_unix_ns": 1784060821483525152,
+        "exit_code": 1,
+        "label": "stopped-poll-worker",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "process",
+          "--gpu",
+          "2",
+          "--general",
+          "--json"
+        ],
+        "captured_unix_ns": 1784060821730797759,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-process",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "c623fc11440b2bf81199ddefe42cadc330fa31ecde1cd268ff0ab930889e09ca",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "static",
+          "--gpu",
+          "2",
+          "--vram",
+          "--json"
+        ],
+        "captured_unix_ns": 1784060821974234936,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-vram",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "3f1a7aa8dc1cdf943f1cfb4470607f73ee704f092ad98a3e38cceeca31dc1168",
+        "timeout_seconds": 2.0
+      }
+    ],
+    "secret_material_recorded": false
+  },
+  "observation_completed_monotonic_ns": 1307789850337633,
+  "observation_started_monotonic_ns": 1307789147830416,
+  "reason": "stopped observation failed",
+  "required_consecutive_stable": 2,
+  "schema_version": "ullm.aq4_p2_stopped_gate_poll_observation.v1",
+  "secret_material_recorded": false,
+  "source_classification": {
+    "observer": "error"
+  }
+}
