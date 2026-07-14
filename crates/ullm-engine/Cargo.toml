@@ -34,6 +34,10 @@ path = "src/bin/ullm-aq4-p2-full-model.rs"
 name = "ullm-aq4-p2-path-oracle"
 path = "src/bin/ullm-aq4-p2-path-oracle.rs"
 
+[[bin]]
+name = "ullm-aq4-p2-calibration"
+path = "src/bin/ullm-aq4-p2-calibration.rs"
+
 [[example]]
 name = "sq8_ck_layer"
 required-features = ["rocm-ck-gfx1201"]
