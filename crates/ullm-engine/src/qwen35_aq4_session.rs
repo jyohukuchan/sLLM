@@ -1642,6 +1642,14 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         &self.model
     }
 
+    /// Borrows the resident model mutably for an explicitly diagnostic caller.
+    ///
+    /// The serving worker does not use this accessor; it exists for the dedicated differential
+    /// trace binary to invoke the model runtime's opt-in intermediate visitor.
+    pub fn model_mut(&mut self) -> &mut M {
+        &mut self.model
+    }
+
     pub fn config(&self) -> &Qwen35Aq4SessionConfig {
         &self.config
     }

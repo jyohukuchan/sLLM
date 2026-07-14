@@ -39,6 +39,10 @@ name = "ullm-aq4-p2-calibration"
 path = "src/bin/ullm-aq4-p2-calibration.rs"
 
 [[bin]]
+name = "ullm-aq4-differential-trace"
+path = "src/bin/ullm-aq4-differential-trace.rs"
+
+[[bin]]
 name = "ullm-aq4-p2-resident-driver"
 path = "src/bin/ullm-aq4-p2-resident-driver.rs"
 

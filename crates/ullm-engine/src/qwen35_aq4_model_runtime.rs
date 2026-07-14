@@ -50,6 +50,17 @@ pub trait Qwen35Aq4CalibrationObserver {
     fn finish(&mut self) -> Result<(), String>;
 }
 
+/// Diagnostic-only visitor for bounded intermediate differential traces.
+///
+/// The runtime copies one hidden row at a time into a reusable host scratch buffer and invokes
+/// these callbacks.  Production sessions never call this visitor; the dedicated differential
+/// trace binary opts into it explicitly.
+pub trait Qwen35Aq4IntermediateTraceObserver {
+    fn observe_embedding(&mut self, values: &[f32]) -> Result<(), String>;
+
+    fn observe_decoder_layer(&mut self, layer_index: usize, values: &[f32]) -> Result<(), String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen35Aq4PrefillInvocation {
     pub layer_index: usize,
@@ -604,6 +615,39 @@ pub struct Qwen35Aq4ModelRuntime {
     device_total_global_mem: u64,
     last_partial_operation_executions: Vec<[Option<OperationExecutionRecord>; 2]>,
     last_partial_prefill_invocations: Vec<Qwen35Aq4FailedPrefillInvocation>,
+}
+
+fn read_intermediate_trace_row(
+    buffer: &ullm_runtime_sys::RuntimeBuffer,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    values: &mut [f32],
+    label: &str,
+) -> Result<(), String> {
+    let raw = unsafe {
+        std::slice::from_raw_parts_mut(
+            values.as_mut_ptr().cast::<u8>(),
+            std::mem::size_of_val(values),
+        )
+    };
+    buffer
+        .copy_to_host(0, raw, Some(stream))
+        .map_err(|error| format!("failed to copy differential trace {label}: {error}"))?;
+    stream
+        .synchronize()
+        .map_err(|error| format!("failed to synchronize differential trace {label}: {error}"))?;
+    for (index, value) in values.iter_mut().enumerate() {
+        let offset = index * std::mem::size_of::<f32>();
+        let bytes = raw
+            .get(offset..offset + std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("differential trace {label} row is truncated"))?;
+        *value = f32::from_le_bytes(bytes.try_into().expect("f32 row width is fixed"));
+        if !value.is_finite() {
+            return Err(format!(
+                "differential trace {label} row contains non-finite data"
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Qwen35Aq4ModelRuntime {
@@ -1253,6 +1297,39 @@ impl Qwen35Aq4ModelRuntime {
             final_norm.output_buffer(),
             top_k,
         )
+    }
+
+    /// Visits the resident embedding row and every decoder-layer output from the latest dispatch.
+    ///
+    /// This method is intentionally diagnostic-only: each output is copied through one reusable
+    /// hidden-sized host scratch row, synchronized on the existing stream, and immediately passed
+    /// to the visitor.  No production session invokes it.
+    pub fn visit_intermediate_trace(
+        &mut self,
+        observer: &mut dyn Qwen35Aq4IntermediateTraceObserver,
+    ) -> Result<(), String> {
+        let hidden = self.geometry.hidden;
+        let mut values = vec![0_f32; hidden];
+        let embedding = self.embedding.as_ref().ok_or_else(|| {
+            "Qwen3.5 AQ4 differential trace has no resident embedding".to_string()
+        })?;
+        read_intermediate_trace_row(
+            embedding.output_buffer(),
+            &mut self.stream,
+            &mut values,
+            "embedding",
+        )?;
+        observer.observe_embedding(&values)?;
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            read_intermediate_trace_row(
+                layer.output_buffer(),
+                &mut self.stream,
+                &mut values,
+                &format!("decoder layer {layer_index}"),
+            )?;
+            observer.observe_decoder_layer(layer_index, &values)?;
+        }
+        Ok(())
     }
 
     /// Observes the normalized hidden row and logits that produced the current prepared token.
