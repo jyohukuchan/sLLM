@@ -538,6 +538,9 @@ def validate_bound_policy(policy: dict[str, Any]) -> None:
     require(isinstance(policy.get("effective_at"), str) and policy["effective_at"], "bound policy effective_at is missing")
     contract = policy.get("binding_contract", {})
     require(contract.get("required_before_case_execution") is True, "bound policy execution guard is missing")
+    require(contract.get("required_hash_fields") == REQUIRED_HASH_FIELDS, "bound policy hash field contract differs")
+    require(contract.get("required_power_fields") == ["expected_power_limit_watts", "allowed_power_tolerance_watts", "maximum_temperature_c", "minimum_vram_headroom_bytes"], "bound policy power field contract differs")
+    require(contract.get("required_correctness_thresholds") == ["max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap"], "bound policy correctness field contract differs")
     hashes = policy.get("hash_binding", {})
     for field in REQUIRED_HASH_FIELDS:
         value = hashes.get(field)
