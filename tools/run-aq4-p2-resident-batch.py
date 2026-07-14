@@ -390,6 +390,7 @@ def _run_fake_ready_handshake(path: Path, timeout: float) -> dict[str, Any]:
 def _run_bundle_validator(path: Path, expected_sha256: str, root: Path, timeout: float) -> dict[str, Any]:
     if SHA256_RE.fullmatch(expected_sha256) is None:
         raise BatchError("trusted bundle validator expected SHA is invalid")
+    _require_absolute_nonsymlink_path(path, "trusted bundle validator")
     source_raw, source_sha, source_before = read_regular(path, "trusted bundle validator", MAX_JSON_BYTES, absolute=True)
     if source_sha != expected_sha256:
         raise BatchError("trusted bundle validator source differs from expected SHA")
@@ -568,7 +569,7 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         or prepared_evidence.get("plan") != {"path": str(root / "dry-run.json"), "sha256": observed_sums["dry-run.json"]}
     ):
         raise BatchError("one-case smoke prepared runner evidence binding differs")
-    validator_path = args.trusted_validator.resolve(strict=True)
+    validator_path = args.trusted_validator
     validator = _run_bundle_validator(validator_path, args.trusted_validator_sha256, root, args.timeout)
     if {entry.name for entry in root.iterdir()} != ONE_CASE_ROOT_MEMBERS or _file_identity(os.lstat(root)) != _file_identity(root_metadata):
         raise BatchError("one-case smoke bundle root changed during validation")

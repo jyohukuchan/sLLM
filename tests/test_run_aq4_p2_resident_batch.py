@@ -301,6 +301,24 @@ def test_one_case_smoke_rejects_trusted_validator_sha_swap(tmp_path: Path) -> No
     assert "source differs from expected SHA" in completed.stderr
 
 
+@pytest.mark.parametrize("variant", ("leaf", "ancestor"))
+def test_one_case_smoke_rejects_absolute_validator_symlink(tmp_path: Path, variant: str) -> None:
+    command = _one_case_command(tmp_path / f"validator-{variant}-symlink")
+    validator_index = command.index("--trusted-validator")
+    if variant == "leaf":
+        linked = tmp_path / "validator.py"
+        linked.symlink_to(TRUSTED_BUNDLE_VALIDATOR)
+    else:
+        linked_parent = tmp_path / "linked-tools"
+        linked_parent.symlink_to(TRUSTED_BUNDLE_VALIDATOR.parent, target_is_directory=True)
+        linked = linked_parent / TRUSTED_BUNDLE_VALIDATOR.name
+    command[validator_index + 1] = str(linked)
+    completed = subprocess.run(command, text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert "trusted bundle validator" in completed.stderr
+    assert "symlink" in completed.stderr or "single-link regular file" in completed.stderr
+
+
 def test_one_case_smoke_rejects_handcrafted_partial_root(tmp_path: Path) -> None:
     handcrafted = tmp_path / "handcrafted"
     shutil.copytree(TRUSTED_ONE_CASE_ROOT, handcrafted)

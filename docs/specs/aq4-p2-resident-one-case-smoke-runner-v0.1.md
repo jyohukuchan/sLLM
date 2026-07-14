@@ -12,7 +12,7 @@ runnerは特定bundle全体のSHA-256をhardcodeしない。case-bindingはtrust
 
 one-case smokeも2 warmup + 10 measuredを固定し、`smoke_only=true`、`promotion_eligible=false`である。0件、2件以上、別caseへの差し替えを拒否する。通常modeの84件境界と出力schemaは変更しない。
 
-one-case dry-runはplannerだけを通さない。`fake-ready.json`はrunner本体から直接JSON readせず、分離したchild processをexactly 1回起動してstdout handshakeとして実runnerのready identity validatorへ入力する。plan artifactはroot member inventory、bundle/fake-ready hash、session/driver identity、`fake_driver_subprocess_count=1`、`driver_fake_handshake=passed`を保持する。normative one-case modeは`--trusted-validator`と`--trusted-validator-sha256`を必須とし、期待SHAと一致するsource blobを実行前後で同一と確認してsubprocess実行する。source/stdout/report SHAはplanへbindする。validator省略やSHA差し替えは許可しない。これはvalidate-only evidenceであり、model load、GPU、service操作を証明しない。
+one-case dry-runはplannerだけを通さない。`fake-ready.json`はrunner本体から直接JSON readせず、分離したchild processをexactly 1回起動してstdout handshakeとして実runnerのready identity validatorへ入力する。plan artifactはroot member inventory、bundle/fake-ready hash、session/driver identity、`fake_driver_subprocess_count=1`、`driver_fake_handshake=passed`を保持する。normative one-case modeは`--trusted-validator`と`--trusted-validator-sha256`を必須とする。validatorのraw CLI pathはresolve前にabsoluteでなければならず、全ancestorとleafのsymlinkを拒否し、single-link regular fileを`O_NOFOLLOW`でopenする。期待SHAとpinned file identity/hashを実行前後で照合し、source/stdout/report SHAをplanへbindする。validator省略、SHA差し替え、symlink経由は許可しない。これはvalidate-only evidenceであり、model load、GPU、service操作を証明しない。
 
 ## 次の行動
 

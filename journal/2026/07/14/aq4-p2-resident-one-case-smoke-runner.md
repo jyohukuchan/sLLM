@@ -15,6 +15,7 @@ prepared bundle v3はone-case planを保持していたが、実runnerは84 targ
 - fake-readyはrunnerから直接loadせずchild processを1回通す。任意のtrusted validatorは同一source blob SHAを前後確認してsubprocess実行し、report SHAまでplanへbindする。
 - 特定bundle全体のSHAはrunnerへhardcodeせず、R→B→Lの信頼連鎖で自己参照cycleを避ける。通常84件経路は変更していない。
 - normative one-caseでは`--trusted-validator`と期待source SHAを必須にした。validator省略またはvalidator SHA swapはbundle内部が自己整合していても拒否する。
+- validatorのraw input pathをresolve前にabsolute検証し、ancestor/leaf symlink、hardlink、実行中のidentity/hash変化を拒否する。
 
 ## 次の行動
 
