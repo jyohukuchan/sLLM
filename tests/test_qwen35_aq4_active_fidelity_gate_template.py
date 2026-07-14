@@ -54,7 +54,9 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             'PACKAGE_MANIFEST="$PACKAGE_ROOT/package/manifest.json"',
             'SYSTEMCTL=(sudo -n -- systemctl)',
             'RUNTIME_DIR_INSTALL=(sudo -n -- install -d -o homelab1 -g homelab1 -m 0750)',
+            'RUNTIME_DIR_REMOVE=(sudo -n -- rmdir)',
             '"${RUNTIME_DIR_INSTALL[@]}" "$RUNTIME_DIR" || fail "runtime directory create failed"',
+            '"${RUNTIME_DIR_REMOVE[@]}" "$RUNTIME_DIR"',
             'EXPECTED_PLAN_SHA256="1b4f8c244e922ab73c0bb026216d8333a9cfe57c23e6695c4141554d117693c0"',
             'EXPECTED_CASES_SHA256="53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8"',
             'EXPECTED_SPLIT_SHA256="966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887"',
@@ -76,6 +78,8 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
         self.assertNotIn('chmod 750 "$RUNTIME_DIR"', text)
         self.assertNotIn('chown homelab1:homelab1 "$LOCK"', text)
         self.assertNotIn('chmod 600 "$LOCK"', text)
+        self.assertNotIn("runuser -u homelab1", text)
+        self.assertIn('env "${guard_env[@]}" \\\n  timeout --signal=TERM --kill-after=30s 1200s "$FIDELITY_BIN"', text)
         self.assertIn("one_model_load=1 nonfinite_rows=0", text)
         self.assertIn("for guard_name in \"${REQUIRED_GUARDS[@]}\"; do guard_env+=(\"$guard_name=1\"); done", text)
         self.assertIn("tools/capture-qwen35-aq4-fidelity.py", text)

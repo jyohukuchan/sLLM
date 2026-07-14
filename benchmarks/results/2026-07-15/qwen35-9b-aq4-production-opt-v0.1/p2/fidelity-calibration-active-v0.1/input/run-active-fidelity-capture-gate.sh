@@ -62,6 +62,7 @@ PYTHON="/usr/bin/python3.12"
 SERVICE="ullm-openai.service"
 SYSTEMCTL=(sudo -n -- systemctl)
 RUNTIME_DIR_INSTALL=(sudo -n -- install -d -o homelab1 -g homelab1 -m 0750)
+RUNTIME_DIR_REMOVE=(sudo -n -- rmdir)
 LOCK="/run/ullm/r9700.lock"
 RUNTIME_DIR="${LOCK%/*}"
 ROCM_SMI="/opt/rocm/bin/rocm-smi"
@@ -294,7 +295,7 @@ cleanup() {
   [[ -n "$OBSERVER_PID" ]] && wait "$OBSERVER_PID" 2>/dev/null
   [[ -n "$LOCK_FD" ]] && eval "exec $LOCK_FD>&-"
   if (( LOCK_CREATED )) && [[ -f "$LOCK" && ! -L "$LOCK" && -z "$(lslocks -o PID,PATH 2>/dev/null | awk -v path="$LOCK" '$2 == path {print $1; exit}')" ]]; then rm -f "$LOCK"; fi
-  if (( RUNTIME_DIR_CREATED )) && [[ -d "$RUNTIME_DIR" && -z "$(find "$RUNTIME_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then rmdir "$RUNTIME_DIR"; fi
+  if (( RUNTIME_DIR_CREATED )) && [[ -d "$RUNTIME_DIR" && -z "$(find "$RUNTIME_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then "${RUNTIME_DIR_REMOVE[@]}" "$RUNTIME_DIR"; fi
   if (( RESTORE_NEEDED )); then
     timeout --signal=TERM --kill-after=5s 60s "${SYSTEMCTL[@]}" start "$SERVICE" || RESTORE_RC=1
     deadline=$((SECONDS + 60))
@@ -353,7 +354,7 @@ touch "$RUN_STARTED_MARKER"
 guard_env=("ULLM_BUILD_GIT_COMMIT=$EXPECTED_BUILD_COMMIT" "ULLM_SERVED_MODEL_MANIFEST=$ACTIVE" "ULLM_HIP_VISIBLE_DEVICES=1" "HIP_VISIBLE_DEVICES=1")
 for guard_name in "${REQUIRED_GUARDS[@]}"; do guard_env+=("$guard_name=1"); done
 env "${guard_env[@]}" \
-  runuser -u homelab1 -- timeout --signal=TERM --kill-after=30s 1200s "$FIDELITY_BIN" \
+  timeout --signal=TERM --kill-after=30s 1200s "$FIDELITY_BIN" \
     --served-model-manifest "$ACTIVE" --split-root "$SPLIT_ROOT" --source "$SOURCE_ARTIFACT" \
     --cases "$CASES" --output "$OUTPUT" --device-index 0 --chunk-elements 65536 \
     --expected-split-manifest-sha256 "$EXPECTED_SPLIT_SHA256" --expected-policy-sha256 "$EXPECTED_POLICY_SHA256" \
