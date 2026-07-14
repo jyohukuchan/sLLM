@@ -32,10 +32,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "180ab1be976fa43cc3d4b46fa8e1f1307cb38ec8"
-LAUNCHER_TREE = "f79d5108933b9157b790a35e9867ad4ce8a5e1f6"
-LAUNCHER_GIT_BLOB = "1e317bab4339792711e7959305dfdfa4c8883909"
-LAUNCHER_SHA = "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e"
+LAUNCHER_COMMIT = "da26839109ebb0a09bc8f194926d9de513095f83"
+LAUNCHER_TREE = "0767afe1b4b41fd677d76c2edb375f490e7fe529"
+LAUNCHER_GIT_BLOB = "ba3953cc586f22437128b5ded7b5bf26acb17a41"
+LAUNCHER_SHA = "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891"
 RUNNER_COMMIT = "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db"
 RUNNER_SHA = "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -1862,8 +1862,8 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 287, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 221, "marker_chain": 55, "diagnostic_capture": 11},
+    "test_count": 295, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 229, "marker_chain": 55, "diagnostic_capture": 11},
     "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
