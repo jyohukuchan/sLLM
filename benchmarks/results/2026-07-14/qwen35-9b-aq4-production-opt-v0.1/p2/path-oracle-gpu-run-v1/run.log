@@ -1,0 +1,12 @@
+GPU[1]		: VRAM Total Memory (B): 32195477504
+GPU[1]		: VRAM Total Used Memory (B): 21401600
+GPU[2]		: VRAM Total Memory (B): 34208743424
+GPU[2]		: VRAM Total Used Memory (B): 87384064
+GPU[1]		: GFX Version:		gfx1030
+GPU[2]		: GFX Version:		gfx1201
+Qwen3.5 AQ4 P2 path oracle export failed: source/path logit_sample sample shape differs
+active
+2087869 /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/python3 /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+{"status":true}
+GPU[2]		: VRAM Total Memory (B): 34208743424
+GPU[2]		: VRAM Total Used Memory (B): 87384064

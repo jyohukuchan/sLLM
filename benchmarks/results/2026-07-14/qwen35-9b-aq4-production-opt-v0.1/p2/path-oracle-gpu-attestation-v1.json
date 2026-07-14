@@ -1,0 +1,99 @@
+{
+  "schema_version": "ullm.qwen35_aq4_path_oracle_attestation.v1",
+  "status": "valid_with_blockers",
+  "base_path": {
+    "root": "path-oracle-v1",
+    "manifest_sha256": "ff7f6e2c721112c43c8e37ad7505e086a8cf90ca32764604a85cb989be8174f0",
+    "payload_sha256": "3dee780aa6d2383bd75687dd3dd4f6b36f1680dbfa49c2310c6d240e6e0d74f1",
+    "runtime_sha256": "dcc817b828a2f86190f56a8d948d69a26239950fb43038d3b39101e4c0fe75e2"
+  },
+  "corrected_path": {
+    "root": "path-oracle-v2",
+    "manifest_sha256": "2197a7e29743f0f1cd6d42f1a832c1baf9d58acb8c8bf12d71388ad7bbbf0773",
+    "payload_sha256": "3dee780aa6d2383bd75687dd3dd4f6b36f1680dbfa49c2310c6d240e6e0d74f1",
+    "runtime_sha256": "b5e3949355c5e0c45487ea13841f3a09e04e1733157f7e5db56741c42276592b"
+  },
+  "execution": {
+    "device_index": 1,
+    "physical_gpu_index": 2,
+    "gfx_architecture": "gfx1201",
+    "environment": {
+      "HIP_VISIBLE_DEVICES": "1",
+      "ULLM_HIP_VISIBLE_DEVICES": "1"
+    },
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "guard_set_sha256": "4530e156b9eaf70d4810953439184b5d42f56fef6cbe4af976b6817ec5c365bb",
+    "start_utc": "2026-07-14T11:54:00Z",
+    "finish_utc": "2026-07-14T11:54:31Z",
+    "elapsed_seconds": 31,
+    "service_recovery": {
+      "baseline": {
+        "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+        "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+        "worker_pid": 2016033,
+        "health": {"status": true}
+      },
+      "final": {
+        "main_pid": 2087869,
+        "worker_pid": 2088025,
+        "n_restarts": 0,
+        "active": true,
+        "health": {"status": true},
+        "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+        "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+      }
+    }
+  },
+  "raw_evidence": {
+    "root": "path-oracle-gpu-run-v1",
+    "files": {
+      "README.md": "5312bd2b83ffe063dda4b8a36a37d583a74c7c6d8adc477aa2ed4a36071fdaa7",
+      "baseline.txt": "8295b6e4b460cf2d7c0bd424c53825741b43fcf1c09c040d16d7f8d875caf74e",
+      "devices.txt": "9937ed53d43989568d247a8edda82a64a0028f529a5076033bd567a76f1a587f",
+      "monitor.log": "ae53a518e221f344d13787dc5c79889a8788a9e8fda186956f5691ecb033c75a",
+      "run.log": "576a2f5b4d99587b3da5347c0be93bbc74d017a34ba2601d38f4225c932b53fb",
+      "command.json": "5ecd8fb682b0cf79b05cc343d600904977757bcff6d366b2a001e4ad25e570f1",
+      "SHA256SUMS": "f10dcf1e27a7597f9c3a65818a519cc2d352297b20dc2ff5a96b5f806c25de51"
+    }
+  },
+  "resource": {
+    "vram_total_bytes": 34208743424,
+    "vram_baseline_bytes": 87384064,
+    "vram_peak_bytes": 7343022080,
+    "power_peak_watts": 21.0,
+    "oom": false
+  },
+  "comparison": {
+    "policy_bound": false,
+    "policy_sha256": null,
+    "scope": "source_comparison_bounded_intersection_and_same_artifact_path_regression",
+    "promotion_eligible": false
+  },
+  "policy_audit": {
+    "status": "blocked_unbound",
+    "template_path": "benchmarks/workloads/aq4-production-opt-p2-threshold-policy-template-v0.1.json",
+    "template_sha256": "8c1f00fa70a66dde8b6caec2a089bf4d0421cea06787219c11e65343daa1bb47",
+    "prefill_validation_spec_path": "docs/specs/prefill-validation-v0.1.md",
+    "prefill_validation_spec_sha256": "4645eebe45409868d874bade8dca75e30160f4ff6c3f1cc6f35407d9833395e1",
+    "threshold_audit_path": "benchmarks/aq4-production-prefill-decode/p2/correctness-threshold-audit.json",
+    "threshold_audit_sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5",
+    "required_fields": [
+      "max_hidden_relative_l2",
+      "max_hidden_max_abs",
+      "max_logits_relative_l2",
+      "max_logits_max_abs",
+      "minimum_top_k_overlap"
+    ],
+    "values": null,
+    "reason": "template values are null; generic prefill example is not an AQ4 bound policy; no threshold inferred from this run"
+  },
+  "blockers": [
+    "base_v1_metadata_invalid: runtime.json declared cpu for the GPU execution",
+    "source_comparison_bounded_agreement_failed",
+    "source_comparison_bounded_shape_failed",
+    "policy_missing: no hash-bound AQ4 P2 bounded relative-L2/cosine/top-k policy",
+    "path_regression_requires_exact_same_artifact_all_m1_contract"
+  ]
+}

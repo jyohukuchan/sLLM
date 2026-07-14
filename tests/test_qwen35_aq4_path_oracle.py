@@ -103,9 +103,12 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
             self.assertEqual(result["path"]["status"], "valid")
             self.assertFalse(result["path"]["usable_as_path_evidence"])
             self.assertFalse(result["link"]["usable_as_p2_oracle_link"])
-            self.assertIn("no artifact manifest", " ".join(result["link"]["blockers"]))
+            self.assertIn("active served-model identity", " ".join(result["link"]["blockers"]))
             runtime = ORACLE.load_json(path / "runtime.json")
             self.assertTrue(runtime["all_m1"])
+            self.assertEqual(runtime["device_kind"], "gpu")
+            self.assertEqual(runtime["device_index"], 0)
+            self.assertIsNone(runtime["visible_devices"])
             self.assertEqual(runtime["model_loads"], 1)
             self.assertEqual(runtime["run"]["row_count"], 3)
             self.assertEqual(
@@ -135,6 +138,30 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                         },
                     )()
                 )
+
+    def test_production_package_only_requires_active_manifest_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "package"
+            package.mkdir()
+            package_manifest = package / "manifest.json"
+            shutil.copyfile(FIXTURE / "package-manifest.json", package_manifest)
+            args = type(
+                "Args",
+                (),
+                {
+                    "tokenizer_root": FIXTURE / "source-model",
+                    "tokenizer_file": list(ORACLE.TOKENIZER_FILES),
+                    "package_manifest": package_manifest,
+                    "artifact_manifest": None,
+                    "model_id": "Qwen/Qwen3.5-9B",
+                    "model_revision": "fixture",
+                    "evidence_class": "production",
+                    "served_model_manifest": None,
+                },
+            )()
+            with self.assertRaisesRegex(ORACLE.OracleError, "served-model-manifest"):
+                CAPTURE._path_identity(args)
 
 
 if __name__ == "__main__":

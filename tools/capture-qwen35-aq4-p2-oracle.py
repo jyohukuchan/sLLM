@@ -131,7 +131,39 @@ def _path_identity(args: argparse.Namespace) -> dict[str, Any]:
     model_id = args.model_id
     if not model_id:
         raise oracle.OracleError("path oracle requires --model-id")
-    return {"artifact": {"package_manifest_sha256": _sha(package), "artifact_manifest_sha256": _sha(artifact) if artifact is not None else None}, "model_id": model_id, "model_revision": args.model_revision, "source_checkpoint": None, "tokenizer": _tokenizer_identity(tokenizer_files, tokenizer_root)}
+    package_sha = _sha(package)
+    artifact_sha = _sha(artifact) if artifact is not None else None
+    binding_kind = "artifact_manifest" if artifact is not None else "package_manifest"
+    served_path = getattr(args, "served_model_manifest", None)
+    if served_path is not None and getattr(args, "evidence_class", "production") == "production":
+        served = _json(_regular(Path(served_path), "served-model manifest"))
+        try:
+            product = served["product"]
+            served_package_sha = product["package"]["manifest_sha256"]
+            served_artifact = product.get("artifact")
+        except (KeyError, TypeError) as error:
+            raise oracle.OracleError("served-model product package identity is invalid") from error
+        oracle.ensure_sha256(served_package_sha, "served-model package manifest hash")
+        if served_package_sha != package_sha:
+            raise oracle.OracleError("served-model package manifest hash differs from path package")
+        if binding_kind == "package_manifest" and served_artifact is not None:
+            raise oracle.OracleError("package-only path binding requires active served-model artifact=null")
+        artifact_identity = {
+            "artifact_binding_kind": binding_kind,
+            "artifact_manifest_sha256": artifact_sha,
+            "package_manifest_sha256": package_sha,
+            "served_model_manifest_path": str(Path(served_path).resolve(strict=True)),
+            "served_model_manifest_sha256": _sha(Path(served_path)),
+            "served_package_manifest_sha256": served_package_sha,
+        }
+    elif binding_kind == "package_manifest" and getattr(args, "evidence_class", "production") == "production":
+        raise oracle.OracleError("production package-only path capture requires --served-model-manifest")
+    else:
+        artifact_identity = {
+            "artifact_manifest_sha256": artifact_sha,
+            "package_manifest_sha256": package_sha,
+        }
+    return {"artifact": artifact_identity, "model_id": model_id, "model_revision": args.model_revision, "source_checkpoint": None, "tokenizer": _tokenizer_identity(tokenizer_files, tokenizer_root)}
 
 
 def _write_manifest(output: Path, manifest: dict[str, Any], payload_src: Path | None = None) -> None:
@@ -167,7 +199,9 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
         evidence_class = args.evidence_class
         status = "fixture" if evidence_class == "synthetic_fixture" else "available"
         usable = evidence_class == "production" and (
-            args.kind == "source" or identity["artifact"]["artifact_manifest_sha256"] is not None
+            args.kind == "source"
+            or identity["artifact"].get("artifact_manifest_sha256") is not None
+            or identity["artifact"].get("artifact_binding_kind") == "package_manifest"
         )
         manifest = {
             "schema_version": oracle.SCHEMAS[args.kind],
@@ -204,7 +238,12 @@ def link(args: argparse.Namespace) -> dict[str, Any]:
         "created_utc": oracle.utc_now(),
         "identity": {"model_id": source["identity"]["model_id"], "model_revision": source["identity"]["model_revision"], "tokenizer_aggregate_sha256": source["identity"]["tokenizer"]["aggregate_sha256"]},
         "source": {"manifest_sha256": _sha(source_root / "manifest.json"), "payload_sha256": source["payload"]["sha256"]},
-        "path": {"manifest_sha256": _sha(path_root / "manifest.json"), "payload_sha256": path["payload"]["sha256"], "artifact_manifest_sha256": path["identity"]["artifact"]["artifact_manifest_sha256"], "package_manifest_sha256": path["identity"]["artifact"]["package_manifest_sha256"]},
+        "path": {
+            "manifest_sha256": _sha(path_root / "manifest.json"),
+            "payload_sha256": path["payload"]["sha256"],
+            "artifact_manifest_sha256": path["identity"]["artifact"]["artifact_manifest_sha256"],
+            "package_manifest_sha256": path["identity"]["artifact"]["package_manifest_sha256"],
+        },
         "agreement": agreement,
         "usable_as_p2_oracle_link": False,
         "promotion_eligible": False,

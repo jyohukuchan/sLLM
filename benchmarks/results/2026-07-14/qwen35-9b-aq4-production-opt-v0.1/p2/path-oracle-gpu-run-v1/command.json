@@ -1,0 +1,21 @@
+{
+  "binary": "target/debug/ullm-aq4-p2-path-oracle",
+  "command": "tools/export-qwen35-aq4-path-oracle.py --allow-package-only --device-index 1 --prefill-m 1 --timeout-seconds 3600",
+  "device_index": 1,
+  "evidence_class": "production",
+  "environment": {
+    "HIP_VISIBLE_DEVICES": "1",
+    "ULLM_HIP_VISIBLE_DEVICES": "1"
+  },
+  "execution": "one sanctioned GPU attempt; no model rerun after completion",
+  "physical_gpu_index": 2,
+  "rocm_architecture": "gfx1201",
+  "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+  "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+  "guard_set_sha256": "4530e156b9eaf70d4810953439184b5d42f56fef6cbe4af976b6817ec5c365bb",
+  "start_utc": "2026-07-14T11:54:00Z",
+  "finish_utc": "2026-07-14T11:54:31Z",
+  "elapsed_seconds_observed": 31,
+  "service_was_stopped": true,
+  "config_modified": false
+}

@@ -1,0 +1,6 @@
+captured_utc=2026-07-14T11:38:42Z
+service=active
+manifest_sha=feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44
+worker_sha=177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d
+openwebui_health={"status":true}
+worker_pid=2016033

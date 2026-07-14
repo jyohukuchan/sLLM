@@ -1,0 +1,80 @@
+{
+  "cases": [
+    {
+      "case_id": "fixture-prompt-0",
+      "prompt_token_count": 3,
+      "prompt_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+      "step_count": 2
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "prompt_token_count": 2,
+      "prompt_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+      "step_count": 1
+    }
+  ],
+  "created_utc": "2026-07-14T11:54:32Z",
+  "evidence_class": "production",
+  "identity": {
+    "artifact": {
+      "artifact_manifest_sha256": null,
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+    },
+    "model_id": "Qwen/Qwen3.5-9B",
+    "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "source_checkpoint": null,
+    "tokenizer": {
+      "aggregate_sha256": "d31f0be10b0c77018130eea34a65078e0a37ca20c873e8be9ddfbda95b604ffc",
+      "files": [
+        {
+          "bytes": 7756,
+          "file": "chat_template.jinja",
+          "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+        },
+        {
+          "bytes": 3353259,
+          "file": "merges.txt",
+          "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+        },
+        {
+          "bytes": 12807982,
+          "file": "tokenizer.json",
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+        },
+        {
+          "bytes": 16710,
+          "file": "tokenizer_config.json",
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        {
+          "bytes": 6722759,
+          "file": "vocab.json",
+          "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        }
+      ],
+      "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B"
+    }
+  },
+  "limits": {
+    "max_cases": 128,
+    "max_payload_bytes": 4194304,
+    "max_sample_values": 256,
+    "max_steps": 128,
+    "max_top_k": 32
+  },
+  "oracle_kind": "same_artifact_all_m1",
+  "payload": {
+    "bytes": 4580,
+    "file": "payload.jsonl",
+    "record_count": 3,
+    "sha256": "3dee780aa6d2383bd75687dd3dd4f6b36f1680dbfa49c2310c6d240e6e0d74f1"
+  },
+  "ranking": {
+    "greedy": "maximum_logit_then_smallest_token_id",
+    "scope": "entire_vocabulary",
+    "topk": "logit_descending_then_token_id_ascending"
+  },
+  "schema_version": "ullm.qwen35_aq4_path_oracle.v1",
+  "status": "available",
+  "usable_as_path_evidence": false
+}

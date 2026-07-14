@@ -1,0 +1,41 @@
+{
+  "agreement": {
+    "bounded_metric_scope": "intersection_of_stored_indices",
+    "greedy_token_exact": false,
+    "hidden_sample_bounded_cosine_min": 0.9833240685779927,
+    "hidden_sample_bounded_relative_l2_max": 0.5452883336042509,
+    "hidden_sample_max_abs_diff": 1.0846476554870605,
+    "hidden_sample_shape_exact": true,
+    "hidden_sample_within_atol": false,
+    "logit_sample_bounded_cosine_min": 0.9446401707134972,
+    "logit_sample_bounded_relative_l2_max": 0.6151289249025698,
+    "logit_sample_max_abs_diff": 8.347781658172607,
+    "logit_sample_shape_exact": true,
+    "logit_sample_within_atol": false,
+    "record_count": 3,
+    "topk_exact": false,
+    "topk_overlap_mean": 0.7000000000000001,
+    "topk_overlap_min": 0.1
+  },
+  "created_utc": "2026-07-14T12:20:28Z",
+  "evidence_class": "production",
+  "identity": {
+    "model_id": "Qwen/Qwen3.5-9B",
+    "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "tokenizer_aggregate_sha256": "d31f0be10b0c77018130eea34a65078e0a37ca20c873e8be9ddfbda95b604ffc"
+  },
+  "path": {
+    "artifact_manifest_sha256": null,
+    "manifest_sha256": "2197a7e29743f0f1cd6d42f1a832c1baf9d58acb8c8bf12d71388ad7bbbf0773",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "payload_sha256": "3dee780aa6d2383bd75687dd3dd4f6b36f1680dbfa49c2310c6d240e6e0d74f1"
+  },
+  "promotion_eligible": false,
+  "schema_version": "ullm.qwen35_aq4_oracle_link.v1",
+  "source": {
+    "manifest_sha256": "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692",
+    "payload_sha256": "7055590cc6f5d068d06edfa85a0464b38af42c7adb6eabfa219444cabd41d8a5"
+  },
+  "status": "available",
+  "usable_as_p2_oracle_link": false
+}

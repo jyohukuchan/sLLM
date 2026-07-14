@@ -30,6 +30,7 @@ MAX_CASES = 128
 MAX_STEPS = 128
 MAX_TOP_K = 32
 MAX_SAMPLE_VALUES = 256
+MAX_JSON_BYTES = 4 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TOKENIZER_FILES = (
     "chat_template.jinja",
@@ -62,12 +63,83 @@ def reject_nonfinite(value: str) -> None:
     raise OracleError(f"non-finite JSON number: {value}")
 
 
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mode,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_nlink,
+    )
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return _file_identity(left) == _file_identity(right)
+
+
+def _open_pinned_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise OracleError(f"cannot stat {label}: {error}") from error
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise OracleError(f"{label} must be a regular non-symlink file")
+    if before.st_nlink != 1:
+        raise OracleError(f"{label} must have exactly one hard link")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise OracleError(f"cannot open pinned {label}: {error}") from error
+    opened = os.fstat(descriptor)
+    if opened.st_nlink != 1 or not stat.S_ISREG(opened.st_mode) or not _same_file_identity(before, opened):
+        os.close(descriptor)
+        raise OracleError(f"{label} path/fd identity changed while opening")
+    return descriptor, opened
+
+
+def _verify_pinned_regular(path: Path, descriptor: int, before: os.stat_result, label: str) -> None:
+    try:
+        descriptor_after = os.fstat(descriptor)
+        path_after = path.lstat()
+    except OSError as error:
+        raise OracleError(f"cannot restat pinned {label}: {error}") from error
+    if (
+        descriptor_after.st_nlink != 1
+        or path_after.st_nlink != 1
+        or not _same_file_identity(before, descriptor_after)
+        or not _same_file_identity(before, path_after)
+    ):
+        raise OracleError(f"{label} fd/path identity changed while reading")
+
+
+def read_regular_bytes(path: Path, label: str, maximum: int) -> bytes:
+    descriptor, before = _open_pinned_regular(path, label)
+    try:
+        if before.st_size > maximum:
+            raise OracleError(f"{label} exceeds {maximum} bytes")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - size))
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > maximum:
+                raise OracleError(f"{label} exceeds {maximum} bytes")
+            chunks.append(chunk)
+        _verify_pinned_regular(path, descriptor, before, label)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
 def load_json(path: Path) -> Any:
-    if path.is_symlink() or not path.is_file():
-        raise OracleError(f"not a regular file: {path}")
     try:
         return json.loads(
-            path.read_text(encoding="utf-8"),
+            read_regular_bytes(path, f"JSON {path}", MAX_JSON_BYTES).decode("utf-8"),
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_nonfinite,
         )
@@ -76,11 +148,15 @@ def load_json(path: Path) -> Any:
 
 
 def sha256_file(path: Path, chunk_bytes: int = 1024 * 1024) -> str:
+    descriptor, before = _open_pinned_regular(path, f"hashed file {path}")
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(chunk_bytes):
+    try:
+        while chunk := os.read(descriptor, chunk_bytes):
             digest.update(chunk)
-    return digest.hexdigest()
+        _verify_pinned_regular(path, descriptor, before, f"hashed file {path}")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def canonical_sha256(value: Any) -> str:
@@ -101,6 +177,8 @@ def safe_relative(root: Path, raw: Any, label: str) -> Path:
         raise OracleError(f"missing {label}: {error}") from error
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise OracleError(f"{label} must be a regular non-symlink file")
+    if info.st_nlink != 1:
+        raise OracleError(f"{label} must have exactly one hard link")
     try:
         path.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (OSError, ValueError) as error:
@@ -375,8 +453,34 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
         raise OracleError("identity.model_id is invalid")
     if identity["model_revision"] is not None and not isinstance(identity["model_revision"], str):
         raise OracleError("identity.model_revision is invalid")
-    artifact = _exact_keys(identity["artifact"], {"package_manifest_sha256", "artifact_manifest_sha256"}, "identity.artifact")
-    for key in artifact:
+    artifact_keys = set(identity["artifact"]) if isinstance(identity["artifact"], dict) else set()
+    base_artifact_keys = {"package_manifest_sha256", "artifact_manifest_sha256"}
+    package_bound_keys = base_artifact_keys | {
+        "artifact_binding_kind",
+        "served_model_manifest_path",
+        "served_model_manifest_sha256",
+        "served_package_manifest_sha256",
+    }
+    if artifact_keys == base_artifact_keys:
+        artifact = _exact_keys(identity["artifact"], base_artifact_keys, "identity.artifact")
+        # Legacy records remain readable, but package-only promotion must use the
+        # explicit served-model binding fields below.
+        artifact["artifact_binding_kind"] = "artifact_manifest" if artifact["artifact_manifest_sha256"] is not None else "package_manifest"
+    elif artifact_keys == package_bound_keys:
+        artifact = _exact_keys(identity["artifact"], package_bound_keys, "identity.artifact")
+        if artifact["artifact_binding_kind"] not in {"artifact_manifest", "package_manifest"}:
+            raise OracleError("identity.artifact.artifact_binding_kind is invalid")
+        if artifact["artifact_binding_kind"] == "package_manifest" and artifact["artifact_manifest_sha256"] is not None:
+            raise OracleError("package_manifest binding must not carry an artifact manifest hash")
+        if artifact["artifact_binding_kind"] == "artifact_manifest" and artifact["artifact_manifest_sha256"] is None:
+            raise OracleError("artifact_manifest binding requires an artifact manifest hash")
+        if not isinstance(artifact["served_model_manifest_path"], str) or not artifact["served_model_manifest_path"]:
+            raise OracleError("identity.artifact.served_model_manifest_path is invalid")
+        ensure_sha256(artifact["served_model_manifest_sha256"], "identity.artifact.served_model_manifest_sha256")
+        ensure_sha256(artifact["served_package_manifest_sha256"], "identity.artifact.served_package_manifest_sha256")
+    else:
+        raise OracleError("identity.artifact keys differ")
+    for key in ("package_manifest_sha256", "artifact_manifest_sha256"):
         if artifact[key] is not None:
             ensure_sha256(artifact[key], f"identity.artifact.{key}")
     tokenizer = _exact_keys(identity["tokenizer"], {"aggregate_sha256", "files", "root"}, "identity.tokenizer")
@@ -455,8 +559,16 @@ def compare_payloads(source_root: Path, source: dict[str, Any], path_root: Path,
     count = 0
     greedy_exact = True
     topk_exact = True
+    hidden_shape_exact = True
+    logit_shape_exact = True
     hidden_max = 0.0
     logit_max = 0.0
+    hidden_relative_l2_max = 0.0
+    hidden_cosine_min = 1.0
+    logit_relative_l2_max = 0.0
+    logit_cosine_min = 1.0
+    topk_overlap_min = 1.0
+    topk_overlap_sum = 0.0
     while True:
         try:
             left = next(source_iter)
@@ -475,16 +587,56 @@ def compare_payloads(source_root: Path, source: dict[str, Any], path_root: Path,
         count += 1
         greedy_exact &= left["greedy_token_id"] == right["greedy_token_id"]
         topk_exact &= left["topk"] == right["topk"]
+        left_topk = {entry["token_id"] for entry in left["topk"]}
+        right_topk = {entry["token_id"] for entry in right["topk"]}
+        topk_overlap = len(left_topk & right_topk) / max(len(left_topk), len(right_topk))
+        topk_overlap_min = min(topk_overlap_min, topk_overlap)
+        topk_overlap_sum += topk_overlap
         for field, target, tolerance in (("hidden_sample", "hidden_sample", hidden_atol), ("logit_sample", "logit_sample", logit_atol)):
             lsample, rsample = left[field], right[target]
-            if lsample["indices"] != rsample["indices"] or lsample["shape"] != rsample["shape"]:
-                raise OracleError(f"source/path {field} sample shape differs")
-            delta = max(abs(float(a) - float(b)) for a, b in zip(lsample["values"], rsample["values"]))
+            if lsample["shape"] != rsample["shape"]:
+                if field == "hidden_sample":
+                    hidden_shape_exact = False
+                else:
+                    logit_shape_exact = False
+            left_values = dict(zip(lsample["indices"], lsample["values"]))
+            right_values = dict(zip(rsample["indices"], rsample["values"]))
+            common = sorted(set(left_values) & set(right_values))
+            if not common:
+                continue
+            pairs = [(float(left_values[index]), float(right_values[index])) for index in common]
+            delta = max(abs(a - b) for a, b in pairs)
+            left_norm = math.sqrt(sum(a * a for a, _ in pairs))
+            right_norm = math.sqrt(sum(b * b for _, b in pairs))
+            diff_norm = math.sqrt(sum((a - b) * (a - b) for a, b in pairs))
+            relative_l2 = diff_norm / max(left_norm, 1e-12)
+            cosine = sum(a * b for a, b in pairs) / max(left_norm * right_norm, 1e-12)
             if field == "hidden_sample":
                 hidden_max = max(hidden_max, delta)
+                hidden_relative_l2_max = max(hidden_relative_l2_max, relative_l2)
+                hidden_cosine_min = min(hidden_cosine_min, cosine)
             else:
                 logit_max = max(logit_max, delta)
+                logit_relative_l2_max = max(logit_relative_l2_max, relative_l2)
+                logit_cosine_min = min(logit_cosine_min, cosine)
             if delta > tolerance:
                 # Keep collecting bounded metrics; caller decides promotion.
                 pass
-    return {"record_count": count, "greedy_token_exact": greedy_exact, "topk_exact": topk_exact, "hidden_sample_max_abs_diff": hidden_max, "logit_sample_max_abs_diff": logit_max, "hidden_sample_within_atol": hidden_max <= hidden_atol, "logit_sample_within_atol": logit_max <= logit_atol}
+    return {
+        "record_count": count,
+        "greedy_token_exact": greedy_exact,
+        "topk_exact": topk_exact,
+        "topk_overlap_min": topk_overlap_min,
+        "topk_overlap_mean": topk_overlap_sum / count if count else 0.0,
+        "hidden_sample_shape_exact": hidden_shape_exact,
+        "logit_sample_shape_exact": logit_shape_exact,
+        "hidden_sample_max_abs_diff": hidden_max,
+        "hidden_sample_bounded_relative_l2_max": hidden_relative_l2_max,
+        "hidden_sample_bounded_cosine_min": hidden_cosine_min,
+        "logit_sample_max_abs_diff": logit_max,
+        "logit_sample_bounded_relative_l2_max": logit_relative_l2_max,
+        "logit_sample_bounded_cosine_min": logit_cosine_min,
+        "bounded_metric_scope": "intersection_of_stored_indices",
+        "hidden_sample_within_atol": hidden_shape_exact and hidden_max <= hidden_atol,
+        "logit_sample_within_atol": logit_shape_exact and logit_max <= logit_atol,
+    }

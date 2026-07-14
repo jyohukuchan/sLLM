@@ -1,0 +1,17 @@
+
+============================ ROCm System Management Interface ============================
+================================== Memory Usage (Bytes) ==================================
+GPU[0]		: VRAM Total Memory (B): 32195477504
+GPU[0]		: VRAM Total Used Memory (B): 21401600
+GPU[1]		: VRAM Total Memory (B): 32195477504
+GPU[1]		: VRAM Total Used Memory (B): 21401600
+GPU[2]		: VRAM Total Memory (B): 34208743424
+GPU[2]		: VRAM Total Used Memory (B): 87384064
+====================================== Product Info ======================================
+GPU[0]		: Card Series:		AMD Radeon Pro V620
+GPU[1]		: Card Series:		AMD Radeon Pro V620
+GPU[2]		: Card Series:		AMD Radeon Graphics
+GPU[2]		: Card Model:		0x7551
+GPU[2]		: Card Vendor:		Advanced Micro Devices, Inc. [AMD/ATI]
+GPU[2]		: GFX Version:		gfx1201
+================================== End of ROCm SMI Log ===================================
