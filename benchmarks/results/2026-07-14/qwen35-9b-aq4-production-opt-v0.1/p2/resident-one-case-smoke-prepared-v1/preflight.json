@@ -1,0 +1,9 @@
+{
+  "gpu_process_snapshot": [],
+  "kv_cache_bytes": 0,
+  "persistent_state_bytes": 0,
+  "temporary_bytes": 0,
+  "vram_headroom_bytes": 0,
+  "weights_bytes": 0,
+  "workspace_bytes": 0
+}

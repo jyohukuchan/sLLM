@@ -1,0 +1,35 @@
+{
+  "build_git_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+  "expanded_manifest_sha256": "9898a65ee54dc6248a8d3959335483ae9d48e2275b83b47a5cc6b01013ec0d6d",
+  "hash_binding": {
+    "bound_case_manifest_sha256": "9898a65ee54dc6248a8d3959335483ae9d48e2275b83b47a5cc6b01013ec0d6d",
+    "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "identity_sha256": "1738f2c2ce1a0a37391c754c7df7fd0571ee11dbe493269f45d2d5828eccf0f9",
+  "resident_driver_identity": {
+    "binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
+    "build_git_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+    "format_id": "AQ4_0",
+    "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
+    "implementation_id": "qwen35_aq4_rdna4_v1",
+    "model_id": "ullm-qwen3.5-9b-aq4",
+    "model_revision": "aq4-reasoning-v0.1-candidate",
+    "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "protocol": "ullm.aq4_p2_resident_driver.v2",
+    "runtime_device": {
+      "architecture": "gfx1201",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "AMD Radeon Graphics",
+      "runtime_device_index": 1
+    },
+    "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "schema_version": "ullm.aq4_production_p2_identity.v2",
+  "status": "bound"
+}

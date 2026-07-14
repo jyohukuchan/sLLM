@@ -1,0 +1,19 @@
+{
+  "case_count": 1,
+  "cases": [
+    {
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "context_tokens": 128,
+      "fixture_path": "fixture.json",
+      "fixture_sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
+      "generated_tokens": 0,
+      "prompt_token_ids_sha256": "de24190aa193d3280175540b973b5021dc00ebaf7b6d4ad6ca380604f7ce25d2",
+      "prompt_tokens": 128
+    }
+  ],
+  "expanded_manifest_sha256": "9898a65ee54dc6248a8d3959335483ae9d48e2275b83b47a5cc6b01013ec0d6d",
+  "schema_version": "ullm.aq4_p2_fixture_index.v1",
+  "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+  "subset": "resident_one_case_smoke"
+}
