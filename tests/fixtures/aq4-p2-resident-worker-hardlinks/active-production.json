@@ -1,0 +1,19 @@
+{
+  "alias_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps/ullm_aq4_worker-03e49ec754c21dc7",
+  "deps_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps",
+  "expected": {
+    "ctime_ns": 1783937083521178513,
+    "device": 66306,
+    "gid": 1000,
+    "inode": 10506405,
+    "mode": 33277,
+    "mtime_ns": 1783937083493176979,
+    "nlink": 2,
+    "size": 3729520,
+    "uid": 1000
+  },
+  "primary_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+  "release_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release",
+  "schema_version": "ullm.aq4_p2_resident_worker_hardlink_identity.v1",
+  "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+}

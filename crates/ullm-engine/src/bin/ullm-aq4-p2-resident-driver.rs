@@ -8,15 +8,15 @@
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -26,19 +26,27 @@ use ullm_engine::backend_operation_registry::{OperationExecutionRecord, Operatio
 use ullm_engine::execution_batch::ExecutionPhase;
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{
-    Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime, QWEN35_AQ4_KV_BLOCK_SIZE,
+    QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime,
 };
 use ullm_engine::qwen35_aq4_session::{
     QWEN35_AQ4_PREFILL_CHUNK_GRID, QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DIM,
 };
-use ullm_engine::served_model::{load_served_model, ServedModel};
+use ullm_engine::served_model::{ServedModel, load_served_model};
 
 const PROTOCOL: &str = "ullm.aq4_p2_resident_driver.v2";
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PACKAGE_FILES: usize = 65_536;
 const MAX_PACKAGE_DEPTH: usize = 32;
+const MAX_WORKER_RELEASE_ENTRIES: usize = 4096;
+const MAX_WORKER_RELEASE_DEPTH: usize = 8;
 const HASH_CHUNK_BYTES: usize = 1024 * 1024;
+const O_NOFOLLOW: i32 = 0o00400000;
+const O_CLOEXEC: i32 = 0o02000000;
+const WORKER_HARDLINK_FIXTURE_RAW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json"
+));
 const DEFAULT_CHUNK_BYTES: usize = 1024 * 1024;
 const DEFAULT_LM_HEAD_CHUNK_ROWS: usize = 8192;
 const TOTAL_RUNS: usize = 12;
@@ -57,6 +65,46 @@ struct Args {
     served_model_manifest: PathBuf,
     device_index: u32,
     build_git_commit: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WorkerHardlinkFixture {
+    schema_version: String,
+    release_root: PathBuf,
+    deps_root: PathBuf,
+    primary_path: PathBuf,
+    alias_path: PathBuf,
+    sha256: String,
+    expected: WorkerFileIdentity,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WorkerFileIdentity {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    size: u64,
+    nlink: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerComponentIdentity {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerHardlinkGuard {
+    fixture: WorkerHardlinkFixture,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -906,6 +954,272 @@ fn resource_peak(preflight: &Value) -> Value {
     })
 }
 
+impl WorkerHardlinkGuard {
+    fn capture(worker_path: &Path, expected_sha256: &str) -> Result<Self, String> {
+        let fixture: WorkerHardlinkFixture = serde_json::from_str(WORKER_HARDLINK_FIXTURE_RAW)
+            .map_err(|error| format!("worker hardlink fixture rejected: {error}"))?;
+        validate_worker_hardlink_set(&fixture, worker_path, expected_sha256, || {})?;
+        Ok(Self { fixture })
+    }
+
+    fn verify(&self, worker_path: &Path, expected_sha256: &str) -> Result<(), String> {
+        validate_worker_hardlink_set(&self.fixture, worker_path, expected_sha256, || {})
+    }
+}
+
+fn worker_file_identity(metadata: &fs::Metadata) -> WorkerFileIdentity {
+    WorkerFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: metadata.mode(),
+        size: metadata.len(),
+        nlink: metadata.nlink(),
+        mtime_ns: i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec()),
+        ctime_ns: i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()),
+    }
+}
+
+fn worker_component_identity(metadata: &fs::Metadata) -> WorkerComponentIdentity {
+    WorkerComponentIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: metadata.mode(),
+    }
+}
+
+fn snapshot_no_symlink_components(
+    path: &Path,
+    label: &str,
+) -> Result<Vec<(PathBuf, WorkerComponentIdentity)>, String> {
+    require_absolute_normal_path(path, label)?;
+    let mut current = PathBuf::new();
+    let mut snapshots = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
+            _ => return Err(format!("{label} path is not canonical absolute form")),
+        }
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| format!("{label} component metadata failed: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label} traverses a symlink"));
+        }
+        snapshots.push((current.clone(), worker_component_identity(&metadata)));
+    }
+    Ok(snapshots)
+}
+
+fn open_worker_nofollow(path: &Path, label: &str) -> Result<File, String> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)
+        .map_err(|error| format!("{label} O_NOFOLLOW open failed: {error}"))
+}
+
+fn hash_open_worker(file: &mut File, label: &str) -> Result<(String, u64), String> {
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; HASH_CHUNK_BYTES];
+    let mut total = 0u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("{label} FD hash failed: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| format!("{label} byte count overflow"))?;
+    }
+    Ok((format!("{:x}", digest.finalize()), total))
+}
+
+fn scan_worker_inode_paths(
+    root: &Path,
+    expected: WorkerFileIdentity,
+    label: &str,
+) -> Result<BTreeSet<PathBuf>, String> {
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| format!("{label} root metadata failed: {error}"))?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(format!("{label} root is not a no-symlink directory"));
+    }
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    let mut matches = BTreeSet::new();
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > MAX_WORKER_RELEASE_DEPTH {
+            return Err(format!("{label} scan depth exceeds bound"));
+        }
+        for entry in
+            fs::read_dir(&directory).map_err(|error| format!("{label} read_dir failed: {error}"))?
+        {
+            let path = entry
+                .map_err(|error| format!("{label} entry failed: {error}"))?
+                .path();
+            visited = visited
+                .checked_add(1)
+                .ok_or_else(|| format!("{label} entry count overflow"))?;
+            if visited > MAX_WORKER_RELEASE_ENTRIES {
+                return Err(format!("{label} scan entry count exceeds bound"));
+            }
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("{label} entry metadata failed: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!("{label} scan encountered a symlink"));
+            }
+            if metadata.is_dir() {
+                pending.push((path, depth + 1));
+            } else if metadata.is_file() {
+                if metadata.dev() == expected.device && metadata.ino() == expected.inode {
+                    matches.insert(path);
+                }
+            } else {
+                return Err(format!("{label} scan encountered a non-regular entry"));
+            }
+        }
+    }
+    Ok(matches)
+}
+
+fn validate_worker_hardlink_set<F>(
+    fixture: &WorkerHardlinkFixture,
+    worker_path: &Path,
+    expected_sha256: &str,
+    mutation_hook: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    if fixture.schema_version != "ullm.aq4_p2_resident_worker_hardlink_identity.v1"
+        || !valid_sha256(&fixture.sha256)
+        || fixture.sha256 != expected_sha256
+        || fixture.expected.nlink != 2
+    {
+        return Err("worker hardlink fixture identity differs".into());
+    }
+    for (path, label) in [
+        (&fixture.release_root, "worker release root"),
+        (&fixture.deps_root, "worker deps root"),
+        (&fixture.primary_path, "worker primary"),
+        (&fixture.alias_path, "worker alias"),
+    ] {
+        require_absolute_normal_path(path, label)?;
+    }
+    if worker_path != fixture.primary_path
+        || fixture.primary_path == fixture.alias_path
+        || fixture.primary_path.parent() != Some(fixture.release_root.as_path())
+        || fixture.alias_path.parent() != Some(fixture.deps_root.as_path())
+        || fixture.deps_root.parent() != Some(fixture.release_root.as_path())
+    {
+        return Err("worker hardlink paths/roots differ".into());
+    }
+    let component_paths = [
+        (&fixture.release_root, "worker release root"),
+        (&fixture.deps_root, "worker deps root"),
+        (&fixture.primary_path, "worker primary"),
+        (&fixture.alias_path, "worker alias"),
+    ];
+    let component_before = component_paths
+        .iter()
+        .map(|(path, label)| snapshot_no_symlink_components(path, label))
+        .collect::<Result<Vec<_>, _>>()?;
+    let primary_before = fs::symlink_metadata(&fixture.primary_path)
+        .map_err(|error| format!("worker primary metadata failed: {error}"))?;
+    let alias_before = fs::symlink_metadata(&fixture.alias_path)
+        .map_err(|error| format!("worker alias metadata failed: {error}"))?;
+    if !primary_before.is_file()
+        || !alias_before.is_file()
+        || primary_before.file_type().is_symlink()
+        || alias_before.file_type().is_symlink()
+        || worker_file_identity(&primary_before) != fixture.expected
+        || worker_file_identity(&alias_before) != fixture.expected
+        || primary_before.mode() & 0o111 == 0
+        || primary_before.mode() & 0o002 != 0
+    {
+        return Err("worker hardlink pre-open metadata differs".into());
+    }
+    let mut primary_file = open_worker_nofollow(&fixture.primary_path, "worker primary")?;
+    let mut alias_file = open_worker_nofollow(&fixture.alias_path, "worker alias")?;
+    if worker_file_identity(
+        &primary_file
+            .metadata()
+            .map_err(|error| format!("worker primary FD metadata failed: {error}"))?,
+    ) != fixture.expected
+        || worker_file_identity(
+            &alias_file
+                .metadata()
+                .map_err(|error| format!("worker alias FD metadata failed: {error}"))?,
+        ) != fixture.expected
+    {
+        return Err("worker hardlink open metadata differs".into());
+    }
+    let expected_release_paths =
+        BTreeSet::from([fixture.primary_path.clone(), fixture.alias_path.clone()]);
+    let expected_deps_paths = BTreeSet::from([fixture.alias_path.clone()]);
+    if scan_worker_inode_paths(
+        &fixture.release_root,
+        fixture.expected,
+        "worker release root",
+    )? != expected_release_paths
+        || scan_worker_inode_paths(&fixture.deps_root, fixture.expected, "worker deps root")?
+            != expected_deps_paths
+    {
+        return Err("worker hardlink path coverage differs".into());
+    }
+    let (primary_sha, primary_bytes) = hash_open_worker(&mut primary_file, "worker primary")?;
+    let (alias_sha, alias_bytes) = hash_open_worker(&mut alias_file, "worker alias")?;
+    if primary_sha != fixture.sha256
+        || alias_sha != fixture.sha256
+        || primary_bytes != fixture.expected.size
+        || alias_bytes != fixture.expected.size
+    {
+        return Err("worker hardlink FD hash differs".into());
+    }
+    mutation_hook();
+    let component_after = component_paths
+        .iter()
+        .map(|(path, label)| snapshot_no_symlink_components(path, label))
+        .collect::<Result<Vec<_>, _>>()?;
+    let primary_after = fs::symlink_metadata(&fixture.primary_path)
+        .map_err(|error| format!("worker primary post metadata failed: {error}"))?;
+    let alias_after = fs::symlink_metadata(&fixture.alias_path)
+        .map_err(|error| format!("worker alias post metadata failed: {error}"))?;
+    if component_before != component_after
+        || worker_file_identity(&primary_after) != fixture.expected
+        || worker_file_identity(&alias_after) != fixture.expected
+        || worker_file_identity(
+            &primary_file
+                .metadata()
+                .map_err(|error| format!("worker primary FD post metadata failed: {error}"))?,
+        ) != fixture.expected
+        || worker_file_identity(
+            &alias_file
+                .metadata()
+                .map_err(|error| format!("worker alias FD post metadata failed: {error}"))?,
+        ) != fixture.expected
+        || scan_worker_inode_paths(
+            &fixture.release_root,
+            fixture.expected,
+            "worker release root post",
+        )? != expected_release_paths
+        || scan_worker_inode_paths(
+            &fixture.deps_root,
+            fixture.expected,
+            "worker deps root post",
+        )? != expected_deps_paths
+    {
+        return Err("worker hardlink identity changed during validation".into());
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     match parse_args(env::args_os().skip(1)).and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
@@ -917,8 +1231,9 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    let (model, identity, package_dir) = startup(&args)?;
+    let (model, identity, package_dir, worker_guard) = startup(&args)?;
     let executor = RealExecutor::load(&model, package_dir, args.device_index)?;
+    worker_guard.verify(&model.worker.binary, &model.worker.binary_sha256)?;
     let session_id = session_id(&identity);
     let mut driver = ResidentDriver::new(session_id, identity, executor);
     write_event(&driver.ready())?;
@@ -1009,7 +1324,9 @@ fn run(args: Args) -> Result<(), String> {
     }
 }
 
-fn startup(args: &Args) -> Result<(ServedModel, DriverIdentity, PathBuf), String> {
+fn startup(
+    args: &Args,
+) -> Result<(ServedModel, DriverIdentity, PathBuf, WorkerHardlinkGuard), String> {
     require_absolute_normal_path(&args.served_model_manifest, "served model manifest")?;
     if args.build_git_commit.len() != 40
         || !args
@@ -1027,9 +1344,8 @@ fn startup(args: &Args) -> Result<(ServedModel, DriverIdentity, PathBuf), String
     if served_sha != model.manifest_sha256 {
         return Err("served manifest hash differs".into());
     }
-    if sha256_file(&model.worker.binary)? != model.worker.binary_sha256 {
-        return Err("worker binary hash differs".into());
-    }
+    let worker_guard =
+        WorkerHardlinkGuard::capture(&model.worker.binary, &model.worker.binary_sha256)?;
     let package_dir = model
         .product
         .root
@@ -1073,7 +1389,7 @@ fn startup(args: &Args) -> Result<(ServedModel, DriverIdentity, PathBuf), String
         },
         guard_set_sha256: guard_set_sha256(&model.worker.required_environment)?,
     };
-    Ok((model, identity, package_dir))
+    Ok((model, identity, package_dir, worker_guard))
 }
 
 fn validate_model(model: &ServedModel) -> Result<(), String> {
@@ -1502,6 +1818,7 @@ fn write_event(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[derive(Default)]
     struct MockExecutor {
@@ -1605,6 +1922,186 @@ mod tests {
             next_run: 0,
             failed: false,
         }
+    }
+
+    struct WorkerTestTree {
+        directory: PathBuf,
+        fixture: WorkerHardlinkFixture,
+    }
+
+    impl Drop for WorkerTestTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn worker_test_tree() -> WorkerTestTree {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!(
+            "ullm-aq4-worker-hardlinks-{}-{unique}",
+            std::process::id()
+        ));
+        let release = directory.join("release");
+        let deps = release.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        let primary = release.join("ullm-aq4-worker");
+        let alias = deps.join("ullm_aq4_worker-03e49ec754c21dc7");
+        fs::write(&primary, b"worker-hardlink-fixture").unwrap();
+        fs::set_permissions(&primary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::hard_link(&primary, &alias).unwrap();
+        let expected = worker_file_identity(&fs::symlink_metadata(&primary).unwrap());
+        WorkerTestTree {
+            directory,
+            fixture: WorkerHardlinkFixture {
+                schema_version: "ullm.aq4_p2_resident_worker_hardlink_identity.v1".into(),
+                release_root: release,
+                deps_root: deps,
+                primary_path: primary,
+                alias_path: alias,
+                sha256: sha256_bytes(b"worker-hardlink-fixture"),
+                expected,
+            },
+        }
+    }
+
+    fn validate_test_worker(tree: &WorkerTestTree) -> Result<(), String> {
+        validate_worker_hardlink_set(
+            &tree.fixture,
+            &tree.fixture.primary_path,
+            &tree.fixture.sha256,
+            || {},
+        )
+    }
+
+    #[test]
+    fn active_production_worker_fixture_is_exact_two_link_set() {
+        let fixture: WorkerHardlinkFixture =
+            serde_json::from_str(WORKER_HARDLINK_FIXTURE_RAW).unwrap();
+        validate_worker_hardlink_set(&fixture, &fixture.primary_path, &fixture.sha256, || {})
+            .unwrap();
+    }
+
+    #[test]
+    fn worker_exact_two_link_fixture_is_accepted() {
+        let tree = worker_test_tree();
+        validate_test_worker(&tree).unwrap();
+    }
+
+    #[test]
+    fn worker_alias_add_remove_and_different_inode_are_rejected() {
+        let add = worker_test_tree();
+        fs::hard_link(
+            &add.fixture.primary_path,
+            add.fixture.release_root.join("third-worker-link"),
+        )
+        .unwrap();
+        assert!(validate_test_worker(&add).is_err());
+
+        let remove = worker_test_tree();
+        fs::remove_file(&remove.fixture.alias_path).unwrap();
+        assert!(validate_test_worker(&remove).is_err());
+
+        let different = worker_test_tree();
+        fs::remove_file(&different.fixture.alias_path).unwrap();
+        fs::copy(
+            &different.fixture.primary_path,
+            &different.fixture.alias_path,
+        )
+        .unwrap();
+        assert!(validate_test_worker(&different).is_err());
+    }
+
+    #[test]
+    fn worker_content_metadata_alias_and_root_escape_are_rejected() {
+        let content = worker_test_tree();
+        fs::write(&content.fixture.alias_path, b"changed-worker-content").unwrap();
+        assert!(validate_test_worker(&content).is_err());
+
+        let metadata = worker_test_tree();
+        fs::set_permissions(
+            &metadata.fixture.primary_path,
+            fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(validate_test_worker(&metadata).is_err());
+
+        let alias = worker_test_tree();
+        let wrong_alias = alias.fixture.deps_root.join("unexpected-worker-name");
+        fs::rename(&alias.fixture.alias_path, &wrong_alias).unwrap();
+        assert!(validate_test_worker(&alias).is_err());
+
+        let escape = worker_test_tree();
+        let mut escaped_fixture = escape.fixture.clone();
+        escaped_fixture.alias_path = escape.directory.join("escaped-worker");
+        fs::rename(&escape.fixture.alias_path, &escaped_fixture.alias_path).unwrap();
+        assert!(
+            validate_worker_hardlink_set(
+                &escaped_fixture,
+                &escaped_fixture.primary_path,
+                &escaped_fixture.sha256,
+                || {},
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_late_link_content_and_path_swaps_are_rejected() {
+        let add = worker_test_tree();
+        let add_primary = add.fixture.primary_path.clone();
+        let add_path = add.fixture.release_root.join("late-third-link");
+        assert!(
+            validate_worker_hardlink_set(
+                &add.fixture,
+                &add.fixture.primary_path,
+                &add.fixture.sha256,
+                || fs::hard_link(add_primary, add_path).unwrap(),
+            )
+            .is_err()
+        );
+
+        let remove = worker_test_tree();
+        let remove_alias = remove.fixture.alias_path.clone();
+        assert!(
+            validate_worker_hardlink_set(
+                &remove.fixture,
+                &remove.fixture.primary_path,
+                &remove.fixture.sha256,
+                || fs::remove_file(remove_alias).unwrap(),
+            )
+            .is_err()
+        );
+
+        let content = worker_test_tree();
+        let content_alias = content.fixture.alias_path.clone();
+        assert!(
+            validate_worker_hardlink_set(
+                &content.fixture,
+                &content.fixture.primary_path,
+                &content.fixture.sha256,
+                || fs::write(content_alias, b"late-content-mutation").unwrap(),
+            )
+            .is_err()
+        );
+
+        let swap = worker_test_tree();
+        let swap_primary = swap.fixture.primary_path.clone();
+        let moved = swap.fixture.release_root.join("moved-original-worker");
+        assert!(
+            validate_worker_hardlink_set(
+                &swap.fixture,
+                &swap.fixture.primary_path,
+                &swap.fixture.sha256,
+                || {
+                    fs::rename(&swap_primary, &moved).unwrap();
+                    fs::copy(&moved, &swap_primary).unwrap();
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
