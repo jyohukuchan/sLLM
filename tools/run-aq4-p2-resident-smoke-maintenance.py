@@ -11,9 +11,11 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -29,10 +31,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "bdb06083ca3646c8f934fea10dac691a6efd4626"
-LAUNCHER_TREE = "7d7f9f30e90118ade4d0d66f058447b6b7777367"
-LAUNCHER_GIT_BLOB = "5e7a3feebe82de13eeefbb3b99f95ad14244953b"
-LAUNCHER_SHA = "ddd84b5b85dc303f381f44048b03eeb1e542bcf8173dfe506aeb0e7ebd235ee5"
+LAUNCHER_COMMIT = "4e0649ccaea3932d7c5e9ab3489b3271b8ef8185"
+LAUNCHER_TREE = "083f8464f5315a68956cffdf178e3bf1f9b12ca2"
+LAUNCHER_GIT_BLOB = "c422e4235a2ee6595cf43656c573b7e863489f9e"
+LAUNCHER_SHA = "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
 RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
 RUNNER_SHA = "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -225,7 +227,8 @@ class Dependencies:
     owner_probe: Callable[[Callable[..., subprocess.CompletedProcess[bytes]], int], dict[str, Any]]
     package_hash: Callable[[Path], str]
     launcher_execute: Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
-    profile_wrapper: Callable[[dict[str, Any]], dict[str, Any]]
+    profile_capture: Callable[[dict[str, Any]], dict[str, Any]]
+    profile_trust: Callable[[dict[str, Any], str], dict[str, Any]]
     sleep: Callable[[float], None]
 
 
@@ -266,53 +269,137 @@ def _default_launcher_execute(binding: dict[str, Any]) -> tuple[int, dict[str, A
     return LAUNCHER.execute_bound(binding, Path(binding["evidence_output"]), Path(binding["runner_output"]), binding["run_id"], trusted_launcher_sha=LAUNCHER_SHA, gate_provider=gate_provider)
 
 
-def validate_profile_wrapper(contract: dict[str, Any]) -> dict[str, Any]:
-    expected = {
-        "ROCPROF_OUTPUT_PATH": str(PROFILE_OUTPUT_DIRECTORY),
-        "ROCPROF_OUTPUT_FILE_NAME": PROFILE_OUTPUT_NAME,
-        "ROCPROF_KERNEL_TRACE": "1",
-        "ROCPROF_HIP_RUNTIME_API_TRACE": "1",
-        "ROCPROF_MEMORY_COPY_TRACE": "1",
-        "ROCPROF_MARKER_API_TRACE": "1",
-    }
-    observed = {name: os.environ.get(name) for name in expected}
-    if contract.get("command") != profile_capture_command() or observed != expected:
-        raise HarnessError("profile diagnostic must run through the exact rocprof wrapper")
-    formats = os.environ.get("ROCPROF_OUTPUT_FORMAT", "").split(",")
-    if "csv" not in formats or os.environ.get("ROCPROFILER_LIBRARY_CTOR") not in {"1", "true", "True"}:
-        raise HarnessError("rocprof instrumentation environment differs")
-    try:
-        maps = Path("/proc/self/maps").read_text(errors="strict")
-    except (OSError, UnicodeError) as error:
-        raise HarnessError("rocprof process map is unavailable") from error
-    required = ("librocprofiler-sdk-tool.so", "librocprofiler-sdk-roctx.so")
-    if any(name not in maps for name in required):
-        raise HarnessError("rocprof instrumentation libraries are not mapped")
+class ProfileTrustGuard:
+    def __init__(self) -> None:
+        self.snapshot = LAUNCHER.Snapshot()
+        self.initialized = False
+
+    def __call__(self, contract: dict[str, Any], stage: str) -> dict[str, Any]:
+        allowed = {"before-start", "capture-before", "capture-after", "finalize-before"}
+        if stage not in allowed:
+            raise HarnessError("profile trust stage differs")
+        if not self.initialized:
+            if stage != "before-start":
+                raise HarnessError("profile trust was not initialized before capture")
+            if contract.get("command") != profile_capture_command() or contract.get("target_launcher", {}).get("command") != profile_launcher_command():
+                raise HarnessError("profile capture/launcher command manifest differs")
+            self.snapshot.file(PROFILE_CAPTURE_TOOL, PROFILE_CAPTURE_SHA, "profile capture tool")
+            self.snapshot.file(PROFILE_PROFILER, PROFILE_PROFILER_SHA, "profile profiler")
+            self.snapshot.file(LAUNCHER_PATH, LAUNCHER_SHA, "profile target launcher")
+            self.initialized = True
+        self.snapshot.verify()
+        return {
+            "stage": stage,
+            "passed": True,
+            "capture_tool_sha256": PROFILE_CAPTURE_SHA,
+            "profiler_sha256": PROFILE_PROFILER_SHA,
+            "launcher_sha256": LAUNCHER_SHA,
+            "capture_command_sha256": contract["command_sha256"],
+            "launcher_command_sha256": contract["target_launcher"]["command_sha256"],
+        }
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    parents: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().split()
+            parents[int(entry.name)] = int(fields[3])
+        except (OSError, ValueError, IndexError):
+            continue
+    descendants: list[int] = []
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        children = [pid for pid, ppid in parents.items() if ppid == parent]
+        descendants.extend(children); pending.extend(children)
+    return sorted(set(descendants))
+
+
+def _signal_profile_tree(root_pid: int, descendants: list[int], value: signal.Signals) -> None:
+    groups: set[int] = set()
+    for pid in [*descendants, root_pid]:
+        try:
+            groups.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+    own_group = os.getpgrp()
+    for group in groups:
+        if group == own_group:
+            continue
+        try:
+            os.killpg(group, value)
+        except ProcessLookupError:
+            pass
+
+
+def run_profile_capture(contract: dict[str, Any]) -> dict[str, Any]:
+    command = contract.get("command")
+    if command != profile_capture_command():
+        raise HarnessError("profile capture command differs")
+    timed_out = False; descendants: list[int] = []
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stdout_file, stderr=stderr_file, shell=False, start_new_session=True)
+        try:
+            return_code = process.wait(timeout=PROFILE_TIMEOUT_SECONDS + 30)
+        except subprocess.TimeoutExpired:
+            timed_out = True; descendants = _descendant_pids(process.pid)
+            for sig, seconds in ((signal.SIGINT, 1.0), (signal.SIGTERM, 1.0), (signal.SIGKILL, 5.0)):
+                _signal_profile_tree(process.pid, descendants, sig)
+                try:
+                    return_code = process.wait(timeout=seconds)
+                    break
+                except subprocess.TimeoutExpired:
+                    descendants = sorted(set(descendants) | set(_descendant_pids(process.pid)))
+            else:
+                process.kill(); return_code = process.wait()
+        stdout_file.seek(0); stdout = stdout_file.read(LAUNCHER.MAX_BYTES + 1)
+        stderr_file.seek(0); stderr = stderr_file.read(LAUNCHER.MAX_BYTES + 1)
+    if len(stdout) > LAUNCHER.MAX_BYTES or len(stderr) > LAUNCHER.MAX_BYTES:
+        raise HarnessError("profile capture output exceeds evidence bound")
+    remaining = [pid for pid in descendants if Path(f"/proc/{pid}").exists()]
+    completed = subprocess.CompletedProcess(command, return_code, stdout, stderr)
+    launcher_evidence = None
+    launcher_path = LAUNCHER.PROFILE_EVIDENCE_OUTPUT / "launcher-evidence.json"
+    if launcher_path.is_file() and not launcher_path.is_symlink():
+        launcher_evidence = LAUNCHER.parse_json(LAUNCHER.read_regular(launcher_path, "profile launcher evidence")[0], "profile launcher evidence")
+    safety = launcher_evidence.get("safety", {}) if isinstance(launcher_evidence, dict) else {}
     return {
-        "validated": True,
-        "profiler": {"path": str(PROFILE_PROFILER), "sha256": PROFILE_PROFILER_SHA},
-        "environment_sha256": sha_bytes(canonical(observed)),
-        "mapped_libraries": list(required),
+        "completed": completed,
+        "started": True,
+        "timed_out": timed_out,
+        "cleanup_passed": not remaining,
+        "children_remaining": remaining,
+        "rocprof_started": PROFILE_OUTPUT_DIRECTORY.exists(),
+        "launcher_started": isinstance(launcher_evidence, dict),
+        "launcher_status": launcher_evidence.get("status") if isinstance(launcher_evidence, dict) else None,
+        "gpu_command_executed": safety.get("gpu_command_executed", "unknown") if timed_out or return_code != 0 else True,
+        "model_load_executed": safety.get("model_load_executed", "unknown") if timed_out or return_code != 0 else True,
     }
 
 
 def default_dependencies() -> Dependencies:
     stopped_gates = lambda: LAUNCHER.collect_execute_gates(environment=dict(LAUNCHER.EXECUTE_ENV))
-    return Dependencies(subprocess.run, default_http_probe, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, validate_profile_wrapper, time.sleep)
+    trust = ProfileTrustGuard()
+    return Dependencies(subprocess.run, default_http_probe, stopped_gates, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep)
 
 
-def profile_harness_command() -> list[str]:
+def profile_launcher_command() -> list[str]:
     return [
         str(LAUNCHER.PYTHON),
-        str(Path(__file__).resolve()),
+        str(LAUNCHER_PATH),
         "--mode",
-        "execute",
-        "--profile-diagnostic",
-        "--ready-artifact",
-        str(PROFILE_READY_PATH),
+        "profile-execute",
         "--evidence-output",
-        str(PROFILE_MAINTENANCE_EVIDENCE),
-        "--confirm-one-case",
+        str(LAUNCHER.PROFILE_EVIDENCE_OUTPUT),
+        "--runner-output",
+        str(LAUNCHER.PROFILE_RUN_OUTPUT),
+        "--run-id",
+        LAUNCHER.PROFILE_RUN_ID,
+        "--trusted-launcher-sha",
+        LAUNCHER_SHA,
     ]
 
 
@@ -338,7 +425,7 @@ def profile_capture_command() -> list[str]:
         "--timeout",
         str(float(PROFILE_TIMEOUT_SECONDS)),
         "--runner-command",
-        *profile_harness_command(),
+        *profile_launcher_command(),
     ]
 
 
@@ -396,6 +483,8 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
         value.pop("measurement_eligible")
     if profile_diagnostic:
         command = profile_capture_command()
+        launcher_command = profile_launcher_command()
+        launcher_binding = LAUNCHER.ready_profile_execute_binding()
         value["profile_diagnostic"] = {
             "schema_version": "ullm.aq4_p3_diagnostic_rocprof_ready.v1",
             "status": "ready_for_one_profile_diagnostic",
@@ -407,6 +496,18 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "profiler": {"path": str(PROFILE_PROFILER), "resolved_path": str(PROFILE_PROFILER), "sha256": PROFILE_PROFILER_SHA},
             "command": command,
             "command_sha256": sha_bytes(canonical(command)),
+            "target_launcher": {
+                "schema_version": "ullm.aq4_p2_profile_target_launcher.v1",
+                "path": str(LAUNCHER_PATH),
+                "commit": LAUNCHER_COMMIT,
+                "sha256": LAUNCHER_SHA,
+                "command": launcher_command,
+                "command_sha256": sha_bytes(canonical(launcher_command)),
+                "binding_sha256": sha_bytes(canonical(launcher_binding)),
+                "run_id": LAUNCHER.PROFILE_RUN_ID,
+                "evidence_output": str(LAUNCHER.PROFILE_EVIDENCE_OUTPUT),
+                "runner_output": str(LAUNCHER.PROFILE_RUN_OUTPUT),
+            },
             "output": {"directory": str(PROFILE_OUTPUT_DIRECTORY), "name": PROFILE_OUTPUT_NAME, "artifact": str(PROFILE_ARTIFACT), "must_not_exist_before_capture": True},
             "resident_evidence": {
                 "identity": str(LAUNCHER.INPUT_ROOT / "identity.json"),
@@ -491,7 +592,7 @@ def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_
     output.mkdir(mode=0o700)
     evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
     if value["execution_mode"] == "profile_diagnostic":
-        evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "wrapper_executed": False, "measurement_eligible": False, "promotion_eligible": False}
+        evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "capture_executed": False, "measurement_eligible": False, "promotion_eligible": False}
     _finalize(output, evidence)
     return 0, evidence
 
@@ -504,20 +605,30 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     if profile_diagnostic:
         if value.get("measurement_eligible") is not False or value.get("authorization", {}).get("rocprof_wrapper_required") is not True or not isinstance(value.get("profile_diagnostic"), dict):
             raise HarnessError("profile diagnostic authorization differs")
-        wrapper = dependencies.profile_wrapper(value["profile_diagnostic"])
-        if not isinstance(wrapper, dict) or wrapper.get("validated") is not True:
-            raise HarnessError("profile diagnostic rocprof wrapper differs")
     elif value.get("authorization", {}).get("rocprof_wrapper_required") is not False or "profile_diagnostic" in value:
         raise HarnessError("normal one-case profile contract differs")
-    else:
-        wrapper = None
     for path, label in ((output, "maintenance evidence"), (Path(value["launcher_binding"]["runner_output"]), "runner output"), (Path(value["launcher_binding"]["evidence_output"]), "launcher evidence")):
         LAUNCHER.reject_symlink_components(path, label, allow_missing_leaf=True)
         if path.exists() or path.is_symlink():
             raise HarnessError(f"{label} already exists")
+    if profile_diagnostic:
+        LAUNCHER.ensure_directory_chain(
+            PROFILE_OUTPUT_DIRECTORY.parent,
+            "profile capture output parent",
+        )
+        LAUNCHER.reject_symlink_components(
+            PROFILE_OUTPUT_DIRECTORY,
+            "profile capture output",
+            allow_missing_leaf=True,
+        )
+        if PROFILE_OUTPUT_DIRECTORY.exists() or PROFILE_OUTPUT_DIRECTORY.is_symlink():
+            raise HarnessError("profile capture output already exists")
+        trust_records = [dependencies.profile_trust(value["profile_diagnostic"], "before-start")]
+    else:
+        trust_records = []
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_wrapper": wrapper, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
-    stop_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
         stage = "pre-stop-snapshot"; pre = capture_running(dependencies); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
@@ -533,13 +644,31 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
         if not isinstance(gates, dict) or gates.get("passed") is not True or gates.get("services") != [{"unit": "ullm-openai.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}, {"unit": "llama-qwen35-udq4.service", "active_state": "inactive", "sub_state": "dead", "main_pid": 0}] or gates.get("old_worker_pids") != [] or gates.get("amd_smi_owners") != [] or gates.get("kfd_owners") != [] or gates.get("lock", {}).get("free") is not True:
             raise HarnessError("stopped live gates differ")
         evidence["sequence"].append("stopped-gates")
-        stage = "launcher"; evidence["process_counts"]["launcher"] = 1; evidence["sequence"].append("launcher")
         evidence["safety"]["gpu_command_executed"] = "unknown"; evidence["safety"]["model_load_executed"] = "unknown"
-        launcher_code, launcher_evidence = dependencies.launcher_execute(value["launcher_binding"]); evidence["launcher"] = {"code": launcher_code, "status": launcher_evidence.get("status"), "safety": launcher_evidence.get("safety"), "failure": launcher_evidence.get("failure")}
-        evidence["safety"]["gpu_command_executed"] = launcher_evidence.get("safety", {}).get("gpu_command_executed", "unknown")
-        evidence["safety"]["model_load_executed"] = launcher_evidence.get("safety", {}).get("model_load_executed", "unknown")
-        if launcher_code != 0 or launcher_evidence.get("status") != "passed":
-            raise HarnessError("immutable launcher failed")
+        if profile_diagnostic:
+            stage = "profile-capture-before"
+            evidence["profile_trust"].append(dependencies.profile_trust(value["profile_diagnostic"], "capture-before"))
+            stage = "profile-capture"; capture_attempted = True; evidence["process_counts"]["capture_tool"] = 1; evidence["sequence"].append("profile-capture")
+            try:
+                outcome = dependencies.profile_capture(value["profile_diagnostic"])
+            finally:
+                evidence["profile_trust"].append(dependencies.profile_trust(value["profile_diagnostic"], "capture-after"))
+            required = {"completed", "started", "timed_out", "cleanup_passed", "children_remaining", "rocprof_started", "launcher_started", "launcher_status", "gpu_command_executed", "model_load_executed"}
+            if not isinstance(outcome, dict) or set(outcome) != required or not isinstance(outcome.get("completed"), subprocess.CompletedProcess) or outcome.get("started") is not True or type(outcome.get("timed_out")) is not bool or type(outcome.get("cleanup_passed")) is not bool or not isinstance(outcome.get("children_remaining"), list) or type(outcome.get("rocprof_started")) is not bool or type(outcome.get("launcher_started")) is not bool:
+                raise HarnessError("profile capture outcome contract differs")
+            completed = outcome["completed"]
+            evidence["process_counts"]["rocprof"] = int(outcome["rocprof_started"]); evidence["process_counts"]["launcher"] = int(outcome["launcher_started"])
+            evidence["safety"]["gpu_command_executed"] = outcome["gpu_command_executed"]; evidence["safety"]["model_load_executed"] = outcome["model_load_executed"]
+            evidence["capture"] = {"command": completed.args, "exit_code": completed.returncode, "stdout_sha256": sha_bytes(completed.stdout), "stderr_sha256": sha_bytes(completed.stderr), "timed_out": outcome["timed_out"], "cleanup_passed": outcome["cleanup_passed"], "children_remaining": outcome["children_remaining"], "launcher_status": outcome["launcher_status"]}
+            if outcome["timed_out"] or not outcome["cleanup_passed"] or outcome["children_remaining"] or completed.returncode != 0 or completed.stderr or outcome["rocprof_started"] is not True or outcome["launcher_started"] is not True or outcome["launcher_status"] != "passed":
+                raise HarnessError("profile capture/launcher failed or left a child process")
+        else:
+            stage = "launcher"; evidence["process_counts"]["launcher"] = 1; evidence["sequence"].append("launcher")
+            launcher_code, launcher_evidence = dependencies.launcher_execute(value["launcher_binding"]); evidence["launcher"] = {"code": launcher_code, "status": launcher_evidence.get("status"), "safety": launcher_evidence.get("safety"), "failure": launcher_evidence.get("failure")}
+            evidence["safety"]["gpu_command_executed"] = launcher_evidence.get("safety", {}).get("gpu_command_executed", "unknown")
+            evidence["safety"]["model_load_executed"] = launcher_evidence.get("safety", {}).get("model_load_executed", "unknown")
+            if launcher_code != 0 or launcher_evidence.get("status") != "passed":
+                raise HarnessError("immutable launcher failed")
         code = 0
     except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
         evidence["failure"] = {"stage": stage, "reason": str(error), "launcher_started": evidence["process_counts"]["launcher"] == 1}
@@ -569,6 +698,12 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             evidence["restore"] = {"attempted": True, "passed": restore_error is None, "error": restore_error, "post_start": post}
         else:
             evidence["restore"] = {"attempted": False, "passed": True, "error": None, "post_start": None}
+        if profile_diagnostic:
+            try:
+                evidence["profile_trust"].append(dependencies.profile_trust(value["profile_diagnostic"], "finalize-before"))
+            except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError) as error:
+                evidence["failure"] = {"stage": "profile-finalize-trust", "reason": str(error), "launcher_started": evidence["process_counts"]["launcher"] == 1}
+                code = 1
         evidence["status"] = "passed" if code == 0 and evidence["restore"]["passed"] else "failed"
         _finalize(output, evidence)
     return code, evidence

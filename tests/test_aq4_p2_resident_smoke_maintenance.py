@@ -25,7 +25,8 @@ class FakeRuntime:
         self.fail = fail
         self.launcher_mode = launcher_mode
         self.calls: list[list[str]] = []
-        self.profile_wrapped = False
+        self.profile_captured = False
+        self.trust_stages: list[str] = []
 
     @property
     def gateway_pid(self) -> int:
@@ -89,14 +90,35 @@ class FakeRuntime:
             return 1, {"status": "failed", "safety": {"gpu_command_executed": "unknown", "model_load_executed": "unknown"}, "failure": {"reason": "synthetic"}}
         return 0, {"status": "passed", "safety": {"gpu_command_executed": True, "model_load_executed": True}, "failure": None}
 
-    def profile_wrapper(self, contract: dict) -> dict:
-        if self.fail == "profile-wrapper":
-            raise HARNESS.HarnessError("synthetic profile wrapper failure")
-        self.profile_wrapped = True
-        return {"validated": True, "command_sha256": contract["command_sha256"]}
+    def profile_capture(self, contract: dict) -> dict:
+        self.profile_captured = True
+        if self.fail == "capture-start":
+            raise OSError("synthetic capture startup failure")
+        timed_out = self.fail == "capture-timeout"
+        remaining = [999999] if self.fail == "capture-child" else []
+        launcher_failed = self.fail == "capture-launcher"
+        command = contract["command"]
+        return {
+            "completed": subprocess.CompletedProcess(command, 1 if timed_out or remaining or launcher_failed else 0, b"", b""),
+            "started": True,
+            "timed_out": timed_out,
+            "cleanup_passed": not remaining,
+            "children_remaining": remaining,
+            "rocprof_started": True,
+            "launcher_started": True,
+            "launcher_status": "failed" if timed_out or remaining or launcher_failed else "passed",
+            "gpu_command_executed": "unknown" if timed_out or launcher_failed else True,
+            "model_load_executed": "unknown" if timed_out or launcher_failed else True,
+        }
+
+    def profile_trust(self, contract: dict, stage: str) -> dict:
+        self.trust_stages.append(stage)
+        if self.fail == f"trust-{stage}":
+            raise HARNESS.HarnessError(f"synthetic trust failure: {stage}")
+        return {"stage": stage, "passed": True}
 
     def dependencies(self) -> HARNESS.Dependencies:
-        return HARNESS.Dependencies(self.run, self.http, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_wrapper, lambda seconds: None)
+        return HARNESS.Dependencies(self.run, self.http, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, lambda seconds: None)
 
 
 def ready(tmp_path: Path) -> dict:
@@ -135,7 +157,7 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "maintenance", runtime.dependencies())
     assert code == 0 and evidence["status"] == "passed"
     assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "launcher", "service-start", "service-restored"]
-    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1}
+    assert evidence["process_counts"] == {"sudo": 3, "systemctl_stop": 1, "launcher": 1, "systemctl_start": 1, "capture_tool": 0, "rocprof": 0}
     assert evidence["safety"] == {"service_touched": True, "service_stopped": True, "gpu_command_executed": True, "model_load_executed": True}
     assert evidence["restore"]["passed"] is True
     assert evidence["restore"]["post_start"]["service"]["main_pid"] != evidence["pre_stop"]["service"]["main_pid"]
@@ -193,7 +215,7 @@ def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
     assert value["authorization"]["maximum_invocations"] == 1
     assert value["authorization"]["rocprof_wrapper_required"] is True
     assert command == HARNESS.profile_capture_command()
-    assert command[-len(HARNESS.profile_harness_command()):] == HARNESS.profile_harness_command()
+    assert command[-len(HARNESS.profile_launcher_command()):] == HARNESS.profile_launcher_command()
     assert command[command.index("--runner-command") + 1] == str(HARNESS.LAUNCHER.PYTHON)
     assert profile["command_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(command))
     assert profile["output"]["must_not_exist_before_capture"] is True
@@ -201,23 +223,72 @@ def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
     assert profile["resident_evidence"]["resident_session_id_source"] == "resident_raw.resident.session_id"
     assert profile["resident_evidence"]["case_id"] == HARNESS.LAUNCHER.CASE_ID
     assert profile["roctx"]["roctx_library"]["resolved_path"] == str(HARNESS.LAUNCHER.ROCTX_LIBRARY_RESOLVED)
+    assert profile["target_launcher"]["command"] == HARNESS.profile_launcher_command()
+    assert profile["target_launcher"]["binding_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(HARNESS.LAUNCHER.ready_profile_execute_binding()))
 
 
-def test_profile_fake_maintenance_requires_wrapper_then_restores(tmp_path: Path) -> None:
+def test_profile_fake_maintenance_captures_child_then_restores(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     code, evidence = HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "profile-maintenance", runtime.dependencies())
     assert code == 0 and evidence["status"] == "passed"
-    assert runtime.profile_wrapped is True
+    assert runtime.profile_captured is True
+    assert runtime.trust_stages == ["before-start", "capture-before", "capture-after", "finalize-before"]
     assert evidence["execution_mode"] == "profile_diagnostic"
-    assert evidence["profile_wrapper"]["validated"] is True
+    assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "profile-capture", "service-start", "service-restored"]
+    assert evidence["process_counts"]["capture_tool"] == evidence["process_counts"]["rocprof"] == evidence["process_counts"]["launcher"] == 1
     assert evidence["restore"]["passed"] is True and runtime.active is True
 
 
-def test_profile_wrapper_failure_starts_no_commands_or_service_change(tmp_path: Path) -> None:
-    runtime = FakeRuntime(fail="profile-wrapper")
-    with pytest.raises(HARNESS.HarnessError, match="wrapper"):
-        HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "profile-fail", runtime.dependencies())
-    assert runtime.calls == [] and runtime.active is True
+@pytest.mark.parametrize("failure", ("capture-start", "capture-timeout", "capture-child", "capture-launcher"))
+def test_profile_capture_failure_always_restores_outer_service(tmp_path: Path, failure: str) -> None:
+    runtime = FakeRuntime(fail=failure)
+    code, evidence = HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / f"profile-{failure}", runtime.dependencies())
+    assert code == 1 and evidence["status"] == "failed"
+    assert runtime.profile_captured is True
+    assert evidence["restore"]["attempted"] is True and evidence["restore"]["passed"] is True
+    assert evidence["restore"]["post_start"]["service"]["main_pid"] != evidence["pre_stop"]["service"]["main_pid"]
+    assert runtime.active is True and runtime.epoch == 1
+    assert runtime.trust_stages == ["before-start", "capture-before", "capture-after", "finalize-before"]
+
+
+@pytest.mark.parametrize("target", ("capture", "profiler"))
+def test_profile_trust_rejects_same_path_hash_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    capture = tmp_path / "capture.py"; capture.write_bytes(b"capture-trusted")
+    profiler = tmp_path / "rocprofv3"; profiler.write_bytes(b"profiler-trusted"); profiler.chmod(0o755)
+    launcher = tmp_path / "launcher.py"; launcher.write_bytes(b"launcher-trusted")
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_TOOL", capture)
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_SHA", HARNESS.sha_bytes(capture.read_bytes()))
+    monkeypatch.setattr(HARNESS, "PROFILE_PROFILER", profiler)
+    monkeypatch.setattr(HARNESS, "PROFILE_PROFILER_SHA", HARNESS.sha_bytes(profiler.read_bytes()))
+    monkeypatch.setattr(HARNESS, "LAUNCHER_PATH", launcher)
+    monkeypatch.setattr(HARNESS, "LAUNCHER_SHA", HARNESS.sha_bytes(launcher.read_bytes()))
+    contract = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)["profile_diagnostic"]
+    guard = HARNESS.ProfileTrustGuard()
+    assert guard(contract, "before-start")["passed"] is True
+    watched = capture if target == "capture" else profiler
+    replacement = tmp_path / f"{target}-replacement"; replacement.write_bytes(b"swapped-bytes")
+    if target == "profiler":
+        replacement.chmod(0o755)
+    replacement.replace(watched)
+    with pytest.raises(HARNESS.LAUNCHER.LauncherError, match="replacement"):
+        guard(contract, "capture-before")
+
+
+@pytest.mark.parametrize("failure", ("trust-capture-after", "trust-finalize-before"))
+def test_profile_late_trust_failure_occurs_with_outer_restore_done(tmp_path: Path, failure: str) -> None:
+    runtime = FakeRuntime(fail=failure)
+    code, evidence = HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / failure, runtime.dependencies())
+    assert code == 1 and evidence["status"] == "failed"
+    assert evidence["restore"]["passed"] is True and evidence["restore"]["post_start"] is not None
+    assert runtime.active is True and runtime.epoch == 1
+
+
+def test_profile_capture_output_reuse_rejected_before_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = FakeRuntime(); existing = tmp_path / "existing-profile"; existing.mkdir()
+    monkeypatch.setattr(HARNESS, "PROFILE_OUTPUT_DIRECTORY", existing)
+    with pytest.raises(HARNESS.HarnessError, match="profile capture output already exists"):
+        HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "maintenance", runtime.dependencies())
+    assert runtime.calls == [] and runtime.profile_captured is False
 
 
 def test_base_and_profile_mode_cannot_be_cross_invoked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,7 +326,7 @@ def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Pat
     assert code == 0
     evidence = json.loads((output / "launcher-evidence.json").read_text())
     assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0, "rocprof": 0, "capture_tool": 0}
-    assert evidence["profile_diagnostic"]["wrapper_executed"] is False
+    assert evidence["profile_diagnostic"]["capture_executed"] is False
 
 
 @pytest.mark.parametrize("failure", ("sudo-pre", "sudo-stop", "stop", "stopped-gate", "sudo-restore", "start", "health"))
