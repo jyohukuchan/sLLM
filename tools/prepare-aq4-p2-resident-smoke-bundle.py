@@ -67,10 +67,10 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "2d770d2ac2313c9cfa4e5416d683a396a77f5854"
-BINDING_SOURCE_TREE = "0b1951645bff891c731e0e951a758a8077d46dfa"
-BINDING_RUNNER_GIT_BLOB = "ac5901e34ddf594d8c43eb0af289321a7b2bd85c"
-BINDING_RUNNER_SHA = "b01646a332166185c493b8ba646c5557ebcfed3526a52793556e7838f9f21b15"
+BINDING_SOURCE_COMMIT = "e9065925d7b5af0352cb8dfd454a7e106abd7172"
+BINDING_SOURCE_TREE = "9f2ff38d06d5ea5724a6e84af1c00d2b8147f241"
+BINDING_RUNNER_GIT_BLOB = "9c097d1a97af3e15ca695c6da08b1e2928d08df7"
+BINDING_RUNNER_SHA = "3140574c4f50f9b09aeb3780e400cbf8020ecf1c4ff69da685622858128f33cc"
 BINDING_DRIVER_GIT_BLOB = "0bed05e56a07807fa1338a80dfba2f72de64d5af"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
@@ -729,7 +729,7 @@ def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, b
     normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if current_driver != normative_driver:
         raise BundleError("binding commit changed the normative resident driver blob")
-    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b"fake_driver_subprocess_count", b"--bundle-root"):
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"fake_driver_subprocess_count", b"--bundle-root"):
         if contract not in runner:
             raise BundleError("binding runner generic root/validator contract differs")
     return runner, validator, validator_tree, validator_object
