@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -327,6 +328,12 @@ fn read_bounded_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
         ));
     }
     let file = File::open(path).map_err(|error| format!("failed to read {label}: {error}"))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("failed to stat opened {label}: {error}"))?;
+    if file_identity(&metadata) != file_identity(&opened) {
+        return Err(format!("{label} changed while opening"));
+    }
     let mut bytes = Vec::new();
     file.take(MAX_INPUT_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -336,12 +343,35 @@ fn read_bounded_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
             "{label} exceeds the {MAX_INPUT_BYTES}-byte input bound"
         ));
     }
+    let after =
+        fs::symlink_metadata(path).map_err(|error| format!("failed to restat {label}: {error}"))?;
+    if file_identity(&metadata) != file_identity(&after) {
+        return Err(format!("{label} changed while reading"));
+    }
     Ok(bytes)
 }
 
-fn load_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T, String> {
+fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64, u64, u32, i64, i64, u64) {
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.mode(),
+        metadata.mtime_nsec(),
+        metadata.ctime_nsec(),
+        metadata.nlink(),
+    )
+}
+
+fn load_json_with_sha<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    label: &str,
+) -> Result<(T, String), String> {
     let bytes = read_bounded_file(path, label)?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("failed to decode {label}: {error}"))
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("failed to decode {label}: {error}"))?;
+    Ok((value, digest))
 }
 
 fn validate_inputs(
@@ -450,6 +480,28 @@ fn total_output_bytes(root: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+fn required_build_git_commit() -> Result<String, String> {
+    let value = env::var("ULLM_BUILD_GIT_COMMIT")
+        .map_err(|_| "ULLM_BUILD_GIT_COMMIT is required".to_string())?;
+    validate_build_git_commit(&value)
+}
+
+fn validate_build_git_commit(value: &str) -> Result<String, String> {
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("ULLM_BUILD_GIT_COMMIT must be a 40-character hexadecimal commit".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn required_regular_sha256(path: &Path, label: &str) -> Result<String, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("{label} is unavailable: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{label} must be a regular file"));
+    }
+    sha256_file(path)
+}
+
 fn run(
     package_dir: PathBuf,
     cases_path: PathBuf,
@@ -467,12 +519,24 @@ fn run(
     if output.exists() || fs::symlink_metadata(&output).is_ok() {
         return Err(format!("refusing to overwrite output {}", output.display()));
     }
-    let cases: CasesFile = load_json(&cases_path, "cases")?;
-    let replay: ReplayFile = load_json(&replay_path, "replay")?;
+    let (cases, cases_sha256): (CasesFile, String) = load_json_with_sha(&cases_path, "cases")?;
+    let (replay, replay_sha256): (ReplayFile, String) = load_json_with_sha(&replay_path, "replay")?;
     let (replay_by_id, total_rows) = validate_inputs(&cases, &replay)?;
-    let cases_sha256 = sha256_file(&cases_path)?;
-    let replay_sha256 = sha256_file(&replay_path)?;
+    let build_git_commit = required_build_git_commit()?;
     let expected_bindings = expected_case_bindings()?;
+    let actual_case_bindings = cases
+        .cases
+        .iter()
+        .map(|case| {
+            Ok(json!({
+                "case_id": case.case_id,
+                "prompt_token_count": case.prompt_token_ids.len(),
+                "prompt_token_ids": case.prompt_token_ids,
+                "prompt_token_ids_sha256": canonical_token_hash(&case.prompt_token_ids)?,
+                "step_count": case.step_count,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let actual_replay_bindings = replay_by_id
         .iter()
         .map(|(case_id, token_ids)| {
@@ -490,13 +554,10 @@ fn run(
     let active_manifest_path = env::var("ULLM_SERVED_MODEL_MANIFEST")
         .unwrap_or_else(|_| "/etc/ullm/served-models/active.json".to_string());
     let active_manifest = PathBuf::from(&active_manifest_path);
-    let active_manifest_sha256 = if active_manifest.is_file() {
-        Some(sha256_file(&active_manifest)?)
-    } else {
-        None
-    };
+    let active_manifest_sha256 =
+        required_regular_sha256(&active_manifest, "active served-model manifest")?;
     let package_manifest = package_dir.join("manifest.json");
-    let package_manifest_sha256 = sha256_file(&package_manifest)?;
+    let package_manifest_sha256 = required_regular_sha256(&package_manifest, "package manifest")?;
     let guard_set = json!({
         "explicit_flag": "--enable-intermediate-trace",
         "max_cases": MAX_CASES,
@@ -509,6 +570,9 @@ fn run(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&guard_set).map_err(|error| error.to_string())?)
     );
+    if guard_set_sha256.len() != 64 {
+        return Err("guard-set identity is incomplete".to_string());
+    }
     let max_steps = cases
         .cases
         .iter()
@@ -531,11 +595,17 @@ fn run(
     session_config.rotary_dim = 64;
     session_config.rope_base = 10_000_000.0;
     let mut session = Qwen35Aq4InferenceSession::load(model_config, session_config)?;
+    let device_name = session.model().device_name().to_string();
+    let backend = session.model().backend().to_string();
+    let total_global_mem = session.model().device_total_global_mem();
+    if device_name.is_empty() || backend.is_empty() || total_global_mem == 0 {
+        return Err("runtime device identity is incomplete".to_string());
+    }
     let device_identity = json!({
         "index": device_index,
-        "name": session.model().device_name(),
-        "backend": session.model().backend(),
-        "total_global_mem": session.model().device_total_global_mem(),
+        "name": device_name,
+        "backend": backend,
+        "total_global_mem": total_global_mem,
     });
     let temporary = output.with_extension(format!("incomplete-{}", std::process::id()));
     fs::create_dir_all(&temporary)
@@ -635,12 +705,13 @@ fn run(
                 "cases_sha256": cases_sha256,
                 "replay_sha256": replay_sha256,
                 "expected_cases": expected_bindings,
+                "actual_cases": actual_case_bindings,
                 "actual_replay_sequences": actual_replay_bindings,
             },
             "identity": {
                 "tool_binary": tool_binary,
                 "tool_binary_sha256": tool_binary_sha256,
-                "build_git_commit": env::var("ULLM_BUILD_GIT_COMMIT").unwrap_or_else(|_| "unknown".to_string()),
+                "build_git_commit": build_git_commit,
                 "active_manifest_path": active_manifest_path,
                 "active_manifest_sha256": active_manifest_sha256,
                 "package_manifest_sha256": package_manifest_sha256,
@@ -916,5 +987,63 @@ mod tests {
         assert_eq!(MAX_ROWS, 3);
         assert_eq!(MAX_ROW_BYTES, 32 * 1024);
         assert_eq!(MAX_OUTPUT_BYTES, 96 * 1024);
+    }
+
+    #[test]
+    fn identity_guards_reject_unknown_or_missing_values() {
+        assert!(validate_build_git_commit("").is_err());
+        assert!(validate_build_git_commit("unknown").is_err());
+        assert!(validate_build_git_commit(&"g".repeat(40)).is_err());
+        assert_eq!(
+            validate_build_git_commit(&"a".repeat(40)).unwrap(),
+            "a".repeat(40)
+        );
+        assert!(
+            required_regular_sha256(
+                Path::new("missing-active-manifest"),
+                "active served-model manifest"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_json_hashes_and_parses_the_same_bytes() {
+        let path = env::temp_dir().join(format!(
+            "ullm-aq4-differential-trace-json-{}",
+            std::process::id()
+        ));
+        let raw = b"{\"cases\":[]}\n";
+        fs::write(&path, raw).expect("test JSON should write");
+        let (decoded, digest) =
+            load_json_with_sha::<CasesFile>(&path, "test cases").expect("test JSON should parse");
+        fs::write(
+            &path,
+            b"{\"cases\":[{\"case_id\":\"replacement\",\"prompt_token_ids\":[],\"step_count\":1}]}\n",
+        )
+        .expect("replacement JSON should write");
+        fs::remove_file(&path).expect("test JSON should remove");
+        assert!(decoded.cases.is_empty());
+        assert_eq!(digest, format!("{:x}", Sha256::digest(raw)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reader_rejects_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+        let target = env::temp_dir().join(format!(
+            "ullm-aq4-differential-trace-target-{}",
+            std::process::id()
+        ));
+        let link = env::temp_dir().join(format!(
+            "ullm-aq4-differential-trace-link-{}",
+            std::process::id()
+        ));
+        fs::write(&target, b"{}").expect("target should write");
+        symlink(&target, &link).expect("symlink should create");
+        let result = read_bounded_file(&link, "symlink test");
+        fs::remove_file(&link).expect("symlink should remove");
+        fs::remove_file(&target).expect("target should remove");
+        assert!(result.is_err());
     }
 }
