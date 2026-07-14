@@ -25,14 +25,19 @@ use std::time::Instant;
 
 use ullm_engine::aq4_worker_backend::QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV;
 use ullm_engine::backend_operation_registry::{OperationExecutionAudit, ResolutionKind};
+use ullm_engine::execution_batch::ExecutionPhase;
 use ullm_engine::inference_api::{
     CancellationToken, GenerationTimings, InferenceRequest, ReasoningUsage, ReleaseOutcome,
     SamplingParams,
 };
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
-use ullm_engine::qwen35_aq4_model_runtime::{QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig};
+use ullm_engine::qwen35_aq4_model_runtime::{
+    QWEN35_AQ4_KV_BLOCK_SIZE, QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH, Qwen35Aq4ModelLoadConfig,
+    Qwen35Aq4ModelRuntime,
+};
 use ullm_engine::qwen35_aq4_session::{
-    QWEN35_AQ4_PREFILL_CHUNK_GRID, Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
+    QWEN35_AQ4_PREFILL_CHUNK_GRID, QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DIM,
+    Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
 };
 use ullm_engine::served_model::{ServedModel, load_served_model};
 use ullm_engine::worker_driver::{InferenceSession, RequestPublications, drive_worker_request};
@@ -80,6 +85,8 @@ struct FixtureCase {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FixtureFile {
+    #[serde(default)]
+    schema_version: Option<String>,
     cases: Vec<FixtureCaseRaw>,
 }
 
@@ -735,7 +742,7 @@ fn run(args: Args) -> Result<bool, String> {
             false,
         );
     }
-    if fixture_case.step_count == 0 || fixture_case.step_count > profile.max_new_tokens {
+    if fixture_case.step_count > profile.max_new_tokens {
         return publish_failure_result(
             &args,
             &bindings,
@@ -774,6 +781,22 @@ fn run(args: Args) -> Result<bool, String> {
         lm_head_mode: PackageLmHeadMode::GpuResidentF32,
         lm_head_chunk_rows: DEFAULT_LM_HEAD_CHUNK_ROWS,
     };
+    // A prefill benchmark must not append a generated token merely to satisfy the ordinary
+    // serving session's `max_new_tokens >= 1` contract.  Keep pure prefill in this driver-local
+    // path: it dispatches the prompt chunks through the resident model, records the same
+    // operation/lifecycle widths, and resets request-owned state without entering decode or
+    // publication.  The shared serving session remains unchanged.
+    if fixture_case.step_count == 0 {
+        return run_pure_prefill(
+            &args,
+            &bindings,
+            identity,
+            preflight,
+            started,
+            model_config,
+            &fixture_case,
+        );
+    }
     let session_config =
         Qwen35Aq4SessionConfig::greedy(fixture_case.step_count, profile.eos_token_ids.clone())
             .with_prefill_chunk_tokens(args.requested_m)?;
@@ -844,6 +867,296 @@ fn run(args: Args) -> Result<bool, String> {
         Some(outcome),
         None,
     )
+}
+
+/// Execute only the prompt portion of a cold request.  This path intentionally bypasses the
+/// serving session because that session requires at least one generated token and would append a
+/// decode/publication operation to a prefill measurement.
+#[allow(clippy::too_many_arguments)]
+fn run_pure_prefill(
+    args: &Args,
+    bindings: &RunBindings,
+    identity: Identity,
+    preflight: DriverPreflight,
+    started: Instant,
+    model_config: Qwen35Aq4ModelLoadConfig,
+    fixture: &FixtureCase,
+) -> Result<bool, String> {
+    if fixture.prompt_token_ids.is_empty()
+        || !QWEN35_AQ4_PREFILL_CHUNK_GRID.contains(&args.requested_m)
+        || args.requested_m > QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH
+    {
+        return publish_failure_result(
+            args,
+            bindings,
+            Some(identity),
+            preflight,
+            started,
+            "pure_prefill_validation",
+            "pure_prefill_width_rejected",
+            false,
+        );
+    }
+    let mut model = match Qwen35Aq4ModelRuntime::load(model_config) {
+        Ok(model) => model,
+        Err(error) => {
+            return publish_failure_result(
+                args,
+                bindings,
+                Some(identity),
+                preflight,
+                started,
+                "model_load",
+                if is_oom(&error) {
+                    "runtime_out_of_memory"
+                } else {
+                    "resident_model_load_failed"
+                },
+                is_oom(&error),
+            );
+        }
+    };
+    let prefill_started = Instant::now();
+    let widths = prefill_chunk_widths(fixture.prompt_token_ids.len(), args.requested_m)?;
+    let mut offset = 0usize;
+    let mut chunks = 0u64;
+    let mut actual_width = 0usize;
+    let mut records = Vec::new();
+    for width in widths {
+        let label = format!("aq4-p2-pure-prefill-{offset}");
+        let dispatch = if width == 1 {
+            model
+                .dispatch_token_for_phase(
+                    fixture.prompt_token_ids[offset],
+                    QWEN35_AQ4_ROTARY_DIM,
+                    QWEN35_AQ4_ROPE_BASE,
+                    offset,
+                    offset,
+                    ExecutionPhase::ColdPrefill,
+                    false,
+                    &label,
+                )
+                .map(|step| {
+                    step.operation_executions
+                        .into_iter()
+                        .enumerate()
+                        .map(|(layer_index, operation_executions)| {
+                            (layer_index, width, operation_executions)
+                        })
+                        .collect::<Vec<_>>()
+                })
+        } else {
+            model
+                .dispatch_prefill_chunk_for_phase(
+                    &fixture.prompt_token_ids[offset..offset + width],
+                    QWEN35_AQ4_ROTARY_DIM,
+                    QWEN35_AQ4_ROPE_BASE,
+                    offset,
+                    ExecutionPhase::ColdPrefill,
+                    false,
+                    &label,
+                )
+                .map(|step| {
+                    debug_assert_eq!(step.execution_width, width);
+                    step.invocations
+                        .into_iter()
+                        .map(|invocation| {
+                            (
+                                invocation.layer_index,
+                                invocation.execution_width,
+                                invocation.records,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+        };
+        let chunk_records = match dispatch {
+            Ok(records) => records,
+            Err(error) => {
+                let _ = model.reset_all_request_state_synchronized();
+                return publish_failure_result(
+                    args,
+                    bindings,
+                    Some(identity),
+                    preflight,
+                    started,
+                    "pure_prefill_dispatch",
+                    if is_oom(&error) {
+                        "runtime_out_of_memory"
+                    } else {
+                        "pure_prefill_dispatch_failed"
+                    },
+                    is_oom(&error),
+                );
+            }
+        };
+        if let Err(error) = model.synchronize() {
+            let _ = model.reset_all_request_state_synchronized();
+            return publish_failure_result(
+                args,
+                bindings,
+                Some(identity),
+                preflight,
+                started,
+                "pure_prefill_synchronize",
+                if is_oom(&error) {
+                    "runtime_out_of_memory"
+                } else {
+                    "pure_prefill_synchronize_failed"
+                },
+                is_oom(&error),
+            );
+        }
+        records.extend(chunk_records);
+        chunks = chunks
+            .checked_add(1)
+            .ok_or_else(|| "pure prefill chunk count overflow".to_string())?;
+        actual_width = actual_width.max(width);
+        offset += width;
+    }
+    if records.is_empty() || chunks == 0 {
+        let _ = model.reset_all_request_state_synchronized();
+        return publish_failure_result(
+            args,
+            bindings,
+            Some(identity),
+            preflight,
+            started,
+            "pure_prefill_audit",
+            "pure_prefill_no_operation_records",
+            false,
+        );
+    }
+    if let Err(error) = model.reset_all_request_state_synchronized() {
+        return publish_failure_result(
+            args,
+            bindings,
+            Some(identity),
+            preflight,
+            started,
+            "pure_prefill_reset",
+            if is_oom(&error) {
+                "runtime_out_of_memory"
+            } else {
+                "pure_prefill_reset_failed"
+            },
+            is_oom(&error),
+        );
+    }
+    let prompt_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
+    let prompt_ms = if prompt_ms.is_finite() && prompt_ms >= 0.001 {
+        prompt_ms
+    } else {
+        0.001
+    };
+    let prompt_n = fixture.prompt_token_ids.len();
+    let generation = GenerationTimings {
+        cache_n: bindings.case_contract.cached_prefix_tokens,
+        prompt_n,
+        prompt_ms,
+        prompt_per_token_ms: prompt_ms / prompt_n as f64,
+        prompt_per_second: 1e3 / prompt_ms * prompt_n as f64,
+        predicted_n: 0,
+        predicted_ms: 0.0,
+        predicted_per_token_ms: 0.0,
+        predicted_per_second: 0.0,
+    };
+    let audit = pure_prefill_audit_facts(
+        &records,
+        model.geometry().layers.len(),
+        chunks,
+        "prefill_complete",
+    );
+    let lifecycle = serde_json::json!({
+        "prepare": chunks,
+        "commit": chunks,
+        "discard": 0,
+        "error": 0,
+        "cancel": 0,
+        "prefill": {"prepare": chunks, "commit": chunks, "discard": 0},
+        "publication": {"prepare": 0, "commit": 0, "discard": 0},
+        "reset": {"attempted": 1, "complete": 1, "failed": 0}
+    });
+    let reset = serde_json::json!({"attempted": 1, "complete": 1, "failed": 0});
+    let result = finalize_result(
+        args,
+        bindings,
+        Some(identity),
+        preflight,
+        TimingFacts {
+            request_elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            generation: Some(generation),
+            generated_tokens: 0,
+        },
+        Some(audit),
+        empty_fallback(),
+        Some(bindings.case_contract.resolved_m),
+        Some(actual_width),
+        Some(bindings.case_contract.request_count),
+        Some(lifecycle),
+        Some(reset),
+        Some("prefill_complete"),
+        "ok",
+        None,
+    )?;
+    write_atomic_json(&args.output, &result)?;
+    Ok(true)
+}
+
+fn prefill_chunk_widths(prompt_len: usize, requested_m: usize) -> Result<Vec<usize>, String> {
+    if prompt_len == 0 {
+        return Err("pure prefill requires at least one prompt token".to_string());
+    }
+    if !QWEN35_AQ4_PREFILL_CHUNK_GRID.contains(&requested_m)
+        || requested_m > QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH
+    {
+        return Err(format!("unsupported pure prefill width {requested_m}"));
+    }
+    let mut widths = Vec::new();
+    let mut remaining = prompt_len;
+    while remaining > 0 {
+        let width = requested_m.min(remaining);
+        widths.push(width);
+        remaining -= width;
+    }
+    Ok(widths)
+}
+
+fn pure_prefill_audit_facts(
+    records: &[(usize, usize, [ullm_engine::backend_operation_registry::OperationExecutionRecord; 2])],
+    layers: usize,
+    chunks: u64,
+    outcome: &str,
+) -> AuditFacts {
+    let mut digest = Sha256::new();
+    digest.update(b"ullm-aq4-p2-pure-prefill-v1\0");
+    digest.update(chunks.to_le_bytes());
+    for (layer, width, pair) in records {
+        digest.update((*layer as u64).to_le_bytes());
+        digest.update((*width as u64).to_le_bytes());
+        for record in pair {
+            digest.update(format!("{:?}\0", record.phase).as_bytes());
+            digest.update(record.implementation_id.as_bytes());
+            digest.update([0]);
+            digest.update(format!("{:?}\0", record.status).as_bytes());
+        }
+    }
+    let coverage_complete = layers > 0
+        && records.len() == chunks as usize * layers
+        && records.iter().all(|(_, _, pair)| {
+            pair.iter().all(|record| {
+                record.status
+                    == ullm_engine::backend_operation_registry::OperationExecutionStatus::Succeeded
+            })
+        });
+    let digest = digest.finalize();
+    AuditFacts {
+        deterministic_digest_sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        outcome: outcome.to_string(),
+        coverage_complete,
+        physical_operation_invocations: records.len() as u64 * 2,
+        total_records: records.len() as u64 * 2,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1884,6 +2197,9 @@ fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, 
     let bytes = read_bounded_regular_file(path, "fixture", MAX_FIXTURE_BYTES)?;
     let fixture: FixtureFile = serde_json::from_value(parse_strict_json(&bytes, "fixture")?)
         .map_err(|error| format!("fixture JSON rejected: {error}"))?;
+    if fixture.schema_version.as_deref().is_some_and(|value| value != "ullm.aq4_p2_case_fixture.v1") {
+        return Err("fixture schema_version is unsupported".to_string());
+    }
     if fixture.cases.is_empty() || fixture.cases.len() > 128 {
         return Err("fixture must contain 1..=128 cases".to_string());
     }
@@ -1913,7 +2229,6 @@ fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, 
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         || raw.prompt_token_ids.is_empty()
         || raw.prompt_token_ids.len() > 4096
-        || raw.step_count == 0
         || raw.step_count > 512
     {
         return Err("fixture case exceeds bounded request limits".to_string());
@@ -2064,6 +2379,14 @@ fn reject_symlink_components(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pure_prefill_widths_keep_m1_tail_and_short_prompt_semantics() {
+        assert_eq!(prefill_chunk_widths(9, 8).unwrap(), vec![8, 1]);
+        assert_eq!(prefill_chunk_widths(1, 8).unwrap(), vec![1]);
+        assert_eq!(prefill_chunk_widths(3, 1).unwrap(), vec![1, 1, 1]);
+        assert!(prefill_chunk_widths(0, 8).is_err());
+    }
 
     fn test_args() -> Args {
         Args {
@@ -2300,6 +2623,13 @@ mod tests {
         let case = load_fixture_case(&fixture, Some("public-0")).unwrap();
         assert_eq!(case.case_id, "public-0");
         assert_eq!(case.step_count, 2);
+        fs::write(
+            &fixture,
+            br#"{"cases":[{"case_id":"prefill-0","prompt_token_ids":[1,2,3],"step_count":0}]}"#,
+        )
+        .unwrap();
+        let prefill = load_fixture_case(&fixture, Some("prefill-0")).unwrap();
+        assert_eq!(prefill.step_count, 0);
         fs::write(
             &fixture,
             br#"{"cases":[{"case_id":"public-0","prompt_token_ids":[1],"step_count":1},{"case_id":"public-0","prompt_token_ids":[2],"step_count":1}]}"#,
