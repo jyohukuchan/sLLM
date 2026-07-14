@@ -27,6 +27,8 @@
   - baseline identity、resident、device lock、workload、linksをexact検証する。
   - audit、state、lifecycle、reset、resource、terminalをexact検証し、bool/int/float代用を拒否する。
 - capability missing/hash swap/incomplete/unknown、HIP launch+H2D zero、reset bool代用の回帰試験を追加した。
+- 追加QAで、`timing.prefill_ms=100`や`resource.samples[].monotonic_ms=1`の整数がfloat fieldを通る問題を確認した。
+- `finite()`を`finite_float()`へ分離し、resident rawの全float fieldで`type(value) is float`を必須化した。5 fieldの型matrix回帰試験を追加した。
 - `docs/specs/aq4-p3-selection-raw-producer-v0.1.md`へ入力、一次trace、hash、統計、pairing、fail-closed契約を固定した。
 
 ## 検証
@@ -43,6 +45,7 @@
   - passed
 - `git diff --check`（producer、test、spec、journal）
   - passed
+- float/int相互代用修正後のproducer + selector + profiler: 74 passed
 - `python3 -m py_compile tools/build-aq4-p3-selection-raw.py tools/select-aq4-p3-candidate.py tests/test_build_aq4_p3_selection_raw.py tests/test_select_aq4_p3_candidate.py`
   - passed
 - GPU、R9700、worker、serviceは実行していない。

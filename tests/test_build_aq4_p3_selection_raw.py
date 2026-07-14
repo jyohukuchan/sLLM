@@ -753,3 +753,32 @@ def test_producer_rejects_bool_int_float_type_substitution(tmp_path: Path) -> No
     write_json(bad_reset, reset_manifest)
     with pytest.raises(PRODUCER.ProducerError, match="must be a non-negative integer"):
         build_manifest(bad_reset)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "replacement"),
+    [
+        (("elapsed_ms",), 100),
+        (("timing", "prefill_ms"), 100),
+        (("timing", "decode_ms"), 0),
+        (("timing", "end_to_end_ms"), 100),
+        (("resource", "samples", 0, "monotonic_ms"), 1),
+    ],
+)
+def test_resident_raw_float_field_matrix_rejects_integer_substitution(
+    tmp_path: Path, field_path: tuple[object, ...], replacement: int
+) -> None:
+    _path, manifest = promotion_manifest(tmp_path)
+    raw_path = Path(manifest["representative_cases"][0]["resident_raw"]["path"])
+    raw = json.loads(raw_path.read_text())
+    target = raw["runs"][2]
+    for part in field_path[:-1]:
+        target = target[part]
+    target[field_path[-1]] = replacement
+    write_json(raw_path, raw)
+    manifest["representative_cases"][0]["resident_raw"] = ref(raw_path)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    bad_path = tmp_path / "integer-for-float.json"
+    write_json(bad_path, manifest)
+    with pytest.raises(PRODUCER.ProducerError, match="must be a finite float"):
+        build_manifest(bad_path)

@@ -303,13 +303,12 @@ def digest(value: Any, label: str) -> str:
     return value
 
 
-def finite(value: Any, label: str, *, positive: bool = False) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ProducerError(f"{label} must be a finite number")
-    result = float(value)
-    if not math.isfinite(result) or (positive and result <= 0.0) or (not positive and result < 0.0):
+def finite_float(value: Any, label: str, *, positive: bool = False) -> float:
+    if type(value) is not float:
+        raise ProducerError(f"{label} must be a finite float")
+    if not math.isfinite(value) or (positive and value <= 0.0) or (not positive and value < 0.0):
         raise ProducerError(f"{label} has an invalid value")
-    return result
+    return value
 
 
 def count(value: Any, label: str, *, positive: bool = False) -> int:
@@ -699,7 +698,11 @@ def validate_raw(
             or run["resident_session_id"] != resident["session_id"]
         ):
             raise ProducerError(f"resident raw run protocol/session differs at {index}")
-        finite(run.get("elapsed_ms"), f"resident raw run {index}.elapsed_ms", positive=True)
+        finite_float(
+            run.get("elapsed_ms"),
+            f"resident raw run {index}.elapsed_ms",
+            positive=True,
+        )
         timing = run.get("timing")
         if not isinstance(timing, dict):
             raise ProducerError(f"resident raw run timing is missing at {index}")
@@ -708,9 +711,13 @@ def validate_raw(
             {"prefill_ms", "decode_ms", "end_to_end_ms", "generated_tokens"},
             f"resident raw run {index}.timing",
         )
-        finite(timing.get("prefill_ms"), f"resident raw run {index} prefill_ms", positive=True)
-        finite(timing.get("decode_ms"), f"resident raw run {index} decode_ms")
-        finite(
+        finite_float(
+            timing.get("prefill_ms"),
+            f"resident raw run {index} prefill_ms",
+            positive=True,
+        )
+        finite_float(timing.get("decode_ms"), f"resident raw run {index} decode_ms")
+        finite_float(
             timing.get("end_to_end_ms"),
             f"resident raw run {index} end_to_end_ms",
             positive=True,
@@ -789,7 +796,7 @@ def validate_raw(
                 raise ProducerError(f"resident raw run {index}.resource sample must be an object")
             sample_label = f"resident raw run {index}.resource.samples[{sample_index}]"
             exact(sample, RESOURCE_SAMPLE_FIELDS, sample_label)
-            finite(sample.get("monotonic_ms"), f"{sample_label}.monotonic_ms")
+            finite_float(sample.get("monotonic_ms"), f"{sample_label}.monotonic_ms")
         peak = resource.get("peak")
         if not isinstance(peak, dict):
             raise ProducerError(f"resident raw run {index}.resource.peak must be an object")
@@ -1090,7 +1097,7 @@ def trace_measurement(
     if required_indices is not None and sorted(observed_indices) != required_indices:
         raise ProducerError("profile runs do not cover measured resident indices 2..11")
     baseline_values = [
-        finite(run["timing"]["prefill_ms"], "measured prefill_ms", positive=True)
+        finite_float(run["timing"]["prefill_ms"], "measured prefill_ms", positive=True)
         for run in raw_runs[2:]
     ]
     p50, cv, ci_halfwidth = stats(baseline_values)
@@ -1265,12 +1272,12 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
                 "pair_id": pair_id,
                 "case_sha256": case_sha,
                 "identity_sha256": identity["identity_sha256"],
-                "baseline_ms": finite(
+                "baseline_ms": finite_float(
                     baseline_runs[run_index]["timing"]["prefill_ms"],
                     f"{label} baseline prefill_ms",
                     positive=True,
                 ),
-                "candidate_ms": finite(
+                "candidate_ms": finite_float(
                     contender_runs[run_index]["timing"]["prefill_ms"],
                     f"{label} candidate prefill_ms",
                     positive=True,

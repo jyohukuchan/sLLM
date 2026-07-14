@@ -95,7 +95,7 @@ resident rawは`ullm.aq4_p2_resident_batch_raw.v1`で、次を要求する。
 - run timing、audit、state、lifecycle、reset、resource、terminalのexact fieldsとstrict型
 - full-model、cold-prefill、manifest指定Mとcase ID/SHAの一致
 
-整数fieldではboolやfloatによる代用を認めない。たとえば`reset.attempted=true`はJSON/Python上で`1`と等値に見える場合でも拒否する。driver identityの比較も、再帰的にJSON型を一致させる。
+整数fieldではboolやfloatによる代用を認めない。たとえば`reset.attempted=true`はJSON/Python上で`1`と等値に見える場合でも拒否する。浮動小数点fieldの`elapsed_ms`、`timing.prefill_ms`、`timing.decode_ms`、`timing.end_to_end_ms`、`resource.samples[].monotonic_ms`では`type(value) is float`を要求し、整数による代用を拒否する。driver identityの比較も、再帰的にJSON型を一致させる。
 
 one-case smokeのraw/summaryはpromotion modeで拒否する。`smoke_only=true`、`execution_mode=one_case_smoke`、`promotion_eligible=false`、明示的`measurement_eligible=false`のいずれかがpromotion sourceに現れた場合はfail-closedとする。diagnostic modeでは逆にone-case smokeとpromotion不可の明示を必須とする。
 
