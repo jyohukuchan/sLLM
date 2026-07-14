@@ -22,8 +22,8 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "180ab1be976fa43cc3d4b46fa8e1f1307cb38ec8",
-    "sha256": "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e"
+    "commit": "da26839109ebb0a09bc8f194926d9de513095f83",
+    "sha256": "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891"
   },
   "manual_boundary_count": 15,
   "runner": {
@@ -33,10 +33,10 @@
   "runner_strict_negative_count": 18,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 287,
+  "test_count": 295,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 221,
+    "existing_and_profile_regression": 229,
     "marker_chain": 55
   }
 }

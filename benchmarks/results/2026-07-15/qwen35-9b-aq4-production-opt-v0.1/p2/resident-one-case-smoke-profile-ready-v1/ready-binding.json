@@ -315,7 +315,7 @@
       "--target-command-manifest",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/target-command-manifest.json",
       "--target-command-manifest-sha256",
-      "2d88fef3f5218435a90060c120cecc848c5944adf8bf30d7add94ff849dee098",
+      "afd25391605d8a22860772d0f0aa48374a8388e7d0ca218bcc0668e810f9973e",
       "--profile-output-directory",
       "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1",
       "--profile-output-name",
@@ -331,7 +331,7 @@
       "--timeout",
       "1800.0"
     ],
-    "command_sha256": "c0836a5a404598f9094a52ae59d6fff0a265a6e2f532dec1c7283c0d5531e503",
+    "command_sha256": "30c6d643104599a06a3ecd19da88705850a126bc1285306bf52cbdd23fd79c17",
     "maximum_invocations": 1,
     "measurement_eligible": false,
     "output": {
@@ -417,25 +417,25 @@
         "--run-id",
         "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
         "--trusted-launcher-sha",
-        "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e"
+        "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891"
       ],
-      "command_sha256": "44174f22678676e296e0669f1e2cd47fd41c663df41ef99822b4e93c49b6dfcc",
-      "commit": "180ab1be976fa43cc3d4b46fa8e1f1307cb38ec8",
+      "command_sha256": "cbc8f2bbac7f5d1e998b645cd64c529c1fc29abf198d6c80f5780fc9ada7baf5",
+      "commit": "da26839109ebb0a09bc8f194926d9de513095f83",
       "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1",
       "manifest": {
-        "manifest_sha256": "7efa8769dc52312728832407186a2205174c8356fa8d924fd5a78c1f7d988bd8",
+        "manifest_sha256": "ec208f59fe97c5e68d55ce0dd4ec23201575ddb8532a798f0ae0814721598a4c",
         "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/target-command-manifest.json",
-        "sha256": "2d88fef3f5218435a90060c120cecc848c5944adf8bf30d7add94ff849dee098"
+        "sha256": "afd25391605d8a22860772d0f0aa48374a8388e7d0ca218bcc0668e810f9973e"
       },
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
       "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
       "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1",
       "schema_version": "ullm.aq4_p2_profile_target_launcher.v1",
-      "sha256": "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e"
+      "sha256": "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891"
     }
   },
   "promotion_eligible": false,
-  "qa_attestation_sha256": "62a25cac5fdae800719ff9150c341474242e859ae421c19da5e3378023791857",
+  "qa_attestation_sha256": "e1622ad22476b69d792dcb8812f145fd20d755ece63936a41094d07dcdc2440b",
   "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1",
   "status": "ready_for_one_case",
   "trust": {
@@ -478,17 +478,17 @@
       }
     },
     "harness": {
-      "commit": "c4c3d9f3d40cdddd6a7625e8361c4c855fbde565",
-      "git_blob": "7f9ecc15698b22b6480fc0bbbcf4854c0c836cf9",
+      "commit": "74ac75596404a6d8fd7b12db1212915307531984",
+      "git_blob": "d33222c3c7690f0ee4d4ff81dee37135be56d0d9",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "sha256": "91ff4e0d18f8292d518c3fd26dd3cef1e08ed697778cc48c0d1e787b4cf37651",
-      "tree": "de7e2fb0e01c98850a292f30c298d29f0658d96f"
+      "sha256": "2818aac32d0cc0f722353af7dd100bb3cd915c22869a4754c78dd3e080ff1ede",
+      "tree": "87a2e80b0975b179aeb8c3419c13789a0d4bf317"
     },
     "launcher": {
-      "commit": "180ab1be976fa43cc3d4b46fa8e1f1307cb38ec8",
-      "git_blob": "1e317bab4339792711e7959305dfdfa4c8883909",
-      "sha256": "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e",
-      "tree": "f79d5108933b9157b790a35e9867ad4ce8a5e1f6"
+      "commit": "da26839109ebb0a09bc8f194926d9de513095f83",
+      "git_blob": "ba3953cc586f22437128b5ded7b5bf26acb17a41",
+      "sha256": "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891",
+      "tree": "0767afe1b4b41fd677d76c2edb375f490e7fe529"
     },
     "production": {
       "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
