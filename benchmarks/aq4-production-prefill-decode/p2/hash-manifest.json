@@ -1,9 +1,9 @@
 {
   "artifacts": [
     {
-      "bytes": 4673,
+      "bytes": 4948,
       "path": "binding-inputs.json",
-      "sha256": "e8f3b76a98071d6898f93147e29354aa31083795d4fbd620d9bb9c865feb4ed2"
+      "sha256": "ae90bc57a42bec336a9a12c4ad68ed1cfb8301b6987235ac272e596e43ee8a59"
     },
     {
       "bytes": 1140,
@@ -26,9 +26,9 @@
       "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf"
     },
     {
-      "bytes": 1703,
+      "bytes": 1874,
       "path": "validation-report.json",
-      "sha256": "5e9e9bfb68b6ef780e38e3ff9b7094a4bc9d6c16696ce7293518648a9fb3d8c6"
+      "sha256": "3493a2f0ec8266136ae62caead13f49d0eab9c21e20b88781ca0601c9a476c0e"
     }
   ],
   "schema_version": "ullm.aq4_production_p2_hash_manifest.v1",

@@ -2,29 +2,35 @@
   "artifacts": {
     "correctness_threshold_audit": {
       "path": "correctness-threshold-audit.json",
-      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5"
+      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5",
+      "type": "correctness_threshold_audit"
     },
     "graph": {
       "path": "graph.json",
-      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b"
+      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b",
+      "type": "model_graph"
     },
     "model_identity": {
       "path": "model_identity.json",
-      "sha256": "eb96a985e64f2c7c4c8f568269062b42e3eec419c18f4dbeb75e691c163b7594"
+      "sha256": "eb96a985e64f2c7c4c8f568269062b42e3eec419c18f4dbeb75e691c163b7594",
+      "type": "model_identity"
     },
     "state": {
       "path": "state.json",
-      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf"
+      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf",
+      "type": "state_schema"
     },
     "validation_report": {
       "path": "validation-report.json",
-      "sha256": "5e9e9bfb68b6ef780e38e3ff9b7094a4bc9d6c16696ce7293518648a9fb3d8c6"
+      "sha256": "3493a2f0ec8266136ae62caead13f49d0eab9c21e20b88781ca0601c9a476c0e",
+      "type": "validation_report"
     }
   },
   "correctness_thresholds": {
     "artifact": {
       "path": "correctness-threshold-audit.json",
-      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5"
+      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5",
+      "type": "correctness_threshold_audit"
     },
     "required_fields": [
       "max_hidden_relative_l2",
@@ -40,7 +46,8 @@
   "graph": {
     "artifact": {
       "path": "graph.json",
-      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b"
+      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b",
+      "type": "model_graph"
     },
     "schema_id": "ullm.model_graph.v0.1",
     "schema_version": "0.1",
@@ -102,7 +109,8 @@
   "state": {
     "artifact": {
       "path": "state.json",
-      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf"
+      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf",
+      "type": "state_schema"
     },
     "schema_id": "ullm.state_schema.v0.1",
     "schema_version": "0.1",

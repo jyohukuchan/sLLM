@@ -18,9 +18,10 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -67,6 +68,47 @@ STATE_CANONICAL_FIELDS = {
 }
 LAYER_FIELDS = {"kind", "layer_index", "tensor_count"}
 MAX_JSON_BYTES = 16 * 1024 * 1024
+MAX_HASH_BYTES = 64 * 1024 * 1024
+MAX_SUMS_BYTES = 1024 * 1024
+EXPECTED_BUNDLE_FILES = {
+    "SHA256SUMS",
+    "binding-inputs.json",
+    "correctness-threshold-audit.json",
+    "graph.json",
+    "hash-manifest.json",
+    "model_identity.json",
+    "state.json",
+    "validation-report.json",
+}
+VALIDATION_REPORT_FIELDS = {
+    "schema_version",
+    "status",
+    "promotion_eligible",
+    "checked",
+    "artifact_directory",
+    "artifacts",
+    "path_oracle_status",
+    "correctness_threshold_status",
+    "blocking_reasons",
+    "promotion_reason",
+}
+VALIDATION_CHECKS = [
+    "active/P0/P1 four-field model identity equality",
+    "P1 canonical graph/state extraction and trace digest/schema/source equality",
+    "duplicate and unknown-field rejection contract",
+    "source oracle role separation",
+    "same-artifact all-M=1 production path oracle not-run contract",
+    "correctness threshold audit remains blocked",
+    "generated artifact hashes",
+]
+VALIDATION_BLOCKING_REASONS = [
+    "same-artifact all-M=1 production path oracle was not executed",
+    "numerical correctness thresholds are not available in the normative plan/spec",
+]
+
+# Tests replace this hook to force a rename, rewrite, or append at a precise
+# point in the fd-based read.  Production callers leave it as ``None``.
+_READ_TEST_HOOK: Callable[[Path, str], None] | None = None
 
 
 class BindingError(ValueError):
@@ -86,16 +128,104 @@ def _constant(value: str) -> Any:
     raise BindingError(f"non-finite JSON value: {value}")
 
 
-def load_json(path: Path, label: str) -> Any:
-    """Read one regular JSON file, rejecting duplicates and non-finite values."""
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
 
-    if path.is_symlink() or not path.is_file():
-        raise BindingError(f"{label} must be a regular non-symlink file")
-    if path.stat().st_size > MAX_JSON_BYTES:
-        raise BindingError(f"{label} exceeds the bounded JSON size")
+
+def _validate_components(path: Path, label: str, *, directory: bool) -> Path:
+    """Reject every symlink component without resolving through it."""
+
+    absolute = _lexical_absolute(path)
+    current = Path(absolute.anchor)
+    parts = absolute.parts[1:]
+    require(bool(parts), f"{label} path is invalid")
+    for index, part in enumerate(parts):
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError as error:
+            raise BindingError(f"{label} path component is unavailable: {current}") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise BindingError(f"{label} path contains a symlink component: {current}")
+        leaf = index == len(parts) - 1
+        if not leaf and not stat.S_ISDIR(metadata.st_mode):
+            raise BindingError(f"{label} parent component is not a directory: {current}")
+        if leaf:
+            expected = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+            require(expected, f"{label} must be a regular {'directory' if directory else 'file'}")
+    return absolute
+
+
+def _same_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+
+
+def _stable_read(path: Path, label: str, *, maximum: int) -> bytes:
+    """Read a bounded regular file through one fd and detect TOCTOU changes."""
+
+    absolute = _validate_components(path, label, directory=False)
     try:
+        pre_open = os.stat(absolute, follow_symlinks=False)
+    except OSError as error:
+        raise BindingError(f"{label} is unavailable before open") from error
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(absolute, flags)
+    except OSError as error:
+        raise BindingError(f"{label} cannot be opened safely") from error
+    try:
+        before = os.fstat(descriptor)
+        path_before = os.stat(absolute, follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode), f"{label} fd is not a regular file")
+        require(_same_identity(pre_open, before), f"{label} changed while opening")
+        require(_same_identity(before, path_before), f"{label} changed before read")
+        require(before.st_size <= maximum, f"{label} exceeds bounded size")
+        if _READ_TEST_HOOK is not None:
+            _READ_TEST_HOOK(absolute, "after_open")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            require(total <= maximum, f"{label} exceeds bounded size")
+        if _READ_TEST_HOOK is not None:
+            _READ_TEST_HOOK(absolute, "after_read")
+        after = os.fstat(descriptor)
+        try:
+            path_after = os.stat(absolute, follow_symlinks=False)
+        except OSError as error:
+            raise BindingError(f"{label} path disappeared during read") from error
+        require(_same_identity(before, after), f"{label} changed during read")
+        require(_same_identity(before, path_after), f"{label} path changed during read")
+        require(total == before.st_size, f"{label} size changed during read")
+        _validate_components(absolute, label, directory=False)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def load_json(path: Path, label: str) -> Any:
+    """Read one stable JSON file, rejecting duplicates and non-finite values."""
+
+    try:
+        raw = _stable_read(path, label, maximum=MAX_JSON_BYTES)
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=_pairs,
             parse_constant=_constant,
         )
@@ -131,19 +261,31 @@ def sha_bytes(value: bytes) -> str:
 
 
 def sha_file(path: Path, label: str) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise BindingError(f"{label} must be a regular non-symlink file")
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha_bytes(_stable_read(path, label, maximum=MAX_HASH_BYTES))
 
 
 def regular(path: Path, label: str) -> Path:
-    if path.is_symlink() or not path.is_file():
-        raise BindingError(f"{label} must be a regular non-symlink file")
-    return path.resolve(strict=True)
+    return _validate_components(path, label, directory=False)
+
+
+def regular_directory(path: Path, label: str) -> Path:
+    return _validate_components(path, label, directory=True)
+
+
+def ensure_directory(path: Path, label: str) -> Path:
+    """Create a directory only after validating every existing parent."""
+
+    absolute = _lexical_absolute(path)
+    cursor = absolute
+    missing: list[Path] = []
+    while not cursor.exists() and not cursor.is_symlink():
+        missing.append(cursor)
+        cursor = cursor.parent
+    regular_directory(cursor, f"{label} existing parent")
+    for item in reversed(missing):
+        os.mkdir(item, 0o755)
+        regular_directory(item, label)
+    return regular_directory(absolute, label)
 
 
 def require(condition: bool, message: str) -> None:
@@ -175,15 +317,26 @@ def json_bytes(value: Any) -> bytes:
 def write_new(path: Path, value: bytes) -> None:
     """Atomically create a new file; never overwrite prior evidence."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
+    path = _lexical_absolute(path)
+    regular_directory(path.parent, "artifact parent")
+    if os.path.lexists(path):
         raise BindingError(f"refusing to overwrite {path}")
     temporary = path.with_name(f".{path.name}.incomplete")
-    with temporary.open("xb") as target:
-        target.write(value)
-        target.flush()
-        os.fsync(target.fileno())
-    temporary.replace(path)
+    if os.path.lexists(temporary):
+        raise BindingError(f"refusing to overwrite {temporary}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o644)
+    try:
+        view = memoryview(value)
+        while view:
+            written = os.write(descriptor, view)
+            require(written > 0, f"short write for {path.name}")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    regular(path, path.name)
 
 
 def active_identity(manifest: dict[str, Any], manifest_path: Path) -> tuple[dict[str, str], str]:
@@ -375,30 +528,18 @@ def _validation_report(values: dict[str, Any], output: Path, artifacts: dict[str
         "schema_version": "ullm.aq4_production_p2_offline_binding_validation.v1",
         "status": "valid",
         "promotion_eligible": False,
-        "checked": [
-            "active/P0/P1 four-field model identity equality",
-            "P1 canonical graph/state extraction and trace digest/schema/source equality",
-            "duplicate and unknown-field rejection contract",
-            "source oracle role separation",
-            "same-artifact all-M=1 production path oracle not-run contract",
-            "correctness threshold audit remains blocked",
-            "generated artifact hashes",
-        ],
-        "artifact_directory": str(output.resolve()),
+        "checked": VALIDATION_CHECKS,
+        "artifact_directory": str(output),
         "artifacts": artifacts,
         "path_oracle_status": "not_run",
         "correctness_threshold_status": "blocked",
-        "blocking_reasons": [
-            "same-artifact all-M=1 production path oracle was not executed",
-            "numerical correctness thresholds are not available in the normative plan/spec",
-        ],
+        "blocking_reasons": VALIDATION_BLOCKING_REASONS,
         "promotion_reason": "offline binding inputs are not promotion evidence",
     }
 
 
 def generate(args: argparse.Namespace) -> Path:
-    output = args.output_dir.resolve()
-    output.mkdir(parents=True, exist_ok=True)
+    output = ensure_directory(args.output_dir, "output directory")
     values = validate_inputs(
         args.active_manifest,
         args.p0_snapshot,
@@ -421,10 +562,10 @@ def generate(args: argparse.Namespace) -> Path:
     write_new(state_path, json_bytes(state))
     write_new(audit_path, json_bytes(audit))
     core = {
-        "model_identity": {"path": model_path.name, "sha256": sha_file(model_path, "model identity")},
-        "graph": {"path": graph_path.name, "sha256": sha_file(graph_path, "graph")},
-        "state": {"path": state_path.name, "sha256": sha_file(state_path, "state")},
-        "correctness_threshold_audit": {"path": audit_path.name, "sha256": sha_file(audit_path, "threshold audit")},
+        "model_identity": {"path": model_path.name, "sha256": sha_file(model_path, "model identity"), "type": "model_identity"},
+        "graph": {"path": graph_path.name, "sha256": sha_file(graph_path, "graph"), "type": "model_graph"},
+        "state": {"path": state_path.name, "sha256": sha_file(state_path, "state"), "type": "state_schema"},
+        "correctness_threshold_audit": {"path": audit_path.name, "sha256": sha_file(audit_path, "threshold audit"), "type": "correctness_threshold_audit"},
     }
     binding = {
         "schema_version": "ullm.aq4_production_p2_offline_binding_inputs.v1",
@@ -480,7 +621,7 @@ def generate(args: argparse.Namespace) -> Path:
     # digest without creating a self-hash cycle.
     report_path = output / "validation-report.json"
     report_artifacts = dict(core)
-    report_artifacts["validation_report"] = {"path": report_path.name, "sha256": None}
+    report_artifacts["validation_report"] = {"path": report_path.name, "sha256": None, "type": "validation_report"}
     report = _validation_report(values, output, report_artifacts)
     report_raw = json_bytes(report)
     report_artifacts["validation_report"]["sha256"] = sha_bytes(report_raw)
@@ -489,7 +630,7 @@ def generate(args: argparse.Namespace) -> Path:
     write_new(report_path, report_raw)
     write_new(output / "binding-inputs.json", binding_raw)
     all_artifacts = {
-        path.name: {"bytes": path.stat().st_size, "sha256": sha_file(path, path.name)}
+        path.name: {"bytes": os.lstat(regular(path, path.name)).st_size, "sha256": sha_file(path, path.name)}
         for path in (model_path, graph_path, state_path, audit_path, report_path, output / "binding-inputs.json")
     }
     hash_manifest = {
@@ -501,27 +642,77 @@ def generate(args: argparse.Namespace) -> Path:
     hash_path = output / "hash-manifest.json"
     write_new(hash_path, json_bytes(hash_manifest))
     sums_path = output / "SHA256SUMS"
-    sums = "".join(f"{sha_file(path, path.name)}  {path.name}\n" for path in sorted(output.iterdir()) if path.name != sums_path.name and path.is_file())
+    sums = "".join(
+        f"{sha_file(output / name, name)}  {name}\n"
+        for name in sorted(EXPECTED_BUNDLE_FILES - {"SHA256SUMS"})
+    )
     write_new(sums_path, sums.encode("ascii"))
     # Validate the final bundle, including hash-manifest and SHA256SUMS.
     validate_bundle(output)
     return output
 
 
-def _artifact_link(value: Any, output: Path, label: str) -> Path:
-    link = exact(value, {"path", "sha256"}, label)
-    path = output / nonempty_string(link["path"], f"{label}.path")
-    require(path.parent.resolve() == output.resolve(), f"{label} path escapes output directory")
+def _artifact_link(value: Any, output: Path, label: str, *, expected_path: str, expected_type: str) -> Path:
+    link = exact(value, {"path", "sha256", "type"}, label)
+    name = nonempty_string(link["path"], f"{label}.path")
+    require(name == expected_path and Path(name).name == name, f"{label} path differs")
+    require(link["type"] == expected_type, f"{label} type differs")
+    path = output / name
     hash_field(link["sha256"], f"{label}.sha256")
     require(sha_file(path, label) == link["sha256"], f"{label} hash differs")
     return path
 
 
+def _bundle_file_set(output: Path) -> set[str]:
+    """Return the exact regular-file set, rejecting symlinks and directories."""
+
+    before = os.stat(output, follow_symlinks=False)
+    names: set[str] = set()
+    with os.scandir(output) as entries:
+        for entry in entries:
+            require(not entry.is_symlink(), f"unexpected symlink in bundle: {entry.name}")
+            metadata = entry.stat(follow_symlinks=False)
+            require(stat.S_ISREG(metadata.st_mode), f"unexpected non-file in bundle: {entry.name}")
+            require(entry.name not in names, f"duplicate bundle entry: {entry.name}")
+            names.add(entry.name)
+    after = os.stat(output, follow_symlinks=False)
+    require(_same_identity(before, after), "output directory changed during enumeration")
+    return names
+
+
+def _validate_validation_report(
+    report: Any,
+    output: Path,
+    binding_artifacts: dict[str, Any],
+) -> None:
+    document = exact(report, VALIDATION_REPORT_FIELDS, "validation report")
+    require(document["schema_version"] == "ullm.aq4_production_p2_offline_binding_validation.v1", "validation report schema differs")
+    require(document["status"] == "valid" and document["promotion_eligible"] is False, "validation report status differs")
+    require(document["checked"] == VALIDATION_CHECKS, "validation report checks differ")
+    require(document["artifact_directory"] == str(output), "validation report artifact directory differs")
+    require(document["path_oracle_status"] == "not_run", "validation report path oracle status differs")
+    require(document["correctness_threshold_status"] == "blocked", "validation report correctness status differs")
+    require(document["blocking_reasons"] == VALIDATION_BLOCKING_REASONS, "validation report blocking reasons differ")
+    require(document["promotion_reason"] == "offline binding inputs are not promotion evidence", "validation report promotion reason differs")
+    artifacts = exact(
+        document["artifacts"],
+        {"model_identity", "graph", "state", "correctness_threshold_audit", "validation_report"},
+        "validation report artifacts",
+    )
+    for name in ("model_identity", "graph", "state", "correctness_threshold_audit"):
+        require(artifacts[name] == binding_artifacts[name], f"validation report {name} link differs")
+    self_link = exact(artifacts["validation_report"], {"path", "sha256", "type"}, "validation report self link")
+    require(
+        self_link == {"path": "validation-report.json", "sha256": None, "type": "validation_report"},
+        "validation report self link differs",
+    )
+
+
 def validate_bundle(output_dir: Path) -> dict[str, Any]:
     """Validate a generated bundle; fail closed on any mismatch or tamper."""
 
-    output = output_dir.resolve(strict=True)
-    require(output.is_dir(), "output directory must be a directory")
+    output = regular_directory(output_dir, "output directory")
+    require(_bundle_file_set(output) == EXPECTED_BUNDLE_FILES, "bundle file set differs")
     binding_path = output / "binding-inputs.json"
     binding = load_json(binding_path, "binding-inputs")
     require(set(binding) == ROOT_FIELDS, "binding-inputs root fields differ")
@@ -529,11 +720,13 @@ def validate_bundle(output_dir: Path) -> dict[str, Any]:
     require(binding["status"] == "blocked" and binding["promotion_eligible"] is False, "binding must remain blocked and ineligible")
     model = validate_model_identity(load_json(output / "model_identity.json", "model identity"))
     require(model == binding["model_identity"], "model identity binding differs")
-    graph_path = _artifact_link(binding["artifacts"]["graph"], output, "graph artifact")
-    state_path = _artifact_link(binding["artifacts"]["state"], output, "state artifact")
-    model_path = _artifact_link(binding["artifacts"]["model_identity"], output, "model identity artifact")
-    audit_path = _artifact_link(binding["artifacts"]["correctness_threshold_audit"], output, "threshold audit artifact")
-    require(model_path.name == "model_identity.json" and graph_path.name == "graph.json" and state_path.name == "state.json", "generated artifact names differ")
+    artifacts = exact(binding["artifacts"], {"model_identity", "graph", "state", "correctness_threshold_audit", "validation_report"}, "binding artifacts")
+    graph_path = _artifact_link(artifacts["graph"], output, "graph artifact", expected_path="graph.json", expected_type="model_graph")
+    state_path = _artifact_link(artifacts["state"], output, "state artifact", expected_path="state.json", expected_type="state_schema")
+    model_path = _artifact_link(artifacts["model_identity"], output, "model identity artifact", expected_path="model_identity.json", expected_type="model_identity")
+    audit_path = _artifact_link(artifacts["correctness_threshold_audit"], output, "threshold audit artifact", expected_path="correctness-threshold-audit.json", expected_type="correctness_threshold_audit")
+    report_path = _artifact_link(artifacts["validation_report"], output, "validation report artifact", expected_path="validation-report.json", expected_type="validation_report")
+    _validate_validation_report(load_json(report_path, "validation report"), output, artifacts)
     audit = load_json(audit_path, "threshold audit")
     require(set(audit) == {"schema_version", "status", "decision", "promotion_eligible", "required_fields", "values", "normative_sources", "finding", "blocking_reasons"}, "threshold audit fields differ")
     require(audit["status"] == "blocked" and audit["decision"] == "BLOCKED" and audit["promotion_eligible"] is False and audit["values"] is None, "threshold audit is not blocked")
@@ -571,13 +764,17 @@ def validate_bundle(output_dir: Path) -> dict[str, Any]:
     trace = load_json(Path(inputs["p1_trace"]["path"]), "P1 trace")
     model_graph, state_schema, model_meta, state_meta = _validate_graph_inputs(record, trace, model, active_sha)
     require(load_json(graph_path, "graph") == model_graph and load_json(state_path, "state") == state_schema, "standalone graph/state values differ")
-    require(set(binding["artifacts"]) == {"model_identity", "graph", "state", "correctness_threshold_audit", "validation_report"}, "artifact binding fields differ")
     require(binding["graph"] == {"artifact": binding["artifacts"]["graph"], **model_meta}, "graph binding differs")
     require(binding["state"] == {"artifact": binding["artifacts"]["state"], **state_meta}, "state binding differs")
-    require(exact(binding["correctness_thresholds"], {"status", "artifact", "template_path", "template_sha256", "required_fields"}, "correctness_thresholds")["status"] == "blocked", "correctness thresholds are not blocked")
+    correctness_binding = exact(binding["correctness_thresholds"], {"status", "artifact", "template_path", "template_sha256", "required_fields"}, "correctness_thresholds")
+    require(correctness_binding["status"] == "blocked", "correctness thresholds are not blocked")
+    require(correctness_binding["artifact"] == artifacts["correctness_threshold_audit"], "correctness threshold audit link differs")
+    require(correctness_binding["required_fields"] == list(REQUIRED_CORRECTNESS_FIELDS), "correctness threshold required fields differ")
+    template_path = regular(Path(correctness_binding["template_path"]), "threshold policy template")
+    require(sha_file(template_path, "threshold policy template") == correctness_binding["template_sha256"], "threshold template hash differs")
     require(exact(binding["promotion"], {"eligible", "reason", "path_oracle_not_run", "thresholds_blocked"}, "promotion") == {
         "eligible": False,
-        "reason": binding["promotion"]["reason"],
+        "reason": "offline binding inputs are not production performance or promotion evidence",
         "path_oracle_not_run": True,
         "thresholds_blocked": True,
     }, "promotion binding differs")
@@ -592,16 +789,19 @@ def validate_bundle(output_dir: Path) -> dict[str, Any]:
     for item in listed:
         child = exact(item, {"path", "bytes", "sha256"}, "hash manifest artifact")
         name = nonempty_string(child["path"], "hash manifest path")
-        require(name not in names, f"duplicate hash manifest path: {name}")
+        require(Path(name).name == name and name not in names, f"duplicate or invalid hash manifest path: {name}")
         names.add(name)
         target = output / name
-        require(target.parent.resolve() == output.resolve() and target.is_file() and not target.is_symlink(), f"hash manifest unknown artifact: {name}")
-        require(child["bytes"] == target.stat().st_size, f"hash manifest byte count differs: {name}")
+        metadata = os.lstat(regular(target, f"hash manifest artifact {name}"))
+        require(child["bytes"] == metadata.st_size, f"hash manifest byte count differs: {name}")
         require(child["sha256"] == sha_file(target, name), f"hash manifest digest differs: {name}")
     expected_names = {"binding-inputs.json", "correctness-threshold-audit.json", "graph.json", "model_identity.json", "state.json", "validation-report.json"}
     require(names == expected_names, "hash manifest artifact set differs")
     sums_path = output / "SHA256SUMS"
-    lines = sums_path.read_text(encoding="ascii").splitlines()
+    try:
+        lines = _stable_read(sums_path, "SHA256SUMS", maximum=MAX_SUMS_BYTES).decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise BindingError("SHA256SUMS is not ASCII") from error
     require(len(lines) == len(expected_names) + 1, "SHA256SUMS must include hash-manifest.json and all generated artifacts")
     sums: dict[str, str] = {}
     for line in lines:
@@ -609,7 +809,7 @@ def validate_bundle(output_dir: Path) -> dict[str, Any]:
         require(len(parts) == 2, "invalid SHA256SUMS line")
         digest, name = parts
         hash_field(digest, f"SHA256SUMS.{name}")
-        require(name not in sums, f"duplicate SHA256SUMS path: {name}")
+        require(Path(name).name == name and name not in sums, f"duplicate or invalid SHA256SUMS path: {name}")
         sums[name] = digest
     require(set(sums) == expected_names | {"hash-manifest.json"}, "SHA256SUMS artifact set differs")
     for name, digest in sums.items():

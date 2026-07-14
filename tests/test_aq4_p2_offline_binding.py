@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib.util
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +19,10 @@ P1_RECORD = RUN_ROOT / "p1/production-executor-record-live-v4.json"
 P1_TRACE = RUN_ROOT / "p1/production-trace-live-v4.json"
 SOURCE = RUN_ROOT / "p2/source-oracle-v2/manifest.json"
 ACTIVE = Path("/etc/ullm/served-models/active.json")
+SPEC = importlib.util.spec_from_file_location("aq4_p2_offline_binding", TOOL)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
 
 
 class Aq4P2OfflineBindingTests(unittest.TestCase):
@@ -40,6 +48,28 @@ class Aq4P2OfflineBindingTests(unittest.TestCase):
             command.extend((flag, str(path)))
         completed = self.run_tool(*command)
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    @staticmethod
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def rehash_bundle(self, output: Path) -> None:
+        binding_path = output / "binding-inputs.json"
+        binding = json.loads(binding_path.read_text())
+        binding["artifacts"]["validation_report"]["sha256"] = self.sha(output / "validation-report.json")
+        binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+        manifest_path = output / "hash-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for artifact in manifest["artifacts"]:
+            path = output / artifact["path"]
+            artifact["bytes"] = path.stat().st_size
+            artifact["sha256"] = self.sha(path)
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        sums = "".join(
+            f"{self.sha(output / name)}  {name}\n"
+            for name in sorted(MODULE.EXPECTED_BUNDLE_FILES - {"SHA256SUMS"})
+        )
+        (output / "SHA256SUMS").write_text(sums)
 
     def test_generation_extracts_lossless_graph_state_and_blocks_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,6 +176,158 @@ class Aq4P2OfflineBindingTests(unittest.TestCase):
             sums.write_text("\n".join(lines) + "\n")
             checked = self.run_tool("--validate", "--output-dir", str(output))
             self.assertNotEqual(checked.returncode, 0)
+
+    def test_validator_rejects_validation_report_unknown_field_after_rehash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "p2"
+            self.generate(output)
+            report = json.loads((output / "validation-report.json").read_text())
+            report["unexpected"] = True
+            (output / "validation-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            self.rehash_bundle(output)
+            checked = self.run_tool("--validate", "--output-dir", str(output))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_validator_rejects_validation_report_semantic_tamper_after_rehash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "p2"
+            self.generate(output)
+            report = json.loads((output / "validation-report.json").read_text())
+            report["path_oracle_status"] = "passed"
+            (output / "validation-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            self.rehash_bundle(output)
+            checked = self.run_tool("--validate", "--output-dir", str(output))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_validator_rejects_validation_report_link_type_after_rehash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "p2"
+            self.generate(output)
+            binding = json.loads((output / "binding-inputs.json").read_text())
+            binding["artifacts"]["validation_report"]["type"] = "model_graph"
+            (output / "binding-inputs.json").write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+            # Update only the outer manifests so this reaches link semantics.
+            manifest = json.loads((output / "hash-manifest.json").read_text())
+            for artifact in manifest["artifacts"]:
+                if artifact["path"] == "binding-inputs.json":
+                    artifact["bytes"] = (output / "binding-inputs.json").stat().st_size
+                    artifact["sha256"] = self.sha(output / "binding-inputs.json")
+            (output / "hash-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            sums = "".join(
+                f"{self.sha(output / name)}  {name}\n"
+                for name in sorted(MODULE.EXPECTED_BUNDLE_FILES - {"SHA256SUMS"})
+            )
+            (output / "SHA256SUMS").write_text(sums)
+            checked = self.run_tool("--validate", "--output-dir", str(output))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_validator_rejects_unexpected_and_missing_bundle_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unexpected = root / "unexpected"
+            self.generate(unexpected)
+            (unexpected / "extra.json").write_text("{}\n")
+            checked = self.run_tool("--validate", "--output-dir", str(unexpected))
+            self.assertNotEqual(checked.returncode, 0)
+            missing = root / "missing"
+            self.generate(missing)
+            (missing / "state.json").unlink()
+            checked = self.run_tool("--validate", "--output-dir", str(missing))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_validator_rejects_sha256sums_symlink_and_output_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "p2"
+            self.generate(output)
+            external = root / "sums.txt"
+            shutil.copy2(output / "SHA256SUMS", external)
+            (output / "SHA256SUMS").unlink()
+            (output / "SHA256SUMS").symlink_to(external)
+            checked = self.run_tool("--validate", "--output-dir", str(output))
+            self.assertNotEqual(checked.returncode, 0)
+            real_output = root / "real-p2"
+            self.generate(real_output)
+            alias = root / "p2-alias"
+            alias.symlink_to(real_output, target_is_directory=True)
+            checked = self.run_tool("--validate", "--output-dir", str(alias))
+            self.assertNotEqual(checked.returncode, 0)
+
+    def test_generator_rejects_input_parent_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_parent = root / "real"
+            real_parent.mkdir()
+            record = real_parent / "record.json"
+            shutil.copy2(P1_RECORD, record)
+            alias = root / "alias"
+            alias.symlink_to(real_parent, target_is_directory=True)
+            completed = self.run_tool(
+                "--output-dir", str(root / "output"), "--p0-snapshot", str(P0),
+                "--p1-executor-record", str(alias / "record.json"), "--p1-trace", str(P1_TRACE),
+                "--source-oracle", str(SOURCE),
+            )
+            self.assertNotEqual(completed.returncode, 0)
+
+    def test_stable_read_rejects_deterministic_rename_toctou(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.json"
+            path.write_text('{"value":1}\n')
+            moved = Path(tmp) / "moved.json"
+
+            def hook(target: Path, phase: str) -> None:
+                if target == path and phase == "after_open":
+                    MODULE._READ_TEST_HOOK = None
+                    target.rename(moved)
+                    target.write_text('{"value":1}\n')
+
+            MODULE._READ_TEST_HOOK = hook
+            try:
+                with self.assertRaises(MODULE.BindingError):
+                    MODULE.load_json(path, "rename fixture")
+            finally:
+                MODULE._READ_TEST_HOOK = None
+
+    def test_stable_read_rejects_deterministic_append_toctou(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.json"
+            path.write_text('{"value":1}\n')
+
+            def hook(target: Path, phase: str) -> None:
+                if target == path and phase == "after_read":
+                    MODULE._READ_TEST_HOOK = None
+                    with target.open("ab") as stream:
+                        stream.write(b" ")
+
+            MODULE._READ_TEST_HOOK = hook
+            try:
+                with self.assertRaises(MODULE.BindingError):
+                    MODULE.load_json(path, "append fixture")
+            finally:
+                MODULE._READ_TEST_HOOK = None
+
+    def test_stable_read_rejects_deterministic_same_size_rewrite_toctou(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.json"
+            original = b'{"value":1}\n'
+            path.write_bytes(original)
+
+            def hook(target: Path, phase: str) -> None:
+                if target == path and phase == "after_read":
+                    MODULE._READ_TEST_HOOK = None
+                    descriptor = os.open(target, os.O_WRONLY)
+                    try:
+                        os.pwrite(descriptor, b'{"value":2}\n', 0)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+
+            MODULE._READ_TEST_HOOK = hook
+            try:
+                with self.assertRaises(MODULE.BindingError):
+                    MODULE.load_json(path, "rewrite fixture")
+            finally:
+                MODULE._READ_TEST_HOOK = None
 
 
 if __name__ == "__main__":
