@@ -215,8 +215,10 @@ def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
     assert value["authorization"]["maximum_invocations"] == 1
     assert value["authorization"]["rocprof_wrapper_required"] is True
     assert command == HARNESS.profile_capture_command()
-    assert command[-len(HARNESS.profile_launcher_command()):] == HARNESS.profile_launcher_command()
-    assert command[command.index("--runner-command") + 1] == str(HARNESS.LAUNCHER.PYTHON)
+    assert "--runner-command" not in command
+    assert command[command.index("--profiler-path") + 1] == str(HARNESS.PROFILE_PROFILER)
+    assert command[command.index("--profiler-sha256") + 1] == HARNESS.PROFILE_PROFILER_SHA
+    assert command[command.index("--target-command-manifest") + 1] == str(HARNESS.PROFILE_TARGET_COMMAND_MANIFEST)
     assert profile["command_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(command))
     assert profile["output"]["must_not_exist_before_capture"] is True
     assert profile["resident_evidence"]["run_id"] == HARNESS.LAUNCHER.PROFILE_RUN_ID
@@ -225,6 +227,15 @@ def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
     assert profile["roctx"]["roctx_library"]["resolved_path"] == str(HARNESS.LAUNCHER.ROCTX_LIBRARY_RESOLVED)
     assert profile["target_launcher"]["command"] == HARNESS.profile_launcher_command()
     assert profile["target_launcher"]["binding_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(HARNESS.LAUNCHER.ready_profile_execute_binding()))
+    target = HARNESS.profile_target_command_manifest()
+    assert target["argv"] == HARNESS.profile_launcher_command()
+    assert {item["argument_index"] for item in target["input_files"]} == {0, 1}
+    assert {item["argument_index"] for item in target["output_paths"]} == {5, 7}
+    assert profile["target_launcher"]["manifest"] == {
+        "path": str(HARNESS.PROFILE_TARGET_COMMAND_MANIFEST),
+        "sha256": HARNESS.sha_bytes(HARNESS.pretty(target)),
+        "manifest_sha256": target["manifest_sha256"],
+    }
 
 
 def test_profile_fake_maintenance_captures_child_then_restores(tmp_path: Path) -> None:
@@ -251,7 +262,7 @@ def test_profile_capture_failure_always_restores_outer_service(tmp_path: Path, f
     assert runtime.trust_stages == ["before-start", "capture-before", "capture-after", "finalize-before"]
 
 
-@pytest.mark.parametrize("target", ("capture", "profiler"))
+@pytest.mark.parametrize("target", ("capture", "profiler", "launcher", "manifest"))
 def test_profile_trust_rejects_same_path_hash_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
     capture = tmp_path / "capture.py"; capture.write_bytes(b"capture-trusted")
     profiler = tmp_path / "rocprofv3"; profiler.write_bytes(b"profiler-trusted"); profiler.chmod(0o755)
@@ -262,10 +273,13 @@ def test_profile_trust_rejects_same_path_hash_swap(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(HARNESS, "PROFILE_PROFILER_SHA", HARNESS.sha_bytes(profiler.read_bytes()))
     monkeypatch.setattr(HARNESS, "LAUNCHER_PATH", launcher)
     monkeypatch.setattr(HARNESS, "LAUNCHER_SHA", HARNESS.sha_bytes(launcher.read_bytes()))
+    manifest = tmp_path / "target-command-manifest.json"
+    monkeypatch.setattr(HARNESS, "PROFILE_TARGET_COMMAND_MANIFEST", manifest)
+    manifest.write_bytes(HARNESS.pretty(HARNESS.profile_target_command_manifest()))
     contract = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)["profile_diagnostic"]
     guard = HARNESS.ProfileTrustGuard()
     assert guard(contract, "before-start")["passed"] is True
-    watched = capture if target == "capture" else profiler
+    watched = {"capture": capture, "profiler": profiler, "launcher": launcher, "manifest": manifest}[target]
     replacement = tmp_path / f"{target}-replacement"; replacement.write_bytes(b"swapped-bytes")
     if target == "profiler":
         replacement.chmod(0o755)

@@ -31,8 +31,8 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "4e0649ccaea3932d7c5e9ab3489b3271b8ef8185"
-LAUNCHER_TREE = "083f8464f5315a68956cffdf178e3bf1f9b12ca2"
+LAUNCHER_COMMIT = "eec6922fa9c90267213d2749c5dc816be54de527"
+LAUNCHER_TREE = "f6cef14d1e2a75dc1a12371d2a8e2a754d506482"
 LAUNCHER_GIT_BLOB = "c422e4235a2ee6595cf43656c573b7e863489f9e"
 LAUNCHER_SHA = "607b7c9ad0bf7aa8e8b9303f60209b4a6dc998886dbd8af86d83955984232835"
 RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
@@ -51,11 +51,14 @@ PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-product
 PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
 PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
 PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
+PROFILE_TARGET_COMMAND_MANIFEST = PROFILE_READY_ROOT / "target-command-manifest.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v1"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "489183abba581332544d0d004338a2cee08a0d89"
-PROFILE_CAPTURE_SHA = "be62caa7eee810cd6b33033eab15418b803ac1cee6559153e0cf7af446fa21f7"
+PROFILE_CAPTURE_COMMIT = "2b5545d83d8be06ffac86dbe04742af3acabf6a9"
+PROFILE_CAPTURE_TREE = "534e66e16b0f9a2fed41dfb817930b26c5d1ca10"
+PROFILE_CAPTURE_GIT_BLOB = "880404abf5f6f4bf8411c71824f9984ad6e9ef3a"
+PROFILE_CAPTURE_SHA = "3903966e32c809e7f0253f8398e63eea6311367dbf140b7d0bbcc6904b2ba73f"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1"
@@ -283,9 +286,23 @@ class ProfileTrustGuard:
                 raise HarnessError("profile trust was not initialized before capture")
             if contract.get("command") != profile_capture_command() or contract.get("target_launcher", {}).get("command") != profile_launcher_command():
                 raise HarnessError("profile capture/launcher command manifest differs")
+            manifest = profile_target_command_manifest()
+            manifest_ref = {
+                "path": str(PROFILE_TARGET_COMMAND_MANIFEST),
+                "sha256": sha_bytes(pretty(manifest)),
+                "manifest_sha256": manifest["manifest_sha256"],
+            }
+            if contract.get("target_launcher", {}).get("manifest") != manifest_ref:
+                raise HarnessError("profile target command manifest binding differs")
             self.snapshot.file(PROFILE_CAPTURE_TOOL, PROFILE_CAPTURE_SHA, "profile capture tool")
             self.snapshot.file(PROFILE_PROFILER, PROFILE_PROFILER_SHA, "profile profiler")
+            self.snapshot.file(LAUNCHER.PYTHON, LAUNCHER.PYTHON_SHA, "profile target Python")
             self.snapshot.file(LAUNCHER_PATH, LAUNCHER_SHA, "profile target launcher")
+            self.snapshot.file(
+                PROFILE_TARGET_COMMAND_MANIFEST,
+                manifest_ref["sha256"],
+                "profile target command manifest",
+            )
             self.initialized = True
         self.snapshot.verify()
         return {
@@ -293,7 +310,9 @@ class ProfileTrustGuard:
             "passed": True,
             "capture_tool_sha256": PROFILE_CAPTURE_SHA,
             "profiler_sha256": PROFILE_PROFILER_SHA,
+            "python_sha256": LAUNCHER.PYTHON_SHA,
             "launcher_sha256": LAUNCHER_SHA,
+            "target_manifest_sha256": contract["target_launcher"]["manifest"]["sha256"],
             "capture_command_sha256": contract["command_sha256"],
             "launcher_command_sha256": contract["target_launcher"]["command_sha256"],
         }
@@ -403,13 +422,47 @@ def profile_launcher_command() -> list[str]:
     ]
 
 
+def profile_target_command_manifest() -> dict[str, Any]:
+    command = profile_launcher_command()
+    value: dict[str, Any] = {
+        "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+        "status": "bound",
+        "manifest_sha256": None,
+        "argv": command,
+        "input_files": [
+            {
+                "argument_index": 0,
+                "path": command[0],
+                "sha256": LAUNCHER.PYTHON_SHA,
+                "executable": True,
+            },
+            {
+                "argument_index": 1,
+                "path": command[1],
+                "sha256": LAUNCHER_SHA,
+                "executable": False,
+            },
+        ],
+        "output_paths": [
+            {"argument_index": 5, "path": command[5]},
+            {"argument_index": 7, "path": command[7]},
+        ],
+    }
+    value["manifest_sha256"] = sha_bytes(canonical(value))
+    return value
+
+
 def profile_capture_command() -> list[str]:
     return [
         str(LAUNCHER.PYTHON),
         str(PROFILE_CAPTURE_TOOL),
         "capture",
-        "--profiler",
+        "--profiler-path",
         str(PROFILE_PROFILER),
+        "--profiler-sha256",
+        PROFILE_PROFILER_SHA,
+        "--target-command-manifest",
+        str(PROFILE_TARGET_COMMAND_MANIFEST),
         "--profile-output-directory",
         str(PROFILE_OUTPUT_DIRECTORY),
         "--profile-output-name",
@@ -424,8 +477,6 @@ def profile_capture_command() -> list[str]:
         str(PROFILE_ARTIFACT),
         "--timeout",
         str(float(PROFILE_TIMEOUT_SECONDS)),
-        "--runner-command",
-        *profile_launcher_command(),
     ]
 
 
@@ -442,9 +493,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 218, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 155, "marker_chain": 55, "diagnostic_capture": 8},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "base-and-profile-dry-run-process-count-zero", "rocprof-wrapper-only", "roctx-run-session-case-and-library-binding"],
+    "test_count": 222, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
+    "test_suites": {"existing_and_profile_regression": 157, "marker_chain": 55, "diagnostic_capture": 10},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
@@ -485,6 +536,7 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
         command = profile_capture_command()
         launcher_command = profile_launcher_command()
         launcher_binding = LAUNCHER.ready_profile_execute_binding()
+        target_manifest = profile_target_command_manifest()
         value["profile_diagnostic"] = {
             "schema_version": "ullm.aq4_p3_diagnostic_rocprof_ready.v1",
             "status": "ready_for_one_profile_diagnostic",
@@ -492,7 +544,13 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "promotion_eligible": False,
             "maximum_invocations": 1,
             "output_no_reuse": True,
-            "capture_tool": {"path": str(PROFILE_CAPTURE_TOOL), "commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
+            "capture_tool": {
+                "path": str(PROFILE_CAPTURE_TOOL),
+                "commit": PROFILE_CAPTURE_COMMIT,
+                "tree": PROFILE_CAPTURE_TREE,
+                "git_blob": PROFILE_CAPTURE_GIT_BLOB,
+                "sha256": PROFILE_CAPTURE_SHA,
+            },
             "profiler": {"path": str(PROFILE_PROFILER), "resolved_path": str(PROFILE_PROFILER), "sha256": PROFILE_PROFILER_SHA},
             "command": command,
             "command_sha256": sha_bytes(canonical(command)),
@@ -504,6 +562,11 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
                 "command": launcher_command,
                 "command_sha256": sha_bytes(canonical(launcher_command)),
                 "binding_sha256": sha_bytes(canonical(launcher_binding)),
+                "manifest": {
+                    "path": str(PROFILE_TARGET_COMMAND_MANIFEST),
+                    "sha256": sha_bytes(pretty(target_manifest)),
+                    "manifest_sha256": target_manifest["manifest_sha256"],
+                },
                 "run_id": LAUNCHER.PROFILE_RUN_ID,
                 "evidence_output": str(LAUNCHER.PROFILE_EVIDENCE_OUTPUT),
                 "runner_output": str(LAUNCHER.PROFILE_RUN_OUTPUT),
@@ -548,9 +611,12 @@ def prepare_ready_artifact(*, profile_diagnostic: bool = False) -> dict[str, Any
     ready_raw = pretty(value); attestation_raw = pretty(QA_ATTESTATION)
     trust = {"schema_version": "ullm.aq4_p2_resident_maintenance_harness_trust.v1", "status": "ready_for_one_case", "execution_mode": value["execution_mode"], "actual_eligible": True, **harness_identity, "ready_binding_sha256": sha_bytes(ready_raw)}
     trust_raw = pretty(trust)
-    for name, raw in (("ready-binding.json", ready_raw), ("qa-attestation.json", attestation_raw), ("harness-trust.json", trust_raw)):
+    files = [("ready-binding.json", ready_raw), ("qa-attestation.json", attestation_raw), ("harness-trust.json", trust_raw)]
+    if profile_diagnostic:
+        files.append(("target-command-manifest.json", pretty(profile_target_command_manifest())))
+    for name, raw in files:
         LAUNCHER.atomic_write(root, name, raw)
-    sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in (("harness-trust.json", trust_raw), ("qa-attestation.json", attestation_raw), ("ready-binding.json", ready_raw))).encode("ascii")
+    sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in sorted(files)).encode("ascii")
     LAUNCHER.atomic_write(root, "SHA256SUMS", sums)
     os.chmod(root, 0o555)
     return value
@@ -563,18 +629,30 @@ def load_ready_artifact(path: Path = READY_PATH) -> dict[str, Any]:
         root, trust_path, attestation_path, profile_diagnostic = PROFILE_READY_ROOT, PROFILE_HARNESS_TRUST_PATH, PROFILE_ATTESTATION_PATH, True
     else:
         raise HarnessError("ready artifact path differs")
-    if {item.name for item in root.iterdir()} != {"ready-binding.json", "qa-attestation.json", "harness-trust.json", "SHA256SUMS"}:
+    expected_names = {"ready-binding.json", "qa-attestation.json", "harness-trust.json", "SHA256SUMS"}
+    if profile_diagnostic:
+        expected_names.add("target-command-manifest.json")
+    if {item.name for item in root.iterdir()} != expected_names:
         raise HarnessError("ready artifact path/coverage differs")
     ready_raw, _ = LAUNCHER.read_regular(path, "ready binding"); value = LAUNCHER.parse_json(ready_raw, "ready binding")
     trust_raw, _ = LAUNCHER.read_regular(trust_path, "harness trust"); trust = LAUNCHER.parse_json(trust_raw, "harness trust")
     attestation_raw, _ = LAUNCHER.read_regular(attestation_path, "QA attestation"); attestation = LAUNCHER.parse_json(attestation_raw, "QA attestation")
+    target_raw = None
+    if profile_diagnostic:
+        target_raw, _ = LAUNCHER.read_regular(PROFILE_TARGET_COMMAND_MANIFEST, "profile target command manifest")
+        target = LAUNCHER.parse_json(target_raw, "profile target command manifest")
+        if target != profile_target_command_manifest():
+            raise HarnessError("profile target command manifest differs")
     expected = ready_document({key: trust[key] for key in ("path", "commit", "tree", "git_blob", "sha256")}, profile_diagnostic=profile_diagnostic)
     if value != expected or attestation != QA_ATTESTATION or trust.get("schema_version") != "ullm.aq4_p2_resident_maintenance_harness_trust.v1" or trust.get("status") != "ready_for_one_case" or trust.get("execution_mode") != value["execution_mode"] or trust.get("actual_eligible") is not True or trust.get("ready_binding_sha256") != sha_bytes(ready_raw):
         raise HarnessError("ready artifact semantic binding differs")
     self_sha = LAUNCHER.sha_file(Path(__file__).resolve(), "maintenance harness self")[0]
     if trust.get("path") != str(Path(__file__).resolve()) or trust.get("sha256") != self_sha:
         raise HarnessError("maintenance harness self differs")
-    expected_sums = "".join(f"{digest}  {name}\n" for name, digest in (("harness-trust.json", sha_bytes(trust_raw)), ("qa-attestation.json", sha_bytes(attestation_raw)), ("ready-binding.json", sha_bytes(ready_raw)))).encode("ascii")
+    sum_inputs = [("harness-trust.json", trust_raw), ("qa-attestation.json", attestation_raw), ("ready-binding.json", ready_raw)]
+    if target_raw is not None:
+        sum_inputs.append(("target-command-manifest.json", target_raw))
+    expected_sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in sorted(sum_inputs)).encode("ascii")
     sums_raw, _ = LAUNCHER.read_regular(root / "SHA256SUMS", "ready sums")
     if sums_raw != expected_sums:
         raise HarnessError("ready artifact SHA256SUMS differs")
