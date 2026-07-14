@@ -69,6 +69,15 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["actual_live_observations"]["runtime_identity"] is None
     assert value["actual_live_observations"]["power"] is None
     assert value["actual_live_observations"]["vram"] is None
+    assert value["resident_driver"]["source_commit"] == BUNDLE.SOURCE_COMMIT
+    assert value["historical_predecessor"] == {
+        "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+        "status": "superseded_historical_prepared",
+        "execution_eligible": False,
+    }
+    superseded = json.loads((ARTIFACT / "SUPERSEDED-0fd7993.json").read_text())
+    assert superseded["execution_eligible"] is False
+    assert superseded["promotion"] is False
 
 
 def test_rejects_unknown_bundle_schema(tmp_path: Path, trusted_reconstruction) -> None:
@@ -202,3 +211,53 @@ def test_nested_unknown_and_duplicate_fields_are_rejected(tmp_path: Path, truste
     rebind_transport(duplicate_root)
     with pytest.raises(BUNDLE.BundleError, match="duplicate JSON key"):
         BUNDLE.validate(duplicate_root, trusted_reconstruction)
+
+
+@pytest.mark.parametrize("variant", ("late_unknown", "late_missing", "late_replace"))
+def test_final_directory_reenumeration_rejects_late_mutation(tmp_path: Path, trusted_reconstruction, variant: str) -> None:
+    root = copy_bundle(tmp_path)
+    replacement = tmp_path / "replacement-policy.json"
+    shutil.copyfile(root / "policy.json", replacement)
+    replacement.chmod(0o444)
+
+    def mutate(bundle_root: Path) -> None:
+        if variant == "late_unknown":
+            (bundle_root / "late-unknown.json").write_text("{}\n", encoding="utf-8")
+        elif variant == "late_missing":
+            (bundle_root / "policy.json").unlink()
+        else:
+            (bundle_root / "policy.json").unlink()
+            shutil.copyfile(replacement, bundle_root / "policy.json")
+            (bundle_root / "policy.json").chmod(0o444)
+
+    BUNDLE._VALIDATION_HOOK = mutate
+    try:
+        with pytest.raises(BUNDLE.BundleError, match="late bundle directory mutation"):
+            BUNDLE.validate(root, trusted_reconstruction)
+    finally:
+        BUNDLE._VALIDATION_HOOK = None
+
+
+@pytest.mark.parametrize("variant", ("relative_served", "parent_driver", "served_sha", "extra_arg"))
+def test_launch_command_rejects_nonexact_following_arguments_and_bindings(tmp_path: Path, variant: str) -> None:
+    value = json.loads((ARTIFACT / "launch-command.json").read_text())
+    if variant == "relative_served":
+        value["argv"][2] = "active.json"
+    elif variant == "parent_driver":
+        value["argv"][0] = str(BUNDLE.CANONICAL_ROOT / "subdir/../resident-driver")
+    elif variant == "served_sha":
+        value["bindings"]["served_model_manifest"]["sha256"] = "0" * 64
+    else:
+        value["argv"].append("--unexpected")
+    with pytest.raises(BUNDLE.BundleError, match="launch command"):
+        BUNDLE.validate_launch_command(value)
+
+
+def test_launch_path_rejects_parent_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "driver").write_bytes(b"driver")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    with pytest.raises(BUNDLE.BundleError, match="symlink component"):
+        BUNDLE.reject_symlink_components(alias / "driver", "launch driver")

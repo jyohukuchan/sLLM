@@ -10,8 +10,8 @@
     "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
     "fixture_sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
     "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
-    "identity_file_sha256": "a89fade6e7e03cf865e6a585e009923a2dddeecf508064631e603e1b185fdd76",
-    "identity_self_sha256": "7cdb460c28d40e0314939ad46c000d671d80c9c002e7e40b4354fc1e36459be6",
+    "identity_file_sha256": "883de9cdb773d83b71e7ea570a84ad9c1c8b93c15b11ef1307ec00e1f94ca741",
+    "identity_self_sha256": "02c83dca5975138de05163e79039abc12c5c8436c6a6b4a4cb1af3d54aee489a",
     "official_case_sha256": "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a",
     "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
     "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
@@ -67,6 +67,11 @@
     }
   },
   "files": {
+    "SUPERSEDED-0fd7993.json": {
+      "mode": "0444",
+      "role": "historical_non_executable_bundle_record",
+      "sha256": "b3eb5e1c5242830187ce7925185e945c1d210c971ffa129273666e4c7b2bec72"
+    },
     "case-binding.json": {
       "mode": "0444",
       "role": "runtime_bound_case",
@@ -75,12 +80,12 @@
     "dry-run.json": {
       "mode": "0444",
       "role": "resident_batch_dry_run",
-      "sha256": "08248787f787e2f78f95a7716fe990d1ce44965022bf065caf155d39770cc314"
+      "sha256": "24ec8382bebf6d8b4bbac5ce849567e043e98d1fa8b4975f318bb8290a1c0b20"
     },
     "fake-ready.json": {
       "mode": "0444",
       "role": "synthetic_ready_event",
-      "sha256": "1b4f600d0717538dfdf08aa3be0f75b79f4cfaf400616127efc4a2195f0cb84e"
+      "sha256": "a26daf1a51499714e6e484694b2a94c107c02e8a604df3ae86de6ebbb0d7d54d"
     },
     "fixture-index.json": {
       "mode": "0444",
@@ -95,12 +100,17 @@
     "identity.json": {
       "mode": "0444",
       "role": "resident_identity",
-      "sha256": "a89fade6e7e03cf865e6a585e009923a2dddeecf508064631e603e1b185fdd76"
+      "sha256": "883de9cdb773d83b71e7ea570a84ad9c1c8b93c15b11ef1307ec00e1f94ca741"
+    },
+    "launch-command.json": {
+      "mode": "0444",
+      "role": "exact_resident_launch_command",
+      "sha256": "df46c6f5b26aca877f8cbdca5c54eee1525a34d489b8b4e8f8c708ba221e8676"
     },
     "official-case.json": {
       "mode": "0444",
       "role": "trusted_official_expansion_case",
-      "sha256": "dd0a9bad786e5e9fa0edc7320392b37d66a3cf5e82ba3608b678ea4ac77c6b0f"
+      "sha256": "808d46c7f8cbe4910267b91fc3086fb39a219e055eff17c5f2efcccf6933338c"
     },
     "package-manifest.json": {
       "mode": "0444",
@@ -120,7 +130,7 @@
     "resident-driver": {
       "mode": "0555",
       "role": "detached_resident_driver",
-      "sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4"
+      "sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
     },
     "served-model.json": {
       "mode": "0444",
@@ -130,8 +140,13 @@
     "trust-roots.json": {
       "mode": "0444",
       "role": "independent_trust_roots",
-      "sha256": "081fb0b83bd96ab0a408c2c77a4518fad0e82702c33d2a5e3f27f64ef42820aa"
+      "sha256": "8c10441800dbead1ca4ffd5b29e8447b9de09584f421216bd354ce46e752fed8"
     }
+  },
+  "historical_predecessor": {
+    "execution_eligible": false,
+    "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+    "status": "superseded_historical_prepared"
   },
   "offline_evidence": {
     "gpu_command_executed": false,
@@ -144,12 +159,12 @@
   },
   "promotion": false,
   "resident_driver": {
-    "binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
+    "binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
     "protocol": "ullm.aq4_p2_resident_driver.v2",
-    "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
-    "source_tree": "3b0956a39749c8741a7d1852b5bc8a07adbc557b"
+    "source_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
+    "source_tree": "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
   },
-  "run_id": "p2-r9700-resident-one-case-smoke-prepared-v2",
-  "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v2",
+  "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3",
+  "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v3",
   "status": "prepared_not_executed"
 }

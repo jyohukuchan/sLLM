@@ -1,7 +1,7 @@
 {
   "driver_identity": {
-    "binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
-    "build_git_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+    "binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+    "build_git_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
     "format_id": "AQ4_0",
     "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
     "implementation_id": "qwen35_aq4_rdna4_v1",

@@ -40,3 +40,12 @@
 - 全JSON payloadをtrust rootsから再構築し、全階層とexact bytesを比較する。
 - semantic valueとtransport hashを同時に再束縛する8種類のnegative testを追加した。
 - v2 CLI validator、SHA256SUMS、17 testsが通過した。
+
+## v3 normative launch-boundary修正
+
+- trust rootをlaunch-boundary hardening commit `319d618`のclean treeとdriver/runner blobsへ更新した。
+- detached clean worktreeで`CARGO_BUILD_JOBS=1` release buildを行い、resident binary SHAを固定した。
+- absolute served manifestと全protocol link契約をtrusted driver blobから再検証する。
+- driver executable、served manifest、device index、build commitをexact launch argvとpath/SHA bindingへ固定した。
+- 旧`0fd7993` provenanceをhistorical superseded、execution不可として明示した。
+- validator終了時のdirectory再列挙とdirectory identity比較を追加し、late unknown/missing/replaceを拒否した。

@@ -28,14 +28,23 @@
   "source": {
     "clean_build": {
       "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
-      "expected_binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
+      "expected_binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
       "provenance": "detached clean Git worktree at source commit"
     },
-    "commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
-    "driver_source_sha256": "297f3e22397a3120f150b3a381253b4a852119171e0aabdb35f7514dff084d3e",
+    "commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
+    "driver_source_sha256": "d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7",
     "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
     "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
     "protocol": "ullm.aq4_p2_resident_driver.v2",
-    "tree": "3b0956a39749c8741a7d1852b5bc8a07adbc557b"
+    "protocol_path_contract": {
+      "case_binding": "absolute_without_parent_traversal",
+      "fixture": "absolute_without_parent_traversal",
+      "identity": "absolute_without_parent_traversal",
+      "policy": "absolute_without_parent_traversal",
+      "preflight": "absolute_without_parent_traversal",
+      "served_model_manifest": "absolute_without_parent_traversal"
+    },
+    "runner_source_sha256": "5488df7b65737288a8bcb452a6778bf4ae0b9565904eac7283cc7ac1c13babf9",
+    "tree": "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
   }
 }

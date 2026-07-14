@@ -1,5 +1,5 @@
 {
-  "build_git_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+  "build_git_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
   "expanded_manifest_sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5",
   "hash_binding": {
     "bound_case_manifest_sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5",
@@ -8,10 +8,10 @@
     "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
     "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
   },
-  "identity_sha256": "7cdb460c28d40e0314939ad46c000d671d80c9c002e7e40b4354fc1e36459be6",
+  "identity_sha256": "02c83dca5975138de05163e79039abc12c5c8436c6a6b4a4cb1af3d54aee489a",
   "resident_driver_identity": {
-    "binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
-    "build_git_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+    "binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+    "build_git_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
     "format_id": "AQ4_0",
     "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
     "implementation_id": "qwen35_aq4_rdna4_v1",

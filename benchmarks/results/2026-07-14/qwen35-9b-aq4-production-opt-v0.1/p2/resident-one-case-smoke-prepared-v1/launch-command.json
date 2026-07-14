@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver",
+    "--served-model-manifest",
+    "/etc/ullm/served-models/active.json",
+    "--device-index",
+    "1",
+    "--build-git-commit",
+    "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
+  ],
+  "bindings": {
+    "build_git_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
+    "device_index": 1,
+    "driver": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver",
+      "sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
+    },
+    "protocol": "ullm.aq4_p2_resident_driver.v2",
+    "served_model_manifest": {
+      "path": "/etc/ullm/served-models/active.json",
+      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    }
+  },
+  "schema_version": "ullm.aq4_p2_resident_launch_command.v1"
+}
