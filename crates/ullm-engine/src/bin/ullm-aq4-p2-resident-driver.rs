@@ -47,6 +47,11 @@ const WORKER_HARDLINK_FIXTURE_RAW: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json"
 ));
+#[cfg(test)]
+const CASE_DEVICE_FIXTURE_RAW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/aq4-p2-resident-case-device/active-production.json"
+));
 const DEFAULT_CHUNK_BYTES: usize = 1024 * 1024;
 const DEFAULT_LM_HEAD_CHUNK_ROWS: usize = 8192;
 const TOTAL_RUNS: usize = 12;
@@ -768,11 +773,6 @@ fn validate_case(
     } else {
         execution.requested_m
     };
-    let device_arch = if identity.runtime_device.architecture == "gfx1201" {
-        "RDNA4"
-    } else {
-        identity.runtime_device.architecture.as_str()
-    };
     if case.case_id != command.case_id
         || case.fixture_id != fixture.case_id
         || case.case_sha256 != command.case_sha256
@@ -813,7 +813,7 @@ fn validate_case(
         || case.device.device_id != identity.runtime_device.device_id
         || case.device.backend != identity.runtime_device.backend
         || case.device.name != identity.runtime_device.name
-        || case.device.architecture != device_arch
+        || case.device.architecture != identity.runtime_device.architecture
         || case.device.runtime_device_index != identity.runtime_device.runtime_device_index as i32
         || case.control.control_id != case.control_id
         || case.control.role != "target"
@@ -1820,6 +1820,16 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ActiveCaseDeviceFixture {
+        schema_version: String,
+        case: P2Case,
+        execution: Execution,
+        runtime_device: RuntimeDevice,
+        source_device: P2Device,
+    }
+
     #[derive(Default)]
     struct MockExecutor {
         clean: bool,
@@ -1883,6 +1893,121 @@ mod tests {
             guard_set_sha256: "1".repeat(64),
         }
     }
+
+    fn active_case_device_fixture() -> ActiveCaseDeviceFixture {
+        serde_json::from_str(CASE_DEVICE_FIXTURE_RAW).expect("active case device fixture")
+    }
+
+    fn case_begin_fields(fixture: &ActiveCaseDeviceFixture) -> BeginFields {
+        let link = Link {
+            path: "/fixture/not-opened-by-validate-case.json".into(),
+            sha256: "0".repeat(64),
+        };
+        BeginFields {
+            schema_version: PROTOCOL.into(),
+            case_id: fixture.case.case_id.clone(),
+            case_sha256: fixture.case.case_sha256.clone(),
+            case_binding: link.clone(),
+            identity: link.clone(),
+            preflight: link.clone(),
+            policy: link.clone(),
+            fixture: link,
+            execution: fixture.execution.clone(),
+        }
+    }
+
+    fn production_identity(fixture: &ActiveCaseDeviceFixture) -> DriverIdentity {
+        let mut value = identity();
+        value.runtime_device = fixture.runtime_device.clone();
+        value
+    }
+
+    #[test]
+    fn production_case_device_uses_exact_runtime_vocabulary() {
+        let fixture = active_case_device_fixture();
+        assert_eq!(
+            fixture.schema_version,
+            "ullm.aq4_p2_resident_case_device_identity.v1"
+        );
+        assert_eq!(fixture.source_device.architecture, "RDNA4");
+        assert_eq!(fixture.source_device.backend, "hip");
+        assert_eq!(fixture.case.device.architecture, "gfx1201");
+        assert_eq!(fixture.runtime_device.architecture, "gfx1201");
+
+        let command = case_begin_fields(&fixture);
+        let case_fixture = FixtureCase {
+            case_id: fixture.case.fixture_id.clone(),
+            prompt_token_ids: vec![1; fixture.case.prompt_tokens],
+            step_count: fixture.case.generated_tokens,
+        };
+        validate_case(
+            &fixture.case,
+            &case_fixture,
+            &command,
+            &production_identity(&fixture),
+        )
+        .expect("active production case and runtime device must bind exactly");
+    }
+
+    #[test]
+    fn case_device_rejects_gfx_rdna_vocabulary_swap() {
+        let mut fixture = active_case_device_fixture();
+        fixture.case.device.architecture = fixture.source_device.architecture.clone();
+        let command = case_begin_fields(&fixture);
+        let case_fixture = FixtureCase {
+            case_id: fixture.case.fixture_id.clone(),
+            prompt_token_ids: vec![1; fixture.case.prompt_tokens],
+            step_count: fixture.case.generated_tokens,
+        };
+        assert_eq!(
+            validate_case(
+                &fixture.case,
+                &case_fixture,
+                &command,
+                &production_identity(&fixture),
+            ),
+            Err("case workload/control/device binding differs".into())
+        );
+    }
+
+    #[test]
+    fn case_device_rejects_case_identity_mismatch() {
+        let mut fixture = active_case_device_fixture();
+        fixture.case.device.device_id = "different-device".into();
+        let command = case_begin_fields(&fixture);
+        let case_fixture = FixtureCase {
+            case_id: fixture.case.fixture_id.clone(),
+            prompt_token_ids: vec![1; fixture.case.prompt_tokens],
+            step_count: fixture.case.generated_tokens,
+        };
+        assert_eq!(
+            validate_case(
+                &fixture.case,
+                &case_fixture,
+                &command,
+                &production_identity(&fixture),
+            ),
+            Err("case workload/control/device binding differs".into())
+        );
+    }
+
+    #[test]
+    fn case_device_rejects_runtime_identity_mismatch() {
+        let fixture = active_case_device_fixture();
+        let command = case_begin_fields(&fixture);
+        let case_fixture = FixtureCase {
+            case_id: fixture.case.fixture_id.clone(),
+            prompt_token_ids: vec![1; fixture.case.prompt_tokens],
+            step_count: fixture.case.generated_tokens,
+        };
+        let mut runtime_identity = production_identity(&fixture);
+        runtime_identity.runtime_device.runtime_device_index = 0;
+        assert_eq!(
+            validate_case(&fixture.case, &case_fixture, &command, &runtime_identity),
+            Err("case workload/control/device binding differs".into())
+        );
+    }
+
     fn active(id: &str, m: usize) -> ActiveCase {
         ActiveCase {
             case_id: id.into(),

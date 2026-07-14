@@ -1,0 +1,89 @@
+{
+  "schema_version": "ullm.aq4_p2_resident_case_device_identity.v1",
+  "case": {
+    "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+    "fixture_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+    "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+    "stage_id": "representative",
+    "stage_order": 2,
+    "scope": "full_model",
+    "phase": "cold_prefill",
+    "mode": "cold_batched",
+    "baseline_mode": "cold_batched",
+    "prompt_tokens": 128,
+    "cached_prefix_tokens": 0,
+    "context_tokens": 128,
+    "decode_start_tokens": 0,
+    "prefill_requested_m": 128,
+    "resolved_m": 128,
+    "request_count": 1,
+    "decode_request_count": 0,
+    "generated_tokens": 0,
+    "device": {
+      "device_id": "r9700-rdna4",
+      "backend": "hip",
+      "name": "AMD Radeon Graphics",
+      "architecture": "gfx1201",
+      "runtime_device_index": 1
+    },
+    "control_id": "aq4_0_target",
+    "control": {
+      "control_id": "aq4_0_target",
+      "role": "target",
+      "format_id": "AQ4_0",
+      "implementation_id": "qwen35_aq4_rdna4_v1",
+      "promotion_eligible": true
+    },
+    "sampling": {
+      "mode": "greedy",
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "top_k": 1,
+      "seed": 0
+    },
+    "format_id": "AQ4_0",
+    "implementation_id": "qwen35_aq4_rdna4_v1",
+    "path_oracle_case_id": "p2-representative-full_model-cold_prefill-all_m1-n128-m128-r9700-rdna4-aq4_0_target",
+    "path_oracle_result_sha256": null
+  },
+  "execution": {
+    "scope": "full_model",
+    "phase": "cold_prefill",
+    "mode": "cold_batched",
+    "prompt_tokens": 128,
+    "cached_prefix_tokens": 0,
+    "context_tokens": 128,
+    "generated_tokens": 0,
+    "request_count": 1,
+    "requested_m": 128,
+    "resolved_m": 128,
+    "sampling": {
+      "mode": "greedy",
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "top_k": 1,
+      "seed": 0
+    },
+    "control": {
+      "control_id": "aq4_0_target",
+      "role": "target",
+      "format_id": "AQ4_0",
+      "implementation_id": "qwen35_aq4_rdna4_v1",
+      "promotion_eligible": true
+    }
+  },
+  "runtime_device": {
+    "runtime_device_index": 1,
+    "device_id": "r9700-rdna4",
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "architecture": "gfx1201"
+  },
+  "source_device": {
+    "device_id": "r9700-rdna4",
+    "backend": "hip",
+    "name": "Radeon AI PRO R9700",
+    "architecture": "RDNA4",
+    "runtime_device_index": 0
+  }
+}
