@@ -12,7 +12,6 @@ package-only identity mode; they remain non-usable for promotion.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -43,6 +42,39 @@ ORACLE = CAPTURE.oracle
 MAX_STDOUT_BYTES = ORACLE.MAX_PAYLOAD_BYTES
 MAX_STDERR_BYTES = 1 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 4 * 60 * 60
+DEFAULT_SERVED_MODEL_MANIFEST = Path("/etc/ullm/served-models/active.json")
+REQUIRED_HIP_KERNEL_ENV = (
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+)
 
 
 def _regular(path: Path, label: str) -> Path:
@@ -81,6 +113,42 @@ def _load_source(source_root: Path, cases_path: Path) -> tuple[dict[str, Any], l
     return source_manifest, cases, by_case
 
 
+def _guard_environment(manifest_path: Path | None, *, production: bool) -> tuple[dict[str, str], dict[str, Any]]:
+    if manifest_path is None:
+        if production:
+            raise ORACLE.OracleError("production path oracle requires --served-model-manifest")
+        return dict(os.environ), {"manifest": None, "manifest_sha256": None, "required_environment": [], "required_environment_sha256": None}
+    manifest = ORACLE.load_json(_regular(manifest_path, "served-model manifest"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("worker"), dict):
+        raise ORACLE.OracleError("served-model manifest worker object is invalid")
+    names = manifest["worker"].get("required_environment")
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        raise ORACLE.OracleError("served-model required_environment is invalid")
+    expected = set(REQUIRED_HIP_KERNEL_ENV)
+    actual = set(names)
+    if len(names) != len(actual) or actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ORACLE.OracleError(f"served-model required_environment differs: missing={missing} extra={extra}")
+    inherited = {name: value for name, value in os.environ.items() if name.startswith("ULLM_REQUIRE_HIP_")}
+    bad = {name: value for name, value in inherited.items() if value != "1"}
+    extra = set(inherited) - expected
+    if bad or extra:
+        raise ORACLE.OracleError(f"inherited HIP guard environment is not exact: bad={bad} extra={sorted(extra)}")
+    child_env = dict(os.environ)
+    for name in list(child_env):
+        if name.startswith("ULLM_REQUIRE_HIP_"):
+            del child_env[name]
+    for name in REQUIRED_HIP_KERNEL_ENV:
+        child_env[name] = "1"
+    return child_env, {
+        "manifest": str(manifest_path.resolve(strict=True)),
+        "manifest_sha256": _sha(manifest_path),
+        "required_environment": list(REQUIRED_HIP_KERNEL_ENV),
+        "required_environment_sha256": ORACLE.canonical_sha256(list(REQUIRED_HIP_KERNEL_ENV)),
+    }
+
+
 def _write_replay(path: Path, cases: list[dict[str, Any]], by_case: dict[str, list[int]]) -> None:
     value = {"cases": [{"case_id": case["case_id"], "token_ids": by_case[case["case_id"]]} for case in cases]}
     path.write_bytes(_canonical(value))
@@ -98,6 +166,7 @@ def _run_binary(
     rotary_dim: int | None,
     rope_base: float | None,
     timeout_seconds: float,
+    environment: dict[str, str],
 ) -> tuple[bytes, bytes, float]:
     _regular(binary, "path oracle binary")
     _directory(package_dir, "package directory")
@@ -116,7 +185,7 @@ def _run_binary(
         command.append(str(rope_base))
     started = time.monotonic()
     try:
-        result = subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_seconds)
+        result = subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_seconds, env=environment)
     except subprocess.TimeoutExpired as error:
         raise ORACLE.OracleError(f"path oracle timed out after {timeout_seconds:g}s") from error
     elapsed = time.monotonic() - started
@@ -150,7 +219,7 @@ def _canonicalize_payload(raw: bytes, path: Path, cases: list[dict[str, Any]]) -
     return records, digest
 
 
-def _write_runtime(output: Path, *, package_dir: Path, package_manifest: Path, artifact_manifest: Path | None, binary: Path, source_root: Path, source_manifest: dict[str, Any], row_count: int, elapsed_seconds: float) -> None:
+def _write_runtime(output: Path, *, package_dir: Path, package_manifest: Path, artifact_manifest: Path | None, binary: Path, source_root: Path, source_manifest: dict[str, Any], row_count: int, elapsed_seconds: float, guard_identity: dict[str, Any]) -> None:
     runtime = {
         "schema_version": "ullm.qwen35_aq4_path_oracle_runtime.v1",
         "runtime": "ullm-aq4-p2-path-oracle",
@@ -168,6 +237,7 @@ def _write_runtime(output: Path, *, package_dir: Path, package_manifest: Path, a
             "manifest_sha256": _sha(source_root / "manifest.json"),
             "payload_sha256": source_manifest["payload"]["sha256"],
         },
+        "served_model_guard": guard_identity,
         "run": {"elapsed_seconds": elapsed_seconds, "row_count": row_count},
     }
     path = output / "runtime.json"
@@ -198,6 +268,7 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
         raise ORACLE.OracleError("artifact and package manifests must be distinct files")
     if artifact_manifest is None and not args.allow_package_only:
         raise ORACLE.OracleError("missing artifact manifest; pass --allow-package-only for package-only products")
+    environment, guard_identity = _guard_environment(args.served_model_manifest, production=args.evidence_class == "production")
     source_manifest, cases, replay_by_case = _load_source(args.source_oracle, args.cases)
     with tempfile.TemporaryDirectory(prefix="qwen35-aq4-path-oracle-") as temporary:
         temporary_root = Path(temporary)
@@ -214,6 +285,7 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
             rotary_dim=args.rotary_dim,
             rope_base=args.rope_base,
             timeout_seconds=args.timeout_seconds,
+            environment=environment,
         )
         payload_path = temporary_root / "payload.jsonl"
         records, payload_sha = _canonicalize_payload(stdout, payload_path, cases)
@@ -242,6 +314,7 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
             source_manifest=source_manifest,
             row_count=records,
             elapsed_seconds=elapsed,
+            guard_identity=guard_identity,
         )
         _write_sums(args.output)
     report = VALIDATE.validate_oracle(args.output, "path")
@@ -266,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--link-output", type=Path)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/ullm-aq4-p2-path-oracle")
+    parser.add_argument("--served-model-manifest", type=Path, default=DEFAULT_SERVED_MODEL_MANIFEST)
     parser.add_argument("--model-id")
     parser.add_argument("--model-revision")
     parser.add_argument("--evidence-class", choices=("production", "synthetic_fixture"), default="production")

@@ -63,6 +63,11 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_binary.chmod(fake_binary.stat().st_mode | stat.S_IXUSR)
+            served_manifest = root / "served-model.json"
+            served_manifest.write_text(
+                json.dumps({"worker": {"required_environment": list(EXPORTER.REQUIRED_HIP_KERNEL_ENV)}}),
+                encoding="utf-8",
+            )
 
             result = EXPORTER.export(
                 type(
@@ -79,6 +84,7 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                         "output": path,
                         "link_output": link,
                         "binary": fake_binary,
+                        "served_model_manifest": served_manifest,
                         "model_id": None,
                         "model_revision": None,
                         "evidence_class": "synthetic_fixture",
@@ -125,6 +131,7 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                             "package_manifest": package_manifest,
                             "artifact_manifest": None,
                             "allow_package_only": False,
+                            "served_model_manifest": None,
                         },
                     )()
                 )
