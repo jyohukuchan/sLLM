@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -1010,6 +1010,7 @@ fn run(args: Args) -> Result<(), String> {
 }
 
 fn startup(args: &Args) -> Result<(ServedModel, DriverIdentity, PathBuf), String> {
+    require_absolute_normal_path(&args.served_model_manifest, "served model manifest")?;
     if args.build_git_commit.len() != 40
         || !args
             .build_git_commit
@@ -1194,11 +1195,25 @@ fn load_link(link: &Link, label: &str) -> Result<Value, String> {
         return Err(format!("{label} link SHA is invalid"));
     }
     let path = Path::new(&link.path);
+    require_absolute_normal_path(path, label)?;
     let bytes = read_regular(path, label, MAX_INPUT_BYTES)?;
     if sha256_bytes(&bytes) != link.sha256 {
         return Err(format!("{label} link SHA differs"));
     }
     parse_strict_json(&bytes, label)
+}
+
+fn require_absolute_normal_path(path: &Path, label: &str) -> Result<(), String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "{label} path must be absolute without parent traversal"
+        ));
+    }
+    Ok(())
 }
 
 fn read_regular(path: &Path, label: &str, maximum: usize) -> Result<Vec<u8>, String> {
@@ -1395,7 +1410,36 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> 
     let mut index = 1u32;
     let mut commit = None;
     while let Some(arg) = args.next() {
-        match arg.to_str(){Some("--served-model-manifest")=>manifest=Some(PathBuf::from(args.next().ok_or("--served-model-manifest requires value")?)),Some("--device-index")=>index=args.next().ok_or("--device-index requires value")?.to_str().ok_or("device index UTF-8")?.parse().map_err(|_|"invalid device index")?,Some("--build-git-commit")=>commit=Some(args.next().ok_or("--build-git-commit requires value")?.into_string().map_err(|_|"build commit UTF-8")?),Some("--help")|Some("-h")=>return Err("Usage: ullm-aq4-p2-resident-driver --served-model-manifest PATH --device-index N --build-git-commit SHA".into()),Some(other)=>return Err(format!("unknown argument {other}")),None=>return Err("arguments must be UTF-8".into())}
+        match arg.to_str() {
+            Some("--served-model-manifest") => {
+                manifest = Some(PathBuf::from(
+                    args.next()
+                        .ok_or("--served-model-manifest requires value")?,
+                ));
+            }
+            Some("--device-index") => {
+                index = args
+                    .next()
+                    .ok_or("--device-index requires value")?
+                    .to_str()
+                    .ok_or("device index UTF-8")?
+                    .parse()
+                    .map_err(|_| "invalid device index")?;
+            }
+            Some("--build-git-commit") => {
+                commit = Some(
+                    args.next()
+                        .ok_or("--build-git-commit requires value")?
+                        .into_string()
+                        .map_err(|_| "build commit UTF-8")?,
+                );
+            }
+            Some("--help") | Some("-h") => {
+                return Err("Usage: ullm-aq4-p2-resident-driver --served-model-manifest PATH --device-index N --build-git-commit SHA".into());
+            }
+            Some(other) => return Err(format!("unknown argument {other}")),
+            None => return Err("arguments must be UTF-8".into()),
+        }
     }
     Ok(Args {
         served_model_manifest: manifest.ok_or("--served-model-manifest is required")?,
@@ -1561,6 +1605,33 @@ mod tests {
             next_run: 0,
             failed: false,
         }
+    }
+
+    #[test]
+    fn cargo_style_hardlink_is_rejected_and_detached_copy_is_accepted() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!(
+            "ullm-aq4-resident-driver-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let cargo_binary = directory.join("target-binary");
+        let cargo_deps_binary = directory.join("deps-binary");
+        let detached_binary = directory.join("detached-binary");
+        fs::write(&cargo_binary, b"resident-driver").unwrap();
+        fs::hard_link(&cargo_binary, &cargo_deps_binary).unwrap();
+        assert!(sha256_file(&cargo_binary).is_err());
+        fs::copy(&cargo_binary, &detached_binary).unwrap();
+        assert_eq!(
+            sha256_file(&detached_binary).unwrap(),
+            sha256_bytes(b"resident-driver")
+        );
+        assert!(require_absolute_normal_path(&detached_binary, "driver").is_ok());
+        assert!(require_absolute_normal_path(Path::new("relative-driver"), "driver").is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

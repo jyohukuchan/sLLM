@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +39,22 @@ SPEC = importlib.util.spec_from_file_location("aq4_resident_batch", ROOT / "tool
 assert SPEC and SPEC.loader
 BATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BATCH)
+
+
+def _identity(driver_sha256: str | None = None) -> dict:
+    value = json.loads(json.dumps(DRIVER_IDENTITY))
+    if driver_sha256 is not None:
+        value["binary_sha256"] = driver_sha256
+    return value
+
+
+def _detached_python(tmp_path: Path) -> tuple[Path, str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    source = Path(sys.executable).resolve(strict=True)
+    detached = tmp_path / "detached-python"
+    shutil.copy2(source, detached)
+    detached.chmod(source.stat().st_mode)
+    return detached, BATCH.sha_file(detached, "detached driver", absolute=True)
 
 
 def _case(tmp_path: Path, prompt: int, requested_m: int, mode: str, index: int) -> dict:
@@ -78,7 +99,7 @@ def _case(tmp_path: Path, prompt: int, requested_m: int, mode: str, index: int) 
     return value, {"case_id": case_id, "case_sha256": value["case_sha256"], "fixture_path": str(fixture), "fixture_sha256": BATCH.sha_file(fixture, "fixture"), "prompt_tokens": prompt, "context_tokens": prompt, "generated_tokens": 0}
 
 
-def _bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
+def _bundle(tmp_path: Path, driver_sha256: str | None = None) -> tuple[Path, Path, Path, Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     expanded_path = tmp_path / "expanded.json"
     fixture_index_path = tmp_path / "fixture-index.json"
@@ -95,7 +116,8 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     expanded_path.write_text(json.dumps({"schema_version": "ullm.aq4_production_p2_expanded.v2", "cases": cases}), encoding="utf-8")
     fixture_index_path.write_text(json.dumps({"schema_version": "ullm.aq4_p2_fixture_index.v1", "case_count": len(entries), "cases": entries}), encoding="utf-8")
     expanded_sha = BATCH.sha_file(expanded_path, "expanded")
-    identity_document = {"schema_version": "ullm.aq4_production_p2_identity.v2", "status": "bound", "identity_sha256": None, "expanded_manifest_sha256": expanded_sha, "build_git_commit": DRIVER_IDENTITY["build_git_commit"], "resident_driver_identity": DRIVER_IDENTITY, "hash_binding": {"bound_case_manifest_sha256": expanded_sha, "served_model_manifest_sha256": DRIVER_IDENTITY["served_model_manifest_sha256"], "worker_binary_sha256": DRIVER_IDENTITY["worker_binary_sha256"], "package_manifest_sha256": DRIVER_IDENTITY["package_manifest_sha256"], "package_content_sha256": DRIVER_IDENTITY["package_content_sha256"]}}
+    resident_identity = _identity(driver_sha256)
+    identity_document = {"schema_version": "ullm.aq4_production_p2_identity.v2", "status": "bound", "identity_sha256": None, "expanded_manifest_sha256": expanded_sha, "build_git_commit": resident_identity["build_git_commit"], "resident_driver_identity": resident_identity, "hash_binding": {"bound_case_manifest_sha256": expanded_sha, "served_model_manifest_sha256": resident_identity["served_model_manifest_sha256"], "worker_binary_sha256": resident_identity["worker_binary_sha256"], "package_manifest_sha256": resident_identity["package_manifest_sha256"], "package_content_sha256": resident_identity["package_content_sha256"]}}
     identity_document["identity_sha256"] = BATCH.sha_bytes(BATCH.canonical(identity_document))
     identity_path.write_text(json.dumps(identity_document), encoding="utf-8")
     preflight_path.write_text(json.dumps({"weights_bytes": 1, "persistent_state_bytes": 1, "kv_cache_bytes": 1, "workspace_bytes": 1, "temporary_bytes": 1, "vram_headroom_bytes": 1, "gpu_process_snapshot": []}), encoding="utf-8")
@@ -103,7 +125,7 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     return expanded_path, fixture_index_path, identity_path, preflight_path, policy_path
 
 
-def _driver(tmp_path: Path, oom: bool = False, reset_bad: bool = False, drift: str | None = None) -> Path:
+def _driver(tmp_path: Path, driver_sha256: str, oom: bool = False, reset_bad: bool = False, drift: str | None = None) -> Path:
     suffix = drift or ("oom" if oom else "reset-bad" if reset_bad else "ok")
     path = tmp_path / f"fake-{suffix}-driver.py"
     path.write_text(
@@ -136,10 +158,14 @@ for line in sys.stdin:
         if terminal_status: break
     elif msg['command']=='case_end': print(json.dumps({'event':'case_complete','schema_version':'ullm.aq4_p2_resident_driver.v2','resident_session_id':session,'case_id':case_id,'release':{'commit':1,'discard':0,'reset':1,'baseline_restored':False if drift=='release' else True}}), flush=True)
     elif msg['command']=='shutdown': break
-""" % (oom, reset_bad, drift, DRIVER_IDENTITY),
+""" % (oom, reset_bad, drift, _identity(driver_sha256)),
         encoding="utf-8",
     )
     return path
+
+
+def _live_command(tmp_path: Path, output: Path, expanded: Path, index: Path, identity: Path, preflight: Path, policy: Path, python: Path, driver: Path, run_id: str) -> list[str]:
+    return [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", run_id, "--baseline-kind", "p3-current-head", "--lock-path", str(tmp_path / "r9700.lock"), "--driver-command", str(python), str(driver)]
 
 
 def test_dry_run_selects_exact_84_target_cases_and_separates_baseline(tmp_path: Path) -> None:
@@ -157,26 +183,29 @@ def test_dry_run_selects_exact_84_target_cases_and_separates_baseline(tmp_path: 
 
 
 def test_fake_resident_driver_writes_one_atomic_raw_per_case(tmp_path: Path) -> None:
-    expanded, index, identity, preflight, policy = _bundle(tmp_path)
+    python, driver_sha256 = _detached_python(tmp_path)
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
     output = tmp_path / "run"
-    driver = _driver(tmp_path)
-    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", "r-current", "--baseline-kind", "p3-current-head", "--driver-command", sys.executable, str(driver)]
+    driver = _driver(tmp_path, driver_sha256)
+    command = _live_command(tmp_path, output, expanded, index, identity, preflight, policy, python, driver, "r-current")
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode == 0, completed.stderr
     raws = list(output.glob("*.raw.json"))
     assert len(raws) == 84
     sample = json.loads(raws[0].read_text())
     assert sample["status"] == "ok"
-    assert sample["resident"] == {"session_id": "fake-session", "model_loads": 1, "driver_identity": DRIVER_IDENTITY, "case_reset_count": 12}
+    assert sample["resident"] == {"session_id": "fake-session", "model_loads": 1, "driver_identity": _identity(driver_sha256), "case_reset_count": 12}
+    assert sample["device_lock"]["driver"]["sha256"] == driver_sha256
     assert sample["schedule"] == {"warmup_runs": 2, "measured_runs": 10, "completed_runs": 12}
     assert json.loads((output / "resident-batch.summary.json").read_text())["completed_cases"] == 84
 
 
 def test_resident_oom_is_immutable_and_aborts_remaining_cases(tmp_path: Path) -> None:
-    expanded, index, identity, preflight, policy = _bundle(tmp_path)
+    python, driver_sha256 = _detached_python(tmp_path)
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
     output = tmp_path / "oom-run"
-    driver = _driver(tmp_path, oom=True)
-    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", "r-current", "--baseline-kind", "p3-current-head", "--driver-command", sys.executable, str(driver)]
+    driver = _driver(tmp_path, driver_sha256, oom=True)
+    command = _live_command(tmp_path, output, expanded, index, identity, preflight, policy, python, driver, "r-current")
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
     raws = list(output.glob("*.raw.json"))
@@ -185,10 +214,11 @@ def test_resident_oom_is_immutable_and_aborts_remaining_cases(tmp_path: Path) ->
 
 
 def test_incomplete_reset_is_immutable_and_aborts_process_reuse(tmp_path: Path) -> None:
-    expanded, index, identity, preflight, policy = _bundle(tmp_path)
+    python, driver_sha256 = _detached_python(tmp_path)
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
     output = tmp_path / "reset-bad-run"
-    driver = _driver(tmp_path, reset_bad=True)
-    command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", "r-current", "--baseline-kind", "p3-current-head", "--driver-command", sys.executable, str(driver)]
+    driver = _driver(tmp_path, driver_sha256, reset_bad=True)
+    command = _live_command(tmp_path, output, expanded, index, identity, preflight, policy, python, driver, "r-current")
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
     raws = list(output.glob("*.raw.json"))
@@ -199,12 +229,13 @@ def test_incomplete_reset_is_immutable_and_aborts_process_reuse(tmp_path: Path) 
     assert value["runs"][-1]["terminal"]["reuse_forbidden"] is True
 
 
-def test_ready_identity_drift_is_rejected_before_case_begin(tmp_path: Path) -> None:
+def test_ready_self_sha_and_identity_drift_are_rejected_before_case_begin(tmp_path: Path) -> None:
     for drift in ("driver", "package", "device"):
-        expanded, index, identity, preflight, policy = _bundle(tmp_path / drift)
+        python, driver_sha256 = _detached_python(tmp_path / drift)
+        expanded, index, identity, preflight, policy = _bundle(tmp_path / drift, driver_sha256)
         output = tmp_path / f"{drift}-drift-run"
-        driver = _driver(tmp_path / drift, drift=drift)
-        command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", f"r-{drift}", "--baseline-kind", "p3-current-head", "--driver-command", sys.executable, str(driver)]
+        driver = _driver(tmp_path / drift, driver_sha256, drift=drift)
+        command = _live_command(tmp_path / drift, output, expanded, index, identity, preflight, policy, python, driver, f"r-{drift}")
         completed = subprocess.run(command, text=True, capture_output=True)
         assert completed.returncode != 0
         assert list(output.glob("*.raw.json")) == []
@@ -212,10 +243,72 @@ def test_ready_identity_drift_is_rejected_before_case_begin(tmp_path: Path) -> N
 
 def test_case_swap_result_order_and_release_drift_are_rejected(tmp_path: Path) -> None:
     for drift in ("case_swap", "result_order", "release"):
-        expanded, index, identity, preflight, policy = _bundle(tmp_path / drift)
+        python, driver_sha256 = _detached_python(tmp_path / drift)
+        expanded, index, identity, preflight, policy = _bundle(tmp_path / drift, driver_sha256)
         output = tmp_path / f"{drift}-run"
-        driver = _driver(tmp_path / drift, drift=drift)
-        command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", f"r-{drift}", "--baseline-kind", "p3-current-head", "--driver-command", sys.executable, str(driver)]
+        driver = _driver(tmp_path / drift, driver_sha256, drift=drift)
+        command = _live_command(tmp_path / drift, output, expanded, index, identity, preflight, policy, python, driver, f"r-{drift}")
         completed = subprocess.run(command, text=True, capture_output=True)
         assert completed.returncode != 0
         assert list(output.glob("*.raw.json")) == []
+
+
+def test_cargo_style_driver_hardlink_is_rejected_and_detached_copy_is_accepted(tmp_path: Path) -> None:
+    detached, digest = _detached_python(tmp_path)
+    cargo_link = tmp_path / "cargo-deps-hardlink"
+    os.link(detached, cargo_link)
+    bound = {"resident_driver_identity": {"binary_sha256": digest}}
+    with pytest.raises(BATCH.BatchError, match="single-link"):
+        BATCH.validate_driver_command([str(detached)], bound)
+    accepted = tmp_path / "accepted-detached-driver"
+    shutil.copy2(detached, accepted)
+    evidence = BATCH.validate_driver_command([str(accepted)], bound)
+    assert evidence["sha256"] == digest
+    assert evidence["nlink"] == 1
+
+
+def test_lock_contention_fails_before_spawn_and_exception_releases_lock(tmp_path: Path) -> None:
+    python, driver_sha256 = _detached_python(tmp_path)
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
+    driver = _driver(tmp_path, driver_sha256, oom=True)
+    lock_path = tmp_path / "r9700.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    blocked_output = tmp_path / "blocked-output"
+    blocked = subprocess.run(_live_command(tmp_path, blocked_output, expanded, index, identity, preflight, policy, python, driver, "blocked"), text=True, capture_output=True)
+    assert blocked.returncode != 0
+    assert not blocked_output.exists()
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+    os.close(descriptor)
+
+    failed_output = tmp_path / "failed-output"
+    failed = subprocess.run(_live_command(tmp_path, failed_output, expanded, index, identity, preflight, policy, python, driver, "oom-cleanup"), text=True, capture_output=True)
+    assert failed.returncode != 0
+    owner = json.loads((failed_output / "resident-batch.lock-owner.json").read_text())
+    assert owner["driver"]["sha256"] == driver_sha256
+    descriptor = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def test_fixture_index_rejects_relative_and_symlink_parent_paths(tmp_path: Path) -> None:
+    for variant in ("relative", "symlink-parent"):
+        root = tmp_path / variant
+        expanded, index, identity, preflight, policy = _bundle(root)
+        document = json.loads(index.read_text())
+        original = Path(document["cases"][0]["fixture_path"])
+        if variant == "relative":
+            document["cases"][0]["fixture_path"] = original.name
+        else:
+            alias = tmp_path / f"{variant}-alias"
+            alias.symlink_to(root, target_is_directory=True)
+            document["cases"][0]["fixture_path"] = str(alias / original.name)
+        index.write_text(json.dumps(document), encoding="utf-8")
+        output = root / "invalid-fixture-output"
+        command = [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--output-dir", str(output), "--run-id", variant, "--baseline-kind", "p3-current-head", "--dry-run"]
+        completed = subprocess.run(command, text=True, capture_output=True)
+        assert completed.returncode != 0
+        assert not output.exists()
