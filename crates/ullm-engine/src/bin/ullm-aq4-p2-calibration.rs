@@ -260,10 +260,17 @@ struct FileIdentity {
     nlink: u64,
 }
 
+#[derive(Debug)]
 struct PinnedRegularFile {
     path: PathBuf,
     label: String,
     file: File,
+    identity: FileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedFile {
+    sha256: String,
     identity: FileIdentity,
 }
 
@@ -727,20 +734,57 @@ impl PinnedRegularFile {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static CROSS_OPEN_TEST_HOOK: std::cell::RefCell<Option<(String, Box<dyn FnOnce()>)>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn install_cross_open_test_hook(label: &str, hook: impl FnOnce() + 'static) {
+    CROSS_OPEN_TEST_HOOK.with(|slot| {
+        let previous = slot.replace(Some((label.to_string(), Box::new(hook))));
+        assert!(
+            previous.is_none(),
+            "cross-open test hook was already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn invoke_cross_open_test_hook(label: &str) {
+    CROSS_OPEN_TEST_HOOK.with(|slot| {
+        let hook = slot.borrow_mut().take();
+        match hook {
+            Some((expected, hook)) if expected == label => hook(),
+            Some(hook) => {
+                slot.replace(Some(hook));
+            }
+            None => {}
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn invoke_cross_open_test_hook(_label: &str) {}
+
 fn read_regular(path: &Path, label: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut pinned = PinnedRegularFile::open(path, label, Some(max_bytes))?;
     pinned.read_bounded(max_bytes)
 }
 
-fn sha256_file(path: &Path, label: &str) -> Result<String, String> {
-    let mut pinned = PinnedRegularFile::open(path, label, None)?;
+fn sha256_pinned(pinned: &mut PinnedRegularFile) -> Result<String, String> {
+    pinned
+        .file
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("{} hash seek failed: {error}", pinned.label))?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];
     loop {
         let read = pinned
             .file
             .read(&mut buffer)
-            .map_err(|error| format!("{label} read failed: {error}"))?;
+            .map_err(|error| format!("{} read failed: {error}", pinned.label))?;
         if read == 0 {
             break;
         }
@@ -748,6 +792,35 @@ fn sha256_file(path: &Path, label: &str) -> Result<String, String> {
     }
     pinned.verify_unchanged()?;
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sha256_file(path: &Path, label: &str) -> Result<String, String> {
+    let mut pinned = PinnedRegularFile::open(path, label, None)?;
+    sha256_pinned(&mut pinned)
+}
+
+fn open_pinned_expected_digest(
+    path: &Path,
+    label: &str,
+    max_bytes: Option<usize>,
+    expected: &VerifiedFile,
+) -> Result<PinnedRegularFile, String> {
+    if !valid_sha256(&expected.sha256) {
+        return Err(format!("{label} expected SHA-256 is invalid"));
+    }
+    invoke_cross_open_test_hook(label);
+    let mut pinned = PinnedRegularFile::open(path, label, max_bytes)?;
+    if pinned.identity != expected.identity {
+        return Err(format!("{label} cross-open file identity differs"));
+    }
+    if sha256_pinned(&mut pinned)? != expected.sha256 {
+        return Err(format!("{label} cross-open SHA-256 differs"));
+    }
+    pinned
+        .file
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("{label} rewind failed: {error}"))?;
+    Ok(pinned)
 }
 
 fn safe_relative(root: &Path, raw: &str, label: &str) -> Result<PathBuf, String> {
@@ -831,6 +904,27 @@ fn load_json_link(path: &Path, label: &str) -> Result<(Value, Link), String> {
     let canonical = path
         .canonicalize()
         .map_err(|error| format!("{label} canonicalization failed: {error}"))?;
+    Ok((
+        value,
+        Link {
+            path: canonical.to_string_lossy().into_owned(),
+            sha256: sha256_bytes(&bytes),
+        },
+    ))
+}
+
+fn load_json_link_expected(
+    path: &Path,
+    label: &str,
+    expected: &VerifiedFile,
+) -> Result<(Value, Link), String> {
+    let mut pinned = open_pinned_expected_digest(path, label, Some(MAX_JSON_BYTES), expected)?;
+    let bytes = pinned.read_bounded(MAX_JSON_BYTES)?;
+    let value = parse_strict_json(&bytes, label)?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("{label} canonicalization failed: {error}"))?;
+    pinned.verify_unchanged()?;
     Ok((
         value,
         Link {
@@ -1002,7 +1096,8 @@ fn package_tree_identity(root: &Path) -> Result<PackageTree, String> {
             if metadata.is_dir() {
                 pending.push((path, depth + 1));
             } else if metadata.is_file() {
-                files.push(path);
+                let identity = validate_regular_identity(&metadata, "package file")?;
+                files.push((path, identity));
                 if files.len() > MAX_PACKAGE_FILES {
                     return Err("package tree exceeds the file-count limit".to_string());
                 }
@@ -1014,7 +1109,7 @@ fn package_tree_identity(root: &Path) -> Result<PackageTree, String> {
     if files.is_empty() {
         return Err("package tree is empty".to_string());
     }
-    files.sort_by(|left, right| {
+    files.sort_by(|(left, _), (right, _)| {
         left.strip_prefix(&canonical)
             .expect("package path has prefix")
             .as_os_str()
@@ -1029,16 +1124,19 @@ fn package_tree_identity(root: &Path) -> Result<PackageTree, String> {
     });
     let mut aggregate = Sha256::new();
     let mut bytes = 0_u64;
-    for file in &files {
+    for (file, entry_identity) in &files {
         let relative = file
             .strip_prefix(&canonical)
             .expect("package path has prefix")
             .as_os_str()
             .as_bytes();
-        let digest = sha256_file(file, "package file")?;
-        let size = fs::metadata(file)
-            .map_err(|error| format!("package file metadata failed: {error}"))?
-            .len();
+        invoke_cross_open_test_hook("package file");
+        let mut pinned = PinnedRegularFile::open(file, "package file", None)?;
+        if pinned.identity != *entry_identity {
+            return Err("package file identity changed after directory enumeration".to_string());
+        }
+        let digest = sha256_pinned(&mut pinned)?;
+        let size = pinned.identity.size;
         bytes = bytes
             .checked_add(size)
             .ok_or_else(|| "package byte count overflows".to_string())?;
@@ -1552,7 +1650,7 @@ fn scan_vector_region(
     Ok((format!("{:x}", digest.finalize()), nonfinite, topk))
 }
 
-fn validate_source_sums(root: &Path) -> Result<(), String> {
+fn validate_source_sums(root: &Path) -> Result<BTreeMap<String, VerifiedFile>, String> {
     let sums_path = root.join("SHA256SUMS");
     let bytes = read_regular(&sums_path, "source SHA256SUMS", 8 * 1024 * 1024)?;
     let text = std::str::from_utf8(&bytes)
@@ -1581,13 +1679,23 @@ fn validate_source_sums(root: &Path) -> Result<(), String> {
     if sums.keys().cloned().collect::<BTreeSet<_>>() != expected {
         return Err("source SHA256SUMS file set differs".to_string());
     }
+    let mut verified = BTreeMap::new();
     for (name, expected) in sums {
         let path = safe_relative(root, &name, "source SHA256SUMS entry")?;
-        if sha256_file(&path, "source SHA256SUMS entry")? != expected {
+        let mut pinned = PinnedRegularFile::open(&path, "source SHA256SUMS entry", None)?;
+        let identity = pinned.identity;
+        if sha256_pinned(&mut pinned)? != expected {
             return Err(format!("source SHA256SUMS digest differs for {name}"));
         }
+        verified.insert(
+            name,
+            VerifiedFile {
+                sha256: expected,
+                identity,
+            },
+        );
     }
-    Ok(())
+    Ok(verified)
 }
 
 fn read_line_bounded<R: BufRead>(
@@ -1619,9 +1727,15 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
         .canonicalize()
         .map_err(|error| format!("source root canonicalization failed: {error}"))?;
     ensure_output_outside_source_roots(&args.output, std::slice::from_ref(&root))?;
-    validate_source_sums(&root)?;
+    let source_sums = validate_source_sums(&root)?;
     let manifest_path = root.join("manifest.json");
-    let (manifest, manifest_link) = load_json_link(&manifest_path, "source manifest")?;
+    let (manifest, manifest_link) = load_json_link_expected(
+        &manifest_path,
+        "source manifest",
+        source_sums
+            .get("manifest.json")
+            .expect("validated source sums contain manifest"),
+    )?;
     exact_fields(
         &manifest,
         &[
@@ -1805,23 +1919,33 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
     }
     let hidden_expected = row_count as u64 * HIDDEN_SIZE as u64 * F32_BYTES as u64;
     let logits_expected = row_count as u64 * VOCAB_SIZE as u64 * F32_BYTES as u64;
-    if fs::metadata(&hidden_path)
-        .map_err(|error| format!("source hidden metadata failed: {error}"))?
-        .len()
-        != hidden_expected
-        || fs::metadata(&logits_path)
-            .map_err(|error| format!("source logits metadata failed: {error}"))?
-            .len()
-            != logits_expected
-    {
-        return Err("source sidecar sizes differ from row count".to_string());
-    }
     let max_rows_bytes = row_count
         .checked_mul(MAX_ROW_LINE_BYTES)
         .ok_or_else(|| "source rows byte bound overflows".to_string())?;
-    let mut rows_pinned = PinnedRegularFile::open(&rows_path, "source rows", Some(max_rows_bytes))?;
-    let mut hidden_pinned = PinnedRegularFile::open(&hidden_path, "source hidden", None)?;
-    let mut logits_pinned = PinnedRegularFile::open(&logits_path, "source logits", None)?;
+    let mut rows_pinned = open_pinned_expected_digest(
+        &rows_path,
+        "source rows",
+        Some(max_rows_bytes),
+        source_sums
+            .get("rows.jsonl")
+            .expect("validated source sums contain rows"),
+    )?;
+    let mut hidden_pinned = open_pinned_expected_digest(
+        &hidden_path,
+        "source hidden",
+        None,
+        source_sums
+            .get("vectors/hidden.f32le")
+            .expect("validated source sums contain hidden"),
+    )?;
+    let mut logits_pinned = open_pinned_expected_digest(
+        &logits_path,
+        "source logits",
+        None,
+        source_sums
+            .get("vectors/logits.f32le")
+            .expect("validated source sums contain logits"),
+    )?;
     if hidden_pinned.identity.size != hidden_expected
         || logits_pinned.identity.size != logits_expected
     {
@@ -3034,6 +3158,89 @@ mod tests {
     fn strict_json_rejects_duplicate_keys_and_nonfinite() {
         assert!(parse_strict_json(br#"{"a":1,"a":2}"#, "duplicate").is_err());
         assert!(parse_strict_json(br#"{"a":NaN}"#, "nonfinite").is_err());
+    }
+
+    fn verified_file(path: &Path, label: &str) -> VerifiedFile {
+        let mut pinned = PinnedRegularFile::open(path, label, None).unwrap();
+        VerifiedFile {
+            sha256: sha256_pinned(&mut pinned).unwrap(),
+            identity: pinned.identity,
+        }
+    }
+
+    #[test]
+    fn source_cross_open_replacements_are_rejected_for_every_summed_payload() {
+        for (index, label) in [
+            "source manifest",
+            "source rows",
+            "source hidden",
+            "source logits",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = temp_path(&format!("cross-open-source-{index}"));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("payload");
+            let moved = root.join("payload-before-replacement");
+            fs::write(&path, b"original").unwrap();
+            let expected = verified_file(&path, "initial summed payload");
+            let hook_path = path.clone();
+            let hook_moved = moved.clone();
+            install_cross_open_test_hook(label, move || {
+                fs::rename(&hook_path, &hook_moved).unwrap();
+                fs::write(&hook_path, b"REPLACED").unwrap();
+            });
+            let error = open_pinned_expected_digest(&path, label, None, &expected).unwrap_err();
+            assert!(error.contains("cross-open file identity differs"));
+            assert!(moved.is_file());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn source_cross_open_same_size_rewrite_with_restored_mtime_is_rejected() {
+        let root = temp_path("cross-open-source-rewrite");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("rows.jsonl");
+        fs::write(&path, b"original").unwrap();
+        let expected = verified_file(&path, "initial source rows");
+        let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let hook_path = path.clone();
+        install_cross_open_test_hook("source rows", move || {
+            let mut writer = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&hook_path)
+                .unwrap();
+            writer.write_all(b"REPLACED").unwrap();
+            writer
+                .set_times(fs::FileTimes::new().set_modified(original_mtime))
+                .unwrap();
+            writer.sync_all().unwrap();
+        });
+        let error = open_pinned_expected_digest(&path, "source rows", None, &expected).unwrap_err();
+        assert!(error.contains("cross-open file identity differs"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_cross_open_replacement_is_rejected_before_digest_accounting() {
+        let root = temp_path("cross-open-package");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("weight.bin");
+        let moved = root.join("weight-before-replacement.bin");
+        fs::write(&path, b"same-bytes").unwrap();
+        let hook_path = path.clone();
+        let hook_moved = moved.clone();
+        install_cross_open_test_hook("package file", move || {
+            fs::rename(&hook_path, &hook_moved).unwrap();
+            fs::write(&hook_path, b"same-bytes").unwrap();
+        });
+        let error = package_tree_identity(&root).unwrap_err();
+        assert!(error.contains("identity changed after directory enumeration"));
+        assert!(moved.is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
