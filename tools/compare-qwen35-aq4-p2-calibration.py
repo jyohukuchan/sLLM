@@ -278,11 +278,12 @@ def load_artifact(root: Path) -> dict[str, Any]:
                         previous_hidden += item["bytes"]
                     else:
                         previous_logits += item["bytes"]
-                if row["logits"]["nonfinite_count"] == 0:
+                row_nonfinite_count = row["hidden"]["nonfinite_count"] + row["logits"]["nonfinite_count"]
+                if row_nonfinite_count == 0:
                     ranked = topk_from_chunks(read_chunks(logit, row["logits"]["offset_bytes"], VOCAB_SIZE, chunk_elements), VOCAB_SIZE, TOP_K)
                     if ranked != row["topk"]:
                         raise ComparisonError(f"artifact top-k differs for {key}")
-                nonfinite_rows += int(row["hidden"]["nonfinite_count"] + row["logits"]["nonfinite_count"] > 0)
+                nonfinite_rows += int(row_nonfinite_count > 0)
     except _VALIDATOR.ValidationError as error:
         raise ComparisonError(str(error)) from error
     blocked = nonfinite_rows > 0

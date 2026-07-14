@@ -14,8 +14,9 @@
 - 独立QA後、全nested schemaとexact artifact file setを閉じ、single-link regular fileだけを受理するようにした。
 - manifest、rows、sidecar、SHA256SUMSは`O_NOFOLLOW` fdへ固定し、device/inode/size/mtime/ctime/nlinkを読取前後に照合する。rowsはfile/line/recordの3上限を持つ。
 - nonfinite rowは順位計算を行わないblocked証跡へ変更した。比較器は異なるchunk幅をglobal element streamとして比較し、短読/余剰を拒否する。
+- 独立再QAで、hiddenだけがnonfiniteのblocked rowを比較器が誤って順位検証する不整合を修正した。hidden/logitsの両方がfiniteの場合だけtop-kを再計算し、validatorからblocked comparisonまでの回帰testを追加した。
 - exporter/comparatorのpublishを`renameat2(RENAME_NOREPLACE)`へ変更し、競合時にfail-closeする。
-- 独立負例を含む19 testsと既存`/tmp/qwen35-aq4-source-calibration-canary-v1`の再検証を通した。モデルは再ロードしていない。
+- 独立負例を含む20 testsと既存`/tmp/qwen35-aq4-source-calibration-canary-v1`の再検証を通した。モデルは再ロードしていない。
 
 ## 次の行動
 
