@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+"""Run the representative AQ4 P2 full-model target profile through one resident driver.
+
+The driver protocol is deliberately tiny and hash-only: one child process announces one model
+load, then receives case/run commands.  A real GPU driver can implement this protocol later; the
+planner and fake-driver tests are CPU-only and never touch a service or device.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import select
+import socket
+import stat
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+MAX_JSON_BYTES = 64 * 1024 * 1024
+CASE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SCHEMA = "ullm.aq4_p2_resident_batch.v1"
+DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v2"
+ONE_CASE_BUNDLE_SCHEMA = "ullm.aq4_p2_resident_smoke_binding_bundle.v3"
+WARMUP_RUNS = 2
+MEASURED_RUNS = 10
+READY_IDENTITY_KEYS = {
+    "binary_sha256",
+    "build_git_commit",
+    "protocol",
+    "worker_binary_sha256",
+    "package_manifest_sha256",
+    "package_content_sha256",
+    "served_model_manifest_sha256",
+    "model_id",
+    "model_revision",
+    "format_id",
+    "implementation_id",
+    "runtime_device",
+    "guard_set_sha256",
+}
+RUNTIME_DEVICE_KEYS = {
+    "runtime_device_index",
+    "device_id",
+    "backend",
+    "name",
+    "architecture",
+}
+DEFAULT_LOCK_PATH = Path("/run/ullm/r9700.lock")
+
+
+class BatchError(ValueError):
+    pass
+
+
+def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, child in items:
+        if key in value:
+            raise BatchError(f"duplicate JSON key: {key}")
+        value[key] = child
+    return value
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mode,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+        value.st_nlink,
+    )
+
+
+def _require_absolute_nonsymlink_path(path: Path, label: str) -> None:
+    if not path.is_absolute() or ".." in path.parts:
+        raise BatchError(f"{label} path must be absolute without parent traversal")
+    for parent in reversed(path.parents):
+        try:
+            if stat.S_ISLNK(os.lstat(parent).st_mode):
+                raise BatchError(f"{label} path has a symlink parent")
+        except FileNotFoundError:
+            continue
+
+
+def read_regular(path: Path, label: str, maximum: int | None = None, *, absolute: bool = False, collect: bool = True) -> tuple[bytes, str, os.stat_result]:
+    if absolute:
+        _require_absolute_nonsymlink_path(path, label)
+    try:
+        before = os.lstat(path)
+    except OSError as error:
+        raise BatchError(f"{label} metadata failed: {error}") from error
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise BatchError(f"{label} must be a single-link regular file")
+    if maximum is not None and before.st_size > maximum:
+        raise BatchError(f"{label} exceeds the byte bound")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise BatchError(f"{label} open failed: {error}") from error
+    try:
+        opened = os.fstat(descriptor)
+        if _file_identity(before) != _file_identity(opened):
+            raise BatchError(f"{label} changed while opening")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if maximum is not None and total > maximum:
+                raise BatchError(f"{label} exceeds the byte bound")
+            digest.update(chunk)
+            if collect:
+                chunks.append(chunk)
+        after = os.lstat(path)
+        if _file_identity(before) != _file_identity(after) or _file_identity(before) != _file_identity(os.fstat(descriptor)):
+            raise BatchError(f"{label} changed while reading")
+        return b"".join(chunks), digest.hexdigest(), before
+    finally:
+        os.close(descriptor)
+
+
+def load(path: Path, label: str) -> dict[str, Any]:
+    data, _, _ = read_regular(path, label, MAX_JSON_BYTES)
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite JSON: {item}")))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise BatchError(f"invalid {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise BatchError(f"{label} root must be an object")
+    return value
+
+
+def canonical(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def sha_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha_file(path: Path, label: str, *, absolute: bool = False) -> str:
+    return read_regular(path, label, absolute=absolute, collect=False)[1]
+
+
+def normalize_fixture_paths(fixture_index: dict[str, Any]) -> None:
+    entries = fixture_index.get("cases")
+    if not isinstance(entries, list):
+        raise BatchError("fixture index cases are missing")
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("fixture_path"), str):
+            raise BatchError("fixture index contains an invalid fixture path")
+        raw = Path(entry["fixture_path"])
+        _require_absolute_nonsymlink_path(raw, "fixture")
+        sha_file(raw, "fixture", absolute=True)
+        try:
+            resolved = raw.resolve(strict=True)
+        except OSError as error:
+            raise BatchError(f"fixture path resolution failed: {error}") from error
+        if resolved != raw:
+            raise BatchError("fixture path must already be resolved")
+        entry["fixture_path"] = str(resolved)
+
+
+def validate_driver_command(command: list[str], identity: dict[str, Any]) -> dict[str, Any]:
+    if not command or not all(isinstance(item, str) and item for item in command):
+        raise BatchError("driver command is empty or invalid")
+    path = Path(command[0])
+    _, digest, metadata = read_regular(path, "resident driver executable", absolute=True, collect=False)
+    if metadata.st_mode & 0o111 == 0:
+        raise BatchError("resident driver executable is not executable")
+    bound = identity.get("resident_driver_identity")
+    if not isinstance(bound, dict) or bound.get("binary_sha256") != digest:
+        raise BatchError("resident driver executable SHA differs from bound identity")
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "nlink": metadata.st_nlink,
+    }
+
+
+@contextmanager
+def acquire_device_lock(path: Path, run_id: str, driver: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    _require_absolute_nonsymlink_path(path, "device lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise BatchError(f"device lock open failed: {error}") from error
+    owner = {
+        "schema_version": "ullm.aq4_p2_device_lock_owner.v1",
+        "path": str(path),
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "run_id": run_id,
+        "acquired_unix_ns": time.time_ns(),
+        "driver": driver,
+    }
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise BatchError("device lock must be a single-link regular file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise BatchError(f"device lock is already owned: {path}") from error
+        payload = canonical(owner) + b"\n"
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise BatchError("device lock owner metadata write failed")
+            offset += written
+        os.fsync(descriptor)
+        yield owner
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def case_hash(case: dict[str, Any]) -> str:
+    value = json.loads(json.dumps(case))
+    value["case_sha256"] = None
+    return sha_bytes(canonical(value))
+
+
+def atomic_write(path: Path, value: Any) -> None:
+    if os.path.lexists(path):
+        raise BatchError(f"refusing to overwrite {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.incomplete")
+    try:
+        with temporary.open("x", encoding="utf-8") as target:
+            json.dump(value, target, ensure_ascii=True, sort_keys=True, indent=2)
+            target.write("\n")
+            target.flush()
+            os.fsync(target.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except FileExistsError as error:
+        raise BatchError(f"refusing to overwrite {path}") from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def select_target_cases(expanded: dict[str, Any], fixture_index: dict[str, Any], *, one_case_smoke: bool = False) -> list[dict[str, Any]]:
+    if expanded.get("schema_version") != "ullm.aq4_production_p2_expanded.v2":
+        raise BatchError("expanded manifest schema differs")
+    if fixture_index.get("schema_version") != "ullm.aq4_p2_fixture_index.v1":
+        raise BatchError("fixture index schema differs")
+    cases = expanded.get("cases")
+    if not isinstance(cases, list):
+        raise BatchError("expanded cases are missing")
+    selected = [
+        case for case in cases
+        if isinstance(case, dict)
+        and case.get("stage_id") == "representative"
+        and case.get("scope") == "full_model"
+        and case.get("phase") == "cold_prefill"
+        and case.get("device", {}).get("device_id") == "r9700-rdna4"
+        and case.get("control_id") == "aq4_0_target"
+    ]
+    expected_cases = 1 if one_case_smoke else 84
+    label = "one-case smoke" if one_case_smoke else "representative full_model target profile"
+    if len(selected) != expected_cases:
+        raise BatchError(f"{label} must contain exactly {expected_cases} target cases, got {len(selected)}")
+    selected_ids = [case.get("case_id") for case in selected]
+    if len(set(selected_ids)) != len(selected_ids):
+        raise BatchError("representative target profile contains duplicate case IDs")
+    index_cases = fixture_index.get("cases")
+    if not isinstance(index_cases, list):
+        raise BatchError("fixture index cases are missing")
+    by_id: dict[str, dict[str, Any]] = {}
+    for entry in index_cases:
+        if not isinstance(entry, dict) or not isinstance(entry.get("case_id"), str) or not entry["case_id"] or entry["case_id"] in by_id:
+            raise BatchError("fixture index contains invalid or duplicate case IDs")
+        by_id[entry["case_id"]] = entry
+    if len(by_id) != fixture_index.get("case_count"):
+        raise BatchError("fixture index case coverage differs")
+    for case in selected:
+        case_id = case.get("case_id")
+        if not isinstance(case_id, str) or CASE_ID_RE.fullmatch(case_id) is None or case.get("case_sha256") != case_hash(case):
+            raise BatchError(f"selected case identity differs: {case_id}")
+        entry = by_id.get(case_id)
+        if not isinstance(entry, dict) or entry.get("case_sha256") != case.get("case_sha256") or entry.get("prompt_tokens") != case.get("prompt_tokens") or entry.get("context_tokens") != case.get("context_tokens") or entry.get("generated_tokens") != case.get("generated_tokens"):
+            raise BatchError(f"fixture index does not bind selected case: {case_id}")
+        fixture_path = Path(entry.get("fixture_path", ""))
+        if sha_file(fixture_path, "fixture") != entry.get("fixture_sha256"):
+            raise BatchError(f"fixture hash differs: {case_id}")
+    return sorted(selected, key=lambda case: case["case_id"])
+
+
+def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str, Any], fixture_index: dict[str, Any], identity: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    root = args.expanded.parent.resolve(strict=True)
+    expected_paths = {
+        "expanded": root / "case-binding.json",
+        "fixture_index": root / "fixture-index.json",
+        "identity": root / "identity.json",
+        "preflight": root / "preflight.json",
+        "policy": root / "policy.json",
+    }
+    for name, expected in expected_paths.items():
+        supplied = getattr(args, name).resolve(strict=True)
+        if supplied != expected:
+            raise BatchError(f"one-case smoke {name} is not the bundle v3 member")
+    bundle_path = root / "bundle.json"
+    fake_ready_path = root / "fake-ready.json"
+    bundle = load(bundle_path, "one-case smoke bundle")
+    fake_ready = load(fake_ready_path, "one-case smoke fake-ready")
+    if bundle.get("schema_version") != ONE_CASE_BUNDLE_SCHEMA or bundle.get("status") != "prepared_not_executed" or bundle.get("promotion") is not False:
+        raise BatchError("one-case smoke bundle v3 status/promotion differs")
+    if len(cases) != 1:
+        raise BatchError("one-case smoke internal case count differs")
+    case = cases[0]
+    bindings = bundle.get("bindings")
+    files = bundle.get("files")
+    case_binding_sha = sha_file(args.expanded, "one-case smoke case binding")
+    if not isinstance(bindings, dict) or bindings.get("case_binding_sha256") != case_binding_sha or bindings.get("case_sha256") != case["case_sha256"]:
+        raise BatchError("one-case smoke bundle case binding/hash differs")
+    case_file = files.get("case-binding.json") if isinstance(files, dict) else None
+    if not isinstance(case_file, dict) or case_file.get("sha256") != case_binding_sha or case_file.get("role") != "runtime_bound_case":
+        raise BatchError("one-case smoke bundle file binding differs")
+    if expanded.get("status") != "bound_one_case_smoke" or expanded.get("case_count") != 1 or expanded.get("canonical_case_sha256") != sha_bytes(canonical(cases)):
+        raise BatchError("one-case smoke case-binding root differs")
+    if fixture_index.get("subset") != "resident_one_case_smoke" or fixture_index.get("case_count") != 1 or fixture_index.get("expanded_manifest_sha256") != case_binding_sha:
+        raise BatchError("one-case smoke fixture index binding differs")
+    if identity.get("expanded_manifest_sha256") != case_binding_sha or identity.get("hash_binding", {}).get("bound_case_manifest_sha256") != case_binding_sha:
+        raise BatchError("one-case smoke identity case binding differs")
+    expected_binary_sha256 = identity.get("resident_driver_identity", {}).get("binary_sha256")
+    if not isinstance(expected_binary_sha256, str) or SHA256_RE.fullmatch(expected_binary_sha256) is None:
+        raise BatchError("one-case smoke resident binary binding is invalid")
+    session_id, driver_identity = validate_ready(fake_ready, identity, cases, expected_binary_sha256)
+    return bundle, {
+        "mode": "validate_only",
+        "bundle": {"path": str(bundle_path), "sha256": sha_file(bundle_path, "one-case smoke bundle")},
+        "fake_ready": {"path": str(fake_ready_path), "sha256": sha_file(fake_ready_path, "one-case smoke fake-ready")},
+        "driver_fake_handshake": "passed",
+        "resident_session_id": session_id,
+        "driver_identity": driver_identity,
+    }
+
+
+def _send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
+    if process.stdin is None:
+        raise BatchError("resident driver stdin is unavailable")
+    process.stdin.write(json.dumps(message, ensure_ascii=True, sort_keys=True) + "\n")
+    process.stdin.flush()
+
+
+def _recv(process: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
+    if process.stdout is None:
+        raise BatchError("resident driver stdout is unavailable")
+    ready, _, _ = select.select([process.stdout], [], [], timeout)
+    if not ready:
+        raise BatchError("resident driver response timed out")
+    line = process.stdout.readline()
+    if not line:
+        raise BatchError("resident driver exited before response")
+    value = json.loads(line, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite driver number: {item}")))
+    if not isinstance(value, dict):
+        raise BatchError("resident driver response is not an object")
+    return value
+
+
+def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != READY_IDENTITY_KEYS:
+        raise BatchError("resident driver identity fields differ")
+    for field in ("binary_sha256", "worker_binary_sha256", "package_manifest_sha256", "package_content_sha256", "served_model_manifest_sha256", "guard_set_sha256"):
+        if not isinstance(value[field], str) or SHA256_RE.fullmatch(value[field]) is None:
+            raise BatchError(f"resident driver identity.{field} is invalid")
+    if not isinstance(value["build_git_commit"], str) or GIT_SHA_RE.fullmatch(value["build_git_commit"]) is None:
+        raise BatchError("resident driver identity.build_git_commit is invalid")
+    if value["protocol"] != DRIVER_SCHEMA:
+        raise BatchError("resident driver identity protocol differs")
+    for field in ("model_id", "model_revision", "format_id", "implementation_id"):
+        if not isinstance(value[field], str) or not value[field]:
+            raise BatchError(f"resident driver identity.{field} is invalid")
+    runtime = value["runtime_device"]
+    if not isinstance(runtime, dict) or set(runtime) != RUNTIME_DEVICE_KEYS:
+        raise BatchError("resident driver runtime device fields differ")
+    if type(runtime["runtime_device_index"]) is not int or runtime["runtime_device_index"] < 0:
+        raise BatchError("resident driver runtime device index is invalid")
+    if not isinstance(runtime["device_id"], (str, int)) or isinstance(runtime["device_id"], bool) or (isinstance(runtime["device_id"], str) and not runtime["device_id"]):
+        raise BatchError("resident driver runtime device ID is invalid")
+    for field in ("backend", "name", "architecture"):
+        if not isinstance(runtime[field], str) or not runtime[field]:
+            raise BatchError(f"resident driver runtime device {field} is invalid")
+    bound = identity.get("resident_driver_identity")
+    if not isinstance(bound, dict) or set(bound) != READY_IDENTITY_KEYS:
+        raise BatchError("identity file lacks resident driver identity")
+    if bound != value:
+        raise BatchError("resident driver identity differs from identity file")
+    bound_hashes = identity.get("hash_binding", {})
+    for field in ("package_manifest_sha256", "package_content_sha256", "served_model_manifest_sha256", "worker_binary_sha256"):
+        if isinstance(bound_hashes, dict) and bound_hashes.get(field) != value[field]:
+            raise BatchError(f"resident {field} identity differs")
+    if identity.get("build_git_commit") not in (None, value["build_git_commit"]):
+        raise BatchError("resident build commit identity differs")
+    for case in cases:
+        device = case.get("device")
+        if not isinstance(device, dict):
+            raise BatchError(f"case device identity is missing: {case.get('case_id')}")
+        for field in RUNTIME_DEVICE_KEYS:
+            expected = device.get(field)
+            if field == "architecture" and runtime[field] == "gfx1201" and expected == "RDNA4":
+                expected = "gfx1201"
+            if field in device and expected != runtime[field]:
+                raise BatchError(f"resident runtime device differs from case: {case['case_id']}")
+    return value
+
+
+def validate_ready(value: dict[str, Any], identity: dict[str, Any], cases: list[dict[str, Any]], expected_binary_sha256: str) -> tuple[str, dict[str, Any]]:
+    if set(value) != {"event", "schema_version", "model_loads", "resident_session_id", "driver_identity"} or value.get("event") != "ready" or value.get("schema_version") != DRIVER_SCHEMA or type(value.get("model_loads")) is not int or value.get("model_loads") != 1 or not isinstance(value.get("resident_session_id"), str) or not value["resident_session_id"]:
+        raise BatchError("resident driver did not prove one model load")
+    ready_identity = _validate_ready_identity(value["driver_identity"], identity, cases)
+    if ready_identity["binary_sha256"] != expected_binary_sha256:
+        raise BatchError("resident driver ready self SHA differs from pre-spawn executable")
+    return value["resident_session_id"], ready_identity
+
+
+def validate_run(value: dict[str, Any], case: dict[str, Any], session_id: str) -> dict[str, Any]:
+    required = {"event", "schema_version", "resident_session_id", "case_id", "run_index", "run_kind", "status", "elapsed_ms", "requested_m", "resolved_m", "actual_token_batch_width", "actual_request_batch_width", "timing", "audit", "state", "lifecycle", "reset", "resource", "terminal"}
+    if set(value) != required or value.get("event") != "run_complete" or value.get("schema_version") != DRIVER_SCHEMA or value.get("resident_session_id") != session_id or value.get("case_id") != case["case_id"] or value.get("status") not in {"ok", "failed", "oom"}:
+        raise BatchError(f"resident driver run identity/status differs: {case['case_id']}")
+    if type(value.get("elapsed_ms")) not in {int, float} or value["elapsed_ms"] < 0:
+        raise BatchError("resident driver elapsed_ms is invalid")
+    reset = value.get("reset")
+    terminal = value.get("terminal")
+    if not isinstance(terminal, dict) or set(terminal) != {"reuse_forbidden", "reason_code", "oom", "hip_fault"} or type(terminal["reuse_forbidden"]) is not bool or type(terminal["oom"]) is not bool or type(terminal["hip_fault"]) is not bool or not isinstance(terminal["reason_code"], str):
+        raise BatchError(f"resident driver terminal fields differ: {case['case_id']}")
+    valid_resets = ({"attempted": 1, "complete": 1, "failed": 0}, {"attempted": 1, "complete": 0, "failed": 1}) if terminal["reuse_forbidden"] else ({"attempted": 1, "complete": 1, "failed": 0},)
+    if not isinstance(reset, dict) or reset not in valid_resets:
+        raise BatchError(f"resident driver reset is not complete: {case['case_id']}")
+    if value["status"] == "oom" and (not terminal["oom"] or not terminal["reuse_forbidden"]):
+        raise BatchError("resident driver OOM is not terminal")
+    if terminal["hip_fault"] and not terminal["reuse_forbidden"]:
+        raise BatchError("resident driver HIP fault is reusable")
+    if value["status"] == "ok":
+        audit = value.get("audit")
+        resource = value.get("resource")
+        if not isinstance(audit, dict) or audit.get("coverage_complete") is not True or not isinstance(audit.get("deterministic_digest_sha256"), str) or not isinstance(resource, dict) or not resource.get("samples") or not isinstance(resource.get("peak"), dict):
+            raise BatchError(f"resident driver terminal audit/resource is incomplete: {case['case_id']}")
+        if terminal["reuse_forbidden"] or value.get("requested_m") != case.get("prefill_requested_m") or value.get("resolved_m") != case.get("resolved_m") or value.get("actual_token_batch_width") != case.get("resolved_m") or value.get("actual_request_batch_width") != case.get("request_count"):
+            raise BatchError(f"resident driver actual width differs: {case['case_id']}")
+        for field in ("timing", "state", "lifecycle"):
+            if not isinstance(value.get(field), dict):
+                raise BatchError(f"resident driver {field} is incomplete: {case['case_id']}")
+    return value
+
+
+def make_case_raw(case: dict[str, Any], fixture_entry: dict[str, Any], identity_link: dict[str, str], policy_link: dict[str, str], run_id: str, baseline_kind: str, session_id: str, driver_identity: dict[str, Any], device_lock: dict[str, Any], runs: list[dict[str, Any]], failure_reason: str | None = None) -> dict[str, Any]:
+    status = "ok" if not failure_reason and all(run["status"] == "ok" for run in runs) else "oom" if any(run["status"] == "oom" for run in runs) else "failed"
+    terminal = {
+        "audit_digests": [run.get("audit", {}).get("deterministic_digest_sha256") for run in runs if isinstance(run.get("audit"), dict)],
+        "reset_count": sum(1 for run in runs if run.get("reset") == {"attempted": 1, "complete": 1, "failed": 0}),
+        "all_resets_complete": all(run.get("reset") == {"attempted": 1, "complete": 1, "failed": 0} for run in runs),
+    }
+    return {
+        "schema_version": "ullm.aq4_p2_resident_batch_raw.v1",
+        "case_id": case["case_id"],
+        "case_sha256": case["case_sha256"],
+        "status": status,
+        "immutable_status": status != "ok",
+        "baseline_identity": {
+            "run_id": run_id,
+            "kind": baseline_kind,
+            "identity_file": identity_link,
+        },
+        "resident": {"session_id": session_id, "model_loads": 1, "driver_identity": driver_identity, "case_reset_count": sum(1 for run in runs if run.get("reset") == {"attempted": 1, "complete": 1, "failed": 0})},
+        "device_lock": device_lock,
+        "workload": {key: case.get(key) for key in ("scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "prefill_requested_m", "resolved_m", "request_count", "generated_tokens")},
+        "schedule": {"warmup_runs": WARMUP_RUNS, "measured_runs": MEASURED_RUNS, "completed_runs": len(runs)},
+        "runs": runs,
+        "terminal": terminal,
+        "failure_reason": failure_reason,
+        "links": {"fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]}, "identity": identity_link, "policy": policy_link},
+    }
+
+
+def build_plan(cases: list[dict[str, Any]], expanded_path: Path, fixture_index_path: Path, run_id: str, baseline_kind: str, identity: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    token_sum = sum(int(case["prompt_tokens"]) for case in cases) * (WARMUP_RUNS + MEASURED_RUNS)
+    return {
+        "schema_version": SCHEMA,
+        "status": "dry_run",
+        "scope": "full_model",
+        "case_count": len(cases),
+        "warmup_runs": WARMUP_RUNS,
+        "measured_runs": MEASURED_RUNS,
+        "transaction_count": len(cases) * (WARMUP_RUNS + MEASURED_RUNS),
+        "prompt_tokens_across_transactions": token_sum,
+        "resident_model_loads": 1,
+        "baseline_identity": {
+            "run_id": run_id,
+            "kind": baseline_kind,
+            "identity_file": {"path": str(identity.get("_path", "")), "sha256": identity.get("_sha256")},
+            "served_model_manifest_sha256": identity.get("hash_binding", {}).get("served_model_manifest_sha256"),
+            "worker_binary_sha256": identity.get("hash_binding", {}).get("worker_binary_sha256"),
+            "build_git_commit": identity.get("build_git_commit"),
+        },
+        "links": {"expanded": {"path": str(expanded_path), "sha256": sha_file(expanded_path, "expanded")}, "fixture_index": {"path": str(fixture_index_path), "sha256": sha_file(fixture_index_path, "fixture index")}, "policy": {"path": str(policy.get("_path", "")), "sha256": policy.get("_sha256")}},
+    }
+
+
+def run_batch(args: argparse.Namespace) -> int:
+    expanded = load(args.expanded, "expanded")
+    fixture_index = load(args.fixture_index, "fixture index")
+    identity = load(args.identity, "identity")
+    preflight = load(args.preflight, "preflight")
+    policy = load(args.policy, "policy")
+    normalize_fixture_paths(fixture_index)
+    expanded_link = {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}
+    identity_link = {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}
+    preflight_link = {"path": str(args.preflight.resolve()), "sha256": sha_file(args.preflight, "preflight")}
+    policy_link = {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}
+    identity["_path"], identity["_sha256"] = str(args.identity.resolve()), identity_link["sha256"]
+    policy["_path"], policy["_sha256"] = str(args.policy.resolve()), policy_link["sha256"]
+    if args.baseline_kind not in {"active-production", "p3-current-head"}:
+        raise BatchError("baseline kind must identify one immutable build/run")
+    cases = select_target_cases(expanded, fixture_index, one_case_smoke=args.one_case_smoke)
+    smoke_validation = None
+    if args.one_case_smoke:
+        _, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, cases)
+    plan = build_plan(cases, args.expanded, args.fixture_index, args.run_id, args.baseline_kind, identity, policy)
+    if args.one_case_smoke:
+        plan.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False, "validation": smoke_validation})
+    if args.dry_run:
+        atomic_write(args.output_dir / "resident-batch.plan.json", plan)
+        return 0
+    if not args.driver_command:
+        raise BatchError("--driver-command is required unless --dry-run is set")
+    driver_executable = validate_driver_command(args.driver_command, identity)
+    completed_cases = 0
+    with acquire_device_lock(args.lock_path, args.run_id, driver_executable) as lock_owner:
+        args.output_dir.mkdir(parents=True, exist_ok=False)
+        atomic_write(args.output_dir / "resident-batch.lock-owner.json", lock_owner)
+        process: subprocess.Popen[str] | None = None
+        try:
+            process = subprocess.Popen(args.driver_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=False, bufsize=1)
+            session_id, driver_identity = validate_ready(_recv(process, args.timeout), identity, cases, driver_executable["sha256"])
+            by_id = {entry["case_id"]: entry for entry in fixture_index["cases"]}
+            for case in cases:
+                fixture_entry = by_id[case["case_id"]]
+                sampling = case.get("sampling")
+                control = case.get("control")
+                if not isinstance(sampling, dict) or not isinstance(control, dict):
+                    raise BatchError(f"case sampling/control is missing: {case['case_id']}")
+                _send(process, {
+                    "command": "case_begin", "schema_version": DRIVER_SCHEMA,
+                    "case_id": case["case_id"], "case_sha256": case["case_sha256"],
+                    "case_binding": expanded_link, "identity": identity_link,
+                    "preflight": preflight_link, "policy": policy_link,
+                    "fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]},
+                    "execution": {
+                        "scope": case.get("scope"), "phase": case.get("phase"), "mode": case.get("mode"),
+                        "prompt_tokens": case.get("prompt_tokens"), "cached_prefix_tokens": case.get("cached_prefix_tokens"),
+                        "context_tokens": case.get("context_tokens"), "generated_tokens": case.get("generated_tokens"),
+                        "request_count": case.get("request_count"), "requested_m": case.get("prefill_requested_m"),
+                        "resolved_m": case.get("resolved_m"), "sampling": sampling, "control": control,
+                    },
+                })
+                begin = _recv(process, args.timeout)
+                if set(begin) != {"event", "schema_version", "resident_session_id", "case_id", "requested_m", "resolved_m", "baseline_clean"} or begin.get("event") != "case_ready" or begin.get("schema_version") != DRIVER_SCHEMA or begin.get("resident_session_id") != session_id or begin.get("case_id") != case["case_id"] or begin.get("requested_m") != case["prefill_requested_m"] or begin.get("resolved_m") != case["resolved_m"] or begin.get("baseline_clean") is not True:
+                    raise BatchError(f"resident driver case begin failed: {case['case_id']}")
+                runs: list[dict[str, Any]] = []
+                reuse_forbidden = False
+                for run_index in range(WARMUP_RUNS + MEASURED_RUNS):
+                    run_kind = "warmup" if run_index < WARMUP_RUNS else "measured"
+                    _send(process, {"command": "run", "schema_version": DRIVER_SCHEMA, "case_id": case["case_id"], "run_index": run_index, "run_kind": run_kind})
+                    value = validate_run(_recv(process, args.timeout), case, session_id)
+                    if value["run_index"] != run_index or value["run_kind"] != run_kind:
+                        raise BatchError(f"resident driver run order differs: {case['case_id']}")
+                    runs.append(value)
+                    if value["terminal"]["reuse_forbidden"] or value["status"] != "ok":
+                        reuse_forbidden = value["terminal"]["reuse_forbidden"]
+                        break
+                if not reuse_forbidden:
+                    _send(process, {"command": "case_end", "schema_version": DRIVER_SCHEMA, "case_id": case["case_id"]})
+                    end = _recv(process, args.timeout)
+                    case_failed = any(item["status"] != "ok" for item in runs)
+                    expected_release = {"commit": int(not case_failed), "discard": int(case_failed), "reset": 1, "baseline_restored": True}
+                    if set(end) != {"event", "schema_version", "resident_session_id", "case_id", "release"} or end.get("event") != "case_complete" or end.get("schema_version") != DRIVER_SCHEMA or end.get("resident_session_id") != session_id or end.get("case_id") != case["case_id"] or end.get("release") != expected_release:
+                        raise BatchError(f"resident driver case end failed: {case['case_id']}")
+                failure_reason = "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else next((item["terminal"]["reason_code"] for item in runs if item["status"] != "ok"), None)
+                raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, lock_owner, runs, failure_reason)
+                if args.one_case_smoke:
+                    raw.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False})
+                atomic_write(args.output_dir / f"{case['case_id']}.raw.json", raw)
+                completed_cases += 1
+                if reuse_forbidden:
+                    raise BatchError(f"resident driver became non-reusable at {case['case_id']}; remaining cases were not executed")
+        finally:
+            if process is not None:
+                try:
+                    _send(process, {"command": "shutdown", "schema_version": DRIVER_SCHEMA})
+                except (BatchError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=args.timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        atomic_write(args.output_dir / "resident-batch.summary.json", {**plan, "status": "complete", "completed_cases": completed_cases, "device_lock": lock_owner})
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expanded", type=Path, required=True)
+    parser.add_argument("--fixture-index", type=Path, required=True)
+    parser.add_argument("--identity", type=Path, required=True)
+    parser.add_argument("--preflight", type=Path, required=True)
+    parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--baseline-kind", choices=("active-production", "p3-current-head"), required=True)
+    parser.add_argument("--driver-command", nargs="+")
+    parser.add_argument("--lock-path", type=Path, default=DEFAULT_LOCK_PATH)
+    parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--one-case-smoke", action="store_true", help="run the exact bundle-v3 one-case smoke; never promotion eligible")
+    args = parser.parse_args(argv)
+    try:
+        return run_batch(args)
+    except (BatchError, OSError, subprocess.SubprocessError) as error:
+        print(f"AQ4 P2 resident batch failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

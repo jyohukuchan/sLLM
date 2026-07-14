@@ -26,15 +26,29 @@
   },
   "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
   "source": {
-    "clean_build": {
-      "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
-      "expected_binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
-      "provenance": "detached clean Git worktree at source commit"
-    },
-    "commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
+    "commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
     "driver_source_sha256": "d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7",
     "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
     "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
+    "normative_driver": {
+      "blob_unchanged_at_current_source": true,
+      "clean_build": {
+        "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+        "expected_binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+        "provenance": "detached clean Git worktree at normative driver commit"
+      },
+      "commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
+      "tree": "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
+    },
+    "one_case_smoke_runner": {
+      "flag": "--one-case-smoke",
+      "measured_runs": 10,
+      "normal_case_count": 84,
+      "promotion_eligible": false,
+      "smoke_case_count": 1,
+      "smoke_transactions": 12,
+      "warmup_runs": 2
+    },
     "protocol": "ullm.aq4_p2_resident_driver.v2",
     "protocol_path_contract": {
       "case_binding": "absolute_without_parent_traversal",
@@ -44,7 +58,7 @@
       "preflight": "absolute_without_parent_traversal",
       "served_model_manifest": "absolute_without_parent_traversal"
     },
-    "runner_source_sha256": "5488df7b65737288a8bcb452a6778bf4ae0b9565904eac7283cc7ac1c13babf9",
-    "tree": "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
+    "runner_source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
+    "tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8"
   }
 }

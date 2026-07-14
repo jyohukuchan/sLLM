@@ -77,11 +77,6 @@
       "role": "runtime_bound_case",
       "sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5"
     },
-    "dry-run.json": {
-      "mode": "0444",
-      "role": "resident_batch_dry_run",
-      "sha256": "24ec8382bebf6d8b4bbac5ce849567e043e98d1fa8b4975f318bb8290a1c0b20"
-    },
     "fake-ready.json": {
       "mode": "0444",
       "role": "synthetic_ready_event",
@@ -105,12 +100,12 @@
     "launch-command.json": {
       "mode": "0444",
       "role": "exact_resident_launch_command",
-      "sha256": "df46c6f5b26aca877f8cbdca5c54eee1525a34d489b8b4e8f8c708ba221e8676"
+      "sha256": "12a1dc385e4e2dc1ee8910a901766a0b6614208ae60dbdcfc2cf1c1557636958"
     },
     "official-case.json": {
       "mode": "0444",
       "role": "trusted_official_expansion_case",
-      "sha256": "808d46c7f8cbe4910267b91fc3086fb39a219e055eff17c5f2efcccf6933338c"
+      "sha256": "8f0d27ea03b995cfb26b4e3d5d4424a54a3a563bbcbbb046eb9feb70a1385d5d"
     },
     "package-manifest.json": {
       "mode": "0444",
@@ -140,7 +135,12 @@
     "trust-roots.json": {
       "mode": "0444",
       "role": "independent_trust_roots",
-      "sha256": "8c10441800dbead1ca4ffd5b29e8447b9de09584f421216bd354ce46e752fed8"
+      "sha256": "8159476b86ebda6694963df3c973c01f26edd9f75db1e3c11ecc01958c87189f"
+    },
+    "trusted-runner.py": {
+      "mode": "0444",
+      "role": "trusted_one_case_smoke_runner",
+      "sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
     }
   },
   "historical_predecessor": {
@@ -155,16 +155,24 @@
     "schema_hash_path_link_toctou_validation": "passed",
     "service_touched": false,
     "synthetic_fake_ready_validation": "passed",
-    "trust_root_reconstruction": "passed"
+    "trust_root_reconstruction": "passed",
+    "trusted_runner_subprocess_required": true
   },
   "promotion": false,
   "resident_driver": {
     "binary_sha256": "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1",
+    "blob_unchanged_at_source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
     "protocol": "ullm.aq4_p2_resident_driver.v2",
     "source_commit": "319d6187b29e877536aa5dfe80c02bde0c77ed7a",
     "source_tree": "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
   },
   "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3",
+  "runner": {
+    "one_case_smoke": true,
+    "source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
+    "source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
+    "source_tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8"
+  },
   "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v3",
   "status": "prepared_not_executed"
 }

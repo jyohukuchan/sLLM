@@ -6,18 +6,23 @@
 
 ## 今回の変更点
 
-v3 validatorの正しさはbundle内の値から導出しない。次の独立trust rootから全payloadを再構築し、JSONの全階層とexact bytesを比較する。
+v3 validatorの正しさはbundle内の値から導出しない。次の独立trust rootからpre-run payloadを再構築し、JSONの全階層とexact bytesを比較する。
 
-- normative Git commit `319d6187b29e877536aa5dfe80c02bde0c77ed7a`、tree、resident source blob、runner source blob、expander blob、fixture generator blob
+- current source/runner Git commit `3dc4aa612b6cfd87675d0bd9fe506426f43e64f9` とtree、runner blob、expander blob、fixture generator blob
+- normative driver Git commit `319d6187b29e877536aa5dfe80c02bde0c77ed7a` とtree、resident source blob。current `3dc4aa6`でもresident source blobがbyte不変であることをGit blobで検証する
 - detached clean worktree buildで確定したresident binary SHA-256
 - `/etc/ullm/served-models/active.json`、active worker、package manifest、1045-file package tree、required guard set
 - official P2 case manifestと、trusted expanderが生成するofficial case
 
-R9700 host bindingはofficial caseを上書きして隠さず、source device、bound `gfx1201` device index 1、visible device 1を独立したruntime-binding objectとして記録する。fixture、identity、synthetic preflight、policy、fake-ready、dry-runは、この明示的なbindingとtrust rootsから決定的に再生成する。
+R9700 host bindingはofficial caseを上書きして隠さず、source device、bound `gfx1201` device index 1、visible device 1を独立したruntime-binding objectとして記録する。fixture、identity、synthetic preflight、policy、fake-readyは、この明示的なbindingとtrust rootsから決定的に再生成する。
+
+`dry-run.json`は手作りしない。bundleに同梱したcurrent `3dc4aa6`のtrusted runnerを、prepare時に`--one-case-smoke --dry-run`でsubprocessとしてexactly once実行する。runner自身がbundle v3、case/fixture/identity binding、synthetic fake-readyをvalidate-only handshakeで検証して生成したplanだけを採用する。subprocessのexact argv、exit code、stdout、stderr、それぞれのSHA-256、plan SHA-256を`runner-dry-run-evidence.json`へ固定する。
+
+validatorはplanのexact schemaと、1 case、12 transactions、warmup 2、measured 10、`execution_mode=one_case_smoke`、`smoke_only=true`、`promotion_eligible=false`、`validation.mode=validate_only`、fake-ready handshake passedを独立検査する。通常profileは84 casesとして別経路に固定し、one-case成果物を通常84-case成果物へ昇格させない。
 
 bundle memberはsingle-link regular file、exact mode、固定SHA-256、exact directory coverageを要求する。JSON duplicate、全階層のunknown/semantic drift、symlink component、hardlink、open前後のfile identity drift、最終passまでのTOCTOUを拒否する。外部trust rootsもopen前後と検証終了時にfile identityを再確認する。
 
-launch commandはdetached driver absolute path/SHA、`--served-model-manifest` absolute path/SHA、device index 1、build commit、protocolをexact argvとして固定する。served manifestと全protocol linkに対するabsolute/no-parent-traversal契約がnormative driver sourceに存在することもblobから再検証する。
+launch bindingは、trusted runner validate-only argvと、detached driverを直接起動するresident driver argvを分けて固定する。後者はdetached driver absolute path/SHA、`--served-model-manifest` absolute path/SHA、device index 1、normative driver build commit、protocolを固定する。served manifestと全protocol linkに対するabsolute/no-parent-traversal契約がnormative driver sourceに存在することもblobから再検証する。
 
 検証終了時にはbundle root directoryを再列挙し、exact names、member type、inode、nlinkとdirectory自体のidentityを初回snapshotと比較する。検証途中に追加・削除・置換されたentryを拒否する。
 

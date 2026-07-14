@@ -49,3 +49,19 @@
 - driver executable、served manifest、device index、build commitをexact launch argvとpath/SHA bindingへ固定した。
 - 旧`0fd7993` provenanceをhistorical superseded、execution不可として明示した。
 - validator終了時のdirectory再列挙とdirectory identity比較を追加し、late unknown/missing/replaceを拒否した。
+
+## 3dc4aa6 trusted runner更新
+
+- current source/runner trust rootを`3dc4aa612b6cfd87675d0bd9fe506426f43e64f9`、tree `bd46e713c658878e66fcab6d49ef863e43a06bd8`、runner blob SHA-256 `e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02`へ更新した。
+- resident driver source blobはnormative `319d618`とcurrent `3dc4aa6`でbyte同一、SHA-256 `d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7`であることをGit blobから検証した。したがって、normative clean binary SHA-256 `62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1`を継続した。
+- prepare時にbundle同梱のtrusted runnerを`--one-case-smoke --dry-run`でsubprocessとして1回実行し、validate-only/fake-ready handshakeを通過したrunner生成planを`dry-run.json`へ収録した。planは1 case、12 transactions、warmup 2、measured 10、`smoke_only=true`、`promotion_eligible=false`である。
+- exact argv、exit code 0、stdout/stderrのexact bytesとSHA-256、plan SHA-256を`runner-dry-run-evidence.json`へ固定した。stdoutとstderrはいずれも空である。
+- 通常profile 84 casesとone-case smokeを分離し、one-case成果物のpromotionはfalseのままとした。
+- launch bindingはtrusted runner validate-only argvとresident driver direct argvを分離した。runnerの`argparse`がoption風のdriver引数を`nargs=+`で透過できないため、両者を単一argvとして偽装していない。
+
+## 検証更新
+
+- offline bundle validator: passed
+- `SHA256SUMS`: `bundle.json`と全required membersを含むexact coverage passed
+- `python3 -m pytest -q tests/test_prepare_aq4_p2_resident_smoke_bundle.py tests/test_run_aq4_p2_resident_batch.py`: 43 passed
+- GPU command、resident driver、worker、model load、live service operationは実行していない。

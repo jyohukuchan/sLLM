@@ -21,10 +21,12 @@ CANONICAL_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-
 SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 DRIVER_BUILD_PATH = ROOT / "target/release/ullm-aq4-p2-resident-driver"
-SOURCE_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
-SOURCE_TREE = "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
+SOURCE_COMMIT = "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9"
+SOURCE_TREE = "bd46e713c658878e66fcab6d49ef863e43a06bd8"
+DRIVER_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
+DRIVER_TREE = "0b5e31e6a4d7f3fd0a7b6ce4002b9b67f7f4347e"
 DRIVER_SOURCE_SHA = "d42e283d231dc177b929bcffb0f51acb0c13900be7bd040f6e24bd51aede95b7"
-RUNNER_SOURCE_SHA = "5488df7b65737288a8bcb452a6778bf4ae0b9565904eac7283cc7ac1c13babf9"
+RUNNER_SOURCE_SHA = "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
 EXPECTED_DRIVER_SHA = "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
@@ -53,11 +55,15 @@ REQUIRED_FILES = {
     "package-manifest.json": (0o444, "package_manifest_snapshot"),
     "trust-roots.json": (0o444, "independent_trust_roots"),
     "launch-command.json": (0o444, "exact_resident_launch_command"),
+    "trusted-runner.py": (0o444, "trusted_one_case_smoke_runner"),
     "SUPERSEDED-0fd7993.json": (0o444, "historical_non_executable_bundle_record"),
     "resident-driver": (0o555, "detached_resident_driver"),
     "fake-ready.json": (0o444, "synthetic_ready_event"),
     "dry-run.json": (0o444, "resident_batch_dry_run"),
+    "runner-dry-run-evidence.json": (0o444, "trusted_runner_subprocess_evidence"),
 }
+POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
+RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 _VALIDATION_HOOK: Callable[[Path], None] | None = None
 
 
@@ -212,8 +218,8 @@ def package_tree_sha256(root: Path, snapshot: Snapshot | None = None) -> tuple[s
     return aggregate.hexdigest(), len(files)
 
 
-def git_blob(path: str, expected_sha: str) -> bytes:
-    completed = subprocess.run(["git", "show", f"{SOURCE_COMMIT}:{path}"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+def git_blob(path: str, expected_sha: str, commit: str = SOURCE_COMMIT) -> bytes:
+    completed = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if completed.returncode != 0 or sha_bytes(completed.stdout) != expected_sha:
         raise BundleError(f"trusted Git blob differs: {path}")
     return completed.stdout
@@ -251,6 +257,24 @@ def token_ids(case: dict[str, Any], count: int, vocab_size: int, reserved: set[i
     return result
 
 
+def runner_validate_argv() -> list[str]:
+    return [
+        str(Path(sys.executable).resolve()), str(CANONICAL_ROOT / "trusted-runner.py"),
+        "--expanded", str(CANONICAL_ROOT / "case-binding.json"),
+        "--fixture-index", str(CANONICAL_ROOT / "fixture-index.json"),
+        "--identity", str(CANONICAL_ROOT / "identity.json"),
+        "--preflight", str(CANONICAL_ROOT / "preflight.json"),
+        "--policy", str(CANONICAL_ROOT / "policy.json"),
+        "--output-dir", str(RUNNER_VALIDATE_OUTPUT),
+        "--run-id", "p2-r9700-resident-one-case-smoke-runner-validate-v3",
+        "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run",
+    ]
+
+
+def resident_driver_argv() -> list[str]:
+    return [str(CANONICAL_ROOT / "resident-driver"), "--served-model-manifest", str(SERVED_PATH), "--device-index", "1", "--build-git-commit", DRIVER_COMMIT]
+
+
 def trusted_official_case(manifest: dict[str, Any], expander_source: bytes) -> dict[str, Any]:
     module = types.ModuleType("trusted_aq4_p2_expander")
     exec(compile(expander_source, f"{SOURCE_COMMIT}:tools/expand-aq4-production-p2.py", "exec"), module.__dict__)
@@ -281,7 +305,13 @@ def reconstruct() -> Reconstruction:
     tree = subprocess.run(["git", "rev-parse", f"{SOURCE_COMMIT}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
     if tree.returncode != 0 or tree.stdout.strip() != SOURCE_TREE:
         raise BundleError("trusted source commit/tree differs")
+    driver_tree = subprocess.run(["git", "rev-parse", f"{DRIVER_COMMIT}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
+    if driver_tree.returncode != 0 or driver_tree.stdout.strip() != DRIVER_TREE:
+        raise BundleError("normative driver commit/tree differs")
     driver_source = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA)
+    normative_driver_source = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
+    if driver_source != normative_driver_source:
+        raise BundleError("current source changed the normative resident driver blob")
     if f'const PROTOCOL: &str = "{PROTOCOL}";'.encode() not in driver_source:
         raise BundleError("trusted protocol differs")
     for contract in (
@@ -371,7 +401,7 @@ def reconstruct() -> Reconstruction:
     }
     fixture_index_raw = pretty(fixture_index)
     resident_identity = {
-        "binary_sha256": EXPECTED_DRIVER_SHA, "build_git_commit": SOURCE_COMMIT, "protocol": PROTOCOL,
+        "binary_sha256": EXPECTED_DRIVER_SHA, "build_git_commit": DRIVER_COMMIT, "protocol": PROTOCOL,
         "worker_binary_sha256": EXPECTED_WORKER_SHA, "package_manifest_sha256": EXPECTED_PACKAGE_MANIFEST_SHA,
         "package_content_sha256": EXPECTED_PACKAGE_CONTENT_SHA, "served_model_manifest_sha256": EXPECTED_SERVED_SHA,
         "model_id": public["id"], "model_revision": public["revision"], "format_id": format_value["format_id"],
@@ -379,7 +409,7 @@ def reconstruct() -> Reconstruction:
     }
     identity = {
         "schema_version": "ullm.aq4_production_p2_identity.v2", "status": "bound", "identity_sha256": None,
-        "expanded_manifest_sha256": case_binding_sha, "build_git_commit": SOURCE_COMMIT, "resident_driver_identity": resident_identity,
+        "expanded_manifest_sha256": case_binding_sha, "build_git_commit": DRIVER_COMMIT, "resident_driver_identity": resident_identity,
         "hash_binding": {"bound_case_manifest_sha256": case_binding_sha, "worker_binary_sha256": EXPECTED_WORKER_SHA, "package_manifest_sha256": EXPECTED_PACKAGE_MANIFEST_SHA, "package_content_sha256": EXPECTED_PACKAGE_CONTENT_SHA, "served_model_manifest_sha256": EXPECTED_SERVED_SHA},
     }
     identity["identity_sha256"] = self_hash(identity, "identity_sha256")
@@ -390,20 +420,15 @@ def reconstruct() -> Reconstruction:
     fake_ready = {"event": "ready", "schema_version": PROTOCOL, "model_loads": 1, "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": resident_identity}
     trust_roots = {
         "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
-        "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "driver_source_sha256": DRIVER_SOURCE_SHA, "runner_source_sha256": RUNNER_SOURCE_SHA, "expander_source_sha256": EXPANDER_SOURCE_SHA, "fixture_generator_source_sha256": FIXTURE_SOURCE_SHA, "protocol": PROTOCOL, "protocol_path_contract": {"served_model_manifest": "absolute_without_parent_traversal", "case_binding": "absolute_without_parent_traversal", "identity": "absolute_without_parent_traversal", "preflight": "absolute_without_parent_traversal", "policy": "absolute_without_parent_traversal", "fixture": "absolute_without_parent_traversal"}, "clean_build": {"command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver", "provenance": "detached clean Git worktree at source commit", "expected_binary_sha256": EXPECTED_DRIVER_SHA}},
+        "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "driver_source_sha256": DRIVER_SOURCE_SHA, "runner_source_sha256": RUNNER_SOURCE_SHA, "expander_source_sha256": EXPANDER_SOURCE_SHA, "fixture_generator_source_sha256": FIXTURE_SOURCE_SHA, "protocol": PROTOCOL, "one_case_smoke_runner": {"flag": "--one-case-smoke", "normal_case_count": 84, "smoke_case_count": 1, "smoke_transactions": 12, "warmup_runs": 2, "measured_runs": 10, "promotion_eligible": False}, "normative_driver": {"commit": DRIVER_COMMIT, "tree": DRIVER_TREE, "blob_unchanged_at_current_source": True, "clean_build": {"command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver", "provenance": "detached clean Git worktree at normative driver commit", "expected_binary_sha256": EXPECTED_DRIVER_SHA}}, "protocol_path_contract": {"served_model_manifest": "absolute_without_parent_traversal", "case_binding": "absolute_without_parent_traversal", "identity": "absolute_without_parent_traversal", "preflight": "absolute_without_parent_traversal", "policy": "absolute_without_parent_traversal", "fixture": "absolute_without_parent_traversal"}},
         "external": {"served_model": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "worker": {"path": str(worker_path), "sha256": EXPECTED_WORKER_SHA, "observed_nlink": worker_path.lstat().st_nlink}, "package_manifest": {"path": str(package_manifest_path), "sha256": EXPECTED_PACKAGE_MANIFEST_SHA}, "package_tree": {"path": str(package_manifest_path.parent), "sha256": EXPECTED_PACKAGE_CONTENT_SHA, "file_count": EXPECTED_PACKAGE_FILES}, "case_manifest": {"path": str(CASE_MANIFEST_PATH), "sha256": EXPECTED_CASE_MANIFEST_SHA}, "guard_set_sha256": EXPECTED_GUARD_SHA},
     }
     policy_raw = pretty(policy)
-    dry_run = {
-        "schema_version": "ullm.aq4_p2_resident_batch.v1", "status": "dry_run", "scope": "full_model", "case_count": 1,
-        "warmup_runs": 2, "measured_runs": 10, "transaction_count": 12, "prompt_tokens_across_transactions": case["prompt_tokens"] * 12, "resident_model_loads": 1,
-        "baseline_identity": {"run_id": "p2-r9700-resident-one-case-smoke-prepared-v3", "kind": "active-production", "identity_file": {"path": str(CANONICAL_ROOT / "identity.json"), "sha256": sha_bytes(identity_raw)}, "served_model_manifest_sha256": EXPECTED_SERVED_SHA, "worker_binary_sha256": EXPECTED_WORKER_SHA, "build_git_commit": SOURCE_COMMIT},
-        "links": {"expanded": {"path": str(CANONICAL_ROOT / "case-binding.json"), "sha256": case_binding_sha}, "fixture_index": {"path": str(CANONICAL_ROOT / "fixture-index.json"), "sha256": sha_bytes(fixture_index_raw)}, "policy": {"path": str(CANONICAL_ROOT / "policy.json"), "sha256": sha_bytes(policy_raw)}},
-    }
     launch_command = {
         "schema_version": "ullm.aq4_p2_resident_launch_command.v1",
-        "argv": [str(CANONICAL_ROOT / "resident-driver"), "--served-model-manifest", str(SERVED_PATH), "--device-index", "1", "--build-git-commit", SOURCE_COMMIT],
-        "bindings": {"driver": {"path": str(CANONICAL_ROOT / "resident-driver"), "sha256": EXPECTED_DRIVER_SHA}, "served_model_manifest": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "device_index": 1, "build_git_commit": SOURCE_COMMIT, "protocol": PROTOCOL},
+        "runner_validate_only_argv": runner_validate_argv(),
+        "resident_driver_argv": resident_driver_argv(),
+        "bindings": {"python": {"path": str(Path(sys.executable).resolve()), "sha256": sha_file(Path(sys.executable).resolve(), "Python interpreter", single_link=False)}, "runner": {"path": str(CANONICAL_ROOT / "trusted-runner.py"), "sha256": RUNNER_SOURCE_SHA, "source_commit": SOURCE_COMMIT}, "driver": {"path": str(CANONICAL_ROOT / "resident-driver"), "sha256": EXPECTED_DRIVER_SHA, "source_commit": DRIVER_COMMIT}, "served_model_manifest": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "device_index": 1, "build_git_commit": DRIVER_COMMIT, "protocol": PROTOCOL, "one_case_smoke": True},
     }
     superseded = {
         "schema_version": "ullm.aq4_p2_resident_smoke_supersession.v1",
@@ -412,33 +437,31 @@ def reconstruct() -> Reconstruction:
         "status": "superseded_historical_prepared",
         "promotion": False,
         "execution_eligible": False,
-        "superseded_by_source_commit": SOURCE_COMMIT,
+        "superseded_by_source_commit": DRIVER_COMMIT,
         "reason": "source predates the normative resident launch-boundary hardening",
     }
     payloads = {
         "official-case.json": source_case_raw, "case-binding.json": case_binding_raw, "fixture.json": fixture_raw,
         "fixture-index.json": fixture_index_raw, "identity.json": identity_raw, "preflight.json": pretty(preflight),
         "policy.json": policy_raw, "served-model.json": served_raw, "package-manifest.json": package_manifest_raw,
-        "trust-roots.json": pretty(trust_roots), "fake-ready.json": pretty(fake_ready), "dry-run.json": pretty(dry_run),
+        "trust-roots.json": pretty(trust_roots), "fake-ready.json": pretty(fake_ready), "trusted-runner.py": runner_source,
         "launch-command.json": pretty(launch_command), "SUPERSEDED-0fd7993.json": pretty(superseded),
     }
-    file_bindings = {name: {"sha256": EXPECTED_DRIVER_SHA if name == "resident-driver" else sha_bytes(payloads[name]), "mode": f"{mode:04o}", "role": role} for name, (mode, role) in sorted(REQUIRED_FILES.items())}
+    file_bindings = {name: {"sha256": EXPECTED_DRIVER_SHA if name == "resident-driver" else sha_bytes(payloads[name]), "mode": f"{mode:04o}", "role": role} for name, (mode, role) in sorted(REQUIRED_FILES.items()) if name not in POST_RUN_FILES}
     bundle = {
         "schema_version": BUNDLE_SCHEMA, "status": "prepared_not_executed", "promotion": False,
         "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3", "canonical_root": str(CANONICAL_ROOT),
         "historical_predecessor": {"source_commit": superseded["source_commit"], "status": superseded["status"], "execution_eligible": False},
-        "resident_driver": {"source_commit": SOURCE_COMMIT, "source_tree": SOURCE_TREE, "binary_sha256": EXPECTED_DRIVER_SHA, "protocol": PROTOCOL},
+        "resident_driver": {"source_commit": DRIVER_COMMIT, "source_tree": DRIVER_TREE, "blob_unchanged_at_source_commit": SOURCE_COMMIT, "binary_sha256": EXPECTED_DRIVER_SHA, "protocol": PROTOCOL},
+        "runner": {"source_commit": SOURCE_COMMIT, "source_tree": SOURCE_TREE, "source_sha256": RUNNER_SOURCE_SHA, "one_case_smoke": True},
         "expected_runtime": {"device": runtime_device, "environment": {"HIP_VISIBLE_DEVICES": "1", "ULLM_HIP_VISIBLE_DEVICES": "1"}, "required_guards": {name: "1" for name in sorted(guards)}},
         "bindings": {"official_case_sha256": source_case["case_sha256"], "case_sha256": case["case_sha256"], "case_binding_sha256": case_binding_sha, "fixture_sha256": fixture_sha, "identity_file_sha256": sha_bytes(identity_raw), "identity_self_sha256": identity["identity_sha256"], "preflight_sha256": sha_bytes(payloads["preflight.json"]), "policy_sha256": sha_bytes(policy_raw), "served_model_manifest_sha256": EXPECTED_SERVED_SHA, "worker_binary_sha256": EXPECTED_WORKER_SHA, "package_manifest_sha256": EXPECTED_PACKAGE_MANIFEST_SHA, "package_content_sha256": EXPECTED_PACKAGE_CONTENT_SHA, "guard_set_sha256": EXPECTED_GUARD_SHA},
-        "offline_evidence": {"trust_root_reconstruction": "passed", "schema_hash_path_link_toctou_validation": "passed", "runner_dry_run": "passed", "synthetic_fake_ready_validation": "passed", "model_load_executed": False, "gpu_command_executed": False, "service_touched": False},
+        "offline_evidence": {"trust_root_reconstruction": "passed", "schema_hash_path_link_toctou_validation": "passed", "trusted_runner_subprocess_required": True, "runner_dry_run": "passed", "synthetic_fake_ready_validation": "passed", "model_load_executed": False, "gpu_command_executed": False, "service_touched": False},
         "actual_live_observations": {"runtime_identity": None, "power": None, "vram": None, "reason": "not acquired; preparation intentionally performed no GPU model load or live service operation"},
         "files": file_bindings,
     }
     bundle_raw = pretty(bundle)
-    sums_map = {name: entry["sha256"] for name, entry in file_bindings.items()}
-    sums_map["bundle.json"] = sha_bytes(bundle_raw)
-    sums = "".join(f"{digest}  {name}\n" for name, digest in sorted(sums_map.items())).encode()
-    return Reconstruction(payloads, bundle, sums, snapshot)
+    return Reconstruction(payloads, bundle, b"", snapshot)
 
 
 def safe_member(root: Path, name: str) -> Path:
@@ -451,33 +474,122 @@ _safe_member = safe_member
 
 
 def validate_launch_command(value: dict[str, Any]) -> None:
-    expected_keys = {"schema_version", "argv", "bindings"}
+    expected_keys = {"schema_version", "runner_validate_only_argv", "resident_driver_argv", "bindings"}
     if set(value) != expected_keys or value.get("schema_version") != "ullm.aq4_p2_resident_launch_command.v1":
         raise BundleError("launch command exact schema differs")
-    expected_argv = [
-        str(CANONICAL_ROOT / "resident-driver"),
-        "--served-model-manifest", str(SERVED_PATH),
-        "--device-index", "1",
-        "--build-git-commit", SOURCE_COMMIT,
-    ]
-    if value.get("argv") != expected_argv:
+    runner_argv = runner_validate_argv()
+    driver_argv = resident_driver_argv()
+    if value.get("runner_validate_only_argv") != runner_argv or value.get("resident_driver_argv") != driver_argv:
         raise BundleError("launch command argv differs")
     bindings = value.get("bindings")
     expected_bindings = {
-        "driver": {"path": expected_argv[0], "sha256": EXPECTED_DRIVER_SHA},
-        "served_model_manifest": {"path": expected_argv[2], "sha256": EXPECTED_SERVED_SHA},
+        "python": {"path": runner_argv[0], "sha256": sha_file(Path(runner_argv[0]), "Python interpreter", single_link=False)},
+        "runner": {"path": runner_argv[1], "sha256": RUNNER_SOURCE_SHA, "source_commit": SOURCE_COMMIT},
+        "driver": {"path": driver_argv[0], "sha256": EXPECTED_DRIVER_SHA, "source_commit": DRIVER_COMMIT},
+        "served_model_manifest": {"path": driver_argv[2], "sha256": EXPECTED_SERVED_SHA},
         "device_index": 1,
-        "build_git_commit": SOURCE_COMMIT,
+        "build_git_commit": DRIVER_COMMIT,
         "protocol": PROTOCOL,
+        "one_case_smoke": True,
     }
     if bindings != expected_bindings:
         raise BundleError("launch command path/SHA bindings differ")
-    reject_symlink_components(Path(expected_argv[0]), "launch driver")
-    reject_symlink_components(Path(expected_argv[2]), "launch served manifest")
-    if sha_file(Path(expected_argv[0]), "launch driver") != EXPECTED_DRIVER_SHA:
+    for path, label in ((Path(runner_argv[0]), "launch Python"), (Path(runner_argv[1]), "launch runner"), (Path(driver_argv[0]), "launch driver"), (Path(driver_argv[2]), "launch served manifest")):
+        reject_symlink_components(path, label)
+    if "--one-case-smoke" not in runner_argv or "--dry-run" not in runner_argv:
+        raise BundleError("launch command does not select validate-only one-case smoke")
+    if sha_file(Path(runner_argv[1]), "launch runner") != RUNNER_SOURCE_SHA:
+        raise BundleError("launch runner path/SHA differs")
+    if sha_file(Path(driver_argv[0]), "launch driver") != EXPECTED_DRIVER_SHA:
         raise BundleError("launch driver path/SHA differs")
-    if sha_file(Path(expected_argv[2]), "launch served manifest") != EXPECTED_SERVED_SHA:
+    if sha_file(Path(driver_argv[2]), "launch served manifest") != EXPECTED_SERVED_SHA:
         raise BundleError("launch served manifest path/SHA differs")
+
+
+def validate_runner_plan(raw: bytes, bundle_raw: bytes, expected: Reconstruction) -> dict[str, Any]:
+    plan = parse_json(raw, "trusted runner dry-run plan")
+    exact_keys = {
+        "schema_version", "status", "scope", "case_count", "warmup_runs", "measured_runs",
+        "transaction_count", "prompt_tokens_across_transactions", "resident_model_loads",
+        "baseline_identity", "links", "execution_mode", "smoke_only", "promotion_eligible", "validation",
+    }
+    if set(plan) != exact_keys:
+        raise BundleError("trusted runner dry-run exact schema differs")
+    facts = {
+        "schema_version": "ullm.aq4_p2_resident_batch.v1", "status": "dry_run", "scope": "full_model",
+        "case_count": 1, "warmup_runs": 2, "measured_runs": 10, "transaction_count": 12,
+        "prompt_tokens_across_transactions": 1536, "resident_model_loads": 1,
+        "execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False,
+    }
+    if any(plan.get(key) != value for key, value in facts.items()):
+        raise BundleError("trusted runner one-case smoke facts differ")
+    identity_raw = expected.payloads["identity.json"]
+    identity = parse_json(identity_raw, "identity")
+    policy_raw = expected.payloads["policy.json"]
+    baseline = {
+        "run_id": "p2-r9700-resident-one-case-smoke-runner-validate-v3",
+        "kind": "active-production",
+        "identity_file": {"path": str(CANONICAL_ROOT / "identity.json"), "sha256": sha_bytes(identity_raw)},
+        "served_model_manifest_sha256": EXPECTED_SERVED_SHA,
+        "worker_binary_sha256": EXPECTED_WORKER_SHA,
+        "build_git_commit": DRIVER_COMMIT,
+    }
+    links = {
+        "expanded": {"path": str(CANONICAL_ROOT / "case-binding.json"), "sha256": sha_bytes(expected.payloads["case-binding.json"])},
+        "fixture_index": {"path": str(CANONICAL_ROOT / "fixture-index.json"), "sha256": sha_bytes(expected.payloads["fixture-index.json"])},
+        "policy": {"path": str(CANONICAL_ROOT / "policy.json"), "sha256": sha_bytes(policy_raw)},
+    }
+    if plan.get("baseline_identity") != baseline or plan.get("links") != links:
+        raise BundleError("trusted runner dry-run identity/links differ")
+    validation = plan.get("validation")
+    if not isinstance(validation, dict) or set(validation) != {"mode", "bundle", "fake_ready", "driver_fake_handshake", "resident_session_id", "driver_identity"}:
+        raise BundleError("trusted runner validation exact schema differs")
+    expected_validation = {
+        "mode": "validate_only",
+        "bundle": {"path": str(CANONICAL_ROOT / "bundle.json"), "sha256": sha_bytes(bundle_raw)},
+        "fake_ready": {"path": str(CANONICAL_ROOT / "fake-ready.json"), "sha256": sha_bytes(expected.payloads["fake-ready.json"])},
+        "driver_fake_handshake": "passed",
+        "resident_session_id": "offline-fake-ready-not-executed",
+        "driver_identity": identity["resident_driver_identity"],
+    }
+    if validation != expected_validation:
+        raise BundleError("trusted runner validate-only/fake-ready handshake differs")
+    return plan
+
+
+def make_runner_evidence(plan_raw: bytes, stdout: bytes, stderr: bytes, exit_code: int) -> bytes:
+    value = {
+        "schema_version": "ullm.aq4_p2_resident_runner_subprocess_evidence.v1",
+        "runner_source_commit": SOURCE_COMMIT,
+        "runner_source_sha256": RUNNER_SOURCE_SHA,
+        "runner_subprocess_count": 1,
+        "command": runner_validate_argv(),
+        "exit_code": exit_code,
+        "stdout": {"sha256": sha_bytes(stdout), "utf8": stdout.decode("utf-8")},
+        "stderr": {"sha256": sha_bytes(stderr), "utf8": stderr.decode("utf-8")},
+        "plan": {"path": str(CANONICAL_ROOT / "dry-run.json"), "sha256": sha_bytes(plan_raw)},
+        "facts": {"case_count": 1, "transaction_count": 12, "warmup_runs": 2, "measured_runs": 10, "smoke_only": True, "promotion_eligible": False, "validation_mode": "validate_only", "fake_handshake": "passed"},
+        "normal_profile": {"case_count": 84, "separate": True},
+    }
+    return pretty(value)
+
+
+def finalize(expected: Reconstruction, plan_raw: bytes, evidence_raw: bytes) -> Reconstruction:
+    bundle_raw = pretty(expected.bundle)
+    validate_runner_plan(plan_raw, bundle_raw, expected)
+    evidence = parse_json(evidence_raw, "trusted runner subprocess evidence")
+    expected_evidence = make_runner_evidence(plan_raw, b"", b"", 0)
+    if evidence_raw != expected_evidence or evidence != parse_json(expected_evidence, "expected runner evidence"):
+        raise BundleError("trusted runner subprocess evidence differs")
+    payloads = dict(expected.payloads)
+    payloads["dry-run.json"] = plan_raw
+    payloads["runner-dry-run-evidence.json"] = evidence_raw
+    lines = []
+    for name in sorted([*REQUIRED_FILES, "bundle.json"]):
+        raw = bundle_raw if name == "bundle.json" else (None if name == "resident-driver" else payloads[name])
+        digest = EXPECTED_DRIVER_SHA if raw is None else sha_bytes(raw)
+        lines.append(f"{digest}  {name}\n")
+    return Reconstruction(payloads, expected.bundle, "".join(lines).encode("ascii"), expected.snapshot)
 
 
 def validate(root: Path, trusted: Reconstruction | None = None) -> dict[str, Any]:
@@ -501,7 +613,8 @@ def validate(root: Path, trusted: Reconstruction | None = None) -> dict[str, Any
         initial[name] = fingerprint(observed)
     for name, raw in expected.payloads.items():
         actual = read_stable(root / name, name, single_link=True)
-        parse_json(actual, name)
+        if name.endswith(".json"):
+            parse_json(actual, name)
         if actual != raw:
             raise BundleError(f"independent semantic reconstruction differs: {name}")
     if sha_file(root / "resident-driver", "resident driver") != EXPECTED_DRIVER_SHA:
@@ -510,6 +623,9 @@ def validate(root: Path, trusted: Reconstruction | None = None) -> dict[str, Any
     bundle = parse_json(bundle_raw, "bundle")
     if bundle != expected.bundle or bundle_raw != pretty(expected.bundle):
         raise BundleError("independent semantic reconstruction differs: bundle.json")
+    plan_raw = read_stable(root / "dry-run.json", "dry-run.json", single_link=True)
+    evidence_raw = read_stable(root / "runner-dry-run-evidence.json", "runner-dry-run-evidence.json", single_link=True)
+    expected = finalize(expected, plan_raw, evidence_raw)
     validate_launch_command(parse_json(expected.payloads["launch-command.json"], "launch command"))
     sums = read_stable(root / "SHA256SUMS", "SHA256SUMS", single_link=True)
     if sums != expected.sums:
@@ -544,10 +660,28 @@ def prepare(output: Path, driver_path: Path) -> dict[str, Any]:
         shutil.copyfileobj(source, target, CHUNK)
         target.flush()
         os.fsync(target.fileno())
+    (output / "bundle.json").write_bytes(pretty(expected.bundle))
+    if RUNNER_VALIDATE_OUTPUT.exists() or RUNNER_VALIDATE_OUTPUT.is_symlink():
+        raise BundleError(f"trusted runner validate-only output already exists: {RUNNER_VALIDATE_OUTPUT}")
+    completed = None
+    try:
+        completed = subprocess.run(runner_validate_argv(), cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        plan_path = RUNNER_VALIDATE_OUTPUT / "resident-batch.plan.json"
+        if completed.returncode != 0:
+            raise BundleError(f"trusted runner validate-only subprocess failed with exit {completed.returncode}")
+        plan_raw = read_stable(plan_path, "trusted runner generated plan", single_link=True)
+    finally:
+        if RUNNER_VALIDATE_OUTPUT.exists() and not RUNNER_VALIDATE_OUTPUT.is_symlink():
+            shutil.rmtree(RUNNER_VALIDATE_OUTPUT)
+    if completed is None:
+        raise BundleError("trusted runner validate-only subprocess did not run")
+    (output / "dry-run.json").write_bytes(plan_raw)
+    evidence_raw = make_runner_evidence(plan_raw, completed.stdout, completed.stderr, completed.returncode)
+    (output / "runner-dry-run-evidence.json").write_bytes(evidence_raw)
+    expected = finalize(expected, plan_raw, evidence_raw)
+    (output / "SHA256SUMS").write_bytes(expected.sums)
     for name, (mode, _) in REQUIRED_FILES.items():
         os.chmod(output / name, mode)
-    (output / "bundle.json").write_bytes(pretty(expected.bundle))
-    (output / "SHA256SUMS").write_bytes(expected.sums)
     os.chmod(output / "bundle.json", 0o444)
     os.chmod(output / "SHA256SUMS", 0o444)
     return validate(output, expected)

@@ -42,7 +42,8 @@ def rebind_transport(root: Path) -> None:
     bundle_path = root / "bundle.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     for name in BUNDLE.REQUIRED_FILES:
-        bundle["files"][name]["sha256"] = hashlib.sha256((root / name).read_bytes()).hexdigest()
+        if name in bundle["files"]:
+            bundle["files"][name]["sha256"] = hashlib.sha256((root / name).read_bytes()).hexdigest()
     rewrite_json(bundle_path, bundle)
     lines = []
     for name in sorted([*BUNDLE.REQUIRED_FILES, "bundle.json"]):
@@ -60,6 +61,7 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["offline_evidence"] == {
         "trust_root_reconstruction": "passed",
         "schema_hash_path_link_toctou_validation": "passed",
+        "trusted_runner_subprocess_required": True,
         "runner_dry_run": "passed",
         "synthetic_fake_ready_validation": "passed",
         "model_load_executed": False,
@@ -69,7 +71,8 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["actual_live_observations"]["runtime_identity"] is None
     assert value["actual_live_observations"]["power"] is None
     assert value["actual_live_observations"]["vram"] is None
-    assert value["resident_driver"]["source_commit"] == BUNDLE.SOURCE_COMMIT
+    assert value["resident_driver"]["source_commit"] == BUNDLE.DRIVER_COMMIT
+    assert value["runner"]["source_commit"] == BUNDLE.SOURCE_COMMIT
     assert value["historical_predecessor"] == {
         "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
         "status": "superseded_historical_prepared",
@@ -242,13 +245,13 @@ def test_final_directory_reenumeration_rejects_late_mutation(tmp_path: Path, tru
 def test_launch_command_rejects_nonexact_following_arguments_and_bindings(tmp_path: Path, variant: str) -> None:
     value = json.loads((ARTIFACT / "launch-command.json").read_text())
     if variant == "relative_served":
-        value["argv"][2] = "active.json"
+        value["resident_driver_argv"][2] = "active.json"
     elif variant == "parent_driver":
-        value["argv"][0] = str(BUNDLE.CANONICAL_ROOT / "subdir/../resident-driver")
+        value["resident_driver_argv"][0] = str(BUNDLE.CANONICAL_ROOT / "subdir/../resident-driver")
     elif variant == "served_sha":
         value["bindings"]["served_model_manifest"]["sha256"] = "0" * 64
     else:
-        value["argv"].append("--unexpected")
+        value["resident_driver_argv"].append("--unexpected")
     with pytest.raises(BUNDLE.BundleError, match="launch command"):
         BUNDLE.validate_launch_command(value)
 
@@ -261,3 +264,38 @@ def test_launch_path_rejects_parent_symlink(tmp_path: Path) -> None:
     alias.symlink_to(real, target_is_directory=True)
     with pytest.raises(BUNDLE.BundleError, match="symlink component"):
         BUNDLE.reject_symlink_components(alias / "driver", "launch driver")
+
+
+def test_runner_generated_plan_and_subprocess_evidence_are_bound() -> None:
+    plan_raw = (ARTIFACT / "dry-run.json").read_bytes()
+    plan = json.loads(plan_raw)
+    evidence = json.loads((ARTIFACT / "runner-dry-run-evidence.json").read_text())
+    assert (plan["case_count"], plan["transaction_count"], plan["warmup_runs"], plan["measured_runs"]) == (1, 12, 2, 10)
+    assert plan["execution_mode"] == "one_case_smoke"
+    assert plan["smoke_only"] is True
+    assert plan["promotion_eligible"] is False
+    assert plan["validation"]["mode"] == "validate_only"
+    assert plan["validation"]["driver_fake_handshake"] == "passed"
+    assert evidence["runner_subprocess_count"] == 1
+    assert evidence["exit_code"] == 0
+    assert evidence["stdout"] == {"sha256": hashlib.sha256(b"").hexdigest(), "utf8": ""}
+    assert evidence["stderr"] == {"sha256": hashlib.sha256(b"").hexdigest(), "utf8": ""}
+    assert evidence["plan"]["sha256"] == hashlib.sha256(plan_raw).hexdigest()
+    assert evidence["normal_profile"] == {"case_count": 84, "separate": True}
+
+
+@pytest.mark.parametrize("variant", ("smoke_only", "transaction_count", "normal_profile"))
+def test_rejects_rebound_runner_plan_or_normal_profile(tmp_path: Path, trusted_reconstruction, variant: str) -> None:
+    root = copy_bundle(tmp_path)
+    if variant == "normal_profile":
+        path = root / "runner-dry-run-evidence.json"
+        value = json.loads(path.read_text())
+        value["normal_profile"]["case_count"] = 1
+    else:
+        path = root / "dry-run.json"
+        value = json.loads(path.read_text())
+        value[variant] = False if variant == "smoke_only" else 84
+    rewrite_json(path, value)
+    rebind_transport(root)
+    with pytest.raises(BUNDLE.BundleError, match="trusted runner"):
+        BUNDLE.validate(root, trusted_reconstruction)
