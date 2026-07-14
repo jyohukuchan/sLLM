@@ -29,3 +29,14 @@
 - live service は変更していない。
 - actual runtime identity、power、VRAM は取得していない。
 - status は `prepared_not_executed`、promotion は `false` のままとした。
+
+## v2 trust-root修正
+
+初版validatorはbundle内のhashを再束縛するとsemantic driftを独立検出できなかったため、schema v2へ更新した。
+
+- `0fd7993`のcommit/tree/source blobとclean build binary SHAを固定した。
+- active served model、worker、package manifest、1045-file package tree、guard setを外部pathから再読・再hashする。
+- trusted Git blobのofficial expanderからofficial caseを再生成し、R9700 host bindingを別objectとして明示した。
+- 全JSON payloadをtrust rootsから再構築し、全階層とexact bytesを比較する。
+- semantic valueとtransport hashを同時に再束縛する8種類のnegative testを追加した。
+- v2 CLI validator、SHA256SUMS、17 testsが通過した。

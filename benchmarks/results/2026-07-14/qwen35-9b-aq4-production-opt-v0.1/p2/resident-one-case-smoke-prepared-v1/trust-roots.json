@@ -1,0 +1,41 @@
+{
+  "external": {
+    "case_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json",
+      "sha256": "1fa264c6a7a485e36b1119ca13732ad88e052a8bd502c2addacdff14ff41cbea"
+    },
+    "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
+    "package_manifest": {
+      "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package/manifest.json",
+      "sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+    },
+    "package_tree": {
+      "file_count": 1045,
+      "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+      "sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1"
+    },
+    "served_model": {
+      "path": "/etc/ullm/served-models/active.json",
+      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    },
+    "worker": {
+      "observed_nlink": 2,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
+  "source": {
+    "clean_build": {
+      "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+      "expected_binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
+      "provenance": "detached clean Git worktree at source commit"
+    },
+    "commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+    "driver_source_sha256": "297f3e22397a3120f150b3a381253b4a852119171e0aabdb35f7514dff084d3e",
+    "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
+    "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
+    "protocol": "ullm.aq4_p2_resident_driver.v2",
+    "tree": "3b0956a39749c8741a7d1852b5bc8a07adbc557b"
+  }
+}

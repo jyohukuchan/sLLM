@@ -49,6 +49,28 @@
       "stage_order": 2
     }
   ],
+  "official_case_sha256": "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a",
+  "runtime_binding": {
+    "bound_device": {
+      "architecture": "gfx1201",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "AMD Radeon Graphics",
+      "runtime_device_index": 1
+    },
+    "environment": {
+      "HIP_VISIBLE_DEVICES": "1",
+      "ULLM_HIP_VISIBLE_DEVICES": "1"
+    },
+    "schema_version": "ullm.aq4_p2_r9700_host_binding.v1",
+    "source_device": {
+      "architecture": "RDNA4",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "Radeon AI PRO R9700",
+      "runtime_device_index": 0
+    }
+  },
   "schema_version": "ullm.aq4_production_p2_expanded.v2",
   "source_manifest_sha256": "1fa264c6a7a485e36b1119ca13732ad88e052a8bd502c2addacdff14ff41cbea",
   "status": "bound_one_case_smoke"

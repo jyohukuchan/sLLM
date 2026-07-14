@@ -6,11 +6,13 @@
     "vram": null
   },
   "bindings": {
-    "case_binding_sha256": "9898a65ee54dc6248a8d3959335483ae9d48e2275b83b47a5cc6b01013ec0d6d",
+    "case_binding_sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5",
     "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
     "fixture_sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
     "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
-    "identity_sha256": "1321441563a82a7572c61c5cc53a093a02c2ce910ca65dbe7b8ce4d5f34086a2",
+    "identity_file_sha256": "a89fade6e7e03cf865e6a585e009923a2dddeecf508064631e603e1b185fdd76",
+    "identity_self_sha256": "7cdb460c28d40e0314939ad46c000d671d80c9c002e7e40b4354fc1e36459be6",
+    "official_case_sha256": "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a",
     "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
     "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
     "policy_sha256": "21dff8ecdbc17a1cd86a458fe7f8771eed0cdd18577a5f0fb6c7b96310a2de16",
@@ -18,6 +20,7 @@
     "served_model_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
     "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
   },
+  "canonical_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1",
   "expected_runtime": {
     "device": {
       "architecture": "gfx1201",
@@ -66,13 +69,13 @@
   "files": {
     "case-binding.json": {
       "mode": "0444",
-      "role": "case_binding",
-      "sha256": "9898a65ee54dc6248a8d3959335483ae9d48e2275b83b47a5cc6b01013ec0d6d"
+      "role": "runtime_bound_case",
+      "sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5"
     },
     "dry-run.json": {
       "mode": "0444",
       "role": "resident_batch_dry_run",
-      "sha256": "d789b7becfae80fa05475b660139088be79a3ee3bb5232ab829f0c75c6a30d74"
+      "sha256": "08248787f787e2f78f95a7716fe990d1ce44965022bf065caf155d39770cc314"
     },
     "fake-ready.json": {
       "mode": "0444",
@@ -82,7 +85,7 @@
     "fixture-index.json": {
       "mode": "0444",
       "role": "fixture_index",
-      "sha256": "8b7400672dda624d88d1860b52233f8ab2a05a1e954b6b30f834dcdd5ba7634b"
+      "sha256": "4bcc02ac22bfd19a55913943e5f28dc690c5917b0743b0b5f679c4a5610d353a"
     },
     "fixture.json": {
       "mode": "0444",
@@ -92,7 +95,12 @@
     "identity.json": {
       "mode": "0444",
       "role": "resident_identity",
-      "sha256": "1321441563a82a7572c61c5cc53a093a02c2ce910ca65dbe7b8ce4d5f34086a2"
+      "sha256": "a89fade6e7e03cf865e6a585e009923a2dddeecf508064631e603e1b185fdd76"
+    },
+    "official-case.json": {
+      "mode": "0444",
+      "role": "trusted_official_expansion_case",
+      "sha256": "dd0a9bad786e5e9fa0edc7320392b37d66a3cf5e82ba3608b678ea4ac77c6b0f"
     },
     "package-manifest.json": {
       "mode": "0444",
@@ -111,13 +119,18 @@
     },
     "resident-driver": {
       "mode": "0555",
-      "role": "resident_driver",
+      "role": "detached_resident_driver",
       "sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4"
     },
     "served-model.json": {
       "mode": "0444",
       "role": "served_model_snapshot",
       "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    },
+    "trust-roots.json": {
+      "mode": "0444",
+      "role": "independent_trust_roots",
+      "sha256": "081fb0b83bd96ab0a408c2c77a4518fad0e82702c33d2a5e3f27f64ef42820aa"
     }
   },
   "offline_evidence": {
@@ -126,39 +139,17 @@
     "runner_dry_run": "passed",
     "schema_hash_path_link_toctou_validation": "passed",
     "service_touched": false,
-    "synthetic_fake_ready_validation": "passed"
+    "synthetic_fake_ready_validation": "passed",
+    "trust_root_reconstruction": "passed"
   },
   "promotion": false,
   "resident_driver": {
     "binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
-    "build_git_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
-    "implementation_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
-    "protocol": "ullm.aq4_p2_resident_driver.v2"
+    "protocol": "ullm.aq4_p2_resident_driver.v2",
+    "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+    "source_tree": "3b0956a39749c8741a7d1852b5bc8a07adbc557b"
   },
-  "run_id": "p2-r9700-resident-one-case-smoke-prepared-v1",
-  "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v1",
-  "source_bindings": {
-    "active_served_model_manifest": {
-      "path": "/etc/ullm/served-models/active.json",
-      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
-    },
-    "case_manifest": {
-      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json",
-      "sha256": "1fa264c6a7a485e36b1119ca13732ad88e052a8bd502c2addacdff14ff41cbea"
-    },
-    "package_manifest": {
-      "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package/manifest.json",
-      "sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
-    },
-    "package_root": {
-      "content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
-      "file_count": 1045,
-      "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
-    },
-    "worker_binary": {
-      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
-      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
-    }
-  },
+  "run_id": "p2-r9700-resident-one-case-smoke-prepared-v2",
+  "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v2",
   "status": "prepared_not_executed"
 }
