@@ -32,15 +32,15 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "da26839109ebb0a09bc8f194926d9de513095f83"
-LAUNCHER_TREE = "0767afe1b4b41fd677d76c2edb375f490e7fe529"
-LAUNCHER_GIT_BLOB = "ba3953cc586f22437128b5ded7b5bf26acb17a41"
-LAUNCHER_SHA = "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891"
-RUNNER_COMMIT = "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db"
-RUNNER_SHA = "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"
+LAUNCHER_COMMIT = "79ce2aa199413323da6fee10ddfa06fbb530b750"
+LAUNCHER_TREE = "a6559659e1c8d14745bc1823d8cbcb6647e1e9a0"
+LAUNCHER_GIT_BLOB = "49014ed017676f401086d67f40ba564ff6e21410"
+LAUNCHER_SHA = "90f5e43a68b438bdf5f4421d2e5651073fd14ae52158be2ae5d66d607014d783"
+RUNNER_COMMIT = "4005c80e542d7e37cf79e62d2fd053f99c0353c1"
+RUNNER_SHA = "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "82c77957a8e53ea7ed0be4f3a83a8cce6f39a65f"
-B_COMMIT = "9a98c67b7fa1f6488f08ffa05a44c947415d3f7b"
+VALIDATOR_COMMIT = "741616fd0a1be897b47b4c94308e5c65290b9749"
+B_COMMIT = "1d964602effa01cc3460cee9cec59fda360ab45e"
 RESIDENT_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
@@ -1862,9 +1862,9 @@ def ready_launcher_binding(profile_diagnostic: bool = False) -> dict[str, Any]:
 
 QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1", "status": "passed", "actual_executed": False,
-    "test_count": 295, "manual_boundary_count": 15, "runner_strict_negative_count": 18,
-    "test_suites": {"existing_and_profile_regression": 229, "marker_chain": 55, "diagnostic_capture": 11},
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "test_count": 303, "manual_boundary_count": 15, "runner_strict_negative_count": 26,
+    "test_suites": {"existing_and_profile_regression": 237, "marker_chain": 55, "diagnostic_capture": 11},
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
