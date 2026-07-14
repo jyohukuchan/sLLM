@@ -4,4 +4,5 @@
 - 結果はullm.qwen35_aq4_p2.full_model_result.v1のbounded JSONとし、identity digest、timings、requested/resolved/actual widths、operation audit digest、lifecycle/reset、OOM/fallbackを記録する。prompt/token ID/output本文は保存しない。
 - 出力は一時ファイルのfsync後にhard-linkでatomic公開し、既存ファイルを拒否する。
 - v2はmanifest環境値、benchmark/worker binary role、streaming package tree、immutable failure/OOM、physical fallback、audit/resetをfail-closedにした。P2 raw v2のbinary-role/embedded-link adapter不足はv0.2 specにhandshakeとして記録した。
-- CPU検証: cargo fmt --all --check、cargo check -p ullm-engine --bin ullm-aq4-p2-full-model、cargo test -p ullm-engine --bin ullm-aq4-p2-full-model -- --test-threads=1（14件成功）、cargo test -p ullm-engine --lib --no-default-features -- --test-threads=1（707件成功、1件ignored）。GPU/live worker実行は未実施。
+- v2追加QAでruntimeのactual device index/device_id/backend/name/architecture、exact case workload/identity、strict fixture open/JSON、width/lifecycle/reset成功条件を追加した。同じarchitectureの別GPU、parent symlink、duplicate/unknown JSON、case不一致、reset/lifecycle不整合をCPU negative testで拒否した。
+- CPU検証: cargo fmt --all --check、cargo check -p ullm-engine --bin ullm-aq4-p2-full-model、cargo test -p ullm-engine --bin ullm-aq4-p2-full-model -- --test-threads=1（17件成功）、cargo test -p ullm-engine --lib --no-default-features -- --test-threads=1（707件成功、1件ignored）。GPU/live worker実行は未実施。

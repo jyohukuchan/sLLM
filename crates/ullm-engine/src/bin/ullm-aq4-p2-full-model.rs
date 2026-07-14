@@ -8,14 +8,17 @@
 //! complete request has reset successfully; the artifact contains dimensions, hashes, and
 //! counters, but no prompt, token id, or generated text.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -75,15 +78,175 @@ struct FixtureCase {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FixtureFile {
     cases: Vec<FixtureCaseRaw>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FixtureCaseRaw {
     case_id: String,
     prompt_token_ids: Vec<usize>,
     step_count: usize,
+}
+
+struct StrictJsonValue(Value);
+
+impl<'de> Deserialize<'de> for StrictJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonVisitor)
+    }
+}
+
+struct StrictJsonVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonVisitor {
+    type Value = StrictJsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("strict JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(StrictJsonValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_string(value.to_string())
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(StrictJsonValue(value)) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(StrictJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        while let Some((key, StrictJsonValue(value))) =
+            map.next_entry::<String, StrictJsonValue>()?
+        {
+            if values.insert(key.clone(), value).is_some() {
+                return Err(de::Error::custom(format!("duplicate JSON key: {key}")));
+            }
+        }
+        Ok(StrictJsonValue(Value::Object(values)))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P2CaseBinding {
+    case_id: String,
+    fixture_id: String,
+    case_sha256: String,
+    stage_id: String,
+    stage_order: u64,
+    scope: String,
+    phase: String,
+    mode: String,
+    baseline_mode: String,
+    prompt_tokens: usize,
+    cached_prefix_tokens: usize,
+    context_tokens: usize,
+    decode_start_tokens: usize,
+    prefill_requested_m: usize,
+    resolved_m: usize,
+    request_count: usize,
+    decode_request_count: usize,
+    generated_tokens: usize,
+    device: P2CaseDevice,
+    control_id: String,
+    control: P2CaseControl,
+    sampling: P2CaseSampling,
+    format_id: String,
+    implementation_id: String,
+    path_oracle_case_id: Option<String>,
+    path_oracle_result_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P2CaseDevice {
+    device_id: String,
+    backend: String,
+    name: String,
+    architecture: String,
+    runtime_device_index: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P2CaseControl {
+    control_id: String,
+    role: String,
+    format_id: String,
+    implementation_id: String,
+    promotion_eligible: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P2CaseSampling {
+    mode: String,
+    temperature: f64,
+    top_p: f64,
+    top_k: usize,
+    seed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RuntimeDeviceIdentity {
+    requested_device_index: u32,
+    observed_device_id: i32,
+    observed_backend: String,
+    observed_name: String,
+    observed_architecture: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,7 +266,8 @@ struct Identity {
     package_manifest_sha256: String,
     package_file_count: usize,
     package_bytes: u64,
-    device: String,
+    manifest_device_architecture: String,
+    runtime_device: RuntimeDeviceIdentity,
     execution_profile: String,
 }
 
@@ -225,7 +389,7 @@ struct PackageTreeIdentity {
 struct RunBindings {
     case_id: String,
     case_sha256: String,
-    case_value: Value,
+    case_contract: P2CaseBinding,
     identity_value: Value,
     case: ArtifactLink,
     identity: ArtifactLink,
@@ -511,8 +675,29 @@ fn run(args: Args) -> Result<bool, String> {
             );
         }
     };
-    let identity = identity_from_model(&model, &package_dir, &benchmark_binary, &package_tree);
-    if validate_p2_bindings(&args, &bindings, &model, &identity).is_err() {
+    let runtime_device = match observe_runtime_device(args.device_index) {
+        Ok(identity) => identity,
+        Err(_) => {
+            return publish_failure_result(
+                &args,
+                &bindings,
+                None,
+                preflight,
+                started,
+                "device_identity",
+                "runtime_device_identity_rejected",
+                false,
+            );
+        }
+    };
+    let identity = identity_from_model(
+        &model,
+        &package_dir,
+        &benchmark_binary,
+        &package_tree,
+        runtime_device,
+    );
+    if validate_p2_bindings(&args, &bindings, &fixture_case, &model, &identity).is_err() {
         return publish_failure_result(
             &args,
             &bindings,
@@ -698,12 +883,6 @@ fn publish_session_result(
                     value.get("lifecycle").and_then(|v| v.get("reset")).cloned(),
                 )
             });
-    let reset_complete = reset
-        .as_ref()
-        .and_then(|value| value.get("complete"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        == 1;
     let audit = operation_audit.map(audit_facts);
     let implicit_failure = if failure.is_none() {
         match operation_audit {
@@ -711,8 +890,19 @@ fn publish_session_result(
             Some(value) if !value.coverage_complete => {
                 Some(("operation_audit", "operation_audit_incomplete", false))
             }
-            Some(_) if !reset_complete => {
-                Some(("request_reset", "request_reset_incomplete", false))
+            Some(_)
+                if validate_terminal_evidence(
+                    bindings,
+                    resolved_m,
+                    actual_token_batch_width,
+                    actual_request_batch_width,
+                    lifecycle.as_ref(),
+                    reset.as_ref(),
+                    outcome.is_some(),
+                )
+                .is_err() =>
+            {
+                Some(("terminal_evidence", "terminal_evidence_incomplete", false))
             }
             Some(_) if fallback.unexpected_count > 0 => {
                 Some(("operation_fallback", "unexpected_fallback_observed", false))
@@ -773,6 +963,8 @@ fn load_run_bindings(args: &Args) -> Result<RunBindings, String> {
     if json_self_hash(&case_value, "case_sha256")? != case_sha256 {
         return Err("P2 case self-hash differs".to_string());
     }
+    let case_contract: P2CaseBinding = serde_json::from_value(case_value.clone())
+        .map_err(|error| format!("P2 case exact schema rejected: {error}"))?;
     if identity_value.get("schema_version").and_then(Value::as_str)
         != Some("ullm.aq4_production_p2_identity.v2")
         || identity_value.get("status").and_then(Value::as_str) != Some("bound")
@@ -794,7 +986,7 @@ fn load_run_bindings(args: &Args) -> Result<RunBindings, String> {
     Ok(RunBindings {
         case_id,
         case_sha256,
-        case_value,
+        case_contract,
         identity_value,
         case: case_link,
         identity: identity_link,
@@ -863,20 +1055,35 @@ fn json_self_hash(value: &Value, field: &str) -> Result<String, String> {
 fn validate_p2_bindings(
     args: &Args,
     bindings: &RunBindings,
+    fixture: &FixtureCase,
     model: &ServedModel,
     identity: &Identity,
 ) -> Result<(), String> {
-    let case = bindings
-        .case_value
-        .as_object()
-        .ok_or_else(|| "P2 case binding root must be an object".to_string())?;
-    if case.get("case_id").and_then(Value::as_str) != Some(bindings.case_id.as_str())
-        || case.get("case_sha256").and_then(Value::as_str) != Some(bindings.case_sha256.as_str())
-        || case.get("scope").and_then(Value::as_str) != Some("full_model")
-        || case.get("format_id").and_then(Value::as_str) != Some("AQ4_0")
-        || case.get("prefill_requested_m").and_then(Value::as_u64) != Some(args.requested_m as u64)
-    {
-        return Err("P2 case fields do not match the full-model request".to_string());
+    let case = &bindings.case_contract;
+    let expected_mode = if args.requested_m == 1 {
+        "all_m1"
+    } else {
+        "cold_batched"
+    };
+    let expected_resolved_m = if expected_mode == "all_m1" {
+        1
+    } else {
+        args.requested_m
+    };
+    validate_case_workload(
+        case,
+        fixture,
+        &bindings.case_id,
+        &bindings.case_sha256,
+        args.requested_m,
+        expected_mode,
+        expected_resolved_m,
+        &model.format.format_id,
+        &model.format.implementation_id,
+    )?;
+    validate_case_device(&case.device, &identity.runtime_device, model)?;
+    if args.device_index != identity.runtime_device.requested_device_index {
+        return Err("requested runtime device index differs from result identity".to_string());
     }
     let binding = bindings
         .identity_value
@@ -890,6 +1097,34 @@ fn validate_p2_bindings(
         .get("artifacts")
         .and_then(Value::as_object)
         .ok_or_else(|| "P2 identity artifacts are missing".to_string())?;
+    let model_identity = binding
+        .get("model_identity")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "P2 model identity is missing".to_string())?;
+    if model_identity.get("id").and_then(Value::as_str) != Some(model.public.id.as_str())
+        || model_identity.get("revision").and_then(Value::as_str)
+            != Some(model.public.revision.as_str())
+        || model_identity.get("format_id").and_then(Value::as_str)
+            != Some(model.format.format_id.as_str())
+        || model_identity
+            .get("implementation_id")
+            .and_then(Value::as_str)
+            != Some(model.format.implementation_id.as_str())
+    {
+        return Err("P2 bound model identity differs from the served model".to_string());
+    }
+    let expanded_manifest_sha256 = binding
+        .get("expanded_manifest_sha256")
+        .and_then(Value::as_str)
+        .filter(|value| valid_sha256(value));
+    let bound_case_manifest_sha256 = hashes
+        .get("bound_case_manifest_sha256")
+        .and_then(Value::as_str)
+        .filter(|value| valid_sha256(value));
+    if expanded_manifest_sha256.is_none() || expanded_manifest_sha256 != bound_case_manifest_sha256
+    {
+        return Err("P2 identity does not bind its expanded case manifest".to_string());
+    }
     let expected = [
         (
             "served_model_manifest_sha256",
@@ -958,21 +1193,103 @@ fn validate_p2_bindings(
     Ok(())
 }
 
-fn load_link_json(path: &Path, label: &str) -> Result<(Value, ArtifactLink), String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("{label} metadata failed: {error}"))?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_LINK_BYTES as u64 {
-        return Err(format!(
-            "{label} must be a bounded regular non-symlink file"
-        ));
+#[allow(clippy::too_many_arguments)]
+fn validate_case_workload(
+    case: &P2CaseBinding,
+    fixture: &FixtureCase,
+    bound_case_id: &str,
+    bound_case_sha256: &str,
+    requested_m: usize,
+    expected_mode: &str,
+    expected_resolved_m: usize,
+    format_id: &str,
+    implementation_id: &str,
+) -> Result<(), String> {
+    if case.case_id != bound_case_id
+        || case.case_id != fixture.case_id
+        || case.fixture_id != fixture.case_id
+        || case.case_sha256 != bound_case_sha256
+        || case.stage_id.is_empty()
+        || case.stage_order == 0
+        || case.scope != "full_model"
+        || case.phase != "cold_prefill"
+        || case.mode != expected_mode
+        || case.baseline_mode != expected_mode
+        || case.prompt_tokens != fixture.prompt_token_ids.len()
+        || case.cached_prefix_tokens != 0
+        || case.context_tokens != fixture.prompt_token_ids.len()
+        || case.decode_start_tokens
+            != if fixture.step_count == 0 {
+                0
+            } else {
+                fixture.prompt_token_ids.len()
+            }
+        || case.prefill_requested_m != requested_m
+        || case.resolved_m != expected_resolved_m
+        || case.request_count != 1
+        || case.decode_request_count != 0
+        || case.generated_tokens != fixture.step_count
+        || case.format_id != "AQ4_0"
+        || case.format_id != format_id
+        || case.implementation_id != implementation_id
+        || case.control_id != "aq4_0_target"
+        || case.control.control_id != case.control_id
+        || case.control.role != "target"
+        || case.control.format_id != case.format_id
+        || case.control.implementation_id != case.implementation_id
+        || !case.control.promotion_eligible
+        || case.sampling.mode != "greedy"
+        || case.sampling.temperature != 0.0
+        || case.sampling.top_p != 1.0
+        || case.sampling.top_k != 1
+        || case.sampling.seed != 0
+        || (case.mode == "all_m1"
+            && (case.path_oracle_case_id.is_some() || case.path_oracle_result_sha256.is_some()))
+        || (case.mode != "all_m1"
+            && (case
+                .path_oracle_case_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || case.path_oracle_result_sha256.is_some()))
+    {
+        return Err("P2 case workload/control fields do not exactly match the request".to_string());
     }
-    reject_symlink_components(path)?;
-    let mut file = File::open(path).map_err(|error| format!("{label} open failed: {error}"))?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("{label} read failed: {error}"))?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| format!("{label} JSON is invalid"))?;
+    Ok(())
+}
+
+fn validate_case_device(
+    case: &P2CaseDevice,
+    runtime: &RuntimeDeviceIdentity,
+    model: &ServedModel,
+) -> Result<(), String> {
+    validate_case_device_values(case, runtime, &model.worker.identity.device)
+}
+
+fn validate_case_device_values(
+    case: &P2CaseDevice,
+    runtime: &RuntimeDeviceIdentity,
+    manifest_device_architecture: &str,
+) -> Result<(), String> {
+    let expected_case_architecture = match runtime.observed_architecture.as_str() {
+        "gfx1201" => "RDNA4",
+        "gfx1030" | "gfx1031" => "RDNA2",
+        other => other,
+    };
+    if case.device_id != "r9700-rdna4"
+        || case.backend != runtime.observed_backend
+        || case.name != runtime.observed_name
+        || case.architecture != expected_case_architecture
+        || case.runtime_device_index != runtime.observed_device_id
+        || manifest_device_architecture != runtime.observed_architecture
+    {
+        return Err("P2 case device differs from the exact runtime device".to_string());
+    }
+    Ok(())
+}
+
+fn load_link_json(path: &Path, label: &str) -> Result<(Value, ArtifactLink), String> {
+    let bytes = read_bounded_regular_file(path, label, MAX_LINK_BYTES)?;
+    let value = parse_strict_json(&bytes, label)?;
     let canonical = path
         .canonicalize()
         .map_err(|error| format!("{label} canonicalization failed: {error}"))?;
@@ -1224,7 +1541,17 @@ fn finalize_result(
             || identity.is_none()
             || !preflight.required_environment_verified
             || !preflight.binary_roles_verified
-            || !preflight.package_tree_verified)
+            || !preflight.package_tree_verified
+            || validate_terminal_evidence(
+                bindings,
+                resolved_m,
+                actual_token_batch_width,
+                actual_request_batch_width,
+                lifecycle.as_ref(),
+                reset.as_ref(),
+                outcome.is_some(),
+            )
+            .is_err())
     {
         return Err("ok result lacks mandatory identity/audit/preflight evidence".to_string());
     }
@@ -1286,6 +1613,84 @@ fn finalize_result(
             raw_v2_requires_role_aware_adapter: true,
         },
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_terminal_evidence(
+    bindings: &RunBindings,
+    resolved_m: Option<usize>,
+    actual_token_batch_width: Option<usize>,
+    actual_request_batch_width: Option<usize>,
+    lifecycle: Option<&Value>,
+    reset: Option<&Value>,
+    outcome_present: bool,
+) -> Result<(), String> {
+    let case = &bindings.case_contract;
+    if resolved_m != Some(case.resolved_m)
+        || actual_token_batch_width != Some(case.resolved_m)
+        || actual_request_batch_width != Some(case.request_count)
+        || !outcome_present
+    {
+        return Err("terminal widths or outcome differ from the case".to_string());
+    }
+    let lifecycle = lifecycle
+        .and_then(Value::as_object)
+        .ok_or_else(|| "terminal lifecycle is missing".to_string())?;
+    let prepare = lifecycle_count(lifecycle, "prepare")?;
+    let commit = lifecycle_count(lifecycle, "commit")?;
+    let discard = lifecycle_count(lifecycle, "discard")?;
+    if prepare == 0
+        || prepare
+            != commit
+                .checked_add(discard)
+                .ok_or("lifecycle count overflow")?
+        || lifecycle_count(lifecycle, "error")? != 0
+        || lifecycle_count(lifecycle, "cancel")? != 0
+    {
+        return Err("terminal lifecycle counts do not reconcile".to_string());
+    }
+    for phase in ["prefill", "publication"] {
+        let phase = lifecycle
+            .get(phase)
+            .and_then(Value::as_object)
+            .ok_or_else(|| "terminal lifecycle phase is missing".to_string())?;
+        let prepared = lifecycle_count(phase, "prepare")?;
+        let committed = lifecycle_count(phase, "commit")?;
+        let discarded = lifecycle_count(phase, "discard")?;
+        if prepared
+            != committed
+                .checked_add(discarded)
+                .ok_or("lifecycle phase count overflow")?
+        {
+            return Err("terminal lifecycle phase counts do not reconcile".to_string());
+        }
+    }
+    let lifecycle_reset = lifecycle
+        .get("reset")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "terminal lifecycle reset is missing".to_string())?;
+    let reset = reset
+        .and_then(Value::as_object)
+        .ok_or_else(|| "terminal reset is missing".to_string())?;
+    for counts in [lifecycle_reset, reset] {
+        if lifecycle_count(counts, "attempted")? != 1
+            || lifecycle_count(counts, "complete")? != 1
+            || lifecycle_count(counts, "failed")? != 0
+        {
+            return Err("terminal reset did not complete exactly once".to_string());
+        }
+    }
+    if Value::Object(lifecycle_reset.clone()) != Value::Object(reset.clone()) {
+        return Err("terminal reset link differs from lifecycle reset".to_string());
+    }
+    Ok(())
+}
+
+fn lifecycle_count(object: &serde_json::Map<String, Value>, field: &str) -> Result<u64, String> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("terminal lifecycle {field} is missing"))
 }
 
 fn canonical_digest<T: Serialize>(value: &T) -> Result<String, String> {
@@ -1432,6 +1837,7 @@ fn identity_from_model(
     package_dir: &Path,
     benchmark_binary: &ArtifactLink,
     package_tree: &PackageTreeIdentity,
+    runtime_device: RuntimeDeviceIdentity,
 ) -> Identity {
     Identity {
         served_model_manifest_sha256: model.manifest_sha256.clone(),
@@ -1449,25 +1855,34 @@ fn identity_from_model(
         package_manifest_sha256: model.product.package.manifest_sha256.clone(),
         package_file_count: package_tree.file_count,
         package_bytes: package_tree.bytes,
-        device: model.worker.identity.device.clone(),
+        manifest_device_architecture: model.worker.identity.device.clone(),
+        runtime_device,
         execution_profile: model.worker.identity.execution_profile.clone(),
     }
 }
 
+fn observe_runtime_device(device_index: u32) -> Result<RuntimeDeviceIdentity, String> {
+    let observed = ullm_runtime_sys::device_info(device_index)
+        .map_err(|error| format!("runtime device query failed: {error}"))?;
+    if observed.backend.is_empty()
+        || observed.name.is_empty()
+        || observed.gcn_arch_name.is_empty()
+        || observed.device_id < 0
+    {
+        return Err("runtime device identity is incomplete".to_string());
+    }
+    Ok(RuntimeDeviceIdentity {
+        requested_device_index: device_index,
+        observed_device_id: observed.device_id,
+        observed_backend: observed.backend,
+        observed_name: observed.name,
+        observed_architecture: observed.gcn_arch_name,
+    })
+}
+
 fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("fixture metadata failed: {error}"))?;
-    if !metadata.file_type().is_file() {
-        return Err("fixture must be a regular non-symlink file".to_string());
-    }
-    if metadata.len() > MAX_FIXTURE_BYTES as u64 {
-        return Err("fixture exceeds the bounded size limit".to_string());
-    }
-    let mut file = File::open(path).map_err(|error| format!("fixture open failed: {error}"))?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("fixture read failed: {error}"))?;
-    let fixture: FixtureFile = serde_json::from_slice(&bytes)
+    let bytes = read_bounded_regular_file(path, "fixture", MAX_FIXTURE_BYTES)?;
+    let fixture: FixtureFile = serde_json::from_value(parse_strict_json(&bytes, "fixture")?)
         .map_err(|error| format!("fixture JSON rejected: {error}"))?;
     if fixture.cases.is_empty() || fixture.cases.len() > 128 {
         return Err("fixture must contain 1..=128 cases".to_string());
@@ -1508,6 +1923,63 @@ fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, 
         prompt_token_ids: raw.prompt_token_ids,
         step_count: raw.step_count,
     })
+}
+
+fn read_bounded_regular_file(
+    path: &Path,
+    label: &str,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    reject_symlink_components(path)?;
+    let before =
+        fs::symlink_metadata(path).map_err(|error| format!("{label} metadata failed: {error}"))?;
+    if !before.file_type().is_file() || before.len() > maximum_bytes as u64 {
+        return Err(format!(
+            "{label} must be a bounded regular non-symlink file"
+        ));
+    }
+    let mut file = File::open(path).map_err(|error| format!("{label} open failed: {error}"))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("{label} opened metadata failed: {error}"))?;
+    if !opened.file_type().is_file()
+        || opened.dev() != before.dev()
+        || opened.ino() != before.ino()
+        || opened.len() != before.len()
+    {
+        return Err(format!("{label} identity changed while opening"));
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut chunk)
+            .map_err(|error| format!("{label} read failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(read) > maximum_bytes {
+            return Err(format!("{label} exceeds the bounded size limit"));
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| format!("{label} final metadata failed: {error}"))?;
+    if after.dev() != opened.dev()
+        || after.ino() != opened.ino()
+        || after.len() != opened.len()
+        || after.len() != bytes.len() as u64
+    {
+        return Err(format!("{label} changed while reading"));
+    }
+    Ok(bytes)
+}
+
+fn parse_strict_json(bytes: &[u8], label: &str) -> Result<Value, String> {
+    serde_json::from_slice::<StrictJsonValue>(bytes)
+        .map(|value| value.0)
+        .map_err(|error| format!("{label} JSON rejected: {error}"))
 }
 
 fn operation_audit_digest(
@@ -1611,7 +2083,7 @@ mod tests {
         RunBindings {
             case_id: "public-fixture-0".into(),
             case_sha256: "1".repeat(64),
-            case_value: serde_json::json!({"case_id": "public-fixture-0"}),
+            case_contract: test_case_contract(),
             identity_value: serde_json::json!({"status": "bound"}),
             case: ArtifactLink {
                 path: "/tmp/case.json".into(),
@@ -1626,6 +2098,55 @@ mod tests {
                 sha256: "4".repeat(64),
             },
             preflight_value: serde_json::json!({"vram_headroom_bytes": 1}),
+        }
+    }
+
+    fn test_case_contract() -> P2CaseBinding {
+        P2CaseBinding {
+            case_id: "public-fixture-0".into(),
+            fixture_id: "public-fixture-0".into(),
+            case_sha256: "1".repeat(64),
+            stage_id: "test".into(),
+            stage_order: 1,
+            scope: "full_model".into(),
+            phase: "cold_prefill".into(),
+            mode: "cold_batched".into(),
+            baseline_mode: "cold_batched".into(),
+            prompt_tokens: 2,
+            cached_prefix_tokens: 0,
+            context_tokens: 2,
+            decode_start_tokens: 2,
+            prefill_requested_m: 8,
+            resolved_m: 8,
+            request_count: 1,
+            decode_request_count: 0,
+            generated_tokens: 1,
+            device: P2CaseDevice {
+                device_id: "r9700-rdna4".into(),
+                backend: "hip".into(),
+                name: "Radeon AI PRO R9700".into(),
+                architecture: "RDNA4".into(),
+                runtime_device_index: 0,
+            },
+            control_id: "aq4_0_target".into(),
+            control: P2CaseControl {
+                control_id: "aq4_0_target".into(),
+                role: "target".into(),
+                format_id: "AQ4_0".into(),
+                implementation_id: "qwen35_aq4_rdna4_v1".into(),
+                promotion_eligible: true,
+            },
+            sampling: P2CaseSampling {
+                mode: "greedy".into(),
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 1,
+                seed: 0,
+            },
+            format_id: "AQ4_0".into(),
+            implementation_id: "qwen35_aq4_rdna4_v1".into(),
+            path_oracle_case_id: Some("oracle".into()),
+            path_oracle_result_sha256: None,
         }
     }
 
@@ -1646,7 +2167,14 @@ mod tests {
             package_manifest_sha256: "9".repeat(64),
             package_file_count: 2,
             package_bytes: 3,
-            device: "gfx1201".into(),
+            manifest_device_architecture: "gfx1201".into(),
+            runtime_device: RuntimeDeviceIdentity {
+                requested_device_index: 1,
+                observed_device_id: 0,
+                observed_backend: "hip".into(),
+                observed_name: "Radeon AI PRO R9700".into(),
+                observed_architecture: "gfx1201".into(),
+            },
             execution_profile: "rdna4_aq4_resident".into(),
         }
     }
@@ -1671,6 +2199,23 @@ mod tests {
         }
     }
 
+    fn test_lifecycle() -> Value {
+        serde_json::json!({
+            "prepare": 2,
+            "commit": 2,
+            "discard": 0,
+            "error": 0,
+            "cancel": 0,
+            "prefill": {"prepare": 1, "commit": 1, "discard": 0},
+            "publication": {"prepare": 1, "commit": 1, "discard": 0},
+            "reset": {"attempted": 1, "complete": 1, "failed": 0}
+        })
+    }
+
+    fn test_reset() -> Value {
+        serde_json::json!({"attempted": 1, "complete": 1, "failed": 0})
+    }
+
     fn ok_result(audit: Option<AuditFacts>) -> Result<BenchmarkResult, String> {
         finalize_result(
             &test_args(),
@@ -1687,8 +2232,8 @@ mod tests {
             Some(8),
             Some(8),
             Some(1),
-            Some(serde_json::json!({"prepare": 1, "commit": 1})),
-            Some(serde_json::json!({"attempted": 1, "complete": 1, "failed": 0})),
+            Some(test_lifecycle()),
+            Some(test_reset()),
             Some("length"),
             "ok",
             None,
@@ -1764,6 +2309,51 @@ mod tests {
         let link = root.join("link.json");
         std::os::unix::fs::symlink(&fixture, &link).unwrap();
         assert!(load_fixture_case(&link, None).is_err());
+        let real_parent = root.join("real-parent");
+        fs::create_dir_all(&real_parent).unwrap();
+        let nested = real_parent.join("nested.json");
+        fs::write(
+            &nested,
+            br#"{"cases":[{"case_id":"parent","prompt_token_ids":[1],"step_count":1}]}"#,
+        )
+        .unwrap();
+        let linked_parent = root.join("linked-parent");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+        assert!(load_fixture_case(&linked_parent.join("nested.json"), None).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixture_json_rejects_duplicate_and_unknown_fields() {
+        let root = env::temp_dir().join(format!(
+            "ullm-aq4-p2-strict-fixture-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.json");
+        fs::write(
+            &fixture,
+            br#"{"cases":[{"case_id":"duplicate","prompt_token_ids":[1],"step_count":1,"step_count":2}]}"#,
+        )
+        .unwrap();
+        assert!(
+            load_fixture_case(&fixture, None)
+                .unwrap_err()
+                .contains("duplicate JSON key")
+        );
+        fs::write(
+            &fixture,
+            br#"{"cases":[{"case_id":"unknown","prompt_token_ids":[1],"step_count":1,"extra":true}]}"#,
+        )
+        .unwrap();
+        assert!(
+            load_fixture_case(&fixture, None)
+                .unwrap_err()
+                .contains("unknown field")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1849,11 +2439,127 @@ mod tests {
         assert_eq!(value["links"]["timing"]["json_pointer"], "/timing");
         assert_eq!(value["links"]["audit"]["json_pointer"], "/audit");
         assert_eq!(value["links"]["audit"]["sha256"], "a".repeat(64));
+        assert_eq!(
+            value["identity"]["runtime_device"]["requested_device_index"],
+            1
+        );
+        assert_eq!(value["identity"]["runtime_device"]["observed_device_id"], 0);
+        assert_eq!(
+            value["identity"]["runtime_device"]["observed_architecture"],
+            "gfx1201"
+        );
     }
 
     #[test]
     fn ok_result_requires_operation_audit() {
         assert!(ok_result(None).unwrap_err().contains("mandatory"));
+    }
+
+    #[test]
+    fn ok_terminal_evidence_requires_exact_widths_lifecycle_and_reset() {
+        let bindings = test_bindings();
+        let lifecycle = test_lifecycle();
+        let reset = test_reset();
+        assert!(
+            validate_terminal_evidence(
+                &bindings,
+                Some(8),
+                Some(8),
+                Some(1),
+                Some(&lifecycle),
+                Some(&reset),
+                true,
+            )
+            .is_ok()
+        );
+        let mut unbalanced = lifecycle.clone();
+        unbalanced["prepare"] = Value::from(3);
+        assert!(
+            validate_terminal_evidence(
+                &bindings,
+                Some(8),
+                Some(8),
+                Some(1),
+                Some(&unbalanced),
+                Some(&reset),
+                true,
+            )
+            .is_err()
+        );
+        let mut incomplete_reset = lifecycle;
+        incomplete_reset["reset"]["attempted"] = Value::from(0);
+        assert!(
+            validate_terminal_evidence(
+                &bindings,
+                Some(8),
+                Some(8),
+                Some(1),
+                Some(&incomplete_reset),
+                Some(&reset),
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_terminal_evidence(
+                &bindings,
+                None,
+                Some(8),
+                Some(1),
+                Some(&test_lifecycle()),
+                Some(&reset),
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn case_workload_and_device_are_exact() {
+        let mut case = test_case_contract();
+        let fixture = FixtureCase {
+            case_id: "public-fixture-0".into(),
+            prompt_token_ids: vec![1, 2],
+            step_count: 1,
+        };
+        assert!(
+            validate_case_workload(
+                &case,
+                &fixture,
+                "public-fixture-0",
+                &"1".repeat(64),
+                8,
+                "cold_batched",
+                8,
+                "AQ4_0",
+                "qwen35_aq4_rdna4_v1",
+            )
+            .is_ok()
+        );
+        case.request_count = 2;
+        assert!(
+            validate_case_workload(
+                &case,
+                &fixture,
+                "public-fixture-0",
+                &"1".repeat(64),
+                8,
+                "cold_batched",
+                8,
+                "AQ4_0",
+                "qwen35_aq4_rdna4_v1",
+            )
+            .is_err()
+        );
+
+        let case_device = test_case_contract().device;
+        let runtime = test_identity().runtime_device;
+        assert!(validate_case_device_values(&case_device, &runtime, "gfx1201").is_ok());
+        let mut same_arch_other_gpu = runtime.clone();
+        same_arch_other_gpu.observed_name = "Different gfx1201 GPU".into();
+        assert!(
+            validate_case_device_values(&case_device, &same_arch_other_gpu, "gfx1201").is_err()
+        );
     }
 
     #[test]
