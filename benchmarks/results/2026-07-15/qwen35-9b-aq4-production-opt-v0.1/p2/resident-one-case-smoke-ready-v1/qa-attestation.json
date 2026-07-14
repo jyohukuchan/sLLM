@@ -8,6 +8,8 @@
     "safety-success-start-failure-partial",
     "validator-runner-finalize-toctou",
     "identity-and-hash-bindings",
+    "container-namespace-health-and-authenticated-model-binding",
+    "secret-free-stdin-header-transport",
     "base-and-profile-dry-run-process-count-zero",
     "rocprof-pinned-fd-and-target-manifest",
     "roctx-run-session-case-and-library-binding"
@@ -24,10 +26,10 @@
   "runner_strict_negative_count": 18,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 234,
+  "test_count": 246,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 168,
+    "existing_and_profile_regression": 180,
     "marker_chain": 55
   }
 }

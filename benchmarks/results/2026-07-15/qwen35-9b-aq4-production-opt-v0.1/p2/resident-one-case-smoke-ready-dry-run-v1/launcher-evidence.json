@@ -6,6 +6,9 @@
   "model_load_executed": false,
   "process_counts": {
     "capture_tool": 0,
+    "container_curl": 0,
+    "docker": 0,
+    "docker_exec": 0,
     "launcher": 0,
     "rocprof": 0,
     "sudo": 0,
@@ -13,7 +16,7 @@
     "systemctl_stop": 0
   },
   "promotion_eligible": false,
-  "ready_binding_sha256": "b71a67a240668626c1c5d9c35cbd9b5b658d282265120aa7721f75516ba67c69",
+  "ready_binding_sha256": "cf4978c22f48dcadcbc4cc1b8233a03076a599f5a01bb139256a7d24f703bb01",
   "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
   "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
   "service_touched": false,
