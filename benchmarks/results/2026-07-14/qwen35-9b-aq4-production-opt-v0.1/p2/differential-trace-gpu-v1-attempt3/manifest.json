@@ -1,0 +1,129 @@
+{
+  "cases_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/qwen35-aq4-p2-oracle/cases.json",
+  "device_index": 1,
+  "identity": {
+    "active_manifest_path": "/etc/ullm/served-models/active.json",
+    "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "build_git_commit": "28ec343ac59e6d22e710035d7874df9fbd8f890f",
+    "device": {
+      "backend": "hip",
+      "index": 1,
+      "name": "AMD Radeon Graphics",
+      "total_global_mem": 34208743424
+    },
+    "guard_set_sha256": "0d034d8717e05e2f30e8b28209a4fbcf52622846a227c87b3376f29986ce3f90",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "tool_binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/ullm-aq4-differential-trace-detached-attempt3",
+    "tool_binary_sha256": "356d131fc578debea418f6c67d7b89272bfb02700495775be98471c44e3bd0b7"
+  },
+  "input_binding": {
+    "actual_cases": [
+      {
+        "case_id": "fixture-prompt-0",
+        "prompt_token_count": 3,
+        "prompt_token_ids": [
+          11,
+          12,
+          13
+        ],
+        "prompt_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        "step_count": 2
+      },
+      {
+        "case_id": "fixture-prompt-1",
+        "prompt_token_count": 2,
+        "prompt_token_ids": [
+          21,
+          22
+        ],
+        "prompt_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        "step_count": 1
+      }
+    ],
+    "actual_replay_sequences": [
+      {
+        "case_id": "fixture-prompt-0",
+        "source_sequence_sha256": "659089fb0d89b0ac00a5409c388e647a00bd5b6864b647283f382cddf5075f9c",
+        "token_ids_sha256": "97001f7e811c413d0ac29e113a1df00fe8e2f0c06d4f308bca792b6a8bb2747b"
+      },
+      {
+        "case_id": "fixture-prompt-1",
+        "source_sequence_sha256": "2f4c17cf7fa30259ea9fbfbb11981a1c6c8a9ce4bd41b4f9824b1aff66763af4",
+        "token_ids_sha256": "e78449a78976a01ba606c523fd27c61be4249ea6bc6c110775f9a6c618bbe3d2"
+      }
+    ],
+    "cases_sha256": "15fed90dd2e16a5b68d4498c8632257d80ac94c56ed614696b0884c65f4836f2",
+    "expected_cases": [
+      {
+        "case_id": "fixture-prompt-0",
+        "prompt_token_count": 3,
+        "prompt_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        "replay_source_sequence_sha256": "659089fb0d89b0ac00a5409c388e647a00bd5b6864b647283f382cddf5075f9c",
+        "replay_token_ids_sha256": "97001f7e811c413d0ac29e113a1df00fe8e2f0c06d4f308bca792b6a8bb2747b",
+        "step_count": 2
+      },
+      {
+        "case_id": "fixture-prompt-1",
+        "prompt_token_count": 2,
+        "prompt_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        "replay_source_sequence_sha256": "2f4c17cf7fa30259ea9fbfbb11981a1c6c8a9ce4bd41b4f9824b1aff66763af4",
+        "replay_token_ids_sha256": "e78449a78976a01ba606c523fd27c61be4249ea6bc6c110775f9a6c618bbe3d2",
+        "step_count": 1
+      }
+    ],
+    "replay_sha256": "1ee0b9228e1bc3a0ae9175e5693bf3770f9b89e872349554562dbd4b6b4747dc"
+  },
+  "mode": "aq4_gpu_intermediate_diagnostic",
+  "package_dir": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+  "production_worker_unchanged": true,
+  "replay_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/replay.json",
+  "rows": 3,
+  "schema_version": "ullm.qwen35_aq4_differential_trace.v1",
+  "stage_contract": {
+    "decoder_layers": 32,
+    "embedding": true,
+    "final_norm": true,
+    "hidden_coordinates": [
+      0,
+      1,
+      1024,
+      2048,
+      4095
+    ],
+    "lm_head": true,
+    "logit_coordinates": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ]
+  }
+}

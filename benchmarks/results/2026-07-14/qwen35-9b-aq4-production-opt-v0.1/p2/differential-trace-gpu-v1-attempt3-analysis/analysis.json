@@ -1,0 +1,59 @@
+{
+  "overall_diagnosis": "analyzed",
+  "path_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-attempt3",
+  "reports": [
+    {
+      "case_id": "fixture-prompt-0",
+      "diagnosis": "decoder_layer_0",
+      "first_mismatch": {
+        "coordinate_count": 5,
+        "layer_index": 0,
+        "max_abs": 0.005409110337495804,
+        "reason": "sample_value_mismatch",
+        "stage": "decoder_layer"
+      },
+      "greedy_exact": false,
+      "missing_stages": [],
+      "status": "analyzed",
+      "step": 0
+    },
+    {
+      "case_id": "fixture-prompt-0",
+      "diagnosis": "decoder_layer_0",
+      "first_mismatch": {
+        "coordinate_count": 5,
+        "layer_index": 0,
+        "max_abs": 0.004887105897068977,
+        "reason": "sample_value_mismatch",
+        "stage": "decoder_layer"
+      },
+      "greedy_exact": true,
+      "missing_stages": [],
+      "status": "analyzed",
+      "step": 1
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "diagnosis": "decoder_layer_0",
+      "first_mismatch": {
+        "coordinate_count": 5,
+        "layer_index": 0,
+        "max_abs": 0.0024267658591270447,
+        "reason": "sample_value_mismatch",
+        "stage": "decoder_layer"
+      },
+      "greedy_exact": true,
+      "missing_stages": [],
+      "status": "analyzed",
+      "step": 0
+    }
+  ],
+  "schema_version": "ullm.qwen35_aq4_differential_analysis.v1",
+  "source_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-differential-trace-v2",
+  "stage_contract": {
+    "decoder_layers": 32,
+    "embedding": true,
+    "final_norm": true,
+    "lm_head": true
+  }
+}
