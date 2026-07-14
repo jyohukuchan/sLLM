@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import pwd
 import re
 import signal
 import stat
@@ -31,15 +32,15 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "0994367b08534909ff42771ee5b080ec56ca4d01"
-LAUNCHER_TREE = "602605dafde92876ceffcb8f79c825934509b549"
-LAUNCHER_GIT_BLOB = "c60a80299a8ac281875fe45b763e52dfed7c9a29"
-LAUNCHER_SHA = "9e1e7ddd3ec9911326aa7eb81702219766ff1422494fef22cc6a2be87154c036"
-RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
-RUNNER_SHA = "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
+LAUNCHER_COMMIT = "180ab1be976fa43cc3d4b46fa8e1f1307cb38ec8"
+LAUNCHER_TREE = "f79d5108933b9157b790a35e9867ad4ce8a5e1f6"
+LAUNCHER_GIT_BLOB = "1e317bab4339792711e7959305dfdfa4c8883909"
+LAUNCHER_SHA = "825e8c83e46a1386ba0215ae48cb242615707c85db350f03850c0f9abc0f209e"
+RUNNER_COMMIT = "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db"
+RUNNER_SHA = "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "82635456825503c535ce0b662e72a7a233d18c40"
-B_COMMIT = "7e59baee0c1ac93a350da58a4292a84fbfde9f1c"
+VALIDATOR_COMMIT = "82c77957a8e53ea7ed0be4f3a83a8cce6f39a65f"
+B_COMMIT = "9a98c67b7fa1f6488f08ffa05a44c947415d3f7b"
 RESIDENT_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
@@ -110,6 +111,14 @@ STOP_POLL_SUDO_KEEPALIVE_SECONDS = 10.0
 STOP_POLL_PROBE_TIMEOUT_SECONDS = 2.0
 RUN_ID = LAUNCHER.EXECUTE_RUN_ID
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+LOCK_SUBSTRATE_OWNER = "homelab1"
+LOCK_SUBSTRATE_DIRECTORY = Path("/run/ullm")
+LOCK_SUBSTRATE_MODE = 0o750
+LOCK_SUBSTRATE_LOCK_MODE = 0o600
+INSTALL = Path("/usr/bin/install")
+INSTALL_SHA = "0e328ae109217200da3207ece12514b867d44fb90b444958b4d64b6007736f33"
+RMDIR = Path("/usr/bin/rmdir")
+RMDIR_SHA = "2450cf2f4eaad71378cfdc6ac6da5cd6b40a6aa772766ae9040d32bf2ee45193"
 
 
 class HarnessError(ValueError):
@@ -238,6 +247,225 @@ def _file_identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def _lock_substrate_directory() -> Path:
+    """Return the fixed directory containing the production device lock.
+
+    Deriving this from the launcher lock path keeps test fakes and an explicitly
+    bound launcher path on the same substrate while production remains exactly
+    ``/run/ullm``.
+    """
+
+    directory = LAUNCHER.LOCK_PATH.parent
+    if directory != LOCK_SUBSTRATE_DIRECTORY:
+        # A test may bind a temporary lock path, but a real run must never move
+        # the trusted substrate away from the production location.
+        return directory
+    return LOCK_SUBSTRATE_DIRECTORY
+
+
+def _lock_owner_ids() -> tuple[int, int]:
+    try:
+        owner = pwd.getpwnam(LOCK_SUBSTRATE_OWNER)
+    except KeyError as error:
+        raise HarnessError("trusted lock substrate owner is unavailable") from error
+    if owner.pw_uid == 0 or owner.pw_gid == 0:
+        raise HarnessError("trusted lock substrate owner must be nonroot")
+    return owner.pw_uid, owner.pw_gid
+
+
+def _substrate_identity(metadata: os.stat_result, *, directory: bool = False) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
+def _substrate_metadata(metadata: os.stat_result) -> dict[str, Any]:
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "nlink": metadata.st_nlink,
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "regular": stat.S_ISREG(metadata.st_mode),
+        "directory": stat.S_ISDIR(metadata.st_mode),
+    }
+
+
+@dataclass(frozen=True)
+class LockSubstrate:
+    directory: Path
+    lock: Path
+    directory_identity: tuple[int, ...]
+    lock_identity: tuple[int, ...]
+    evidence: dict[str, Any]
+
+
+def _pinned_tool_sha(path: Path, expected: str, label: str) -> str:
+    LAUNCHER.reject_symlink_components(path, label)
+    observed, _ = LAUNCHER.sha_file(path, label)
+    if observed != expected:
+        raise HarnessError(f"{label} SHA differs")
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(path, os.X_OK):
+        raise HarnessError(f"{label} executable identity differs")
+    return observed
+
+
+def _substrate_dir_state(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {"path": str(path), "present": False, "symlink": False, "metadata": None, "empty": None}
+    if stat.S_ISLNK(metadata.st_mode):
+        raise HarnessError("trusted lock substrate directory is a symlink")
+    empty = stat.S_ISDIR(metadata.st_mode) and not any(path.iterdir())
+    return {"path": str(path), "present": True, "symlink": False, "metadata": _substrate_metadata(metadata), "empty": empty}
+
+
+def _verify_substrate_directory(
+    path: Path,
+    owner_uid: int,
+    owner_gid: int,
+    *,
+    expected_identity: tuple[int, ...] | None = None,
+    empty: bool,
+) -> os.stat_result:
+    LAUNCHER.reject_symlink_components(path, "trusted lock substrate directory")
+    metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != LOCK_SUBSTRATE_MODE
+        or metadata.st_nlink != 2
+        or metadata.st_uid != owner_uid
+        or metadata.st_gid != owner_gid
+        or (expected_identity is not None and _substrate_identity(metadata, directory=True) != expected_identity)
+    ):
+        raise HarnessError("trusted lock substrate directory identity differs")
+    if empty and any(path.iterdir()):
+        raise HarnessError("trusted lock substrate directory is not empty")
+    return metadata
+
+
+def _verify_substrate_lock(
+    path: Path,
+    owner_uid: int,
+    owner_gid: int,
+    *,
+    expected_identity: tuple[int, ...] | None = None,
+) -> os.stat_result:
+    LAUNCHER.reject_symlink_components(path, "trusted lock substrate lock")
+    metadata = path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != LOCK_SUBSTRATE_LOCK_MODE
+        or metadata.st_nlink != 1
+        or metadata.st_uid != owner_uid
+        or metadata.st_gid != owner_gid
+        or metadata.st_uid == 0
+        or (expected_identity is not None and _substrate_identity(metadata) != expected_identity)
+    ):
+        raise HarnessError("trusted lock substrate lock identity differs")
+    return metadata
+
+
+def _command_with_pinned_executable(
+    run: Callable[..., subprocess.CompletedProcess[bytes]],
+    argv: list[str],
+    label: str,
+    executable: Path,
+    executable_sha: str,
+) -> dict[str, Any]:
+    observed_sha = _pinned_tool_sha(executable, executable_sha, label)
+    completed, record = _command(run, argv, label)
+    record["executable"] = str(executable)
+    record["executable_sha256"] = observed_sha
+    record["sha256"] = observed_sha
+    record["argv_sha256"] = sha_bytes(canonical(argv))
+    if completed.returncode != 0 or completed.stdout or completed.stderr:
+        raise HarnessError(f"{label} command failed")
+    return record
+
+
+def prepare_lock_substrate(
+    run: Callable[..., subprocess.CompletedProcess[bytes]],
+) -> LockSubstrate:
+    """Create the non-root lock substrate after the production service stops."""
+
+    directory = _lock_substrate_directory()
+    lock = LAUNCHER.LOCK_PATH
+    owner_uid, owner_gid = _lock_owner_ids()
+    LAUNCHER.reject_symlink_components(directory, "trusted lock substrate directory", allow_missing_leaf=True)
+    pre_directory = _substrate_dir_state(directory)
+    if pre_directory["present"]:
+        raise HarnessError("trusted lock substrate directory must be absent before install")
+    try:
+        pre_lock = lock.lstat()
+    except FileNotFoundError:
+        pre_lock = None
+    if pre_lock is not None:
+        raise HarnessError("trusted lock substrate lock must be absent before install")
+    install_argv = [str(LAUNCHER.SUDO), "-n", str(INSTALL), "-d", "-o", LOCK_SUBSTRATE_OWNER, "-g", LOCK_SUBSTRATE_OWNER, "-m", f"{LOCK_SUBSTRATE_MODE:04o}", str(directory)]
+    install_record = _command_with_pinned_executable(run, install_argv, "lock-substrate-install", INSTALL, INSTALL_SHA)
+    directory_metadata = _verify_substrate_directory(directory, owner_uid, owner_gid, empty=True)
+    directory_descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    descriptor = -1
+    try:
+        if _substrate_identity(os.fstat(directory_descriptor), directory=True) != _substrate_identity(directory_metadata, directory=True):
+            raise HarnessError("trusted lock substrate directory changed before lock creation")
+        descriptor = os.open(
+            lock.name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            LOCK_SUBSTRATE_LOCK_MODE,
+            dir_fd=directory_descriptor,
+        )
+    except FileExistsError as error:
+        raise HarnessError("trusted lock substrate lock appeared during creation") from error
+    finally:
+        try:
+            if descriptor >= 0:
+                try:
+                    os.fchmod(descriptor, LOCK_SUBSTRATE_LOCK_MODE)
+                finally:
+                    os.close(descriptor)
+        finally:
+            os.close(directory_descriptor)
+    lock_metadata = _verify_substrate_lock(lock, owner_uid, owner_gid)
+    # A second directory check closes the install/create race and records the
+    # exact directory and lock identities used by all subsequent gates.
+    directory_metadata = _verify_substrate_directory(directory, owner_uid, owner_gid, empty=False)
+    evidence = {
+        "schema_version": "ullm.aq4_p2_trusted_lock_substrate.v1",
+        "owner": {"name": LOCK_SUBSTRATE_OWNER, "uid": owner_uid, "gid": owner_gid, "nonroot": True},
+        "directory": str(directory),
+        "lock": str(lock),
+        "pre": {"directory": pre_directory, "lock": {"path": str(lock), "present": False}},
+        "post": {
+            "directory": _substrate_metadata(directory_metadata) | {"empty": False},
+            "lock": _substrate_metadata(lock_metadata),
+        },
+        "commands": [install_record],
+        "identity": {
+            "directory": {"device": directory_metadata.st_dev, "inode": directory_metadata.st_ino},
+            "lock": {"device": lock_metadata.st_dev, "inode": lock_metadata.st_ino},
+        },
+        "secret_material_recorded": False,
+    }
+    return LockSubstrate(directory, lock, _substrate_identity(directory_metadata, directory=True), _substrate_identity(lock_metadata), evidence)
 
 
 def _api_key_snapshot() -> tuple[bytes, tuple[int, ...]]:
@@ -565,16 +793,135 @@ def default_lock_busy() -> bool:
         os.close(descriptor)
 
 
+def _lock_holder_pids_for_identity(device: int, inode: int) -> tuple[list[int], bytes]:
+    try:
+        locks_raw = Path("/proc/locks").read_bytes()
+    except OSError as error:
+        raise HarnessError("trusted lock substrate holder source failed") from error
+    if len(locks_raw) > 4 * 1024 * 1024:
+        raise HarnessError("trusted lock substrate holder source exceeds bound")
+    lock_id = f"{os.major(device):02x}:{os.minor(device):02x}:{inode}"
+    holder_pids: set[int] = set()
+    try:
+        for line in locks_raw.decode("ascii").splitlines():
+            fields = line.split()
+            if len(fields) >= 6 and fields[5].lower() == lock_id.lower():
+                holder_pids.add(int(fields[4]))
+    except (UnicodeError, ValueError) as error:
+        raise HarnessError("trusted lock substrate holder source schema differs") from error
+    return sorted(holder_pids), locks_raw
+
+
+def _lock_holder_pids_for_stat(metadata: os.stat_result) -> tuple[list[int], bytes]:
+    return _lock_holder_pids_for_identity(metadata.st_dev, metadata.st_ino)
+
+
+def cleanup_lock_substrate(
+    substrate: LockSubstrate,
+    run: Callable[..., subprocess.CompletedProcess[bytes]],
+    *,
+    runner_finished: bool,
+    runner_children: list[int] | None = None,
+) -> dict[str, Any]:
+    """Remove only the exact substrate created by :func:`prepare_lock_substrate`."""
+
+    owner_uid, owner_gid = _lock_owner_ids()
+    children = sorted(set(runner_children or []))
+    if any(type(pid) is not int or pid <= 0 for pid in children):
+        raise HarnessError("trusted lock substrate runner child schema differs")
+    if children:
+        raise HarnessError("trusted lock substrate runner child is still alive")
+    directory = substrate.directory
+    lock = substrate.lock
+    pre = {"directory": _substrate_dir_state(directory), "lock": None}
+    try:
+        lock_metadata = lock.lstat()
+    except FileNotFoundError:
+        lock_metadata = None
+    if lock_metadata is None:
+        pre["lock"] = {"path": str(lock), "present": False}
+        if not runner_finished:
+            raise HarnessError("trusted lock substrate lock disappeared before runner completion")
+        holder_pids, locks_raw = _lock_holder_pids_for_identity(substrate.lock_identity[0], substrate.lock_identity[1])
+        if holder_pids:
+            raise HarnessError("trusted lock substrate removed lock still has a holder")
+        lock_source = "runner_removed"
+    else:
+        pre["lock"] = _substrate_metadata(lock_metadata)
+        if _substrate_identity(lock_metadata) != substrate.lock_identity:
+            raise HarnessError("trusted lock substrate lock replacement detected during cleanup")
+        _verify_substrate_lock(lock, owner_uid, owner_gid, expected_identity=substrate.lock_identity)
+        holder_pids, locks_raw = _lock_holder_pids_for_stat(lock_metadata)
+        descriptor = os.open(lock, os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                after_lock = lock.lstat()
+            except FileNotFoundError:
+                raise HarnessError("trusted lock substrate lock disappeared during cleanup")
+            if _substrate_identity(after_lock) != substrate.lock_identity:
+                raise HarnessError("trusted lock substrate lock replacement detected during cleanup")
+            if holder_pids:
+                raise HarnessError("trusted lock substrate lock holder remains")
+            directory_descriptor = os.open(
+                directory,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                if _substrate_identity(os.fstat(directory_descriptor), directory=True) != substrate.directory_identity:
+                    raise HarnessError("trusted lock substrate directory replacement detected during cleanup")
+                os.unlink(lock.name, dir_fd=directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except BlockingIOError as error:
+            raise HarnessError("trusted lock substrate lock still has a holder") from error
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        lock_source = "maintenance_unlinked"
+        locks_raw = b""
+    if holder_pids:
+        raise HarnessError("trusted lock substrate lock holder remains")
+    directory_metadata = _verify_substrate_directory(directory, owner_uid, owner_gid, expected_identity=substrate.directory_identity, empty=True)
+    rmdir_argv = [str(LAUNCHER.SUDO), "-n", str(RMDIR), str(directory)]
+    rmdir_record = _command_with_pinned_executable(run, rmdir_argv, "lock-substrate-rmdir", RMDIR, RMDIR_SHA)
+    if directory.exists() or directory.is_symlink():
+        raise HarnessError("trusted lock substrate directory remained after rmdir")
+    return {
+        "schema_version": "ullm.aq4_p2_trusted_lock_substrate_cleanup.v1",
+        "passed": True,
+        "directory": str(directory),
+        "lock": str(lock),
+        "source": lock_source,
+        "runner_finished": runner_finished,
+        "runner_children": children,
+        "holder_pids": holder_pids,
+        "pre": pre,
+        "post": {"directory": {"path": str(directory), "present": False}, "lock": {"path": str(lock), "present": False}},
+        "identity": {
+            "directory": {"device": directory_metadata.st_dev, "inode": directory_metadata.st_ino},
+            "lock": {"device": substrate.lock_identity[0], "inode": substrate.lock_identity[1]},
+        },
+        "commands": [rmdir_record],
+        "source_sha256": sha_bytes(locks_raw),
+        "source_bytes": len(locks_raw),
+        "secret_material_recorded": False,
+    }
+
+
 def default_owner_probe(run: Callable[..., subprocess.CompletedProcess[bytes]], worker_pid: int) -> dict[str, Any]:
     completed, record = _command(run, [str(LAUNCHER.AMD_SMI), "process", "--gpu", "2", "--general", "--json"], "gpu-owner")
     if completed.returncode != 0 or completed.stderr:
         raise HarnessError("GPU owner probe failed")
     parsed = LAUNCHER.parse_amd_process_owners(completed.stdout)
     amd_pids = parsed["owners"]
-    kfd_pids = LAUNCHER._kfd_owners()
+    kfd_source = LAUNCHER._kfd_owner_snapshot(allowed_owners={worker_pid})
+    kfd_pids = kfd_source["owners"]
     if amd_pids != [worker_pid] or kfd_pids != [worker_pid]:
         raise HarnessError("restored worker does not uniquely own target GPU")
-    return {"amd_smi": amd_pids, "amd_smi_process": parsed["diagnostic"], "amd_smi_probe": record, "kfd": kfd_pids}
+    return {"amd_smi": amd_pids, "amd_smi_process": parsed["diagnostic"], "amd_smi_probe": record, "kfd": kfd_pids, "kfd_source": kfd_source}
 
 
 def _poll_service_value(completed: subprocess.CompletedProcess[bytes], unit: str) -> dict[str, Any]:
@@ -647,15 +994,61 @@ def _safe_proc_cmdline(pid: int) -> dict[str, Any]:
         }
 
 
-def _poll_lock_observation() -> dict[str, Any]:
-    LAUNCHER.reject_symlink_components(LAUNCHER.LOCK_PATH, "stopped poll device lock")
-    metadata = LAUNCHER.LOCK_PATH.lstat()
+def _poll_lock_observation(substrate: LockSubstrate | None = None) -> dict[str, Any]:
+    directory = substrate.directory if substrate is not None else _lock_substrate_directory()
+    LAUNCHER.reject_symlink_components(directory, "stopped poll lock substrate directory")
+    try:
+        directory_metadata = directory.lstat()
+        metadata = LAUNCHER.LOCK_PATH.lstat()
+    except FileNotFoundError:
+        if substrate is not None:
+            return {
+                "path": str(LAUNCHER.LOCK_PATH),
+                "free": False,
+                "device": -1,
+                "inode": -1,
+                "holder_pids": [],
+                "source": "absent",
+                "source_sha256": sha_bytes(b"absent"),
+                "source_bytes": 6,
+            }
+        raise HarnessError("stopped poll device lock is absent")
+    source = None
+    if substrate is not None:
+        if _substrate_identity(directory_metadata, directory=True) != substrate.directory_identity or _substrate_identity(metadata) != substrate.lock_identity:
+            source = "replacement"
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600:
+        if substrate is not None:
+            return {
+                "path": str(LAUNCHER.LOCK_PATH),
+                "free": False,
+                "device": metadata.st_dev,
+                "inode": metadata.st_ino,
+                "holder_pids": [],
+                "source": source or "invalid",
+                "source_sha256": sha_bytes(canonical(_substrate_metadata(metadata))),
+                "source_bytes": len(canonical(_substrate_metadata(metadata))),
+            }
         raise HarnessError("stopped poll device lock identity differs")
+    if source is not None:
+        # Never flock or parse holder records for an untrusted replacement.
+        return {
+            "path": str(LAUNCHER.LOCK_PATH),
+            "free": False,
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "holder_pids": [],
+            "source": source,
+            "source_sha256": sha_bytes(canonical(_substrate_metadata(metadata))),
+            "source_bytes": len(canonical(_substrate_metadata(metadata))),
+        }
     identity = LAUNCHER.file_identity(metadata)
     descriptor = os.open(LAUNCHER.LOCK_PATH, os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     free = False
     try:
+        opened = os.fstat(descriptor)
+        if opened.st_dev != metadata.st_dev or opened.st_ino != metadata.st_ino:
+            raise HarnessError("stopped poll device lock changed while opening")
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             free = True
@@ -666,32 +1059,26 @@ def _poll_lock_observation() -> dict[str, Any]:
         os.close(descriptor)
     if LAUNCHER.file_identity(LAUNCHER.LOCK_PATH.lstat()) != identity:
         raise HarnessError("stopped poll device lock changed")
-    try:
-        locks_raw = Path("/proc/locks").read_bytes()
-    except OSError as error:
-        raise HarnessError("stopped poll lock holder source failed") from error
-    if len(locks_raw) > 4 * 1024 * 1024:
-        raise HarnessError("stopped poll lock holder source exceeds bound")
-    lock_id = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:{metadata.st_ino}"
-    holder_pids: set[int] = set()
-    try:
-        for line in locks_raw.decode("ascii").splitlines():
-            fields = line.split()
-            if len(fields) >= 6 and fields[5].lower() == lock_id.lower():
-                holder_pids.add(int(fields[4]))
-    except (UnicodeError, ValueError) as error:
-        raise HarnessError("stopped poll lock holder schema differs") from error
+    holder_values, locks_raw = _lock_holder_pids_for_stat(metadata)
+    holder_pids = set(holder_values)
     if free and holder_pids:
         raise HarnessError("stopped poll free lock has a holder")
-    return {
+    result = {
         "path": str(LAUNCHER.LOCK_PATH),
         "free": free,
         "device": identity[0],
         "inode": identity[1],
-        "holder_pids": sorted(holder_pids),
+        "holder_pids": holder_values,
         "source_sha256": sha_bytes(locks_raw),
         "source_bytes": len(locks_raw),
     }
+    if substrate is not None:
+        result["source"] = "trusted_substrate"
+        result["substrate"] = {
+            "directory": {"device": directory_metadata.st_dev, "inode": directory_metadata.st_ino},
+            "lock": {"device": metadata.st_dev, "inode": metadata.st_ino},
+        }
+    return result
 
 
 class StoppedPollDeadline(HarnessError):
@@ -714,11 +1101,13 @@ class StoppedPollControl:
         monotonic_ns: Callable[[], int],
         keepalive: Callable[[int, float], None],
         first_keepalive_ns: int,
+        lock_substrate: LockSubstrate | None = None,
     ) -> None:
         self.deadline_ns = deadline_ns
         self.monotonic_ns = monotonic_ns
         self.keepalive = keepalive
         self.next_keepalive_ns = first_keepalive_ns
+        self.lock_substrate = lock_substrate
         self.attempt = 0
         self.checkpoints: list[dict[str, Any]] = []
         self.probes: list[dict[str, Any]] = []
@@ -845,8 +1234,15 @@ class StoppedGateObserver:
             raise HarnessError("stopped poll AMD VRAM schema differs") from error
         if static.returncode != 0 or static.stderr or len(gpu_data) != 1 or vram_item.get("gpu") != LAUNCHER.AMD_SMI_INDEX or size.get("unit") != "MB" or total_bytes <= 0:
             raise HarnessError("stopped poll AMD VRAM probe differs")
-        kfd_owners = control.bounded_call("stopped-poll-kfd", LAUNCHER._kfd_owners)
-        lock = control.bounded_call("stopped-poll-lock", _poll_lock_observation)
+        kfd_source = control.bounded_call(
+            "stopped-poll-kfd",
+            lambda: LAUNCHER._kfd_owner_snapshot(allowed_owners={old_worker_pid}),
+        )
+        kfd_owners = kfd_source["owners"]
+        lock = control.bounded_call(
+            "stopped-poll-lock",
+            (lambda: _poll_lock_observation(control.lock_substrate)) if control.lock_substrate is not None else _poll_lock_observation,
+        )
         observed_pids = sorted(set(worker_pids) | set(amd_smi_owners) | set(kfd_owners) | set(lock["holder_pids"]) | {old_worker_pid, old_service_pid})
         proc_cmdlines = [control.bounded_call(f"stopped-poll-proc-{pid}", lambda pid=pid: _safe_proc_cmdline(pid)) for pid in observed_pids]
         return {
@@ -866,7 +1262,7 @@ class StoppedGateObserver:
             "probes": probes,
             "virtual_sources": {
                 "amd_smi_owners": parsed_processes["diagnostic"],
-                "kfd_owners": {"raw_sha256": sha_bytes(canonical(kfd_owners)), "parsed_pids": kfd_owners},
+                "kfd_owners": kfd_source,
                 "lock_holders": {"raw_sha256": lock["source_sha256"], "raw_bytes": lock["source_bytes"], "parsed_pids": lock["holder_pids"]},
             },
             "secret_material_recorded": False,
@@ -878,6 +1274,7 @@ def _stopped_observation_decision(
     old_worker_pid: int,
     old_service_pid: int,
     seen_zero: dict[str, bool],
+    substrate: LockSubstrate | None = None,
 ) -> tuple[str, str | None, dict[str, str]]:
     expected_services = [
         {"unit": unit, "active_state": "inactive", "sub_state": "dead", "main_pid": 0}
@@ -906,8 +1303,24 @@ def _stopped_observation_decision(
         else:
             classifications[name] = "draining_pre_stop_worker"
     lock = observation.get("lock")
-    if not isinstance(lock, dict) or set(lock) != {"path", "free", "device", "inode", "holder_pids", "source_sha256", "source_bytes"} or lock.get("path") != str(LAUNCHER.LOCK_PATH) or type(lock.get("free")) is not bool or not isinstance(lock.get("holder_pids"), list):
+    lock_keys = {"path", "free", "device", "inode", "holder_pids", "source_sha256", "source_bytes"}
+    if not isinstance(lock, dict) or not lock_keys.issubset(lock) or lock.get("path") != str(LAUNCHER.LOCK_PATH) or type(lock.get("free")) is not bool or not isinstance(lock.get("holder_pids"), list):
         return "terminal_failure", "stopped observation lock schema differs", classifications
+    if lock.get("source") in {"replacement", "absent", "invalid"}:
+        classifications["lock"] = str(lock["source"])
+        return "terminal_failure", "trusted lock substrate replacement or disappearance observed", classifications
+    if "source" in lock and lock.get("source") != "trusted_substrate":
+        classifications["lock"] = "untrusted_source"
+        return "terminal_failure", "stopped observation lock source is untrusted", classifications
+    if substrate is not None:
+        observed_substrate = lock.get("substrate")
+        expected_substrate = {
+            "directory": {"device": substrate.directory_identity[0], "inode": substrate.directory_identity[1]},
+            "lock": {"device": substrate.lock_identity[0], "inode": substrate.lock_identity[1]},
+        }
+        if lock.get("source") != "trusted_substrate" or observed_substrate != expected_substrate:
+            classifications["lock"] = "identity_mismatch"
+            return "terminal_failure", "stopped observation lock substrate identity differs", classifications
     foreign_lock = [pid for pid in lock["holder_pids"] if pid != old_service_pid]
     if foreign_lock or (lock["free"] is False and not lock["holder_pids"]):
         classifications["lock"] = "foreign_or_unknown_holder"
@@ -943,6 +1356,7 @@ def poll_stopped_gates(
     old_service_pid: int,
     dependencies: "Dependencies",
     keepalive: Callable[[int, float], None],
+    lock_substrate: LockSubstrate | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     started_ns = dependencies.monotonic_ns()
     deadline_ns = started_ns + int(STOP_POLL_TIMEOUT_SECONDS * 1_000_000_000)
@@ -951,6 +1365,7 @@ def poll_stopped_gates(
         monotonic_ns=dependencies.monotonic_ns,
         keepalive=keepalive,
         first_keepalive_ns=started_ns + int(STOP_POLL_SUDO_KEEPALIVE_SECONDS * 1_000_000_000),
+        lock_substrate=lock_substrate,
     )
     stable_count = 0
     seen_zero = {"worker_pids": False, "amd_smi_owners": False, "kfd_owners": False, "lock": False}
@@ -966,7 +1381,7 @@ def poll_stopped_gates(
             control.checkpoint("observation:start")
             observation = dependencies.stopped_observation(old_worker_pid, old_service_pid, dependencies.run, control)
             observation_completed_ns = control.checkpoint("observation:complete")
-            decision, reason, classifications = _stopped_observation_decision(observation, old_worker_pid, old_service_pid, seen_zero)
+            decision, reason, classifications = _stopped_observation_decision(observation, old_worker_pid, old_service_pid, seen_zero, lock_substrate)
         except StoppedPollDeadline as error:
             observation = {
                 "captured_unix_ns": time.time_ns(),
@@ -1004,6 +1419,16 @@ def poll_stopped_gates(
             }
             observation_completed_ns = dependencies.monotonic_ns()
             decision, reason, classifications = "terminal_failure", f"stopped AMD process schema rejected: {error.diagnostic['reason_code']}", {"observer": "amd_process_schema"}
+        except LAUNCHER.KfdOwnerScanError as error:
+            observation = {
+                "captured_unix_ns": time.time_ns(),
+                "error_type": type(error).__name__,
+                "parse_diagnostic": error.diagnostic,
+                "partial_probes": list(control.probes),
+                "secret_material_recorded": False,
+            }
+            observation_completed_ns = dependencies.monotonic_ns()
+            decision, reason, classifications = "terminal_failure", f"stopped KFD owner scan rejected: {error.diagnostic['reason_code']}", {"observer": "kfd_owner_scan"}
         except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
             observation = {
                 "captured_unix_ns": time.time_ns(),
@@ -1094,7 +1519,10 @@ def poll_stopped_gates(
         "runtime_mapping": {"runtime_device_index": 1, "visible_token": "1", "amd_smi_index": 2, "bdf": LAUNCHER.GPU_BDF, "uuid": LAUNCHER.GPU_UUID, "kfd_id": LAUNCHER.KFD_ID, "node_id": 2},
         "amd_smi_owners": final_observation["amd_smi_owners"],
         "kfd_owners": final_observation["kfd_owners"],
-        "lock": {key: final_observation["lock"][key] for key in ("path", "free", "device", "inode")},
+        "lock": {
+            **{key: final_observation["lock"][key] for key in ("path", "free", "device", "inode")},
+            **({key: final_observation["lock"][key] for key in ("source", "substrate") if key in final_observation["lock"]}),
+        },
         "vram": final_observation["vram"],
         "probes": final_observation["probes"],
     }
@@ -1115,6 +1543,8 @@ class Dependencies:
     profile_trust: Callable[[dict[str, Any], str], dict[str, Any]]
     sleep: Callable[[float], None]
     monotonic_ns: Callable[[], int]
+    lock_substrate_prepare: Callable[[Callable[..., subprocess.CompletedProcess[bytes]]], LockSubstrate] | None = None
+    lock_substrate_cleanup: Callable[..., dict[str, Any]] | None = None
 
 
 def _host_route_diagnostics(dependencies: Dependencies) -> dict[str, Any]:
@@ -1324,7 +1754,22 @@ def default_dependencies() -> Dependencies:
     trust = ProfileTrustGuard()
     container_health = ContainerHealthGuard()
     stopped_observation = StoppedGateObserver()
-    return Dependencies(subprocess.run, default_http_probe, container_health, stopped_observation, default_lock_busy, default_owner_probe, tree_hash, _default_launcher_execute, run_profile_capture, trust, time.sleep, time.monotonic_ns)
+    return Dependencies(
+        subprocess.run,
+        default_http_probe,
+        container_health,
+        stopped_observation,
+        default_lock_busy,
+        default_owner_probe,
+        tree_hash,
+        _default_launcher_execute,
+        run_profile_capture,
+        trust,
+        time.sleep,
+        time.monotonic_ns,
+        prepare_lock_substrate,
+        cleanup_lock_substrate,
+    )
 
 
 def profile_launcher_command() -> list[str]:
@@ -1462,9 +1907,19 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
                 "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_observation_and_probe",
                 "transitional_amd_kfd_owner": "pre_stop_worker_pid_only",
                 "transitional_lock_holder": "pre_stop_service_main_pid_only",
-                "foreign_new_or_reappeared_owner": "immediate_fail_closed",
-                "evidence": "atomic_immutable_per_poll_secret_safe_digests_and_parsed_pids",
+            "foreign_new_or_reappeared_owner": "immediate_fail_closed",
+            "evidence": "atomic_immutable_per_poll_secret_safe_digests_and_parsed_pids",
+            "kfd_scan": "bounded_enoent_rescan_and_fatal_non_enoent_source_diagnostics",
+            "trusted_lock_substrate": {
+                "directory": str(LOCK_SUBSTRATE_DIRECTORY),
+                "owner": LOCK_SUBSTRATE_OWNER,
+                "directory_mode": f"{LOCK_SUBSTRATE_MODE:04o}",
+                "lock_mode": f"{LOCK_SUBSTRATE_LOCK_MODE:04o}",
+                "create": "pinned_sudo_install_then_nonroot_o_excl_o_nofollow",
+                "identity": "same_device_inode_from_stopped_poll_through_runner_and_cleanup",
+                "cleanup": "same_inode_unlink_then_pinned_sudo_rmdir_before_unconditional_service_restore",
             },
+        },
         },
         "trust": {
             "launcher": {"commit": LAUNCHER_COMMIT, "tree": LAUNCHER_TREE, "git_blob": LAUNCHER_GIT_BLOB, "sha256": LAUNCHER_SHA},
@@ -1659,8 +2114,8 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     else:
         trust_records = []
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "stopped_gate_poll": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
-    stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "stopped_gate_poll": None, "lock_substrate": None, "lock_substrate_cleanup": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; substrate: LockSubstrate | None = None; runner_finished = False; runner_evidence: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
         stage = "pre-stop-snapshot"; pre = capture_running(dependencies); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
@@ -1674,13 +2129,20 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
         if stopped.returncode != 0 or stopped.stdout or stopped.stderr:
             raise HarnessError("service stop failed")
         evidence["safety"]["service_stopped"] = True; evidence["sequence"].append("service-stopped")
+        stage = "lock-substrate"
+        if dependencies.lock_substrate_prepare is not None:
+            substrate = dependencies.lock_substrate_prepare(dependencies.run)
+            if not isinstance(substrate, LockSubstrate):
+                raise HarnessError("trusted lock substrate preparation contract differs")
+            evidence["lock_substrate"] = substrate.evidence
+            evidence["process_counts"]["lock_substrate_install"] = 1
         stage = "stopped-gates"
         def stopped_poll_keepalive(attempt: int, timeout: float) -> None:
             record = _sudo_valid(dependencies.run, f"sudo-stopped-poll-keepalive-{attempt}", timeout=timeout)
             evidence["commands"].append(record)
             evidence["process_counts"]["sudo"] += 1
             evidence["process_counts"]["sudo_keepalive"] += 1
-        gates, poll_evidence = poll_stopped_gates(output, pre["worker"]["pid"], pre["service"]["main_pid"], dependencies, stopped_poll_keepalive)
+        gates, poll_evidence = poll_stopped_gates(output, pre["worker"]["pid"], pre["service"]["main_pid"], dependencies, stopped_poll_keepalive, substrate)
         evidence["stopped_gate_poll"] = poll_evidence
         evidence["process_counts"]["stopped_gate_polls"] = poll_evidence["poll_count"]
         evidence["process_counts"]["stopped_gate_probe_commands"] = poll_evidence["probe_command_count"]
@@ -1695,6 +2157,8 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             stage = "profile-capture"; capture_attempted = True; evidence["process_counts"]["capture_tool"] = 1; evidence["sequence"].append("profile-capture")
             try:
                 outcome = dependencies.profile_capture(value["profile_diagnostic"])
+                runner_finished = True
+                runner_evidence = outcome if isinstance(outcome, dict) else None
             finally:
                 evidence["profile_trust"].append(dependencies.profile_trust(value["profile_diagnostic"], "capture-after"))
             required = {"completed", "started", "timed_out", "cleanup_passed", "children_remaining", "rocprof_started", "launcher_started", "launcher_status", "gpu_command_executed", "model_load_executed"}
@@ -1708,7 +2172,14 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                 raise HarnessError("profile capture/launcher failed or left a child process")
         else:
             stage = "launcher"; evidence["process_counts"]["launcher"] = 1; evidence["sequence"].append("launcher")
-            launcher_code, launcher_evidence = dependencies.launcher_execute(value["launcher_binding"]); evidence["launcher"] = {"code": launcher_code, "status": launcher_evidence.get("status"), "safety": launcher_evidence.get("safety"), "failure": launcher_evidence.get("failure")}
+            try:
+                launcher_code, launcher_evidence = dependencies.launcher_execute(value["launcher_binding"])
+                runner_finished = True
+                runner_evidence = launcher_evidence if isinstance(launcher_evidence, dict) else None
+            except Exception:
+                runner_finished = False
+                raise
+            evidence["launcher"] = {"code": launcher_code, "status": launcher_evidence.get("status"), "safety": launcher_evidence.get("safety"), "failure": launcher_evidence.get("failure"), "children_remaining": launcher_evidence.get("children_remaining", [])}
             evidence["safety"]["gpu_command_executed"] = launcher_evidence.get("safety", {}).get("gpu_command_executed", "unknown")
             evidence["safety"]["model_load_executed"] = launcher_evidence.get("safety", {}).get("model_load_executed", "unknown")
             if launcher_code != 0 or launcher_evidence.get("status") != "passed":
@@ -1720,6 +2191,45 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     finally:
         if stop_attempted:
             restore_error: str | None = None; post: dict[str, Any] | None = None
+            cleanup_error: str | None = None
+            if substrate is not None:
+                try:
+                    children = []
+                    if isinstance(runner_evidence, dict):
+                        for key in ("children_remaining", "child_pids", "children"):
+                            value_children = runner_evidence.get(key)
+                            if isinstance(value_children, list):
+                                children.extend(value_children)
+                    if not runner_finished and (capture_attempted or evidence["process_counts"]["launcher"]):
+                        # A failed/aborted runner has no trustworthy child
+                        # inventory.  Keep the service stopped only long
+                        # enough to record cleanup failure; never unlink a
+                        # substrate while an unknown child may still hold it.
+                        children = [-1]
+                    cleanup = (
+                        dependencies.lock_substrate_cleanup(
+                            substrate,
+                            dependencies.run,
+                            runner_finished=runner_finished,
+                            runner_children=children,
+                        )
+                        if dependencies.lock_substrate_cleanup is not None
+                        else cleanup_lock_substrate(
+                            substrate,
+                            dependencies.run,
+                            runner_finished=runner_finished,
+                            runner_children=children,
+                        )
+                    )
+                    if not isinstance(cleanup, dict) or cleanup.get("passed") is not True or cleanup.get("secret_material_recorded") is not False:
+                        raise HarnessError("trusted lock substrate cleanup contract differs")
+                    evidence["lock_substrate_cleanup"] = cleanup
+                    evidence["process_counts"]["lock_substrate_rmdir"] = 1
+                except Exception as error:
+                    cleanup_error = str(error)
+                    evidence["lock_substrate_cleanup"] = {"passed": False, "error": cleanup_error, "secret_material_recorded": False}
+                    evidence["failure"] = {"stage": "lock-substrate-cleanup", "reason": cleanup_error, "launcher_started": evidence["process_counts"]["launcher"] == 1}
+                    code = 1
             try:
                 evidence["commands"].append(_sudo_valid(dependencies.run, "sudo-before-restore")); evidence["process_counts"]["sudo"] += 1
                 started, record = _command(dependencies.run, [str(LAUNCHER.SUDO), "-n", str(LAUNCHER.SYSTEMCTL), "start", SERVICE], "service-start"); evidence["commands"].append(record); evidence["process_counts"]["systemctl_start"] = 1; evidence["sequence"].append("service-start")
@@ -1741,7 +2251,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                 evidence["sequence"].append("service-restored")
             except (HarnessError, OSError, ValueError, subprocess.SubprocessError) as error:
                 restore_error = str(error); code = 1
-            evidence["restore"] = {"attempted": True, "passed": restore_error is None, "error": restore_error, "post_start": post}
+            evidence["restore"] = {"attempted": True, "passed": restore_error is None, "error": restore_error, "post_start": post, "lock_substrate_cleanup_passed": cleanup_error is None}
         else:
             evidence["restore"] = {"attempted": False, "passed": True, "error": None, "post_start": None}
         if profile_diagnostic:

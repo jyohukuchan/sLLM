@@ -315,6 +315,16 @@ def test_ready_document_fixes_one_case_live_policy_and_trust() -> None:
         "transitional_lock_holder": "pre_stop_service_main_pid_only",
         "foreign_new_or_reappeared_owner": "immediate_fail_closed",
         "evidence": "atomic_immutable_per_poll_secret_safe_digests_and_parsed_pids",
+        "kfd_scan": "bounded_enoent_rescan_and_fatal_non_enoent_source_diagnostics",
+        "trusted_lock_substrate": {
+            "directory": "/run/ullm",
+            "owner": "homelab1",
+            "directory_mode": "0750",
+            "lock_mode": "0600",
+            "create": "pinned_sudo_install_then_nonroot_o_excl_o_nofollow",
+            "identity": "same_device_inode_from_stopped_poll_through_runner_and_cleanup",
+            "cleanup": "same_inode_unlink_then_pinned_sudo_rmdir_before_unconditional_service_restore",
+        },
     }
 
 
@@ -512,7 +522,13 @@ def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdli
     monkeypatch.setattr(HARNESS.LAUNCHER, "validate_amd_smi_tool", lambda: None)
     expected_sha = {HARNESS.LAUNCHER.SYSTEMCTL: HARNESS.LAUNCHER.SYSTEMCTL_SHA, HARNESS.LAUNCHER.PGREP: HARNESS.LAUNCHER.PGREP_SHA}
     monkeypatch.setattr(HARNESS.LAUNCHER, "sha_file", lambda path, label: (expected_sha[path], ()))
-    monkeypatch.setattr(HARNESS.LAUNCHER, "_kfd_owners", lambda: [old_worker_pid])
+    kfd_source = {
+        "schema_version": "ullm.aq4_p2_kfd_owner_snapshot.v1",
+        "classification": "stable",
+        "owners": [old_worker_pid],
+        "secret_material_recorded": False,
+    }
+    monkeypatch.setattr(HARNESS.LAUNCHER, "_kfd_owner_snapshot", lambda **kwargs: kfd_source)
     monkeypatch.setattr(HARNESS, "_poll_lock_observation", lambda: {"path": str(HARNESS.LAUNCHER.LOCK_PATH), "free": False, "device": 1, "inode": 2, "holder_pids": [old_service_pid], "source_sha256": "a" * 64, "source_bytes": 12})
     monkeypatch.setattr(HARNESS, "_safe_proc_cmdline", lambda pid: {"pid": pid, "readable": True, "bytes": 9, "sha256": "b" * 64, "argv0_basename": "worker", "matches_expected_worker": pid == old_worker_pid, "raw_recorded": False})
 
@@ -545,6 +561,7 @@ def test_default_stopped_observer_records_probe_sha_pids_vram_and_redacted_cmdli
     assert all(len(item["stdout_sha256"]) == 64 and len(item["stderr_sha256"]) == 64 for item in value["probes"])
     assert value["virtual_sources"]["amd_smi_owners"]["reason_code"] == "accepted_owner_records"
     assert len(value["virtual_sources"]["amd_smi_owners"]["raw_sha256"]) == 64
+    assert value["virtual_sources"]["kfd_owners"] == kfd_source
     assert {item["pid"] for item in value["proc_cmdlines"]} == {old_worker_pid, old_service_pid}
     assert all(item["raw_recorded"] is False for item in value["proc_cmdlines"])
 
@@ -860,3 +877,165 @@ def test_actual_cli_requires_explicit_one_case_confirmation_without_commands(tmp
     runtime = FakeRuntime()
     code = HARNESS.main(["--mode", "execute", "--evidence-output", str(tmp_path / "no-confirm")], dependencies=runtime.dependencies())
     assert code == 1 and runtime.calls == []
+
+
+def _substrate_fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, install_failure: bool = False):
+    lock = tmp_path / "run" / "ullm" / "r9700.lock"
+    lock.parent.parent.mkdir()
+    install = tmp_path / "install"
+    install.write_bytes(b"trusted-install")
+    install.chmod(0o755)
+    rmdir = tmp_path / "rmdir"
+    rmdir.write_bytes(b"trusted-rmdir")
+    rmdir.chmod(0o755)
+    monkeypatch.setattr(HARNESS.LAUNCHER, "LOCK_PATH", lock)
+    monkeypatch.setattr(HARNESS, "INSTALL", install)
+    monkeypatch.setattr(HARNESS, "INSTALL_SHA", HARNESS.sha_bytes(install.read_bytes()))
+    monkeypatch.setattr(HARNESS, "RMDIR", rmdir)
+    monkeypatch.setattr(HARNESS, "RMDIR_SHA", HARNESS.sha_bytes(rmdir.read_bytes()))
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[2] == str(install):
+            if install_failure:
+                return subprocess.CompletedProcess(argv, 1, b"", b"install failed")
+            lock.parent.mkdir(mode=HARNESS.LOCK_SUBSTRATE_MODE)
+            os.chmod(lock.parent, HARNESS.LOCK_SUBSTRATE_MODE)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if argv[2] == str(rmdir):
+            lock.parent.rmdir()
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        raise AssertionError(argv)
+
+    return lock, calls, run
+
+
+def test_lock_substrate_prepare_records_pinned_install_and_exact_identities(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock, calls, run = _substrate_fake(tmp_path, monkeypatch)
+    substrate = HARNESS.prepare_lock_substrate(run)
+    assert substrate.directory == lock.parent
+    assert substrate.lock == lock
+    assert substrate.evidence["pre"]["directory"]["present"] is False
+    assert substrate.evidence["post"]["directory"]["mode"] == HARNESS.LOCK_SUBSTRATE_MODE
+    assert substrate.evidence["post"]["lock"]["mode"] == HARNESS.LOCK_SUBSTRATE_LOCK_MODE
+    assert substrate.evidence["post"]["lock"]["uid"] == os.getuid()
+    command = substrate.evidence["commands"][0]
+    assert command["argv"] == calls[0]
+    assert command["executable"] == str(HARNESS.INSTALL)
+    assert command["executable_sha256"] == HARNESS.INSTALL_SHA
+    assert command["argv_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(calls[0]))
+
+
+@pytest.mark.parametrize("initial", ("directory", "file", "symlink"))
+def test_lock_substrate_prepare_rejects_foreign_present_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initial: str) -> None:
+    lock, _, run = _substrate_fake(tmp_path, monkeypatch)
+    if initial == "directory":
+        lock.parent.mkdir()
+    elif initial == "file":
+        lock.parent.write_bytes(b"foreign")
+    else:
+        target = tmp_path / "foreign-target"
+        target.mkdir()
+        lock.parent.symlink_to(target, target_is_directory=True)
+    with pytest.raises((HARNESS.HarnessError, HARNESS.LAUNCHER.LauncherError), match="absent|symlink"):
+        HARNESS.prepare_lock_substrate(run)
+
+
+def test_lock_substrate_prepare_rejects_install_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, calls, run = _substrate_fake(tmp_path, monkeypatch, install_failure=True)
+    with pytest.raises(HARNESS.HarnessError, match="command failed"):
+        HARNESS.prepare_lock_substrate(run)
+    assert len(calls) == 1
+
+
+def test_stopped_poll_classifies_lock_inode_swap_as_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock, _, run = _substrate_fake(tmp_path, monkeypatch)
+    substrate = HARNESS.prepare_lock_substrate(run)
+    lock.rename(tmp_path / "poll-original.lock")
+    lock.write_bytes(b"replacement")
+    lock.chmod(HARNESS.LOCK_SUBSTRATE_LOCK_MODE)
+    monkeypatch.setattr(HARNESS, "_lock_holder_pids_for_stat", lambda metadata: ([], b""))
+    observation = HARNESS._poll_lock_observation(substrate)
+    assert observation["source"] == "replacement"
+    assert observation["free"] is False
+    decision, reason, classifications = HARNESS._stopped_observation_decision(
+        {"captured_unix_ns": 1, "services": [], "worker_pids": [], "amd_smi_owners": [], "kfd_owners": [], "lock": observation, "vram": {}, "proc_cmdlines": [], "probes": [], "virtual_sources": {}, "secret_material_recorded": False},
+        1,
+        2,
+        {"worker_pids": True, "amd_smi_owners": True, "kfd_owners": True, "lock": False},
+    )
+    assert decision == "terminal_failure" and "replacement" in (reason or "") and classifications["lock"] == "replacement"
+
+
+def test_lock_substrate_cleanup_requires_same_inode_and_handles_runner_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock, calls, run = _substrate_fake(tmp_path, monkeypatch)
+    substrate = HARNESS.prepare_lock_substrate(run)
+    lock.unlink()
+    monkeypatch.setattr(HARNESS, "_lock_holder_pids_for_identity", lambda device, inode: ([], b""))
+    cleanup = HARNESS.cleanup_lock_substrate(substrate, run, runner_finished=True)
+    assert cleanup["passed"] is True and cleanup["source"] == "runner_removed"
+    assert not lock.parent.exists()
+    assert calls[-1][2] == str(HARNESS.RMDIR)
+
+
+def test_lock_substrate_cleanup_unlinks_lock_kept_by_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock, _, run = _substrate_fake(tmp_path, monkeypatch)
+    substrate = HARNESS.prepare_lock_substrate(run)
+    lock.write_bytes(b'{"runner":"completed"}\n')
+    monkeypatch.setattr(HARNESS, "_lock_holder_pids_for_stat", lambda metadata: ([], b""))
+    cleanup = HARNESS.cleanup_lock_substrate(substrate, run, runner_finished=True)
+    assert cleanup["passed"] is True and cleanup["source"] == "maintenance_unlinked"
+    assert not lock.parent.exists()
+
+
+def test_lock_substrate_cleanup_rejects_inode_swap_and_keeps_service_recovery_independent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock, _, run = _substrate_fake(tmp_path, monkeypatch)
+    substrate = HARNESS.prepare_lock_substrate(run)
+    lock.rename(tmp_path / "cleanup-original.lock")
+    lock.write_bytes(b"replacement")
+    lock.chmod(HARNESS.LOCK_SUBSTRATE_LOCK_MODE)
+    with pytest.raises(HARNESS.HarnessError, match="replacement"):
+        HARNESS.cleanup_lock_substrate(substrate, run, runner_finished=True)
+
+
+def test_lock_substrate_cleanup_failure_still_attempts_service_start_and_records_recovery(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    prepared = {"value": False}
+    cleaned = {"value": False}
+    substrate_box: dict[str, HARNESS.LockSubstrate] = {}
+
+    def prepare(run):
+        prepared["value"] = True
+        substrate = HARNESS.LockSubstrate(
+            tmp_path / "run" / "ullm",
+            tmp_path / "run" / "ullm" / "r9700.lock",
+            (1, 2, 0o40750, 2, os.getuid(), os.getgid()),
+            (1, 3, 0o100600, 1, os.getuid(), os.getgid(), 1),
+            {"schema_version": "test", "secret_material_recorded": False},
+        )
+        substrate_box["value"] = substrate
+        return substrate
+
+    def cleanup(*args, **kwargs):
+        cleaned["value"] = True
+        raise HARNESS.HarnessError("synthetic cleanup failure")
+
+    def stopped(old_worker_pid, old_service_pid, run, control):
+        observation = runtime.stopped(old_worker_pid, old_service_pid, run, control)
+        substrate = substrate_box["value"]
+        observation["lock"]["source"] = "trusted_substrate"
+        observation["lock"]["substrate"] = {
+            "directory": {"device": substrate.directory_identity[0], "inode": substrate.directory_identity[1]},
+            "lock": {"device": substrate.lock_identity[0], "inode": substrate.lock_identity[1]},
+        }
+        return observation
+
+    dependencies = replace(runtime.dependencies(), stopped_observation=stopped, lock_substrate_prepare=prepare, lock_substrate_cleanup=cleanup)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "cleanup-failure", dependencies)
+    assert code == 1 and evidence["status"] == "failed"
+    assert prepared["value"] is True and cleaned["value"] is True
+    assert evidence["failure"]["stage"] == "lock-substrate-cleanup"
+    assert evidence["restore"]["attempted"] is True
+    assert evidence["restore"]["passed"] is True
+    assert runtime.active is True and runtime.epoch == 1
