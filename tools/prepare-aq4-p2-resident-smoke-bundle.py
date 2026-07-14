@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
+BINDING_VALIDATOR_EXEC = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
 SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 DRIVER_BUILD_PATH = ROOT / "target/release/ullm-aq4-p2-resident-driver"
@@ -64,6 +66,20 @@ REQUIRED_FILES = {
 }
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
+BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
+BINDING_SOURCE_COMMIT = "2d770d2ac2313c9cfa4e5416d683a396a77f5854"
+BINDING_SOURCE_TREE = "0b1951645bff891c731e0e951a758a8077d46dfa"
+BINDING_RUNNER_GIT_BLOB = "ac5901e34ddf594d8c43eb0af289321a7b2bd85c"
+BINDING_RUNNER_SHA = "b01646a332166185c493b8ba646c5557ebcfed3526a52793556e7838f9f21b15"
+BINDING_DRIVER_GIT_BLOB = "0bed05e56a07807fa1338a80dfba2f72de64d5af"
+BINDING_FILES = {
+    "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
+    "trusted-validator.py": (0o444, "ed67910_bundle_validator_source"),
+    "runner-plan.json": (0o444, "actual_generic_runner_dry_run_plan"),
+    "runner-subprocess-evidence.json": (0o444, "actual_runner_subprocess_evidence"),
+    "validator-report.json": (0o444, "trusted_validator_report"),
+    "binding-manifest.json": (0o444, "immutable_binding_manifest"),
+}
 _VALIDATION_HOOK: Callable[[Path], None] | None = None
 
 
@@ -687,6 +703,246 @@ def prepare(output: Path, driver_path: Path) -> dict[str, Any]:
     return validate(output, expected)
 
 
+def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, bytes, str, str]:
+    tree = subprocess.run(["git", "rev-parse", f"{BINDING_SOURCE_COMMIT}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
+    if tree.returncode != 0 or tree.stdout.strip() != BINDING_SOURCE_TREE:
+        raise BundleError("binding source commit/tree differs")
+    expected_objects = {
+        "tools/run-aq4-p2-resident-batch.py": BINDING_RUNNER_GIT_BLOB,
+        "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs": BINDING_DRIVER_GIT_BLOB,
+    }
+    for path, object_id in expected_objects.items():
+        observed = subprocess.run(["git", "rev-parse", f"{BINDING_SOURCE_COMMIT}:{path}"], cwd=ROOT, text=True, capture_output=True, check=False)
+        if observed.returncode != 0 or observed.stdout.strip() != object_id:
+            raise BundleError(f"binding Git blob object differs: {path}")
+    runner = git_blob("tools/run-aq4-p2-resident-batch.py", BINDING_RUNNER_SHA, BINDING_SOURCE_COMMIT)
+    if re.fullmatch(r"[0-9a-f]{40}", validator_commit) is None or SHA_RE.fullmatch(validator_sha) is None:
+        raise BundleError("binding validator commit/SHA is invalid")
+    validator_tree_process = subprocess.run(["git", "rev-parse", f"{validator_commit}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
+    validator_object_process = subprocess.run(["git", "rev-parse", f"{validator_commit}:tools/prepare-aq4-p2-resident-smoke-bundle.py"], cwd=ROOT, text=True, capture_output=True, check=False)
+    if validator_tree_process.returncode != 0 or validator_object_process.returncode != 0:
+        raise BundleError("binding validator Git commit/blob is unavailable")
+    validator_tree = validator_tree_process.stdout.strip()
+    validator_object = validator_object_process.stdout.strip()
+    validator = git_blob("tools/prepare-aq4-p2-resident-smoke-bundle.py", validator_sha, validator_commit)
+    current_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, BINDING_SOURCE_COMMIT)
+    normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
+    if current_driver != normative_driver:
+        raise BundleError("binding commit changed the normative resident driver blob")
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b"fake_driver_subprocess_count", b"--bundle-root"):
+        if contract not in runner:
+            raise BundleError("binding runner generic root/validator contract differs")
+    return runner, validator, validator_tree, validator_object
+
+
+def binding_runner_argv(validator_sha: str, root: Path = BINDING_ROOT) -> list[str]:
+    return [
+        str(Path(sys.executable).resolve()), str(root / "trusted-runner.py"),
+        "--expanded", str(CANONICAL_ROOT / "case-binding.json"),
+        "--fixture-index", str(CANONICAL_ROOT / "fixture-index.json"),
+        "--identity", str(CANONICAL_ROOT / "identity.json"),
+        "--preflight", str(CANONICAL_ROOT / "preflight.json"),
+        "--policy", str(CANONICAL_ROOT / "policy.json"),
+        "--bundle-root", str(CANONICAL_ROOT),
+        "--trusted-validator", str(BINDING_VALIDATOR_EXEC),
+        "--trusted-validator-sha256", validator_sha,
+        "--output-dir", str(BINDING_RUNNER_OUTPUT),
+        "--run-id", "p2-r9700-resident-one-case-smoke-binding-v4-validate",
+        "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run",
+    ]
+
+
+def input_root_inventory() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    root_metadata = CANONICAL_ROOT.lstat()
+    allowed = set(REQUIRED_FILES) | {"bundle.json", "SHA256SUMS"}
+    if {entry.name for entry in CANONICAL_ROOT.iterdir()} != allowed:
+        raise BundleError("binding input root exact member coverage differs")
+    members: dict[str, dict[str, Any]] = {}
+    for name in sorted(allowed):
+        path = CANONICAL_ROOT / name
+        metadata = path.lstat()
+        if name in REQUIRED_FILES:
+            mode, role = REQUIRED_FILES[name]
+        else:
+            mode, role = 0o444, {"bundle.json": "bundle_manifest", "SHA256SUMS": "sha256_manifest"}[name]
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != mode:
+            raise BundleError(f"binding input root member differs: {name}")
+        members[name] = {"path": str(path), "sha256": sha_file(path, f"binding input {name}"), "role": role, "type": "regular_file", "nlink": 1, "mode": f"{mode:04o}"}
+    directory = {"path": str(CANONICAL_ROOT), "device": root_metadata.st_dev, "inode": root_metadata.st_ino}
+    return directory, members
+
+
+def validator_report_stdout(report: dict[str, Any]) -> bytes:
+    return (json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n").encode()
+
+
+def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[str, Any], members: dict[str, dict[str, Any]], validator_sha: str) -> dict[str, Any]:
+    plan = parse_json(raw, "binding runner plan")
+    exact_keys = {
+        "schema_version", "status", "scope", "case_count", "warmup_runs", "measured_runs", "transaction_count",
+        "prompt_tokens_across_transactions", "resident_model_loads", "baseline_identity", "links", "execution_mode",
+        "smoke_only", "promotion_eligible", "validation",
+    }
+    if set(plan) != exact_keys:
+        raise BundleError("binding runner plan exact schema differs")
+    facts = {"schema_version": "ullm.aq4_p2_resident_batch.v1", "status": "dry_run", "scope": "full_model", "case_count": 1, "warmup_runs": 2, "measured_runs": 10, "transaction_count": 12, "prompt_tokens_across_transactions": 1536, "resident_model_loads": 1, "execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False}
+    if any(plan.get(key) != value for key, value in facts.items()):
+        raise BundleError("binding runner plan one-case facts differ")
+    identity = parse_json(read_stable(CANONICAL_ROOT / "identity.json", "binding identity"), "binding identity")
+    baseline = {
+        "run_id": "p2-r9700-resident-one-case-smoke-binding-v4-validate", "kind": "active-production",
+        "identity_file": {"path": str(CANONICAL_ROOT / "identity.json"), "sha256": members["identity.json"]["sha256"]},
+        "served_model_manifest_sha256": EXPECTED_SERVED_SHA, "worker_binary_sha256": EXPECTED_WORKER_SHA, "build_git_commit": DRIVER_COMMIT,
+    }
+    links = {
+        "expanded": {"path": str(CANONICAL_ROOT / "case-binding.json"), "sha256": members["case-binding.json"]["sha256"]},
+        "fixture_index": {"path": str(CANONICAL_ROOT / "fixture-index.json"), "sha256": members["fixture-index.json"]["sha256"]},
+        "policy": {"path": str(CANONICAL_ROOT / "policy.json"), "sha256": members["policy.json"]["sha256"]},
+    }
+    if plan.get("baseline_identity") != baseline or plan.get("links") != links:
+        raise BundleError("binding runner plan identity/links differ")
+    validation = plan.get("validation")
+    expected_validator = {
+        "subprocess_count": 1,
+        "source": {"path": str(BINDING_VALIDATOR_EXEC), "sha256": validator_sha},
+        "stdout_sha256": sha_bytes(validator_report_stdout(report)),
+        "report_sha256": sha_bytes(canonical(report)),
+        "report": report,
+    }
+    expected_validation = {
+        "mode": "validate_only", "root_contract": "ullm.aq4_p2_resident_smoke_bundle_root.v4",
+        "bundle_root": directory, "members": members,
+        "bundle": {"path": str(CANONICAL_ROOT / "bundle.json"), "sha256": members["bundle.json"]["sha256"]},
+        "fake_ready": {"path": str(CANONICAL_ROOT / "fake-ready.json"), "sha256": members["fake-ready.json"]["sha256"]},
+        "fake_driver_subprocess_count": 1, "driver_fake_handshake": "passed",
+        "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": identity["resident_driver_identity"],
+        "trusted_bundle_validator": expected_validator,
+    }
+    if validation != expected_validation:
+        raise BundleError("binding runner root/fake-ready/validator report differs")
+    return plan
+
+
+def binding_evidence(plan_raw: bytes, report: dict[str, Any], stdout: bytes, stderr: bytes, exit_code: int, validator_sha: str) -> bytes:
+    return pretty({
+        "schema_version": "ullm.aq4_p2_resident_binding_runner_evidence.v1", "runner_subprocess_count": 1,
+        "command": binding_runner_argv(validator_sha), "exit_code": exit_code,
+        "stdout": {"sha256": sha_bytes(stdout), "utf8": stdout.decode("utf-8")},
+        "stderr": {"sha256": sha_bytes(stderr), "utf8": stderr.decode("utf-8")},
+        "plan": {"path": str(BINDING_ROOT / "runner-plan.json"), "sha256": sha_bytes(plan_raw)},
+        "trusted_validator": {"source_sha256": validator_sha, "subprocess_count": 1, "canonical_report_sha256": sha_bytes(canonical(report)), "report_file_sha256": sha_bytes(pretty(report))},
+    })
+
+
+def binding_manifest(plan_raw: bytes, evidence_raw: bytes, report_raw: bytes, directory: dict[str, Any], members: dict[str, dict[str, Any]], runner_raw: bytes, validator_raw: bytes, validator_commit: str, validator_tree: str, validator_object: str) -> dict[str, Any]:
+    root_fingerprint = {"directory": directory, "members": members, "sha256": sha_bytes(canonical({"directory": directory, "members": members}))}
+    return {
+        "schema_version": "ullm.aq4_p2_resident_smoke_binding.v4", "status": "prepared_not_executed", "promotion": False,
+        "launch_eligible": False, "requires_immutable_launcher": True,
+        "predecessor": {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False},
+        "trust_roots": {
+            "source_commit": BINDING_SOURCE_COMMIT, "source_tree": BINDING_SOURCE_TREE,
+            "runner": {"git_blob": BINDING_RUNNER_GIT_BLOB, "sha256": sha_bytes(runner_raw)},
+            "validator": {"source_commit": validator_commit, "source_tree": validator_tree, "git_blob": validator_object, "sha256": sha_bytes(validator_raw), "archive_path": str(BINDING_ROOT / "trusted-validator.py"), "execution_path": str(BINDING_VALIDATOR_EXEC)},
+            "resident_driver": {"normative_commit": DRIVER_COMMIT, "git_blob_at_binding_commit": BINDING_DRIVER_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged": True, "binary_sha256": EXPECTED_DRIVER_SHA},
+        },
+        "input_root": root_fingerprint,
+        "outputs": {"runner_plan_sha256": sha_bytes(plan_raw), "runner_evidence_sha256": sha_bytes(evidence_raw), "validator_report_file_sha256": sha_bytes(report_raw), "validator_report_canonical_sha256": sha_bytes(canonical(parse_json(report_raw, "binding validator report")))},
+        "execution": {"runner_subprocess_count": 1, "trusted_validator_subprocess_count": 1, "fake_driver_subprocess_count": 1, "model_load_executed": False, "gpu_command_executed": False, "service_touched": False},
+        "cycle_control": {"input_root_unchanged_after_runner": True, "generated_outputs_outside_input_root": True, "input_root_dry_run_not_replaced": True, "generic_runner_schema_not_embedded_back_into_input_root": True},
+        "next_stage": {"name": "L immutable launcher", "required": True, "must_pin": ["input root fingerprint", "binding manifest SHA-256", "runner SHA-256", "validator SHA-256"]},
+    }
+
+
+def validate_binding(validator_commit: str, validator_sha: str, root: Path = BINDING_ROOT) -> dict[str, Any]:
+    root = root.absolute()
+    reject_symlink_components(root, "binding root")
+    if root.is_symlink() or not root.is_dir():
+        raise BundleError("binding root must be a non-symlink directory")
+    allowed = set(BINDING_FILES) | {"SHA256SUMS"}
+    if {entry.name for entry in root.iterdir()} != allowed:
+        raise BundleError("binding sidecar exact member coverage differs")
+    for name in sorted(allowed):
+        metadata = (root / name).lstat()
+        mode = BINDING_FILES.get(name, (0o444, ""))[0]
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != mode:
+            raise BundleError(f"binding sidecar member differs: {name}")
+    runner_raw, validator_raw, validator_tree, validator_object = binding_sources(validator_commit, validator_sha)
+    if read_stable(root / "trusted-runner.py", "binding runner") != runner_raw or read_stable(root / "trusted-validator.py", "binding validator") != validator_raw:
+        raise BundleError("binding trusted source differs")
+    if read_stable(BINDING_VALIDATOR_EXEC, "binding validator execution copy") != validator_raw:
+        raise BundleError("binding validator execution copy differs")
+    validate(CANONICAL_ROOT)
+    directory, members = input_root_inventory()
+    plan_raw = read_stable(root / "runner-plan.json", "binding runner plan")
+    report_raw = read_stable(root / "validator-report.json", "binding validator report")
+    report = parse_json(report_raw, "binding validator report")
+    if report != {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3"} or report_raw != pretty(report):
+        raise BundleError("binding validator report differs")
+    validate_binding_plan(plan_raw, report, directory, members, validator_sha)
+    evidence_raw = read_stable(root / "runner-subprocess-evidence.json", "binding runner evidence")
+    if evidence_raw != binding_evidence(plan_raw, report, b"", b"", 0, validator_sha):
+        raise BundleError("binding runner subprocess evidence differs")
+    manifest = binding_manifest(plan_raw, evidence_raw, report_raw, directory, members, runner_raw, validator_raw, validator_commit, validator_tree, validator_object)
+    manifest_raw = read_stable(root / "binding-manifest.json", "binding manifest")
+    if manifest_raw != pretty(manifest) or parse_json(manifest_raw, "binding manifest") != manifest:
+        raise BundleError("binding manifest differs")
+    expected_sums = "".join(f"{sha_file(root / name, f'binding sum {name}')}  {name}\n" for name in sorted(BINDING_FILES)).encode("ascii")
+    if read_stable(root / "SHA256SUMS", "binding SHA256SUMS") != expected_sums:
+        raise BundleError("binding SHA256SUMS differs")
+    return manifest
+
+
+def prepare_binding(validator_commit: str, validator_sha: str, output: Path = BINDING_ROOT) -> dict[str, Any]:
+    if output.resolve() != BINDING_ROOT.resolve():
+        raise BundleError(f"binding output must be canonical: {BINDING_ROOT}")
+    if output.exists() or output.is_symlink():
+        raise BundleError(f"binding output already exists: {output}")
+    validate(CANONICAL_ROOT)
+    directory_before, members_before = input_root_inventory()
+    runner_raw, validator_raw, validator_tree, validator_object = binding_sources(validator_commit, validator_sha)
+    output.mkdir(parents=True)
+    (output / "trusted-runner.py").write_bytes(runner_raw)
+    (output / "trusted-validator.py").write_bytes(validator_raw)
+    if read_stable(BINDING_VALIDATOR_EXEC, "binding validator execution copy") != validator_raw:
+        raise BundleError(f"binding validator execution path differs: {BINDING_VALIDATOR_EXEC}")
+    os.chmod(output / "trusted-runner.py", 0o444)
+    os.chmod(output / "trusted-validator.py", 0o444)
+    if BINDING_RUNNER_OUTPUT.exists() or BINDING_RUNNER_OUTPUT.is_symlink():
+        raise BundleError(f"binding runner output already exists: {BINDING_RUNNER_OUTPUT}")
+    completed = None
+    try:
+        completed = subprocess.run(binding_runner_argv(validator_sha, output), cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if completed.returncode != 0:
+            raise BundleError(f"binding runner subprocess failed with exit {completed.returncode}: {completed.stderr.decode('utf-8', 'replace')}")
+        plan_raw = read_stable(BINDING_RUNNER_OUTPUT / "resident-batch.plan.json", "actual binding runner plan")
+    finally:
+        if BINDING_RUNNER_OUTPUT.exists() and not BINDING_RUNNER_OUTPUT.is_symlink():
+            shutil.rmtree(BINDING_RUNNER_OUTPUT)
+    if completed is None:
+        raise BundleError("binding runner subprocess did not run")
+    plan = parse_json(plan_raw, "actual binding runner plan")
+    report = plan.get("validation", {}).get("trusted_bundle_validator", {}).get("report")
+    if not isinstance(report, dict):
+        raise BundleError("actual binding runner omitted validator report")
+    validate_binding_plan(plan_raw, report, directory_before, members_before, validator_sha)
+    report_raw = pretty(report)
+    evidence_raw = binding_evidence(plan_raw, report, completed.stdout, completed.stderr, completed.returncode, validator_sha)
+    manifest = binding_manifest(plan_raw, evidence_raw, report_raw, directory_before, members_before, runner_raw, validator_raw, validator_commit, validator_tree, validator_object)
+    generated = {"runner-plan.json": plan_raw, "runner-subprocess-evidence.json": evidence_raw, "validator-report.json": report_raw, "binding-manifest.json": pretty(manifest)}
+    for name, raw in generated.items():
+        (output / name).write_bytes(raw)
+    sums = "".join(f"{sha_file(output / name, f'prepared binding {name}')}  {name}\n" for name in sorted(BINDING_FILES)).encode("ascii")
+    (output / "SHA256SUMS").write_bytes(sums)
+    for name, (mode, _) in BINDING_FILES.items():
+        os.chmod(output / name, mode)
+    os.chmod(output / "SHA256SUMS", 0o444)
+    directory_after, members_after = input_root_inventory()
+    if directory_after != directory_before or members_after != members_before:
+        raise BundleError("binding input root changed during actual runner validation")
+    return validate_binding(validator_commit, validator_sha, output)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -695,10 +951,27 @@ def main(argv: list[str] | None = None) -> int:
     prepare_parser.add_argument("--resident-driver", type=Path, default=DRIVER_BUILD_PATH)
     validate_parser = sub.add_parser("validate")
     validate_parser.add_argument("--bundle", type=Path, default=CANONICAL_ROOT)
+    binding_prepare_parser = sub.add_parser("prepare-binding")
+    binding_prepare_parser.add_argument("--output", type=Path, default=BINDING_ROOT)
+    binding_prepare_parser.add_argument("--validator-source-commit", required=True)
+    binding_prepare_parser.add_argument("--validator-sha256", required=True)
+    binding_validate_parser = sub.add_parser("validate-binding")
+    binding_validate_parser.add_argument("--binding", type=Path, default=BINDING_ROOT)
+    binding_validate_parser.add_argument("--validator-source-commit", required=True)
+    binding_validate_parser.add_argument("--validator-sha256", required=True)
     args = parser.parse_args(argv)
     try:
-        result = prepare(args.output, args.resident_driver) if args.command == "prepare" else validate(args.bundle)
-        print(json.dumps({"status": result["status"], "promotion": result["promotion"], "run_id": result["run_id"]}, sort_keys=True))
+        if args.command == "prepare":
+            result = prepare(args.output, args.resident_driver)
+        elif args.command == "validate":
+            result = validate(args.bundle)
+        elif args.command == "prepare-binding":
+            result = prepare_binding(args.validator_source_commit, args.validator_sha256, args.output)
+        else:
+            result = validate_binding(args.validator_source_commit, args.validator_sha256, args.binding)
+        summary = {"status": result["status"], "promotion": result["promotion"]}
+        summary["run_id"] = result.get("run_id", "p2-r9700-resident-one-case-smoke-binding-v4")
+        print(json.dumps(summary, sort_keys=True))
         return 0
     except (BundleError, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
         print(f"AQ4 P2 resident smoke bundle {args.command} failed: {error}", file=sys.stderr)
