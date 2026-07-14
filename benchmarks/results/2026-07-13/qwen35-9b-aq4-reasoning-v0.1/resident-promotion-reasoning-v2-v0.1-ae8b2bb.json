@@ -1,0 +1,530 @@
+{
+  "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+  "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+  "created_at_unix_ns": 1783959623955540705,
+  "production_receipt_written": false,
+  "gpu_exclusive_preflight": {
+    "tool": "rocm-smi --showpids --json",
+    "gpu_index": "1",
+    "positive_vram_processes": []
+  },
+  "ephemeral_bundle": {
+    "receipt": {
+      "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c"
+    },
+    "profile_sha256": "d53fa4dd797ee1a1667fd0830704fe5c979f859f047f477ce16812a3eadf8f12",
+    "manifest_sha256": "7afe4e76062f1ce0db59bc739138af1eb778f302cd255e144d0f10709ccb3f2d",
+    "manifest": {
+      "schema_version": "ullm.served_model.v2",
+      "public": {
+        "id": "ullm-qwen3.5-9b-aq4",
+        "name": "uLLM Qwen3.5 9B AQ4 reasoning",
+        "description": "Unactivated Qwen3.5 9B AQ4 reasoning candidate.",
+        "upstream_id": "Qwen/Qwen3.5-9B",
+        "revision": "aq4-reasoning-v0.1-candidate",
+        "context_length": 4096
+      },
+      "generation": {
+        "max_completion_tokens": 512,
+        "vocab_size": 248320,
+        "eos_token_ids": [
+          248044,
+          248046
+        ],
+        "sampling": {
+          "top_k": 1,
+          "temperature": false,
+          "top_p": false
+        }
+      },
+      "format": {
+        "format_id": "AQ4_0",
+        "implementation_id": "qwen35_aq4_rdna4_v1"
+      },
+      "tokenizer": {
+        "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+        "transformers_version": "5.12.1",
+        "class": "Qwen2Tokenizer",
+        "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "files": {
+          "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+          "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        },
+        "template_options": {
+          "add_generation_prompt": true,
+          "enable_thinking": false
+        }
+      },
+      "worker": {
+        "protocol": "ullm.worker.v2",
+        "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+        "binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+        "arguments": [
+          "--served-model-manifest",
+          "{manifest}"
+        ],
+        "required_environment": [
+          "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+          "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+          "ULLM_REQUIRE_HIP_ADD_KERNEL",
+          "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+          "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+          "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+          "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+          "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+          "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+          "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+          "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+          "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+          "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+          "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+          "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+          "ULLM_REQUIRE_HIP_TOP1_KERNEL"
+        ],
+        "identity": {
+          "device": "gfx1201",
+          "execution_profile": "rdna4_aq4_resident"
+        }
+      },
+      "product": {
+        "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1",
+        "artifact": null,
+        "package": {
+          "manifest_path": "package/manifest.json",
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+        }
+      },
+      "promotion": {
+        "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+        "receipt": "/tmp/ullm-aq4-promotion-evidence-6erb345g/smoke-promotion.json",
+        "receipt_sha256": "8042f90c911a9af35152108e499a4ac3d63d02659d80b737c42e35e5ce41fcbd"
+      },
+      "reasoning": {
+        "enabled_by_default": false,
+        "dialect_id": "qwen3.5-thinking-v1",
+        "start_token_ids": [
+          248068
+        ],
+        "end_token_ids": [
+          248069
+        ],
+        "forced_end_token_ids": [
+          248069
+        ],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {
+          "low": 32,
+          "medium": 128,
+          "high": 256
+        },
+        "max_budget_tokens": 256,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit"
+      }
+    }
+  },
+  "worker_binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+  "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+  "legacy_engine": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/ullm-engine",
+  "legacy_engine_sha256": "7aba7f242f591eee71184e4acb3d5bfbb22225c97937d2d8ade3f613a52abdf9",
+  "resident": {
+    "mode": "resident",
+    "pid": 1905647,
+    "ready": {
+      "type": "ready",
+      "schema_version": "ullm.worker.v2",
+      "model": "ullm-qwen3.5-9b-aq4",
+      "model_revision": "aq4-reasoning-v0.1-candidate",
+      "artifact_content_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "device": "gfx1201",
+      "execution_profile": "rdna4_aq4_resident",
+      "context_length": 4096,
+      "max_new_tokens": 512
+    },
+    "cases": [
+      {
+        "id": "raw-p0001-g0004",
+        "prompt_token_ids": [
+          1
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          5328,
+          1438,
+          728,
+          310
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 1,
+          "prompt_ms": 38.215563,
+          "prompt_per_token_ms": 38.215563,
+          "prompt_per_second": 26.167349673744173,
+          "predicted_n": 4,
+          "predicted_ms": 41.924454,
+          "predicted_per_token_ms": 10.4811135,
+          "predicted_per_second": 95.40971004655184
+        }
+      },
+      {
+        "id": "raw-p0008-g0004",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          32948,
+          33898,
+          2110,
+          58716
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          8
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 8,
+          "prompt_ms": 153.683276,
+          "prompt_per_token_ms": 19.2104095,
+          "prompt_per_second": 52.0551110584082,
+          "predicted_n": 4,
+          "predicted_ms": 42.23633,
+          "predicted_per_token_ms": 10.5590825,
+          "predicted_per_second": 94.70519810788484
+        }
+      },
+      {
+        "id": "reasoning-budget-zero",
+        "prompt_token_ids": [
+          1
+        ],
+        "max_new_tokens": 2,
+        "reasoning": {
+          "enabled": true,
+          "budget_tokens": 0,
+          "dialect_id": "qwen3.5-thinking-v1",
+          "end_token_ids": [
+            248069
+          ],
+          "forced_end_token_ids": [
+            248069
+          ],
+          "reserved_answer_tokens": 1
+        },
+        "tokens": [
+          248069,
+          271
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 1,
+          "prompt_ms": 12.567998000000001,
+          "prompt_per_token_ms": 12.567998000000001,
+          "prompt_per_second": 79.56716734041491,
+          "predicted_n": 2,
+          "predicted_ms": 13.90775,
+          "predicted_per_token_ms": 6.953875,
+          "predicted_per_second": 143.80471319947512
+        },
+        "reasoning_usage": {
+          "reasoning_tokens": 0,
+          "forced_end_tokens": 1
+        }
+      }
+    ],
+    "child_process_checks": [
+      {
+        "phase": "ready",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "sent:raw-p0001-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:started",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:progress",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0001-g0004:released",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "after:raw-p0001-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "sent:raw-p0008-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:started",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:progress",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:raw-p0008-g0004:released",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "after:raw-p0008-g0004",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "sent:reasoning-budget-zero",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:reasoning-budget-zero:started",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:reasoning-budget-zero:progress",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:reasoning-budget-zero:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:reasoning-budget-zero:token",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "event:reasoning-budget-zero:released",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      },
+      {
+        "phase": "after:reasoning-budget-zero",
+        "procfs_supported": true,
+        "descendants": [],
+        "sibling_engine_count": 0
+      }
+    ],
+    "clean_shutdown": true,
+    "stderr_tail": "_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":24,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":24,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":24,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":24,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":24,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":24,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":25,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":25,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":25,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":25,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":25,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":25,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":26,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":26,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":26,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":26,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":26,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":26,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":27,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipFusedQkNormRopePagedKvWriteF32\",\"geometry\":\"FusedQkNormRopePagedKvWrite { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, rotary_dim: 64, rope_base_bits: 1259902592, norm_epsilon_bits: 925353388, block_size: 256, cache_blocks: 16 }\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"FusedQkNormRopePagedKvWrite\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(4), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":73728,\"value_format\":\"F32\",\"weight_format\":\"F32\",\"weight_layout\":\"Some(RowMajor)\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":27,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipFusedQkNormRopePagedKvWriteF32\",\"geometry\":\"FusedQkNormRopePagedKvWrite { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, rotary_dim: 64, rope_base_bits: 1259902592, norm_epsilon_bits: 925353388, block_size: 256, cache_blocks: 16 }\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"FusedQkNormRopePagedKvWrite\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(4), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":73728,\"value_format\":\"F32\",\"weight_format\":\"F32\",\"weight_layout\":\"Some(RowMajor)\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":27,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipFusedQkNormRopePagedKvWriteF32\",\"geometry\":\"FusedQkNormRopePagedKvWrite { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, rotary_dim: 64, rope_base_bits: 1259902592, norm_epsilon_bits: 925353388, block_size: 256, cache_blocks: 16 }\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"FusedQkNormRopePagedKvWrite\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(4), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":73728,\"value_format\":\"F32\",\"weight_format\":\"F32\",\"weight_layout\":\"Some(RowMajor)\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":27,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":27,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":27,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":28,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":28,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":28,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":28,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":28,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":28,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":29,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":29,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":29,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":29,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":29,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":29,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":30,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":30,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":30,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionQkvPrepareF32\",\"geometry\":\"LinearAttentionQkvPrepare { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128, kernel_size: 4, query_scale: InverseSqrtKeyDim, qk_l2_norm: true }\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"LinearAttentionQkvPrepare\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":131072,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(1), writes: StateResourceSet(1), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"ConvolutionHistory\",\"temporary_bytes\":98304,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":30,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":30,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":30,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipLinearAttentionRecurrentF32\",\"geometry\":\"GatedDeltaRule { key_heads: 16, value_heads: 32, key_dim: 128, value_dim: 128 }\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"GatedDeltaRuleScan\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":2097152,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(2), writes: StateResourceSet(2), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"RecurrentMatrix\",\"temporary_bytes\":49408,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":31,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipFusedQkNormRopePagedKvWriteF32\",\"geometry\":\"FusedQkNormRopePagedKvWrite { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, rotary_dim: 64, rope_base_bits: 1259902592, norm_epsilon_bits: 925353388, block_size: 256, cache_blocks: 16 }\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"FusedQkNormRopePagedKvWrite\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(4), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":73728,\"value_format\":\"F32\",\"weight_format\":\"F32\",\"weight_layout\":\"Some(RowMajor)\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":31,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipFusedQkNormRopePagedKvWriteF32\",\"geometry\":\"FusedQkNormRopePagedKvWrite { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, rotary_dim: 64, rope_base_bits: 1259902592, norm_epsilon_bits: 925353388, block_size: 256, cache_blocks: 16 }\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"FusedQkNormRopePagedKvWrite\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(4), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":73728,\"value_format\":\"F32\",\"weight_format\":\"F32\",\"weight_layout\":\"Some(RowMajor)\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":31,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipFusedQkNormRopePagedKvWriteF32\",\"geometry\":\"FusedQkNormRopePagedKvWrite { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, rotary_dim: 64, rope_base_bits: 1259902592, norm_epsilon_bits: 925353388, block_size: 256, cache_blocks: 16 }\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"input_layout\":\"TokensHidden\",\"kind\":\"FusedQkNormRopePagedKvWrite\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(4), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: InPlace, externally_visible_before_commit: true }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":73728,\"value_format\":\"F32\",\"weight_format\":\"F32\",\"weight_layout\":\"Some(RowMajor)\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":31,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"ColdPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":31,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"CachedPrefixPrefill\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.backend_operation.load.v1\",\"layer_position\":31,\"trace\":{\"abi_version\":1,\"activation_format\":\"F32\",\"architecture\":\"gfx1201\",\"backend\":\"Hip\",\"batch_width\":1,\"chunk_width\":1,\"device_id\":0,\"device_name\":\"AMD Radeon Graphics\",\"executable\":\"HipPagedDecodeAttentionSigmoidGateF32\",\"geometry\":\"PagedCausalGqaRead { q_heads: 16, kv_heads: 4, head_dim: 256, value_dim: 256, block_size: 256, cache_blocks: 16, sigmoid_gate: true }\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"input_layout\":\"TokensHidden\",\"kind\":\"PagedCausalGqaRead\",\"output_layout\":\"TokensHidden\",\"persistent_bytes\":33554432,\"phase\":\"Decode\",\"promotion\":\"Production\",\"resolution\":\"Primary\",\"runtime_build\":\"0.1.0\",\"runtime_feature_count\":13,\"semantic_version\":\"1.0.0\",\"state_effect\":\"StateEffect { reads: StateResourceSet(4), writes: StateResourceSet(0), prepares: StateResourceSet(0), commits: StateResourceSet(0), update_mode: ReadOnly, externally_visible_before_commit: false }\",\"state_format\":\"F32\",\"state_layout\":\"PagedKvBlocks\",\"temporary_bytes\":49216,\"value_format\":\"F32\",\"weight_format\":null,\"weight_layout\":\"None\",\"workspace_budget_bytes\":34208743424}}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"start\",\"prompt_tokens\":1,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0001-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":1,\"completion_tokens\":4,\"elapsed_ms\":82,\"outcome\":\"length\",\"operation_execution_audit\":{\"schema_version\":\"ullm.backend_operation.request.v2\",\"outcome\":\"length\",\"expected_layers_per_step\":32,\"expected_records_per_layer\":2,\"cold_prefill_steps\":1,\"cached_prefix_prefill_steps\":0,\"decode_steps\":3,\"total_steps\":4,\"total_records\":256,\"physical_operation_invocations\":256,\"token_equivalent_operation_coverage\":256,\"prefill_chunks_executed\":1,\"prefill_tokens_executed\":1,\"prefill_tokens_committed\":1,\"prefill_width_histogram\":[0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"implementation_counts\":[{\"kind\":\"linear_attention_qkv_prepare\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"count\":96},{\"kind\":\"gated_delta_rule_scan\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"count\":96},{\"kind\":\"paged_kv_write\",\"implementation_id\":\"hip.paged-kv-write-f32.m1\",\"count\":0},{\"kind\":\"fused_qk_norm_rope_paged_kv_write\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"count\":32},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-f32.m1-gqa\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"count\":32},{\"kind\":\"linear_attention_qkv_prepare\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-batch-f32.m2-m128\",\"count\":0},{\"kind\":\"gated_delta_rule_scan\",\"implementation_id\":\"hip.linear-attention-recurrent-sequence-f32.m2-m128\",\"count\":0},{\"kind\":\"paged_kv_write\",\"implementation_id\":\"hip.paged-kv-write-chunk-f32.m2-m128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-f32.tile128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-f32.tile256\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-sigmoid-gate-f32.tile128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-sigmoid-gate-f32.tile256\",\"count\":0}],\"deterministic_digest_sha256\":\"5a8d70bafe60af4471c64e84b92284a62808528b319efdcce76bf79503c3927d\",\"coverage_complete\":true}}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"start\",\"prompt_tokens\":8,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"raw-p0008-g0004\",\"phase\":\"reset_complete\",\"prompt_tokens\":8,\"completion_tokens\":4,\"elapsed_ms\":198,\"outcome\":\"length\",\"operation_execution_audit\":{\"schema_version\":\"ullm.backend_operation.request.v2\",\"outcome\":\"length\",\"expected_layers_per_step\":32,\"expected_records_per_layer\":2,\"cold_prefill_steps\":1,\"cached_prefix_prefill_steps\":7,\"decode_steps\":3,\"total_steps\":11,\"total_records\":256,\"physical_operation_invocations\":256,\"token_equivalent_operation_coverage\":704,\"prefill_chunks_executed\":1,\"prefill_tokens_executed\":8,\"prefill_tokens_committed\":8,\"prefill_width_histogram\":[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"implementation_counts\":[{\"kind\":\"linear_attention_qkv_prepare\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"count\":72},{\"kind\":\"gated_delta_rule_scan\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"count\":72},{\"kind\":\"paged_kv_write\",\"implementation_id\":\"hip.paged-kv-write-f32.m1\",\"count\":0},{\"kind\":\"fused_qk_norm_rope_paged_kv_write\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"count\":24},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-f32.m1-gqa\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"count\":24},{\"kind\":\"linear_attention_qkv_prepare\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-batch-f32.m2-m128\",\"count\":24},{\"kind\":\"gated_delta_rule_scan\",\"implementation_id\":\"hip.linear-attention-recurrent-sequence-f32.m2-m128\",\"count\":24},{\"kind\":\"paged_kv_write\",\"implementation_id\":\"hip.paged-kv-write-chunk-f32.m2-m128\",\"count\":8},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128\",\"count\":8},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-f32.tile128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-f32.tile256\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-sigmoid-gate-f32.tile128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-sigmoid-gate-f32.tile256\",\"count\":0}],\"deterministic_digest_sha256\":\"0b32697ebd504883ee95081a3330a2dd8242691ae725920551db0af3a199bd85\",\"coverage_complete\":true}}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_admitted\",\"request_id\":\"reasoning-budget-zero\",\"phase\":\"start\",\"prompt_tokens\":1,\"completion_tokens\":0,\"elapsed_ms\":0}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"request_released\",\"request_id\":\"reasoning-budget-zero\",\"phase\":\"reset_complete\",\"prompt_tokens\":1,\"completion_tokens\":2,\"elapsed_ms\":28,\"outcome\":\"length\",\"operation_execution_audit\":{\"schema_version\":\"ullm.backend_operation.request.v2\",\"outcome\":\"length\",\"expected_layers_per_step\":32,\"expected_records_per_layer\":2,\"cold_prefill_steps\":1,\"cached_prefix_prefill_steps\":0,\"decode_steps\":1,\"total_steps\":2,\"total_records\":128,\"physical_operation_invocations\":128,\"token_equivalent_operation_coverage\":128,\"prefill_chunks_executed\":1,\"prefill_tokens_executed\":1,\"prefill_tokens_committed\":1,\"prefill_width_histogram\":[0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"implementation_counts\":[{\"kind\":\"linear_attention_qkv_prepare\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-f32.m1\",\"count\":48},{\"kind\":\"gated_delta_rule_scan\",\"implementation_id\":\"hip.linear-attention-recurrent-f32.m1\",\"count\":48},{\"kind\":\"paged_kv_write\",\"implementation_id\":\"hip.paged-kv-write-f32.m1\",\"count\":0},{\"kind\":\"fused_qk_norm_rope_paged_kv_write\",\"implementation_id\":\"hip.fused-qk-norm-rope-paged-kv-write-f32.m1\",\"count\":16},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-f32.m1-gqa\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa\",\"count\":16},{\"kind\":\"linear_attention_qkv_prepare\",\"implementation_id\":\"hip.linear-attention-qkv-prepare-batch-f32.m2-m128\",\"count\":0},{\"kind\":\"gated_delta_rule_scan\",\"implementation_id\":\"hip.linear-attention-recurrent-sequence-f32.m2-m128\",\"count\":0},{\"kind\":\"paged_kv_write\",\"implementation_id\":\"hip.paged-kv-write-chunk-f32.m2-m128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-f32.tile128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-f32.tile256\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-sigmoid-gate-f32.tile128\",\"count\":0},{\"kind\":\"paged_causal_gqa_read\",\"implementation_id\":\"hip.paged-decode-attention-split-sigmoid-gate-f32.tile256\",\"count\":0}],\"deterministic_digest_sha256\":\"f2c676009e7bd3ef80a0aa8a5a959916785c5bafd3af5d635edff19a0fc98903\",\"coverage_complete\":true}}\n{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"process_stopped\",\"phase\":\"process\"}\n"
+  },
+  "legacy": {
+    "mode": "legacy",
+    "pid": 1905986,
+    "ready": {
+      "type": "ready",
+      "schema_version": "ullm.worker.v1",
+      "model": "ullm-qwen3.5-9b-aq4",
+      "model_revision": "aq4-reasoning-v0.1-candidate",
+      "artifact_content_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "device": "gfx1201",
+      "execution_profile": "rdna4_aq4_cli_compat",
+      "context_length": 4096,
+      "max_new_tokens": 512
+    },
+    "cases": [
+      {
+        "id": "raw-p0001-g0004",
+        "prompt_token_ids": [
+          1
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          5328,
+          1438,
+          728,
+          310
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 1,
+          "prompt_ms": 40.801005,
+          "prompt_per_token_ms": 40.801005,
+          "prompt_per_second": 24.509200202298935,
+          "predicted_n": 4,
+          "predicted_ms": 41.856853,
+          "predicted_per_token_ms": 10.46421325,
+          "predicted_per_second": 95.5638017029135
+        }
+      },
+      {
+        "id": "raw-p0008-g0004",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "max_new_tokens": 4,
+        "tokens": [
+          32948,
+          33898,
+          2110,
+          58716
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          8
+        ],
+        "reset_complete": true,
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 8,
+          "prompt_ms": 120.337184,
+          "prompt_per_token_ms": 15.042148,
+          "prompt_per_second": 66.47986710408647,
+          "predicted_n": 4,
+          "predicted_ms": 41.830273,
+          "predicted_per_token_ms": 10.45756825,
+          "predicted_per_second": 95.62452532882106
+        }
+      }
+    ],
+    "child_process_checks": [],
+    "clean_shutdown": true,
+    "stderr_tail": "{\"schema_version\":\"ullm.worker.log.v1\",\"level\":\"info\",\"event\":\"process_stopped\",\"phase\":\"process\"}\n"
+  },
+  "comparisons": [
+    {
+      "id": "raw-p0001-g0004",
+      "tokens_exact_match": true
+    },
+    {
+      "id": "raw-p0008-g0004",
+      "tokens_exact_match": true
+    }
+  ],
+  "verified": true
+}

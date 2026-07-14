@@ -1,0 +1,31 @@
+{
+  "schema_version": "ullm.generic_reasoning_release_campaign.v1",
+  "status": "incomplete",
+  "raw_bodies_stored": false,
+  "case_count": 10,
+  "stream_case_count": 5,
+  "nonstream_case_count": 5,
+  "modes": [
+    "disabled",
+    "budget-32",
+    "budget-128",
+    "budget-256",
+    "unbounded"
+  ],
+  "manifest_sha256": "e6f749654e85a5f69f2d077bd55d4e27aff869d71803809386c5d36865183e72",
+  "model_id": "ullm-qwen3.5-9b-aq4",
+  "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+  "gpu_exclusive_preflight": {
+    "tool": "/opt/rocm/bin/rocm-smi --showpids --json",
+    "gpu_index": "1",
+    "positive_vram_processes": [
+      {
+        "pid": "2016033",
+        "process": "ullm-aq4-worker",
+        "gpu_index": "1",
+        "vram_bytes": 7351918592,
+        "binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+      }
+    ]
+  }
+}

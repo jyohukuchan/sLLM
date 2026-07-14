@@ -1,0 +1,196 @@
+{
+  "schema_version": "ullm.generic_reasoning_phase0_http_baseline.v1",
+  "status": "complete",
+  "captured_at_unix_ns": 1783959748984428126,
+  "production_activation_performed": false,
+  "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+  "active_manifest": {
+    "path": "/etc/ullm/served-models/active.json",
+    "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "schema_version": "ullm.served_model.v2"
+  },
+  "active_promotion_source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+  "source_commit_aligned": true,
+  "worker": {
+    "protocol": "ullm.worker.v2",
+    "binary": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+    "binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+  },
+  "endpoint": "http://172.20.0.1:8000/v1/chat/completions",
+  "image": "curlimages/curl@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6",
+  "cases": [
+    {
+      "id": "phase0-v1-target-18",
+      "target_prompt_tokens": 18,
+      "prompt_sha256": "4afde19d2a631196d5bdb4a210ef95f11ffb2417241add9983e184f5c17268ad",
+      "prompt_tokens": 18,
+      "request_body_sha256": "6b4cd764c0261925f3cb5b696cfc65ccebb05dd3cf22015e83b19e11dd07d8f4",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "c576733a75f3c8acafbfc66ff2349f9d7ecbf18c4e196765472fc68d74da4cb4",
+        "response_bytes": 647,
+        "finish_reason": "length",
+        "prompt_tokens": 18,
+        "completion_tokens": 2,
+        "total_tokens": 20
+      },
+      "stream": {
+        "http_status": 200,
+        "response_body_sha256": "1cca3dbb53b17a70d78146260f541c8454a0c62560f9f4f09a38bb58d9f2caee",
+        "response_bytes": 1477,
+        "chunks": 5,
+        "event_sequence": [
+          "role",
+          "token",
+          "token",
+          "token",
+          "stop",
+          "usage",
+          "done"
+        ],
+        "delta_keys": [
+          [
+            "content",
+            "role"
+          ],
+          [
+            "content"
+          ],
+          [
+            "content"
+          ],
+          []
+        ],
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 2,
+          "total_tokens": 20
+        },
+        "invalid_data_lines": 0,
+        "request_body_sha256": "ecbe17a74395fdf24fb1cbe13d7a0cc4bd312f4531301a45cf7966ee6d5e2c0c"
+      }
+    },
+    {
+      "id": "phase0-v1-target-1024",
+      "target_prompt_tokens": 1024,
+      "prompt_sha256": "f9476d07e05388c33b088d6f6f34993ec1a03eb31882ca01836254448a078647",
+      "prompt_tokens": 1024,
+      "request_body_sha256": "630239a5f555307b6381f1418d13b25cc19b4cb33b90d14711dce1d2ae7c4b23",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "bbe687976ef615275d49a38bbea39dc103f5130c681cc3079e7ef9f62dff9107",
+        "response_bytes": 653,
+        "finish_reason": "length",
+        "prompt_tokens": 1024,
+        "completion_tokens": 2,
+        "total_tokens": 1026
+      }
+    },
+    {
+      "id": "phase0-v1-target-2048",
+      "target_prompt_tokens": 2048,
+      "prompt_sha256": "1cc6cf201486155dfb9a6127c486b5f33d5f949f782bf3049f39f21004466834",
+      "prompt_tokens": 2048,
+      "request_body_sha256": "57871905e7b194ba7d6b69d93b92c3cc05c27f562e4547cf33498bca5316a80e",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "485eb535acd661991e5cc8543c512f1cad9d76948c8e63294e5552ce83890999",
+        "response_bytes": 644,
+        "finish_reason": "length",
+        "prompt_tokens": 2048,
+        "completion_tokens": 2,
+        "total_tokens": 2050
+      }
+    },
+    {
+      "id": "phase0-v1-target-3072",
+      "target_prompt_tokens": 3072,
+      "prompt_sha256": "5398eba76f885c064b774f724f703c6c1aed5452befd22a6f5a684a8bc78ef89",
+      "prompt_tokens": 3072,
+      "request_body_sha256": "58adfd0f1252d26ad6c61f2ca7f44c6c9fa65bb1796dde0ce40f3b4db072ded5",
+      "request_max_tokens": 2,
+      "nonstream": {
+        "http_status": 200,
+        "response_body_sha256": "b9ac74046097e79b1aff75f74bb71217cbd6da7fa07c058f49b46024d8d9f3c6",
+        "response_bytes": 644,
+        "finish_reason": "length",
+        "prompt_tokens": 3072,
+        "completion_tokens": 2,
+        "total_tokens": 3074
+      }
+    }
+  ],
+  "raw_bodies_stored": false,
+  "worker_generated_token_evidence": {
+    "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+    "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+    "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "evidence_sha256": "713ce233e4c521db04527b751065fda8f84375e7ed892fc8c29696f0ce235bfe",
+    "cases": [
+      {
+        "id": "raw-p0001-g0004",
+        "prompt_token_ids": [
+          1
+        ],
+        "generated_token_ids": [
+          5328,
+          1438,
+          728,
+          310
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true
+      },
+      {
+        "id": "raw-p0008-g0004",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "generated_token_ids": [
+          32948,
+          33898,
+          2110,
+          58716
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          8
+        ],
+        "reset_complete": true
+      },
+      {
+        "id": "reasoning-budget-zero",
+        "prompt_token_ids": [
+          1
+        ],
+        "generated_token_ids": [
+          248069,
+          271
+        ],
+        "outcome": "length",
+        "prompt_progress": [
+          1
+        ],
+        "reset_complete": true,
+        "reasoning_usage": {
+          "reasoning_tokens": 0,
+          "forced_end_tokens": 1
+        }
+      }
+    ]
+  },
+  "missing": []
+}

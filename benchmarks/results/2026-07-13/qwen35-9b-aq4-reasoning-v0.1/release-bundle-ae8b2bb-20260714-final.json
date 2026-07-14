@@ -1,0 +1,44 @@
+{
+  "schema_version": "ullm.generic_reasoning_release_bundle.v1",
+  "status": "complete",
+  "production_activation_performed": false,
+  "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+  "active_promotion_source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+  "identity": {
+    "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "worker_binary_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "tokenizer_sha256": "b959f4b4ac6b6272f390747e393b1adcf1c55f14d78daeb37d6dedb9598a49d9",
+    "openwebui_image": "ullm/open-webui@sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
+  },
+  "artifacts": {
+    "release_evidence": {
+      "path": "release-evidence-ae8b2bb.json",
+      "sha256": "6c97d7b381b0adf55b7aa3c0bcc3342ca8d3fa29e789304d0bb217917b0d5ec1"
+    },
+    "release_validator": {
+      "path": "release-validator-ae8b2bb-20260714.json",
+      "sha256": "5f063bd6d493ab5f43bde5b31043bca82cfa333127fc8d469d53d73a7a191a15"
+    },
+    "browser_evidence": {
+      "path": "browser-reasoning-ae8b2bb-20260714-root-rocm.json",
+      "sha256": "fc1061587e629267e78cd3b4d05a415ec29bc23e23f234b2a502f87e6106ac26"
+    },
+    "browser_validator": {
+      "path": "browser-validator-ae8b2bb-20260714-root-rocm.json",
+      "sha256": "2ff2b68a86e7ee5fcf5f35b20cbe74929cfb6c3e9ea05f8f64188f47a6246edf"
+    },
+    "promotion_evidence": {
+      "path": "resident-promotion-reasoning-v2-v0.1-ae8b2bb.json",
+      "sha256": "713ce233e4c521db04527b751065fda8f84375e7ed892fc8c29696f0ce235bfe"
+    },
+    "promotion_receipt": {
+      "path": "promotion-receipt-ae8b2bb-20260714.json",
+      "sha256": "f0861446539684cebc58ae329ddc1b88d686d4f95d0f156d690f3921f75d7ea6"
+    }
+  },
+  "rollback_target": {
+    "manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "systemd_unit_sha256": "f0239713b16b3bf31cfd12a98f506e77e55af9b31abf58352f4e437e1cdee552",
+    "environment_sha256": "601f37575c26ecd82b996de07bb6aea08dd345fad1564e9e53bab066c787eca5"
+  }
+}

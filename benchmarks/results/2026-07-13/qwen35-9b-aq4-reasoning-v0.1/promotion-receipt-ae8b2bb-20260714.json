@@ -1,0 +1,8 @@
+{
+  "schema_version": "ullm.aq4_resident_promotion.v1",
+  "source_commit": "ae8b2bb7c2735f4dc761773957bf45f470dd5a8c",
+  "evidence": {
+    "path": "resident-promotion-reasoning-v2-v0.1-ae8b2bb.json",
+    "sha256": "713ce233e4c521db04527b751065fda8f84375e7ed892fc8c29696f0ce235bfe"
+  }
+}
