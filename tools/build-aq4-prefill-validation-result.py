@@ -172,6 +172,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         if args.path_oracle_result is None: raise ResultError("optimized case requires a path oracle result")
         path_result = load(args.path_oracle_result, "path oracle result"); path_sha = sha_file(args.path_oracle_result, "path oracle result")
         if path_result.get("schema_version") != "ullm.prefill_validation.v1" or path_result.get("case_id") != case.get("path_oracle_case_id") or path_result.get("status") != "ok" or path_result.get("workload", {}).get("baseline_mode") != "all_m1": raise ResultError("path oracle result identity/status differs")
+        if path_result.get("identity", {}).get("sha256") != sha_file(args.identity, "identity") or path_result.get("oracles", {}).get("source_oracle", {}).get("sha256") != source_sha or path_result.get("oracles", {}).get("threshold_policy", {}).get("self_sha256") != policy.get("hash_binding", {}).get("policy_sha256"): raise ResultError("path oracle artifact/source/policy identity differs")
         for field in ("phase", "cached_prefix_tokens", "prompt_tokens", "prefill_requested_m", "scope", "control_id"):
             left = path_result.get("workload", {}).get(field) if field in {"phase", "cached_prefix_tokens", "prompt_tokens", "prefill_requested_m"} else path_result.get(field)
             if left != case.get(field): raise ResultError(f"path oracle same-state field differs: {field}")
@@ -187,7 +188,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     baseline = load(baseline_path, "baseline"); baseline_sha = sha_file(baseline_path, "baseline")
     if baseline_sha != identity.get("hash_binding", {}).get("baseline_result_sha256"): raise ResultError("baseline identity differs")
     baseline_p50 = numeric(baseline.get("prefill_tokens_per_second_p50"), "baseline p50", minimum=1e-12); baseline_p95 = numeric(baseline.get("prefill_tokens_per_second_p95"), "baseline p95", minimum=1e-12)
-    regression = {"baseline_result_path": str(baseline_path), "baseline_result_sha256": baseline_sha, "prefill_p50_change_percent": (performance["prefill_tokens_per_second_p50"] / baseline_p50 - 1) * 100, "prefill_p95_change_percent": (performance["prefill_tokens_per_second_p95"] / baseline_p95 - 1) * 100, "new_oom": status == "oom" and baseline.get("oom") is not True, "passed": status == "ok" and baseline.get("oom") is not True}
+    p50_change = (performance["prefill_tokens_per_second_p50"] / baseline_p50 - 1) * 100
+    p95_change = (performance["prefill_tokens_per_second_p95"] / baseline_p95 - 1) * 100
+    prefill_policy = policy.get("performance_thresholds", {}).get("prefill", {})
+    new_oom = status == "oom" and baseline.get("oom") is not True
+    regression = {"baseline_result_path": str(baseline_path), "baseline_result_sha256": baseline_sha, "prefill_p50_change_percent": p50_change, "prefill_p95_change_percent": p95_change, "new_oom": new_oom, "passed": status == "ok" and not new_oom and p50_change >= -100 * prefill_policy.get("p50_regression_stop_fraction", 0) and p95_change >= -100 * prefill_policy.get("p95_regression_stop_fraction", 0)}
     mode = raw.get("mode")
     reasons = ["producer_non_authoritative"]
     if mode == "cpu_synthetic": reasons.append("cpu_synthetic_never_promotes")

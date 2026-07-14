@@ -148,6 +148,10 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         case = case_by_id[case_id]; prefix = case_id
         if result.get("schema_version") != "ullm.prefill_validation.v1" or result.get("case_sha256") != case.get("case_sha256"): failures.append(f"result_schema_case_hash:{prefix}")
         if result.get("scope") != case.get("scope") or result.get("control_id") != case.get("control_id") or result.get("identity", {}).get("format_id") != case.get("format_id"): failures.append(f"result_case_identity:{prefix}")
+        try:
+            result_identity_path = contained(root, Path(result.get("identity", {}).get("path", "")), "result identity")
+            if result_identity_path != args.identity.resolve() or result.get("identity", {}).get("sha256") != sha_file(args.identity, "identity") or result.get("identity", {}).get("binding_sha256") != identity.get("identity_sha256"): failures.append(f"result_identity_link:{prefix}")
+        except (EvidenceError, OSError): failures.append(f"result_identity_link:{prefix}")
         for field in ("phase", "baseline_mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "generated_tokens"):
             if result.get("workload", {}).get(field) != case.get(field): failures.append(f"result_workload_{field}:{prefix}")
         try:
@@ -183,6 +187,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
                 for field in ("phase", "cached_prefix_tokens", "prompt_tokens", "prefill_requested_m"):
                     if oracle_result.get("workload", {}).get(field) != case.get(field): failures.append(f"path_oracle_state_{field}:{prefix}")
                 if oracle_result.get("workload", {}).get("baseline_mode") != "all_m1" or oracle_result.get("scope") != case.get("scope") or oracle_result.get("control_id") != case.get("control_id"): failures.append(f"path_oracle_identity:{prefix}")
+                if oracle_result.get("identity", {}).get("sha256") != sha_file(args.identity, "identity") or oracle_result.get("oracles", {}).get("source_oracle", {}).get("sha256") != source_sha or oracle_result.get("oracles", {}).get("threshold_policy", {}).get("self_sha256") != policy.get("hash_binding", {}).get("policy_sha256"): failures.append(f"path_oracle_artifact_identity:{prefix}")
         elif path_link is not None: failures.append(f"unexpected_path_oracle:{prefix}")
         trace_link = result.get("evidence", {}).get("execution_trace"); expected_trace_sha = None
         if trace_link is not None:
@@ -240,7 +245,10 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             regression = result.get("regression", {}); performance = result.get("performance", {})
             expected_p50 = (performance["prefill_tokens_per_second_p50"] / baseline["prefill_tokens_per_second_p50"] - 1) * 100
             expected_p95 = (performance["prefill_tokens_per_second_p95"] / baseline["prefill_tokens_per_second_p95"] - 1) * 100
-            if baseline_sha != identity.get("hash_binding", {}).get("baseline_result_sha256") or regression.get("baseline_result_sha256") != baseline_sha or not math.isclose(regression.get("prefill_p50_change_percent"), expected_p50, rel_tol=1e-12) or not math.isclose(regression.get("prefill_p95_change_percent"), expected_p95, rel_tol=1e-12) or regression.get("new_oom") is not (result.get("status") == "oom" and baseline.get("oom") is not True): failures.append(f"regression_recompute:{prefix}")
+            new_oom = result.get("status") == "oom" and baseline.get("oom") is not True
+            prefill_policy = policy.get("performance_thresholds", {}).get("prefill", {})
+            expected_passed = result.get("status") == "ok" and not new_oom and expected_p50 >= -100 * prefill_policy.get("p50_regression_stop_fraction", 0) and expected_p95 >= -100 * prefill_policy.get("p95_regression_stop_fraction", 0)
+            if baseline_sha != identity.get("hash_binding", {}).get("baseline_result_sha256") or regression.get("baseline_result_sha256") != baseline_sha or not math.isclose(regression.get("prefill_p50_change_percent"), expected_p50, rel_tol=1e-12) or not math.isclose(regression.get("prefill_p95_change_percent"), expected_p95, rel_tol=1e-12) or regression.get("new_oom") is not new_oom or regression.get("passed") is not expected_passed: failures.append(f"regression_recompute:{prefix}")
         except (EvidenceError, OSError, KeyError, ZeroDivisionError, TypeError): failures.append(f"regression_link:{prefix}")
     promotion = False
     return {"schema_version": "ullm.aq4_production_p2_evidence_validator.v2", "status": "valid" if not failures else "invalid", "failure_codes": sorted(set(failures)), "scheduled_case_count": len(case_by_id), "result_count": len(results), "complete_matrix": not missing and len(results) == len(case_by_id), "promotion_eligible": promotion, "production_live_execution": False, "review_note": "CPU/synthetic validation never promotes; GPU/live execution was not performed"}
