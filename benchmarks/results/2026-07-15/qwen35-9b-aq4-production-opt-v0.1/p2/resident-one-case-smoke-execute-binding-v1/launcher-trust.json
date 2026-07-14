@@ -1,14 +1,14 @@
 {
   "actual_eligible": false,
-  "commit": "da26839109ebb0a09bc8f194926d9de513095f83",
+  "commit": "79ce2aa199413323da6fee10ddfa06fbb530b750",
   "execute_binding": {
     "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v1/execute-binding.json",
-    "sha256": "6eb51e6040412be3953b1c6b1ae67ef8e56fc183006f9377f1f502c342b50519"
+    "sha256": "a55b10a3d9ee16181e9ab67b2f502e74acae263ecaf1f45a1ce1366989dadd08"
   },
-  "git_blob": "ba3953cc586f22437128b5ded7b5bf26acb17a41",
+  "git_blob": "49014ed017676f401086d67f40ba564ff6e21410",
   "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
   "schema_version": "ullm.aq4_p2_resident_execute_launcher_trust.v1",
-  "sha256": "a5efe7d11afe10c75ca367ed3abd84baeaaa0144f83e35aa49d2bd523bf79891",
+  "sha256": "90f5e43a68b438bdf5f4421d2e5651073fd14ae52158be2ae5d66d607014d783",
   "status": "qa_pending",
-  "tree": "0767afe1b4b41fd677d76c2edb375f490e7fe529"
+  "tree": "a6559659e1c8d14745bc1823d8cbcb6647e1e9a0"
 }

@@ -1,14 +1,14 @@
 {
   "B": {
-    "manifest_sha256": "5071cf7b643d68b297d4d5f9588074ad09b71de26b0059bebefa3b6393bec146",
+    "manifest_sha256": "d539ab1981a35a2568241e23b58fa1243e0b7de992f60c0caa16babd0b0e6218",
     "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
   },
   "R": {
-    "commit": "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db",
-    "git_blob": "75e2c8cd3b0d7f50de66a3f9ce92953d4b5c16e8",
+    "commit": "4005c80e542d7e37cf79e62d2fd053f99c0353c1",
+    "git_blob": "6af99284b507035957102b9ab79a72d7561942a0",
     "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4/trusted-runner.py",
-    "sha256": "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907",
-    "tree": "32e2a2c5d8435af2715d652e035f408c07eae2bf"
+    "sha256": "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b",
+    "tree": "635d72f5b6aa1a5a63a43a3fc4fa005be4d7b213"
   },
   "actual_eligible": false,
   "blocked_reasons": [
@@ -161,11 +161,11 @@
     }
   },
   "validator": {
-    "commit": "82c77957a8e53ea7ed0be4f3a83a8cce6f39a65f",
-    "git_blob": "ce5dc11f65de018fb45f48413e3e1879ff4d8e33",
+    "commit": "741616fd0a1be897b47b4c94308e5c65290b9749",
+    "git_blob": "2d9aa53295f00750676e39d81276d632fd0c7144",
     "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
-    "sha256": "b6b7b249d39a8a6c7312535f220a008d058b9b979a9ee8efffb0ddef127bbc28",
-    "tree": "2c945b87b8f5b084ffab02233a033a409aaa642b"
+    "sha256": "84b88ff3b3037675acca52a48c05bbd679d802d92abc482d5649e2be26ed5fb6",
+    "tree": "9cbe2b015df6edd10e15c19ff406ab7843ff292b"
   },
   "worker_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker"
 }
