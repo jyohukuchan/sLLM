@@ -1,0 +1,12 @@
+{
+  "mode": "path_endpoint_only",
+  "rows": 3,
+  "schema_version": "ullm.qwen35_aq4_differential_trace.v1",
+  "source_trace_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-differential-trace-v2",
+  "stage_contract": {
+    "available": [
+      "final_norm",
+      "lm_head"
+    ]
+  }
+}
