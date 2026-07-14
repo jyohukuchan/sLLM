@@ -1,0 +1,17 @@
+{
+  "actual_executed": false,
+  "coverage": [
+    "safety-success-start-failure-partial",
+    "validator-runner-finalize-toctou",
+    "identity-and-hash-bindings",
+    "blocked-artifact-process-count-zero"
+  ],
+  "launcher": {
+    "commit": "bb7a5fb00c453d911cd0ccb9499a47863c6eb07c",
+    "sha256": "4f547d50b4a321196dbb8b2e7703843657c87a4d3d215c0325a6f8d267db5382"
+  },
+  "runner_strict_negative_count": 18,
+  "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
+  "status": "passed",
+  "test_count": 120
+}

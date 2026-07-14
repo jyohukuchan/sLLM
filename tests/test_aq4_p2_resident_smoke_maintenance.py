@@ -164,3 +164,38 @@ def test_output_reuse_rejected_before_any_fake_command(tmp_path: Path) -> None:
     with pytest.raises(HARNESS.HarnessError, match="already exists"):
         HARNESS.execute_maintenance(ready(tmp_path), output, runtime.dependencies())
     assert runtime.calls == []
+
+
+def test_canonical_ready_artifact_readback_and_harness_pin() -> None:
+    value = HARNESS.load_ready_artifact()
+    assert value["status"] == "ready_for_one_case" and value["actual_eligible"] is True
+    assert value["promotion_eligible"] is False
+    assert value["trust"]["harness"]["commit"] == "fabd520daaa878eca5c93b24d1faf092cafe3448"
+    assert value["trust"]["harness"]["sha256"] == "7b45825e31df363d714880712eb2ea0f15332a9de6707fa404c87eb1d888621b"
+    assert value["qa_attestation_sha256"] == HARNESS.sha_bytes(HARNESS.pretty(HARNESS.QA_ATTESTATION))
+
+
+def test_canonical_dry_run_cli_has_zero_actual_processes(tmp_path: Path) -> None:
+    output = tmp_path / "ready-dry-run"
+    code = HARNESS.main(["--mode", "dry-run", "--evidence-output", str(output)])
+    assert code == 0
+    evidence = json.loads((output / "launcher-evidence.json").read_text())
+    assert evidence["process_counts"] == {"launcher": 0, "sudo": 0, "systemctl_start": 0, "systemctl_stop": 0}
+    assert evidence["service_touched"] is False
+
+
+@pytest.mark.parametrize("failure", ("sudo-pre", "sudo-stop", "stop", "stopped-gate", "sudo-restore", "start", "health"))
+def test_actual_cli_with_each_fake_gate_fails_closed(tmp_path: Path, failure: str) -> None:
+    runtime = FakeRuntime(fail=failure)
+    output = tmp_path / f"cli-{failure}"
+    code = HARNESS.main(["--mode", "execute", "--confirm-one-case", "--evidence-output", str(output)], dependencies=runtime.dependencies())
+    assert code == 1
+    evidence = json.loads((output / "launcher-evidence.json").read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["secret_material_recorded"] is False
+
+
+def test_actual_cli_requires_explicit_one_case_confirmation_without_commands(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    code = HARNESS.main(["--mode", "execute", "--evidence-output", str(tmp_path / "no-confirm")], dependencies=runtime.dependencies())
+    assert code == 1 and runtime.calls == []

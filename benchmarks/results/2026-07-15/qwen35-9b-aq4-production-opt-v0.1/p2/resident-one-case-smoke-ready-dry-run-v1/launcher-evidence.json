@@ -1,0 +1,18 @@
+{
+  "actual_eligible": true,
+  "gpu_command_executed": false,
+  "mode": "dry-run",
+  "model_load_executed": false,
+  "process_counts": {
+    "launcher": 0,
+    "sudo": 0,
+    "systemctl_start": 0,
+    "systemctl_stop": 0
+  },
+  "promotion_eligible": false,
+  "ready_binding_sha256": "4a257dd0edaec5eafa27e05b0804311435e57fbda5b4a5ba6e74a1f1c80a028a",
+  "run_id": "p2-r9700-resident-one-case-smoke-execute-v1",
+  "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
+  "service_touched": false,
+  "status": "passed"
+}
