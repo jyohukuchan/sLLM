@@ -1,5 +1,5 @@
 {
-  "artifact_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2",
+  "artifact_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/aq4-production-prefill-decode/p2",
   "artifacts": {
     "correctness_threshold_audit": {
       "path": "correctness-threshold-audit.json",

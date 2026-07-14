@@ -18,7 +18,7 @@
     },
     "validation_report": {
       "path": "validation-report.json",
-      "sha256": "20d4dd424c0111819e2acdc6e4a6d516043f01ecafe15d497433b51a68ebc35f"
+      "sha256": "5e9e9bfb68b6ef780e38e3ff9b7094a4bc9d6c16696ce7293518648a9fb3d8c6"
     }
   },
   "correctness_thresholds": {
