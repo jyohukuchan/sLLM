@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "case_id": "fixture-prompt-0",
+      "prompt_token_count": 3,
+      "prompt_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+      "step_count": 2
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "prompt_token_count": 2,
+      "prompt_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+      "step_count": 1
+    }
+  ],
+  "created_utc": "2026-07-14T09:32:56Z",
+  "evidence_class": "production",
+  "identity": {
+    "artifact": {
+      "artifact_manifest_sha256": null,
+      "package_manifest_sha256": null
+    },
+    "model_id": "Qwen/Qwen3.5-9B",
+    "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "tokenizer": {
+      "aggregate_sha256": "9a45a4af8164013eec52539a0bff6dbbd94ed4ace0b59438c6c170787068f74b",
+      "files": [
+        {
+          "bytes": 12807982,
+          "file": "tokenizer.json",
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+        },
+        {
+          "bytes": 16710,
+          "file": "tokenizer_config.json",
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        }
+      ]
+    }
+  },
+  "limits": {
+    "max_cases": 128,
+    "max_payload_bytes": 4194304,
+    "max_sample_values": 256,
+    "max_steps": 128,
+    "max_top_k": 32
+  },
+  "oracle_kind": "independent_source",
+  "payload": {
+    "bytes": 2863,
+    "file": "payload.jsonl",
+    "record_count": 3,
+    "sha256": "7055590cc6f5d068d06edfa85a0464b38af42c7adb6eabfa219444cabd41d8a5"
+  },
+  "promotion_eligible": true,
+  "runtime": {
+    "device": "cpu",
+    "dtype": "bfloat16",
+    "low_cpu_mem_usage": false,
+    "low_cpu_mem_usage_blocker": "accelerate package is unavailable in the installed environment",
+    "preflight": {
+      "checkpoint_bytes": 19306310880,
+      "headroom_factor": 1.5,
+      "mem_available_bytes": 62916956160,
+      "mem_total_bytes": 117933965312,
+      "required_headroom_bytes": 28959466320,
+      "status": "passed"
+    },
+    "python": "3.12.3",
+    "run": {
+      "elapsed_seconds": 15.716299368068576,
+      "rows": 3
+    },
+    "runtime": "transformers.AutoModelForCausalLM",
+    "safetensors": "0.8.0",
+    "torch": "2.12.0+cpu",
+    "transformers": "5.12.1"
+  },
+  "schema_version": "ullm.qwen35_aq4_source_oracle.v1",
+  "status": "available"
+}

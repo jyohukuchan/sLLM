@@ -1,0 +1,23 @@
+{
+  "device": "cpu",
+  "dtype": "bfloat16",
+  "low_cpu_mem_usage": false,
+  "low_cpu_mem_usage_blocker": "accelerate package is unavailable in the installed environment",
+  "preflight": {
+    "checkpoint_bytes": 19306310880,
+    "headroom_factor": 1.5,
+    "mem_available_bytes": 62916956160,
+    "mem_total_bytes": 117933965312,
+    "required_headroom_bytes": 28959466320,
+    "status": "passed"
+  },
+  "python": "3.12.3",
+  "run": {
+    "elapsed_seconds": 15.716299368068576,
+    "rows": 3
+  },
+  "runtime": "transformers.AutoModelForCausalLM",
+  "safetensors": "0.8.0",
+  "torch": "2.12.0+cpu",
+  "transformers": "5.12.1"
+}

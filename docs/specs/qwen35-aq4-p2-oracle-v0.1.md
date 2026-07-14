@@ -19,7 +19,9 @@ source/path manifestにも `promotion_eligible` を持たせ、`evidence_class=s
 
 ## 次の行動
 
-外部source runnerは、固定したQwen3.5-9B BF16/F32 checkpoint、tokenizer、revisionをidentityとして記録し、各case/stepのbounded payloadをJSONLで供給する。AQ4 path runnerは同じcaseを同一artifact identityで供給する。両方の独立payloadが揃うまでP2 candidateはpromotion不可とする。
+`export-qwen35-aq4-source-oracle.py` は、installed official `transformers` によるCPU-only BF16 source forwardを実行する。`local_files_only`、1 process、`inference_mode`、caseごとのcache解放、final tokenの1行logitだけを使う。CPU preflightはcheckpoint bytesの1.5倍をMemAvailableから要求し、失敗時は実行しない。`accelerate` がないため現環境では `low_cpu_mem_usage=False` を記録するが、full logit matrixを保存しない。
+
+実行済みsource oracleは `benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-oracle-v1/` にあり、独立validatorとSHA256SUMSを通過している。Qwen3.5-9B BF16 source、revision、tokenizer、3 bounded rows、exact greedy/top-kを記録する。AQ4 path oracleは同じcaseを同一artifact identityで供給する。両方の独立payloadが揃うまでP2 candidateはpromotion不可とする。
 
 ### CLI bridge
 
