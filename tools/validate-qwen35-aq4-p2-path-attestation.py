@@ -30,11 +30,174 @@ def _load(name: str, filename: str):
 
 
 ORACLE = _load("qwen35_aq4_p2_oracle_attestation", "qwen35_aq4_p2_oracle.py")
-VALIDATE = _load("validate_qwen35_aq4_p2_oracle_attestation", "validate-qwen35-aq4-p2-oracle.py")
+
+REQUIRED_HIP_KERNEL_ENV = (
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+)
 
 
 def _sha(path: Path) -> str:
     return ORACLE.sha256_file(path)
+
+
+def _sha_relaxed(path: Path) -> str:
+    """Hash an active service binary without requiring its install-time nlink."""
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ORACLE.OracleError(f"cannot stat active service binary: {path}") from error
+    if path.is_symlink() or not path.is_file():
+        raise ORACLE.OracleError(f"active service binary is not a regular non-symlink file: {path}")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as error:
+        raise ORACLE.OracleError(f"cannot read active service binary: {path}") from error
+    if path.lstat() != info:
+        raise ORACLE.OracleError(f"active service binary changed while reading: {path}")
+    return digest.hexdigest()
+
+
+def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        actual = set(value) if isinstance(value, dict) else set()
+        raise ORACLE.OracleError(f"{label} keys differ: missing={sorted(fields - actual)} extra={sorted(actual - fields)}")
+    return value
+
+
+def _validate_sha256s(root: Path, manifest: dict[str, Any]) -> None:
+    sums = root / "SHA256SUMS"
+    if sums.is_symlink() or not sums.is_file():
+        raise ORACLE.OracleError("corrected path SHA256SUMS is not a regular file")
+    expected_names = {"manifest.json", manifest["payload"]["file"], "runtime.json"}
+    entries: dict[str, str] = {}
+    for number, line in enumerate(sums.read_text(encoding="ascii").splitlines(), 1):
+        parts = line.split("  ")
+        if len(parts) != 2 or parts[1] in entries:
+            raise ORACLE.OracleError(f"corrected path SHA256SUMS line {number} is invalid")
+        ORACLE.ensure_sha256(parts[0], f"corrected path SHA256SUMS line {number}")
+        entries[parts[1]] = parts[0]
+    if set(entries) != expected_names:
+        raise ORACLE.OracleError("corrected path SHA256SUMS coverage differs")
+    actual_names = {path.name for path in root.iterdir() if not path.is_symlink() and path.is_file()}
+    if actual_names != expected_names | {"SHA256SUMS"}:
+        raise ORACLE.OracleError("corrected path root file coverage differs")
+    for name, digest in entries.items():
+        path = root / name
+        if _sha(path) != digest:
+            raise ORACLE.OracleError(f"corrected path SHA256SUMS digest differs: {name}")
+
+
+def _validate_corrected_path(root: Path) -> dict[str, Any]:
+    """Validate the v2 package-bound path contract without the mutable parent validator."""
+    manifest = ORACLE.validate_manifest(root, expected_kind="path")
+    runtime = _load_json(root / "runtime.json")
+    runtime = _exact(
+        runtime,
+        {
+            "all_m1", "artifact_manifest", "artifact_manifest_sha256", "binary", "device_index", "device_kind",
+            "dtype", "evidence_scope", "execution_environment", "model_loads", "package_dir", "package_manifest",
+            "package_manifest_sha256", "run", "runtime", "schema_version", "served_model_guard", "source_replay",
+            "visible_devices",
+        },
+        "corrected path runtime",
+    )
+    if runtime["schema_version"] != "ullm.qwen35_aq4_path_oracle_runtime.v1" or runtime["runtime"] != "ullm-aq4-p2-path-oracle":
+        raise ORACLE.OracleError("corrected path runtime schema differs")
+    if runtime["evidence_scope"] != "production_gpu" or runtime["device_kind"] != "gpu" or runtime["device_index"] != 1 or runtime["visible_devices"] != "1" or runtime["dtype"] != "f32" or runtime["all_m1"] is not True or runtime["model_loads"] != 1:
+        raise ORACLE.OracleError("corrected path runtime GPU contract differs")
+    package_dir = Path(runtime["package_dir"])
+    package_path = Path(runtime["package_manifest"])
+    if not package_dir.is_absolute() or package_dir.is_symlink() or not package_dir.is_dir() or not package_path.is_absolute() or package_path.is_symlink() or not package_path.is_file():
+        raise ORACLE.OracleError("corrected path package identity paths are invalid")
+    try:
+        package_path.resolve().relative_to(package_dir.resolve())
+    except ValueError as error:
+        raise ORACLE.OracleError("corrected path package manifest escapes package directory") from error
+    package_sha = ORACLE.ensure_sha256(runtime["package_manifest_sha256"], "corrected path package hash")
+    artifact = manifest["identity"]["artifact"]
+    if package_sha != artifact["package_manifest_sha256"] or _sha(package_path) != package_sha:
+        raise ORACLE.OracleError("corrected path package manifest hash differs")
+    artifact_binding = artifact.get("artifact_binding_kind")
+    if artifact_binding != "package_manifest" or artifact.get("artifact_manifest_sha256") is not None or runtime["artifact_manifest"] is not None or runtime["artifact_manifest_sha256"] is not None:
+        raise ORACLE.OracleError("corrected path package-only artifact nullability differs")
+
+    guard = _exact(runtime["served_model_guard"], {"evidence_scope", "manifest", "manifest_sha256", "package", "public", "required_environment", "required_environment_sha256", "worker"}, "corrected path served guard")
+    if guard["evidence_scope"] != runtime["evidence_scope"] or tuple(guard["required_environment"]) != REQUIRED_HIP_KERNEL_ENV or guard["required_environment_sha256"] != ORACLE.canonical_sha256(list(REQUIRED_HIP_KERNEL_ENV)):
+        raise ORACLE.OracleError("corrected path served guard environment differs")
+    expected_environment = {name: "1" for name in REQUIRED_HIP_KERNEL_ENV} | {"HIP_VISIBLE_DEVICES": "1", "ULLM_HIP_VISIBLE_DEVICES": "1"}
+    if runtime["execution_environment"] != expected_environment:
+        raise ORACLE.OracleError("corrected path execution environment differs")
+    served_path = Path(guard["manifest"])
+    if not served_path.is_absolute() or served_path.is_symlink() or not served_path.is_file() or _sha_relaxed(served_path) != guard["manifest_sha256"]:
+        raise ORACLE.OracleError("corrected path served-model manifest hash differs")
+    if served_path.resolve() != Path(artifact["served_model_manifest_path"]).resolve() or guard["manifest_sha256"] != artifact["served_model_manifest_sha256"]:
+        raise ORACLE.OracleError("corrected path served-model manifest binding differs")
+    served = _load_json(served_path)
+    if served.get("schema_version") != "ullm.served_model.v2" or not isinstance(served.get("product"), dict):
+        raise ORACLE.OracleError("active served-model schema is invalid")
+    product = served["product"]
+    active_package = product.get("package")
+    if not isinstance(active_package, dict) or product.get("artifact") is not None:
+        raise ORACLE.OracleError("active served-model package-only identity differs")
+    public = served.get("public")
+    if not isinstance(public, dict) or not isinstance(public.get("upstream_id"), str) or not isinstance(public.get("revision"), str):
+        raise ORACLE.OracleError("active served public identity is incomplete")
+    if public["upstream_id"] != manifest["identity"]["model_id"] or _exact(guard["public"], {"model_id", "model_revision"}, "corrected path public binding") != {"model_id": public["upstream_id"], "model_revision": public["revision"]}:
+        raise ORACLE.OracleError("corrected path public model identity differs")
+    active_worker = served.get("worker")
+    if not isinstance(active_worker, dict) or not isinstance(active_worker.get("binary"), str) or not isinstance(active_worker.get("binary_sha256"), str):
+        raise ORACLE.OracleError("active served worker identity is incomplete")
+    worker_binding = _exact(guard["worker"], {"binary_path", "binary_sha256", "device_architecture", "execution_profile"}, "corrected path worker binding")
+    worker_path = Path(active_worker["binary"])
+    worker_sha = ORACLE.ensure_sha256(active_worker["binary_sha256"], "active worker hash")
+    if worker_path.is_symlink() or not worker_path.is_file() or _sha_relaxed(worker_path) != worker_sha or worker_binding["binary_path"] != str(worker_path.resolve()) or worker_binding["binary_sha256"] != worker_sha or worker_binding["device_architecture"] != "gfx1201" or worker_binding["execution_profile"] != "rdna4_aq4_resident":
+        raise ORACLE.OracleError("corrected path active worker identity differs")
+    package_binding = _exact(guard["package"], {"manifest_path", "manifest_sha256", "product_root"}, "corrected path package binding")
+    product_root = Path(product.get("root", ""))
+    active_package_path = product_root / str(active_package.get("manifest_path", ""))
+    if not product_root.is_absolute() or product_root.resolve() != package_dir.resolve().parent or Path(package_binding["manifest_path"]).resolve() != package_path.resolve() or package_binding["manifest_sha256"] != package_sha or Path(package_binding["product_root"]).resolve() != product_root.resolve() or active_package_path.resolve() != package_path.resolve() or active_package.get("manifest_sha256") != package_sha:
+        raise ORACLE.OracleError("corrected path served package binding differs")
+    binary = _exact(runtime["binary"], {"path", "sha256"}, "corrected path binary")
+    binary_path = Path(binary["path"])
+    if not binary_path.is_absolute() or binary_path.is_symlink() or not binary_path.is_file() or binary_path.stat().st_nlink != 1 or binary_path.stat().st_mode & 0o002 or _sha(binary_path) != ORACLE.ensure_sha256(binary["sha256"], "corrected path binary hash"):
+        raise ORACLE.OracleError("corrected path binary identity differs")
+    run = _exact(runtime["run"], {"elapsed_seconds", "row_count"}, "corrected path run")
+    if not isinstance(run["row_count"], int) or run["row_count"] != manifest["payload"]["record_count"] or not isinstance(run["elapsed_seconds"], (int, float)) or run["elapsed_seconds"] <= 0:
+        raise ORACLE.OracleError("corrected path run summary differs")
+    _validate_sha256s(root, manifest)
+    return {"schema_version": "ullm.qwen35_aq4_p2_oracle_validator.v1", "status": "valid", "oracle_kind": manifest["oracle_kind"], "manifest_sha256": _sha(root / "manifest.json"), "payload_sha256": manifest["payload"]["sha256"], "record_count": manifest["payload"]["record_count"], "usable_as_path_evidence": manifest["usable_as_path_evidence"], "promotion_eligible": False, "blockers": []}
 
 
 def _rust_replay_sha(token_ids: list[int]) -> str:
@@ -63,6 +226,78 @@ def _validate_raw_root(raw_root: Path, expected: dict[str, str]) -> None:
         path = raw_root / name
         if not path.is_file() or path.is_symlink() or _sha(path) != digest:
             raise ORACLE.OracleError(f"raw evidence hash differs: {name}")
+
+
+def _validate_binary_binding(attestation: dict[str, Any], raw_root: Path) -> dict[str, Any]:
+    execution = attestation.get("execution")
+    if not isinstance(execution, dict):
+        raise ORACLE.OracleError("attestation execution binding is missing")
+    executed_path_value = execution.get("executed_path")
+    executed_sha = execution.get("executed_binary_sha256")
+    copy_path_value = execution.get("evidence_copy_path")
+    copy_sha = execution.get("evidence_copy_sha256")
+    if not all(isinstance(value, str) and value for value in (executed_path_value, executed_sha, copy_path_value, copy_sha)):
+        raise ORACLE.OracleError("attestation must bind executed and detached binary paths and hashes")
+
+    command = _load_json(raw_root / "command.json")
+    command_binary = command.get("binary")
+    if not isinstance(command_binary, str) or not command_binary:
+        raise ORACLE.OracleError("raw command evidence has no binary path")
+    executed_path = Path(executed_path_value)
+    expected_executed_path = (ROOT / command_binary).resolve()
+    if executed_path.is_symlink() or not executed_path.is_file() or executed_path.resolve() != expected_executed_path:
+        raise ORACLE.OracleError("executed_path does not bind the raw command binary")
+    observed_executed_sha = _sha_relaxed(executed_path)
+    if observed_executed_sha != executed_sha:
+        raise ORACLE.OracleError("executed binary SHA256 differs from attestation")
+
+    copy_path = Path(copy_path_value)
+    if copy_path.is_absolute():
+        raise ORACLE.OracleError("evidence_copy_path must be relative to the raw evidence root")
+    evidence_copy = (raw_root / copy_path).resolve()
+    raw_resolved = raw_root.resolve()
+    if not evidence_copy.is_relative_to(raw_resolved) or evidence_copy.is_symlink() or not evidence_copy.is_file():
+        raise ORACLE.OracleError("evidence_copy_path is not a regular file in the raw evidence root")
+    stat_result = evidence_copy.stat()
+    if stat_result.st_nlink != 1:
+        raise ORACLE.OracleError("evidence binary must be detached with nlink=1")
+    if stat_result.st_mode & 0o002:
+        raise ORACLE.OracleError("evidence binary must not be world-writable")
+    observed_copy_sha = _sha(evidence_copy)
+    if observed_copy_sha != copy_sha or observed_copy_sha != observed_executed_sha:
+        raise ORACLE.OracleError("detached evidence binary SHA256 does not equal executed binary SHA256")
+    worker_executed_value = execution.get("worker_executed_path")
+    worker_executed_sha = execution.get("worker_executed_sha256")
+    worker_copy_value = execution.get("worker_evidence_copy_path")
+    worker_copy_sha = execution.get("worker_evidence_copy_sha256")
+    if not all(isinstance(value, str) and value for value in (worker_executed_value, worker_executed_sha, worker_copy_value, worker_copy_sha)):
+        raise ORACLE.OracleError("attestation must bind active and detached worker paths and hashes")
+    worker_path = Path(worker_executed_value)
+    if worker_path.is_symlink() or not worker_path.is_file() or _sha_relaxed(worker_path) != worker_executed_sha:
+        raise ORACLE.OracleError("active served worker SHA256 differs from attestation")
+    worker_copy_relative = Path(worker_copy_value)
+    if worker_copy_relative.is_absolute():
+        raise ORACLE.OracleError("worker_evidence_copy_path must be relative to the raw evidence root")
+    worker_copy = (raw_root / worker_copy_relative).resolve()
+    if not worker_copy.is_relative_to(raw_resolved) or worker_copy.is_symlink() or not worker_copy.is_file():
+        raise ORACLE.OracleError("worker evidence copy is not a regular file in the raw evidence root")
+    worker_stat = worker_copy.stat()
+    if worker_stat.st_nlink != 1 or worker_stat.st_mode & 0o002:
+        raise ORACLE.OracleError("worker evidence copy must be detached and not world-writable")
+    if _sha(worker_copy) != worker_copy_sha or worker_copy_sha != worker_executed_sha:
+        raise ORACLE.OracleError("detached worker evidence SHA256 does not equal active worker SHA256")
+    return {
+        "executed_path": str(executed_path.resolve()),
+        "evidence_copy_path": str(evidence_copy),
+        "sha256": observed_executed_sha,
+        "evidence_copy_nlink": stat_result.st_nlink,
+        "evidence_copy_mode": format(stat_result.st_mode & 0o777, "04o"),
+        "worker_executed_path": str(worker_path.resolve()),
+        "worker_evidence_copy_path": str(worker_copy),
+        "worker_sha256": worker_executed_sha,
+        "worker_evidence_copy_nlink": worker_stat.st_nlink,
+        "worker_evidence_copy_mode": format(worker_stat.st_mode & 0o777, "04o"),
+    }
 
 
 def _validate_device(raw_root: Path, command: dict[str, Any]) -> dict[str, Any]:
@@ -126,25 +361,24 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("root") != args.raw_root.name:
         raise ORACLE.OracleError("attestation raw evidence root differs")
     _validate_raw_root(args.raw_root, raw["files"])
+    binary = _validate_binary_binding(attestation, args.raw_root)
     device = _validate_device(args.raw_root, attestation["execution"])
-    try:
-        base_report = VALIDATE.validate_oracle(args.base_path, "path")
-    except ORACLE.OracleError as error:
-        # v1 is intentionally retained as immutable raw evidence. Its old
-        # runtime sidecar cannot satisfy the corrected production runtime schema.
-        base_manifest = ORACLE.validate_manifest(args.base_path, expected_kind="path")
-        base_report = {
-            "schema_version": "ullm.qwen35_aq4_p2_oracle_validator.v1",
-            "status": "valid",
-            "oracle_kind": base_manifest["oracle_kind"],
-            "manifest_sha256": _sha(args.base_path / "manifest.json"),
-            "payload_sha256": base_manifest["payload"]["sha256"],
-            "record_count": base_manifest["payload"]["record_count"],
-            "usable_as_path_evidence": False,
-            "promotion_eligible": False,
-            "blockers": [f"metadata_invalid: {error}"],
-        }
-    path_report = VALIDATE.validate_oracle(args.path, "path")
+    # v1 is intentionally retained as immutable raw evidence.  Validate its
+    # manifest contract directly and record its legacy CPU metadata blocker;
+    # do not delegate to the mutable parent validator.
+    base_manifest = ORACLE.validate_manifest(args.base_path, expected_kind="path")
+    base_report = {
+        "schema_version": "ullm.qwen35_aq4_p2_oracle_validator.v1",
+        "status": "valid",
+        "oracle_kind": base_manifest["oracle_kind"],
+        "manifest_sha256": _sha(args.base_path / "manifest.json"),
+        "payload_sha256": base_manifest["payload"]["sha256"],
+        "record_count": base_manifest["payload"]["record_count"],
+        "usable_as_path_evidence": False,
+        "promotion_eligible": False,
+        "blockers": ["metadata_invalid: runtime.json declared cpu for the GPU execution"],
+    }
+    path_report = _validate_corrected_path(args.path)
     if base_report["manifest_sha256"] != attestation["base_path"]["manifest_sha256"] or base_report["payload_sha256"] != attestation["base_path"]["payload_sha256"] or _sha(args.base_path / "runtime.json") != attestation["base_path"]["runtime_sha256"]:
         raise ORACLE.OracleError("base path oracle hash binding differs")
     if path_report["manifest_sha256"] != attestation["corrected_path"]["manifest_sha256"] or path_report["payload_sha256"] != attestation["corrected_path"]["payload_sha256"] or _sha(args.path / "runtime.json") != attestation["corrected_path"]["runtime_sha256"]:
@@ -175,7 +409,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         blockers.append("source_comparison_bounded_shape_failed")
     blockers.append("policy_missing: no hash-bound AQ4 P2 bounded relative-L2/cosine/top-k policy")
     blockers.append("path_regression_requires_exact_same_artifact_all_m1_contract")
-    return {"schema_version": "ullm.qwen35_aq4_path_oracle_attestation_validator.v1", "status": "valid_with_blockers", "metadata_valid": not base_metadata_invalid, "base_path": base_report, "corrected_path": path_report, "execution": {"device": device, "service_recovery": attestation["execution"]["service_recovery"]}, "step_alignment": replay, "source_comparison": comparison, "path_regression": {"status": "diagnostic_only", "all_m1": True, "exact_greedy": comparison["greedy_token_exact"], "exact_topk": comparison["topk_exact"]}, "policy_audit": policy, "blockers": blockers}
+    return {"schema_version": "ullm.qwen35_aq4_path_oracle_attestation_validator.v1", "status": "valid_with_blockers", "metadata_valid": not base_metadata_invalid, "base_path": base_report, "corrected_path": path_report, "execution": {"device": device, "binary": binary, "service_recovery": attestation["execution"]["service_recovery"]}, "step_alignment": replay, "source_comparison": comparison, "path_regression": {"status": "diagnostic_only", "all_m1": True, "exact_greedy": comparison["greedy_token_exact"], "exact_topk": comparison["topk_exact"]}, "policy_audit": policy, "blockers": blockers}
 
 
 def main(argv: list[str] | None = None) -> int:

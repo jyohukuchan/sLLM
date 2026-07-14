@@ -11,9 +11,17 @@
     "root": "path-oracle-v2",
     "manifest_sha256": "2197a7e29743f0f1cd6d42f1a832c1baf9d58acb8c8bf12d71388ad7bbbf0773",
     "payload_sha256": "3dee780aa6d2383bd75687dd3dd4f6b36f1680dbfa49c2310c6d240e6e0d74f1",
-    "runtime_sha256": "89fbb0826ab30916396c007f0207324780f8032b7d40804d00d91756ca327d1d"
+    "runtime_sha256": "927e86657d7d8bcddea873cab3cfaac00ee91ea6c5bd7a2c1bd578e18376842b"
   },
   "execution": {
+    "executed_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/debug/ullm-aq4-p2-path-oracle",
+    "executed_binary_sha256": "2d810ef47da1646941a4f389b3d14557a274b972a7e1501c6f2ba1dd7d2cd998",
+    "evidence_copy_path": "path-oracle-binary",
+    "evidence_copy_sha256": "2d810ef47da1646941a4f389b3d14557a274b972a7e1501c6f2ba1dd7d2cd998",
+    "worker_executed_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+    "worker_executed_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "worker_evidence_copy_path": "worker-binary",
+    "worker_evidence_copy_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
     "device_index": 1,
     "physical_gpu_index": 2,
     "gfx_architecture": "gfx1201",
@@ -49,13 +57,15 @@
   "raw_evidence": {
     "root": "path-oracle-gpu-run-v1",
     "files": {
-      "README.md": "5312bd2b83ffe063dda4b8a36a37d583a74c7c6d8adc477aa2ed4a36071fdaa7",
+      "README.md": "3195302e76c85380a4ecdcd6454be6d18aadeb4a5a501766d584bbc3b51395f4",
       "baseline.txt": "8295b6e4b460cf2d7c0bd424c53825741b43fcf1c09c040d16d7f8d875caf74e",
       "devices.txt": "9937ed53d43989568d247a8edda82a64a0028f529a5076033bd567a76f1a587f",
       "monitor.log": "ae53a518e221f344d13787dc5c79889a8788a9e8fda186956f5691ecb033c75a",
       "run.log": "576a2f5b4d99587b3da5347c0be93bbc74d017a34ba2601d38f4225c932b53fb",
       "command.json": "5ecd8fb682b0cf79b05cc343d600904977757bcff6d366b2a001e4ad25e570f1",
-      "SHA256SUMS": "f10dcf1e27a7597f9c3a65818a519cc2d352297b20dc2ff5a96b5f806c25de51"
+      "path-oracle-binary": "2d810ef47da1646941a4f389b3d14557a274b972a7e1501c6f2ba1dd7d2cd998",
+      "worker-binary": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+      "SHA256SUMS": "592706937867eaae4c1c495788c72b252a5b5704dfd3d3b791c29ce27a17353c"
     }
   },
   "resource": {

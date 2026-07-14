@@ -8,3 +8,9 @@ device. The exporter completed model execution and wrote the path payload; the
 first link attempt failed on a diagnostic sample-shape exception before the
 comparison tolerance fix. The later link was generated from the same immutable
 payload, without another model run.
+
+`path-oracle-binary` is a detached (`nlink=1`, mode `0755`) copy of the executed
+path-oracle binary. `worker-binary` is the corresponding detached copy of the
+resident worker; both copies are hash-bound to their active execution paths in
+the attestation, while the original active worker installation remains read-only
+evidence.
