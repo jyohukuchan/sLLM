@@ -78,6 +78,7 @@ def case_hash(case: dict[str, Any]) -> str:
 
 def append_prefill(
     target: list[dict[str, Any]], stage: dict[str, Any], device: dict[str, Any],
+    control_by_id: dict[str, dict[str, Any]], sampling: Any,
     scope: str, phase: str, mode: str, prompts: list[int], prefixes: list[int],
 ) -> None:
     prefill = stage["prefill"]
@@ -88,27 +89,28 @@ def append_prefill(
                 raise ExpansionError(f"cached-prefix context exceeds 4096: {stage['stage_id']} prefix={prefix} prompt={prompt}")
             for requested_m in prefill["requested_m"]:
                 for control_id in controls(stage, device_id):
+                    control = control_by_id[control_id]
                     prefix_label = f"-prefix{prefix}" if phase == "cached_prefix_prefill" else ""
                     case_id = f"p2-{stage['stage_id']}-{scope}-{phase}-{mode}{prefix_label}-n{prompt}-m{requested_m}-{device_id}-{control_id}"
                     value = {
-                        "case_id": safe_id(case_id, "case_id"), "fixture_id": safe_id(case_id, "case_id"), "case_sha256": None,
+                        "case_id": safe_id(case_id, "case_id"), "fixture_id": safe_id(stage.get("fixture_id", case_id), "fixture_id"), "case_sha256": None,
                         "stage_id": stage["stage_id"], "stage_order": stage["order"], "scope": scope,
                         "phase": phase, "mode": mode, "baseline_mode": mode,
                         "prompt_tokens": prompt, "cached_prefix_tokens": prefix,
-                        "context_tokens": prefix + prompt, "decode_start_tokens": 0,
+                        "context_tokens": prefix + prompt, "decode_start_tokens": prefix + prompt if prefill.get("generated_tokens", 0) else 0,
                         "prefill_requested_m": requested_m,
                         "resolved_m": 1 if mode == "all_m1" else requested_m,
-                        "decode_request_count": 0, "generated_tokens": 0,
-                        "device": {key: device.get(key) for key in ("device_id", "backend", "gpu_architecture", "gpu_name")},
+                        "request_count": 1, "decode_request_count": 0, "generated_tokens": prefill.get("generated_tokens", 0),
+                        "device": {key: device.get(key) for key in ("device_id", "backend", "name", "architecture", "runtime_device_index")},
                         "control_id": control_id,
-                        "format_id": "AQ4_0" if control_id == "aq4_0_target" else "SQ8_0" if control_id == "sq8_0_cross_format" else "REFERENCE",
+                        "control": control.get("trace_control", control), "sampling": stage.get("sampling", sampling), "format_id": control["format_id"], "implementation_id": control["implementation_id"],
                         "path_oracle_case_id": None, "path_oracle_result_sha256": None,
                     }
                     value["case_sha256"] = case_hash(value)
                     target.append(value)
 
 
-def expand_stage(stage: dict[str, Any], device: dict[str, Any]) -> list[dict[str, Any]]:
+def expand_stage(stage: dict[str, Any], device: dict[str, Any], control_by_id: dict[str, dict[str, Any]], sampling: Any) -> list[dict[str, Any]]:
     stage_id = safe_id(stage.get("stage_id"), "stage_id")
     device_id = safe_id(device.get("device_id"), "device_id")
     stage["stage_id"] = stage_id
@@ -135,14 +137,14 @@ def expand_stage(stage: dict[str, Any], device: dict[str, Any]) -> list[dict[str
         scope_prompts = prefill.get("production_server_prompt_tokens", []) if scope == "production_server" else prompts
         if not scope_prompts:
             continue
-        append_prefill(result, stage, device, scope, "cold_prefill", "all_m1", scope_prompts, [0])
-        append_prefill(result, stage, device, scope, "cold_prefill", "cold_batched", scope_prompts, [0])
+        append_prefill(result, stage, device, control_by_id, sampling, scope, "cold_prefill", "all_m1", scope_prompts, [0])
+        append_prefill(result, stage, device, control_by_id, sampling, scope, "cold_prefill", "cold_batched", scope_prompts, [0])
         if cached_enabled:
             scope_cached = [item for item in cached_prompts if item in scope_prompts]
             if not scope_cached:
                 raise ExpansionError(f"{stage_id}.{scope} cached-prefix axis is empty")
-            append_prefill(result, stage, device, scope, "cached_prefix_prefill", "all_m1", scope_cached, cached_prefixes)
-            append_prefill(result, stage, device, scope, "cached_prefix_prefill", "cached_prefix_chunked", scope_cached, cached_prefixes)
+            append_prefill(result, stage, device, control_by_id, sampling, scope, "cached_prefix_prefill", "all_m1", scope_cached, cached_prefixes)
+            append_prefill(result, stage, device, control_by_id, sampling, scope, "cached_prefix_prefill", "cached_prefix_chunked", scope_cached, cached_prefixes)
     contexts = nonempty_unique_ints(decode.get("start_context_tokens"), f"{stage_id}.decode contexts")
     for scope in decode.get("scopes", []):
         scope_contexts = decode.get("production_server_start_context_tokens", []) if scope == "production_server" else contexts
@@ -150,17 +152,18 @@ def expand_stage(stage: dict[str, Any], device: dict[str, Any]) -> list[dict[str
             if context + decode.get("generated_tokens", 0) > 4096:
                 raise ExpansionError(f"decode context exceeds 4096: {stage_id} context={context}")
             for control_id in controls(stage, device_id):
+                control = control_by_id[control_id]
                 case_id = f"p2-{stage_id}-{scope}-decode-n{context}-requests{decode.get('request_count')}-{device_id}-{control_id}"
                 value = {
-                    "case_id": safe_id(case_id, "case_id"), "fixture_id": safe_id(case_id, "case_id"), "case_sha256": None,
+                    "case_id": safe_id(case_id, "case_id"), "fixture_id": safe_id(stage.get("fixture_id", case_id), "fixture_id"), "case_sha256": None,
                     "stage_id": stage_id, "stage_order": stage["order"], "scope": scope,
                     "phase": "decode", "mode": "decode", "baseline_mode": "decode",
-                    "prompt_tokens": 0, "cached_prefix_tokens": 0, "context_tokens": context,
+                    "prompt_tokens": context, "cached_prefix_tokens": 0, "context_tokens": context,
                     "decode_start_tokens": context, "prefill_requested_m": 0, "resolved_m": 1,
-                    "decode_request_count": decode.get("request_count"), "generated_tokens": decode.get("generated_tokens"),
-                    "device": {key: device.get(key) for key in ("device_id", "backend", "gpu_architecture", "gpu_name")},
+                    "request_count": decode.get("request_count"), "decode_request_count": decode.get("request_count"), "generated_tokens": decode.get("generated_tokens"),
+                    "device": {key: device.get(key) for key in ("device_id", "backend", "name", "architecture", "runtime_device_index")},
                     "control_id": control_id,
-                    "format_id": "AQ4_0" if control_id == "aq4_0_target" else "SQ8_0" if control_id == "sq8_0_cross_format" else "REFERENCE",
+                    "control": control.get("trace_control", control), "sampling": stage.get("sampling", sampling), "format_id": control["format_id"], "implementation_id": control["implementation_id"],
                     "path_oracle_case_id": None, "path_oracle_result_sha256": None,
                 }
                 value["case_sha256"] = case_hash(value)
@@ -176,6 +179,10 @@ def expand(manifest: dict[str, Any], manifest_sha256: str) -> dict[str, Any]:
     if not isinstance(stages, list) or not isinstance(devices, list):
         raise ExpansionError("manifest stages/devices are missing")
     device_by_id = {safe_id(item.get("device_id"), "device_id"): item for item in devices}
+    controls_axis = manifest.get("axes", {}).get("controls")
+    if not isinstance(controls_axis, list): raise ExpansionError("control axis is missing")
+    control_by_id = {safe_id(item.get("control_id"), "control_id"): item for item in controls_axis}
+    sampling = manifest.get("identity_binding", {}).get("sampling")
     cases: list[dict[str, Any]] = []
     stage_counts: dict[str, int] = {}
     for stage in sorted(stages, key=lambda item: item.get("order", 0)):
@@ -183,7 +190,7 @@ def expand(manifest: dict[str, Any], manifest_sha256: str) -> dict[str, Any]:
         for device_id in stage.get("devices", []):
             if device_id not in device_by_id:
                 raise ExpansionError(f"unknown device: {device_id}")
-            cases.extend(expand_stage(stage, device_by_id[device_id]))
+            cases.extend(expand_stage(stage, device_by_id[device_id], control_by_id, sampling))
         actual = len(cases) - before
         expected = stage.get("expected_case_count", {}).get("total")
         if actual != expected:
@@ -192,6 +199,11 @@ def expand(manifest: dict[str, Any], manifest_sha256: str) -> dict[str, Any]:
     cases.sort(key=lambda item: item["case_id"])
     if len({item["case_id"] for item in cases}) != len(cases):
         raise ExpansionError("duplicate expanded case id")
+    for item in cases:
+        device = item.get("device", {})
+        required = (item.get("implementation_id"), item.get("request_count"), device.get("backend"), device.get("name"), device.get("architecture"), device.get("runtime_device_index"))
+        if any(value is None for value in required): raise ExpansionError(f"case execution identity is incomplete: {item.get('case_id')}")
+        if item.get("scope") == "production_server" and (item.get("sampling") is None or item.get("control") is None): raise ExpansionError(f"production case sampling/control is incomplete: {item.get('case_id')}")
     oracle_index = {
         (item["stage_id"], item["scope"], item["phase"], item["cached_prefix_tokens"], item["prompt_tokens"], item["prefill_requested_m"], item["device"]["device_id"], item["control_id"]): item
         for item in cases if item["mode"] == "all_m1" and item["phase"] != "decode"

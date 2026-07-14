@@ -79,6 +79,9 @@
       {
         "device_id": "cpu-reference",
         "backend": "cpu",
+        "name": "CPU reference",
+        "architecture": "host",
+        "runtime_device_index": 0,
         "gpu_architecture": null,
         "gpu_name": null,
         "required": true
@@ -86,6 +89,9 @@
       {
         "device_id": "r9700-rdna4",
         "backend": "hip",
+        "name": "Radeon AI PRO R9700",
+        "architecture": "RDNA4",
+        "runtime_device_index": 0,
         "gpu_architecture": "RDNA4",
         "gpu_name": "Radeon AI PRO R9700",
         "required": true
@@ -93,6 +99,9 @@
       {
         "device_id": "v620-rdna2",
         "backend": "hip",
+        "name": "Radeon PRO V620",
+        "architecture": "RDNA2",
+        "runtime_device_index": 1,
         "gpu_architecture": "RDNA2",
         "gpu_name": "Radeon PRO V620",
         "required": false,
@@ -104,12 +113,14 @@
         "control_id": "aq4_0_target",
         "role": "target",
         "format_id": "AQ4_0",
+        "implementation_id": "qwen35_aq4_0_v1",
         "promotion_eligible": true
       },
       {
         "control_id": "sq8_0_cross_format",
         "role": "cross_format_control",
         "format_id": "SQ8_0",
+        "implementation_id": "qwen35_sq8_0_control_v1",
         "promotion_eligible": false,
         "required_for_aq4_comparison": true
       },
@@ -117,6 +128,7 @@
         "control_id": "reference_source_oracle",
         "role": "independent_reference",
         "format_id": "REFERENCE",
+        "implementation_id": "qwen35_reference_source_oracle_v1",
         "promotion_eligible": false,
         "required_for_aq4_comparison": true
       }

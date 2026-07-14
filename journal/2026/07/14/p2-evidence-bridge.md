@@ -14,6 +14,7 @@
 - negative testsを12件へ拡張した。65MiB sparse package、1/6,214 partial matrix、dummy trace、cached state mismatch、lock競合、foreign GPU process、32/33-byte出力境界などを含み、全件成功した。P1 trace tests 7件も成功した。
 - 再QAで、trace JSON内の64桁文字列だけを独立検証として扱える欠陥が見つかった。builderとfinal validatorの両方からP1 strict validatorを再実行し、trace manifest、executor record、binding、detached report、aggregation source tracesの実体・run-root・SHA-256・scope・status・promotionを照合するよう修正した。`report_sha256="x"` と64個の`0`を使うbuilder/final validator negativeを追加し、専用testは14件になった。
 - 次のQAで、strict-validなP1 trace bundleを別P2 case/rawへ流用できる欠陥が見つかった。各caseの`fixture_id = case_id`を固定し、rawへcase contractとtrace path/hash/trace_idを保存する。builderとfinal validatorはrequest summary、phase kind/mode、token/context/generated count、requested/resolved/actual width、device、model/served manifest/worker/package/artifact identity、sampling/control、per-sample timing aggregation、terminal auditを完全一致で再検証する。full bundle fixtureの正例と、別decode case・別prefill raw linkへの差し替え負例を追加し、専用testは15件、P1との合同testは22件になった。
+- その後のQAで、実際の6,214件にはassociationが要求する実装、正規化device、sampling/control、request_countが不足し、production pathが常時拒否される欠陥が見つかった。workload/expanderで全caseへこれらをhash-bound fieldとして展開し、prefillの単一requestとdecode request countを分離した。手作りcaseの正例を廃止し、実CLIのexpander→binder case、P1 strict-valid bundle、associationを通す統合testへ置き換えた。件数は6,214件のままで、合同test 22件とplanning validatorが成功した。
 
 ## 次の行動
 

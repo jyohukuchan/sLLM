@@ -162,9 +162,7 @@ def bound_trace_identity(identity: dict[str, Any]) -> dict[str, Any]:
 
 def validate_trace_association(trace: dict[str, Any], case: dict[str, Any], raw: dict[str, Any], identity: dict[str, Any], measurement: dict[str, Any], trace_path: Path, trace_sha: str) -> None:
     summary = trace.get("request_summary", {})
-    if case.get("fixture_id") != case.get("case_id"):
-        raise ResultError("case fixture_id must equal case_id")
-    contract_fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "sampling", "control_id", "format_id", "implementation_id", "device")
+    contract_fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "request_count", "decode_request_count", "sampling", "control", "control_id", "format_id", "implementation_id", "device")
     if raw.get("case_contract") != {key: case.get(key) for key in contract_fields}:
         raise ResultError("raw case contract differs")
     expected_summary = {
@@ -176,20 +174,23 @@ def validate_trace_association(trace: dict[str, Any], case: dict[str, Any], raw:
         raise ResultError("trace request/case association differs")
     phases = trace.get("phases", [])
     matching = [item for item in phases if item.get("kind") == case.get("phase")]
-    if len(matching) != 1: raise ResultError("trace phase/case association differs")
+    if not matching or (case.get("phase") != "decode" and len(matching) != 1): raise ResultError("trace phase/case association differs")
     phase = matching[0]
     expected_mode = {"all_m1": "cold", "cold_batched": "cold", "cached_prefix_chunked": "cached_prefix"}.get(case.get("mode"))
     if case.get("phase") != "decode" and phase.get("prefill_mode") != expected_mode: raise ResultError("trace prefill mode differs")
     expected_phase = {
-        "input_token_count": case.get("prompt_tokens") if case.get("phase") != "decode" else case.get("generated_tokens"),
+        "input_token_count": case.get("prompt_tokens"),
         "cached_prefix_token_count": case.get("cached_prefix_tokens"),
         "context_tokens_before": case.get("cached_prefix_tokens") if case.get("phase") != "decode" else case.get("decode_start_tokens"),
         "context_tokens_after": case.get("context_tokens") if case.get("phase") != "decode" else case.get("decode_start_tokens", 0) + case.get("generated_tokens", 0),
         "actual_token_batch_width": case.get("resolved_m") if case.get("phase") != "decode" else 1,
-        "actual_request_batch_width": case.get("decode_request_count", case.get("request_count")),
-        "request_count": case.get("decode_request_count", case.get("request_count")),
+        "actual_request_batch_width": case.get("request_count"),
+        "request_count": case.get("request_count"),
     }
-    if any(wanted is None or phase.get(field) != wanted for field, wanted in expected_phase.items()): raise ResultError("trace phase shape/width/context differs")
+    if case.get("phase") == "decode":
+        if sum(item.get("input_token_count", -1) for item in matching) != case.get("generated_tokens") or sum(item.get("output_token_count", -1) for item in matching) != case.get("generated_tokens") or matching[0].get("context_tokens_before") != case.get("decode_start_tokens") or matching[-1].get("context_tokens_after") != case.get("decode_start_tokens", 0) + case.get("generated_tokens", 0) or any(item.get("actual_token_batch_width") != 1 or item.get("actual_request_batch_width") != case.get("request_count") or item.get("request_count") != case.get("request_count") for item in matching):
+            raise ResultError("trace decode phase aggregation differs")
+    elif any(wanted is None or phase.get(field) != wanted for field, wanted in expected_phase.items()): raise ResultError("trace phase shape/width/context differs")
     if case.get("phase") != "decode" and (case.get("prefill_requested_m") is None or phase.get("chunk_width_tokens") != case.get("resolved_m")): raise ResultError("trace requested/resolved width differs")
     executor = trace.get("executor", {}); device = case.get("device", {}); trace_device = executor.get("device", {})
     expected_device = {"backend": device.get("backend"), "name": device.get("name"), "architecture": device.get("architecture"), "runtime_device_index": device.get("runtime_device_index")}
@@ -208,8 +209,8 @@ def validate_trace_association(trace: dict[str, Any], case: dict[str, Any], raw:
     artifact = trace_identity.get("artifact", {})
     if artifact.get("manifest_sha256") is not None and artifact.get("manifest_sha256") != hashes.get("artifact_manifest_sha256"): raise ResultError("trace artifact identity differs")
     if artifact.get("content_sha256") is not None and artifact.get("content_sha256") != hashes.get("artifact_content_sha256"): raise ResultError("trace artifact content differs")
-    if trace.get("sampling") is not None and trace.get("sampling") != case.get("sampling"): raise ResultError("trace sampling differs")
-    if trace.get("control") is not None and trace.get("control") != case.get("control"): raise ResultError("trace control differs")
+    if trace.get("sampling") != case.get("sampling"): raise ResultError("trace sampling differs")
+    if trace.get("control") != case.get("control"): raise ResultError("trace control differs")
     raw_link = raw.get("links", {}).get("trace")
     expected_link = {"path": str(trace_path.resolve()), "sha256": trace_sha, "trace_id": trace.get("trace_id")}
     if raw_link != expected_link: raise ResultError("raw trace path/hash/id association differs")

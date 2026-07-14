@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,6 +132,13 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
                 self.assertLessEqual(case["cached_prefix_tokens"] + case["prompt_tokens"], 4096)
                 self.assertEqual((oracle["phase"], oracle["cached_prefix_tokens"], oracle["prompt_tokens"], oracle["prefill_requested_m"], oracle["resolved_m"]), (case["phase"], case["cached_prefix_tokens"], case["prompt_tokens"], case["prefill_requested_m"], 1))
             self.assertFalse(any(case["mode"] == "cached_prefix_chunked" and case["prompt_tokens"] == 4096 for case in expanded["cases"]))
+            production = [case for case in expanded["cases"] if case["scope"] == "production_server"]
+            self.assertTrue(production)
+            for case in production:
+                self.assertIsNotNone(case["sampling"]); self.assertIsNotNone(case["control"]); self.assertTrue(case["implementation_id"])
+                self.assertTrue(all(case["device"].get(field) is not None for field in ("backend", "name", "architecture", "runtime_device_index")))
+                self.assertEqual(case["request_count"], 1)
+                self.assertEqual(case["decode_request_count"], 1 if case["phase"] == "decode" else 0)
 
     def test_expansion_rejects_empty_cached_axis_context_edge_and_count_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -333,36 +341,36 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             self.assertTrue(any(name in failure for failure in module.trace_failures(changed, case, "case")), name)
 
     def test_full_trace_bundle_exact_case_association_and_decode_prefill_swaps(self) -> None:
-        spec = importlib.util.spec_from_file_location("p2_build_association", BUILD); self.assertIsNotNone(spec and spec.loader)
-        module = importlib.util.module_from_spec(spec); assert spec and spec.loader; spec.loader.exec_module(module)
-        trace_path = ROOT / "tests/fixtures/production-execution-trace-p1/schema-r1/verified.json"
-        trace = json.loads(trace_path.read_text()); trace_sha = sha(trace_path)
-        case = {
-            "case_id": "cpu-production-trace-r1", "fixture_id": "cpu-production-trace-r1", "scope": "full_model",
-            "phase": "cold_prefill", "mode": "cold_batched", "prompt_tokens": 4, "cached_prefix_tokens": 0,
-            "context_tokens": 4, "decode_start_tokens": 4, "generated_tokens": 1, "prefill_requested_m": 4,
-            "resolved_m": 4, "decode_request_count": 1, "sampling": None, "control_id": "aq4_0_target",
-            "format_id": "AQ4_0", "implementation_id": "cpu_fixture_v1",
-            "device": {"backend": "cpu", "name": "CPU fixture", "architecture": "x86_64", "runtime_device_index": 0},
-        }
-        fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "sampling", "control_id", "format_id", "implementation_id", "device")
-        raw = {"case_contract": {key: case.get(key) for key in fields}, "links": {"trace": {"path": str(trace_path.resolve()), "sha256": trace_sha, "trace_id": trace["trace_id"]}}}
-        identity = {"model_identity": trace["identity"]["model"], "artifacts": {"served_model_manifest": str(trace_path.with_name("manifest.json"))}, "hash_binding": {
-            "served_model_manifest_sha256": trace["identity"]["served_model_manifest_sha256"],
-            "worker_binary_sha256": trace["identity"]["worker"]["binary_sha256"],
-            "package_manifest_sha256": trace["identity"]["package"]["manifest_sha256"],
-        }}
-        measurement = {"measured_runs": [{} for _ in range(10)], "trace_aggregation": {
-            "schema_version": "ullm.aq4_p2_trace_aggregation.v1", "case_id": case["case_id"], "trace_id": trace["trace_id"],
-            "trace_sha256": trace_sha, "sample_count": 10,
-            "phase_wall_time_ms": {item["phase_id"]: item["wall_time_ms"] for item in trace["phases"]},
-            "terminal_audit_sha256": module.trace_terminal_sha(trace),
-        }}
-        module.validate_trace_association(trace, case, raw, identity, measurement, trace_path, trace_sha)
-        other_decode = copy.deepcopy(case); other_decode.update({"case_id": "other-decode-case", "fixture_id": "other-decode-case", "phase": "decode", "prompt_tokens": 4, "resolved_m": 1, "prefill_requested_m": 1})
-        with self.assertRaises(module.ResultError): module.validate_trace_association(trace, other_decode, raw, identity, measurement, trace_path, trace_sha)
-        other_prefill_raw = copy.deepcopy(raw); other_prefill_raw["links"]["trace"]["path"] = str(trace_path.with_name("verified-copy.json"))
-        with self.assertRaises(module.ResultError): module.validate_trace_association(trace, case, other_prefill_raw, identity, measurement, trace_path, trace_sha)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); bundle = ROOT / "tests/fixtures/production-execution-trace-p1/schema-r1"
+            manifest = json.loads(MANIFEST.read_text()); manifest["identity_binding"]["sampling"] = None
+            manifest["axes"]["devices"] = [{"device_id": "cpu-fixture", "backend": "cpu", "name": "CPU fixture", "architecture": "x86_64", "runtime_device_index": 0, "required": True}]
+            manifest["axes"]["controls"] = [{"control_id": "aq4_0_target", "role": "target", "format_id": "AQ4_0", "implementation_id": "cpu_fixture_v1", "trace_control": None, "promotion_eligible": False}]
+            manifest["stages"] = [{"stage_id": "trace", "order": 1, "fixture_id": "cpu-production-trace-r1", "devices": ["cpu-fixture"], "controls": ["aq4_0_target"], "sampling": None, "prefill": {"prompt_tokens": [4], "requested_m": [4], "modes": ["all_m1", "cold_batched"], "scopes": ["full_model"], "cached_prefix_tokens": [], "cached_prefix_prompt_tokens": [], "generated_tokens": 1}, "decode": {"start_context_tokens": [4], "request_count": 1, "generated_tokens": 1, "scopes": []}, "expected_case_count": {"prefill": 2, "decode": 0, "total": 2}}]
+            manifest_path = root / "manifest.json"; write_json(manifest_path, manifest)
+            expanded_path = root / "expanded.json"; expanded_run = invoke(EXPAND, "--manifest", str(manifest_path), "--output", str(expanded_path)); self.assertEqual(expanded_run.returncode, 0, expanded_run.stderr)
+            expanded = json.loads(expanded_path.read_text()); case = next(item for item in expanded["cases"] if item["mode"] == "cold_batched")
+            model_path = root / "model.json"; write_json(model_path, json.loads((bundle / "verified.json").read_text())["identity"]["model"])
+            tokenizer = root / "tokenizer.json"; write_json(tokenizer, {"fixture": True}); graph = root / "graph.json"; write_json(graph, {"fixture": True}); state = root / "state.json"; write_json(state, {"fixture": True})
+            source = root / "source.json"; write_json(source, {"schema_version": "ullm.qwen35_aq4_source_oracle.v1", "oracle_kind": "independent_source", "status": "fixture"})
+            power = root / "power.json"; write_json(power, {"policy_binding": {"expected_power_limit_watts": 1, "allowed_power_tolerance_watts": 0, "maximum_temperature_c": 100, "minimum_vram_headroom_bytes": 1}})
+            correctness = root / "correctness.json"; write_json(correctness, {"max_hidden_relative_l2": 1, "max_hidden_max_abs": 1, "max_logits_relative_l2": 1, "max_logits_max_abs": 1, "minimum_top_k_overlap": 1})
+            baseline = root / "baseline.json"; write_json(baseline, {"prefill_tokens_per_second_p50": 1, "prefill_tokens_per_second_p95": 1, "oom": False})
+            identity_path = root / "identity.json"; policy_path = root / "policy.json"
+            bound = invoke(BIND, "--manifest", str(manifest_path), "--expanded", str(expanded_path), "--policy", str(POLICY), "--worker", str(bundle / "worker.bin"), "--package-root", str(bundle), "--package-manifest", str(bundle / "package.json"), "--tokenizer", str(tokenizer), "--served-model-manifest", str(bundle / "manifest.json"), "--model-identity", str(model_path), "--graph", str(graph), "--state", str(state), "--source-oracle", str(source), "--power-capture", str(power), "--correctness-thresholds", str(correctness), "--baseline-result", str(baseline), "--effective-at", "2026-07-14T12:00:00Z", "--git-commit", "a" * 40, "--output", str(identity_path), "--bound-policy", str(policy_path)); self.assertEqual(bound.returncode, 0, bound.stderr)
+            identity = json.loads(identity_path.read_text()); trace_path = bundle / "verified.json"; trace = json.loads(trace_path.read_text()); trace_sha = sha(trace_path)
+            fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "request_count", "decode_request_count", "sampling", "control", "control_id", "format_id", "implementation_id", "device")
+            raw = {"case_contract": {key: case.get(key) for key in fields}, "links": {"trace": {"path": str(trace_path), "sha256": trace_sha, "trace_id": trace["trace_id"]}}}
+            spec = importlib.util.spec_from_file_location("p2_build_association", BUILD); assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            args = SimpleNamespace(trace=trace_path, trace_manifest=bundle / "manifest.json", trace_executor_record=bundle / "executor-record.json", trace_binding=bundle / "verified-binding.json", trace_report=bundle / "report.json", trace_source=[])
+            strict_trace, _ = module.validate_trace_bundle(args, ROOT, case)
+            measurement = {"measured_runs": [{} for _ in range(10)], "trace_aggregation": {"schema_version": "ullm.aq4_p2_trace_aggregation.v1", "case_id": case["case_id"], "trace_id": trace["trace_id"], "trace_sha256": trace_sha, "sample_count": 10, "phase_wall_time_ms": {item["phase_id"]: item["wall_time_ms"] for item in trace["phases"]}, "terminal_audit_sha256": module.trace_terminal_sha(trace)}}
+            module.validate_trace_association(strict_trace, case, raw, identity, measurement, trace_path, trace_sha)
+            other_decode = next((item for item in expanded["cases"] if item["phase"] == "decode"), copy.deepcopy(case)); other_decode.update({"case_id": "other-decode-case", "fixture_id": "other-decode-case", "phase": "decode"})
+            with self.assertRaises(module.ResultError): module.validate_trace_association(trace, other_decode, raw, identity, measurement, trace_path, trace_sha)
+            other_prefill_raw = copy.deepcopy(raw); other_prefill_raw["case_contract"] = {**raw["case_contract"], "fixture_id": "other-prefill"}
+            with self.assertRaises(module.ResultError): module.validate_trace_association(trace, case, other_prefill_raw, identity, measurement, trace_path, trace_sha)
 
 
 if __name__ == "__main__": unittest.main()
