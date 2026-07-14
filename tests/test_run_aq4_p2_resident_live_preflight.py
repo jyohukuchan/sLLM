@@ -91,6 +91,58 @@ def test_valid_live_preflight_is_bound_by_hash_and_identity(tmp_path: Path) -> N
     BATCH.verify_live_preflight(path, link)
 
 
+def test_case_begin_keeps_exact_prepared_preflight_link_outside_live_gate(tmp_path: Path) -> None:
+    case = json.loads((BUNDLE_ROOT / "case-binding.json").read_text())["cases"][0]
+    fixture = json.loads((BUNDLE_ROOT / "fixture-index.json").read_text())["cases"][0]
+    prepared_path = BUNDLE_ROOT / "preflight.json"
+    prepared = BATCH.validate_prepared_preflight_link(
+        prepared_path, json.loads(prepared_path.read_text())
+    )
+    live_path = _write(tmp_path / "live.json", _document())
+    live = BATCH.validate_live_preflight(
+        live_path, _args(), json.loads((BUNDLE_ROOT / "bundle.json").read_text())
+    )
+    link = lambda name: {
+        "path": str(BUNDLE_ROOT / name),
+        "sha256": BATCH.sha_file(BUNDLE_ROOT / name, name),
+    }
+    message = BATCH.build_case_begin_command(
+        case, fixture, link("case-binding.json"), link("identity.json"),
+        prepared, link("policy.json"),
+    )
+    assert message["preflight"] == prepared
+    assert message["preflight"]["path"] == str(prepared_path)
+    assert message["preflight"]["path"] != live["path"]
+    assert set(message["preflight"]) == {"path", "sha256"}
+
+
+@pytest.mark.parametrize("variant", ("live_swap", "field_collision"))
+def test_case_begin_rejects_live_preflight_swap_and_field_collision(tmp_path: Path, variant: str) -> None:
+    case = json.loads((BUNDLE_ROOT / "case-binding.json").read_text())["cases"][0]
+    fixture = json.loads((BUNDLE_ROOT / "fixture-index.json").read_text())["cases"][0]
+    prepared_path = BUNDLE_ROOT / "preflight.json"
+    prepared = BATCH.validate_prepared_preflight_link(
+        prepared_path, json.loads(prepared_path.read_text())
+    )
+    if variant == "live_swap":
+        live_path = _write(tmp_path / "live.json", _document())
+        candidate = BATCH.validate_live_preflight(
+            live_path, _args(), json.loads((BUNDLE_ROOT / "bundle.json").read_text())
+        )
+    else:
+        candidate = dict(prepared)
+        candidate["captured_unix_ns"] = 1
+    link = lambda name: {
+        "path": str(BUNDLE_ROOT / name),
+        "sha256": BATCH.sha_file(BUNDLE_ROOT / name, name),
+    }
+    with pytest.raises(BATCH.BatchError, match="prepared preflight link fields differ"):
+        BATCH.build_case_begin_command(
+            case, fixture, link("case-binding.json"), link("identity.json"),
+            candidate, link("policy.json"),
+        )
+
+
 @pytest.mark.parametrize(
     ("variant", "mutate"),
     [

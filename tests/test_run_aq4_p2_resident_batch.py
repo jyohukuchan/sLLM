@@ -205,6 +205,22 @@ reset_bad = %r
 drift = %r
 identity = %r
 identity['binary_sha256'] = hashlib.sha256(open(sys.argv[0], 'rb').read()).hexdigest()
+def file_sha(path):
+    with open(path, 'rb') as handle: return hashlib.sha256(handle.read()).hexdigest()
+def exact_link(value):
+    assert set(value) == {'path', 'sha256'}
+    assert file_sha(value['path']) == value['sha256']
+def validate_case_begin(message):
+    assert set(message) == {'command', 'schema_version', 'case_id', 'case_sha256', 'case_binding', 'identity', 'preflight', 'policy', 'fixture', 'execution'}
+    assert message['command'] == 'case_begin' and message['schema_version'] == 'ullm.aq4_p2_resident_driver.v2'
+    for name in ('case_binding', 'identity', 'preflight', 'policy', 'fixture'): exact_link(message[name])
+    with open(message['preflight']['path'], encoding='utf-8') as handle: prepared = json.load(handle)
+    assert set(prepared) == {'weights_bytes', 'persistent_state_bytes', 'kv_cache_bytes', 'workspace_bytes', 'temporary_bytes', 'vram_headroom_bytes', 'gpu_process_snapshot'}
+    assert all(type(prepared[name]) is int and prepared[name] >= 0 for name in set(prepared) - {'gpu_process_snapshot'})
+    assert isinstance(prepared['gpu_process_snapshot'], list)
+    assert set(message['execution']) == {'scope', 'phase', 'mode', 'prompt_tokens', 'cached_prefix_tokens', 'context_tokens', 'generated_tokens', 'request_count', 'requested_m', 'resolved_m', 'sampling', 'control'}
+    assert set(message['execution']['sampling']) == {'mode', 'temperature', 'top_p', 'top_k', 'seed'}
+    assert set(message['execution']['control']) == {'control_id', 'role', 'format_id', 'implementation_id', 'promotion_eligible'}
 if drift == 'driver': identity['binary_sha256'] = '0' * 64
 if drift == 'package': identity['package_manifest_sha256'] = '0' * 64
 if drift == 'device': identity['runtime_device']['architecture'] = 'gfx9999'
@@ -216,6 +232,7 @@ print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.
 for line in sys.stdin:
     msg=json.loads(line)
     if msg['command']=='case_begin':
+        validate_case_begin(msg)
         case_id=msg['case_id']; requested=msg['execution']['requested_m']; resolved=msg['execution']['resolved_m']
         print(json.dumps({'event':'case_ready','schema_version':'ullm.aq4_p2_resident_driver.v2','resident_session_id':session,'case_id':'wrong-case' if drift=='case_swap' else case_id,'requested_m':requested,'resolved_m':resolved,'baseline_clean':True}), flush=True)
     elif msg['command']=='run':

@@ -26,7 +26,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple
+from typing import Any, Iterator, NamedTuple, TypedDict
 
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_DRIVER_STDOUT_LINE_BYTES = 1024 * 1024
@@ -39,6 +39,10 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SCHEMA = "ullm.aq4_p2_resident_batch.v1"
 DRIVER_SCHEMA = "ullm.aq4_p2_resident_driver.v2"
+PREPARED_PREFLIGHT_FIELDS = {
+    "weights_bytes", "persistent_state_bytes", "kv_cache_bytes", "workspace_bytes",
+    "temporary_bytes", "vram_headroom_bytes", "gpu_process_snapshot",
+}
 ONE_CASE_BUNDLE_SCHEMA = "ullm.aq4_p2_resident_smoke_binding_bundle.v3"
 ONE_CASE_ROOT_CONTRACT = "ullm.aq4_p2_resident_smoke_bundle_root.v4"
 TRUSTED_ONE_CASE_ID = "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target"
@@ -97,6 +101,22 @@ ROCTX_MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 
 class BatchError(ValueError):
     pass
+
+
+class PreparedPreflightLink(TypedDict):
+    path: str
+    sha256: str
+
+
+class LivePreflightLink(TypedDict):
+    path: str
+    sha256: str
+    device: int
+    inode: int
+    captured_unix_ns: int
+    runtime_mapping: dict[str, Any]
+    lock: dict[str, Any]
+    vram: dict[str, Any]
 
 
 class DriverProtocolError(BatchError):
@@ -1426,7 +1446,43 @@ def build_plan(cases: list[dict[str, Any]], expanded_path: Path, fixture_index_p
     }
 
 
-def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[str, Any]) -> dict[str, Any]:
+def validate_prepared_preflight_link(path: Path, value: dict[str, Any]) -> PreparedPreflightLink:
+    if set(value) != PREPARED_PREFLIGHT_FIELDS:
+        raise BatchError("prepared preflight fields differ")
+    for field in PREPARED_PREFLIGHT_FIELDS - {"gpu_process_snapshot"}:
+        if type(value.get(field)) is not int or value[field] < 0:
+            raise BatchError(f"prepared preflight {field} is invalid")
+    processes = value.get("gpu_process_snapshot")
+    if not isinstance(processes, list):
+        raise BatchError("prepared preflight process snapshot is invalid")
+    for process in processes:
+        if not isinstance(process, dict) or set(process) != {"pid", "process_name", "vram_bytes"} or type(process.get("pid")) is not int or process["pid"] < 0 or not isinstance(process.get("process_name"), str) or type(process.get("vram_bytes")) is not int or process["vram_bytes"] < 0:
+            raise BatchError("prepared preflight process entry is invalid")
+    resolved = path.resolve(strict=True)
+    link: PreparedPreflightLink = {"path": str(resolved), "sha256": sha_file(path, "prepared preflight")}
+    return require_prepared_preflight_link(link)
+
+
+def require_prepared_preflight_link(value: dict[str, Any]) -> PreparedPreflightLink:
+    if set(value) != {"path", "sha256"} or not isinstance(value.get("path"), str) or not Path(value["path"]).is_absolute() or ".." in Path(value["path"]).parts or not isinstance(value.get("sha256"), str) or SHA256_RE.fullmatch(value["sha256"]) is None:
+        raise BatchError("prepared preflight link fields differ")
+    return {"path": value["path"], "sha256": value["sha256"]}
+
+
+def require_live_preflight_link(value: dict[str, Any]) -> LivePreflightLink:
+    exact = {"path", "sha256", "device", "inode", "captured_unix_ns", "runtime_mapping", "lock", "vram"}
+    if set(value) != exact or not isinstance(value.get("path"), str) or not Path(value["path"]).is_absolute() or not isinstance(value.get("sha256"), str) or SHA256_RE.fullmatch(value["sha256"]) is None:
+        raise BatchError("live preflight link fields differ")
+    if any(type(value.get(field)) is not int or value[field] < 0 for field in ("device", "inode", "captured_unix_ns")) or any(not isinstance(value.get(field), dict) for field in ("runtime_mapping", "lock", "vram")):
+        raise BatchError("live preflight link identity fields differ")
+    return {
+        "path": value["path"], "sha256": value["sha256"], "device": value["device"],
+        "inode": value["inode"], "captured_unix_ns": value["captured_unix_ns"],
+        "runtime_mapping": value["runtime_mapping"], "lock": value["lock"], "vram": value["vram"],
+    }
+
+
+def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[str, Any]) -> LivePreflightLink:
     _require_absolute_nonsymlink_path(path, "live preflight")
     raw, digest, before = read_regular(path, "live preflight", MAX_JSON_BYTES, absolute=True)
     if stat.S_IMODE(before.st_mode) != 0o444:
@@ -1489,10 +1545,10 @@ def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[s
         raise BatchError("live preflight command evidence differs")
     if _file_identity(before) != _file_identity(os.lstat(path)) or sha_file(path, "live preflight", absolute=True) != digest:
         raise BatchError("live preflight changed during validation")
-    return {"path": str(path), "sha256": digest, "device": before.st_dev, "inode": before.st_ino, "captured_unix_ns": value["captured_unix_ns"], "runtime_mapping": mapping, "lock": lock, "vram": vram}
+    return require_live_preflight_link({"path": str(path), "sha256": digest, "device": before.st_dev, "inode": before.st_ino, "captured_unix_ns": value["captured_unix_ns"], "runtime_mapping": mapping, "lock": lock, "vram": vram})
 
 
-def verify_live_preflight(path: Path, link: dict[str, Any]) -> None:
+def verify_live_preflight(path: Path, link: LivePreflightLink) -> None:
     try:
         metadata = os.lstat(path)
     except OSError as error:
@@ -1535,6 +1591,35 @@ def roctx_marker_name(
         f"case_id={case_id}/case_sha256={case_sha256}/"
         f"run_index={run_index}/run_kind={run_kind}"
     )
+
+
+def build_case_begin_command(
+    case: dict[str, Any],
+    fixture_entry: dict[str, Any],
+    case_binding_link: dict[str, Any],
+    identity_link: dict[str, Any],
+    prepared_preflight_link: PreparedPreflightLink,
+    policy_link: dict[str, Any],
+) -> dict[str, Any]:
+    sampling = case.get("sampling")
+    control = case.get("control")
+    if not isinstance(sampling, dict) or not isinstance(control, dict):
+        raise BatchError(f"case sampling/control is missing: {case['case_id']}")
+    preflight = require_prepared_preflight_link(prepared_preflight_link)
+    return {
+        "command": "case_begin", "schema_version": DRIVER_SCHEMA,
+        "case_id": case["case_id"], "case_sha256": case["case_sha256"],
+        "case_binding": case_binding_link, "identity": identity_link,
+        "preflight": preflight, "policy": policy_link,
+        "fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]},
+        "execution": {
+            "scope": case.get("scope"), "phase": case.get("phase"), "mode": case.get("mode"),
+            "prompt_tokens": case.get("prompt_tokens"), "cached_prefix_tokens": case.get("cached_prefix_tokens"),
+            "context_tokens": case.get("context_tokens"), "generated_tokens": case.get("generated_tokens"),
+            "request_count": case.get("request_count"), "requested_m": case.get("prefill_requested_m"),
+            "resolved_m": case.get("resolved_m"), "sampling": sampling, "control": control,
+        },
+    }
 
 
 def execute_resident_run(
@@ -1614,7 +1699,7 @@ def run_batch(args: argparse.Namespace) -> int:
     normalize_fixture_paths(fixture_index)
     expanded_link = {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}
     identity_link = {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}
-    preflight_link = {"path": str(args.preflight.resolve()), "sha256": sha_file(args.preflight, "preflight")}
+    prepared_preflight_link = validate_prepared_preflight_link(args.preflight, preflight)
     policy_link = {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}
     identity["_path"], identity["_sha256"] = str(args.identity.resolve()), identity_link["sha256"]
     policy["_path"], policy["_sha256"] = str(args.policy.resolve()), policy_link["sha256"]
@@ -1625,11 +1710,10 @@ def run_batch(args: argparse.Namespace) -> int:
     smoke_bundle = None
     if args.one_case_smoke:
         smoke_bundle, smoke_validation = validate_one_case_smoke_bundle(args, expanded, fixture_index, identity, preflight, policy, cases)
-    live_preflight_link = None
+    live_preflight_link: LivePreflightLink | None = None
     if args.one_case_smoke and not args.dry_run:
         live_preflight_link = validate_live_preflight(args.live_preflight, args, smoke_bundle)
         smoke_validation["live_preflight"] = live_preflight_link
-        preflight_link = live_preflight_link
     plan = build_plan(cases, args.expanded, args.fixture_index, args.run_id, args.baseline_kind, identity, policy)
     if args.one_case_smoke:
         plan.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False, "validation": smoke_validation})
@@ -1687,24 +1771,10 @@ def run_batch(args: argparse.Namespace) -> int:
                 if live_preflight_link is not None:
                     verify_live_preflight(args.live_preflight, live_preflight_link)
                 fixture_entry = by_id[case["case_id"]]
-                sampling = case.get("sampling")
-                control = case.get("control")
-                if not isinstance(sampling, dict) or not isinstance(control, dict):
-                    raise BatchError(f"case sampling/control is missing: {case['case_id']}")
-                _send(process, {
-                    "command": "case_begin", "schema_version": DRIVER_SCHEMA,
-                    "case_id": case["case_id"], "case_sha256": case["case_sha256"],
-                    "case_binding": expanded_link, "identity": identity_link,
-                    "preflight": {"path": preflight_link["path"], "sha256": preflight_link["sha256"]}, "policy": policy_link,
-                    "fixture": {"path": fixture_entry["fixture_path"], "sha256": fixture_entry["fixture_sha256"]},
-                    "execution": {
-                        "scope": case.get("scope"), "phase": case.get("phase"), "mode": case.get("mode"),
-                        "prompt_tokens": case.get("prompt_tokens"), "cached_prefix_tokens": case.get("cached_prefix_tokens"),
-                        "context_tokens": case.get("context_tokens"), "generated_tokens": case.get("generated_tokens"),
-                        "request_count": case.get("request_count"), "requested_m": case.get("prefill_requested_m"),
-                        "resolved_m": case.get("resolved_m"), "sampling": sampling, "control": control,
-                    },
-                })
+                _send(process, build_case_begin_command(
+                    case, fixture_entry, expanded_link, identity_link,
+                    prepared_preflight_link, policy_link,
+                ))
                 begin = _recv(process, args.timeout, audit, f"case_begin:{case['case_id']}")
                 if set(begin) != {"event", "schema_version", "resident_session_id", "case_id", "requested_m", "resolved_m", "baseline_clean"} or begin.get("event") != "case_ready" or begin.get("schema_version") != DRIVER_SCHEMA or begin.get("resident_session_id") != session_id or begin.get("case_id") != case["case_id"] or begin.get("requested_m") != case["prefill_requested_m"] or begin.get("resolved_m") != case["resolved_m"] or begin.get("baseline_clean") is not True:
                     raise BatchError(f"resident driver case begin failed: {case['case_id']}")
