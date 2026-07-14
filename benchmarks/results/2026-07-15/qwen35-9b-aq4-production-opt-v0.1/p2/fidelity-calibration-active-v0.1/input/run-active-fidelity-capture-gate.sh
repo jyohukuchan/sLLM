@@ -61,6 +61,7 @@ MAX_VECTOR_BYTES=24231936
 PYTHON="/usr/bin/python3.12"
 SERVICE="ullm-openai.service"
 SYSTEMCTL=(sudo -n -- systemctl)
+RUNTIME_DIR_INSTALL=(sudo -n -- install -d -o homelab1 -g homelab1 -m 0750)
 LOCK="/run/ullm/r9700.lock"
 RUNTIME_DIR="${LOCK%/*}"
 ROCM_SMI="/opt/rocm/bin/rocm-smi"
@@ -341,12 +342,10 @@ printf 'service_stop_returned_at=%s\n' "$(date --iso-8601=seconds)" >>"$STOP_MAR
 for _ in $(seq 1 30); do [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" || true)" = inactive ]] && break; sleep 1; done
 [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" || true)" = inactive ]] || fail "service did not stop"
 [[ ! -e "$RUNTIME_DIR" && ! -L "$RUNTIME_DIR" ]] || fail "RuntimeDirectory remained after service stop"
-(umask 077; mkdir "$RUNTIME_DIR") || fail "runtime directory create failed"
+"${RUNTIME_DIR_INSTALL[@]}" "$RUNTIME_DIR" || fail "runtime directory create failed"
 RUNTIME_DIR_CREATED=1
-chown homelab1:homelab1 "$RUNTIME_DIR"; chmod 750 "$RUNTIME_DIR"
 (umask 077; set -C; : >"$LOCK") || fail "runtime lock create failed"
 LOCK_CREATED=1
-chown homelab1:homelab1 "$LOCK"; chmod 600 "$LOCK"
 exec {LOCK_FD}>"$LOCK"
 flock -n "$LOCK_FD" || fail "runtime lock acquisition failed"
 printf 'runtime_lock_acquired_at=%s\n' "$(date --iso-8601=seconds)" >>"$STOP_MARKER"
