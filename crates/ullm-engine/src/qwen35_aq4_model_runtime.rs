@@ -623,24 +623,28 @@ fn read_intermediate_trace_row(
     values: &mut [f32],
     label: &str,
 ) -> Result<(), String> {
-    let raw = unsafe {
-        std::slice::from_raw_parts_mut(
-            values.as_mut_ptr().cast::<u8>(),
-            std::mem::size_of_val(values),
-        )
-    };
-    buffer
-        .copy_to_host(0, raw, Some(stream))
-        .map_err(|error| format!("failed to copy differential trace {label}: {error}"))?;
+    {
+        // RuntimeBuffer exposes bytes while the reusable scratch row is typed as f32.  The
+        // allocation is exactly `values.len() * 4` bytes and remains live for the copy.
+        let raw = unsafe {
+            std::slice::from_raw_parts_mut(
+                values.as_mut_ptr().cast::<u8>(),
+                std::mem::size_of_val(values),
+            )
+        };
+        buffer
+            .copy_to_host(0, raw, Some(stream))
+            .map_err(|error| format!("failed to copy differential trace {label}: {error}"))?;
+    }
     stream
         .synchronize()
         .map_err(|error| format!("failed to synchronize differential trace {label}: {error}"))?;
-    for (index, value) in values.iter_mut().enumerate() {
-        let offset = index * std::mem::size_of::<f32>();
-        let bytes = raw
-            .get(offset..offset + std::mem::size_of::<f32>())
-            .ok_or_else(|| format!("differential trace {label} row is truncated"))?;
-        *value = f32::from_le_bytes(bytes.try_into().expect("f32 row width is fixed"));
+    if cfg!(target_endian = "big") {
+        for value in values.iter_mut() {
+            *value = f32::from_bits(value.to_bits().swap_bytes());
+        }
+    }
+    for value in values.iter() {
         if !value.is_finite() {
             return Err(format!(
                 "differential trace {label} row contains non-finite data"
