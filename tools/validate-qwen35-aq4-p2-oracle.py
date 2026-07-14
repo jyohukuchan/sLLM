@@ -94,7 +94,7 @@ def probe_source(root: Path, payload: Path | None) -> dict[str, Any]:
         identity = None
         source_status = "blocked"
         source_error = str(error)
-    forward_status = "available" if payload is not None and payload.is_file() else "blocked"
+    forward_status = "available" if payload is not None and payload.is_file() and not payload.is_symlink() else "blocked"
     blocker = None if forward_status == "available" else "independent BF16/F32 forward summaries are absent; checkpoint metadata alone is not an oracle"
     return {"schema_version": "ullm.qwen35_aq4_source_probe.v1", "status": "valid", "source_model": {"status": source_status, "identity": identity, "error": source_error}, "independent_forward_artifact": {"status": forward_status, "payload": str(payload) if payload else None, "blocker": blocker}, "production_oracle_available": source_status == "available" and forward_status == "available"}
 

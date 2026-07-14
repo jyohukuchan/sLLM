@@ -245,9 +245,7 @@ def digest_payload(path: Path) -> tuple[str, int, int]:
 
 
 def metadata_file(root: Path, name: str) -> dict[str, Any]:
-    path = root / name
-    if path.is_symlink() or not path.is_file():
-        raise OracleError(f"metadata file is missing or unsafe: {name}")
+    path = safe_relative(root, name, "metadata file")
     return {"file": name, "bytes": path.stat().st_size, "sha256": sha256_file(path)}
 
 
@@ -269,6 +267,8 @@ def inspect_source_model(root: Path) -> dict[str, Any]:
     if not isinstance(weight_map, dict) or not weight_map:
         raise OracleError("source safetensors index has no weight_map")
     shards = sorted(set(weight_map.values()))
+    if any(not isinstance(name, str) or not name for name in shards):
+        raise OracleError("source safetensors index contains an invalid shard name")
     for name in shards:
         metadata_file(root, name)
     revision = None
