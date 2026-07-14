@@ -1,0 +1,274 @@
+{
+  "block_size": 256,
+  "cache_blocks": 16,
+  "context_length": 4096,
+  "format_id": "AQ4_0",
+  "hidden_size": 4096,
+  "layers": [
+    {
+      "kind": [
+        "linear_attention",
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 0,
+      "tensor_count": 25
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 1,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 2,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 3,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 4,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 5,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 6,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 7,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 8,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 9,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 10,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 11,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 12,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 13,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 14,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 15,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 16,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 17,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 18,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 19,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 20,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 21,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 22,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 23,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 24,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 25,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 26,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 27,
+      "tensor_count": 11
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 28,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 29,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "linear_attention",
+        "other"
+      ],
+      "layer_index": 30,
+      "tensor_count": 14
+    },
+    {
+      "kind": [
+        "other",
+        "self_attention"
+      ],
+      "layer_index": 31,
+      "tensor_count": 11
+    }
+  ],
+  "model_id": "ullm-qwen3.5-9b-aq4",
+  "terminal_components": [
+    "embedding",
+    "decoder_stack",
+    "final_norm",
+    "lm_head"
+  ],
+  "vocab_size": 248320
+}

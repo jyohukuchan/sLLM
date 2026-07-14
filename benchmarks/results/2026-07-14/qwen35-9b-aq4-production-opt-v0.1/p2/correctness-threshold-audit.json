@@ -1,0 +1,30 @@
+{
+  "blocking_reasons": [
+    "no approved numerical correctness thresholds are present in the existing plan/spec artifacts",
+    "this generator refuses to invent threshold values",
+    "P2 execution and promotion must remain blocked until a reviewed threshold policy is bound"
+  ],
+  "decision": "BLOCKED",
+  "finding": "The existing plan/spec define qualitative correctness gates but do not define numerical values for the five required fields.",
+  "normative_sources": [
+    {
+      "path": "benchmarks/workloads/aq4-production-opt-p2-threshold-policy-template-v0.1.json",
+      "sha256": "8c1f00fa70a66dde8b6caec2a089bf4d0421cea06787219c11e65343daa1bb47"
+    },
+    {
+      "path": "docs/specs/prefill-validation-v0.1.md",
+      "sha256": "4645eebe45409868d874bade8dca75e30160f4ff6c3f1cc6f35407d9833395e1"
+    }
+  ],
+  "promotion_eligible": false,
+  "required_fields": [
+    "max_hidden_relative_l2",
+    "max_hidden_max_abs",
+    "max_logits_relative_l2",
+    "max_logits_max_abs",
+    "minimum_top_k_overlap"
+  ],
+  "schema_version": "ullm.aq4_production_p2_correctness_threshold_audit.v1",
+  "status": "blocked",
+  "values": null
+}

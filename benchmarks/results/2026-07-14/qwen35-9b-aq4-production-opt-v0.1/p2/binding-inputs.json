@@ -1,0 +1,114 @@
+{
+  "artifacts": {
+    "correctness_threshold_audit": {
+      "path": "correctness-threshold-audit.json",
+      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5"
+    },
+    "graph": {
+      "path": "graph.json",
+      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b"
+    },
+    "model_identity": {
+      "path": "model_identity.json",
+      "sha256": "eb96a985e64f2c7c4c8f568269062b42e3eec419c18f4dbeb75e691c163b7594"
+    },
+    "state": {
+      "path": "state.json",
+      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf"
+    },
+    "validation_report": {
+      "path": "validation-report.json",
+      "sha256": "20d4dd424c0111819e2acdc6e4a6d516043f01ecafe15d497433b51a68ebc35f"
+    }
+  },
+  "correctness_thresholds": {
+    "artifact": {
+      "path": "correctness-threshold-audit.json",
+      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5"
+    },
+    "required_fields": [
+      "max_hidden_relative_l2",
+      "max_hidden_max_abs",
+      "max_logits_relative_l2",
+      "max_logits_max_abs",
+      "minimum_top_k_overlap"
+    ],
+    "status": "blocked",
+    "template_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/workloads/aq4-production-opt-p2-threshold-policy-template-v0.1.json",
+    "template_sha256": "8c1f00fa70a66dde8b6caec2a089bf4d0421cea06787219c11e65343daa1bb47"
+  },
+  "graph": {
+    "artifact": {
+      "path": "graph.json",
+      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b"
+    },
+    "schema_id": "ullm.model_graph.v0.1",
+    "schema_version": "0.1",
+    "sha256": "f70d65a36b819816e962fee505737890271ea96a76385a0f2cf3a7cd6efc74bc",
+    "source": "resident_worker_package_manifest",
+    "trace_sha256": "f70d65a36b819816e962fee505737890271ea96a76385a0f2cf3a7cd6efc74bc"
+  },
+  "inputs": {
+    "active_manifest": {
+      "path": "/etc/ullm/served-models/active.json",
+      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    },
+    "p0_snapshot": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/p0-snapshot.json",
+      "sha256": "65f46a83bb98df13b2890eaa9e6ec12a8c017883cd6fb970d726c6f9ebd15abe"
+    },
+    "p1_executor_record": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v4.json",
+      "sha256": "95b3ab0928640193084b146aa4ec32d86680283d433e54d1a156432404ab8b28"
+    },
+    "p1_trace": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4.json",
+      "sha256": "0a883721581a5e734890f50548d20718d7bd8e32821a82f62b7eae8a3b654103"
+    }
+  },
+  "model_identity": {
+    "format_id": "AQ4_0",
+    "id": "ullm-qwen3.5-9b-aq4",
+    "implementation_id": "qwen35_aq4_rdna4_v1",
+    "revision": "aq4-reasoning-v0.1-candidate"
+  },
+  "path_oracle": {
+    "fixture_substitute": false,
+    "kind": "same-artifact-all-m1",
+    "p1_trace_substitute": false,
+    "production_path_oracle": false,
+    "reason": "P2 offline binding generation performs no production execution",
+    "required": true,
+    "source_oracle_substitute": false,
+    "status": "not_run"
+  },
+  "promotion": {
+    "eligible": false,
+    "path_oracle_not_run": true,
+    "reason": "offline binding inputs are not production performance or promotion evidence",
+    "thresholds_blocked": true
+  },
+  "promotion_eligible": false,
+  "schema_version": "ullm.aq4_production_p2_offline_binding_inputs.v1",
+  "source_oracle": {
+    "oracle_kind": "independent_source",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-oracle-v2/manifest.json",
+    "production_path_oracle_substitute": false,
+    "sha256": "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692",
+    "source_model_id": "Qwen/Qwen3.5-9B",
+    "source_model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "status": "available"
+  },
+  "state": {
+    "artifact": {
+      "path": "state.json",
+      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf"
+    },
+    "schema_id": "ullm.state_schema.v0.1",
+    "schema_version": "0.1",
+    "sha256": "d17fd34a47db75491a9f3b301fb20825ffd66a3beb398628c707424e6b1689dc",
+    "source": "resident_worker_session_contract",
+    "trace_sha256": "d17fd34a47db75491a9f3b301fb20825ffd66a3beb398628c707424e6b1689dc"
+  },
+  "status": "blocked"
+}

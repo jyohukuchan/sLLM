@@ -1,0 +1,17 @@
+{
+  "request_state": [
+    "recurrent_state",
+    "paged_kv",
+    "decode_position",
+    "sampling_state"
+  ],
+  "reset_scope": "request_owned_state_only",
+  "resident_weights_reloaded_per_request": false,
+  "transaction": [
+    "prepare",
+    "publish",
+    "commit",
+    "discard",
+    "reset"
+  ]
+}

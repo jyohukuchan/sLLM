@@ -1,0 +1,37 @@
+{
+  "artifacts": [
+    {
+      "bytes": 4673,
+      "path": "binding-inputs.json",
+      "sha256": "a26cad0a1d9a29103697e6f14de0c3272ebba7efc6a1ed0967080f1452cff885"
+    },
+    {
+      "bytes": 1140,
+      "path": "correctness-threshold-audit.json",
+      "sha256": "552f1cb93d190f6ecbbfd86e493bc616d091c3432813f7766e976f96855c8ae5"
+    },
+    {
+      "bytes": 4524,
+      "path": "graph.json",
+      "sha256": "5962d6d2aa7d51ad87c1d47e28f6bb900794ac17e07cbb5b20b5cbef91768e8b"
+    },
+    {
+      "bytes": 150,
+      "path": "model_identity.json",
+      "sha256": "eb96a985e64f2c7c4c8f568269062b42e3eec419c18f4dbeb75e691c163b7594"
+    },
+    {
+      "bytes": 302,
+      "path": "state.json",
+      "sha256": "f6f06608d79a0d9d7c2753ed4c89152018b61047f86438f541a85240430d9bcf"
+    },
+    {
+      "bytes": 1726,
+      "path": "validation-report.json",
+      "sha256": "20d4dd424c0111819e2acdc6e4a6d516043f01ecafe15d497433b51a68ebc35f"
+    }
+  ],
+  "schema_version": "ullm.aq4_production_p2_hash_manifest.v1",
+  "self_included": false,
+  "status": "complete"
+}

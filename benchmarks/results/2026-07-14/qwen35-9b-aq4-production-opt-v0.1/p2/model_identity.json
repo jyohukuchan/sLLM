@@ -1,0 +1,6 @@
+{
+  "format_id": "AQ4_0",
+  "id": "ullm-qwen3.5-9b-aq4",
+  "implementation_id": "qwen35_aq4_rdna4_v1",
+  "revision": "aq4-reasoning-v0.1-candidate"
+}
