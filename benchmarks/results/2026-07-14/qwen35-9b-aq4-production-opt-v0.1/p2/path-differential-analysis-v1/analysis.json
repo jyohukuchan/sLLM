@@ -1,0 +1,458 @@
+{
+  "overall_diagnosis": "inconclusive_missing_intermediate_aq4_trace",
+  "path_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/path-differential-endpoint-v1",
+  "reports": [
+    {
+      "case_id": "fixture-prompt-0",
+      "diagnosis": "inconclusive_missing_intermediate_aq4_trace",
+      "first_mismatch": {
+        "coordinate_count": 5,
+        "layer_index": null,
+        "max_abs": 0.7082529067993164,
+        "reason": "sample_value_mismatch",
+        "stage": "final_norm"
+      },
+      "greedy_exact": false,
+      "missing_stages": [
+        {
+          "layer_index": null,
+          "stage": "embedding"
+        },
+        {
+          "layer_index": 0,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 1,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 2,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 3,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 4,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 5,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 6,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 7,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 8,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 9,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 10,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 11,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 12,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 13,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 14,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 15,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 16,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 17,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 18,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 19,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 20,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 21,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 22,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 23,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 24,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 25,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 26,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 27,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 28,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 29,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 30,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 31,
+          "stage": "decoder_layer"
+        }
+      ],
+      "status": "analyzed",
+      "step": 0
+    },
+    {
+      "case_id": "fixture-prompt-0",
+      "diagnosis": "inconclusive_missing_intermediate_aq4_trace",
+      "first_mismatch": {
+        "coordinate_count": 5,
+        "layer_index": null,
+        "max_abs": 0.9728304147720337,
+        "reason": "sample_value_mismatch",
+        "stage": "final_norm"
+      },
+      "greedy_exact": true,
+      "missing_stages": [
+        {
+          "layer_index": null,
+          "stage": "embedding"
+        },
+        {
+          "layer_index": 0,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 1,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 2,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 3,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 4,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 5,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 6,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 7,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 8,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 9,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 10,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 11,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 12,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 13,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 14,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 15,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 16,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 17,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 18,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 19,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 20,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 21,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 22,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 23,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 24,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 25,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 26,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 27,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 28,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 29,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 30,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 31,
+          "stage": "decoder_layer"
+        }
+      ],
+      "status": "analyzed",
+      "step": 1
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "diagnosis": "inconclusive_missing_intermediate_aq4_trace",
+      "first_mismatch": {
+        "coordinate_count": 5,
+        "layer_index": null,
+        "max_abs": 1.0846476554870605,
+        "reason": "sample_value_mismatch",
+        "stage": "final_norm"
+      },
+      "greedy_exact": true,
+      "missing_stages": [
+        {
+          "layer_index": null,
+          "stage": "embedding"
+        },
+        {
+          "layer_index": 0,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 1,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 2,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 3,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 4,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 5,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 6,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 7,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 8,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 9,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 10,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 11,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 12,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 13,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 14,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 15,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 16,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 17,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 18,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 19,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 20,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 21,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 22,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 23,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 24,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 25,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 26,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 27,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 28,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 29,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 30,
+          "stage": "decoder_layer"
+        },
+        {
+          "layer_index": 31,
+          "stage": "decoder_layer"
+        }
+      ],
+      "status": "analyzed",
+      "step": 0
+    }
+  ],
+  "schema_version": "ullm.qwen35_aq4_differential_analysis.v1",
+  "source_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/source-differential-trace-v1",
+  "stage_contract": {
+    "decoder_layers": 32,
+    "embedding": true,
+    "final_norm": true,
+    "lm_head": true
+  }
+}
