@@ -9,6 +9,7 @@ planner and fake-driver tests are CPU-only and never touch a service or device.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -19,10 +20,11 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 MAX_JSON_BYTES = 64 * 1024 * 1024
 CASE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -82,10 +84,223 @@ RUNTIME_DEVICE_KEYS = {
     "architecture",
 }
 DEFAULT_LOCK_PATH = Path("/run/ullm/r9700.lock")
+ROCTX_SCHEMA = "ullm.aq4_p2_resident_roctx_ranges.v1"
+ROCTX_MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 
 
 class BatchError(ValueError):
     pass
+
+
+class PathComponentIdentity(NamedTuple):
+    path: Path
+    identity: tuple[int, ...]
+    symlink_target: str | None
+
+
+class RoctxLibraryIdentity(NamedTuple):
+    invocation_path: Path
+    resolved_path: Path
+    sha256: str
+    resolved_identity: tuple[int, ...]
+    components: tuple[PathComponentIdentity, ...]
+
+    def verify(self) -> None:
+        for component in self.components:
+            try:
+                current = os.lstat(component.path)
+            except OSError as error:
+                raise BatchError(f"ROCTx invocation component disappeared: {component.path}") from error
+            if _file_identity(current) != component.identity:
+                raise BatchError(f"ROCTx invocation component changed: {component.path}")
+            target = os.readlink(component.path) if stat.S_ISLNK(current.st_mode) else None
+            if target != component.symlink_target:
+                raise BatchError(f"ROCTx invocation symlink target changed: {component.path}")
+        try:
+            resolved = self.invocation_path.resolve(strict=True)
+        except OSError as error:
+            raise BatchError(f"ROCTx invocation path resolution failed: {error}") from error
+        if resolved != self.resolved_path:
+            raise BatchError("ROCTx invocation path resolved target changed")
+        _raw, digest, metadata = read_regular(resolved, "ROCTx resolved library")
+        if _file_identity(metadata) != self.resolved_identity or digest != self.sha256:
+            raise BatchError("ROCTx resolved library identity changed")
+
+
+class RoctxRangeRecorder:
+    def __init__(self, identity: RoctxLibraryIdentity, handle: Any) -> None:
+        self.identity = identity
+        try:
+            self._push = handle.roctxRangePushA
+            self._pop = handle.roctxRangePop
+        except AttributeError as error:
+            raise BatchError("ROCTx library lacks roctxRangePushA/roctxRangePop") from error
+        self._push.argtypes = [ctypes.c_char_p]
+        self._push.restype = ctypes.c_int
+        self._pop.argtypes = []
+        self._pop.restype = ctypes.c_int
+        self.pid = os.getpid()
+        self.thread_id = threading.get_ident()
+        self.active: dict[str, Any] | None = None
+        self.records: list[dict[str, Any]] = []
+
+    @classmethod
+    def load(
+        cls,
+        invocation_path: Path,
+        expected_sha256: str,
+        *,
+        cdll_factory: Any = ctypes.CDLL,
+    ) -> "RoctxRangeRecorder":
+        if not invocation_path.is_absolute() or ".." in invocation_path.parts:
+            raise BatchError("ROCTx invocation path must be absolute without parent traversal")
+        if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
+            raise BatchError("ROCTx expected SHA-256 is invalid")
+        components: list[PathComponentIdentity] = []
+        current = Path(invocation_path.anchor)
+        for part in invocation_path.parts[1:]:
+            current /= part
+            try:
+                metadata = os.lstat(current)
+            except OSError as error:
+                raise BatchError(f"ROCTx invocation component is unavailable: {current}") from error
+            if stat.S_ISLNK(metadata.st_mode):
+                components.append(
+                    PathComponentIdentity(
+                        current, _file_identity(metadata), os.readlink(current)
+                    )
+                )
+        try:
+            resolved = invocation_path.resolve(strict=True)
+        except OSError as error:
+            raise BatchError(f"ROCTx invocation path resolution failed: {error}") from error
+        try:
+            metadata = os.lstat(resolved)
+        except OSError as error:
+            raise BatchError(f"ROCTx resolved library metadata failed: {error}") from error
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise BatchError("ROCTx resolved library must be a single-link regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(resolved, flags)
+        except OSError as error:
+            raise BatchError(f"ROCTx resolved library open failed: {error}") from error
+        digest_value = hashlib.sha256()
+        try:
+            opened = os.fstat(descriptor)
+            if _file_identity(opened) != _file_identity(metadata):
+                raise BatchError("ROCTx resolved library changed while opening")
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest_value.update(chunk)
+            digest = digest_value.hexdigest()
+            after = os.lstat(resolved)
+            if (
+                _file_identity(os.fstat(descriptor)) != _file_identity(metadata)
+                or _file_identity(after) != _file_identity(metadata)
+            ):
+                raise BatchError("ROCTx resolved library changed while hashing")
+            if digest != expected_sha256:
+                raise BatchError("ROCTx resolved library SHA-256 differs")
+            identity = RoctxLibraryIdentity(
+                invocation_path,
+                resolved,
+                digest,
+                _file_identity(metadata),
+                tuple(components),
+            )
+            try:
+                handle = cdll_factory(
+                    f"/proc/self/fd/{descriptor}",
+                    mode=getattr(os, "RTLD_NOW", 0) | getattr(ctypes, "RTLD_LOCAL", 0),
+                )
+            except OSError as error:
+                raise BatchError(f"ROCTx library load failed: {error}") from error
+            if _file_identity(os.fstat(descriptor)) != identity.resolved_identity:
+                raise BatchError("ROCTx resolved library changed while loading")
+            identity.verify()
+        finally:
+            os.close(descriptor)
+        recorder = cls(identity, handle)
+        return recorder
+
+    def _same_context(self) -> None:
+        if os.getpid() != self.pid or threading.get_ident() != self.thread_id:
+            raise BatchError("ROCTx ranges must execute in one PID/thread")
+
+    def begin(self, name: str, run_index: int, run_kind: str) -> None:
+        self._same_context()
+        if self.active is not None or run_index != len(self.records):
+            raise BatchError("ROCTx range begin order/unbalanced state differs")
+        expected_kind = "warmup" if run_index < WARMUP_RUNS else "measured"
+        if run_index >= WARMUP_RUNS + MEASURED_RUNS or run_kind != expected_kind:
+            raise BatchError("ROCTx range index/kind differs")
+        result = self._push(name.encode("utf-8"))
+        if type(result) is not int or result < 0:
+            raise BatchError("ROCTx range push failed")
+        self.active = {
+            "name": name,
+            "run_index": run_index,
+            "run_kind": run_kind,
+            "push_result": result,
+        }
+
+    def end(self) -> None:
+        self._same_context()
+        if self.active is None:
+            raise BatchError("ROCTx range pop has no active range")
+        result = self._pop()
+        if type(result) is not int or result < 0:
+            raise BatchError("ROCTx range pop failed")
+        self.records.append({**self.active, "pop_result": result})
+        self.active = None
+
+    @contextmanager
+    def range(self, name: str, run_index: int, run_kind: str) -> Iterator[None]:
+        self.begin(name, run_index, run_kind)
+        try:
+            yield
+        finally:
+            self.end()
+
+    def close_active(self) -> None:
+        if self.active is not None:
+            self.end()
+
+    def evidence(self) -> dict[str, Any]:
+        self._same_context()
+        if self.active is not None or len(self.records) != WARMUP_RUNS + MEASURED_RUNS:
+            raise BatchError("ROCTx range audit is incomplete or unbalanced")
+        for index, record in enumerate(self.records):
+            expected_kind = "warmup" if index < WARMUP_RUNS else "measured"
+            if record["run_index"] != index or record["run_kind"] != expected_kind:
+                raise BatchError("ROCTx range audit order differs")
+        self.identity.verify()
+        value = {
+            "schema_version": ROCTX_SCHEMA,
+            "status": "complete_diagnostic",
+            "measurement_eligible": False,
+            "promotion_eligible": False,
+            "audit_sha256": None,
+            "pid": self.pid,
+            "thread_id": self.thread_id,
+            "library": {
+                "invocation_path": str(self.identity.invocation_path),
+                "resolved_path": str(self.identity.resolved_path),
+                "sha256": self.identity.sha256,
+                "symbols": ["roctxRangePushA", "roctxRangePop"],
+                "components": [
+                    {
+                        "path": str(item.path),
+                        "identity": list(item.identity),
+                        "symlink_target": item.symlink_target,
+                    }
+                    for item in self.identity.components
+                ],
+            },
+            "ranges": self.records,
+        }
+        value["audit_sha256"] = sha_bytes(canonical(value))
+        return value
 
 
 def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -862,7 +1077,86 @@ def verify_live_preflight(path: Path, link: dict[str, Any]) -> None:
         raise BatchError("live preflight content changed after validation")
 
 
+def roctx_marker_name(
+    run_id: str,
+    session_id: str,
+    case_id: str,
+    case_sha256: str,
+    run_index: int,
+    run_kind: str,
+) -> str:
+    for label, value in (
+        ("run_id", run_id),
+        ("session_id", session_id),
+        ("case_id", case_id),
+    ):
+        if not isinstance(value, str) or not value or "/" in value or "=" in value:
+            raise BatchError(f"ROCTx marker {label} is invalid")
+    if not isinstance(case_sha256, str) or SHA256_RE.fullmatch(case_sha256) is None:
+        raise BatchError("ROCTx marker case SHA-256 is invalid")
+    expected_kind = "warmup" if run_index < WARMUP_RUNS else "measured"
+    if (
+        type(run_index) is not int
+        or run_index < 0
+        or run_index >= WARMUP_RUNS + MEASURED_RUNS
+        or run_kind != expected_kind
+    ):
+        raise BatchError("ROCTx marker run index/kind is invalid")
+    return (
+        f"{ROCTX_MARKER_PREFIX}/run_id={run_id}/session_id={session_id}/"
+        f"case_id={case_id}/case_sha256={case_sha256}/"
+        f"run_index={run_index}/run_kind={run_kind}"
+    )
+
+
+def execute_resident_run(
+    process: subprocess.Popen[str],
+    case: dict[str, Any],
+    session_id: str,
+    run_index: int,
+    run_kind: str,
+    timeout: float,
+    roctx: RoctxRangeRecorder | None,
+    run_id: str,
+) -> dict[str, Any]:
+    manager: Any = nullcontext()
+    if roctx is not None:
+        marker = roctx_marker_name(
+            run_id,
+            session_id,
+            case["case_id"],
+            case["case_sha256"],
+            run_index,
+            run_kind,
+        )
+        manager = roctx.range(marker, run_index, run_kind)
+    with manager:
+        _send(
+            process,
+            {
+                "command": "run",
+                "schema_version": DRIVER_SCHEMA,
+                "case_id": case["case_id"],
+                "run_index": run_index,
+                "run_kind": run_kind,
+            },
+        )
+        value = validate_run(_recv(process, timeout), case, session_id)
+        if value["run_index"] != run_index or value["run_kind"] != run_kind:
+            raise BatchError(f"resident driver run order differs: {case['case_id']}")
+        return value
+
+
 def run_batch(args: argparse.Namespace) -> int:
+    if args.profile_roctx_ranges:
+        if not args.one_case_smoke or args.dry_run:
+            raise BatchError("--profile-roctx-ranges requires an actual --one-case-smoke run")
+        if args.roctx_library is None or args.roctx_library_sha256 is None:
+            raise BatchError(
+                "--roctx-library and --roctx-library-sha256 are required with profiling ranges"
+            )
+    elif args.roctx_library is not None or args.roctx_library_sha256 is not None:
+        raise BatchError("ROCTx library options require --profile-roctx-ranges")
     if not args.one_case_smoke and (args.bundle_root is not None or args.trusted_validator is not None or args.trusted_validator_sha256 is not None or args.live_preflight is not None):
         raise BatchError("--bundle-root/--trusted-validator require --one-case-smoke")
     if args.one_case_smoke and args.bundle_root is None:
@@ -907,6 +1201,11 @@ def run_batch(args: argparse.Namespace) -> int:
         raise BatchError("--driver-command is required unless --dry-run is set")
     expected_driver_argv = smoke_validation["resident_driver_argv"] if smoke_validation is not None else None
     driver_executable = validate_driver_command(args.driver_command, identity, expected_argv=expected_driver_argv)
+    roctx = (
+        RoctxRangeRecorder.load(args.roctx_library, args.roctx_library_sha256)
+        if args.profile_roctx_ranges
+        else None
+    )
     if live_preflight_link is not None:
         verify_live_preflight(args.live_preflight, live_preflight_link)
     completed_cases = 0
@@ -947,10 +1246,16 @@ def run_batch(args: argparse.Namespace) -> int:
                 reuse_forbidden = False
                 for run_index in range(WARMUP_RUNS + MEASURED_RUNS):
                     run_kind = "warmup" if run_index < WARMUP_RUNS else "measured"
-                    _send(process, {"command": "run", "schema_version": DRIVER_SCHEMA, "case_id": case["case_id"], "run_index": run_index, "run_kind": run_kind})
-                    value = validate_run(_recv(process, args.timeout), case, session_id)
-                    if value["run_index"] != run_index or value["run_kind"] != run_kind:
-                        raise BatchError(f"resident driver run order differs: {case['case_id']}")
+                    value = execute_resident_run(
+                        process,
+                        case,
+                        session_id,
+                        run_index,
+                        run_kind,
+                        args.timeout,
+                        roctx,
+                        args.run_id,
+                    )
                     runs.append(value)
                     if value["terminal"]["reuse_forbidden"] or value["status"] != "ok":
                         reuse_forbidden = value["terminal"]["reuse_forbidden"]
@@ -971,6 +1276,8 @@ def run_batch(args: argparse.Namespace) -> int:
                 if reuse_forbidden:
                     raise BatchError(f"resident driver became non-reusable at {case['case_id']}; remaining cases were not executed")
         finally:
+            if roctx is not None:
+                roctx.close_active()
             if process is not None:
                 try:
                     _send(process, {"command": "shutdown", "schema_version": DRIVER_SCHEMA})
@@ -983,6 +1290,11 @@ def run_batch(args: argparse.Namespace) -> int:
                     process.wait()
         if live_preflight_link is not None:
             verify_live_preflight(args.live_preflight, live_preflight_link)
+        if roctx is not None:
+            atomic_write(
+                args.output_dir / "resident-batch.roctx-ranges.json",
+                roctx.evidence(),
+            )
         atomic_write(args.output_dir / "resident-batch.summary.json", {**plan, "status": "complete", "completed_cases": completed_cases, "device_lock": lock_owner})
     return 0
 
@@ -1005,6 +1317,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trusted-validator", type=Path, help="trusted bundle validator Python source required by --one-case-smoke")
     parser.add_argument("--trusted-validator-sha256", help="expected lowercase SHA-256 of --trusted-validator")
     parser.add_argument("--live-preflight", type=Path, help="immutable live gate sidecar required for actual one-case smoke and forbidden for dry-run")
+    parser.add_argument(
+        "--profile-roctx-ranges",
+        action="store_true",
+        help="emit exact 12 diagnostic ROCTx run ranges; one-case actual runs only",
+    )
+    parser.add_argument("--roctx-library", type=Path)
+    parser.add_argument("--roctx-library-sha256")
     parser.add_argument("--driver-command", nargs=argparse.REMAINDER, help="exact resident driver argv; this option and its value must be last")
     return parser.parse_args(argv)
 

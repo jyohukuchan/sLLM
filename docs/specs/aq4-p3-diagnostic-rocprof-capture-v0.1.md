@@ -42,9 +42,9 @@ run_kind=<warmup|measured>
 
 実際は改行せず1文字列に連結する。index 0,1は`warmup`、2..11は`measured`である。beginはrunnerが`command=run`をresident stdinへ送る直前、endは対応する`run_complete`を受信してexact schema・status・index・kindを検証した直後である。exception、OOM、timeoutでもfinallyでrangeを閉じ、flush完了後に次rangeを開始する。missing、duplicate、unknown field、unbalanced、crossing、clock逆行、rawとのrun/session/case/hash不一致を拒否する。
 
-最小実装箇所は`tools/run-aq4-p2-resident-batch.py`のmain run loopにある`_send(... command=run ...)`直前と、`validate_run(_recv(...))`直後である。明示的profiling flagがない通常runはmarker libraryをloadせず、挙動を変更しない。marker libraryはabsolute path、ancestor symlinkなし、single-link executable/DSO、inode identity、SHA-256、必要ROCTx begin/end/flush symbolを起動前後に固定する。
+実装箇所は`tools/run-aq4-p2-resident-batch.py`の`execute_resident_run`で、main run loopから呼ぶ。`_send(... command=run ...)`直前にpushし、`validate_run(_recv(...))`とindex/kind検証直後にpopする。明示的`--profile-roctx-ranges`がない通常runはmarker libraryをloadせず、挙動を変更しない。marker libraryはinvocation symlink chain、resolved実体、inode identity、SHA-256、`roctxRangePushA`/`roctxRangePop` symbolを起動前後に固定する。
 
-runner sourceを変更すると、prepared one-case bundleの`trusted-runner.py`、bundle manifest、trust roots、SHA256SUMS、launcher固定hashの再生成が必要である。これらは別作業であり、本capture toolは未更新runnerからmarkerなしのartifactを作らない。
+runner sourceは実装済みだが、prepared one-case bundleの`trusted-runner.py`、bundle manifest、trust roots、SHA256SUMS、B sidecar、launcher/harness固定hashの再生成が必要である。これらは別作業であり、本capture toolは未更新runnerからmarkerなしのartifactを作らない。
 
 ## warmup除外とsplit
 
