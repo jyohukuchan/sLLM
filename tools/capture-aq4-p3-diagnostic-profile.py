@@ -196,6 +196,107 @@ class PinnedProfiler:
         os.close(self.descriptor)
 
 
+class PinnedTargetManifest:
+    def __init__(
+        self,
+        path: Path,
+        expected_sha256: str,
+        descriptor: int,
+        identity: tuple[int, ...],
+    ) -> None:
+        self.path = path
+        self.sha256 = expected_sha256
+        self.descriptor = descriptor
+        self.identity = identity
+
+    @classmethod
+    def open(cls, path: Path, expected_sha256: str) -> "PinnedTargetManifest":
+        if not path.is_absolute() or ".." in path.parts:
+            raise CaptureError(
+                "target command manifest path must be absolute without parent traversal"
+            )
+        if (
+            not isinstance(expected_sha256, str)
+            or PRODUCER.SHA256_RE.fullmatch(expected_sha256) is None
+        ):
+            raise CaptureError("target command manifest expected SHA-256 is invalid")
+        try:
+            resolved = PROFILER.canonical_path(path, "target command manifest")
+            metadata = resolved.lstat()
+        except (OSError, PROFILER.ProfileError) as error:
+            raise CaptureError(f"target command manifest path is invalid: {error}") from error
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise CaptureError(
+                "target command manifest must be a single-link regular file"
+            )
+        if metadata.st_size > PRODUCER.MAX_INPUT_BYTES:
+            raise CaptureError("target command manifest exceeds the input limit")
+        descriptor = os.open(
+            resolved,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if PROFILER._identity(opened) != PROFILER._identity(metadata):
+                raise CaptureError("target command manifest changed while opening")
+            pinned = cls(
+                resolved,
+                expected_sha256,
+                descriptor,
+                PROFILER._identity(metadata),
+            )
+            pinned.verify()
+            return pinned
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def read_verified(self) -> bytes:
+        try:
+            current = self.path.lstat()
+            opened = os.fstat(self.descriptor)
+        except OSError as error:
+            raise CaptureError(
+                f"target command manifest binding is unavailable: {error}"
+            ) from error
+        if (
+            PROFILER._identity(current) != self.identity
+            or PROFILER._identity(opened) != self.identity
+        ):
+            raise CaptureError("target command manifest inode identity changed")
+        os.lseek(self.descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := os.read(self.descriptor, 1024 * 1024):
+            size += len(chunk)
+            if size > PRODUCER.MAX_INPUT_BYTES:
+                raise CaptureError("target command manifest exceeds the input limit")
+            digest.update(chunk)
+            chunks.append(chunk)
+        if digest.hexdigest() != self.sha256:
+            raise CaptureError("target command manifest file SHA-256 differs")
+        if PROFILER._identity(os.fstat(self.descriptor)) != self.identity:
+            raise CaptureError("target command manifest changed while hashing")
+        return b"".join(chunks)
+
+    def verify(self) -> None:
+        data = self.read_verified()
+        snapshot = PRODUCER.Snapshot(
+            self.path,
+            PRODUCER.file_identity(os.fstat(self.descriptor)),
+            self.sha256,
+            data,
+        )
+        value = PRODUCER.parse_json(snapshot, "target command manifest")
+        validate_target_manifest_root(value)
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+
+
 def process_group_alive(process_group: int, process: subprocess.Popen[Any]) -> bool:
     process.poll()
     try:
@@ -293,11 +394,7 @@ def pinned_profiler_version(profiler: PinnedProfiler) -> dict[str, Any]:
     }
 
 
-def load_target_command_manifest(
-    path: Path, *, allow_existing_outputs: bool = False
-) -> tuple[dict[str, Any], list[Any]]:
-    manifest_snapshot = PRODUCER.capture(path, "target command manifest")
-    value = PRODUCER.parse_json(manifest_snapshot, "target command manifest")
+def validate_target_manifest_root(value: dict[str, Any]) -> None:
     fields = {
         "schema_version", "status", "manifest_sha256", "argv", "input_files", "output_paths"
     }
@@ -307,71 +404,105 @@ def load_target_command_manifest(
     declared = PRODUCER.digest(value.get("manifest_sha256"), "target command manifest hash")
     if declared != self_hash(value, "manifest_sha256"):
         raise CaptureError("target command manifest self-hash differs")
-    argv = value.get("argv")
-    if (
-        not isinstance(argv, list)
-        or not argv
-        or any(not isinstance(item, str) or not item for item in argv)
-    ):
-        raise CaptureError("target command argv is invalid")
-    inputs = value.get("input_files")
-    outputs = value.get("output_paths")
-    if not isinstance(inputs, list) or not inputs or not isinstance(outputs, list):
-        raise CaptureError("target command path bindings are invalid")
-    snapshots: list[Any] = [manifest_snapshot]
-    classified: set[int] = set()
-    for number, item in enumerate(inputs):
-        if not isinstance(item, dict):
-            raise CaptureError("target input binding must be an object")
-        PRODUCER.exact(
-            item,
-            {"argument_index", "path", "sha256", "executable"},
-            f"target input {number}",
+
+
+def load_target_command_manifest(
+    path: Path,
+    expected_sha256: str,
+    *,
+    allow_existing_outputs: bool = False,
+) -> tuple[dict[str, Any], list[Any]]:
+    manifest_snapshot = PinnedTargetManifest.open(path, expected_sha256)
+    try:
+        data = manifest_snapshot.read_verified()
+        parser_snapshot = PRODUCER.Snapshot(
+            manifest_snapshot.path,
+            PRODUCER.file_identity(os.fstat(manifest_snapshot.descriptor)),
+            manifest_snapshot.sha256,
+            data,
         )
-        index = PRODUCER.count(item.get("argument_index"), f"target input {number} index")
-        if index >= len(argv) or index in classified or argv[index] != item.get("path"):
-            raise CaptureError("target input index/path binding differs")
-        if type(item.get("executable")) is not bool:
-            raise CaptureError("target input executable flag must be boolean")
-        snapshot = PROFILER.capture(
-            Path(item["path"]),
-            f"target input {number}",
-            require_executable=item["executable"],
-            require_single_link=True,
-        )
-        if snapshot.sha256 != PRODUCER.digest(item.get("sha256"), f"target input {number} hash"):
-            raise CaptureError("target input SHA-256 differs")
-        snapshots.append(snapshot)
-        classified.add(index)
-    if 0 not in classified or not any(
-        item.get("argument_index") == 0 and item.get("executable") is True
-        for item in inputs
-    ):
-        raise CaptureError("target argv[0] executable is not hash-bound")
-    for number, item in enumerate(outputs):
-        if not isinstance(item, dict):
-            raise CaptureError("target output binding must be an object")
-        PRODUCER.exact(item, {"argument_index", "path"}, f"target output {number}")
-        index = PRODUCER.count(item.get("argument_index"), f"target output {number} index")
-        target = item.get("path")
+        value = PRODUCER.parse_json(parser_snapshot, "target command manifest")
+        validate_target_manifest_root(value)
+        argv = value.get("argv")
         if (
-            index >= len(argv)
-            or index in classified
-            or argv[index] != target
-            or not isinstance(target, str)
-            or not Path(target).is_absolute()
+            not isinstance(argv, list)
+            or not argv
+            or any(not isinstance(item, str) or not item for item in argv)
         ):
-            raise CaptureError("target output index/path binding differs")
-        if Path(target).is_symlink():
-            raise CaptureError("target output path must not be a symlink")
-        if not allow_existing_outputs and Path(target).exists():
-            raise CaptureError("target output path already exists")
-        PROFILER.canonical_path(Path(target).parent, f"target output {number} parent")
-        classified.add(index)
-    absolute_indices = {index for index, item in enumerate(argv) if Path(item).is_absolute()}
-    if classified != absolute_indices:
-        raise CaptureError("target absolute argv path coverage differs")
-    return value, snapshots
+            raise CaptureError("target command argv is invalid")
+        inputs = value.get("input_files")
+        outputs = value.get("output_paths")
+        if not isinstance(inputs, list) or not inputs or not isinstance(outputs, list):
+            raise CaptureError("target command path bindings are invalid")
+        snapshots: list[Any] = [manifest_snapshot]
+        classified: set[int] = set()
+        for number, item in enumerate(inputs):
+            if not isinstance(item, dict):
+                raise CaptureError("target input binding must be an object")
+            PRODUCER.exact(
+                item,
+                {"argument_index", "path", "sha256", "executable"},
+                f"target input {number}",
+            )
+            index = PRODUCER.count(
+                item.get("argument_index"), f"target input {number} index"
+            )
+            if index >= len(argv) or index in classified or argv[index] != item.get("path"):
+                raise CaptureError("target input index/path binding differs")
+            if type(item.get("executable")) is not bool:
+                raise CaptureError("target input executable flag must be boolean")
+            snapshot = PROFILER.capture(
+                Path(item["path"]),
+                f"target input {number}",
+                require_executable=item["executable"],
+                require_single_link=True,
+            )
+            if snapshot.sha256 != PRODUCER.digest(
+                item.get("sha256"), f"target input {number} hash"
+            ):
+                raise CaptureError("target input SHA-256 differs")
+            snapshots.append(snapshot)
+            classified.add(index)
+        if 0 not in classified or not any(
+            item.get("argument_index") == 0 and item.get("executable") is True
+            for item in inputs
+        ):
+            raise CaptureError("target argv[0] executable is not hash-bound")
+        for number, item in enumerate(outputs):
+            if not isinstance(item, dict):
+                raise CaptureError("target output binding must be an object")
+            PRODUCER.exact(
+                item, {"argument_index", "path"}, f"target output {number}"
+            )
+            index = PRODUCER.count(
+                item.get("argument_index"), f"target output {number} index"
+            )
+            target = item.get("path")
+            if (
+                index >= len(argv)
+                or index in classified
+                or argv[index] != target
+                or not isinstance(target, str)
+                or not Path(target).is_absolute()
+            ):
+                raise CaptureError("target output index/path binding differs")
+            if Path(target).is_symlink():
+                raise CaptureError("target output path must not be a symlink")
+            if not allow_existing_outputs and Path(target).exists():
+                raise CaptureError("target output path already exists")
+            PROFILER.canonical_path(
+                Path(target).parent, f"target output {number} parent"
+            )
+            classified.add(index)
+        absolute_indices = {
+            index for index, item in enumerate(argv) if Path(item).is_absolute()
+        }
+        if classified != absolute_indices:
+            raise CaptureError("target absolute argv path coverage differs")
+        return value, snapshots
+    except Exception:
+        manifest_snapshot.close()
+        raise
 
 
 def profiler_command(
@@ -494,6 +625,9 @@ def run_profile(
 ) -> None:
     if verifier is not None:
         verifier()
+    output_preexisted = output_directory.exists() or output_directory.is_symlink()
+    failure: BaseException | None = None
+    reason: str | None = None
     try:
         _run_profile(
             command,
@@ -502,22 +636,42 @@ def run_profile(
             pass_fds=pass_fds,
             spawn_verifier=verifier,
         )
-    except (CaptureError, OSError, subprocess.SubprocessError) as error:
-        reason = (
-            str(error)
-            if isinstance(error, CaptureError)
-            else f"rocprof launch failed: {error}"
-        )
-        if output_directory.is_dir() and not output_directory.is_symlink():
+    except (
+        CaptureError,
+        PRODUCER.ProducerError,
+        PROFILER.ProfileError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
+        failure = error
+        reason = str(error)
+    try:
+        if verifier is not None:
+            verifier()
+    except (
+        CaptureError,
+        PRODUCER.ProducerError,
+        PROFILER.ProfileError,
+        OSError,
+    ) as error:
+        if failure is None:
+            failure = error
+            reason = f"post-spawn input verification failed: {error}"
+        else:
+            reason = f"{reason}; post-spawn input verification failed: {error}"
+    if failure is not None:
+        assert reason is not None
+        if (
+            not output_preexisted
+            and output_directory.is_dir()
+            and not output_directory.is_symlink()
+        ):
             write_failure_evidence(
                 output_directory, reason, command, failure_context
             )
-        if isinstance(error, CaptureError):
-            raise
-        raise CaptureError(reason) from error
-    finally:
-        if verifier is not None:
-            verifier()
+        if isinstance(failure, CaptureError) and reason == str(failure):
+            raise failure
+        raise CaptureError(reason) from failure
 
 
 def discover(output_directory: Path) -> dict[str, Path]:
@@ -924,6 +1078,9 @@ def _assemble(
 def assemble(**kwargs: Any) -> dict[str, Any]:
     output_directory = kwargs["output_directory"]
     artifact_path = kwargs["artifact_path"]
+    failure_path = output_directory / "capture-failure.json"
+    if failure_path.exists() or failure_path.is_symlink():
+        raise CaptureError("failure evidence exists; refusing to publish a success artifact")
     split_directory = output_directory / "measured-runs"
     capability_path = output_directory / "capture-capabilities.json"
     split_existed = split_directory.exists() or split_directory.is_symlink()
@@ -947,6 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profiler-path", type=Path, required=True)
     parser.add_argument("--profiler-sha256", required=True)
     parser.add_argument("--target-command-manifest", type=Path, required=True)
+    parser.add_argument("--target-command-manifest-sha256", required=True)
     parser.add_argument("--profile-output-directory", type=Path, required=True)
     parser.add_argument("--profile-output-name", default="aq4-p3-diagnostic")
     parser.add_argument("--identity", type=Path, required=True)
@@ -956,18 +1114,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=1800.0)
     args = parser.parse_args(argv)
     pinned_profiler: PinnedProfiler | None = None
+    pinned_target_manifest: PinnedTargetManifest | None = None
     capture_completed = False
     failure_context: dict[str, Any] | None = None
     logical_command: list[str] | None = None
     try:
+        if args.command == "capture" and (
+            args.artifact.exists() or args.artifact.is_symlink()
+        ):
+            raise CaptureError("success artifact path already exists")
         pinned_profiler = PinnedProfiler.open(
             args.profiler_path, args.profiler_sha256
         )
         profiler_value = pinned_profiler_version(pinned_profiler)
         target_value, target_snapshots = load_target_command_manifest(
             args.target_command_manifest,
+            args.target_command_manifest_sha256,
             allow_existing_outputs=args.command == "assemble",
         )
+        pinned_target_manifest = target_snapshots[0]
         target_command = target_value["argv"]
         profiler_value["target_command_manifest"] = ref(target_snapshots[0])
         command = profiler_command(
@@ -1022,7 +1187,7 @@ def main(argv: list[str] | None = None) -> int:
             output_directory=args.profile_output_directory,
             artifact_path=args.artifact,
         )
-        pinned_profiler.verify()
+        capture_completed = False
         print(json.dumps({"status": artifact["status"], "promotion_eligible": False}, sort_keys=True))
         return 0
     except (
@@ -1048,6 +1213,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"AQ4 P3 diagnostic rocprof capture failed: {error}", file=sys.stderr)
         return 1
     finally:
+        if pinned_target_manifest is not None:
+            pinned_target_manifest.close()
         if pinned_profiler is not None:
             pinned_profiler.close()
 

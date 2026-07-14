@@ -22,14 +22,17 @@
 - target commandはself-hash付きexact argv manifestへ変更した。argv[0]を含む入力file hashと出力pathをargument indexへ結び、absolute argvを漏れなく分類し、spawn直前と終了後に再検証する。
 - 実行所有順を`outer maintenance harness -> capture tool -> rocprof child(new process group) -> launcher -> runner`へ固定した。timeout cleanupはrocprof child groupだけへSIGINT、SIGTERM、SIGKILLを段階送信し、group全消失を要求する。
 - timeout/nonzero/launch失敗ではread-only `capture-failure.json`へnon-promotion、cleanup状態、outer harness非signal、stdout/stderr hash、固定入力contextをself-hash付きで残す。
+- 独立QA修正として`--target-command-manifest-sha256`を必須化し、manifest file全体の期待SHAとmanifest内self-hashを別々に検証する。manifestはread-only同一FDでinitial、spawn直前、終了後にpath/inode/file SHA/self-hashを固定する。
+- post-spawn verifierの失敗を`run_profile`のfailure経路内へ移し、path swapを含む全CaptureErrorでatomic read-only failure evidenceを発行してからraiseする。failure evidenceがあるoutputからsuccess artifactを発行せず、両者を併存させない。
 
 ## 検証
 
 - GPU、service、model loadは実行していない。
-- `tests/test_capture_aq4_p3_diagnostic_profile.py`: 10 passed
+- `tests/test_capture_aq4_p3_diagnostic_profile.py`: 11 passed
 - fake outer harness sentinelがcapture timeout後も生存し、子group消失後にrestoreを完了することを確認した。
 - profiler SHA不一致・invocation symlink差し替え、target absolute argv未分類を拒否することを確認した。
-- capture + producer + profiler + selector: 84 passed
+- manifest argvを並べ替えてself-hashを再計算しても期待file SHA不一致で拒否し、post-spawn path swapがfailure evidenceを残してsuccess artifactを禁止することを確認した。
+- capture + producer + profiler + selector: 85 passed
 - py_compile: passed
 
 ## 残課題

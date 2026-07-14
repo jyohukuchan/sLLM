@@ -24,11 +24,13 @@ rocprofv3
 -- EXACT_HASH_BOUND_TARGET_COMMAND...
 ```
 
-CLIは`--profiler-path`、`--profiler-sha256`、`--target-command-manifest`を必須にする。profiler pathはabsoluteかつ`..`なしで、invocationのsymlink chain、resolved path、single-link executable regular file、inode identity、SHA-256を固定する。resolved profilerをread-only FDで開いたまま、初回検証、spawn直前検証、終了後検証を行い、実行自体も同じFDの`/proc/self/fd/<n>`を使う。path再openだけに依存しない。
+CLIは`--profiler-path`、`--profiler-sha256`、`--target-command-manifest`、`--target-command-manifest-sha256`を必須にする。profiler pathはabsoluteかつ`..`なしで、invocationのsymlink chain、resolved path、single-link executable regular file、inode identity、SHA-256を固定する。resolved profilerをread-only FDで開いたまま、初回検証、spawn直前検証、終了後検証を行い、実行自体も同じFDの`/proc/self/fd/<n>`を使う。path再openだけに依存しない。
 
-target command manifestは`ullm.aq4_p3_profile_target_command.v1`、`status=bound`、self-hash、exact `argv`、`input_files`、`output_paths`を持つ。`input_files`はargument index、absolute path、SHA-256、executable flagを結び、argv[0]をsingle-link executable regular fileとして必ず固定する。`output_paths`もargument indexとabsolute pathを結ぶ。argv内のabsolute pathは入力または出力へ漏れなく一度だけ分類し、入力manifestとファイルidentityをspawn直前と終了後に再検証する。capture時の出力pathは未作成でなければならず、正常終了後に生成済みであることを要求する。command全体のcanonical SHA-256もartifactへ保存する。
+target command manifestは`ullm.aq4_p3_profile_target_command.v1`、`status=bound`、self-hash、exact `argv`、`input_files`、`output_paths`を持つ。outer ready artifactとexact capture argvは`--target-command-manifest-sha256`へmanifest file全体のSHA-256を固定する。これはmanifest内のcanonical self-hashとは別物であり、両方の一致を要求する。manifestはsingle-link regular fileのread-only FDを保持し、initial、spawn直前、終了後に同じFD、path identity、期待file SHA、self-hashを再検証する。flag/valueを並べ替えてself-hashを再計算しても、outerが固定したfile SHAと異なるため拒否する。
 
-timeout時はrocprof child groupへSIGINTを送り、残存時だけSIGTERM、SIGKILLの順で段階終了する。親をwaitし、process group全体の消失を確認できなければcleanup失敗として拒否する。outer maintenance harnessのprocess groupは対象にしない。nonzero、signal、OOM候補の137/-9を成功扱いしない。失敗時は`capture-failure.json`をread-onlyかつself-hash付きで発行し、non-promotion、cleanup完了可否、outer harnessへsignalを送っていないこと、stdout/stderr hash、固定入力contextを残す。
+`input_files`はargument index、absolute path、SHA-256、executable flagを結び、argv[0]をsingle-link executable regular fileとして必ず固定する。`output_paths`もargument indexとabsolute pathを結ぶ。argv内のabsolute pathは入力または出力へ漏れなく一度だけ分類し、入力ファイルidentityもspawn直前と終了後に再検証する。capture時の出力pathは未作成でなければならず、正常終了後に生成済みであることを要求する。command全体のcanonical SHA-256もartifactへ保存する。
+
+timeout時はrocprof child groupへSIGINTを送り、残存時だけSIGTERM、SIGKILLの順で段階終了する。親をwaitし、process group全体の消失を確認できなければcleanup失敗として拒否する。outer maintenance harnessのprocess groupは対象にしない。nonzero、signal、OOM候補の137/-9を成功扱いしない。profile実行失敗だけでなく、post-spawnのprofiler、manifest、target input検証失敗も捕捉し、raiseより先に`capture-failure.json`をread-onlyかつself-hash付きでatomic発行する。failure evidenceはnon-promotion、cleanup完了可否、outer harnessへsignalを送っていないこと、stdout/stderr hash、固定入力contextを残す。`capture-failure.json`が存在するoutputからsuccess artifactを発行せず、success artifact発行後にfailure evidenceを併存させない。
 
 ## marker hook契約
 

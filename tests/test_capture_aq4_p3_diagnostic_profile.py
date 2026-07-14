@@ -156,6 +156,7 @@ def test_fake_rocprof_runs_once_and_discovers_exact_trace_set(tmp_path: Path) ->
     assert (output / "rocprof.stdout").exists()
     with pytest.raises(CAPTURE.CaptureError, match="already exists"):
         CAPTURE.run_profile(command, output, 10.0)
+    assert not (output / "capture-failure.json").exists()
 
 
 def test_pinned_profiler_uses_verified_fd_and_rejects_sha_or_symlink_swap(
@@ -224,20 +225,91 @@ def test_target_command_manifest_binds_exact_argv_and_input_hashes(tmp_path: Pat
     manifest = (tmp_path / "target.json").resolve()
     argv = [str(executable.resolve()), "--output", str(output)]
     value = write_target_manifest(manifest, argv, output_indices=(2,))
-    loaded, snapshots = CAPTURE.load_target_command_manifest(manifest)
-    assert loaded == value
-    assert loaded["argv"] == argv
-    assert len(snapshots) == 2
+    expected_file_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, expected_file_sha
+    )
+    try:
+        assert loaded == value
+        assert loaded["argv"] == argv
+        assert len(snapshots) == 2
 
-    executable.chmod(0o755)
-    with pytest.raises(CAPTURE.PROFILER.ProfileError, match="identity changed"):
-        snapshots[1].verify()
+        executable.chmod(0o755)
+        with pytest.raises(CAPTURE.PROFILER.ProfileError, match="identity changed"):
+            snapshots[1].verify()
+    finally:
+        snapshots[0].close()
 
     executable.chmod(0o555)
+    reordered = write_target_manifest(
+        manifest,
+        [str(executable.resolve()), str(output), "--output"],
+        output_indices=(1,),
+    )
+    assert reordered["manifest_sha256"] == CAPTURE.self_hash(
+        reordered, "manifest_sha256"
+    )
+    with pytest.raises(CAPTURE.CaptureError, match="file SHA-256 differs"):
+        CAPTURE.load_target_command_manifest(manifest, expected_file_sha)
+
     unbound = (tmp_path / "unbound.json").resolve()
     write_target_manifest(unbound, [str(executable.resolve()), str(output)])
     with pytest.raises(CAPTURE.CaptureError, match="coverage differs"):
-        CAPTURE.load_target_command_manifest(unbound)
+        CAPTURE.load_target_command_manifest(
+            unbound, hashlib.sha256(unbound.read_bytes()).hexdigest()
+        )
+
+
+def test_post_spawn_manifest_path_swap_emits_failure_and_blocks_success(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "launcher"
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o555)
+    manifest = (tmp_path / "target.json").resolve()
+    write_target_manifest(manifest, [str(launcher.resolve())])
+    expected_file_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    _value, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, expected_file_sha
+    )
+    pinned_manifest = snapshots[0]
+    replacement = tmp_path / "target-replacement.json"
+    replacement.write_bytes(manifest.read_bytes())
+    swapper = tmp_path / "swap-manifest"
+    swapper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "os.replace(sys.argv[1], sys.argv[2])\n",
+        encoding="utf-8",
+    )
+    swapper.chmod(0o555)
+    output_directory = (tmp_path / "profile-output").resolve()
+    artifact = tmp_path / "success-artifact.json"
+    try:
+        with pytest.raises(CAPTURE.CaptureError, match="post-spawn.*identity changed"):
+            CAPTURE.run_profile(
+                [str(swapper), str(replacement), str(manifest)],
+                output_directory,
+                10.0,
+                verifier=pinned_manifest.verify,
+                failure_context={"target_command_manifest": CAPTURE.ref(pinned_manifest)},
+            )
+        failure_path = output_directory / "capture-failure.json"
+        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        assert failure_path.stat().st_mode & 0o777 == 0o444
+        assert failure["failure_sha256"] == CAPTURE.self_hash(
+            failure, "failure_sha256"
+        )
+        assert failure["promotion_eligible"] is False
+        assert not artifact.exists()
+        with pytest.raises(CAPTURE.CaptureError, match="failure evidence exists"):
+            CAPTURE.assemble(
+                output_directory=output_directory,
+                artifact_path=artifact,
+            )
+        assert not artifact.exists()
+    finally:
+        pinned_manifest.close()
 
 
 def test_profile_timeout_and_oom_exit_fail_closed(tmp_path: Path) -> None:
