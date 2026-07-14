@@ -5,6 +5,41 @@
   "created_at": "2026-07-14T00:00:00Z",
   "effective_at": null,
   "scope": "planning_only",
+  "binding_contract": {
+    "bound_status": "bound",
+    "required_before_case_execution": true,
+    "policy_sha256_rule": "sha256-canonical-json-with-hash_binding.policy_sha256-null",
+    "required_hash_fields": [
+      "model_identity_sha256",
+      "tokenizer_sha256",
+      "served_model_manifest_sha256",
+      "worker_binary_sha256",
+      "package_manifest_sha256",
+      "package_content_sha256",
+      "graph_identity_sha256",
+      "state_schema_sha256",
+      "source_oracle_sha256",
+      "path_oracle_identity_sha256",
+      "baseline_result_sha256",
+      "power_capture_sha256",
+      "policy_sha256",
+      "bound_case_manifest_sha256"
+    ],
+    "required_power_fields": [
+      "expected_power_limit_watts",
+      "allowed_power_tolerance_watts",
+      "maximum_temperature_c",
+      "minimum_vram_headroom_bytes"
+    ],
+    "required_correctness_thresholds": [
+      "max_hidden_relative_l2",
+      "max_hidden_max_abs",
+      "max_logits_relative_l2",
+      "max_logits_max_abs",
+      "minimum_top_k_overlap"
+    ],
+    "unbound_template_is_planning_only": true
+  },
   "applies_to": {
     "model_family": "Qwen3.5",
     "model_name": "Qwen3.5-9B",
@@ -81,7 +116,7 @@
     "minimum_top_k_overlap": null,
     "threshold_values_must_be_bound_to_artifact": true
   },
-  "performance_thresholds": {
+    "performance_thresholds": {
     "measurement_schedule": {
       "warmup_runs": 2,
       "measured_runs": 10,
@@ -105,7 +140,8 @@
     },
     "decode": {
       "generated_tokens_per_case": 64,
-      "requested_m": 1,
+      "request_count": 1,
+      "actual_token_batch_width_required": 1,
       "context_1339_min_tokens_per_second": 53.3,
       "context_1339_improvement_fraction_min": 0.25,
       "context_1339_prefill_only_regression_fraction_max": 0.05,
@@ -144,13 +180,25 @@
         "note": "Use only as a control dependency; do not promote SQ8_0 from this AQ4 P2 run."
       }
     ],
-    "matching_identity_fields": [
+      "matching_identity_fields": [
       "model_identity_sha256",
       "tokenizer_sha256",
       "package_manifest_sha256",
+      "package_content_sha256",
+      "format_id",
+      "implementation_id",
+      "resolved_m",
+      "backend_identity",
+      "device_identity",
       "prompt_tokens",
+      "cached_prefix_tokens",
       "context_tokens",
-      "requested_m",
+      "decode_start_tokens",
+      "prefill_requested_m",
+      "decode_request_count",
+      "phase",
+      "baseline_mode",
+      "source_oracle_identity",
       "sampling",
       "power_capture_sha256"
     ],
