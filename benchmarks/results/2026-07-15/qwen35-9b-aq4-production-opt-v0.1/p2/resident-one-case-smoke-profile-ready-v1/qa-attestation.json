@@ -1,5 +1,195 @@
 {
   "actual_executed": false,
+  "automated_tests": {
+    "aggregate": {
+      "collected": 342,
+      "deselected": 0,
+      "distinct_test_file_count": 11,
+      "failed": 0,
+      "passed": 342
+    },
+    "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
+    "suites": [
+      {
+        "collected": 252,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_prepare_aq4_p2_resident_smoke_bundle.py",
+          "tests/test_run_aq4_p2_resident_batch.py",
+          "tests/test_run_aq4_p2_resident_live_preflight.py",
+          "tests/test_launch_aq4_p2_resident_smoke.py",
+          "tests/test_launch_aq4_p2_resident_smoke_execute.py",
+          "tests/test_aq4_p2_resident_smoke_maintenance.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 50,
+            "git_blob": "34c25be2a019d52564e4eb2449cb68622b2336f3",
+            "passed": 50,
+            "path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py",
+            "source_commit": "2c24b7670b52610f6b1db33633139023778b18e9"
+          },
+          {
+            "collected": 37,
+            "git_blob": "61778f9935e2d8bcd469cdf1a8a74495543c1aee",
+            "passed": 37,
+            "path": "tests/test_run_aq4_p2_resident_batch.py",
+            "source_commit": "4005c80e542d7e37cf79e62d2fd053f99c0353c1"
+          },
+          {
+            "collected": 24,
+            "git_blob": "9ca9a777e96c34d308a3ce64354acf62e05f7d2d",
+            "passed": 24,
+            "path": "tests/test_run_aq4_p2_resident_live_preflight.py",
+            "source_commit": "774f6ddc10791db8795b37f41c5245d0edfebe42"
+          },
+          {
+            "collected": 7,
+            "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546",
+            "passed": 7,
+            "path": "tests/test_launch_aq4_p2_resident_smoke.py",
+            "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958"
+          },
+          {
+            "collected": 58,
+            "git_blob": "00ebb0291738b373c1bdc3e848da82cc54100291",
+            "passed": 58,
+            "path": "tests/test_launch_aq4_p2_resident_smoke_execute.py",
+            "source_commit": "3642999bd89bac462330a15da1e114f92204f8b5"
+          },
+          {
+            "collected": 76,
+            "git_blob": "c6f55e522435c037ee607d3bc661a2954371bd61",
+            "passed": 76,
+            "path": "tests/test_aq4_p2_resident_smoke_maintenance.py",
+            "source_commit": "9a3de26914fee595466644bc9f47f276ae7337c0"
+          }
+        ],
+        "name": "resident_trust_chain",
+        "passed": 252
+      },
+      {
+        "collected": 5,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_aq4_p2_resident_roctx_ranges.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 5,
+            "git_blob": "a6ee8886ffdf58ea668b1b4c49452fa47637f7d9",
+            "passed": 5,
+            "path": "tests/test_aq4_p2_resident_roctx_ranges.py",
+            "source_commit": "62eadada3082b0c72eb1b467177ffe0c9445f26d"
+          }
+        ],
+        "name": "resident_roctx_ranges",
+        "passed": 5
+      },
+      {
+        "collected": 11,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_capture_aq4_p3_diagnostic_profile.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 11,
+            "git_blob": "86b95305159a831151c12472e3366a937e38e0fd",
+            "passed": 11,
+            "path": "tests/test_capture_aq4_p3_diagnostic_profile.py",
+            "source_commit": "b4d515f9908136fa773f957775beab79edc3065d"
+          }
+        ],
+        "name": "diagnostic_capture",
+        "passed": 11
+      },
+      {
+        "collected": 21,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_build_aq4_p3_selection_raw.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 21,
+            "git_blob": "1227c0a4fd60b9730e2e9e8b9f663fbc5867914f",
+            "passed": 21,
+            "path": "tests/test_build_aq4_p3_selection_raw.py",
+            "source_commit": "78ba33c982c994df47c8ff4541df85b8d7da4a63"
+          }
+        ],
+        "name": "selection_raw_producer",
+        "passed": 21
+      },
+      {
+        "collected": 27,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_profile_aq4_p2_family_exclusive.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 27,
+            "git_blob": "30827a375a2dacd329e3023fd02b0631d8526b67",
+            "passed": 27,
+            "path": "tests/test_profile_aq4_p2_family_exclusive.py",
+            "source_commit": "0a630c705b7594a016edb42e32a29e4647da9d10"
+          }
+        ],
+        "name": "profile_family_exclusion",
+        "passed": 27
+      },
+      {
+        "collected": 26,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_select_aq4_p3_candidate.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 26,
+            "git_blob": "9665da8fd81cd875b522c80f42bea6777642caf7",
+            "passed": 26,
+            "path": "tests/test_select_aq4_p3_candidate.py",
+            "source_commit": "01055a1960e55ab98990a6ee109e4a778f5bfd67"
+          }
+        ],
+        "name": "candidate_selector",
+        "passed": 26
+      }
+    ]
+  },
   "capture_tool": {
     "commit": "b4d515f9908136fa773f957775beab79edc3065d",
     "sha256": "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8"
@@ -28,18 +218,15 @@
     "commit": "73438ede07e0bc48d300aeb9986742532fbe730b",
     "sha256": "56634a890aa18b3e0c8d4ac3b83800a7e1a6dea0a09156dbd1dfbc722388af77"
   },
-  "manual_boundary_count": 15,
+  "manual_checks": {
+    "boundary_count": 15,
+    "status": "passed"
+  },
   "runner": {
     "commit": "084d2e71114857da77e4196061d18a1dfefd53e8",
     "sha256": "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"
   },
-  "runner_strict_negative_count": 38,
-  "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
+  "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2",
   "status": "passed",
-  "test_count": 318,
-  "test_suites": {
-    "diagnostic_capture": 11,
-    "existing_and_profile_regression": 252,
-    "marker_chain": 55
-  }
+  "strict_negative_contract_count": 38
 }
