@@ -363,5 +363,5 @@ PY
   --expected-guard-sha256 "$GUARD_SHA256" --expected-device-architecture "$DEVICE_ARCHITECTURE" \
   --expected-quantized-artifact-revision "$QUANTIZED_ARTIFACT_REVISION" >"$BASE/metrics.stdout" 2>"$BASE/metrics.stderr"
 "$PYTHON" tools/validate-qwen35-aq4-fidelity-capture.py --metrics "$METRICS" --split-root "$SPLIT_ROOT" >"$BASE/metrics.validate.stdout" 2>"$BASE/metrics.validate.stderr"
-echo "active_output_verified=1 metrics_verified=1 rows=$MAX_ROWS one_model_load=1 nonfinite_rows=0"
+echo "active_output_verified=1 metrics_verified=1 metrics_sha256=$(sha256_file "$METRICS") rows=$MAX_ROWS one_model_load=1 nonfinite_rows=0"
 echo "gate_finished=$(date --iso-8601=seconds)"
