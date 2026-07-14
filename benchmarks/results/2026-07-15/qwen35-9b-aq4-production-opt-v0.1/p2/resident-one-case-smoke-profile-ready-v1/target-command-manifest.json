@@ -11,7 +11,7 @@
     "--run-id",
     "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
     "--trusted-launcher-sha",
-    "56634a890aa18b3e0c8d4ac3b83800a7e1a6dea0a09156dbd1dfbc722388af77"
+    "35195d815fca42b4705ff0e9001674507a37149b1d70c0bdd183378417e8279c"
   ],
   "input_files": [
     {
@@ -24,10 +24,10 @@
       "argument_index": 1,
       "executable": false,
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/launch-aq4-p2-resident-smoke.py",
-      "sha256": "56634a890aa18b3e0c8d4ac3b83800a7e1a6dea0a09156dbd1dfbc722388af77"
+      "sha256": "35195d815fca42b4705ff0e9001674507a37149b1d70c0bdd183378417e8279c"
     }
   ],
-  "manifest_sha256": "99d9e559db86ee53916b99ed51648d5babda76c382c056f6abc6921905a37889",
+  "manifest_sha256": "85d1bdfe335f7e46d834374c21ac00a2d3ee2aff71f4dbcbc73340cacb1e0347",
   "output_paths": [
     {
       "argument_index": 5,
