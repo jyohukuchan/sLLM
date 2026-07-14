@@ -91,8 +91,11 @@ resident rawは`ullm.aq4_p2_resident_batch_raw.v1`で、次を要求する。
 - scheduleが2 warmup + 10 measured、completed 12
 - run index 0..11とwarmup/measured kindのexact order
 - 全run成功、正のprefill時間、完全reset
-- run timingのexact fields
+- baseline identity、resident、device lock、workload、linksのexact fieldsとstrict型
+- run timing、audit、state、lifecycle、reset、resource、terminalのexact fieldsとstrict型
 - full-model、cold-prefill、manifest指定Mとcase ID/SHAの一致
+
+整数fieldではboolやfloatによる代用を認めない。たとえば`reset.attempted=true`はJSON/Python上で`1`と等値に見える場合でも拒否する。driver identityの比較も、再帰的にJSON型を一致させる。
 
 one-case smokeのraw/summaryはpromotion modeで拒否する。`smoke_only=true`、`execution_mode=one_case_smoke`、`promotion_eligible=false`、明示的`measurement_eligible=false`のいずれかがpromotion sourceに現れた場合はfail-closedとする。diagnostic modeでは逆にone-case smokeとpromotion不可の明示を必須とする。
 
@@ -110,13 +113,50 @@ measurement_eligible
 clock_domain
 kernel_trace_complete
 hip_api_trace_complete
+capture_capabilities
 kernel_trace
 hip_api_trace
 ```
 
 `clock_domain=rocprofv3_monotonic_ns`、両trace complete=trueを要求する。promotion modeでは`measurement_eligible=true`、diagnostic modeではfalseである。case ID/SHA、identity SHA、resident measured run indexをrawへ一致させる。同じkernel traceまたはHIP API traceのSHA-256を別runで再利用してはならない。
 
-trace completenessがfalse、必要columnがない、fileが空、API directionが不明な場合は0と推定せず入力を拒否する。
+trace completenessがfalse、必要columnがない、fileが空、API directionが不明な場合は0と推定せず入力を拒否する。`kernel_trace_complete`と`hip_api_trace_complete`はrun bindingの宣言であり、単独ではAPIの0件観測を証明しない。
+
+### 4.1 capture capability manifest
+
+各bindingの`capture_capabilities`はfile bytesをpath/SHA-256で固定し、schema `ullm.aq4_p3_rocprof_capture_capabilities.v1`を参照する。root exact fieldsは次である。
+
+```text
+schema_version
+status
+measurement_eligible
+capability_sha256
+tool
+domains
+rocprof_config
+```
+
+`capability_sha256`は自身をnullにしたcanonical JSONのself-hashである。`status=complete`、`tool.name=rocprofv3`、非空versionを要求する。promotionでは`measurement_eligible=true`、diagnosticではfalseである。
+
+`domains`はexactly次のboolean fieldを持ち、すべてtrueでなければならない。
+
+```text
+kernel_dispatch
+hip_api
+d2h_memcpy
+stream_synchronize
+device_synchronize
+```
+
+`rocprof_config`はexactly次を持つ。
+
+```text
+kernel_trace = true
+hip_api_trace = true
+api_filter = all_functions
+```
+
+missing、unknown、false、型代用、self-hash不一致、file hash不一致はfail-closedである。同じcapability manifestは同一capture設定の複数runから参照できるが、kernel/API trace自体の再利用は禁止する。
 
 ## 5. kernel trace
 
@@ -170,6 +210,8 @@ hipDeviceSynchronize
 
 明示的H2D/D2D/peer copyと`hipEventSynchronize`は別種として無視する。`hipMemcpyAsync`のように方向を証明できない名前、または未知の`*Synchronize*`は拒否する。API traceがheaderだけで空の場合も、0件を観測したとは扱わない。
 
+`hipLaunchKernel`やH2Dだけを含みD2H/syncが0件のtraceは、hash-bound capability manifestが全HIP API domainと`api_filter=all_functions`を証明した場合にだけ0として受理する。capabilityがmissing、unknown、ambiguous、不完全なら0件を能力不足と区別できないため拒否する。
+
 回数は一次row数である。時間は同種API intervalのunionで、重複時間を二重計上しない。selector rawの各代表promptには10 measured runの合計として次を保存する。
 
 ```text
@@ -210,6 +252,8 @@ baseline/candidateは異なるrun ID、同じidentity file、driver identity、c
 - manifest、identity self-hash、file reference SHAの不一致
 - input TOCTOUまたはtrace再利用
 - incomplete/smoke/ineligible resident summary/rawからpromotion生成
+- capture capability manifestの欠落、不完全なdomain/config、self-hash/file hash不一致
+- resident raw nested fieldのbool/int/float代用またはunknown/missing field
 - 7 prompt不足、prompt/case重複、M=128または別Mの欠落
 - profile measured index 2..11の欠落・重複・順序差し替え
 - kernel unknown、API transfer/sync unknown、trace column/clock/phase不正

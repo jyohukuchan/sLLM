@@ -98,11 +98,25 @@ def run_record(case_id: str, run_index: int, resolved_m: int, prefill_ms: float)
             "end_to_end_ms": prefill_ms,
             "generated_tokens": 0,
         },
-        "audit": {"coverage_complete": True, "deterministic_digest_sha256": "3" * 64},
+        "audit": {
+            "coverage_complete": True,
+            "deterministic_digest_sha256": "3" * 64,
+            "physical_operation_invocations": 1,
+        },
         "state": {"baseline_before": True, "baseline_after": True, "request_state_sha256": "4" * 64},
-        "lifecycle": {"prepare": 1, "commit": 1, "discard": 0, "error": 0, "cancel": 0},
+        "lifecycle": {
+            "prepare": 1,
+            "commit": 1,
+            "discard": 0,
+            "error": 0,
+            "cancel": 0,
+            "reset": {"attempted": 1, "complete": 1, "failed": 0},
+        },
         "reset": {"attempted": 1, "complete": 1, "failed": 0},
-        "resource": {"samples": [{"monotonic_ms": 1}], "peak": {"vram_used_bytes": 1}},
+        "resource": {
+            "samples": [{"monotonic_ms": 1.0}],
+            "peak": {"vram_used_bytes": 1, "workspace_bytes": 1, "temporary_bytes": 1},
+        },
         "terminal": {"reuse_forbidden": False, "reason_code": "none", "oom": False, "hip_fault": False},
     }
 
@@ -140,7 +154,21 @@ def raw_fixture(
             "driver_identity": identity["resident_driver_identity"],
             "case_reset_count": 12,
         },
-        "device_lock": {},
+        "device_lock": {
+            "schema_version": "ullm.aq4_p2_device_lock_owner.v1",
+            "path": "/tmp/fixture-device.lock",
+            "pid": 123,
+            "hostname": "fixture-host",
+            "run_id": run_id,
+            "acquired_unix_ns": 123456789,
+            "driver": {
+                "path": "/fixture/resident-driver",
+                "sha256": "b" * 64,
+                "device": 1,
+                "inode": 2,
+                "nlink": 1,
+            },
+        },
         "workload": {
             "scope": "full_model",
             "phase": "cold_prefill",
@@ -239,8 +267,34 @@ def write_api(path: Path, token: int, *, overlap: bool = False, unknown: bool = 
     )
 
 
+def capability_fixture(path: Path, *, diagnostic: bool = False) -> tuple[Path, dict[str, object]]:
+    value = {
+        "schema_version": PRODUCER.CAPABILITY_SCHEMA,
+        "status": "complete",
+        "measurement_eligible": not diagnostic,
+        "capability_sha256": None,
+        "tool": {"name": "rocprofv3", "version": "fixture-3.0"},
+        "domains": {
+            "kernel_dispatch": True,
+            "hip_api": True,
+            "d2h_memcpy": True,
+            "stream_synchronize": True,
+            "device_synchronize": True,
+        },
+        "rocprof_config": {
+            "kernel_trace": True,
+            "hip_api_trace": True,
+            "api_filter": "all_functions",
+        },
+    }
+    value["capability_sha256"] = PRODUCER.self_hash(value, "capability_sha256")
+    write_json(path, value)
+    return path, value
+
+
 def promotion_manifest(tmp_path: Path, *, all_m128: bool = False) -> tuple[Path, dict[str, object]]:
     identity_path, identity = identity_fixture(tmp_path)
+    capability_path, _capability = capability_fixture(tmp_path / "capture-capabilities.json")
     summaries = []
     for run_id in ("profile-run", "baseline-run", "candidate-run"):
         path = tmp_path / f"summary-{run_id}.json"
@@ -281,6 +335,7 @@ def promotion_manifest(tmp_path: Path, *, all_m128: bool = False) -> tuple[Path,
                     "clock_domain": "rocprofv3_monotonic_ns",
                     "kernel_trace_complete": True,
                     "hip_api_trace_complete": True,
+                    "capture_capabilities": ref(capability_path),
                     "kernel_trace": ref(kernel),
                     "hip_api_trace": ref(api),
                 }
@@ -359,9 +414,10 @@ def build_manifest(path: Path) -> dict[str, object]:
 
 
 def test_hip_api_parser_counts_union_time_and_rejects_unknown(tmp_path: Path) -> None:
+    _capability_path, capability = capability_fixture(tmp_path / "capability.json")
     trace = tmp_path / "api.csv"
     write_api(trace, 1, overlap=True)
-    result = PRODUCER.parse_hip_api_trace(PRODUCER.capture(trace.resolve(), "api"))
+    result = PRODUCER.parse_hip_api_trace(PRODUCER.capture(trace.resolve(), "api"), capability)
     assert result == {
         "d2h_count": 2,
         "d2h_union_ns": 150,
@@ -371,13 +427,88 @@ def test_hip_api_parser_counts_union_time_and_rejects_unknown(tmp_path: Path) ->
     unknown = tmp_path / "unknown-api.csv"
     write_api(unknown, 2, unknown=True)
     with pytest.raises(PRODUCER.ProducerError, match="unknown transfer"):
-        PRODUCER.parse_hip_api_trace(PRODUCER.capture(unknown.resolve(), "unknown"))
+        PRODUCER.parse_hip_api_trace(PRODUCER.capture(unknown.resolve(), "unknown"), capability)
     empty = tmp_path / "empty-api.csv"
     empty.write_text(
         "Correlation_Id,Function,Start_Timestamp,End_Timestamp\n", encoding="utf-8"
     )
     with pytest.raises(PRODUCER.ProducerError, match="zero counts are not observable"):
-        PRODUCER.parse_hip_api_trace(PRODUCER.capture(empty.resolve(), "empty"))
+        PRODUCER.parse_hip_api_trace(PRODUCER.capture(empty.resolve(), "empty"), capability)
+
+
+def test_hip_api_zero_requires_hash_bound_complete_domain_proof(tmp_path: Path) -> None:
+    _capability_path, capability = capability_fixture(tmp_path / "capability.json")
+    trace = tmp_path / "unrelated-api.csv"
+    trace.write_text(
+        "Correlation_Id,Function,Start_Timestamp,End_Timestamp\n"
+        "1,hipLaunchKernel,100,200\n"
+        "2,hipMemcpyHtoDAsync,300,400\n",
+        encoding="utf-8",
+    )
+    snapshot = PRODUCER.capture(trace.resolve(), "unrelated API")
+    with pytest.raises(PRODUCER.ProducerError, match="require complete capture capabilities"):
+        PRODUCER.parse_hip_api_trace(snapshot)
+    result = PRODUCER.parse_hip_api_trace(snapshot, capability)
+    assert result == {
+        "d2h_count": 0,
+        "d2h_union_ns": 0,
+        "stream_sync_count": 0,
+        "stream_sync_union_ns": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["domains"].__setitem__("d2h_memcpy", False), "domain is incomplete"),
+        (lambda value: value["rocprof_config"].__setitem__("api_filter", "selected"), "configuration is incomplete"),
+        (lambda value: value["domains"].__setitem__("unknown_domain", True), "fields differ"),
+    ],
+)
+def test_build_rejects_incomplete_or_ambiguous_capture_capability(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    _path, manifest = promotion_manifest(tmp_path)
+    capability_ref = manifest["representative_cases"][0]["profile_runs"][0]["capture_capabilities"]
+    capability_path = Path(capability_ref["path"])
+    capability = json.loads(capability_path.read_text())
+    mutation(capability)
+    capability["capability_sha256"] = PRODUCER.self_hash(capability, "capability_sha256")
+    write_json(capability_path, capability)
+    for case in manifest["representative_cases"]:
+        for binding in case["profile_runs"]:
+            binding["capture_capabilities"] = ref(capability_path)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    bad_path = tmp_path / "invalid-capability-manifest.json"
+    write_json(bad_path, manifest)
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        build_manifest(bad_path)
+
+
+def test_build_rejects_missing_or_hash_swapped_capture_capability(tmp_path: Path) -> None:
+    _path, manifest = promotion_manifest(tmp_path)
+    del manifest["representative_cases"][0]["profile_runs"][0]["capture_capabilities"]
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    missing_path = tmp_path / "missing-capability.json"
+    write_json(missing_path, manifest)
+    with pytest.raises(PRODUCER.ProducerError, match="fields differ"):
+        build_manifest(missing_path)
+
+    swap_root = tmp_path / "swap"
+    swap_root.mkdir()
+    _path, swapped = promotion_manifest(swap_root)
+    capability_path = Path(
+        swapped["representative_cases"][0]["profile_runs"][0]["capture_capabilities"]["path"]
+    )
+    capability = json.loads(capability_path.read_text())
+    capability["tool"]["version"] = "different"
+    capability["capability_sha256"] = PRODUCER.self_hash(capability, "capability_sha256")
+    write_json(capability_path, capability)
+    swapped["manifest_sha256"] = PRODUCER.manifest_sha256(swapped)
+    swapped_path = swap_root / "hash-swapped-capability.json"
+    write_json(swapped_path, swapped)
+    with pytest.raises(PRODUCER.ProducerError, match="SHA-256 differs"):
+        build_manifest(swapped_path)
 
 
 def test_kernel_parser_uses_union_for_same_family_overlap_and_rejects_unknown(
@@ -497,6 +628,9 @@ def test_promotion_profile_binding_must_be_eligible_and_complete(
 
 def test_one_case_diagnostic_is_explicitly_non_promotable(tmp_path: Path) -> None:
     identity_path, identity = identity_fixture(tmp_path)
+    capability_path, _capability = capability_fixture(
+        tmp_path / "capture-capabilities.json", diagnostic=True
+    )
     summary = summary_fixture(
         tmp_path / "summary.json", identity_path, "diagnostic-run", diagnostic=True
     )
@@ -548,6 +682,7 @@ def test_one_case_diagnostic_is_explicitly_non_promotable(tmp_path: Path) -> Non
                         "clock_domain": "rocprofv3_monotonic_ns",
                         "kernel_trace_complete": True,
                         "hip_api_trace_complete": True,
+                        "capture_capabilities": ref(capability_path),
                         "kernel_trace": ref(kernel),
                         "hip_api_trace": ref(api),
                     }
@@ -604,3 +739,17 @@ def test_producer_rejects_bool_int_float_type_substitution(tmp_path: Path) -> No
     write_json(bad_raw, raw_manifest)
     with pytest.raises(PRODUCER.ProducerError, match="run order/status differs"):
         build_manifest(bad_raw)
+
+    reset_root = tmp_path / "reset-bool"
+    reset_root.mkdir()
+    _path, reset_manifest = promotion_manifest(reset_root)
+    reset_path = Path(reset_manifest["representative_cases"][0]["resident_raw"]["path"])
+    reset_raw = json.loads(reset_path.read_text())
+    reset_raw["runs"][2]["reset"]["attempted"] = True
+    write_json(reset_path, reset_raw)
+    reset_manifest["representative_cases"][0]["resident_raw"] = ref(reset_path)
+    reset_manifest["manifest_sha256"] = PRODUCER.manifest_sha256(reset_manifest)
+    bad_reset = reset_root / "bad-reset-bool.json"
+    write_json(bad_reset, reset_manifest)
+    with pytest.raises(PRODUCER.ProducerError, match="must be a non-negative integer"):
+        build_manifest(bad_reset)

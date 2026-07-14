@@ -39,6 +39,7 @@ PROFILER = load_tool("aq4_p2_profiler_for_producer", ROOT / "tools/profile-aq4-p
 
 INPUT_SCHEMA = "ullm.aq4_p3_selection_raw_producer_input.v1"
 PROFILE_BINDING_SCHEMA = "ullm.aq4_p3_rocprof_run_binding.v1"
+CAPABILITY_SCHEMA = "ullm.aq4_p3_rocprof_capture_capabilities.v1"
 RAW_SCHEMA = SELECTOR.RAW_SCHEMA
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_TRACE_ROWS = 500_000
@@ -77,6 +78,7 @@ PROFILE_RUN_FIELDS = {
     "clock_domain",
     "kernel_trace_complete",
     "hip_api_trace_complete",
+    "capture_capabilities",
     "kernel_trace",
     "hip_api_trace",
 }
@@ -125,6 +127,34 @@ RUN_FIELDS = {
     "resource",
     "terminal",
 }
+BASELINE_IDENTITY_FIELDS = {"run_id", "kind", "identity_file"}
+RESIDENT_FIELDS = {"session_id", "model_loads", "driver_identity", "case_reset_count"}
+DEVICE_LOCK_FIELDS = {
+    "schema_version", "path", "pid", "hostname", "run_id", "acquired_unix_ns", "driver"
+}
+DEVICE_LOCK_DRIVER_FIELDS = {"path", "sha256", "device", "inode", "nlink"}
+WORKLOAD_FIELDS = {
+    "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens",
+    "prefill_requested_m", "resolved_m", "request_count", "generated_tokens",
+}
+AUDIT_FIELDS = {"coverage_complete", "deterministic_digest_sha256", "physical_operation_invocations"}
+STATE_FIELDS = {"baseline_before", "baseline_after", "request_state_sha256"}
+LIFECYCLE_FIELDS = {"prepare", "commit", "discard", "error", "cancel", "reset"}
+RESET_FIELDS = {"attempted", "complete", "failed"}
+RESOURCE_FIELDS = {"samples", "peak"}
+RESOURCE_SAMPLE_FIELDS = {"monotonic_ms"}
+RESOURCE_PEAK_FIELDS = {"vram_used_bytes", "workspace_bytes", "temporary_bytes"}
+TERMINAL_FIELDS = {"reuse_forbidden", "reason_code", "oom", "hip_fault"}
+RAW_TERMINAL_FIELDS = {"audit_digests", "reset_count", "all_resets_complete"}
+CAPABILITY_FIELDS = {
+    "schema_version", "status", "measurement_eligible", "capability_sha256", "tool",
+    "domains", "rocprof_config",
+}
+CAPABILITY_TOOL_FIELDS = {"name", "version"}
+CAPABILITY_DOMAIN_FIELDS = {
+    "kernel_dispatch", "hip_api", "d2h_memcpy", "stream_synchronize", "device_synchronize",
+}
+CAPABILITY_CONFIG_FIELDS = {"kernel_trace", "hip_api_trace", "api_filter"}
 
 D2H_APIS = {"hipmemcpydtoh", "hipmemcpydtohasync"}
 KNOWN_OTHER_MEMCPY_APIS = {
@@ -288,6 +318,47 @@ def count(value: Any, label: str, *, positive: bool = False) -> int:
     return value
 
 
+def text_value(value: Any, label: str, *, nonempty: bool = True) -> str:
+    if not isinstance(value, str) or (nonempty and not value):
+        raise ProducerError(f"{label} must be a {'non-empty ' if nonempty else ''}string")
+    return value
+
+
+def boolean(value: Any, label: str) -> bool:
+    if type(value) is not bool:
+        raise ProducerError(f"{label} must be a boolean")
+    return value
+
+
+def strict_json_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(strict_json_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(strict_json_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def validate_ref_shape(value: Any, label: str) -> None:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, REF_FIELDS, label)
+    text_value(value.get("path"), f"{label}.path")
+    digest(value.get("sha256"), f"{label}.sha256")
+
+
+def validate_complete_reset(value: Any, label: str) -> None:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, RESET_FIELDS, label)
+    expected = {"attempted": 1, "complete": 1, "failed": 0}
+    for field, wanted in expected.items():
+        observed = count(value.get(field), f"{label}.{field}")
+        if observed != wanted:
+            raise ProducerError(f"{label}.{field} differs")
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -416,6 +487,57 @@ def validate_summary(
     return run_id
 
 
+def validate_capture_capabilities(value: dict[str, Any], mode: str) -> None:
+    exact(value, CAPABILITY_FIELDS, "capture capabilities")
+    if value.get("schema_version") != CAPABILITY_SCHEMA or value.get("status") != "complete":
+        raise ProducerError("capture capabilities schema/status differs")
+    expected_eligible = mode == "promotion"
+    if (
+        boolean(
+            value.get("measurement_eligible"),
+            "capture capabilities.measurement_eligible",
+        )
+        is not expected_eligible
+    ):
+        raise ProducerError("capture capabilities measurement eligibility differs")
+    declared = digest(value.get("capability_sha256"), "capture capabilities.capability_sha256")
+    if declared != self_hash(value, "capability_sha256"):
+        raise ProducerError("capture capabilities self-hash differs")
+    tool = value.get("tool")
+    if not isinstance(tool, dict):
+        raise ProducerError("capture capabilities.tool must be an object")
+    exact(tool, CAPABILITY_TOOL_FIELDS, "capture capabilities.tool")
+    if tool.get("name") != "rocprofv3" or not text_value(
+        tool.get("version"), "capture capabilities.tool.version"
+    ):
+        raise ProducerError("capture capabilities tool differs")
+    domains = value.get("domains")
+    if not isinstance(domains, dict):
+        raise ProducerError("capture capabilities.domains must be an object")
+    exact(domains, CAPABILITY_DOMAIN_FIELDS, "capture capabilities.domains")
+    for field in sorted(CAPABILITY_DOMAIN_FIELDS):
+        if boolean(domains.get(field), f"capture capabilities.domains.{field}") is not True:
+            raise ProducerError(f"capture capabilities domain is incomplete: {field}")
+    config = value.get("rocprof_config")
+    if not isinstance(config, dict):
+        raise ProducerError("capture capabilities.rocprof_config must be an object")
+    exact(config, CAPABILITY_CONFIG_FIELDS, "capture capabilities.rocprof_config")
+    if (
+        boolean(
+            config.get("kernel_trace"),
+            "capture capabilities.rocprof_config.kernel_trace",
+        )
+        is not True
+        or boolean(
+            config.get("hip_api_trace"),
+            "capture capabilities.rocprof_config.hip_api_trace",
+        )
+        is not True
+        or config.get("api_filter") != "all_functions"
+    ):
+        raise ProducerError("capture capabilities rocprof configuration is incomplete")
+
+
 def validate_raw(
     value: dict[str, Any], identity: dict[str, str], summaries: dict[str, Snapshot], mode: str
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -426,25 +548,110 @@ def validate_raw(
     exact(value, expected, "resident raw")
     if value.get("schema_version") != "ullm.aq4_p2_resident_batch_raw.v1":
         raise ProducerError("resident raw schema differs")
-    if value.get("status") != "ok" or value.get("immutable_status") is not False or value.get("failure_reason") is not None:
-        raise ProducerError("resident raw is not a complete successful measurement")
-    baseline = value.get("baseline_identity")
-    resident = value.get("resident")
     if (
-        not isinstance(resident, dict)
-        or resident.get("driver_identity") != identity["_resident_driver_identity"]
-        or resident.get("model_loads") != 1
+        value.get("status") != "ok"
+        or value.get("immutable_status") is not False
+        or value.get("failure_reason") is not None
+    ):
+        raise ProducerError("resident raw is not a complete successful measurement")
+    text_value(value.get("case_id"), "resident raw.case_id")
+    digest(value.get("case_sha256"), "resident raw.case_sha256")
+    boolean(value.get("immutable_status"), "resident raw.immutable_status")
+    baseline = value.get("baseline_identity")
+    if not isinstance(baseline, dict):
+        raise ProducerError("resident raw baseline_identity must be an object")
+    exact(baseline, BASELINE_IDENTITY_FIELDS, "resident raw baseline_identity")
+    validate_ref_shape(
+        baseline.get("identity_file"), "resident raw baseline_identity.identity_file"
+    )
+    if not strict_json_equal(
+        baseline.get("identity_file"),
+        {
+            "path": identity["identity_path"],
+            "sha256": identity["identity_file_sha256"],
+        },
+    ):
+        raise ProducerError("resident raw identity link differs")
+    run_id = text_value(baseline.get("run_id"), "resident raw baseline_identity.run_id")
+    text_value(baseline.get("kind"), "resident raw baseline_identity.kind")
+    if run_id not in summaries:
+        raise ProducerError("resident raw has no bound complete summary")
+    resident = value.get("resident")
+    if not isinstance(resident, dict):
+        raise ProducerError("resident raw resident must be an object")
+    exact(resident, RESIDENT_FIELDS, "resident raw resident")
+    text_value(resident.get("session_id"), "resident raw resident.session_id")
+    if (
+        count(
+            resident.get("model_loads"),
+            "resident raw resident.model_loads",
+            positive=True,
+        )
+        != 1
+        or count(resident.get("case_reset_count"), "resident raw resident.case_reset_count") != 12
+        or not strict_json_equal(resident.get("driver_identity"), identity["_resident_driver_identity"])
     ):
         raise ProducerError("resident raw artifact identity differs")
-    if not isinstance(baseline, dict) or baseline.get("identity_file") != {
-        "path": identity["identity_path"],
-        "sha256": identity["identity_file_sha256"],
-    }:
-        raise ProducerError("resident raw identity link differs")
-    run_id = baseline.get("run_id")
-    if not isinstance(run_id, str) or run_id not in summaries:
-        raise ProducerError("resident raw has no bound complete summary")
+    lock = value.get("device_lock")
+    if not isinstance(lock, dict):
+        raise ProducerError("resident raw device_lock must be an object")
+    exact(lock, DEVICE_LOCK_FIELDS, "resident raw device_lock")
+    if (
+        lock.get("schema_version") != "ullm.aq4_p2_device_lock_owner.v1"
+        or lock.get("run_id") != run_id
+    ):
+        raise ProducerError("resident raw device_lock binding differs")
+    for field in ("path", "hostname"):
+        text_value(lock.get(field), f"resident raw device_lock.{field}")
+    for field in ("pid", "acquired_unix_ns"):
+        count(lock.get(field), f"resident raw device_lock.{field}", positive=True)
+    driver = lock.get("driver")
+    if not isinstance(driver, dict):
+        raise ProducerError("resident raw device_lock.driver must be an object")
+    exact(driver, DEVICE_LOCK_DRIVER_FIELDS, "resident raw device_lock.driver")
+    text_value(driver.get("path"), "resident raw device_lock.driver.path")
+    digest(driver.get("sha256"), "resident raw device_lock.driver.sha256")
+    for field in ("device", "inode", "nlink"):
+        count(driver.get(field), f"resident raw device_lock.driver.{field}", positive=True)
+    if driver["sha256"] != identity["binary_sha256"]:
+        raise ProducerError("resident raw device_lock driver SHA differs")
+    workload = value.get("workload")
+    if not isinstance(workload, dict):
+        raise ProducerError("resident raw workload must be an object")
+    exact(workload, WORKLOAD_FIELDS, "resident raw workload")
+    for field in ("scope", "phase", "mode"):
+        text_value(workload.get(field), f"resident raw workload.{field}")
+    for field in (
+        "prompt_tokens",
+        "context_tokens",
+        "prefill_requested_m",
+        "resolved_m",
+        "request_count",
+    ):
+        count(workload.get(field), f"resident raw workload.{field}", positive=True)
+    for field in ("cached_prefix_tokens", "generated_tokens"):
+        count(workload.get(field), f"resident raw workload.{field}")
+    if workload["scope"] != "full_model" or workload["phase"] != "cold_prefill":
+        raise ProducerError("resident raw workload scope/phase differs")
+    links = value.get("links")
+    expected_links = {"fixture", "identity", "policy"} | (
+        {"live_preflight"}
+        if mode == "diagnostic" and "live_preflight" in (links or {})
+        else set()
+    )
+    if not isinstance(links, dict):
+        raise ProducerError("resident raw links must be an object")
+    exact(links, expected_links, "resident raw links")
+    for field in expected_links:
+        validate_ref_shape(links.get(field), f"resident raw links.{field}")
+    if not strict_json_equal(links["identity"], baseline["identity_file"]):
+        raise ProducerError("resident raw links.identity differs")
     smoke = value.get("smoke_only") is True or value.get("execution_mode") == "one_case_smoke"
+    for field in smoke_fields & set(value):
+        if field == "execution_mode":
+            text_value(value[field], "resident raw execution_mode")
+        else:
+            boolean(value[field], f"resident raw {field}")
     if mode == "promotion" and (smoke or value.get("promotion_eligible") is False):
         raise ProducerError("smoke/ineligible resident raw cannot produce promotion raw")
     if mode == "diagnostic" and not (smoke and value.get("promotion_eligible") is False):
@@ -477,6 +684,22 @@ def validate_raw(
             or run.get("case_id") != value.get("case_id")
         ):
             raise ProducerError(f"resident raw run order/status differs at {index}")
+        for field in (
+            "event",
+            "schema_version",
+            "resident_session_id",
+            "case_id",
+            "run_kind",
+            "status",
+        ):
+            text_value(run.get(field), f"resident raw run {index}.{field}")
+        if (
+            run["event"] != "run_complete"
+            or run["schema_version"] != "ullm.aq4_p2_resident_driver.v2"
+            or run["resident_session_id"] != resident["session_id"]
+        ):
+            raise ProducerError(f"resident raw run protocol/session differs at {index}")
+        finite(run.get("elapsed_ms"), f"resident raw run {index}.elapsed_ms", positive=True)
         timing = run.get("timing")
         if not isinstance(timing, dict):
             raise ProducerError(f"resident raw run timing is missing at {index}")
@@ -487,12 +710,124 @@ def validate_raw(
         )
         finite(timing.get("prefill_ms"), f"resident raw run {index} prefill_ms", positive=True)
         finite(timing.get("decode_ms"), f"resident raw run {index} decode_ms")
-        finite(timing.get("end_to_end_ms"), f"resident raw run {index} end_to_end_ms", positive=True)
+        finite(
+            timing.get("end_to_end_ms"),
+            f"resident raw run {index} end_to_end_ms",
+            positive=True,
+        )
         count(timing.get("generated_tokens"), f"resident raw run {index} generated_tokens")
-        for field in ("requested_m", "resolved_m", "actual_token_batch_width", "actual_request_batch_width"):
+        for field in (
+            "requested_m",
+            "resolved_m",
+            "actual_token_batch_width",
+            "actual_request_batch_width",
+        ):
             count(run.get(field), f"resident raw run {index}.{field}", positive=True)
-        if run.get("reset") != {"attempted": 1, "complete": 1, "failed": 0}:
-            raise ProducerError(f"resident raw run reset differs at {index}")
+        if (
+            run["requested_m"] != workload["prefill_requested_m"]
+            or run["resolved_m"] != workload["resolved_m"]
+            or run["actual_token_batch_width"] != workload["resolved_m"]
+            or run["actual_request_batch_width"] != workload["request_count"]
+        ):
+            raise ProducerError(f"resident raw run width differs at {index}")
+        audit = run.get("audit")
+        if not isinstance(audit, dict):
+            raise ProducerError(f"resident raw run {index}.audit must be an object")
+        exact(audit, AUDIT_FIELDS, f"resident raw run {index}.audit")
+        if (
+            boolean(
+                audit.get("coverage_complete"),
+                f"resident raw run {index}.audit.coverage_complete",
+            )
+            is not True
+        ):
+            raise ProducerError(f"resident raw run audit coverage differs at {index}")
+        digest(audit.get("deterministic_digest_sha256"), f"resident raw run {index}.audit digest")
+        count(
+            audit.get("physical_operation_invocations"),
+            f"resident raw run {index}.audit physical operations",
+            positive=True,
+        )
+        state = run.get("state")
+        if not isinstance(state, dict):
+            raise ProducerError(f"resident raw run {index}.state must be an object")
+        exact(state, STATE_FIELDS, f"resident raw run {index}.state")
+        if any(
+            boolean(state.get(field), f"resident raw run {index}.state.{field}")
+            is not True
+            for field in ("baseline_before", "baseline_after")
+        ):
+            raise ProducerError(f"resident raw run state baseline differs at {index}")
+        digest(state.get("request_state_sha256"), f"resident raw run {index}.state digest")
+        lifecycle = run.get("lifecycle")
+        if not isinstance(lifecycle, dict):
+            raise ProducerError(f"resident raw run {index}.lifecycle must be an object")
+        exact(lifecycle, LIFECYCLE_FIELDS, f"resident raw run {index}.lifecycle")
+        expected_lifecycle = {
+            "prepare": 1,
+            "commit": 1,
+            "discard": 0,
+            "error": 0,
+            "cancel": 0,
+        }
+        for field, wanted in expected_lifecycle.items():
+            if count(lifecycle.get(field), f"resident raw run {index}.lifecycle.{field}") != wanted:
+                raise ProducerError(f"resident raw run lifecycle differs at {index}")
+        validate_complete_reset(
+            lifecycle.get("reset"), f"resident raw run {index}.lifecycle.reset"
+        )
+        validate_complete_reset(run.get("reset"), f"resident raw run {index}.reset")
+        resource = run.get("resource")
+        if not isinstance(resource, dict):
+            raise ProducerError(f"resident raw run {index}.resource must be an object")
+        exact(resource, RESOURCE_FIELDS, f"resident raw run {index}.resource")
+        samples = resource.get("samples")
+        if not isinstance(samples, list) or not samples:
+            raise ProducerError(f"resident raw run {index}.resource.samples must be non-empty")
+        for sample_index, sample in enumerate(samples):
+            if not isinstance(sample, dict):
+                raise ProducerError(f"resident raw run {index}.resource sample must be an object")
+            sample_label = f"resident raw run {index}.resource.samples[{sample_index}]"
+            exact(sample, RESOURCE_SAMPLE_FIELDS, sample_label)
+            finite(sample.get("monotonic_ms"), f"{sample_label}.monotonic_ms")
+        peak = resource.get("peak")
+        if not isinstance(peak, dict):
+            raise ProducerError(f"resident raw run {index}.resource.peak must be an object")
+        exact(peak, RESOURCE_PEAK_FIELDS, f"resident raw run {index}.resource.peak")
+        for field in RESOURCE_PEAK_FIELDS:
+            if peak[field] is not None:
+                count(peak[field], f"resident raw run {index}.resource.peak.{field}")
+        terminal = run.get("terminal")
+        if not isinstance(terminal, dict):
+            raise ProducerError(f"resident raw run {index}.terminal must be an object")
+        exact(terminal, TERMINAL_FIELDS, f"resident raw run {index}.terminal")
+        if any(
+            boolean(terminal.get(field), f"resident raw run {index}.terminal.{field}")
+            for field in ("reuse_forbidden", "oom", "hip_fault")
+        ):
+            raise ProducerError(f"resident raw run terminal flags differ at {index}")
+        if terminal.get("reason_code") != "none":
+            raise ProducerError(f"resident raw run terminal reason differs at {index}")
+    raw_terminal = value.get("terminal")
+    if not isinstance(raw_terminal, dict):
+        raise ProducerError("resident raw terminal must be an object")
+    exact(raw_terminal, RAW_TERMINAL_FIELDS, "resident raw terminal")
+    digests = raw_terminal.get("audit_digests")
+    if not isinstance(digests, list) or len(digests) != 12:
+        raise ProducerError("resident raw terminal audit_digests differs")
+    for index, item in enumerate(digests):
+        digest(item, f"resident raw terminal.audit_digests[{index}]")
+        if item != runs[index]["audit"]["deterministic_digest_sha256"]:
+            raise ProducerError("resident raw terminal audit digest binding differs")
+    if (
+        count(raw_terminal.get("reset_count"), "resident raw terminal.reset_count") != 12
+        or boolean(
+            raw_terminal.get("all_resets_complete"),
+            "resident raw terminal.all_resets_complete",
+        )
+        is not True
+    ):
+        raise ProducerError("resident raw terminal reset summary differs")
     return run_id, runs
 
 
@@ -586,7 +921,21 @@ def normalized_api_name(value: str) -> str:
     return value.strip().split("(", 1)[0].split("::")[-1].replace("_", "").lower()
 
 
-def parse_hip_api_trace(snapshot: Snapshot) -> dict[str, int]:
+def parse_hip_api_trace(
+    snapshot: Snapshot, capture_capabilities: dict[str, Any] | None = None
+) -> dict[str, int]:
+    if capture_capabilities is None:
+        raise ProducerError("HIP API zero observations require complete capture capabilities")
+    domains = capture_capabilities.get("domains")
+    config = capture_capabilities.get("rocprof_config")
+    if (
+        not isinstance(domains, dict)
+        or any(domains.get(field) is not True for field in CAPABILITY_DOMAIN_FIELDS)
+        or not isinstance(config, dict)
+        or config.get("hip_api_trace") is not True
+        or config.get("api_filter") != "all_functions"
+    ):
+        raise ProducerError("HIP API trace lacks complete capture domain proof")
     reader, fields = _csv(snapshot, "HIP API trace")
     correlation_col = _column(
         fields, ("Correlation_Id", "Correlation_ID", "Index", "correlation_id"), "correlation id"
@@ -707,7 +1056,11 @@ def trace_measurement(
         ):
             raise ProducerError(f"{label} case/identity/clock binding differs")
         eligible = binding["measurement_eligible"]
-        if not isinstance(eligible, bool) or (mode == "promotion" and not eligible) or (mode == "diagnostic" and eligible):
+        if (
+            not isinstance(eligible, bool)
+            or (mode == "promotion" and not eligible)
+            or (mode == "diagnostic" and eligible)
+        ):
             raise ProducerError(f"{label} measurement eligibility differs")
         run_index = count(binding["resident_run_index"], f"{label}.resident_run_index")
         if run_index < 2 or run_index > 11:
@@ -715,6 +1068,10 @@ def trace_measurement(
         observed_indices.append(run_index)
         if raw_runs[run_index]["case_id"] != case["case_id"]:
             raise ProducerError(f"{label} resident run pairing differs")
+        _capability_snapshot, capability = load_ref(
+            binding["capture_capabilities"], f"{label} capture capabilities", snapshots
+        )
+        validate_capture_capabilities(capability, mode)
         kernel = load_csv_ref(binding["kernel_trace"], f"{label} kernel trace", snapshots)
         api = load_csv_ref(binding["hip_api_trace"], f"{label} HIP API trace", snapshots)
         if kernel.sha256 in used_kernel_traces or api.sha256 in used_api_traces:
@@ -722,7 +1079,7 @@ def trace_measurement(
         used_kernel_traces.add(kernel.sha256)
         used_api_traces.add(api.sha256)
         kernel_value = parse_kernel_trace(kernel, candidate_id)
-        api_value = parse_hip_api_trace(api)
+        api_value = parse_hip_api_trace(api, capability)
         exclusive_ms.append(kernel_value["candidate_exclusive_ns"] / 1_000_000.0)
         d2h_count += api_value["d2h_count"]
         d2h_times_ms.append(api_value["d2h_union_ns"] / 1_000_000.0)
