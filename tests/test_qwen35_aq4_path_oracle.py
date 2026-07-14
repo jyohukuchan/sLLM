@@ -375,6 +375,65 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ORACLE.OracleError, "identity changed"):
                     VALIDATE.validate_oracle(original, "path")
 
+    def test_cross_open_snapshot_rejects_post_hash_rename_and_same_size_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, original, _ = self.production_export(root)
+            for mutation in ("rename", "rewrite"):
+                with self.subTest(mutation=mutation):
+                    candidate = root / f"cross-open-{mutation}"
+                    shutil.copytree(original, candidate)
+                    changed = False
+
+                    def hook(stage: str, validation_root: Path) -> None:
+                        nonlocal changed
+                        if changed or stage != "after_sha256s" or validation_root != candidate:
+                            return
+                        changed = True
+                        runtime = candidate / "runtime.json"
+                        info = runtime.stat()
+                        data = runtime.read_bytes()
+                        if mutation == "rename":
+                            replacement = candidate / "replacement.json"
+                            replacement.write_bytes(data)
+                            os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+                            os.replace(replacement, runtime)
+                        else:
+                            replaced = data.replace(b'"device_kind":"gpu"', b'"device_kind":"cpu"', 1)
+                            self.assertEqual(len(replaced), len(data))
+                            runtime.write_bytes(replaced)
+                            os.utime(runtime, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+                    with mock.patch.object(VALIDATE, "VALIDATION_TEST_HOOK", hook):
+                        with self.assertRaisesRegex(ORACLE.OracleError, "snapshot identity changed"):
+                            VALIDATE.validate_oracle(candidate, "path")
+                    self.assertTrue(changed)
+
+    def test_cross_open_snapshot_rejects_semantic_then_sha_version_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, original, _ = self.production_export(root)
+            candidate = root / "cross-open-semantic-sha"
+            shutil.copytree(original, candidate)
+            changed = False
+
+            def hook(stage: str, validation_root: Path) -> None:
+                nonlocal changed
+                if changed or stage != "after_path_semantics" or validation_root != candidate:
+                    return
+                changed = True
+                runtime = candidate / "runtime.json"
+                data = runtime.read_bytes()
+                replacement = data.replace(b'"device_kind":"gpu"', b'"device_kind":"cpu"', 1)
+                self.assertEqual(len(replacement), len(data))
+                runtime.write_bytes(replacement)
+                rewrite_sums(candidate)
+
+            with mock.patch.object(VALIDATE, "VALIDATION_TEST_HOOK", hook):
+                with self.assertRaises(ORACLE.OracleError):
+                    VALIDATE.validate_oracle(candidate, "path")
+            self.assertTrue(changed)
+
 
 if __name__ == "__main__":
     unittest.main()

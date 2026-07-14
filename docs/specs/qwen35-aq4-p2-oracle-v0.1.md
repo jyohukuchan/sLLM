@@ -25,6 +25,8 @@ legacyまたはfixtureのpackage-only identityはvalidな診断用artifactとし
 
 PayloadはJSONLを逐次読み取りし、4 MiB、128 cases、128 steps、256 sample values、top-k 32を上限とする。validatorは重複キー、非有限数、symlink/path escape、順序、coverage、payload hashを再計算する。oracle内外のmanifest、payload、runtime、SHA256SUMS、package、worker、binary、cases入力はsingle-link regular fileだけを受け付け、全path componentのsymlinkを拒否する。`O_NOFOLLOW`で開いたfile descriptorとpathのdevice/inode/size/mode/mtime/ctime/nlinkをread前後に照合し、hardlinkと読み取り中の置換を拒否する。
 
+validatorはmanifest、payload、runtime、SHA256SUMSを最初のpinned file descriptorから得たbytes、file identity、SHA-256のsnapshotとしてvalidation contextへ保持する。schema/semantic、replay、source/path comparison、checksum、最終reportは同じsnapshotを再利用し、検証段階ごとのpath reopenを行わない。link検証ではsource/path/linkのcontextをvalidation完了まで共有する。全semantic/checksum検証後に全snapshotのpath identityを再確認するため、semantic後の別SHA版への差替え、checksum後のrename、同一size rewriteとmtime復元も拒否する。
+
 sourceではconfig、index、全4 shard、tokenizer 5 filesを実pathからstreaming SHA-256で再読し、canonical aggregateを照合する。source manifest runtime、runtime.json、CPU/BF16、package version、thread数、preflight、row count、SHA256SUMSも相互照合する。pathでも`runtime.json`と`SHA256SUMS`を必須とし、rootのfile coverageとchecksum順をexactに検証する。hidden/logitの完全な行列は保存しない。
 
 path runtimeは`ullm.qwen35_aq4_path_oracle_runtime.v1`のexact schemaである。productionでは`evidence_scope=production_gpu`、`device_kind=gpu`、runtime device index `1`、`HIP_VISIBLE_DEVICES=1`、`ULLM_HIP_VISIBLE_DEVICES=1`を実際の子process環境へ設定し、そのexact mappingをruntimeへ記録する。served workerはgfx1201と`rdna4_aq4_resident`でなければならない。CPU実行はsynthetic fixtureに限り、device index `0`、visible mappingなし、`evidence_scope=fixture_only`、promotion falseとする。

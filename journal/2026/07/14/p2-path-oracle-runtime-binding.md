@@ -11,6 +11,8 @@
 - runtimeへserved v2 manifest、product package、worker binary、gfx1201 profile、path binary、source root、cases入力、source replay sequence/contextをexact bindした。
 - validatorはpath runtimeとSHA256SUMSを必須化し、runtimeの全fieldとroot file coverage、served/package/worker/device/env/replay linkを元artifactから再構築する。
 - manifest、payload、runtime、外部binding fileをsingle-link、`O_NOFOLLOW`、fd/path identity固定で読み、unknown/duplicate、stale SHA、symlink、hardlink、read中identity変化を拒否する負例を追加した。
+- 独立QAで見つかったcross-open TOCTOUを閉じるため、manifest/payload/runtime/SHA256SUMSの最初のpinned bytes、identity、digestをvalidation contextへ保持した。source replayとlink comparisonを含むsemantic/hash検証は同snapshotを再利用し、完了時に全path identityを再照合する。
+- 決定的test hookにより、checksum後のrename、same-size rewrite+mtime復元、semantic後のruntime差替え+SHA256SUMS更新を発生させ、いずれもsnapshot identity/digest不一致として拒否した。
 
 ## 次の行動
 

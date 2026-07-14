@@ -16,6 +16,7 @@ import math
 import os
 import re
 import stat
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
@@ -48,6 +49,73 @@ RANKING_CONTRACT = {
 
 class OracleError(ValueError):
     """A fail-closed oracle contract error."""
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    path: Path
+    identity: tuple[int, ...]
+    data: bytes
+    sha256: str
+
+
+@dataclass
+class ValidationContext:
+    snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
+
+    @staticmethod
+    def _key(path: Path) -> str:
+        return os.path.abspath(os.fspath(path))
+
+    def read(self, path: Path, label: str, maximum: int) -> bytes:
+        key = self._key(path)
+        existing = self.snapshots.get(key)
+        if existing is not None:
+            if len(existing.data) > maximum:
+                raise OracleError(f"{label} exceeds {maximum} bytes")
+            self.verify(existing, label)
+            return existing.data
+        descriptor, before = _open_pinned_regular(path, label)
+        try:
+            if before.st_size > maximum:
+                raise OracleError(f"{label} exceeds {maximum} bytes")
+            chunks: list[bytes] = []
+            size = 0
+            while True:
+                chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > maximum:
+                    raise OracleError(f"{label} exceeds {maximum} bytes")
+                chunks.append(chunk)
+            _verify_pinned_regular(path, descriptor, before, label)
+            data = b"".join(chunks)
+            snapshot = FileSnapshot(
+                path=Path(key),
+                identity=_file_identity(before),
+                data=data,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+            self.snapshots[key] = snapshot
+            return data
+        finally:
+            os.close(descriptor)
+
+    def get(self, path: Path) -> FileSnapshot | None:
+        return self.snapshots.get(self._key(path))
+
+    def verify(self, snapshot: FileSnapshot, label: str) -> None:
+        try:
+            current = snapshot.path.lstat()
+        except OSError as error:
+            raise OracleError(f"cannot restat validation snapshot {label}: {error}") from error
+        if current.st_nlink != 1 or _file_identity(current) != snapshot.identity:
+            raise OracleError(f"validation snapshot identity changed: {label}")
+
+    def verify_all(self) -> None:
+        for snapshot in self.snapshots.values():
+            self.verify(snapshot, os.fspath(snapshot.path))
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -129,7 +197,15 @@ def _verify_pinned_regular(path: Path, descriptor: int, before: os.stat_result, 
         raise OracleError(f"{label} fd/path identity changed while reading")
 
 
-def read_regular_bytes(path: Path, label: str, maximum: int) -> bytes:
+def read_regular_bytes(
+    path: Path,
+    label: str,
+    maximum: int,
+    *,
+    context: ValidationContext | None = None,
+) -> bytes:
+    if context is not None:
+        return context.read(path, label, maximum)
     descriptor, before = _open_pinned_regular(path, label)
     try:
         if before.st_size > maximum:
@@ -150,10 +226,10 @@ def read_regular_bytes(path: Path, label: str, maximum: int) -> bytes:
         os.close(descriptor)
 
 
-def load_json(path: Path) -> Any:
+def load_json(path: Path, *, context: ValidationContext | None = None) -> Any:
     try:
         return json.loads(
-            read_regular_bytes(path, f"JSON {path}", MAX_JSON_BYTES).decode("utf-8"),
+            read_regular_bytes(path, f"JSON {path}", MAX_JSON_BYTES, context=context).decode("utf-8"),
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_nonfinite,
         )
@@ -161,7 +237,17 @@ def load_json(path: Path) -> Any:
         raise OracleError(f"invalid JSON {path}: {error}") from error
 
 
-def sha256_file(path: Path, chunk_bytes: int = 1024 * 1024) -> str:
+def sha256_file(
+    path: Path,
+    chunk_bytes: int = 1024 * 1024,
+    *,
+    context: ValidationContext | None = None,
+) -> str:
+    if context is not None:
+        snapshot = context.get(path)
+        if snapshot is not None:
+            context.verify(snapshot, f"hashed file {path}")
+            return snapshot.sha256
     descriptor, before = _open_pinned_regular(path, f"hashed file {path}")
     digest = hashlib.sha256()
     try:
@@ -334,12 +420,18 @@ def _iter_payload_bytes(raw_bytes: bytes) -> Iterator[dict[str, Any]]:
         yield validate_payload_record(raw, f"payload[{line_number}]")
 
 
-def iter_payload(path: Path) -> Iterator[dict[str, Any]]:
-    yield from _iter_payload_bytes(read_regular_bytes(path, "payload", MAX_PAYLOAD_BYTES))
+def iter_payload(
+    path: Path, *, context: ValidationContext | None = None
+) -> Iterator[dict[str, Any]]:
+    yield from _iter_payload_bytes(
+        read_regular_bytes(path, "payload", MAX_PAYLOAD_BYTES, context=context)
+    )
 
 
-def digest_payload(path: Path) -> tuple[str, int, int]:
-    raw = read_regular_bytes(path, "payload", MAX_PAYLOAD_BYTES)
+def digest_payload(
+    path: Path, *, context: ValidationContext | None = None
+) -> tuple[str, int, int]:
+    raw = read_regular_bytes(path, "payload", MAX_PAYLOAD_BYTES, context=context)
     records = 0
     for _ in _iter_payload_bytes(raw):
         records += 1
@@ -431,8 +523,13 @@ def _validate_file_identity(value: Any, label: str) -> list[dict[str, Any]]:
     return result
 
 
-def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[str, Any]:
-    manifest = load_json(root / "manifest.json")
+def validate_manifest(
+    root: Path,
+    *,
+    expected_kind: str | None = None,
+    context: ValidationContext | None = None,
+) -> dict[str, Any]:
+    manifest = load_json(root / "manifest.json", context=context)
     if not isinstance(manifest, dict):
         raise OracleError("manifest must be an object")
     kind = manifest.get("oracle_kind")
@@ -520,7 +617,7 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
     ensure_sha256(payload["sha256"], "payload.sha256")
     payload_bytes = integer(payload["bytes"], "payload.bytes", minimum=1)
     records = integer(payload["record_count"], "payload.record_count", minimum=1)
-    actual_sha, actual_bytes, actual_records = digest_payload(payload_path)
+    actual_sha, actual_bytes, actual_records = digest_payload(payload_path, context=context)
     if (actual_sha, actual_bytes, actual_records) != (payload["sha256"], payload_bytes, records):
         raise OracleError("payload hash, byte count, or record count differs")
     cases = manifest.get("cases")
@@ -541,7 +638,7 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
                 raise OracleError("duplicate case and step")
             expected_pairs.add((case["case_id"], step))
     seen_pairs: set[tuple[str, int]] = set()
-    for record in iter_payload(payload_path):
+    for record in iter_payload(payload_path, context=context):
         key = (record["case_id"], record["step"])
         if key in seen_pairs:
             raise OracleError("duplicate payload case and step")
@@ -551,9 +648,14 @@ def validate_manifest(root: Path, *, expected_kind: str | None = None) -> dict[s
     return manifest
 
 
-def payload_records(root: Path, manifest: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def payload_records(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    context: ValidationContext | None = None,
+) -> Iterator[dict[str, Any]]:
     path = safe_relative(root, manifest["payload"]["file"], "payload.file")
-    yield from iter_payload(path)
+    yield from iter_payload(path, context=context)
 
 
 def canonical_token_ids_hash(token_ids: Iterable[int]) -> str:
@@ -561,9 +663,19 @@ def canonical_token_ids_hash(token_ids: Iterable[int]) -> str:
     return hashlib.sha256((json.dumps(values, separators=(",", ":")) + "\n").encode()).hexdigest()
 
 
-def compare_payloads(source_root: Path, source: dict[str, Any], path_root: Path, path: dict[str, Any], *, logit_atol: float = 1e-5, hidden_atol: float = 1e-5) -> dict[str, Any]:
-    source_iter = iter(payload_records(source_root, source))
-    path_iter = iter(payload_records(path_root, path))
+def compare_payloads(
+    source_root: Path,
+    source: dict[str, Any],
+    path_root: Path,
+    path: dict[str, Any],
+    *,
+    logit_atol: float = 1e-5,
+    hidden_atol: float = 1e-5,
+    source_context: ValidationContext | None = None,
+    path_context: ValidationContext | None = None,
+) -> dict[str, Any]:
+    source_iter = iter(payload_records(source_root, source, context=source_context))
+    path_iter = iter(payload_records(path_root, path, context=path_context))
     count = 0
     greedy_exact = True
     topk_exact = True

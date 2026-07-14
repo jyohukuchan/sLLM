@@ -239,24 +239,37 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
 
 def link(args: argparse.Namespace) -> dict[str, Any]:
     source_root, path_root = Path(args.source_oracle), Path(args.path_oracle)
-    source = oracle.validate_manifest(source_root, expected_kind="independent_source")
-    path = oracle.validate_manifest(path_root, expected_kind="same_artifact_all_m1")
+    source_context = oracle.ValidationContext()
+    path_context = oracle.ValidationContext()
+    source = oracle.validate_manifest(
+        source_root, expected_kind="independent_source", context=source_context
+    )
+    path = oracle.validate_manifest(
+        path_root, expected_kind="same_artifact_all_m1", context=path_context
+    )
     if source["identity"]["model_id"] != path["identity"]["model_id"] or source["identity"]["model_revision"] != path["identity"]["model_revision"]:
         raise oracle.OracleError("source/path model identity differs")
     if source["identity"]["tokenizer"]["aggregate_sha256"] != path["identity"]["tokenizer"]["aggregate_sha256"] or source["identity"]["tokenizer"]["files"] != path["identity"]["tokenizer"]["files"]:
         raise oracle.OracleError("source/path tokenizer identity differs")
     if path["identity"]["artifact"]["package_manifest_sha256"] is None:
         raise oracle.OracleError("path oracle must bind the package manifest")
-    agreement = oracle.compare_payloads(source_root, source, path_root, path)
+    agreement = oracle.compare_payloads(
+        source_root,
+        source,
+        path_root,
+        path,
+        source_context=source_context,
+        path_context=path_context,
+    )
     manifest = {
         "schema_version": oracle.LINK_SCHEMA,
         "status": "fixture" if source["evidence_class"] == "synthetic_fixture" or path["evidence_class"] == "synthetic_fixture" else "available",
         "evidence_class": "synthetic_fixture" if source["evidence_class"] == "synthetic_fixture" or path["evidence_class"] == "synthetic_fixture" else "production",
         "created_utc": oracle.utc_now(),
         "identity": {"model_id": source["identity"]["model_id"], "model_revision": source["identity"]["model_revision"], "tokenizer_aggregate_sha256": source["identity"]["tokenizer"]["aggregate_sha256"]},
-        "source": {"manifest_sha256": _sha(source_root / "manifest.json"), "payload_sha256": source["payload"]["sha256"]},
+        "source": {"manifest_sha256": oracle.sha256_file(source_root / "manifest.json", context=source_context), "payload_sha256": source["payload"]["sha256"]},
         "path": {
-            "manifest_sha256": _sha(path_root / "manifest.json"),
+            "manifest_sha256": oracle.sha256_file(path_root / "manifest.json", context=path_context),
             "payload_sha256": path["payload"]["sha256"],
             "artifact_manifest_sha256": path["identity"]["artifact"]["artifact_manifest_sha256"],
             "package_manifest_sha256": path["identity"]["artifact"]["package_manifest_sha256"],
@@ -266,6 +279,8 @@ def link(args: argparse.Namespace) -> dict[str, Any]:
         "promotion_eligible": False,
     }
     manifest["usable_as_p2_oracle_link"] = bool(manifest["evidence_class"] == "production" and source["identity"]["model_revision"] is not None and source["usable_as_source_evidence"] and path["usable_as_path_evidence"] and agreement["greedy_token_exact"] and agreement["topk_exact"] and agreement["hidden_sample_within_atol"] and agreement["logit_sample_within_atol"])
+    source_context.verify_all()
+    path_context.verify_all()
     if os.path.lexists(args.output):
         raise oracle.OracleError(f"refusing to overwrite existing output: {args.output}")
     args.output.parent.mkdir(parents=True, exist_ok=True)

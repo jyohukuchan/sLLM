@@ -55,6 +55,13 @@ REQUIRED_HIP_KERNEL_ENV = (
     "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
     "ULLM_REQUIRE_HIP_TOP1_KERNEL",
 )
+VALIDATION_TEST_HOOK = None
+
+
+def _validation_hook(stage: str, root: Path) -> None:
+    hook = VALIDATION_TEST_HOOK
+    if hook is not None:
+        hook(stage, root)
 
 
 def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
@@ -66,12 +73,17 @@ def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _absolute_regular(raw: Any, label: str) -> Path:
+def _absolute_regular(
+    raw: Any, label: str, *, context: oracle.ValidationContext | None = None
+) -> Path:
     if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
         raise oracle.OracleError(f"{label} must be an absolute path")
     path = Path(raw)
     # sha256_file performs O_NOFOLLOW, single-link, fd/path identity validation.
-    _sha(path)
+    if context is None:
+        _sha(path)
+    else:
+        oracle.read_regular_bytes(path, label, oracle.MAX_JSON_BYTES, context=context)
     return path.resolve(strict=True)
 
 
@@ -102,8 +114,8 @@ def _replay_sha256(token_ids: list[int]) -> str:
     return digest.hexdigest()
 
 
-def _sha(path: Path) -> str:
-    return oracle.sha256_file(path)
+def _sha(path: Path, *, context: oracle.ValidationContext | None = None) -> str:
+    return oracle.sha256_file(path, context=context)
 
 
 def _rehash_files(root_raw: str, files: list[dict[str, Any]], label: str) -> None:
@@ -123,13 +135,17 @@ def _package_version(name: str) -> str | None:
         return None
 
 
-def _validate_sha256s(root: Path, manifest: dict[str, Any]) -> None:
+def _validate_sha256s(
+    root: Path, manifest: dict[str, Any], context: oracle.ValidationContext
+) -> None:
     sums_path = oracle.safe_relative(root, "SHA256SUMS", "SHA256SUMS")
     expected_order = ["manifest.json", manifest["payload"]["file"], "runtime.json"]
     expected_names = set(expected_order)
     entries: dict[str, str] = {}
     try:
-        sums_text = oracle.read_regular_bytes(sums_path, "SHA256SUMS", 4096).decode("ascii")
+        sums_text = oracle.read_regular_bytes(
+            sums_path, "SHA256SUMS", 4096, context=context
+        ).decode("ascii")
     except UnicodeError as error:
         raise oracle.OracleError("SHA256SUMS must be ASCII") from error
     if not sums_text.endswith("\n") or "\r" in sums_text:
@@ -155,11 +171,14 @@ def _validate_sha256s(root: Path, manifest: dict[str, Any]) -> None:
         raise oracle.OracleError("oracle root file coverage differs from SHA256SUMS")
     for name, digest in entries.items():
         path = oracle.safe_relative(root, name, f"SHA256SUMS target {name}")
-        if _sha(path) != digest:
+        if _sha(path, context=context) != digest:
             raise oracle.OracleError(f"SHA256SUMS digest differs: {name}")
+    _validation_hook("after_sha256s", root)
 
 
-def _package_binding_status(artifact: dict[str, Any]) -> tuple[bool, str | None]:
+def _package_binding_status(
+    artifact: dict[str, Any], context: oracle.ValidationContext
+) -> tuple[bool, str | None]:
     """Recognize the extended package-only binding before runtime reconstruction."""
     if artifact.get("artifact_binding_kind") != "package_manifest":
         return False, "path oracle artifact binding kind is not package_manifest"
@@ -169,9 +188,9 @@ def _package_binding_status(artifact: dict[str, Any]) -> tuple[bool, str | None]
     manifest_path = Path(artifact["served_model_manifest_path"])
     if manifest_path.is_symlink() or not manifest_path.is_file():
         return False, "active served-model manifest is not a regular file"
-    if _sha(manifest_path) != artifact["served_model_manifest_sha256"]:
+    active = oracle.load_json(manifest_path, context=context)
+    if _sha(manifest_path, context=context) != artifact["served_model_manifest_sha256"]:
         return False, "active served-model manifest SHA-256 differs"
-    active = oracle.load_json(manifest_path)
     try:
         product = active["product"]
         package = product["package"]
@@ -186,8 +205,10 @@ def _package_binding_status(artifact: dict[str, Any]) -> tuple[bool, str | None]
     return True, None
 
 
-def _load_cases_input(path: Path) -> tuple[list[dict[str, Any]], dict[str, list[int]]]:
-    value = oracle.load_json(path)
+def _load_cases_input(
+    path: Path, context: oracle.ValidationContext
+) -> tuple[list[dict[str, Any]], dict[str, list[int]]]:
+    value = oracle.load_json(path, context=context)
     if not isinstance(value, dict) or set(value) != {"cases"} or not isinstance(value["cases"], list):
         raise oracle.OracleError("path runtime cases input schema differs")
     normalized: list[dict[str, Any]] = []
@@ -219,31 +240,42 @@ def _load_cases_input(path: Path) -> tuple[list[dict[str, Any]], dict[str, list[
     return normalized, prompts
 
 
-def _validate_source_replay(value: Any, manifest: dict[str, Any], *, production: bool) -> None:
+def _validate_source_replay(
+    value: Any,
+    manifest: dict[str, Any],
+    *,
+    production: bool,
+    source_context: oracle.ValidationContext,
+    binding_context: oracle.ValidationContext,
+) -> None:
     replay = _exact(
         value,
         {"cases", "cases_input", "manifest_sha256", "payload_sha256", "root"},
         "path runtime source_replay",
     )
     source_root = _absolute_directory(replay["root"], "path runtime source root")
-    source_manifest = oracle.validate_manifest(source_root, expected_kind="source")
+    source_manifest = oracle.validate_manifest(
+        source_root, expected_kind="source", context=source_context
+    )
     if production and source_manifest["evidence_class"] != "production":
         raise oracle.OracleError("production path runtime requires a production source oracle")
-    if _sha(source_root / "manifest.json") != replay["manifest_sha256"]:
+    if _sha(source_root / "manifest.json", context=source_context) != replay["manifest_sha256"]:
         raise oracle.OracleError("path runtime source manifest hash differs")
     if source_manifest["payload"]["sha256"] != replay["payload_sha256"]:
         raise oracle.OracleError("path runtime source payload hash differs")
     if source_manifest["cases"] != manifest["cases"]:
         raise oracle.OracleError("path runtime source/path case contract differs")
     cases_input = _exact(replay["cases_input"], {"path", "sha256"}, "path runtime cases input")
-    cases_path = _absolute_regular(cases_input["path"], "path runtime cases input")
-    if _sha(cases_path) != cases_input["sha256"]:
+    cases_path = _absolute_regular(
+        cases_input["path"], "path runtime cases input", context=binding_context
+    )
+    if _sha(cases_path, context=binding_context) != cases_input["sha256"]:
         raise oracle.OracleError("path runtime cases input hash differs")
-    normalized_cases, prompts = _load_cases_input(cases_path)
+    normalized_cases, prompts = _load_cases_input(cases_path, binding_context)
     if normalized_cases != manifest["cases"]:
         raise oracle.OracleError("path runtime cases input differs from path manifest")
     by_case = {case["case_id"]: [] for case in manifest["cases"]}
-    for row in oracle.payload_records(source_root, source_manifest):
+    for row in oracle.payload_records(source_root, source_manifest, context=source_context):
         if row["case_id"] not in by_case:
             raise oracle.OracleError("path runtime source replay contains an unknown case")
         by_case[row["case_id"]].append(row["greedy_token_id"])
@@ -283,6 +315,7 @@ def _validate_served_guard(
     manifest: dict[str, Any],
     *,
     production: bool,
+    context: oracle.ValidationContext,
 ) -> None:
     guard = _exact(
         guard_value,
@@ -318,20 +351,24 @@ def _validate_served_guard(
             if guard["manifest_sha256"] is not None:
                 raise oracle.OracleError("fixture served manifest hash differs")
         else:
-            served_path = _absolute_regular(guard["manifest"], "fixture served-model manifest")
-            if _sha(served_path) != guard["manifest_sha256"]:
+            served_path = _absolute_regular(
+                guard["manifest"], "fixture served-model manifest", context=context
+            )
+            if _sha(served_path, context=context) != guard["manifest_sha256"]:
                 raise oracle.OracleError("fixture served-model manifest hash differs")
         return
 
     if artifact.get("artifact_binding_kind") not in {"package_manifest", "artifact_manifest"}:
         raise oracle.OracleError("production path manifest lacks extended served binding")
-    served_path = _absolute_regular(guard["manifest"], "production served-model manifest")
-    served_sha = _sha(served_path)
+    served_path = _absolute_regular(
+        guard["manifest"], "production served-model manifest", context=context
+    )
+    served_sha = _sha(served_path, context=context)
     if served_sha != guard["manifest_sha256"] or served_sha != artifact.get("served_model_manifest_sha256"):
         raise oracle.OracleError("production served-model manifest hash chain differs")
     if served_path != Path(artifact.get("served_model_manifest_path", "")).resolve(strict=True):
         raise oracle.OracleError("production served-model manifest path chain differs")
-    served = oracle.load_json(served_path)
+    served = oracle.load_json(served_path, context=context)
     if not isinstance(served, dict) or served.get("schema_version") != "ullm.served_model.v2":
         raise oracle.OracleError("production served-model schema is not v2")
     try:
@@ -404,9 +441,14 @@ def _validate_served_guard(
             raise oracle.OracleError("served artifact manifest hash/path chain differs")
 
 
-def _validate_path_runtime(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+def _validate_path_runtime(
+    root: Path,
+    manifest: dict[str, Any],
+    context: oracle.ValidationContext,
+    source_context: oracle.ValidationContext,
+) -> dict[str, Any]:
     runtime_path = oracle.safe_relative(root, "runtime.json", "path runtime")
-    runtime = oracle.load_json(runtime_path)
+    runtime = oracle.load_json(runtime_path, context=context)
     runtime = _exact(
         runtime,
         {
@@ -475,15 +517,35 @@ def _validate_path_runtime(root: Path, manifest: dict[str, Any]) -> dict[str, An
     elapsed = oracle.finite(run["elapsed_seconds"], "path runtime elapsed_seconds")
     if elapsed <= 0 or run["row_count"] != manifest["payload"]["record_count"]:
         raise oracle.OracleError("path runtime run summary differs")
-    _validate_source_replay(runtime["source_replay"], manifest, production=production)
-    _validate_served_guard(runtime["served_model_guard"], artifact, runtime, manifest, production=production)
-    _validate_sha256s(root, manifest)
+    _validate_source_replay(
+        runtime["source_replay"],
+        manifest,
+        production=production,
+        source_context=source_context,
+        binding_context=context,
+    )
+    _validate_served_guard(
+        runtime["served_model_guard"],
+        artifact,
+        runtime,
+        manifest,
+        production=production,
+        context=context,
+    )
+    _validation_hook("after_path_semantics", root)
+    _validate_sha256s(root, manifest, context)
     return runtime
 
 
-def _validate_runtime(root: Path, manifest: dict[str, Any]) -> None:
+def _validate_runtime(
+    root: Path,
+    manifest: dict[str, Any],
+    context: oracle.ValidationContext | None = None,
+) -> None:
+    owned_context = context is None
+    context = context or oracle.ValidationContext()
     runtime_path = oracle.safe_relative(root, "runtime.json", "runtime.json")
-    runtime = oracle.load_json(runtime_path)
+    runtime = oracle.load_json(runtime_path, context=context)
     if runtime != manifest.get("runtime"):
         raise oracle.OracleError("manifest runtime and runtime.json differ")
     expected_keys = {"device", "dtype", "full_vocab_ranking", "inference_mode", "low_cpu_mem_usage", "low_cpu_mem_usage_blocker", "max_resident_logit_rows", "model_loads", "preflight", "python", "run", "runtime", "safetensors", "torch", "torch_num_interop_threads", "torch_num_threads", "transformers"}
@@ -511,13 +573,24 @@ def _validate_runtime(root: Path, manifest: dict[str, Any]) -> None:
     run = runtime["run"]
     if not isinstance(run, dict) or set(run) != {"elapsed_seconds", "row_count"} or run["row_count"] != manifest["payload"]["record_count"] or isinstance(run["elapsed_seconds"], bool) or not isinstance(run["elapsed_seconds"], (int, float)) or not math.isfinite(run["elapsed_seconds"]) or run["elapsed_seconds"] <= 0:
         raise oracle.OracleError("runtime run summary differs")
-    _validate_sha256s(root, manifest)
+    _validate_sha256s(root, manifest, context)
+    if owned_context:
+        context.verify_all()
 
 
-def validate_oracle(root: Path, kind: str) -> dict[str, Any]:
+def validate_oracle(
+    root: Path,
+    kind: str,
+    *,
+    context: oracle.ValidationContext | None = None,
+    source_context: oracle.ValidationContext | None = None,
+    verify_context: bool = True,
+) -> dict[str, Any]:
+    context = context or oracle.ValidationContext()
+    source_context = source_context or oracle.ValidationContext()
     if root.is_symlink() or not root.is_dir():
         raise oracle.OracleError("oracle root must be a regular directory, not a symlink")
-    manifest = oracle.validate_manifest(root, expected_kind=kind)
+    manifest = oracle.validate_manifest(root, expected_kind=kind, context=context)
     blockers: list[str] = []
     if manifest["evidence_class"] == "synthetic_fixture":
         blockers.append("synthetic fixture is not an independent production oracle")
@@ -529,13 +602,13 @@ def validate_oracle(root: Path, kind: str) -> dict[str, Any]:
         artifact = manifest["identity"]["artifact"]
         runtime_path = root / "runtime.json"
         if runtime_path.exists() or runtime_path.is_symlink():
-            _validate_path_runtime(root, manifest)
+            _validate_path_runtime(root, manifest, context, source_context)
         elif manifest["evidence_class"] == "production":
             raise oracle.OracleError("production path oracle requires runtime.json")
         else:
             blockers.append("synthetic capture has no executable path runtime and is fixture-only")
         if artifact["artifact_manifest_sha256"] is None:
-            package_ok, package_error = _package_binding_status(artifact)
+            package_ok, package_error = _package_binding_status(artifact, context)
             if not package_ok:
                 blockers.append(package_error or "path oracle package binding is invalid")
     tokenizer = manifest["identity"]["tokenizer"]
@@ -557,28 +630,47 @@ def validate_oracle(root: Path, kind: str) -> dict[str, Any]:
         if {entry["file"] for entry in source_checkpoint["files"]} != expected_checkpoint_files:
             raise oracle.OracleError("source checkpoint file coverage differs")
         if manifest["evidence_class"] == "production":
-            _validate_runtime(root, manifest)
+            _validate_runtime(root, manifest, context)
     usable_key = "usable_as_source_evidence" if kind == "source" else "usable_as_path_evidence"
     usable = manifest[usable_key] and manifest["status"] == "available" and manifest["evidence_class"] == "production" and not blockers
-    return {
+    report = {
         "schema_version": "ullm.qwen35_aq4_p2_oracle_validator.v1",
         "status": "valid",
         "oracle_kind": manifest["oracle_kind"],
-        "manifest_sha256": _sha(root / "manifest.json"),
+        "manifest_sha256": _sha(root / "manifest.json", context=context),
         "payload_sha256": manifest["payload"]["sha256"],
         "record_count": manifest["payload"]["record_count"],
         usable_key: usable,
         "promotion_eligible": False,
         "blockers": blockers,
     }
+    if verify_context:
+        context.verify_all()
+        source_context.verify_all()
+    return report
 
 
 def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, Any]:
-    source_report = validate_oracle(source_root, "source")
-    path_report = validate_oracle(path_root, "path")
-    source = oracle.validate_manifest(source_root, expected_kind="source")
-    path = oracle.validate_manifest(path_root, expected_kind="path")
-    link = oracle.load_json(root / "manifest.json")
+    source_context = oracle.ValidationContext()
+    path_context = oracle.ValidationContext()
+    link_context = oracle.ValidationContext()
+    source_report = validate_oracle(
+        source_root, "source", context=source_context, verify_context=False
+    )
+    path_report = validate_oracle(
+        path_root,
+        "path",
+        context=path_context,
+        source_context=source_context,
+        verify_context=False,
+    )
+    source = oracle.validate_manifest(
+        source_root, expected_kind="source", context=source_context
+    )
+    path = oracle.validate_manifest(
+        path_root, expected_kind="path", context=path_context
+    )
+    link = oracle.load_json(root / "manifest.json", context=link_context)
     if not isinstance(link, dict):
         raise oracle.OracleError("link manifest must be an object")
     expected = {"agreement", "created_utc", "evidence_class", "identity", "path", "promotion_eligible", "schema_version", "source", "status", "usable_as_p2_oracle_link"}
@@ -601,7 +693,8 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
         entry = link[key]
         if not isinstance(entry, dict) or set(entry) != ({"manifest_sha256", "payload_sha256"} if key == "source" else {"artifact_manifest_sha256", "manifest_sha256", "package_manifest_sha256", "payload_sha256"}):
             raise oracle.OracleError(f"link {key} keys differ")
-        if entry["manifest_sha256"] != _sha(expected_root / "manifest.json") or entry["payload_sha256"] != manifest["payload"]["sha256"]:
+        expected_context = source_context if key == "source" else path_context
+        if entry["manifest_sha256"] != _sha(expected_root / "manifest.json", context=expected_context) or entry["payload_sha256"] != manifest["payload"]["sha256"]:
             raise oracle.OracleError(f"link {key} hash binding differs")
         if key == "path":
             if entry["artifact_manifest_sha256"] != manifest["identity"]["artifact"]["artifact_manifest_sha256"] or entry["package_manifest_sha256"] != manifest["identity"]["artifact"]["package_manifest_sha256"]:
@@ -610,7 +703,14 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
                 oracle.ensure_sha256(entry["artifact_manifest_sha256"], "link path artifact hash")
             oracle.ensure_sha256(entry["package_manifest_sha256"], "link path package hash")
     agreement = link["agreement"]
-    if not isinstance(agreement, dict) or agreement != oracle.compare_payloads(source_root, source, path_root, path):
+    if not isinstance(agreement, dict) or agreement != oracle.compare_payloads(
+        source_root,
+        source,
+        path_root,
+        path,
+        source_context=source_context,
+        path_context=path_context,
+    ):
         raise oracle.OracleError("link agreement differs from bounded payload comparison")
     if link["promotion_eligible"] is not False:
         raise oracle.OracleError("source/path link must remain non-promotable until production policy accepts it")
@@ -618,7 +718,7 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
     if link["evidence_class"] == "synthetic_fixture":
         blockers.append("source/path link contains synthetic fixture evidence")
     if path["identity"]["artifact"]["artifact_manifest_sha256"] is None:
-        package_ok, package_error = _package_binding_status(path["identity"]["artifact"])
+        package_ok, package_error = _package_binding_status(path["identity"]["artifact"], path_context)
         if not package_ok:
             blockers.append(package_error or "path oracle package binding is invalid")
     if not agreement["greedy_token_exact"] or not agreement["topk_exact"] or not agreement["hidden_sample_within_atol"] or not agreement["logit_sample_within_atol"]:
@@ -628,7 +728,10 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
     expected_usable = bool(link["evidence_class"] == "production" and source_report["usable_as_source_evidence"] and path_report["usable_as_path_evidence"] and not blockers)
     if link["usable_as_p2_oracle_link"] is not expected_usable:
         raise oracle.OracleError("link usable_as_p2_oracle_link differs from recomputed agreement")
-    return {"schema_version": "ullm.qwen35_aq4_p2_oracle_link_validator.v1", "status": "valid", "manifest_sha256": _sha(root / "manifest.json"), "source_manifest_sha256": link["source"]["manifest_sha256"], "path_manifest_sha256": link["path"]["manifest_sha256"], "agreement": agreement, "usable_as_p2_oracle_link": expected_usable, "promotion_eligible": False, "blockers": blockers}
+    source_context.verify_all()
+    path_context.verify_all()
+    link_context.verify_all()
+    return {"schema_version": "ullm.qwen35_aq4_p2_oracle_link_validator.v1", "status": "valid", "manifest_sha256": _sha(root / "manifest.json", context=link_context), "source_manifest_sha256": link["source"]["manifest_sha256"], "path_manifest_sha256": link["path"]["manifest_sha256"], "agreement": agreement, "usable_as_p2_oracle_link": expected_usable, "promotion_eligible": False, "blockers": blockers}
 
 
 def probe_source(root: Path, payload: Path | None) -> dict[str, Any]:
