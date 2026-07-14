@@ -347,32 +347,35 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
     for name in ("model", "worker", "product"):
         for key, value in identity[name].items():
             if key.endswith("sha256") or key == "identity_sha256": digest(value, f"identity.{name}.{key}", nullable=trace["scope"] == "component")
-            elif name != "product" or key in {"id", "revision"}: string(value, f"identity.{name}.{key}", identifier=True)
+            elif name != "product" or key in {"id", "revision"}: string(value, f"identity.{name}.{key}", identifier=True, nullable=trace["scope"] == "component")
     for key in ("manifest_sha256", "content_sha256"): digest(identity["artifact"][key], f"identity.artifact.{key}", nullable=True)
     digest(identity["served_model_manifest_sha256"], "identity.served_model_manifest_sha256", nullable=trace["scope"] == "component")
     if identity["served_model_manifest_sha256"] is not None and sha(manifest_raw) != identity["served_model_manifest_sha256"]: raise ValidationError("active manifest hash differs")
     public, fmt, worker = manifest.get("public", {}), manifest.get("format", {}), manifest.get("worker", {})
-    if identity["model"]["id"] != public.get("id") or identity["model"]["revision"] != public.get("revision") or identity["model"]["format_id"] != fmt.get("format_id") or identity["model"]["implementation_id"] != fmt.get("implementation_id"): raise ValidationError("model identity differs")
-    binary = resolve_manifest_path(worker.get("binary", ""), manifest_path=manifest_path, label="worker binary")
-    observed_worker_sha = file_sha(binary)
-    if worker.get("binary_sha256") is not None and worker.get("binary_sha256") != observed_worker_sha: raise ValidationError("manifest declared worker digest differs")
+    if any(identity["model"][key] is not None for key in identity["model"]) and (identity["model"]["id"] != public.get("id") or identity["model"]["revision"] != public.get("revision") or identity["model"]["format_id"] != fmt.get("format_id") or identity["model"]["implementation_id"] != fmt.get("implementation_id")): raise ValidationError("model identity differs")
     if identity["worker"]["binary_sha256"] is not None:
+        binary = resolve_manifest_path(worker.get("binary", ""), manifest_path=manifest_path, label="worker binary")
+        observed_worker_sha = file_sha(binary)
+        if worker.get("binary_sha256") is not None and worker.get("binary_sha256") != observed_worker_sha: raise ValidationError("manifest declared worker digest differs")
         if observed_worker_sha != identity["worker"]["binary_sha256"] or identity["worker"]["binary_sha256"] != trace["producer"]["binary_sha256"]: raise ValidationError("worker binary binding differs")
-    if worker.get("protocol") != identity["worker"]["protocol"]: raise ValidationError("worker protocol differs")
+    if identity["worker"]["protocol"] is not None and worker.get("protocol") != identity["worker"]["protocol"]: raise ValidationError("worker protocol differs")
     product = manifest.get("product", {}) if isinstance(manifest.get("product"), dict) else {}
     package = product.get("package", {}) if isinstance(product.get("package"), dict) else {}
     # The manifest itself is supplied separately to validate_trace; relative
     # paths resolve from the current manifest directory in the caller.
     product_root = resolve_manifest_path(product.get("root", "."), manifest_path=manifest_path, label="product root")
-    package_path = resolve_manifest_path(package.get("manifest_path", ""), manifest_path=manifest_path, root=product_root, label="package manifest")
-    if file_sha(package_path) != identity["package"]["manifest_sha256"]: raise ValidationError("package manifest binding differs")
-    receipt_path = resolve_manifest_path(manifest.get("promotion", {}).get("receipt", ""), manifest_path=manifest_path, label="promotion receipt")
-    observed_receipt_sha = file_sha(receipt_path)
-    if manifest.get("promotion", {}).get("receipt_sha256") is not None and manifest.get("promotion", {}).get("receipt_sha256") != observed_receipt_sha: raise ValidationError("manifest declared receipt digest differs")
-    if observed_receipt_sha != identity["product"]["promotion_receipt_sha256"]: raise ValidationError("promotion receipt binding differs")
-    if package.get("manifest_sha256") is not None and package.get("manifest_sha256") != identity["package"]["manifest_sha256"]: raise ValidationError("manifest declared package digest differs")
-    expected_product = {"id": public.get("id"), "revision": public.get("revision"), "root": str(product_root), "package_manifest_sha256": identity["package"]["manifest_sha256"]}
-    if sha(canonical(expected_product)) != identity["product"]["identity_sha256"]: raise ValidationError("product identity digest differs")
+    if identity["package"]["manifest_sha256"] is not None:
+        package_path = resolve_manifest_path(package.get("manifest_path", ""), manifest_path=manifest_path, root=product_root, label="package manifest")
+        if file_sha(package_path) != identity["package"]["manifest_sha256"]: raise ValidationError("package manifest binding differs")
+        if package.get("manifest_sha256") is not None and package.get("manifest_sha256") != identity["package"]["manifest_sha256"]: raise ValidationError("manifest declared package digest differs")
+    if identity["product"]["promotion_receipt_sha256"] is not None:
+        receipt_path = resolve_manifest_path(manifest.get("promotion", {}).get("receipt", ""), manifest_path=manifest_path, label="promotion receipt")
+        observed_receipt_sha = file_sha(receipt_path)
+        if manifest.get("promotion", {}).get("receipt_sha256") is not None and manifest.get("promotion", {}).get("receipt_sha256") != observed_receipt_sha: raise ValidationError("manifest declared receipt digest differs")
+        if observed_receipt_sha != identity["product"]["promotion_receipt_sha256"]: raise ValidationError("promotion receipt binding differs")
+    if identity["product"]["identity_sha256"] is not None:
+        expected_product = {"id": public.get("id"), "revision": public.get("revision"), "root": str(product_root), "package_manifest_sha256": identity["package"]["manifest_sha256"]}
+        if sha(canonical(expected_product)) != identity["product"]["identity_sha256"]: raise ValidationError("product identity digest differs")
     manifest_artifact = product.get("artifact") if isinstance(product.get("artifact"), dict) else {}
     for name in ("manifest_sha256", "content_sha256"):
         if identity["artifact"][name] != manifest_artifact.get(name): raise ValidationError(f"artifact identity differs at {name}")
