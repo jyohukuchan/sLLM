@@ -1,0 +1,1431 @@
+{
+  "capture": null,
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "captured_unix_ns": 1784070423548051894,
+      "exit_code": 0,
+      "label": "sudo-prevalidate",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "captured_unix_ns": 1784070448179048718,
+      "exit_code": 0,
+      "label": "sudo-before-stop",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "/usr/bin/systemctl",
+        "stop",
+        "ullm-openai.service"
+      ],
+      "captured_unix_ns": 1784070448353689038,
+      "exit_code": 0,
+      "label": "service-stop",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "captured_unix_ns": 1784070477997965935,
+      "exit_code": 0,
+      "label": "sudo-before-restore",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "/usr/bin/systemctl",
+        "start",
+        "ullm-openai.service"
+      ],
+      "captured_unix_ns": 1784070478436915716,
+      "exit_code": 0,
+      "label": "service-start",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "execution_mode": "one_case",
+  "failure": {
+    "launcher_started": true,
+    "reason": "immutable launcher failed",
+    "stage": "launcher"
+  },
+  "launcher": {
+    "children_remaining": [],
+    "code": 1,
+    "failure": {
+      "reason": "execute runner subprocess failed",
+      "runner_started": true,
+      "stage": "runner"
+    },
+    "safety": {
+      "execution_state_source": "runner_executor_outcome",
+      "gpu_command_executed": "unknown",
+      "model_load_executed": "unknown",
+      "service_stopped": false,
+      "service_touched": false
+    },
+    "status": "failed"
+  },
+  "lock_substrate": {
+    "commands": [
+      {
+        "argv": [
+          "/usr/bin/sudo",
+          "-n",
+          "/usr/bin/install",
+          "-d",
+          "-o",
+          "homelab1",
+          "-g",
+          "homelab1",
+          "-m",
+          "0750",
+          "/run/ullm"
+        ],
+        "argv_sha256": "75c7c5b267088a66153e127eabccbcf8f5e3cc6e7d5e02c3659b4d5437ed86a4",
+        "captured_unix_ns": 1784070448368144820,
+        "executable": "/usr/bin/install",
+        "executable_sha256": "0e328ae109217200da3207ece12514b867d44fb90b444958b4d64b6007736f33",
+        "exit_code": 0,
+        "label": "lock-substrate-install",
+        "sha256": "0e328ae109217200da3207ece12514b867d44fb90b444958b4d64b6007736f33",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "directory": "/run/ullm",
+    "identity": {
+      "directory": {
+        "device": 26,
+        "inode": 751338
+      },
+      "lock": {
+        "device": 26,
+        "inode": 751339
+      }
+    },
+    "lock": "/run/ullm/r9700.lock",
+    "owner": {
+      "gid": 1000,
+      "name": "homelab1",
+      "nonroot": true,
+      "uid": 1000
+    },
+    "post": {
+      "directory": {
+        "device": 26,
+        "directory": true,
+        "empty": false,
+        "gid": 1000,
+        "inode": 751338,
+        "mode": 488,
+        "nlink": 2,
+        "regular": false,
+        "uid": 1000
+      },
+      "lock": {
+        "device": 26,
+        "directory": false,
+        "gid": 1000,
+        "inode": 751339,
+        "mode": 384,
+        "nlink": 1,
+        "regular": true,
+        "uid": 1000
+      }
+    },
+    "pre": {
+      "directory": {
+        "empty": null,
+        "metadata": null,
+        "path": "/run/ullm",
+        "present": false,
+        "symlink": false
+      },
+      "lock": {
+        "path": "/run/ullm/r9700.lock",
+        "present": false
+      }
+    },
+    "schema_version": "ullm.aq4_p2_trusted_lock_substrate.v1",
+    "secret_material_recorded": false
+  },
+  "lock_substrate_cleanup": {
+    "commands": [
+      {
+        "argv": [
+          "/usr/bin/sudo",
+          "-n",
+          "/usr/bin/rmdir",
+          "/run/ullm"
+        ],
+        "argv_sha256": "409512f8c121d5c020e8b2995371c1ab4861859bbd7cf614906e3d9e0f41e24e",
+        "captured_unix_ns": 1784070477989241058,
+        "executable": "/usr/bin/rmdir",
+        "executable_sha256": "2450cf2f4eaad71378cfdc6ac6da5cd6b40a6aa772766ae9040d32bf2ee45193",
+        "exit_code": 0,
+        "label": "lock-substrate-rmdir",
+        "sha256": "2450cf2f4eaad71378cfdc6ac6da5cd6b40a6aa772766ae9040d32bf2ee45193",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "directory": "/run/ullm",
+    "holder_pids": [],
+    "identity": {
+      "directory": {
+        "device": 26,
+        "inode": 751338
+      },
+      "lock": {
+        "device": 26,
+        "inode": 751339
+      }
+    },
+    "lock": "/run/ullm/r9700.lock",
+    "passed": true,
+    "post": {
+      "directory": {
+        "path": "/run/ullm",
+        "present": false
+      },
+      "lock": {
+        "path": "/run/ullm/r9700.lock",
+        "present": false
+      }
+    },
+    "pre": {
+      "directory": {
+        "empty": false,
+        "metadata": {
+          "device": 26,
+          "directory": true,
+          "gid": 1000,
+          "inode": 751338,
+          "mode": 488,
+          "nlink": 2,
+          "regular": false,
+          "uid": 1000
+        },
+        "path": "/run/ullm",
+        "present": true,
+        "symlink": false
+      },
+      "lock": {
+        "device": 26,
+        "directory": false,
+        "gid": 1000,
+        "inode": 751339,
+        "mode": 384,
+        "nlink": 1,
+        "regular": true,
+        "uid": 1000
+      }
+    },
+    "runner_children": [],
+    "runner_finished": true,
+    "schema_version": "ullm.aq4_p2_trusted_lock_substrate_cleanup.v1",
+    "secret_material_recorded": false,
+    "source": "maintenance_unlinked",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "marker": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v7/maintenance-marker.json",
+    "sha256": "8f4765f417dddff6b38761321b9b521ba0641518b5ca3774e31598d05c23b563"
+  },
+  "mode": "execute",
+  "pre_stop": {
+    "commands": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "ullm-openai.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--property=NRestarts",
+          "--property=ControlGroup",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784070423554499302,
+        "exit_code": 0,
+        "label": "service-running",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "05e88ec141bcd9db632d006144a11b5117f188a6eea3aeb397423598cd94f1b8"
+      },
+      {
+        "argv": [
+          "/usr/bin/pgrep",
+          "-f",
+          "-x",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+        ],
+        "captured_unix_ns": 1784070423753135452,
+        "exit_code": 0,
+        "label": "worker-running",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "fe45f7abb76cc4ad53574545ed28c5ee57a917a5e35ae2d0c04e5f99f7990c12"
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "list",
+          "--json"
+        ],
+        "captured_unix_ns": 1784070423995459155,
+        "exit_code": 0,
+        "label": "gpu-identity",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "a7fc353f0234d1bb86e01c847fd7a330518dbf6b4f5636d2a6824cef3fd02243"
+      }
+    ],
+    "gpu": {
+      "amd_smi_index": 2,
+      "bdf": "0000:47:00.0",
+      "kfd_id": 51545,
+      "node_id": 2,
+      "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+    },
+    "hashes": {
+      "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+      "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    },
+    "health": {
+      "formal": {
+        "commands": [
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "version",
+              "--format",
+              "{{json .Client}}"
+            ],
+            "captured_unix_ns": 1784070442484128829,
+            "exit_code": 0,
+            "label": "docker-client-version",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "318bd0262c70774265e31726d6ff0cd87bae5dfbd564f2ce79c8a8d60164e33c"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "inspect",
+              "--type",
+              "container",
+              "--format",
+              "{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks \"open-webui-network\"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}",
+              "open-webui"
+            ],
+            "captured_unix_ns": 1784070442508146962,
+            "exit_code": 0,
+            "label": "openwebui-container-inspect",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "ef8ce1929209495b03e09ef804047b443902fcfd9ef72e0e5f66006bf3e2eaf1"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "exec",
+              "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+              "/usr/bin/curl",
+              "--version"
+            ],
+            "captured_unix_ns": 1784070442588961317,
+            "exit_code": 0,
+            "label": "container-curl-version",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "cc1470d1e66681b5b01a8df907c86e2947cb30622d2419b9d7d10aea1ddcf7b8"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "exec",
+              "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+              "/usr/bin/sha256sum",
+              "/usr/bin/curl"
+            ],
+            "captured_unix_ns": 1784070442665650324,
+            "exit_code": 0,
+            "label": "container-curl-sha256",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "f753756cb95d3a5d402d12da58d58f6bcb4e7a91cbec47f4f392c6290db43169"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "exec",
+              "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+              "/usr/bin/curl",
+              "--silent",
+              "--show-error",
+              "--fail-with-body",
+              "--max-time",
+              "5",
+              "--request",
+              "GET",
+              "--header",
+              "Accept: application/json",
+              "--write-out",
+              "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+              "--url",
+              "http://172.20.0.1:8000/healthz"
+            ],
+            "captured_unix_ns": 1784070442751695247,
+            "exit_code": 0,
+            "label": "gateway_healthz",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "e1c558b58217af22f18024e482d78585546972e89d4b504c8c0dfd1f52ea6658"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "exec",
+              "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+              "/usr/bin/curl",
+              "--silent",
+              "--show-error",
+              "--fail-with-body",
+              "--max-time",
+              "5",
+              "--request",
+              "GET",
+              "--header",
+              "Accept: application/json",
+              "--write-out",
+              "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+              "--url",
+              "http://172.20.0.1:8000/readyz"
+            ],
+            "captured_unix_ns": 1784070442838934581,
+            "exit_code": 0,
+            "label": "gateway_readyz",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "cf7c607782b09fcf5b87620ac701bd58bb4560e31dddef3ccd5b5f0af3ad3b2f"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "exec",
+              "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+              "/usr/bin/curl",
+              "--silent",
+              "--show-error",
+              "--fail-with-body",
+              "--max-time",
+              "5",
+              "--request",
+              "GET",
+              "--header",
+              "Accept: application/json",
+              "--write-out",
+              "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+              "--url",
+              "http://127.0.0.1:8080/health"
+            ],
+            "captured_unix_ns": 1784070442920381317,
+            "exit_code": 0,
+            "label": "openwebui_health",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "b804451473eee09a5efc90e1b7e81056b6cc82282fdad719f6367836138c3c40"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "exec",
+              "-i",
+              "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+              "/usr/bin/curl",
+              "--silent",
+              "--show-error",
+              "--fail-with-body",
+              "--max-time",
+              "5",
+              "--request",
+              "GET",
+              "--header",
+              "Accept: application/json",
+              "--header",
+              "@-",
+              "--write-out",
+              "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+              "--url",
+              "http://172.20.0.1:8000/v1/models"
+            ],
+            "captured_unix_ns": 1784070443007743003,
+            "exit_code": 0,
+            "label": "gateway-models",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "authorization_header_redacted",
+            "stdout_sha256": "9e6fc96b8bcd2a846eac6e15b03428610b2bb7502099c2b47a9118d8a7f7506a"
+          },
+          {
+            "argv": [
+              "/usr/bin/docker",
+              "inspect",
+              "--type",
+              "container",
+              "--format",
+              "{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks \"open-webui-network\"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}",
+              "open-webui"
+            ],
+            "captured_unix_ns": 1784070443031535222,
+            "exit_code": 0,
+            "label": "openwebui-container-inspect",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdin": "devnull",
+            "stdout_sha256": "ef8ce1929209495b03e09ef804047b443902fcfd9ef72e0e5f66006bf3e2eaf1"
+          }
+        ],
+        "container": {
+          "health": "healthy",
+          "id": "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+          "image_id": "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409",
+          "name": "open-webui",
+          "network": {
+            "gateway": "172.20.0.1",
+            "id": "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8",
+            "ip": "172.20.0.2",
+            "name": "open-webui-network"
+          },
+          "running": true,
+          "status": "running"
+        },
+        "curl": {
+          "path": "/usr/bin/curl",
+          "sha256": "58824afa640f512e07e895c0f2d1e1fe2c3fd1456acab689b6e4c1c75cef2593",
+          "version": "7.88.1"
+        },
+        "docker": {
+          "client_api_version": "1.55",
+          "client_version": "29.6.0",
+          "device": 66306,
+          "inode": 189403434,
+          "mode": 493,
+          "path": "/usr/bin/docker",
+          "sha256": "f8470ebe5d201284a9fb4e7e59326f116e5b764a8d0d9a47097c26d52257d446",
+          "size": 45355819
+        },
+        "endpoints": {
+          "gateway_healthz": {
+            "authenticated": false,
+            "body_bytes": 15,
+            "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+            "status": 200,
+            "url": "http://172.20.0.1:8000/healthz"
+          },
+          "gateway_models": {
+            "authenticated": true,
+            "body_bytes": 90,
+            "body_sha256": "ccfc5786e5d0928931111c7a2d272ab62e202abd9978b1490a531aa0b6133c20",
+            "model_id": "ullm-qwen3.5-9b-aq4",
+            "status": 200,
+            "url": "http://172.20.0.1:8000/v1/models"
+          },
+          "gateway_readyz": {
+            "authenticated": false,
+            "body_bytes": 18,
+            "body_sha256": "31bf75f4c0a97cc1f7b60df824fa390b3be9ba014f29b63c87c698ba63d9a9fd",
+            "status": 200,
+            "url": "http://172.20.0.1:8000/readyz"
+          },
+          "openwebui_health": {
+            "authenticated": false,
+            "body_bytes": 15,
+            "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+            "status": 200,
+            "url": "http://127.0.0.1:8080/health"
+          }
+        },
+        "process_counts": {
+          "container_curl": 6,
+          "container_curl_endpoint": 5,
+          "container_curl_total": 6,
+          "container_curl_version": 1,
+          "docker": 9,
+          "docker_exec": 6
+        },
+        "secret_material_recorded": false,
+        "transport": "docker-exec-container-network-namespace"
+      },
+      "host_route_diagnostics": {
+        "formal_gate": false,
+        "probes": {
+          "gateway_readyz": {
+            "body_bytes": null,
+            "body_sha256": null,
+            "error_type": "URLError",
+            "matches_formal_response": false,
+            "reachable": false,
+            "status": null,
+            "url": "http://172.20.0.1:8000/readyz"
+          },
+          "openwebui_health": {
+            "body_bytes": 15,
+            "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+            "error_type": null,
+            "matches_formal_response": true,
+            "reachable": true,
+            "status": 200,
+            "url": "http://127.0.0.1:3000/health"
+          }
+        }
+      }
+    },
+    "lock": {
+      "busy": true,
+      "path": "/run/ullm/r9700.lock"
+    },
+    "owners": {
+      "amd_smi": [
+        438020
+      ],
+      "amd_smi_probe": {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "process",
+          "--gpu",
+          "2",
+          "--general",
+          "--json"
+        ],
+        "captured_unix_ns": 1784070442270212630,
+        "exit_code": 0,
+        "label": "gpu-owner",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "1bdbbab197b19114c79c5beeed4bcbeb229de692bdac2bed577bd002b23916ed"
+      },
+      "amd_smi_process": {
+        "entry_key_sets": [
+          [
+            "process_info"
+          ]
+        ],
+        "process_info_types": [
+          "object"
+        ],
+        "process_list_length": 1,
+        "process_list_type": "list",
+        "raw_bytes": 630,
+        "raw_sha256": "1bdbbab197b19114c79c5beeed4bcbeb229de692bdac2bed577bd002b23916ed",
+        "reason_code": "accepted_owner_records",
+        "root_keys": [
+          "gpu",
+          "process_list"
+        ],
+        "schema_version": "ullm.aq4_p2_amd_process_parse_diagnostic.v1",
+        "status": "accepted",
+        "top_level_length": 1,
+        "top_level_type": "list"
+      },
+      "kfd": [
+        438020
+      ],
+      "kfd_source": {
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "attempt": 0,
+            "classification": "stable",
+            "enumerated_pid_count": 1,
+            "enumerated_pids_sha256": "37bde50da7976443fdad65b99f398030c37707aef03fe07895a8e4f4771790f9"
+          }
+        ],
+        "classification": "stable",
+        "owners": [
+          438020
+        ],
+        "root": {
+          "device": 23,
+          "inode": 97870,
+          "path": "/sys/class/kfd/kfd/proc"
+        },
+        "schema_version": "ullm.aq4_p2_kfd_owner_snapshot.v1",
+        "secret_material_recorded": false,
+        "source_kind": "kernel_sysfs",
+        "sources": [
+          {
+            "line_ending": "none",
+            "parsed_gpuid": 51545,
+            "pid": 438020,
+            "queue": 0,
+            "raw_bytes": 5,
+            "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+          },
+          {
+            "line_ending": "none",
+            "parsed_gpuid": 51545,
+            "pid": 438020,
+            "queue": 1,
+            "raw_bytes": 5,
+            "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+          },
+          {
+            "line_ending": "none",
+            "parsed_gpuid": 51545,
+            "pid": 438020,
+            "queue": 2,
+            "raw_bytes": 5,
+            "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+          }
+        ]
+      }
+    },
+    "service": {
+      "active_state": "active",
+      "control_group": "/system.slice/ullm-openai.service",
+      "main_pid": 437627,
+      "nrestarts": 0,
+      "sub_state": "running",
+      "unit": "ullm-openai.service"
+    },
+    "worker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "pid": 438020,
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "process_counts": {
+    "capture_tool": 0,
+    "container_curl": 12,
+    "container_curl_endpoint": 10,
+    "container_curl_total": 12,
+    "container_curl_version": 2,
+    "docker": 18,
+    "docker_exec": 12,
+    "launcher": 1,
+    "lock_substrate_install": 1,
+    "lock_substrate_rmdir": 1,
+    "rocprof": 0,
+    "stopped_gate_polls": 2,
+    "stopped_gate_probe_commands": 10,
+    "sudo": 3,
+    "sudo_keepalive": 0,
+    "systemctl_start": 1,
+    "systemctl_stop": 1
+  },
+  "profile_trust": [],
+  "promotion_eligible": false,
+  "restore": {
+    "attempted": true,
+    "error": null,
+    "lock_substrate_cleanup_passed": true,
+    "passed": true,
+    "post_start": {
+      "commands": [
+        {
+          "argv": [
+            "/usr/bin/systemctl",
+            "show",
+            "ullm-openai.service",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=MainPID",
+            "--property=NRestarts",
+            "--property=ControlGroup",
+            "--no-pager"
+          ],
+          "captured_unix_ns": 1784070480886179228,
+          "exit_code": 0,
+          "label": "service-running",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "d28745dc2ff5c4520105e083df173332b2414d59b85f4a3ae38bd87928b49b39"
+        },
+        {
+          "argv": [
+            "/usr/bin/pgrep",
+            "-f",
+            "-x",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+          ],
+          "captured_unix_ns": 1784070481083653365,
+          "exit_code": 0,
+          "label": "worker-running",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "d177b154897621fc916c6b5f187b0efedeee67a3c363a44063c8c31c117e27c6"
+        },
+        {
+          "argv": [
+            "/opt/rocm/bin/amd-smi",
+            "list",
+            "--json"
+          ],
+          "captured_unix_ns": 1784070481306703411,
+          "exit_code": 0,
+          "label": "gpu-identity",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "a7fc353f0234d1bb86e01c847fd7a330518dbf6b4f5636d2a6824cef3fd02243"
+        }
+      ],
+      "gpu": {
+        "amd_smi_index": 2,
+        "bdf": "0000:47:00.0",
+        "kfd_id": 51545,
+        "node_id": 2,
+        "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+      },
+      "hashes": {
+        "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+        "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+        "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+        "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+      },
+      "health": {
+        "formal": {
+          "commands": [
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "version",
+                "--format",
+                "{{json .Client}}"
+              ],
+              "captured_unix_ns": 1784070497868453308,
+              "exit_code": 0,
+              "label": "docker-client-version",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "318bd0262c70774265e31726d6ff0cd87bae5dfbd564f2ce79c8a8d60164e33c"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks \"open-webui-network\"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}",
+                "open-webui"
+              ],
+              "captured_unix_ns": 1784070497890202013,
+              "exit_code": 0,
+              "label": "openwebui-container-inspect",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "ef8ce1929209495b03e09ef804047b443902fcfd9ef72e0e5f66006bf3e2eaf1"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--version"
+              ],
+              "captured_unix_ns": 1784070497975304913,
+              "exit_code": 0,
+              "label": "container-curl-version",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "cc1470d1e66681b5b01a8df907c86e2947cb30622d2419b9d7d10aea1ddcf7b8"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/sha256sum",
+                "/usr/bin/curl"
+              ],
+              "captured_unix_ns": 1784070498062605630,
+              "exit_code": 0,
+              "label": "container-curl-sha256",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "f753756cb95d3a5d402d12da58d58f6bcb4e7a91cbec47f4f392c6290db43169"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://172.20.0.1:8000/healthz"
+              ],
+              "captured_unix_ns": 1784070498154084567,
+              "exit_code": 0,
+              "label": "gateway_healthz",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "e1c558b58217af22f18024e482d78585546972e89d4b504c8c0dfd1f52ea6658"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://172.20.0.1:8000/readyz"
+              ],
+              "captured_unix_ns": 1784070498240512339,
+              "exit_code": 0,
+              "label": "gateway_readyz",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "cf7c607782b09fcf5b87620ac701bd58bb4560e31dddef3ccd5b5f0af3ad3b2f"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://127.0.0.1:8080/health"
+              ],
+              "captured_unix_ns": 1784070498334500558,
+              "exit_code": 0,
+              "label": "openwebui_health",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "b804451473eee09a5efc90e1b7e81056b6cc82282fdad719f6367836138c3c40"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "-i",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--header",
+                "@-",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://172.20.0.1:8000/v1/models"
+              ],
+              "captured_unix_ns": 1784070498416764261,
+              "exit_code": 0,
+              "label": "gateway-models",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "authorization_header_redacted",
+              "stdout_sha256": "9e6fc96b8bcd2a846eac6e15b03428610b2bb7502099c2b47a9118d8a7f7506a"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks \"open-webui-network\"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}",
+                "open-webui"
+              ],
+              "captured_unix_ns": 1784070498438654998,
+              "exit_code": 0,
+              "label": "openwebui-container-inspect",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "ef8ce1929209495b03e09ef804047b443902fcfd9ef72e0e5f66006bf3e2eaf1"
+            }
+          ],
+          "container": {
+            "health": "healthy",
+            "id": "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+            "image_id": "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409",
+            "name": "open-webui",
+            "network": {
+              "gateway": "172.20.0.1",
+              "id": "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8",
+              "ip": "172.20.0.2",
+              "name": "open-webui-network"
+            },
+            "running": true,
+            "status": "running"
+          },
+          "curl": {
+            "path": "/usr/bin/curl",
+            "sha256": "58824afa640f512e07e895c0f2d1e1fe2c3fd1456acab689b6e4c1c75cef2593",
+            "version": "7.88.1"
+          },
+          "docker": {
+            "client_api_version": "1.55",
+            "client_version": "29.6.0",
+            "device": 66306,
+            "inode": 189403434,
+            "mode": 493,
+            "path": "/usr/bin/docker",
+            "sha256": "f8470ebe5d201284a9fb4e7e59326f116e5b764a8d0d9a47097c26d52257d446",
+            "size": 45355819
+          },
+          "endpoints": {
+            "gateway_healthz": {
+              "authenticated": false,
+              "body_bytes": 15,
+              "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+              "status": 200,
+              "url": "http://172.20.0.1:8000/healthz"
+            },
+            "gateway_models": {
+              "authenticated": true,
+              "body_bytes": 90,
+              "body_sha256": "ccfc5786e5d0928931111c7a2d272ab62e202abd9978b1490a531aa0b6133c20",
+              "model_id": "ullm-qwen3.5-9b-aq4",
+              "status": 200,
+              "url": "http://172.20.0.1:8000/v1/models"
+            },
+            "gateway_readyz": {
+              "authenticated": false,
+              "body_bytes": 18,
+              "body_sha256": "31bf75f4c0a97cc1f7b60df824fa390b3be9ba014f29b63c87c698ba63d9a9fd",
+              "status": 200,
+              "url": "http://172.20.0.1:8000/readyz"
+            },
+            "openwebui_health": {
+              "authenticated": false,
+              "body_bytes": 15,
+              "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+              "status": 200,
+              "url": "http://127.0.0.1:8080/health"
+            }
+          },
+          "process_counts": {
+            "container_curl": 6,
+            "container_curl_endpoint": 5,
+            "container_curl_total": 6,
+            "container_curl_version": 1,
+            "docker": 9,
+            "docker_exec": 6
+          },
+          "secret_material_recorded": false,
+          "transport": "docker-exec-container-network-namespace"
+        },
+        "host_route_diagnostics": {
+          "formal_gate": false,
+          "probes": {
+            "gateway_readyz": {
+              "body_bytes": null,
+              "body_sha256": null,
+              "error_type": "URLError",
+              "matches_formal_response": false,
+              "reachable": false,
+              "status": null,
+              "url": "http://172.20.0.1:8000/readyz"
+            },
+            "openwebui_health": {
+              "body_bytes": 15,
+              "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+              "error_type": null,
+              "matches_formal_response": true,
+              "reachable": true,
+              "status": 200,
+              "url": "http://127.0.0.1:3000/health"
+            }
+          }
+        }
+      },
+      "lock": {
+        "busy": true,
+        "path": "/run/ullm/r9700.lock"
+      },
+      "owners": {
+        "amd_smi": [
+          647632
+        ],
+        "amd_smi_probe": {
+          "argv": [
+            "/opt/rocm/bin/amd-smi",
+            "process",
+            "--gpu",
+            "2",
+            "--general",
+            "--json"
+          ],
+          "captured_unix_ns": 1784070497739467801,
+          "exit_code": 0,
+          "label": "gpu-owner",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "3ce2a47012743af50360faaee9a55febd29448b71395ffde194b2b6a23ba081d"
+        },
+        "amd_smi_process": {
+          "entry_key_sets": [
+            [
+              "process_info"
+            ]
+          ],
+          "process_info_types": [
+            "object"
+          ],
+          "process_list_length": 1,
+          "process_list_type": "list",
+          "raw_bytes": 628,
+          "raw_sha256": "3ce2a47012743af50360faaee9a55febd29448b71395ffde194b2b6a23ba081d",
+          "reason_code": "accepted_owner_records",
+          "root_keys": [
+            "gpu",
+            "process_list"
+          ],
+          "schema_version": "ullm.aq4_p2_amd_process_parse_diagnostic.v1",
+          "status": "accepted",
+          "top_level_length": 1,
+          "top_level_type": "list"
+        },
+        "kfd": [
+          647632
+        ],
+        "kfd_source": {
+          "attempt_count": 1,
+          "attempts": [
+            {
+              "attempt": 0,
+              "classification": "stable",
+              "enumerated_pid_count": 1,
+              "enumerated_pids_sha256": "884269dfeaebf779cd4c1f7268992e4ea86d8dccd5ccdd7b103d1fad91b3624c"
+            }
+          ],
+          "classification": "stable",
+          "owners": [
+            647632
+          ],
+          "root": {
+            "device": 23,
+            "inode": 97870,
+            "path": "/sys/class/kfd/kfd/proc"
+          },
+          "schema_version": "ullm.aq4_p2_kfd_owner_snapshot.v1",
+          "secret_material_recorded": false,
+          "source_kind": "kernel_sysfs",
+          "sources": [
+            {
+              "line_ending": "none",
+              "parsed_gpuid": 51545,
+              "pid": 647632,
+              "queue": 0,
+              "raw_bytes": 5,
+              "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+            },
+            {
+              "line_ending": "none",
+              "parsed_gpuid": 51545,
+              "pid": 647632,
+              "queue": 1,
+              "raw_bytes": 5,
+              "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+            },
+            {
+              "line_ending": "none",
+              "parsed_gpuid": 51545,
+              "pid": 647632,
+              "queue": 2,
+              "raw_bytes": 5,
+              "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+            }
+          ]
+        }
+      },
+      "service": {
+        "active_state": "active",
+        "control_group": "/system.slice/ullm-openai.service",
+        "main_pid": 647551,
+        "nrestarts": 0,
+        "sub_state": "running",
+        "unit": "ullm-openai.service"
+      },
+      "worker": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+        "pid": 647632,
+        "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+      }
+    }
+  },
+  "run_id": "p2-r9700-resident-one-case-smoke-execute-v3",
+  "safety": {
+    "gpu_command_executed": "unknown",
+    "model_load_executed": "unknown",
+    "service_stopped": true,
+    "service_touched": true
+  },
+  "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
+  "secret_material_recorded": false,
+  "sequence": [
+    "sudo-prevalidate",
+    "pre-stop-snapshot",
+    "durable-marker",
+    "service-stopped",
+    "stopped-gates",
+    "launcher",
+    "service-start",
+    "service-restored"
+  ],
+  "status": "failed",
+  "stopped_gate_poll": {
+    "failure": null,
+    "passed": true,
+    "policy": {
+      "absolute_deadline_monotonic_ns": 1317446244255926,
+      "initial_interval_seconds": 0.25,
+      "maximum_interval_seconds": 1.0,
+      "maximum_probe_timeout_seconds": 2.0,
+      "only_pre_stop_service_pid_may_hold_lock": 437627,
+      "only_pre_stop_worker_pid_may_drain": 438020,
+      "required_consecutive_stable": 2,
+      "sudo_keepalive_seconds": 10.0,
+      "timeout_seconds": 30.0
+    },
+    "poll_count": 2,
+    "poll_files": [
+      {
+        "consecutive_stable": 1,
+        "decision": "stable",
+        "name": "stopped-gate-poll-0000.json",
+        "sha256": "1eb3f7d40afd24eb1887cbf86505b2ed324cc41a98852b7fde08e027a4c32595"
+      },
+      {
+        "consecutive_stable": 2,
+        "decision": "stable",
+        "name": "stopped-gate-poll-0001.json",
+        "sha256": "1187e2c9317675202d190d06121991dd24161b7e12badc81824eefaf8fe6178d"
+      }
+    ],
+    "probe_command_count": 10,
+    "schema_version": "ullm.aq4_p2_stopped_gate_poll.v1",
+    "secret_material_recorded": false
+  },
+  "stopped_gates": {
+    "amd_smi_owners": [],
+    "environment": {
+      "HIP_VISIBLE_DEVICES": "1",
+      "ULLM_BUILD_GIT_COMMIT": "084d2e71114857da77e4196061d18a1dfefd53e8",
+      "ULLM_HIP_VISIBLE_DEVICES": "1",
+      "ULLM_REQUIRE_HIP_ADD_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL": "1",
+      "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
+      "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json"
+    },
+    "kfd_owners": [],
+    "lock": {
+      "device": 26,
+      "free": true,
+      "inode": 751339,
+      "path": "/run/ullm/r9700.lock",
+      "source": "trusted_substrate",
+      "substrate": {
+        "directory": {
+          "device": 26,
+          "inode": 751338
+        },
+        "lock": {
+          "device": 26,
+          "inode": 751339
+        }
+      }
+    },
+    "old_worker_pids": [],
+    "passed": true,
+    "probes": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "ullm-openai.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784070449372576004,
+        "exit_code": 0,
+        "label": "stopped-poll-service-ullm-openai.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "llama-qwen35-udq4.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784070449378157608,
+        "exit_code": 0,
+        "label": "stopped-poll-service-llama-qwen35-udq4.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/pgrep",
+          "-f",
+          "-x",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+        ],
+        "captured_unix_ns": 1784070449594433917,
+        "exit_code": 1,
+        "label": "stopped-poll-worker",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "process",
+          "--gpu",
+          "2",
+          "--general",
+          "--json"
+        ],
+        "captured_unix_ns": 1784070449844595955,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-process",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "c623fc11440b2bf81199ddefe42cadc330fa31ecde1cd268ff0ab930889e09ca",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "static",
+          "--gpu",
+          "2",
+          "--vram",
+          "--json"
+        ],
+        "captured_unix_ns": 1784070450093077314,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-vram",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "3f1a7aa8dc1cdf943f1cfb4470607f73ee704f092ad98a3e38cceeca31dc1168",
+        "timeout_seconds": 2.0
+      }
+    ],
+    "runtime_mapping": {
+      "amd_smi_index": 2,
+      "bdf": "0000:47:00.0",
+      "kfd_id": 51545,
+      "node_id": 2,
+      "runtime_device_index": 1,
+      "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+      "visible_token": "1"
+    },
+    "services": [
+      {
+        "active_state": "inactive",
+        "main_pid": 0,
+        "sub_state": "dead",
+        "unit": "ullm-openai.service"
+      },
+      {
+        "active_state": "inactive",
+        "main_pid": 0,
+        "sub_state": "dead",
+        "unit": "llama-qwen35-udq4.service"
+      }
+    ],
+    "vram": {
+      "free_bytes": 32624000000,
+      "headroom_bytes": 32624000000,
+      "total_bytes": 32624000000,
+      "used_bytes": 0
+    }
+  }
+}
