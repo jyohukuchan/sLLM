@@ -13,9 +13,11 @@ import ctypes
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import select
+import signal
 import socket
 import stat
 import subprocess
@@ -27,6 +29,11 @@ from pathlib import Path
 from typing import Any, Iterator, NamedTuple
 
 MAX_JSON_BYTES = 64 * 1024 * 1024
+MAX_DRIVER_STDOUT_LINE_BYTES = 1024 * 1024
+MAX_DRIVER_STDERR_RETAIN_BYTES = 1024 * 1024
+MAX_DRIVER_TAIL_BYTES = 64 * 1024
+DRIVER_IO_CHUNK_BYTES = 64 * 1024
+DRIVER_CLEANUP_GRACE_SECONDS = 5.0
 CASE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -90,6 +97,13 @@ ROCTX_MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 
 class BatchError(ValueError):
     pass
+
+
+class DriverProtocolError(BatchError):
+    def __init__(self, kind: str, stage: str, message: str) -> None:
+        self.kind = kind
+        self.stage = stage
+        super().__init__(message)
 
 
 class PathComponentIdentity(NamedTuple):
@@ -555,7 +569,7 @@ def case_hash(case: dict[str, Any]) -> str:
     return sha_bytes(canonical(value))
 
 
-def atomic_write(path: Path, value: Any) -> None:
+def atomic_write(path: Path, value: Any, mode: int | None = None) -> None:
     if os.path.lexists(path):
         raise BatchError(f"refusing to overwrite {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -566,6 +580,40 @@ def atomic_write(path: Path, value: Any) -> None:
             target.write("\n")
             target.flush()
             os.fsync(target.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except FileExistsError as error:
+        raise BatchError(f"refusing to overwrite {path}") from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_bytes(path: Path, raw: bytes, mode: int = 0o444) -> None:
+    if os.path.lexists(path):
+        raise BatchError(f"refusing to overwrite {path}")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.incomplete")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+        try:
+            offset = 0
+            while offset < len(raw):
+                written = os.write(descriptor, raw[offset:])
+                if written <= 0:
+                    raise BatchError(f"atomic byte write failed: {path}")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.chmod(temporary, mode)
         os.link(temporary, path, follow_symlinks=False)
         directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -885,26 +933,358 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
     }
 
 
-def _send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
+DRIVER_SECRET_MARKERS = (b"authorization:", b"bearer ", b"api_key", b"api-key", b"x-api-key")
+
+
+def _tail_update(tail: bytearray, chunk: bytes) -> None:
+    tail.extend(chunk)
+    if len(tail) > MAX_DRIVER_TAIL_BYTES:
+        del tail[:-MAX_DRIVER_TAIL_BYTES]
+
+
+def _secret_scan(previous: bytes, chunk: bytes) -> tuple[bytes, bool]:
+    combined = (previous + chunk).lower()
+    detected = any(marker in combined for marker in DRIVER_SECRET_MARKERS)
+    return combined[-64:], detected
+
+
+class DriverAudit:
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = output_dir
+        self.stderr_capture_path = output_dir / ".resident-driver.stderr.incomplete"
+        descriptor = os.open(
+            self.stderr_capture_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        self.stderr_handle = os.fdopen(descriptor, "wb", buffering=0)
+        self.spawned_unix_ns: int | None = None
+        self.pid: int | None = None
+        self.pgid: int | None = None
+        self.stdout_event_count = 0
+        self.stdout_records: list[dict[str, Any]] = []
+        self.stdout_records_dropped = 0
+        self.ready_received = False
+        self.case_begin_count = 0
+        self.warmup_completed = 0
+        self.measured_completed = 0
+        self.case_end_count = 0
+        self.last_stage = "spawn"
+
+    def mark_spawned(self, process: subprocess.Popen[bytes]) -> None:
+        self.spawned_unix_ns = time.time_ns()
+        self.pid = process.pid
+        self.pgid = os.getpgid(process.pid)
+
+    def record_stdout(self, record: dict[str, Any]) -> None:
+        if len(self.stdout_records) == 64:
+            self.stdout_records.pop(0)
+            self.stdout_records_dropped += 1
+        self.stdout_records.append(record)
+
+    def close_parent_stderr(self) -> None:
+        if not self.stderr_handle.closed:
+            self.stderr_handle.flush()
+            os.fsync(self.stderr_handle.fileno())
+            self.stderr_handle.close()
+
+    def finalize_stderr(self) -> dict[str, Any]:
+        self.close_parent_stderr()
+        digest = hashlib.sha256()
+        total = 0
+        tail = bytearray()
+        overlap = b""
+        secret_detected = False
+        with self.stderr_capture_path.open("rb", buffering=0) as source:
+            while chunk := source.read(DRIVER_IO_CHUNK_BYTES):
+                digest.update(chunk)
+                total += len(chunk)
+                _tail_update(tail, chunk)
+                overlap, detected = _secret_scan(overlap, chunk)
+                secret_detected = secret_detected or detected
+        metadata = self.stderr_capture_path.lstat()
+        retained_path: Path | None = None
+        retained_kind = "none"
+        omission_reason: str | None = "empty" if total == 0 else None
+        if total and not secret_detected and total <= MAX_DRIVER_STDERR_RETAIN_BYTES:
+            retained_path = self.output_dir / "resident-driver.stderr.log"
+            os.chmod(self.stderr_capture_path, 0o444)
+            os.rename(self.stderr_capture_path, retained_path)
+            retained_kind = "complete"
+        elif total and not secret_detected:
+            try:
+                bytes(tail).decode("utf-8")
+            except UnicodeError:
+                omission_reason = "tail_not_utf8"
+            else:
+                retained_path = self.output_dir / "resident-driver.stderr.tail.log"
+                atomic_write_bytes(retained_path, bytes(tail))
+                retained_kind = "bounded_tail"
+                omission_reason = "full_stream_exceeds_retention_bound"
+        elif secret_detected:
+            omission_reason = "secret_marker_detected"
+        if self.stderr_capture_path.exists():
+            self.stderr_capture_path.unlink()
+        directory = os.open(self.output_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return {
+            "bytes": total,
+            "sha256": digest.hexdigest(),
+            "source_identity": {"device": metadata.st_dev, "inode": metadata.st_ino, "mode": stat.S_IMODE(metadata.st_mode)},
+            "retention_bound_bytes": MAX_DRIVER_STDERR_RETAIN_BYTES,
+            "tail_bound_bytes": MAX_DRIVER_TAIL_BYTES,
+            "retained_kind": retained_kind,
+            "retained_path": str(retained_path) if retained_path is not None else None,
+            "retained_sha256": sha_file(retained_path, "driver stderr retained evidence") if retained_path is not None else None,
+            "secret_scan": {"performed": True, "markers": [marker.decode("ascii") for marker in DRIVER_SECRET_MARKERS], "detected": secret_detected},
+            "omission_reason": omission_reason,
+        }
+
+
+def _send(process: subprocess.Popen[bytes], message: dict[str, Any]) -> None:
     if process.stdin is None:
         raise BatchError("resident driver stdin is unavailable")
-    process.stdin.write(json.dumps(message, ensure_ascii=True, sort_keys=True) + "\n")
+    process.stdin.write((json.dumps(message, ensure_ascii=True, sort_keys=True) + "\n").encode("utf-8"))
     process.stdin.flush()
 
 
-def _recv(process: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
+def _recv(process: subprocess.Popen[bytes], timeout: float, audit: DriverAudit, stage: str) -> dict[str, Any]:
     if process.stdout is None:
         raise BatchError("resident driver stdout is unavailable")
-    ready, _, _ = select.select([process.stdout], [], [], timeout)
-    if not ready:
-        raise BatchError("resident driver response timed out")
-    line = process.stdout.readline()
-    if not line:
-        raise BatchError("resident driver exited before response")
-    value = json.loads(line, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite driver number: {item}")))
+    audit.last_stage = stage
+    deadline = time.monotonic() + timeout
+    digest = hashlib.sha256()
+    tail = bytearray()
+    captured = bytearray()
+    total = 0
+    ended = False
+    timed_out = False
+    secret_overlap = b""
+    secret_detected = False
+    while not ended:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        ready, _, _ = select.select([process.stdout], [], [], remaining)
+        if not ready:
+            timed_out = True
+            break
+        chunk = process.stdout.readline(DRIVER_IO_CHUNK_BYTES)
+        if not chunk:
+            break
+        digest.update(chunk)
+        total += len(chunk)
+        _tail_update(tail, chunk)
+        secret_overlap, detected = _secret_scan(secret_overlap, chunk)
+        secret_detected = secret_detected or detected
+        if len(captured) <= MAX_DRIVER_STDOUT_LINE_BYTES:
+            remaining_capture = MAX_DRIVER_STDOUT_LINE_BYTES + 1 - len(captured)
+            captured.extend(chunk[:remaining_capture])
+        ended = chunk.endswith(b"\n")
+    if total:
+        audit.stdout_event_count += 1
+    record = {
+        "stage": stage,
+        "bytes": total,
+        "sha256": digest.hexdigest(),
+        "line_complete": ended,
+        "process_poll": process.poll(),
+        "outcome": "pending",
+        "tail_bytes": len(tail),
+        "tail_sha256": sha_bytes(bytes(tail)),
+        "tail_utf8": None,
+        "tail_omission_reason": None,
+    }
+    if secret_detected:
+        record["tail_omission_reason"] = "secret_marker_detected"
+    else:
+        try:
+            record["tail_utf8"] = bytes(tail).decode("utf-8")
+        except UnicodeError:
+            record["tail_omission_reason"] = "tail_not_utf8"
+    if timed_out:
+        record["outcome"] = "timeout"
+        audit.record_stdout(record)
+        raise DriverProtocolError("timeout", stage, "resident driver response timed out")
+    if total == 0:
+        record["outcome"] = "eof"
+        audit.record_stdout(record)
+        raise DriverProtocolError("eof", stage, "resident driver exited before response")
+    if not ended:
+        record["outcome"] = "eof_mid_line"
+        audit.record_stdout(record)
+        raise DriverProtocolError("eof_mid_line", stage, "resident driver exited during response")
+    if total > MAX_DRIVER_STDOUT_LINE_BYTES:
+        record["outcome"] = "line_too_large"
+        audit.record_stdout(record)
+        raise DriverProtocolError("stdout_line_too_large", stage, "resident driver response exceeds line bound")
+    line = bytes(captured)
+    try:
+        value = json.loads(line, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite driver number: {item}")))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        record["outcome"] = "invalid_json"
+        audit.record_stdout(record)
+        raise DriverProtocolError("invalid_json", stage, f"resident driver response JSON differs: {error}") from error
     if not isinstance(value, dict):
-        raise BatchError("resident driver response is not an object")
+        record["outcome"] = "non_object"
+        audit.record_stdout(record)
+        raise DriverProtocolError("non_object", stage, "resident driver response is not an object")
+    record["outcome"] = "json_object"
+    audit.record_stdout(record)
     return value
+
+
+def _process_group_alive(pgid: int | None) -> bool:
+    if pgid is None:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_process_group_exit(pgid: int | None, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _process_group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return True
+
+
+def _driver_exit(returncode: int | None) -> dict[str, Any]:
+    if returncode is None:
+        return {"kind": "still_running", "exit_code": None, "signal": None, "oom_like_unconfirmed": False}
+    if returncode < 0:
+        signal_number = -returncode
+        return {"kind": "signal", "exit_code": None, "signal": signal_number, "oom_like_unconfirmed": signal_number == signal.SIGKILL}
+    return {"kind": "exit", "exit_code": returncode, "signal": None, "oom_like_unconfirmed": returncode == 137}
+
+
+def _cleanup_driver(process: subprocess.Popen[bytes], audit: DriverAudit, timeout: float) -> tuple[dict[str, Any], dict[str, Any]]:
+    record: dict[str, Any] = {
+        "initial_poll": process.poll(),
+        "shutdown_attempted": False,
+        "shutdown_send_error": None,
+        "stdin_closed": False,
+        "wait_timed_out": False,
+        "signals": [],
+        "reaped": False,
+        "final_returncode": None,
+        "process_group_alive_final": None,
+        "errors": [],
+    }
+    if process.poll() is None:
+        record["shutdown_attempted"] = True
+        try:
+            _send(process, {"command": "shutdown", "schema_version": DRIVER_SCHEMA})
+        except (BatchError, OSError) as error:
+            record["shutdown_send_error"] = str(error)
+    if process.stdin is not None:
+        try:
+            process.stdin.close()
+            record["stdin_closed"] = True
+        except OSError as error:
+            record["errors"].append(f"stdin-close: {error}")
+    try:
+        process.wait(timeout=timeout)
+        record["reaped"] = True
+    except subprocess.TimeoutExpired:
+        record["wait_timed_out"] = True
+    grace = min(DRIVER_CLEANUP_GRACE_SECONDS, max(0.1, timeout))
+    if process.poll() is None or _process_group_alive(audit.pgid):
+        try:
+            if audit.pgid is not None:
+                os.killpg(audit.pgid, signal.SIGTERM)
+                record["signals"].append("SIGTERM")
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            record["errors"].append(f"sigterm: {error}")
+        try:
+            process.wait(timeout=grace)
+            record["reaped"] = True
+        except subprocess.TimeoutExpired:
+            pass
+        _wait_process_group_exit(audit.pgid, grace)
+    if process.poll() is None or _process_group_alive(audit.pgid):
+        try:
+            if audit.pgid is not None:
+                os.killpg(audit.pgid, signal.SIGKILL)
+                record["signals"].append("SIGKILL")
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            record["errors"].append(f"sigkill: {error}")
+        try:
+            process.wait(timeout=grace)
+            record["reaped"] = True
+        except subprocess.TimeoutExpired as error:
+            record["errors"].append(f"final-wait: {error}")
+        _wait_process_group_exit(audit.pgid, grace)
+    record["final_returncode"] = process.poll()
+    record["process_group_alive_final"] = _process_group_alive(audit.pgid)
+    if process.stdout is not None:
+        process.stdout.close()
+    stderr = audit.finalize_stderr()
+    record["passed"] = record["reaped"] is True and record["process_group_alive_final"] is False and not record["errors"]
+    return record, stderr
+
+
+def _driver_process_document(
+    audit: DriverAudit,
+    cleanup: dict[str, Any],
+    stderr: dict[str, Any],
+    lock_owner: dict[str, Any],
+    error: BaseException | None,
+) -> dict[str, Any]:
+    try:
+        lock_metadata = os.lstat(lock_owner["path"])
+        lock_after = {
+            "present": True,
+            "device": lock_metadata.st_dev,
+            "inode": lock_metadata.st_ino,
+            "same_inode": lock_metadata.st_dev == lock_owner.get("device") and lock_metadata.st_ino == lock_owner.get("inode"),
+        }
+    except OSError as lock_error:
+        lock_after = {"present": False, "device": None, "inode": None, "same_inode": False, "error_type": type(lock_error).__name__}
+    failure = None
+    if error is not None:
+        failure = {
+            "kind": error.kind if isinstance(error, DriverProtocolError) else type(error).__name__,
+            "stage": error.stage if isinstance(error, DriverProtocolError) else audit.last_stage,
+            "reason": str(error),
+        }
+    return {
+        "schema_version": "ullm.aq4_p2_resident_driver_process.v1",
+        "status": "failed" if error is not None else "complete",
+        "spawn": {"captured_unix_ns": audit.spawned_unix_ns, "pid": audit.pid, "process_group_id": audit.pgid},
+        "protocol": {
+            "last_stage": audit.last_stage,
+            "stdout_event_count": audit.stdout_event_count,
+            "stdout_records": audit.stdout_records,
+            "stdout_records_dropped": audit.stdout_records_dropped,
+            "ready_received": audit.ready_received,
+            "case_begin_count": audit.case_begin_count,
+            "warmup_completed": audit.warmup_completed,
+            "measured_completed": audit.measured_completed,
+            "case_end_count": audit.case_end_count,
+        },
+        "failure": failure,
+        "exit": _driver_exit(cleanup.get("final_returncode")),
+        "stderr": stderr,
+        "cleanup": cleanup,
+        "lock": {"expected": {key: lock_owner.get(key) for key in ("path", "device", "inode")}, "after_driver": lock_after, "held_by_runner_during_capture": True},
+        "gpu_owner": {"status": "not_probed", "reason": "runner_has_no_pinned_post_driver_gpu_owner_probe"},
+        "secret_material_recorded": False,
+    }
 
 
 def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1158,7 +1538,8 @@ def roctx_marker_name(
 
 
 def execute_resident_run(
-    process: subprocess.Popen[str],
+    process: subprocess.Popen[bytes],
+    audit: DriverAudit,
     case: dict[str, Any],
     session_id: str,
     run_index: int,
@@ -1189,13 +1570,23 @@ def execute_resident_run(
                 "run_kind": run_kind,
             },
         )
-        value = validate_run(_recv(process, timeout), case, session_id)
+        value = validate_run(
+            _recv(process, timeout, audit, f"run:{case['case_id']}:{run_index}"),
+            case,
+            session_id,
+        )
         if value["run_index"] != run_index or value["run_kind"] != run_kind:
             raise BatchError(f"resident driver run order differs: {case['case_id']}")
+        if run_kind == "warmup":
+            audit.warmup_completed += 1
+        else:
+            audit.measured_completed += 1
         return value
 
 
 def run_batch(args: argparse.Namespace) -> int:
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise BatchError("--timeout must be a finite positive number")
     if args.profile_roctx_ranges:
         if not args.one_case_smoke or args.dry_run:
             raise BatchError("--profile-roctx-ranges requires an actual --one-case-smoke run")
@@ -1269,10 +1660,28 @@ def run_batch(args: argparse.Namespace) -> int:
     ) as lock_owner:
         args.output_dir.mkdir(parents=True, exist_ok=False)
         atomic_write(args.output_dir / "resident-batch.lock-owner.json", lock_owner)
-        process: subprocess.Popen[str] | None = None
+        process: subprocess.Popen[bytes] | None = None
+        audit = DriverAudit(args.output_dir)
+        driver_error: BaseException | None = None
         try:
-            process = subprocess.Popen(args.driver_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=False, bufsize=1)
-            session_id, driver_identity = validate_ready(_recv(process, args.timeout), identity, cases, driver_executable["sha256"])
+            process = subprocess.Popen(
+                args.driver_command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=audit.stderr_handle,
+                text=False,
+                shell=False,
+                bufsize=0,
+                start_new_session=True,
+            )
+            audit.mark_spawned(process)
+            session_id, driver_identity = validate_ready(
+                _recv(process, args.timeout, audit, "ready"),
+                identity,
+                cases,
+                driver_executable["sha256"],
+            )
+            audit.ready_received = True
             by_id = {entry["case_id"]: entry for entry in fixture_index["cases"]}
             for case in cases:
                 if live_preflight_link is not None:
@@ -1296,15 +1705,17 @@ def run_batch(args: argparse.Namespace) -> int:
                         "resolved_m": case.get("resolved_m"), "sampling": sampling, "control": control,
                     },
                 })
-                begin = _recv(process, args.timeout)
+                begin = _recv(process, args.timeout, audit, f"case_begin:{case['case_id']}")
                 if set(begin) != {"event", "schema_version", "resident_session_id", "case_id", "requested_m", "resolved_m", "baseline_clean"} or begin.get("event") != "case_ready" or begin.get("schema_version") != DRIVER_SCHEMA or begin.get("resident_session_id") != session_id or begin.get("case_id") != case["case_id"] or begin.get("requested_m") != case["prefill_requested_m"] or begin.get("resolved_m") != case["resolved_m"] or begin.get("baseline_clean") is not True:
                     raise BatchError(f"resident driver case begin failed: {case['case_id']}")
+                audit.case_begin_count += 1
                 runs: list[dict[str, Any]] = []
                 reuse_forbidden = False
                 for run_index in range(WARMUP_RUNS + MEASURED_RUNS):
                     run_kind = "warmup" if run_index < WARMUP_RUNS else "measured"
                     value = execute_resident_run(
                         process,
+                        audit,
                         case,
                         session_id,
                         run_index,
@@ -1319,11 +1730,12 @@ def run_batch(args: argparse.Namespace) -> int:
                         break
                 if not reuse_forbidden:
                     _send(process, {"command": "case_end", "schema_version": DRIVER_SCHEMA, "case_id": case["case_id"]})
-                    end = _recv(process, args.timeout)
+                    end = _recv(process, args.timeout, audit, f"case_end:{case['case_id']}")
                     case_failed = any(item["status"] != "ok" for item in runs)
                     expected_release = {"commit": int(not case_failed), "discard": int(case_failed), "reset": 1, "baseline_restored": True}
                     if set(end) != {"event", "schema_version", "resident_session_id", "case_id", "release"} or end.get("event") != "case_complete" or end.get("schema_version") != DRIVER_SCHEMA or end.get("resident_session_id") != session_id or end.get("case_id") != case["case_id"] or end.get("release") != expected_release:
                         raise BatchError(f"resident driver case end failed: {case['case_id']}")
+                    audit.case_end_count += 1
                 failure_reason = "resident_driver_oom" if any(item["status"] == "oom" for item in runs) else next((item["terminal"]["reason_code"] for item in runs if item["status"] != "ok"), None)
                 raw = make_case_raw(case, fixture_entry, identity_link, policy_link, args.run_id, args.baseline_kind, session_id, driver_identity, lock_owner, runs, failure_reason, live_preflight=live_preflight_link)
                 if args.one_case_smoke:
@@ -1332,19 +1744,67 @@ def run_batch(args: argparse.Namespace) -> int:
                 completed_cases += 1
                 if reuse_forbidden:
                     raise BatchError(f"resident driver became non-reusable at {case['case_id']}; remaining cases were not executed")
+        except BaseException as error:
+            driver_error = error
+            raise
         finally:
             if roctx is not None:
                 roctx.close_active()
+            cleanup_error: BaseException | None = None
             if process is not None:
                 try:
-                    _send(process, {"command": "shutdown", "schema_version": DRIVER_SCHEMA})
-                except (BatchError, OSError):
-                    pass
-                try:
-                    process.wait(timeout=args.timeout)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                    cleanup, stderr = _cleanup_driver(process, audit, args.timeout)
+                    if not cleanup["passed"]:
+                        cleanup_error = BatchError("resident driver or descendant cleanup failed")
+                except BaseException as error:
+                    cleanup_error = error
+                    cleanup = {
+                        "initial_poll": process.poll(),
+                        "shutdown_attempted": False,
+                        "shutdown_send_error": None,
+                        "stdin_closed": False,
+                        "wait_timed_out": False,
+                        "signals": [],
+                        "reaped": process.poll() is not None,
+                        "final_returncode": process.poll(),
+                        "process_group_alive_final": _process_group_alive(audit.pgid),
+                        "errors": [f"cleanup-exception: {type(error).__name__}: {error}"],
+                        "passed": False,
+                    }
+                    try:
+                        stderr = audit.finalize_stderr()
+                    except BaseException as stderr_error:
+                        stderr = {
+                            "bytes": None,
+                            "sha256": None,
+                            "retained_kind": "unavailable",
+                            "omission_reason": f"finalization_failed:{type(stderr_error).__name__}",
+                        }
+            else:
+                cleanup = {
+                    "initial_poll": None,
+                    "shutdown_attempted": False,
+                    "shutdown_send_error": None,
+                    "stdin_closed": False,
+                    "wait_timed_out": False,
+                    "signals": [],
+                    "reaped": False,
+                    "final_returncode": None,
+                    "process_group_alive_final": False,
+                    "errors": ["driver-spawn-failed"],
+                    "passed": False,
+                }
+                cleanup_error = BatchError("resident driver spawn failed")
+                stderr = audit.finalize_stderr()
+            effective_error = driver_error if driver_error is not None else cleanup_error
+            atomic_write(
+                args.output_dir
+                / ("resident-batch.failure.json" if effective_error is not None else "resident-batch.driver-process.json"),
+                _driver_process_document(audit, cleanup, stderr, lock_owner, effective_error),
+                mode=0o444,
+            )
+            if driver_error is None and cleanup_error is not None:
+                raise cleanup_error
         if live_preflight_link is not None:
             verify_live_preflight(args.live_preflight, live_preflight_link)
         if roctx is not None:
