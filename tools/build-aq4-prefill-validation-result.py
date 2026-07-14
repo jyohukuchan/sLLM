@@ -8,11 +8,13 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 OK_STATUSES = {"ok", "failed", "oom", "unsupported", "skipped"}
+STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
 
 
 class ResultError(ValueError): pass
@@ -125,6 +127,58 @@ def validate_trace(trace: dict[str, Any], case: dict[str, Any]) -> None:
     if memory.get("oom") is not None or memory.get("observer", {}).get("complete") is not True or numeric(memory.get("observed_headroom_bytes"), "trace headroom") <= 0: raise ResultError("trace memory evidence is unsafe")
 
 
+def validate_trace_bundle(args: argparse.Namespace, root: Path, case: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    required = {
+        "trace": args.trace, "manifest": args.trace_manifest,
+        "executor record": args.trace_executor_record, "binding": args.trace_binding,
+        "detached report": args.trace_report,
+    }
+    if any(path is None for path in required.values()):
+        raise ResultError("trace requires manifest, executor record, binding, and detached report")
+    for label, path in required.items():
+        assert path is not None
+        contained(root, path, f"trace {label}")
+    for source in args.trace_source:
+        contained(root, source, "trace source")
+    command = [
+        sys.executable, str(STRICT_TRACE_VALIDATOR),
+        "--trace", str(args.trace), "--manifest", str(args.trace_manifest),
+        "--executor-record", str(args.trace_executor_record),
+        "--binding", str(args.trace_binding), "--report", str(args.trace_report),
+    ]
+    for source in args.trace_source:
+        command.extend(("--source-trace", str(source)))
+    try:
+        completed = subprocess.run(command, cwd=STRICT_TRACE_VALIDATOR.parent.parent, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ResultError(f"strict trace validator failed to run: {error}") from error
+    if completed.returncode != 0:
+        raise ResultError(f"strict trace validation failed: {completed.stderr.strip()[:512]}")
+    try:
+        strict_report = json.loads(completed.stdout, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(ResultError(f"non-finite strict report number: {item}")))
+    except (json.JSONDecodeError, ResultError) as error:
+        raise ResultError(f"strict trace validator returned invalid JSON: {error}") from error
+    trace = load(args.trace, "trace")
+    detached = load(args.trace_report, "detached trace report")
+    validate_trace(trace, case)
+    expected_promotion = case.get("scope") == "production_server" and trace.get("status") == "ok"
+    if strict_report.get("schema_version") != "ullm.production_execution_trace_validator.v1" or strict_report.get("status") != "valid" or strict_report.get("trace_sha256") != sha_file(args.trace, "trace") or strict_report.get("executor_record_sha256") != sha_file(args.trace_executor_record, "trace executor record") or strict_report.get("scope") != case.get("scope") or strict_report.get("promotion_eligible") is not expected_promotion:
+        raise ResultError("strict trace validator report fields differ")
+    if detached.get("schema_version") != "ullm.production_execution_trace_validator.v1" or detached.get("status") != "valid" or detached.get("scope") != case.get("scope") or detached.get("executor_record_sha256") != sha_file(args.trace_executor_record, "trace executor record") or detached.get("promotion_eligible") is not expected_promotion:
+        raise ResultError("detached trace validator report fields differ")
+    if trace.get("verification", {}).get("independent_validation", {}).get("report_sha256") != sha_file(args.trace_report, "detached trace report"):
+        raise ResultError("trace detached report hash differs")
+    links = {
+        "manifest": {"path": str(args.trace_manifest.resolve()), "sha256": sha_file(args.trace_manifest, "trace manifest")},
+        "executor_record": {"path": str(args.trace_executor_record.resolve()), "sha256": sha_file(args.trace_executor_record, "trace executor record")},
+        "binding": {"path": str(args.trace_binding.resolve()), "sha256": sha_file(args.trace_binding, "trace binding")},
+        "detached_report": {"path": str(args.trace_report.resolve()), "sha256": sha_file(args.trace_report, "detached trace report"), "report": detached},
+        "source_traces": [{"path": str(path.resolve()), "sha256": sha_file(path, "trace source")} for path in args.trace_source],
+        "strict_validation": strict_report,
+    }
+    return trace, links
+
+
 def validate_source_oracle(value: dict[str, Any], validation: dict[str, Any], source_sha: str) -> None:
     if value.get("schema_version") != "ullm.qwen35_aq4_source_oracle.v1" or value.get("oracle_kind") != "independent_source" or value.get("status") not in {"available", "fixture"}: raise ResultError("source oracle is not an independent source artifact")
     if validation.get("schema_version") != "ullm.qwen35_aq4_p2_oracle_validator.v1" or validation.get("status") != "valid" or validation.get("oracle_kind") != "independent_source" or validation.get("manifest_sha256") != source_sha: raise ResultError("source oracle independent validation artifact differs")
@@ -150,6 +204,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     paths = [(args.case, "case"), (args.expanded, "expanded"), (args.raw, "raw"), (args.identity, "identity"), (args.policy, "policy"), (args.source_oracle, "source oracle"), (args.source_oracle_validation, "source oracle validation"), (args.independent_validation, "independent validation")]
     if args.path_oracle_result: paths.append((args.path_oracle_result, "path oracle result"))
     if args.trace: paths.append((args.trace, "trace"))
+    elif any((args.trace_manifest, args.trace_executor_record, args.trace_binding, args.trace_report, args.trace_source)):
+        raise ResultError("trace validation artifacts cannot be supplied without a trace")
     for path, label in paths: contained(root, path, label)
     contained(root, args.output, "output", existing=False)
     case = load(args.case, "case"); expanded = load(args.expanded, "expanded"); raw = load(args.raw, "raw"); identity = load(args.identity, "identity"); policy = load(args.policy, "policy")
@@ -180,8 +236,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     elif args.path_oracle_result is not None: raise ResultError("all-M1/decode case must not attach a path oracle result")
     trace_sha = None; trace_link = None
     if args.trace:
-        trace = load(args.trace, "trace"); validate_trace(trace, case); trace_sha = sha_file(args.trace, "trace")
-        trace_link = {"schema_version": trace["schema_version"], "trace_id": trace.get("trace_id"), "path": str(args.trace.resolve()), "sha256": trace_sha, "scope": trace.get("scope")}
+        trace, trace_validation = validate_trace_bundle(args, root, case); trace_sha = sha_file(args.trace, "trace")
+        trace_link = {"schema_version": trace["schema_version"], "trace_id": trace.get("trace_id"), "path": str(args.trace.resolve()), "sha256": trace_sha, "scope": trace.get("scope"), "validation": trace_validation}
     if case.get("scope") == "production_server" and status == "ok" and trace_link is None: raise ResultError("production-server ok result requires a trace")
     raw_sha = sha_file(args.raw, "raw"); correctness = validate_independent(independent, case, raw_sha, source_sha, path_sha, trace_sha, policy)
     baseline_path = Path(identity.get("artifacts", {}).get("baseline_result", "")); contained(root, baseline_path, "baseline")
@@ -223,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("run_root", "case", "expanded", "raw", "identity", "policy", "source_oracle", "source_oracle_validation", "independent_validation", "output"):
         parser.add_argument(f"--{name.replace('_', '-')}", dest=name, type=Path, required=True)
     parser.add_argument("--path-oracle-result", type=Path); parser.add_argument("--trace", type=Path)
+    parser.add_argument("--trace-manifest", type=Path); parser.add_argument("--trace-executor-record", type=Path); parser.add_argument("--trace-binding", type=Path); parser.add_argument("--trace-report", type=Path); parser.add_argument("--trace-source", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
     try:
         result = build(args); atomic_write(args.output, result); print(json.dumps({"status": "ok", "promotion_eligible": False}, sort_keys=True)); return 0

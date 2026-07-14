@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -92,7 +93,7 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
         completed = invoke(RUN, *command)
         return output, completed
 
-    def result(self, bound: dict[str, Path | dict], root: Path, case_path: Path, case: dict, raw: Path, *, path_result: Path | None = None, trace: Path | None = None) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    def result(self, bound: dict[str, Path | dict], root: Path, case_path: Path, case: dict, raw: Path, *, path_result: Path | None = None, trace: Path | None = None, trace_bundle: dict[str, Path] | None = None) -> tuple[Path, subprocess.CompletedProcess[str]]:
         independent = root / f"{case['case_id']}.independent.json"
         correctness = {field: True for field in ("finite", "shape_contract_passed", "source_oracle_passed", "greedy_tokens_exact", "kv_state_cache_passed", "scheduler_progress_passed", "chunk_equivalence_passed", "cancel_reset_passed", "publish_failure_reset_passed")}
         correctness["path_oracle_passed"] = case["mode"] != "all_m1"
@@ -101,8 +102,20 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
         output = root / f"{case['case_id']}.result.json"
         command = ["--run-root", str(root), "--case", str(case_path), "--expanded", str(bound["expanded_path"]), "--raw", str(raw), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--source-oracle-validation", str(bound["source_validation"]), "--independent-validation", str(independent), "--output", str(output)]
         if path_result: command += ["--path-oracle-result", str(path_result)]
-        if trace: command += ["--trace", str(trace)]
+        if trace:
+            command += ["--trace", str(trace)]
+            if trace_bundle:
+                command += ["--trace-manifest", str(trace_bundle["manifest"]), "--trace-executor-record", str(trace_bundle["executor_record"]), "--trace-binding", str(trace_bundle["binding"]), "--trace-report", str(trace_bundle["report"])]
+                for source in trace_bundle.get("sources", []): command += ["--trace-source", str(source)]
         return output, invoke(BUILD, *command)
+
+    def fabricated_trace_bundle(self, root: Path, report_sha256: str) -> tuple[Path, dict[str, Path]]:
+        source = ROOT / "tests/fixtures/production-execution-trace-p1/schema-r1"
+        destination = root / "trace-bundle"; shutil.copytree(source, destination)
+        trace = destination / "verified.json"; value = json.loads(trace.read_text())
+        value["verification"]["independent_validation"]["report_sha256"] = report_sha256; write_json(trace, value)
+        binding = destination / "verified-binding.json"; binding_value = json.loads(binding.read_text()); binding_value["trace_sha256"] = sha(trace); write_json(binding, binding_value)
+        return trace, {"manifest": destination / "manifest.json", "executor_record": destination / "executor-record.json", "binding": binding, "report": destination / "report.json"}
 
     def test_cached_prefix_axis_same_state_oracle_context_and_counts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -248,6 +261,16 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             output, built = self.result(bound, root, candidate_path, candidate, candidate_raw, path_result=oracle_result)
             self.assertNotEqual(built.returncode, 0); self.assertFalse(output.exists())
 
+    def test_builder_rejects_fabricated_detached_trace_report_hashes(self) -> None:
+        for forged in ("x", "0" * 64):
+            with self.subTest(forged=forged[:8]), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); bound = self.bind(root)
+                case_path, case = self.case(bound, root, lambda item: item["stage_id"] == "smoke" and item["scope"] == "full_model" and item["mode"] == "all_m1")
+                trace, bundle = self.fabricated_trace_bundle(root, forged)
+                raw, ran = self.raw(bound, root, case_path, case, trace=trace); self.assertEqual(ran.returncode, 0, ran.stderr)
+                output, built = self.result(bound, root, case_path, case, raw, trace=trace, trace_bundle=bundle)
+                self.assertNotEqual(built.returncode, 0); self.assertFalse(output.exists())
+
     def test_validator_duplicate_extra_identity_escape_and_control_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); bound = self.bind(root)
@@ -264,6 +287,33 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             escaped = root.parent / "escaped-report.json"
             self.assertNotEqual(invoke(VALIDATE, "--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--result", str(result), "--output", str(escaped)).returncode, 0)
             self.assertFalse(escaped.exists())
+
+    def test_final_validator_rejects_fabricated_detached_trace_report_hashes(self) -> None:
+        for forged in ("x", "0" * 64):
+            with self.subTest(forged=forged[:8]), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); bound = self.bind(root)
+                case_path, case = self.case(bound, root, lambda item: item["stage_id"] == "smoke" and item["scope"] == "full_model" and item["mode"] == "all_m1")
+                raw, ran = self.raw(bound, root, case_path, case); self.assertEqual(ran.returncode, 0, ran.stderr)
+                result, built = self.result(bound, root, case_path, case, raw); self.assertEqual(built.returncode, 0, built.stderr)
+                trace, bundle = self.fabricated_trace_bundle(root, forged)
+                result_value = json.loads(result.read_text()); detached = json.loads(bundle["report"].read_text())
+                result_value["evidence"]["execution_trace"] = {
+                    "schema_version": "ullm.production_execution_trace.v1", "trace_id": json.loads(trace.read_text())["trace_id"],
+                    "path": str(trace), "sha256": sha(trace), "scope": "full_model",
+                    "validation": {
+                        "manifest": {"path": str(bundle["manifest"]), "sha256": sha(bundle["manifest"])},
+                        "executor_record": {"path": str(bundle["executor_record"]), "sha256": sha(bundle["executor_record"])},
+                        "binding": {"path": str(bundle["binding"]), "sha256": sha(bundle["binding"])},
+                        "detached_report": {"path": str(bundle["report"]), "sha256": sha(bundle["report"]), "report": detached},
+                        "source_traces": [], "strict_validation": detached,
+                    },
+                }
+                independent_path = Path(result_value["evidence"]["independent_validation"]["path"]); independent = json.loads(independent_path.read_text()); independent["trace_sha256"] = sha(trace); write_json(independent_path, independent)
+                result_value["evidence"]["independent_validation"]["sha256"] = sha(independent_path); write_json(result, result_value)
+                report = root / "forged-report-validation.json"
+                checked = invoke(VALIDATE, "--run-root", str(root), "--expanded", str(bound["expanded_path"]), "--identity", str(bound["identity"]), "--policy", str(bound["policy"]), "--source-oracle", str(bound["source"]), "--result", str(result), "--output", str(report))
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertTrue(any(code.startswith("trace_strict_validation:") for code in json.loads(report.read_text())["failure_codes"]))
 
     def test_trace_negative_scope_independent_reset_fallback_memory(self) -> None:
         spec = importlib.util.spec_from_file_location("p2_validate", VALIDATE); self.assertIsNotNone(spec and spec.loader)

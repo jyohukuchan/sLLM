@@ -12,6 +12,7 @@
 - builderは正式な `ullm.prefill_validation.v1` を生成する。raw statusは上書き不可で、source oracle validator、same-state path oracle result、独立validation artifact、trace、2 warmup + 10 measured、p50/p95、TTFT、ITL、state/reset/fallback/memory、baseline regressionを実検証する。CPU syntheticは常にpromotion不可である。
 - validatorは6,214件の完全matrixを要求し、partial、duplicate、extra、全case identity、run-root path、case/raw/oracle/policy/trace/state/measurement/regressionのhashと内容を再構築する。component/full-model/control/CPU syntheticのpromotionを許さない。
 - negative testsを12件へ拡張した。65MiB sparse package、1/6,214 partial matrix、dummy trace、cached state mismatch、lock競合、foreign GPU process、32/33-byte出力境界などを含み、全件成功した。P1 trace tests 7件も成功した。
+- 再QAで、trace JSON内の64桁文字列だけを独立検証として扱える欠陥が見つかった。builderとfinal validatorの両方からP1 strict validatorを再実行し、trace manifest、executor record、binding、detached report、aggregation source tracesの実体・run-root・SHA-256・scope・status・promotionを照合するよう修正した。`report_sha256="x"` と64個の`0`を使うbuilder/final validator negativeを追加し、専用testは14件になった。
 
 ## 次の行動
 

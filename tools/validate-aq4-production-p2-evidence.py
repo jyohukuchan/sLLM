@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 STATUSES = {"ok", "failed", "oom", "unsupported", "skipped"}
 POWER_FIELDS = ("expected_power_limit_watts", "allowed_power_tolerance_watts", "maximum_temperature_c", "minimum_vram_headroom_bytes")
 CORRECTNESS_FIELDS = ("max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap")
+STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
 
 
 class EvidenceError(ValueError): pass
@@ -93,6 +95,46 @@ def trace_failures(trace: dict[str, Any], case: dict[str, Any], prefix: str) -> 
         matching = [phase for phase in phases if phase.get("kind") == case.get("phase")]
         if not matching or any(phase.get("actual_token_batch_width") != case.get("resolved_m") for phase in matching): failures.append(f"trace_phase_width:{prefix}")
     return failures
+
+
+def strict_trace_failures(root: Path, trace_path: Path, trace: dict[str, Any], case: dict[str, Any], validation: Any, prefix: str) -> list[str]:
+    failure = f"trace_strict_validation:{prefix}"
+    if not isinstance(validation, dict): return [failure]
+    required = ("manifest", "executor_record", "binding", "detached_report")
+    resolved: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
+    try:
+        for role in required:
+            link = validation.get(role)
+            if not isinstance(link, dict): return [failure]
+            path = contained(root, Path(link.get("path", "")), f"trace {role}")
+            if sha_file(path, f"trace {role}") != link.get("sha256"): return [failure]
+            resolved[role] = (path, load(path, f"trace {role}"), link)
+        sources = validation.get("source_traces")
+        if not isinstance(sources, list): return [failure]
+        source_paths: list[Path] = []
+        for link in sources:
+            if not isinstance(link, dict): return [failure]
+            path = contained(root, Path(link.get("path", "")), "trace source")
+            if sha_file(path, "trace source") != link.get("sha256"): return [failure]
+            source_paths.append(path)
+        command = [
+            sys.executable, str(STRICT_TRACE_VALIDATOR), "--trace", str(trace_path),
+            "--manifest", str(resolved["manifest"][0]), "--executor-record", str(resolved["executor_record"][0]),
+            "--binding", str(resolved["binding"][0]), "--report", str(resolved["detached_report"][0]),
+        ]
+        for source in source_paths: command.extend(("--source-trace", str(source)))
+        completed = subprocess.run(command, cwd=STRICT_TRACE_VALIDATOR.parent.parent, capture_output=True, text=True, timeout=60, check=False)
+        if completed.returncode != 0: return [failure]
+        strict_report = json.loads(completed.stdout, object_pairs_hook=pairs, parse_constant=lambda item: (_ for _ in ()).throw(EvidenceError(f"non-finite strict report number: {item}")))
+        detached = resolved["detached_report"][1]
+        expected_promotion = case.get("scope") == "production_server" and trace.get("status") == "ok"
+        if validation.get("strict_validation") != strict_report or resolved["detached_report"][2].get("report") != detached: return [failure]
+        if strict_report.get("schema_version") != "ullm.production_execution_trace_validator.v1" or strict_report.get("status") != "valid" or strict_report.get("trace_sha256") != sha_file(trace_path, "trace") or strict_report.get("executor_record_sha256") != sha_file(resolved["executor_record"][0], "trace executor record") or strict_report.get("scope") != case.get("scope") or strict_report.get("promotion_eligible") is not expected_promotion: return [failure]
+        if detached.get("schema_version") != "ullm.production_execution_trace_validator.v1" or detached.get("status") != "valid" or detached.get("scope") != case.get("scope") or detached.get("executor_record_sha256") != sha_file(resolved["executor_record"][0], "trace executor record") or detached.get("promotion_eligible") is not expected_promotion: return [failure]
+        if trace.get("verification", {}).get("independent_validation", {}).get("report_sha256") != sha_file(resolved["detached_report"][0], "detached trace report"): return [failure]
+        return []
+    except (EvidenceError, OSError, ValueError, subprocess.TimeoutExpired):
+        return [failure]
 
 
 def validate(args: argparse.Namespace) -> dict[str, Any]:
@@ -196,6 +238,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
                 expected_trace_sha = sha_file(trace_path, "trace")
                 if expected_trace_sha != trace_link.get("sha256"): failures.append(f"trace_hash:{prefix}")
                 failures.extend(trace_failures(trace, case, prefix))
+                failures.extend(strict_trace_failures(root, trace_path, trace, case, trace_link.get("validation"), prefix))
             except (EvidenceError, OSError): failures.append(f"trace_link:{prefix}")
         elif case.get("scope") == "production_server" and result.get("status") == "ok": failures.append(f"production_trace_missing:{prefix}")
         independent_link = result.get("evidence", {}).get("independent_validation", {})
