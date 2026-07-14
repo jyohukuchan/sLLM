@@ -20,6 +20,10 @@ HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 STATUSES = {"ok", "failed", "oom", "unsupported", "skipped"}
 POWER_FIELDS = ("expected_power_limit_watts", "allowed_power_tolerance_watts", "maximum_temperature_c", "minimum_vram_headroom_bytes")
 CORRECTNESS_FIELDS = ("max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap")
+CAPABILITY_SCHEMA = "ullm.aq4_p2_capability_record.v1"
+SOURCE_ORACLE_SCHEMA = "ullm.qwen35_aq4_source_oracle.v1"
+SOURCE_ORACLE_VALIDATOR_SCHEMA = "ullm.qwen35_aq4_p2_oracle_validator.v1"
+SQ8_CANONICAL_SCHEMA = "sq-fp8-artifact-v0.2"
 STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
 P2_RESULT_BUILDER = Path(__file__).with_name("build-aq4-prefill-validation-result.py")
 FIXED_EXPANDER = Path(__file__).with_name("expand-aq4-production-p2.py")
@@ -209,6 +213,114 @@ def strict_trace_failures(root: Path, trace_path: Path, trace: dict[str, Any], c
         return [failure]
 
 
+def _link_value(root: Path, link: Any, label: str) -> tuple[Path, dict[str, Any]]:
+    if not isinstance(link, dict) or set(link) != {"path", "sha256"} or HASH_RE.fullmatch(str(link.get("sha256", ""))) is None:
+        raise EvidenceError(f"{label} link differs")
+    path = contained(root, Path(link["path"]), label)
+    if sha_file(path, label) != link["sha256"]:
+        raise EvidenceError(f"{label} hash differs")
+    return path, load(path, label)
+
+
+def validate_source_oracle_bundle(root: Path, bundle: Any, case_id: str) -> None:
+    """Validate the full independent-source bundle required by reference controls.
+
+    A one-file manifest link is not enough for a control row: the payload and the detached
+    validator report must be hash-bound to the same manifest.  This check is deliberately local to
+    the unsupported/capability path so a CPU capability record cannot masquerade as correctness
+    evidence.
+    """
+    if not isinstance(bundle, dict) or set(bundle) != {"manifest", "payload", "validator"}:
+        raise EvidenceError("reference source oracle bundle links differ")
+    manifest_path, manifest = _link_value(root, bundle["manifest"], "source oracle manifest")
+    payload_path, _ = _link_value(root, bundle["payload"], "source oracle payload")
+    _, validation = _link_value(root, bundle["validator"], "source oracle validator")
+    if manifest.get("schema_version") != SOURCE_ORACLE_SCHEMA or manifest.get("oracle_kind") != "independent_source" or manifest.get("status") not in {"available", "fixture"}:
+        raise EvidenceError("source oracle manifest identity differs")
+    if not isinstance(manifest.get("cases"), list) or not manifest["cases"] or not any(item.get("case_id") == case_id for item in manifest["cases"] if isinstance(item, dict)):
+        raise EvidenceError("source oracle manifest does not cover the case")
+    payload_sha = bundle["payload"].get("sha256")
+    if manifest.get("payload_sha256") not in {None, payload_sha}:
+        raise EvidenceError("source oracle payload is not manifest-bound")
+    if validation.get("schema_version") != SOURCE_ORACLE_VALIDATOR_SCHEMA or validation.get("status") != "valid" or validation.get("oracle_kind") != "independent_source" or validation.get("manifest_sha256") != bundle["manifest"]["sha256"]:
+        raise EvidenceError("source oracle validator report is not manifest-bound")
+    # Keep this explicit: an unused path variable must not accidentally weaken the regular-file
+    # and containment checks above when this helper is refactored.
+    if not payload_path.is_file() or not manifest_path.is_file():
+        raise EvidenceError("source oracle bundle path is unavailable")
+
+
+def validate_sq8_control_bundle(root: Path, bundle: Any) -> None:
+    """Require source-correct canonical SQ8 v0.2 identity/evidence links."""
+    if not isinstance(bundle, dict) or set(bundle) != {"schema_version", "identity", "evidence", "source_correct"} or bundle.get("schema_version") != SQ8_CANONICAL_SCHEMA or bundle.get("source_correct") is not True:
+        raise EvidenceError("SQ8 cross-format control bundle is not canonical v0.2")
+    _, identity = _link_value(root, bundle["identity"], "SQ8 control identity")
+    _, evidence = _link_value(root, bundle["evidence"], "SQ8 control evidence")
+    for value, label in ((identity, "identity"), (evidence, "evidence")):
+        if value.get("schema_version") != SQ8_CANONICAL_SCHEMA or value.get("source_correct") is not True:
+            raise EvidenceError(f"SQ8 control {label} is not source-correct canonical v0.2")
+
+
+def validate_capability_result(root: Path, case: dict[str, Any], result: dict[str, Any], raw: dict[str, Any], identity: dict[str, Any]) -> list[str]:
+    """Validate an immutable unsupported/skipped capability row.
+
+    Capability rows are counted as scheduled cases, but never enter timing, performance, or
+    correctness populations.  They are accepted only for a CPU case paired with a HIP-only served
+    worker and must prove that no model load or GPU process occurred.
+    """
+    prefix = str(case.get("case_id"))
+    failures: list[str] = []
+    status = result.get("status")
+    capability = result.get("capability")
+    required = {"schema_version", "status", "reason_code", "case_id", "case_sha256", "served_worker", "model_loads", "gpu_processes", "evidence_class"}
+    if status not in {"unsupported", "skipped"}:
+        return [f"capability_status:{prefix}"]
+    if not isinstance(capability, dict) or set(capability) != required or capability.get("schema_version") != CAPABILITY_SCHEMA or capability.get("status") != status or capability.get("case_id") != case.get("case_id") or capability.get("case_sha256") != case.get("case_sha256") or capability.get("evidence_class") != "immutable_capability_record":
+        failures.append(f"capability_schema:{prefix}")
+    if case.get("device", {}).get("backend") != "cpu":
+        failures.append(f"capability_device:{prefix}")
+    reason = capability.get("reason_code") if isinstance(capability, dict) else None
+    if reason != "cpu_reference_unsupported_by_hip_resident_worker":
+        failures.append(f"capability_reason:{prefix}")
+    if isinstance(capability, dict) and (capability.get("model_loads") != 0 or capability.get("gpu_processes") != 0):
+        failures.append(f"capability_zero_execution:{prefix}")
+    served_path = Path(identity.get("artifacts", {}).get("served_model_manifest", ""))
+    try:
+        served_sha = sha_file(served_path, "served model manifest")
+        served = load(served_path, "served model manifest")
+        expected_manifest_sha = identity.get("hash_binding", {}).get("served_model_manifest_sha256")
+        if served_sha != expected_manifest_sha:
+            failures.append(f"capability_manifest_hash:{prefix}")
+        worker = served.get("worker", {})
+        worker_identity = worker.get("identity", {}) if isinstance(worker, dict) else {}
+        expected_worker = {
+            "backend": "hip",
+            "architecture": worker_identity.get("device"),
+            "binary_sha256": identity.get("hash_binding", {}).get("worker_binary_sha256"),
+            "manifest_sha256": expected_manifest_sha,
+        }
+        if not isinstance(capability, dict) or capability.get("served_worker") != expected_worker or not expected_worker["architecture"] or expected_worker["architecture"] in {"cpu", "host"}:
+            failures.append(f"capability_served_worker:{prefix}")
+    except (EvidenceError, OSError):
+        failures.append(f"capability_served_manifest:{prefix}")
+    if raw.get("status") != status or raw.get("immutable_status") is not True or raw.get("failure_reason") != reason:
+        failures.append(f"capability_raw_status:{prefix}")
+    execution = raw.get("execution", {})
+    if not isinstance(execution, dict) or execution.get("status") != status or execution.get("returncode") is not None:
+        failures.append(f"capability_execution_status:{prefix}")
+    if case.get("control_id") == "reference_source_oracle":
+        try:
+            validate_source_oracle_bundle(root, result.get("oracles", {}).get("source_oracle"), prefix)
+        except (EvidenceError, OSError):
+            failures.append(f"capability_source_oracle:{prefix}")
+    elif case.get("control_id") == "sq8_0_cross_format":
+        try:
+            validate_sq8_control_bundle(root, result.get("oracles", {}).get("cross_format_control"))
+        except (EvidenceError, OSError):
+            failures.append(f"capability_sq8_control:{prefix}")
+    return failures
+
+
 def trace_association_failures(root: Path, trace_path: Path, trace: dict[str, Any], case: dict[str, Any], raw: dict[str, Any], identity: dict[str, Any], prefix: str) -> list[str]:
     failure = f"trace_case_association:{prefix}"
     try:
@@ -285,6 +397,20 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         case = case_by_id[case_id]; prefix = case_id
         if result.get("schema_version") != "ullm.prefill_validation.v1" or result.get("case_sha256") != case.get("case_sha256"): failures.append(f"result_schema_case_hash:{prefix}")
         if result.get("scope") != case.get("scope") or result.get("control_id") != case.get("control_id") or result.get("identity", {}).get("format_id") != case.get("format_id"): failures.append(f"result_case_identity:{prefix}")
+        if result.get("status") in {"unsupported", "skipped"}:
+            try:
+                capability_raw_link = result.get("evidence", {}).get("raw_result", {})
+                capability_raw_path = contained(root, Path(capability_raw_link.get("path", "")), "capability raw link")
+                capability_raw = load(capability_raw_path, "capability raw")
+                if sha_file(capability_raw_path, "capability raw") != capability_raw_link.get("sha256"):
+                    failures.append(f"capability_raw_hash:{prefix}")
+                failures.extend(validate_capability_result(root, case, result, capability_raw, identity))
+            except (EvidenceError, OSError):
+                failures.append(f"capability_record:{prefix}")
+            # Capability rows are immutable scheduling evidence only.  Do not apply the ordinary
+            # measurement, timing, performance, correctness, path-oracle, or production-trace
+            # predicates to them.
+            continue
         try:
             result_identity_path = contained(root, Path(result.get("identity", {}).get("path", "")), "result identity")
             if result_identity_path != args.identity.resolve() or result.get("identity", {}).get("sha256") != sha_file(args.identity, "identity") or result.get("identity", {}).get("binding_sha256") != identity.get("identity_sha256"): failures.append(f"result_identity_link:{prefix}")
@@ -321,8 +447,8 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         elif calibration_module is not None:
             try:
                 source_link = calibration["source_gate"]
-                if not isinstance(source_link, dict) or set(source_link) != {"path", "sha256", "comparison", "metrics"}: raise EvidenceError("source calibration link fields differ")
-                source_calibration = calibration_module.validate_calibration_evidence(Path(source_link["path"]), "source_gate", root, case, expanded, identity, policy, source_sha)
+                if not isinstance(source_link, dict) or set(source_link) != {"path", "sha256", "comparison", "manifests", "metrics"}: raise EvidenceError("source calibration link fields differ")
+                source_calibration = calibration_module.validate_calibration_evidence(Path(source_link["path"]), "source_gate", root, case, expanded, identity, policy, args.source_oracle, source, source_sha)
                 if source_link != source_calibration: raise EvidenceError("source calibration result link differs")
                 source_comparison_sha = source_calibration["comparison"]["sha256"]
                 prior = used_calibration_comparisons["source_gate"].get(source_comparison_sha)
@@ -334,8 +460,14 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             if optimized:
                 try:
                     path_link_value = calibration["path_gate"]
-                    if not isinstance(path_link_value, dict) or set(path_link_value) != {"path", "sha256", "comparison", "metrics"}: raise EvidenceError("path calibration link fields differ")
-                    path_calibration = calibration_module.validate_calibration_evidence(Path(path_link_value["path"]), "path_gate", root, case, expanded, identity, policy, source_sha)
+                    if not isinstance(path_link_value, dict) or set(path_link_value) != {"path", "sha256", "comparison", "manifests", "metrics", "path_oracle"}: raise EvidenceError("path calibration link fields differ")
+                    oracle_entry = results.get(case.get("path_oracle_case_id"))
+                    if oracle_entry is None: raise EvidenceError("path oracle result is absent")
+                    oracle_result, oracle_result_path = oracle_entry
+                    oracle_result_sha = sha_file(oracle_result_path, "path oracle result")
+                    path_chain = calibration_module.path_oracle_calibration_chain(oracle_result, oracle_result_sha, root, expanded, identity, policy, args.source_oracle, source, source_sha)
+                    if path_chain["case"]["case_id"] != case.get("path_oracle_case_id"): raise EvidenceError("path oracle calibration case differs")
+                    path_calibration = calibration_module.validate_calibration_evidence(Path(path_link_value["path"]), "path_gate", root, case, expanded, identity, policy, args.source_oracle, source, source_sha, path_oracle=path_chain)
                     if path_link_value != path_calibration: raise EvidenceError("path calibration result link differs")
                     path_comparison_sha = path_calibration["comparison"]["sha256"]
                     if source_calibration is not None and source_calibration["comparison"]["sha256"] == path_comparison_sha: raise EvidenceError("source/path calibration comparison is reused")
