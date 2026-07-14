@@ -9,7 +9,6 @@
 //! counters, but no prompt, token id, or generated text.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -321,10 +320,9 @@ fn run(args: Args) -> Result<(), String> {
         &mut publications,
     )?;
     let terminal = session.terminal_sanitized_execution_audit();
-    let audit = terminal
-        .as_ref()
-        .and_then(|value| value.get("operation_audit"))
-        .map(digest_json);
+    let audit = session
+        .terminal_operation_execution_audit()
+        .map(operation_audit_digest);
     let (resolved_m, actual_token_batch_width, actual_request_batch_width, lifecycle, reset) =
         terminal
             .as_ref()
@@ -483,11 +481,15 @@ fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, 
     })
 }
 
-fn digest_json(value: &serde_json::Value) -> String {
-    let bytes = serde_json::to_vec(value).expect("JSON values are serializable");
-    let mut digest = Sha256::new();
-    digest.update(bytes);
-    format!("sha256:{:x}", digest.finalize())
+fn operation_audit_digest(
+    audit: &ullm_engine::backend_operation_registry::OperationExecutionAudit,
+) -> String {
+    let mut encoded = String::with_capacity(64);
+    for byte in audit.deterministic_digest_sha256 {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    format!("sha256:{encoded}")
 }
 
 fn classify_runtime_error(error: String) -> String {
