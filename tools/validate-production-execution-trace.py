@@ -510,7 +510,7 @@ def atomic_write(path: Path, raw: bytes) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trace", type=Path, required=True); parser.add_argument("--manifest", type=Path, required=True); parser.add_argument("--executor-record", type=Path, required=True); parser.add_argument("--binding", type=Path, required=True); parser.add_argument("--output", type=Path); parser.add_argument("--report", type=Path, help="detached validator report to bind when trace carries independent_validation=valid"); parser.add_argument("--verified-trace", type=Path); parser.add_argument("--verified-binding", type=Path)
+    parser.add_argument("--trace", type=Path, required=True); parser.add_argument("--manifest", type=Path, required=True); parser.add_argument("--executor-record", type=Path, required=True); parser.add_argument("--binding", type=Path, required=True); parser.add_argument("--output", type=Path); parser.add_argument("--report", type=Path, help="detached validator report to bind when trace carries independent_validation=valid"); parser.add_argument("--source-trace", type=Path, action="append", default=[], help="complete source trace for an aggregated trace; repeat once per source") ; parser.add_argument("--verified-trace", type=Path); parser.add_argument("--verified-binding", type=Path)
     args = parser.parse_args(argv)
     try:
         trace, trace_raw = load(args.trace, "trace"); manifest, manifest_raw = load(args.manifest, "manifest"); facts, facts_raw = load(args.executor_record, "executor record"); binding, _ = load(args.binding, "binding")
@@ -518,6 +518,17 @@ def main(argv: list[str] | None = None) -> int:
         check_tree(facts); reject_forbidden(facts)
         check_tree(manifest); reject_forbidden(manifest)
         check_tree(binding); reject_forbidden(binding)
+        aggregation = trace.get("aggregation", {})
+        if aggregation.get("is_aggregated"):
+            source_hashes = []
+            for source_path in args.source_trace:
+                source_value, source_raw = load(source_path, "aggregation source trace")
+                check_tree(source_value); reject_forbidden(source_value)
+                source_hashes.append(sha(source_raw))
+            if len(source_hashes) != len(set(source_hashes)) or set(source_hashes) != set(aggregation.get("source_trace_sha256s", [])):
+                raise ValidationError("aggregation source trace files do not match declared hashes")
+        elif args.source_trace:
+            raise ValidationError("non-aggregated trace cannot supply source traces")
         if trace.get("verification", {}).get("independent_validation", {}).get("status") == "valid":
             if args.report is None:
                 raise ValidationError("valid independent_validation requires --report detached report")
