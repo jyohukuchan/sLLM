@@ -1,0 +1,109 @@
+{
+  "actual_executed": false,
+  "captured_unix_ns": 1784063418498581019,
+  "gpu_state_changed": false,
+  "gpuid_sources": [
+    {
+      "ends_with_newline": false,
+      "field_diff": [
+        "missing_trailing_newline"
+      ],
+      "identity": {
+        "device": 23,
+        "inode": 4139165,
+        "mode": 292
+      },
+      "parsed_gpuid": 51545,
+      "path": "/sys/class/kfd/kfd/proc/18897/queues/0/gpuid",
+      "pid": 18897,
+      "queue": 0,
+      "raw_ascii_repr": "'51545'",
+      "raw_bytes": 5,
+      "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab",
+      "scanner_expected": "ASCII positive decimal digits followed by newline",
+      "stripped_ascii": "51545",
+      "stripped_is_digits": true
+    },
+    {
+      "ends_with_newline": false,
+      "field_diff": [
+        "missing_trailing_newline"
+      ],
+      "identity": {
+        "device": 23,
+        "inode": 4139169,
+        "mode": 292
+      },
+      "parsed_gpuid": 51545,
+      "path": "/sys/class/kfd/kfd/proc/18897/queues/1/gpuid",
+      "pid": 18897,
+      "queue": 1,
+      "raw_ascii_repr": "'51545'",
+      "raw_bytes": 5,
+      "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab",
+      "scanner_expected": "ASCII positive decimal digits followed by newline",
+      "stripped_ascii": "51545",
+      "stripped_is_digits": true
+    },
+    {
+      "ends_with_newline": false,
+      "field_diff": [
+        "missing_trailing_newline"
+      ],
+      "identity": {
+        "device": 23,
+        "inode": 4139173,
+        "mode": 292
+      },
+      "parsed_gpuid": 51545,
+      "path": "/sys/class/kfd/kfd/proc/18897/queues/2/gpuid",
+      "pid": 18897,
+      "queue": 2,
+      "raw_ascii_repr": "'51545'",
+      "raw_bytes": 5,
+      "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab",
+      "scanner_expected": "ASCII positive decimal digits followed by newline",
+      "stripped_ascii": "51545",
+      "stripped_is_digits": true
+    }
+  ],
+  "scanner_diff": {
+    "expected": "text.endswith(newline) and text_without_newline.isdigit and gpuid>0",
+    "observed_common_diff": [
+      "missing_trailing_newline"
+    ],
+    "reason_code": "gpuid_schema_differs"
+  },
+  "schema_version": "ullm.aq4_p2_kfd_gpuid_schema_diagnostic.v1",
+  "secret_material_recorded": false,
+  "service": {
+    "active_state": "active",
+    "main_pid": 18825,
+    "nrestarts": 0,
+    "sub_state": "running"
+  },
+  "service_touched": false,
+  "status": "captured",
+  "topology_mapping": {
+    "derived_bdf": "0000:47:00.0",
+    "domain": 0,
+    "expected_bdf": "0000:47:00.0",
+    "gpu_id": 51545,
+    "gpu_id_identity": {
+      "device": 23,
+      "inode": 101694,
+      "mode": 292
+    },
+    "gpu_id_raw_sha256": "2d264a39a12825959b28a14be07b48b8a49c84253f980c97190a04b51666fcea",
+    "location_id": 18176,
+    "mapping_passed": true,
+    "node_id": 2,
+    "properties_identity": {
+      "device": 23,
+      "inode": 101696,
+      "mode": 292
+    },
+    "properties_sha256": "4ad2c40901a6ce1013b021c68e5d59c27fb232e797f730327bdab9c0976dea94"
+  },
+  "worker_pid": 18897
+}
