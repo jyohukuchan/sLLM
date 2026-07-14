@@ -1,0 +1,15 @@
+{
+  "schema_version": "ullm.aq4_p2_pure_prefill_fixture.v1",
+  "prompt_token_ids": [11, 12, 13],
+  "position_ids": [0, 1, 2],
+  "attention_mask": [[1, 0, 0], [1, 1, 0], [1, 1, 1]],
+  "sampling": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "top_k": 1,
+    "seed": 0
+  },
+  "prefill_mode": "cold",
+  "request_batch_width": 1,
+  "token_batch_width": 3
+}
