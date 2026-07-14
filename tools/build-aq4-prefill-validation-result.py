@@ -127,6 +127,98 @@ def validate_trace(trace: dict[str, Any], case: dict[str, Any]) -> None:
     if memory.get("oom") is not None or memory.get("observer", {}).get("complete") is not True or numeric(memory.get("observed_headroom_bytes"), "trace headroom") <= 0: raise ResultError("trace memory evidence is unsafe")
 
 
+def trace_terminal_sha(trace: dict[str, Any]) -> str:
+    phases = trace.get("phases", [])
+    terminal = {
+        "request_summary": trace.get("request_summary"),
+        "phase_terminal": [{"phase_id": item.get("phase_id"), "kind": item.get("kind"), "context_tokens_before": item.get("context_tokens_before"), "context_tokens_after": item.get("context_tokens_after"), "input_token_count": item.get("input_token_count"), "output_token_count": item.get("output_token_count")} for item in phases],
+        "state_commit": trace.get("state_commit"), "fallback": trace.get("fallback"), "memory": trace.get("memory"),
+    }
+    return sha_bytes(canonical(terminal))
+
+
+def bound_trace_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    artifacts = identity.get("artifacts", {}); manifest_path = Path(artifacts.get("served_model_manifest", ""))
+    manifest = load(manifest_path, "served model manifest")
+    public = manifest.get("public", {}); fmt = manifest.get("format", {}); worker = manifest.get("worker", {}); product = manifest.get("product", {})
+    product_root = (manifest_path.parent / product.get("root", "")).resolve(strict=True)
+    package_path = (product_root / product.get("package", {}).get("manifest_path", "")).resolve(strict=True)
+    receipt_path = (manifest_path.parent / manifest.get("promotion", {}).get("receipt", "")).resolve(strict=True)
+    worker_path = (manifest_path.parent / worker.get("binary", "")).resolve(strict=True)
+    package_sha = sha_file(package_path, "trace package manifest")
+    product_value = {"id": public.get("id"), "revision": public.get("revision"), "root": str(product_root), "package_manifest_sha256": package_sha}
+    artifact_manifest = manifest.get("artifact", {}).get("manifest")
+    artifact_path = (manifest_path.parent / artifact_manifest).resolve(strict=True) if artifact_manifest else None
+    expected = {
+        "model": {"id": public.get("id"), "revision": public.get("revision"), "format_id": fmt.get("format_id"), "implementation_id": fmt.get("implementation_id")},
+        "served_model_manifest_sha256": sha_file(manifest_path, "served model manifest"),
+        "worker": {"protocol": worker.get("protocol"), "binary_sha256": sha_file(worker_path, "trace worker")},
+        "artifact": {"manifest_sha256": sha_file(artifact_path, "artifact manifest") if artifact_path else None, "content_sha256": manifest.get("artifact", {}).get("content_sha256")},
+        "package": {"manifest_sha256": package_sha},
+        "product": {"id": public.get("id"), "revision": public.get("revision"), "identity_sha256": sha_bytes(canonical(product_value)), "promotion_receipt_sha256": sha_file(receipt_path, "promotion receipt")},
+    }
+    return expected
+
+
+def validate_trace_association(trace: dict[str, Any], case: dict[str, Any], raw: dict[str, Any], identity: dict[str, Any], measurement: dict[str, Any], trace_path: Path, trace_sha: str) -> None:
+    summary = trace.get("request_summary", {})
+    if case.get("fixture_id") != case.get("case_id"):
+        raise ResultError("case fixture_id must equal case_id")
+    contract_fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "sampling", "control_id", "format_id", "implementation_id", "device")
+    if raw.get("case_contract") != {key: case.get(key) for key in contract_fields}:
+        raise ResultError("raw case contract differs")
+    expected_summary = {
+        "fixture_id": case.get("fixture_id"), "request_count": case.get("request_count", case.get("decode_request_count")),
+        "prompt_token_count": case.get("prompt_tokens"), "cached_prefix_token_count": case.get("cached_prefix_tokens"),
+        "context_tokens_at_decode_start": case.get("decode_start_tokens"), "generated_token_count": case.get("generated_tokens"),
+    }
+    if any(wanted is None or summary.get(field) != wanted for field, wanted in expected_summary.items()):
+        raise ResultError("trace request/case association differs")
+    phases = trace.get("phases", [])
+    matching = [item for item in phases if item.get("kind") == case.get("phase")]
+    if len(matching) != 1: raise ResultError("trace phase/case association differs")
+    phase = matching[0]
+    expected_mode = {"all_m1": "cold", "cold_batched": "cold", "cached_prefix_chunked": "cached_prefix"}.get(case.get("mode"))
+    if case.get("phase") != "decode" and phase.get("prefill_mode") != expected_mode: raise ResultError("trace prefill mode differs")
+    expected_phase = {
+        "input_token_count": case.get("prompt_tokens") if case.get("phase") != "decode" else case.get("generated_tokens"),
+        "cached_prefix_token_count": case.get("cached_prefix_tokens"),
+        "context_tokens_before": case.get("cached_prefix_tokens") if case.get("phase") != "decode" else case.get("decode_start_tokens"),
+        "context_tokens_after": case.get("context_tokens") if case.get("phase") != "decode" else case.get("decode_start_tokens", 0) + case.get("generated_tokens", 0),
+        "actual_token_batch_width": case.get("resolved_m") if case.get("phase") != "decode" else 1,
+        "actual_request_batch_width": case.get("decode_request_count", case.get("request_count")),
+        "request_count": case.get("decode_request_count", case.get("request_count")),
+    }
+    if any(wanted is None or phase.get(field) != wanted for field, wanted in expected_phase.items()): raise ResultError("trace phase shape/width/context differs")
+    if case.get("phase") != "decode" and (case.get("prefill_requested_m") is None or phase.get("chunk_width_tokens") != case.get("resolved_m")): raise ResultError("trace requested/resolved width differs")
+    executor = trace.get("executor", {}); device = case.get("device", {}); trace_device = executor.get("device", {})
+    expected_device = {"backend": device.get("backend"), "name": device.get("name"), "architecture": device.get("architecture"), "runtime_device_index": device.get("runtime_device_index")}
+    actual_device = {"backend": executor.get("backend"), "name": trace_device.get("name"), "architecture": trace_device.get("architecture"), "runtime_device_index": trace_device.get("runtime_device_index")}
+    if any(value is None for value in expected_device.values()) or actual_device != expected_device: raise ResultError("trace device association differs")
+    trace_identity = trace.get("identity", {}); model = identity.get("model_identity", {})
+    if trace_identity != bound_trace_identity(identity): raise ResultError("trace manifest/product identity differs")
+    if case.get("format_id") != trace_identity.get("model", {}).get("format_id") or case.get("implementation_id") != trace_identity.get("model", {}).get("implementation_id"): raise ResultError("trace case format/implementation differs")
+    if trace_identity.get("model") != {key: model.get(key) for key in ("id", "revision", "format_id", "implementation_id")}:
+        raise ResultError("trace model identity differs")
+    hashes = identity.get("hash_binding", {})
+    for trace_field, identity_field in (("served_model_manifest_sha256", "served_model_manifest_sha256"),):
+        if trace_identity.get(trace_field) != hashes.get(identity_field): raise ResultError("trace served identity differs")
+    if trace_identity.get("worker", {}).get("binary_sha256") != hashes.get("worker_binary_sha256") or trace_identity.get("package", {}).get("manifest_sha256") != hashes.get("package_manifest_sha256"):
+        raise ResultError("trace worker/package identity differs")
+    artifact = trace_identity.get("artifact", {})
+    if artifact.get("manifest_sha256") is not None and artifact.get("manifest_sha256") != hashes.get("artifact_manifest_sha256"): raise ResultError("trace artifact identity differs")
+    if artifact.get("content_sha256") is not None and artifact.get("content_sha256") != hashes.get("artifact_content_sha256"): raise ResultError("trace artifact content differs")
+    if trace.get("sampling") is not None and trace.get("sampling") != case.get("sampling"): raise ResultError("trace sampling differs")
+    if trace.get("control") is not None and trace.get("control") != case.get("control"): raise ResultError("trace control differs")
+    raw_link = raw.get("links", {}).get("trace")
+    expected_link = {"path": str(trace_path.resolve()), "sha256": trace_sha, "trace_id": trace.get("trace_id")}
+    if raw_link != expected_link: raise ResultError("raw trace path/hash/id association differs")
+    aggregation = measurement.get("trace_aggregation", {})
+    expected_times = {item.get("phase_id"): item.get("wall_time_ms") for item in phases}
+    if aggregation.get("schema_version") != "ullm.aq4_p2_trace_aggregation.v1" or aggregation.get("case_id") != case.get("case_id") or aggregation.get("trace_id") != trace.get("trace_id") or aggregation.get("trace_sha256") != trace_sha or aggregation.get("sample_count") != len(measurement.get("measured_runs", [])) or aggregation.get("phase_wall_time_ms") != expected_times or aggregation.get("terminal_audit_sha256") != trace_terminal_sha(trace):
+        raise ResultError("trace measurement aggregation differs")
+
+
 def validate_trace_bundle(args: argparse.Namespace, root: Path, case: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     required = {
         "trace": args.trace, "manifest": args.trace_manifest,
@@ -222,7 +314,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     measurement_path = Path(raw.get("links", {}).get("measurement", {}).get("path", "")); state_path = Path(raw.get("links", {}).get("state", {}).get("path", ""))
     contained(root, measurement_path, "measurement"); contained(root, state_path, "state")
     if sha_file(measurement_path, "measurement") != raw["links"]["measurement"]["sha256"] or sha_file(state_path, "state") != raw["links"]["state"]["sha256"]: raise ResultError("raw evidence hash differs")
-    performance = validate_measurements(load(measurement_path, "measurement"), case); state = load(state_path, "state"); validate_state(state, case["case_id"])
+    measurement = load(measurement_path, "measurement"); performance = validate_measurements(measurement, case); state = load(state_path, "state"); validate_state(state, case["case_id"])
     path_sha = None; path_link = None
     if case.get("mode") in {"cold_batched", "cached_prefix_chunked"}:
         if args.path_oracle_result is None: raise ResultError("optimized case requires a path oracle result")
@@ -237,6 +329,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     trace_sha = None; trace_link = None
     if args.trace:
         trace, trace_validation = validate_trace_bundle(args, root, case); trace_sha = sha_file(args.trace, "trace")
+        validate_trace_association(trace, case, raw, identity, measurement, args.trace, trace_sha)
         trace_link = {"schema_version": trace["schema_version"], "trace_id": trace.get("trace_id"), "path": str(args.trace.resolve()), "sha256": trace_sha, "scope": trace.get("scope"), "validation": trace_validation}
     if case.get("scope") == "production_server" and status == "ok" and trace_link is None: raise ResultError("production-server ok result requires a trace")
     raw_sha = sha_file(args.raw, "raw"); correctness = validate_independent(independent, case, raw_sha, source_sha, path_sha, trace_sha, policy)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -19,6 +20,7 @@ STATUSES = {"ok", "failed", "oom", "unsupported", "skipped"}
 POWER_FIELDS = ("expected_power_limit_watts", "allowed_power_tolerance_watts", "maximum_temperature_c", "minimum_vram_headroom_bytes")
 CORRECTNESS_FIELDS = ("max_hidden_relative_l2", "max_hidden_max_abs", "max_logits_relative_l2", "max_logits_max_abs", "minimum_top_k_overlap")
 STRICT_TRACE_VALIDATOR = Path(__file__).with_name("validate-production-execution-trace.py")
+P2_RESULT_BUILDER = Path(__file__).with_name("build-aq4-prefill-validation-result.py")
 
 
 class EvidenceError(ValueError): pass
@@ -137,6 +139,22 @@ def strict_trace_failures(root: Path, trace_path: Path, trace: dict[str, Any], c
         return [failure]
 
 
+def trace_association_failures(root: Path, trace_path: Path, trace: dict[str, Any], case: dict[str, Any], raw: dict[str, Any], identity: dict[str, Any], prefix: str) -> list[str]:
+    failure = f"trace_case_association:{prefix}"
+    try:
+        measurement_link = raw.get("links", {}).get("measurement", {})
+        measurement_path = contained(root, Path(measurement_link.get("path", "")), "trace measurement")
+        if sha_file(measurement_path, "trace measurement") != measurement_link.get("sha256"): return [failure]
+        measurement = load(measurement_path, "trace measurement")
+        spec = importlib.util.spec_from_file_location("aq4_p2_result_builder_association", P2_RESULT_BUILDER)
+        if spec is None or spec.loader is None: return [failure]
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        module.validate_trace_association(trace, case, raw, identity, measurement, trace_path, sha_file(trace_path, "trace"))
+        return []
+    except Exception:
+        return [failure]
+
+
 def validate(args: argparse.Namespace) -> dict[str, Any]:
     root = args.run_root.resolve(strict=True)
     for path, label in ((args.expanded, "expanded"), (args.identity, "identity"), (args.policy, "policy"), (args.source_oracle, "source oracle")): contained(root, path, label)
@@ -236,8 +254,10 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 trace_path = contained(root, Path(trace_link.get("path", "")), "trace"); trace = load(trace_path, "trace")
                 expected_trace_sha = sha_file(trace_path, "trace")
-                if expected_trace_sha != trace_link.get("sha256"): failures.append(f"trace_hash:{prefix}")
+                expected_raw_trace = {"path": str(trace_path), "sha256": expected_trace_sha, "trace_id": trace.get("trace_id")}
+                if expected_trace_sha != trace_link.get("sha256") or trace_link.get("trace_id") != trace.get("trace_id") or raw.get("links", {}).get("trace") != expected_raw_trace: failures.append(f"trace_hash:{prefix}")
                 failures.extend(trace_failures(trace, case, prefix))
+                failures.extend(trace_association_failures(root, trace_path, trace, case, raw, identity, prefix))
                 failures.extend(strict_trace_failures(root, trace_path, trace, case, trace_link.get("validation"), prefix))
             except (EvidenceError, OSError): failures.append(f"trace_link:{prefix}")
         elif case.get("scope") == "production_server" and result.get("status") == "ok": failures.append(f"production_trace_missing:{prefix}")

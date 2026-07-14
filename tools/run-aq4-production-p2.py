@@ -150,7 +150,12 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     device_id = case.get("device", {}).get("device_id")
     failure_reason = None; lock_handle = None
     if args.mode == "production" and (case.get("scope") != "production_server" or args.trace is None): failure_reason = "production_scope_or_trace_missing"
-    if args.trace is not None: contained(root, args.trace, "trace")
+    trace_value = None
+    if args.trace is not None:
+        contained(root, args.trace, "trace")
+        trace_value = load(args.trace, "trace")
+        if trace_value.get("schema_version") != "ullm.production_execution_trace.v1" or not isinstance(trace_value.get("trace_id"), str):
+            raise RunnerError("trace identity is invalid")
     if device_id == "r9700-rdna4":
         lock_name = identity.get("execution_contract", {}).get("r9700_lock_name")
         if args.lock is None or args.lock.name != f"{lock_name}.lock": failure_reason = failure_reason or "canonical_lock_required"
@@ -174,9 +179,10 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     raw = {
         "schema_version": "ullm.aq4_production_p2_raw_result.v2", "case_id": case["case_id"], "case_sha256": case["case_sha256"],
         "status": status, "immutable_status": status != "ok", "mode": args.mode, "device_id": device_id,
+        "case_contract": {key: case.get(key) for key in ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "sampling", "control_id", "format_id", "implementation_id", "device")},
         "started_at_unix": started, "finished_at_unix": time.time(), "execution": execution,
         "declared_execution": {"executable": str(executable), "executable_sha256": sha_file(executable, "worker"), "package_root": str(package_root), "package_content_sha256": tree_hash(package_root), "argv_sha256": sha_bytes(canonical(argv)), "argv_count": len(argv), "argv_values_recorded": False},
-        "links": {"expanded": {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}, "measurement": {"path": str(args.measurement.resolve()), "sha256": sha_file(args.measurement, "measurement")}, "state": {"path": str(args.state.resolve()), "sha256": sha_file(args.state, "state")}, "trace": {"path": str(args.trace.resolve()), "sha256": sha_file(args.trace, "trace")} if args.trace else None},
+        "links": {"expanded": {"path": str(args.expanded.resolve()), "sha256": sha_file(args.expanded, "expanded")}, "identity": {"path": str(args.identity.resolve()), "sha256": sha_file(args.identity, "identity")}, "policy": {"path": str(args.policy.resolve()), "sha256": sha_file(args.policy, "policy")}, "measurement": {"path": str(args.measurement.resolve()), "sha256": sha_file(args.measurement, "measurement")}, "state": {"path": str(args.state.resolve()), "sha256": sha_file(args.state, "state")}, "trace": {"path": str(args.trace.resolve()), "sha256": sha_file(args.trace, "trace"), "trace_id": trace_value["trace_id"]} if args.trace else None},
         "preflight": preflight, "failure_reason": failure_reason, "capture_contract": {"bounded_streaming": True, "shell": False, "max_output_bytes_per_stream": args.max_output_bytes, "command_arguments_stored": False},
     }
     return raw, 0 if status == "ok" else 1

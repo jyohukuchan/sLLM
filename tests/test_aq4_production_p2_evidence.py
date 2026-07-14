@@ -332,5 +332,37 @@ class Aq4ProductionP2EvidenceTests(unittest.TestCase):
             changed = copy.deepcopy(trace); mutate(changed)
             self.assertTrue(any(name in failure for failure in module.trace_failures(changed, case, "case")), name)
 
+    def test_full_trace_bundle_exact_case_association_and_decode_prefill_swaps(self) -> None:
+        spec = importlib.util.spec_from_file_location("p2_build_association", BUILD); self.assertIsNotNone(spec and spec.loader)
+        module = importlib.util.module_from_spec(spec); assert spec and spec.loader; spec.loader.exec_module(module)
+        trace_path = ROOT / "tests/fixtures/production-execution-trace-p1/schema-r1/verified.json"
+        trace = json.loads(trace_path.read_text()); trace_sha = sha(trace_path)
+        case = {
+            "case_id": "cpu-production-trace-r1", "fixture_id": "cpu-production-trace-r1", "scope": "full_model",
+            "phase": "cold_prefill", "mode": "cold_batched", "prompt_tokens": 4, "cached_prefix_tokens": 0,
+            "context_tokens": 4, "decode_start_tokens": 4, "generated_tokens": 1, "prefill_requested_m": 4,
+            "resolved_m": 4, "decode_request_count": 1, "sampling": None, "control_id": "aq4_0_target",
+            "format_id": "AQ4_0", "implementation_id": "cpu_fixture_v1",
+            "device": {"backend": "cpu", "name": "CPU fixture", "architecture": "x86_64", "runtime_device_index": 0},
+        }
+        fields = ("fixture_id", "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "decode_start_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "decode_request_count", "sampling", "control_id", "format_id", "implementation_id", "device")
+        raw = {"case_contract": {key: case.get(key) for key in fields}, "links": {"trace": {"path": str(trace_path.resolve()), "sha256": trace_sha, "trace_id": trace["trace_id"]}}}
+        identity = {"model_identity": trace["identity"]["model"], "artifacts": {"served_model_manifest": str(trace_path.with_name("manifest.json"))}, "hash_binding": {
+            "served_model_manifest_sha256": trace["identity"]["served_model_manifest_sha256"],
+            "worker_binary_sha256": trace["identity"]["worker"]["binary_sha256"],
+            "package_manifest_sha256": trace["identity"]["package"]["manifest_sha256"],
+        }}
+        measurement = {"measured_runs": [{} for _ in range(10)], "trace_aggregation": {
+            "schema_version": "ullm.aq4_p2_trace_aggregation.v1", "case_id": case["case_id"], "trace_id": trace["trace_id"],
+            "trace_sha256": trace_sha, "sample_count": 10,
+            "phase_wall_time_ms": {item["phase_id"]: item["wall_time_ms"] for item in trace["phases"]},
+            "terminal_audit_sha256": module.trace_terminal_sha(trace),
+        }}
+        module.validate_trace_association(trace, case, raw, identity, measurement, trace_path, trace_sha)
+        other_decode = copy.deepcopy(case); other_decode.update({"case_id": "other-decode-case", "fixture_id": "other-decode-case", "phase": "decode", "prompt_tokens": 4, "resolved_m": 1, "prefill_requested_m": 1})
+        with self.assertRaises(module.ResultError): module.validate_trace_association(trace, other_decode, raw, identity, measurement, trace_path, trace_sha)
+        other_prefill_raw = copy.deepcopy(raw); other_prefill_raw["links"]["trace"]["path"] = str(trace_path.with_name("verified-copy.json"))
+        with self.assertRaises(module.ResultError): module.validate_trace_association(trace, case, other_prefill_raw, identity, measurement, trace_path, trace_sha)
+
 
 if __name__ == "__main__": unittest.main()

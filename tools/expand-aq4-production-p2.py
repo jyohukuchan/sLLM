@@ -91,7 +91,7 @@ def append_prefill(
                     prefix_label = f"-prefix{prefix}" if phase == "cached_prefix_prefill" else ""
                     case_id = f"p2-{stage['stage_id']}-{scope}-{phase}-{mode}{prefix_label}-n{prompt}-m{requested_m}-{device_id}-{control_id}"
                     value = {
-                        "case_id": safe_id(case_id, "case_id"), "case_sha256": None,
+                        "case_id": safe_id(case_id, "case_id"), "fixture_id": safe_id(case_id, "case_id"), "case_sha256": None,
                         "stage_id": stage["stage_id"], "stage_order": stage["order"], "scope": scope,
                         "phase": phase, "mode": mode, "baseline_mode": mode,
                         "prompt_tokens": prompt, "cached_prefix_tokens": prefix,
@@ -152,7 +152,7 @@ def expand_stage(stage: dict[str, Any], device: dict[str, Any]) -> list[dict[str
             for control_id in controls(stage, device_id):
                 case_id = f"p2-{stage_id}-{scope}-decode-n{context}-requests{decode.get('request_count')}-{device_id}-{control_id}"
                 value = {
-                    "case_id": safe_id(case_id, "case_id"), "case_sha256": None,
+                    "case_id": safe_id(case_id, "case_id"), "fixture_id": safe_id(case_id, "case_id"), "case_sha256": None,
                     "stage_id": stage_id, "stage_order": stage["order"], "scope": scope,
                     "phase": "decode", "mode": "decode", "baseline_mode": "decode",
                     "prompt_tokens": 0, "cached_prefix_tokens": 0, "context_tokens": context,
