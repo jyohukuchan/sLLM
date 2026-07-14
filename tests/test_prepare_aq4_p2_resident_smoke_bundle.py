@@ -312,9 +312,9 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert value["requires_immutable_launcher"] is True
     assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
     roots = value["trust_roots"]
-    assert roots["source_commit"] == "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db"
-    assert roots["source_tree"] == "32e2a2c5d8435af2715d652e035f408c07eae2bf"
-    assert roots["runner"] == {"git_blob": "75e2c8cd3b0d7f50de66a3f9ce92953d4b5c16e8", "sha256": "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"}
+    assert roots["source_commit"] == "4005c80e542d7e37cf79e62d2fd053f99c0353c1"
+    assert roots["source_tree"] == "635d72f5b6aa1a5a63a43a3fc4fa005be4d7b213"
+    assert roots["runner"] == {"git_blob": "6af99284b507035957102b9ab79a72d7561942a0", "sha256": "a3ba3e099a931682ffc441e268e56f77aeb5d95220e15fc9efce61aa13962f3b"}
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
     assert roots["resident_driver"]["blob_unchanged"] is True
