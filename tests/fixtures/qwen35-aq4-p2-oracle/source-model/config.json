@@ -1,0 +1,1 @@
+{"architectures":["Qwen3_5ForConditionalGeneration"],"model_type":"qwen3_5","text_config":{"dtype":"bfloat16","hidden_size":4096}}
