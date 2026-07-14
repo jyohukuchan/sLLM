@@ -459,9 +459,41 @@ def validate_driver_command(command: list[str], identity: dict[str, Any], *, exp
 
 
 @contextmanager
-def acquire_device_lock(path: Path, run_id: str, driver: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def acquire_device_lock(
+    path: Path,
+    run_id: str,
+    driver: dict[str, Any],
+    *,
+    expected_identity: dict[str, int] | None = None,
+) -> Iterator[dict[str, Any]]:
     _require_absolute_nonsymlink_path(path, "device lock")
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    before: os.stat_result | None = None
+    if expected_identity is not None:
+        if (
+            set(expected_identity) != {"device", "inode"}
+            or type(expected_identity.get("device")) is not int
+            or expected_identity["device"] < 0
+            or type(expected_identity.get("inode")) is not int
+            or expected_identity["inode"] < 0
+        ):
+            raise BatchError("expected device lock identity differs")
+        try:
+            before = os.lstat(path)
+        except OSError as error:
+            raise BatchError(f"bound device lock metadata failed: {error}") from error
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != os.geteuid()
+            or before.st_gid != os.getegid()
+        ):
+            raise BatchError("bound device lock file contract differs")
+        if before.st_dev != expected_identity["device"] or before.st_ino != expected_identity["inode"]:
+            raise BatchError("bound device lock identity differs")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if expected_identity is None:
+        flags |= os.O_CREAT
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError as error:
@@ -479,10 +511,26 @@ def acquire_device_lock(path: Path, run_id: str, driver: dict[str, Any]) -> Iter
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise BatchError("device lock must be a single-link regular file")
+        if before is not None and (
+            metadata.st_dev != before.st_dev
+            or metadata.st_ino != before.st_ino
+            or metadata.st_dev != expected_identity["device"]
+            or metadata.st_ino != expected_identity["inode"]
+        ):
+            raise BatchError("bound device lock changed while opening")
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise BatchError(f"device lock is already owned: {path}") from error
+        if before is not None:
+            try:
+                current = os.lstat(path)
+            except OSError as error:
+                raise BatchError(f"bound device lock final metadata failed: {error}") from error
+            if current.st_dev != metadata.st_dev or current.st_ino != metadata.st_ino:
+                raise BatchError("bound device lock path changed before acquisition")
+        owner["device"] = metadata.st_dev
+        owner["inode"] = metadata.st_ino
         payload = canonical(owner) + b"\n"
         os.ftruncate(descriptor, 0)
         os.lseek(descriptor, 0, os.SEEK_SET)
@@ -1061,7 +1109,7 @@ def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[s
         raise BatchError("live preflight command evidence differs")
     if _file_identity(before) != _file_identity(os.lstat(path)) or sha_file(path, "live preflight", absolute=True) != digest:
         raise BatchError("live preflight changed during validation")
-    return {"path": str(path), "sha256": digest, "device": before.st_dev, "inode": before.st_ino, "captured_unix_ns": value["captured_unix_ns"], "runtime_mapping": mapping, "vram": vram}
+    return {"path": str(path), "sha256": digest, "device": before.st_dev, "inode": before.st_ino, "captured_unix_ns": value["captured_unix_ns"], "runtime_mapping": mapping, "lock": lock, "vram": vram}
 
 
 def verify_live_preflight(path: Path, link: dict[str, Any]) -> None:
@@ -1209,7 +1257,16 @@ def run_batch(args: argparse.Namespace) -> int:
     if live_preflight_link is not None:
         verify_live_preflight(args.live_preflight, live_preflight_link)
     completed_cases = 0
-    with acquire_device_lock(args.lock_path, args.run_id, driver_executable) as lock_owner:
+    expected_lock_identity = None if live_preflight_link is None else {
+        "device": live_preflight_link["lock"]["device"],
+        "inode": live_preflight_link["lock"]["inode"],
+    }
+    with acquire_device_lock(
+        args.lock_path,
+        args.run_id,
+        driver_executable,
+        expected_identity=expected_lock_identity,
+    ) as lock_owner:
         args.output_dir.mkdir(parents=True, exist_ok=False)
         atomic_write(args.output_dir / "resident-batch.lock-owner.json", lock_owner)
         process: subprocess.Popen[str] | None = None

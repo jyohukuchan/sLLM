@@ -13,8 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
 BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "82635456825503c535ce0b662e72a7a233d18c40"
-VALIDATOR_SHA = "02367c9369e2e25f2a768d4cd81812b82dc58973ad0882d938c283ddf7793ab7"
+VALIDATOR_COMMIT = "82c77957a8e53ea7ed0be4f3a83a8cce6f39a65f"
+VALIDATOR_SHA = "b6b7b249d39a8a6c7312535f220a008d058b9b979a9ee8efffb0ddef127bbc28"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -312,9 +312,9 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert value["requires_immutable_launcher"] is True
     assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
     roots = value["trust_roots"]
-    assert roots["source_commit"] == "e93a2c162eb059cb2db883953d331f7a158d3a16"
-    assert roots["source_tree"] == "65ac07cac2f025a6cde6eae153435e6ff86e679d"
-    assert roots["runner"] == {"git_blob": "a4b0ea2bbae805441715a40b9c4ded406ede4414", "sha256": "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"}
+    assert roots["source_commit"] == "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db"
+    assert roots["source_tree"] == "32e2a2c5d8435af2715d652e035f408c07eae2bf"
+    assert roots["runner"] == {"git_blob": "75e2c8cd3b0d7f50de66a3f9ce92953d4b5c16e8", "sha256": "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"}
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
     assert roots["resident_driver"]["blob_unchanged"] is True
