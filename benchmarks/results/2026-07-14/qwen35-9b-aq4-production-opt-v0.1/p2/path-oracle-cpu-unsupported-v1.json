@@ -1,0 +1,36 @@
+{
+  "schema_version": "ullm.qwen35_aq4_path_oracle_attempt.v1",
+  "status": "unsupported",
+  "oracle_kind": "same_artifact_all_m1",
+  "evidence_class": "production",
+  "created_utc": "2026-07-14T20:40:00Z",
+  "device": {
+    "backend": "cpu",
+    "device_index": 0,
+    "name": "host CPU fallback",
+    "total_global_mem_bytes": 0
+  },
+  "identity": {
+    "model_id": "Qwen/Qwen3.5-9B",
+    "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "source_oracle_manifest_sha256": "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "artifact_manifest_sha256": null,
+    "binary_sha256": "f4a82d9bcd7f713d6ea4a7e96d823342b8dff5bb0a31116b0a793cf3359474af"
+  },
+  "execution": {
+    "all_m1": true,
+    "model_loads": 0,
+    "rows_emitted": 0,
+    "stdout_bytes": 0,
+    "output": null
+  },
+  "blocker": {
+    "kind": "workspace_capacity_admission",
+    "required_capacity_bytes": 8668919584,
+    "observed_capacity_bytes": 0,
+    "message": "Qwen3.5 AQ4 model workspace admission failed before model load: workspace capacity is insufficient: required=8668919584 capacity=0"
+  },
+  "usable_as_path_evidence": false,
+  "promotion_eligible": false
+}

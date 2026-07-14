@@ -123,12 +123,15 @@ def _path_identity(args: argparse.Namespace) -> dict[str, Any]:
     for name in args.tokenizer_file:
         path = oracle.safe_relative(tokenizer_root, name, "tokenizer file")
         tokenizer_files.append({"file": name, "bytes": path.stat().st_size, "sha256": _sha(path)})
-    artifact = _regular(Path(args.artifact_manifest), "artifact manifest")
     package = _regular(Path(args.package_manifest), "package manifest")
+    artifact_raw = getattr(args, "artifact_manifest", None)
+    artifact = _regular(Path(artifact_raw), "artifact manifest") if artifact_raw is not None else None
+    if artifact is not None and artifact.resolve() == package.resolve():
+        raise oracle.OracleError("artifact and package manifests must be distinct files")
     model_id = args.model_id
     if not model_id:
         raise oracle.OracleError("path oracle requires --model-id")
-    return {"artifact": {"package_manifest_sha256": _sha(package), "artifact_manifest_sha256": _sha(artifact)}, "model_id": model_id, "model_revision": args.model_revision, "source_checkpoint": None, "tokenizer": _tokenizer_identity(tokenizer_files, tokenizer_root)}
+    return {"artifact": {"package_manifest_sha256": _sha(package), "artifact_manifest_sha256": _sha(artifact) if artifact is not None else None}, "model_id": model_id, "model_revision": args.model_revision, "source_checkpoint": None, "tokenizer": _tokenizer_identity(tokenizer_files, tokenizer_root)}
 
 
 def _write_manifest(output: Path, manifest: dict[str, Any], payload_src: Path | None = None) -> None:
@@ -163,12 +166,15 @@ def capture(args: argparse.Namespace) -> dict[str, Any]:
             identity = _path_identity(args)
         evidence_class = args.evidence_class
         status = "fixture" if evidence_class == "synthetic_fixture" else "available"
+        usable = evidence_class == "production" and (
+            args.kind == "source" or identity["artifact"]["artifact_manifest_sha256"] is not None
+        )
         manifest = {
             "schema_version": oracle.SCHEMAS[args.kind],
             "oracle_kind": "independent_source" if args.kind == "source" else "same_artifact_all_m1",
             "status": status,
             "evidence_class": evidence_class,
-            ("usable_as_source_evidence" if args.kind == "source" else "usable_as_path_evidence"): evidence_class == "production",
+            ("usable_as_source_evidence" if args.kind == "source" else "usable_as_path_evidence"): usable,
             "created_utc": oracle.utc_now(),
             "identity": identity,
             "ranking": oracle.RANKING_CONTRACT,
@@ -188,8 +194,8 @@ def link(args: argparse.Namespace) -> dict[str, Any]:
         raise oracle.OracleError("source/path model identity differs")
     if source["identity"]["tokenizer"]["aggregate_sha256"] != path["identity"]["tokenizer"]["aggregate_sha256"] or source["identity"]["tokenizer"]["files"] != path["identity"]["tokenizer"]["files"]:
         raise oracle.OracleError("source/path tokenizer identity differs")
-    if path["identity"]["artifact"]["artifact_manifest_sha256"] is None or path["identity"]["artifact"]["package_manifest_sha256"] is None:
-        raise oracle.OracleError("path oracle must bind artifact and package manifests")
+    if path["identity"]["artifact"]["package_manifest_sha256"] is None:
+        raise oracle.OracleError("path oracle must bind the package manifest")
     agreement = oracle.compare_payloads(source_root, source, path_root, path)
     manifest = {
         "schema_version": oracle.LINK_SCHEMA,
@@ -233,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--tokenizer-file", action="append", default=list(oracle.TOKENIZER_FILES))
     capture_parser.add_argument("--artifact-manifest", type=Path)
     capture_parser.add_argument("--package-manifest", type=Path)
+    capture_parser.add_argument("--allow-package-only", action="store_true", help="explicitly allow a product with no artifact manifest")
     capture_parser.add_argument("--model-id")
     capture_parser.add_argument("--model-revision")
     link_parser = sub.add_parser("link")
@@ -244,8 +251,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "capture":
             if args.kind == "source" and args.source_root is None:
                 raise oracle.OracleError("source capture requires --source-root")
-            if args.kind == "path" and (args.artifact_manifest is None or args.package_manifest is None):
-                raise oracle.OracleError("path capture requires --artifact-manifest and --package-manifest")
+            if args.kind == "path" and args.package_manifest is None:
+                raise oracle.OracleError("path capture requires --package-manifest")
+            if args.kind == "path" and args.artifact_manifest is None and not args.allow_package_only:
+                raise oracle.OracleError("path capture without --artifact-manifest requires --allow-package-only")
             result = capture(args)
         else:
             result = link(args)

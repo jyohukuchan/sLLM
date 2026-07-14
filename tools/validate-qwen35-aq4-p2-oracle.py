@@ -104,8 +104,11 @@ def validate_oracle(root: Path, kind: str) -> dict[str, Any]:
         blockers.append("synthetic fixture is not an independent production oracle")
     if kind == "source" and manifest["identity"]["model_revision"] is None:
         blockers.append("source checkpoint revision metadata is unavailable or inconsistent")
-    if kind == "path" and manifest["identity"]["artifact"]["artifact_manifest_sha256"] is None:
-        blockers.append("path oracle is not bound to an artifact manifest")
+    if kind == "path":
+        if manifest["identity"]["artifact"]["package_manifest_sha256"] is None:
+            raise oracle.OracleError("path oracle must bind a package manifest")
+        if manifest["identity"]["artifact"]["artifact_manifest_sha256"] is None:
+            blockers.append("path oracle is package-bound but the active product has no artifact manifest")
     tokenizer = manifest["identity"]["tokenizer"]
     if {entry["file"] for entry in tokenizer["files"]} != set(oracle.TOKENIZER_FILES):
         raise oracle.OracleError("tokenizer file coverage differs")
@@ -174,7 +177,8 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
         if key == "path":
             if entry["artifact_manifest_sha256"] != manifest["identity"]["artifact"]["artifact_manifest_sha256"] or entry["package_manifest_sha256"] != manifest["identity"]["artifact"]["package_manifest_sha256"]:
                 raise oracle.OracleError("link path artifact binding differs")
-            oracle.ensure_sha256(entry["artifact_manifest_sha256"], "link path artifact hash")
+            if entry["artifact_manifest_sha256"] is not None:
+                oracle.ensure_sha256(entry["artifact_manifest_sha256"], "link path artifact hash")
             oracle.ensure_sha256(entry["package_manifest_sha256"], "link path package hash")
     agreement = link["agreement"]
     if not isinstance(agreement, dict) or agreement != oracle.compare_payloads(source_root, source, path_root, path):
@@ -184,6 +188,8 @@ def validate_link(root: Path, source_root: Path, path_root: Path) -> dict[str, A
     blockers = []
     if link["evidence_class"] == "synthetic_fixture":
         blockers.append("source/path link contains synthetic fixture evidence")
+    if path["identity"]["artifact"]["artifact_manifest_sha256"] is None:
+        blockers.append("path oracle is package-bound but the active product has no artifact manifest")
     if not agreement["greedy_token_exact"] or not agreement["topk_exact"] or not agreement["hidden_sample_within_atol"] or not agreement["logit_sample_within_atol"]:
         blockers.append("source/path bounded agreement gate failed")
     expected_usable = bool(link["evidence_class"] == "production" and source_report["usable_as_source_evidence"] and path_report["usable_as_path_evidence"] and not blockers)

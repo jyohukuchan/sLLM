@@ -12,6 +12,13 @@ P2では、AQ4 packageの同一artifact pathだけでなく、独立したBF16/F
 - `ullm.qwen35_aq4_path_oracle.v1`: 同一AQ4 artifactのall-M=1 path。source oracleとは別root・別manifestで保存する。
 - `ullm.qwen35_aq4_oracle_link.v1`: 両manifest、payload、artifact/package、tokenizer identityをhashで結ぶ比較結果。
 
+現行 product が独立した artifact manifest を公開していない場合は、path
+manifest の `identity.artifact.artifact_manifest_sha256` を `null` とし、実在する
+package manifest の SHA-256 (`package_manifest_sha256`) だけを束縛してよい。この
+package-only identity は役割の異なる manifest を同一ファイルとして扱わないための
+明示的な状態であり、validator は path/link を valid として再検証できるが、
+`usable_as_path_evidence` と `usable_as_p2_oracle_link` は false のままにする。
+
 PayloadはJSONLを逐次読み取りし、4 MiB、128 cases、128 steps、256 sample values、top-k 32を上限とする。validatorは重複キー、非有限数、symlink/path escape、順序、coverage、payload hashを再計算する。sourceではconfig、index、全4 shard、tokenizer 5 filesを実pathからstreaming SHA-256で再読し、canonical aggregateを照合する。manifest runtime、runtime.json、CPU/BF16、package version、thread数、preflight、row count、SHA256SUMSも相互照合する。hidden/logitの完全な行列は保存しない。
 
 greedy tokenは全語彙の最大logitとし、同値では最小token IDを選ぶ。top-kは全語彙をlogit降順、同値token ID昇順に並べた先頭kである。実行中に保持できるlogitはfinal tokenの1 vocabulary rowまでで、sequence×vocabulary matrixは保持しない。
