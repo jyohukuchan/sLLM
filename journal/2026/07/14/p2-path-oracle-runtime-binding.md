@@ -13,6 +13,8 @@
 - manifest、payload、runtime、外部binding fileをsingle-link、`O_NOFOLLOW`、fd/path identity固定で読み、unknown/duplicate、stale SHA、symlink、hardlink、read中identity変化を拒否する負例を追加した。
 - 独立QAで見つかったcross-open TOCTOUを閉じるため、manifest/payload/runtime/SHA256SUMSの最初のpinned bytes、identity、digestをvalidation contextへ保持した。source replayとlink comparisonを含むsemantic/hash検証は同snapshotを再利用し、完了時に全path identityを再照合する。
 - 決定的test hookにより、checksum後のrename、same-size rewrite+mtime復元、semantic後のruntime差替え+SHA256SUMS更新を発生させ、いずれもsnapshot identity/digest不一致として拒否した。
+- 外部binary/package/artifact/workerをJSON bytes上限から分離し、single-link pinned fdのstreaming digestとidentityをvalidation contextへ登録した。product/package directoryは全entryの相対path、種別、size、identity、same-fd file digestを固定し、完了時にtreeとfile identityを再照合する。
+- path semantics後のbinary同一size rewrite/rename、worker/package/artifact置換を決定的に発生させる負例と、4 MiBを超えるbinary/workerを受理する正例を追加した。
 
 ## 次の行動
 

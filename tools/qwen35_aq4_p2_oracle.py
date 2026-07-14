@@ -55,13 +55,30 @@ class OracleError(ValueError):
 class FileSnapshot:
     path: Path
     identity: tuple[int, ...]
-    data: bytes
+    data: bytes | None
     sha256: str
+
+
+@dataclass(frozen=True)
+class DirectoryEntrySnapshot:
+    relative_path: str
+    kind: str
+    identity: tuple[int, ...]
+    size: int
+    sha256: str | None
+
+
+@dataclass(frozen=True)
+class DirectorySnapshot:
+    path: Path
+    identity: tuple[int, ...]
+    entries: tuple[DirectoryEntrySnapshot, ...]
 
 
 @dataclass
 class ValidationContext:
     snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
+    directories: dict[str, DirectorySnapshot] = field(default_factory=dict)
 
     @staticmethod
     def _key(path: Path) -> str:
@@ -71,6 +88,8 @@ class ValidationContext:
         key = self._key(path)
         existing = self.snapshots.get(key)
         if existing is not None:
+            if existing.data is None:
+                raise OracleError(f"{label} was first captured as a streaming-only snapshot")
             if len(existing.data) > maximum:
                 raise OracleError(f"{label} exceeds {maximum} bytes")
             self.verify(existing, label)
@@ -102,6 +121,95 @@ class ValidationContext:
         finally:
             os.close(descriptor)
 
+    def digest(self, path: Path, label: str, chunk_bytes: int = 1024 * 1024) -> str:
+        key = self._key(path)
+        existing = self.snapshots.get(key)
+        if existing is not None:
+            self.verify(existing, label)
+            return existing.sha256
+        descriptor, before = _open_pinned_regular(path, label)
+        digest = hashlib.sha256()
+        try:
+            while chunk := os.read(descriptor, chunk_bytes):
+                digest.update(chunk)
+            _verify_pinned_regular(path, descriptor, before, label)
+            self.snapshots[key] = FileSnapshot(
+                path=Path(key),
+                identity=_file_identity(before),
+                data=None,
+                sha256=digest.hexdigest(),
+            )
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+
+    def snapshot_directory(self, path: Path, label: str) -> DirectorySnapshot:
+        key = self._key(path)
+        existing = self.directories.get(key)
+        if existing is not None:
+            self.verify_directory(existing, label)
+            return existing
+        root = Path(key)
+        _reject_symlink_components(root, label)
+        try:
+            root_info = root.lstat()
+        except OSError as error:
+            raise OracleError(f"cannot stat {label}: {error}") from error
+        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+            raise OracleError(f"{label} must be a non-symlink directory")
+        entries: list[DirectoryEntrySnapshot] = []
+
+        def visit(directory: Path, relative: Path) -> None:
+            try:
+                with os.scandir(directory) as iterator:
+                    children = sorted(iterator, key=lambda item: item.name)
+            except OSError as error:
+                raise OracleError(f"cannot scan {label}: {error}") from error
+            for child in children:
+                child_path = directory / child.name
+                child_relative = relative / child.name
+                try:
+                    info = child.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise OracleError(f"cannot stat {label} entry {child_relative}: {error}") from error
+                if stat.S_ISLNK(info.st_mode):
+                    raise OracleError(f"{label} contains a symlink: {child_relative}")
+                if stat.S_ISDIR(info.st_mode):
+                    entries.append(
+                        DirectoryEntrySnapshot(
+                            relative_path=child_relative.as_posix(),
+                            kind="directory",
+                            identity=_file_identity(info),
+                            size=info.st_size,
+                            sha256=None,
+                        )
+                    )
+                    visit(child_path, child_relative)
+                elif stat.S_ISREG(info.st_mode):
+                    digest = self.digest(child_path, f"{label} file {child_relative}")
+                    snapshot = self.snapshots[self._key(child_path)]
+                    entries.append(
+                        DirectoryEntrySnapshot(
+                            relative_path=child_relative.as_posix(),
+                            kind="file",
+                            identity=snapshot.identity,
+                            size=info.st_size,
+                            sha256=digest,
+                        )
+                    )
+                else:
+                    raise OracleError(f"{label} contains a non-regular entry: {child_relative}")
+
+        visit(root, Path())
+        snapshot = DirectorySnapshot(
+            path=root,
+            identity=_file_identity(root_info),
+            entries=tuple(entries),
+        )
+        self.directories[key] = snapshot
+        self.verify_directory(snapshot, label)
+        return snapshot
+
     def get(self, path: Path) -> FileSnapshot | None:
         return self.snapshots.get(self._key(path))
 
@@ -113,9 +221,61 @@ class ValidationContext:
         if current.st_nlink != 1 or _file_identity(current) != snapshot.identity:
             raise OracleError(f"validation snapshot identity changed: {label}")
 
+    def verify_directory(self, snapshot: DirectorySnapshot, label: str) -> None:
+        try:
+            root_info = snapshot.path.lstat()
+        except OSError as error:
+            raise OracleError(f"cannot restat directory snapshot {label}: {error}") from error
+        if not stat.S_ISDIR(root_info.st_mode) or _file_identity(root_info) != snapshot.identity:
+            raise OracleError(f"validation directory snapshot identity changed: {label}")
+        observed: list[tuple[str, str, tuple[int, ...], int]] = []
+
+        def walk_error(error: OSError) -> None:
+            raise OracleError(f"cannot scan directory snapshot {label}: {error}") from error
+
+        for directory, directories, files in os.walk(
+            snapshot.path, followlinks=False, onerror=walk_error
+        ):
+            directories.sort()
+            files.sort()
+            base = Path(directory)
+            for name in directories:
+                path = base / name
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise OracleError(f"validation directory snapshot entry changed: {path}")
+                observed.append(
+                    (
+                        path.relative_to(snapshot.path).as_posix(),
+                        "directory",
+                        _file_identity(info),
+                        info.st_size,
+                    )
+                )
+            for name in files:
+                path = base / name
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                    raise OracleError(f"validation directory snapshot entry changed: {path}")
+                observed.append(
+                    (
+                        path.relative_to(snapshot.path).as_posix(),
+                        "file",
+                        _file_identity(info),
+                        info.st_size,
+                    )
+                )
+        expected = [
+            (entry.relative_path, entry.kind, entry.identity, entry.size) for entry in snapshot.entries
+        ]
+        if sorted(observed) != sorted(expected):
+            raise OracleError(f"validation directory tree changed: {label}")
+
     def verify_all(self) -> None:
         for snapshot in self.snapshots.values():
             self.verify(snapshot, os.fspath(snapshot.path))
+        for snapshot in self.directories.values():
+            self.verify_directory(snapshot, os.fspath(snapshot.path))
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -244,10 +404,7 @@ def sha256_file(
     context: ValidationContext | None = None,
 ) -> str:
     if context is not None:
-        snapshot = context.get(path)
-        if snapshot is not None:
-            context.verify(snapshot, f"hashed file {path}")
-            return snapshot.sha256
+        return context.digest(path, f"hashed file {path}", chunk_bytes)
     descriptor, before = _open_pinned_regular(path, f"hashed file {path}")
     digest = hashlib.sha256()
     try:

@@ -117,14 +117,29 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
         return binary
 
-    def production_export(self, root: Path) -> tuple[Path, Path, Path]:
+    def production_export(
+        self,
+        root: Path,
+        *,
+        with_artifact: bool = False,
+        large_binaries: bool = False,
+    ) -> tuple[Path, Path, Path]:
         source = self.capture_source(root, production=True)
         product = root / "product"
         package = product / "package"
         package.mkdir(parents=True)
         package_manifest = package / "manifest.json"
         shutil.copyfile(FIXTURE / "package-manifest.json", package_manifest)
+        artifact_manifest = None
+        if with_artifact:
+            artifact_dir = product / "artifact"
+            artifact_dir.mkdir()
+            artifact_manifest = artifact_dir / "manifest.json"
+            write_json(artifact_manifest, {"artifact": "fixture", "version": 1})
         binary = self.fake_binary(root)
+        if large_binaries:
+            with binary.open("ab") as handle:
+                handle.write(b"\n#" + b"x" * (ORACLE.MAX_JSON_BYTES + 1))
         worker = root / "served-worker"
         shutil.copyfile(binary, worker)
         worker.chmod(worker.stat().st_mode | stat.S_IXUSR)
@@ -142,7 +157,15 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                 },
                 "product": {
                     "root": str(product.resolve()),
-                    "artifact": None,
+                    "artifact": (
+                        {
+                            "content_sha256": "a" * 64,
+                            "manifest_path": "artifact/manifest.json",
+                            "manifest_sha256": ORACLE.sha256_file(artifact_manifest),
+                        }
+                        if artifact_manifest is not None
+                        else None
+                    ),
                     "package": {
                         "manifest_path": "package/manifest.json",
                         "manifest_sha256": ORACLE.sha256_file(package_manifest),
@@ -158,8 +181,8 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                 {
                     "package_dir": package,
                     "package_manifest": package_manifest,
-                    "artifact_manifest": None,
-                    "allow_package_only": True,
+                    "artifact_manifest": artifact_manifest,
+                    "allow_package_only": artifact_manifest is None,
                     "cases": FIXTURE / "cases.json",
                     "source_oracle": source,
                     "tokenizer_root": FIXTURE / "source-model",
@@ -407,6 +430,83 @@ class Qwen35Aq4PathOracleTests(unittest.TestCase):
                     with mock.patch.object(VALIDATE, "VALIDATION_TEST_HOOK", hook):
                         with self.assertRaisesRegex(ORACLE.OracleError, "snapshot identity changed"):
                             VALIDATE.validate_oracle(candidate, "path")
+                    self.assertTrue(changed)
+
+    def test_external_runtime_references_stream_past_json_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, path, _ = self.production_export(root, large_binaries=True)
+            runtime = json.loads((path / "runtime.json").read_text(encoding="utf-8"))
+            self.assertGreater(
+                Path(runtime["binary"]["path"]).stat().st_size,
+                ORACLE.MAX_JSON_BYTES,
+            )
+            self.assertGreater(
+                Path(runtime["served_model_guard"]["worker"]["binary_path"]).stat().st_size,
+                ORACLE.MAX_JSON_BYTES,
+            )
+            self.assertTrue(VALIDATE.validate_oracle(path, "path")["usable_as_path_evidence"])
+
+    def test_external_runtime_snapshot_rejects_post_semantic_replacements(self) -> None:
+        mutations = (
+            ("binary_rewrite", False),
+            ("binary_rename", False),
+            ("worker_replace", False),
+            ("package_replace", False),
+            ("artifact_replace", True),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            outer = Path(temporary)
+            for mutation, with_artifact in mutations:
+                with self.subTest(mutation=mutation):
+                    root = outer / mutation
+                    _, path, _ = self.production_export(
+                        root, with_artifact=with_artifact
+                    )
+                    runtime = json.loads((path / "runtime.json").read_text(encoding="utf-8"))
+                    artifact_path = runtime["artifact_manifest"]
+                    if mutation == "artifact_replace":
+                        self.assertIsInstance(artifact_path, str)
+                    targets = {
+                        "binary_rewrite": Path(runtime["binary"]["path"]),
+                        "binary_rename": Path(runtime["binary"]["path"]),
+                        "worker_replace": Path(
+                            runtime["served_model_guard"]["worker"]["binary_path"]
+                        ),
+                        "package_replace": Path(runtime["package_manifest"]),
+                        "artifact_replace": Path(artifact_path or runtime["package_manifest"]),
+                    }
+                    target = targets[mutation]
+                    changed = False
+
+                    def hook(stage: str, validation_root: Path) -> None:
+                        nonlocal changed
+                        if changed or stage != "after_path_semantics" or validation_root != path:
+                            return
+                        changed = True
+                        info = target.stat()
+                        data = target.read_bytes()
+                        if mutation == "binary_rewrite":
+                            replacement = bytes([data[0] ^ 1]) + data[1:]
+                            self.assertEqual(len(replacement), len(data))
+                            target.write_bytes(replacement)
+                            os.chmod(target, info.st_mode)
+                            os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+                        else:
+                            replacement_path = target.with_name(target.name + ".replacement")
+                            replacement_path.write_bytes(data)
+                            os.chmod(replacement_path, info.st_mode)
+                            os.utime(
+                                replacement_path,
+                                ns=(info.st_atime_ns, info.st_mtime_ns),
+                            )
+                            os.replace(replacement_path, target)
+
+                    with mock.patch.object(VALIDATE, "VALIDATION_TEST_HOOK", hook):
+                        with self.assertRaisesRegex(
+                            ORACLE.OracleError, "snapshot|directory"
+                        ):
+                            VALIDATE.validate_oracle(path, "path")
                     self.assertTrue(changed)
 
     def test_cross_open_snapshot_rejects_semantic_then_sha_version_replace(self) -> None:

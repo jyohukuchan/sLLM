@@ -74,26 +74,35 @@ def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
 
 
 def _absolute_regular(
-    raw: Any, label: str, *, context: oracle.ValidationContext | None = None
+    raw: Any,
+    label: str,
+    *,
+    context: oracle.ValidationContext | None = None,
+    maximum: int | None = None,
 ) -> Path:
     if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
         raise oracle.OracleError(f"{label} must be an absolute path")
     path = Path(raw)
     # sha256_file performs O_NOFOLLOW, single-link, fd/path identity validation.
-    if context is None:
-        _sha(path)
+    if maximum is not None:
+        oracle.read_regular_bytes(path, label, maximum, context=context)
     else:
-        oracle.read_regular_bytes(path, label, oracle.MAX_JSON_BYTES, context=context)
+        _sha(path, context=context)
     return path.resolve(strict=True)
 
 
-def _absolute_directory(raw: Any, label: str) -> Path:
+def _absolute_directory(
+    raw: Any, label: str, *, context: oracle.ValidationContext | None = None
+) -> Path:
     if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
         raise oracle.OracleError(f"{label} must be an absolute path")
     path = Path(raw)
     if path.is_symlink() or not path.is_dir():
         raise oracle.OracleError(f"{label} must be a non-symlink directory")
-    return path.resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    if context is not None:
+        context.snapshot_directory(resolved, label)
+    return resolved
 
 
 def _relative_under(root: Path, raw: Any, label: str) -> Path:
@@ -267,7 +276,10 @@ def _validate_source_replay(
         raise oracle.OracleError("path runtime source/path case contract differs")
     cases_input = _exact(replay["cases_input"], {"path", "sha256"}, "path runtime cases input")
     cases_path = _absolute_regular(
-        cases_input["path"], "path runtime cases input", context=binding_context
+        cases_input["path"],
+        "path runtime cases input",
+        context=binding_context,
+        maximum=oracle.MAX_JSON_BYTES,
     )
     if _sha(cases_path, context=binding_context) != cases_input["sha256"]:
         raise oracle.OracleError("path runtime cases input hash differs")
@@ -352,7 +364,10 @@ def _validate_served_guard(
                 raise oracle.OracleError("fixture served manifest hash differs")
         else:
             served_path = _absolute_regular(
-                guard["manifest"], "fixture served-model manifest", context=context
+                guard["manifest"],
+                "fixture served-model manifest",
+                context=context,
+                maximum=oracle.MAX_JSON_BYTES,
             )
             if _sha(served_path, context=context) != guard["manifest_sha256"]:
                 raise oracle.OracleError("fixture served-model manifest hash differs")
@@ -361,7 +376,10 @@ def _validate_served_guard(
     if artifact.get("artifact_binding_kind") not in {"package_manifest", "artifact_manifest"}:
         raise oracle.OracleError("production path manifest lacks extended served binding")
     served_path = _absolute_regular(
-        guard["manifest"], "production served-model manifest", context=context
+        guard["manifest"],
+        "production served-model manifest",
+        context=context,
+        maximum=oracle.MAX_JSON_BYTES,
     )
     served_sha = _sha(served_path, context=context)
     if served_sha != guard["manifest_sha256"] or served_sha != artifact.get("served_model_manifest_sha256"):
@@ -388,9 +406,11 @@ def _validate_served_guard(
         {"binary_path", "binary_sha256", "device_architecture", "execution_profile"},
         "served worker binding",
     )
-    worker_path = _absolute_regular(worker_binding["binary_path"], "served worker binary")
+    worker_path = _absolute_regular(
+        worker_binding["binary_path"], "served worker binary", context=context
+    )
     worker_sha = oracle.ensure_sha256(worker_binding["binary_sha256"], "served worker binary hash")
-    if str(worker_path) != worker.get("binary") or worker_sha != worker.get("binary_sha256") or _sha(worker_path) != worker_sha:
+    if str(worker_path) != worker.get("binary") or worker_sha != worker.get("binary_sha256") or _sha(worker_path, context=context) != worker_sha:
         raise oracle.OracleError("served worker binary identity differs")
     if (
         worker_identity.get("device") != PRODUCTION_DEVICE_ARCHITECTURE
@@ -406,18 +426,22 @@ def _validate_served_guard(
         {"manifest_path", "manifest_sha256", "product_root"},
         "served package binding",
     )
-    product_root = _absolute_directory(package_binding["product_root"], "served product root")
+    product_root = _absolute_directory(
+        package_binding["product_root"], "served product root", context=context
+    )
     declared_product_root = Path(product.get("root", ""))
     if not declared_product_root.is_absolute():
         declared_product_root = served_path.parent / declared_product_root
-    if _absolute_directory(str(declared_product_root), "declared served product root") != product_root:
+    if _absolute_directory(
+        str(declared_product_root), "declared served product root", context=context
+    ) != product_root:
         raise oracle.OracleError("served product root binding differs")
     package_path = _relative_under(product_root, package.get("manifest_path"), "served package manifest")
     package_sha = oracle.ensure_sha256(package.get("manifest_sha256"), "served package manifest hash")
     if (
         package_path != Path(package_binding["manifest_path"]).resolve(strict=True)
         or package_path != Path(runtime["package_manifest"]).resolve(strict=True)
-        or _sha(package_path) != package_sha
+        or _sha(package_path, context=context) != package_sha
         or package_binding["manifest_sha256"] != package_sha
         or runtime["package_manifest_sha256"] != package_sha
         or artifact["package_manifest_sha256"] != package_sha
@@ -434,7 +458,7 @@ def _validate_served_guard(
         artifact_sha = oracle.ensure_sha256(active["manifest_sha256"], "served artifact manifest hash")
         if (
             artifact_path != Path(runtime["artifact_manifest"]).resolve(strict=True)
-            or _sha(artifact_path) != artifact_sha
+            or _sha(artifact_path, context=context) != artifact_sha
             or runtime["artifact_manifest_sha256"] != artifact_sha
             or artifact["artifact_manifest_sha256"] != artifact_sha
         ):
@@ -491,27 +515,33 @@ def _validate_path_runtime(
             raise oracle.OracleError("production path runtime is not bound to the R9700 GPU mapping")
     elif runtime["device_kind"] == "cpu" and (device_index != 0 or visible is not None):
         raise oracle.OracleError("CPU path fixture device mapping differs")
-    package_dir = _absolute_directory(runtime["package_dir"], "path runtime package directory")
-    package_path = _absolute_regular(runtime["package_manifest"], "path runtime package manifest")
+    package_dir = _absolute_directory(
+        runtime["package_dir"], "path runtime package directory", context=context
+    )
+    package_path = _absolute_regular(
+        runtime["package_manifest"], "path runtime package manifest", context=context
+    )
     try:
         package_path.relative_to(package_dir)
     except ValueError as error:
         raise oracle.OracleError("path runtime package manifest escapes package directory") from error
     package_sha = oracle.ensure_sha256(runtime["package_manifest_sha256"], "path runtime package hash")
     artifact = manifest["identity"]["artifact"]
-    if _sha(package_path) != package_sha or package_sha != artifact["package_manifest_sha256"]:
+    if _sha(package_path, context=context) != package_sha or package_sha != artifact["package_manifest_sha256"]:
         raise oracle.OracleError("path runtime package manifest identity differs")
     if runtime["artifact_manifest"] is None:
         if runtime["artifact_manifest_sha256"] is not None or artifact["artifact_manifest_sha256"] is not None:
             raise oracle.OracleError("path runtime artifact nullability differs")
     else:
-        artifact_path = _absolute_regular(runtime["artifact_manifest"], "path runtime artifact manifest")
+        artifact_path = _absolute_regular(
+            runtime["artifact_manifest"], "path runtime artifact manifest", context=context
+        )
         artifact_sha = oracle.ensure_sha256(runtime["artifact_manifest_sha256"], "path runtime artifact hash")
-        if artifact_path == package_path or _sha(artifact_path) != artifact_sha or artifact_sha != artifact["artifact_manifest_sha256"]:
+        if artifact_path == package_path or _sha(artifact_path, context=context) != artifact_sha or artifact_sha != artifact["artifact_manifest_sha256"]:
             raise oracle.OracleError("path runtime artifact manifest identity differs")
     binary = _exact(runtime["binary"], {"path", "sha256"}, "path runtime binary")
-    binary_path = _absolute_regular(binary["path"], "path runtime binary")
-    if _sha(binary_path) != oracle.ensure_sha256(binary["sha256"], "path runtime binary hash"):
+    binary_path = _absolute_regular(binary["path"], "path runtime binary", context=context)
+    if _sha(binary_path, context=context) != oracle.ensure_sha256(binary["sha256"], "path runtime binary hash"):
         raise oracle.OracleError("path runtime binary hash differs")
     run = _exact(runtime["run"], {"elapsed_seconds", "row_count"}, "path runtime run")
     elapsed = oracle.finite(run["elapsed_seconds"], "path runtime elapsed_seconds")
