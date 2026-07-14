@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -53,6 +53,8 @@ const DEFAULT_CHUNK_ELEMENTS: usize = 65_536;
 const DEFAULT_LOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const DEFAULT_LM_HEAD_CHUNK_ROWS: usize = 8192;
 const DIRECT_TOP1_ENV: &str = "ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1";
+const O_NOFOLLOW: i32 = 0o00400000;
+const O_CLOEXEC: i32 = 0o02000000;
 const PREFLIGHT_FIELDS: &[&str] = &[
     "weights_bytes",
     "persistent_state_bytes",
@@ -245,6 +247,26 @@ struct PackageTree {
     bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mode: u32,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+    nlink: u64,
+}
+
+struct PinnedRegularFile {
+    path: PathBuf,
+    label: String,
+    file: File,
+    identity: FileIdentity,
+}
+
 struct CommonBinding {
     model: ServedModel,
     fixture: FixtureCase,
@@ -413,6 +435,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<Args>, 
     let preflight = path(take("--preflight")?);
     let source_root = path(take("--source")?);
     let output = path(take("--output")?);
+    validate_output_lexical(&output)?;
     let case_id = text(take("--case-id")?, "case id")?;
     let policy_id = text(take("--policy-id")?, "policy id")?;
     let oracle_kind = text(take("--oracle-kind")?, "oracle kind")?;
@@ -482,6 +505,111 @@ fn print_help() {
     );
 }
 
+fn validate_output_lexical(path: &Path) -> Result<(), String> {
+    let raw = path.as_os_str().as_bytes();
+    let invalid_segment = raw
+        .split(|byte| *byte == b'/')
+        .enumerate()
+        .any(|(index, segment)| {
+            segment == b"."
+                || segment == b".."
+                || (segment.is_empty() && !(index == 0 && path.is_absolute()))
+        });
+    if raw.is_empty() || invalid_segment || path.file_name().is_none() {
+        return Err("output must be a normalized path with no '.' or '..' component".to_string());
+    }
+    Ok(())
+}
+
+fn canonical_output_candidate(path: &Path) -> Result<PathBuf, String> {
+    validate_output_lexical(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => return Err("output root already exists; overwrite is forbidden".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("output root metadata failed: {error}")),
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    reject_symlink_components(parent)?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("output parent must already exist and canonicalize: {error}"))?;
+    let metadata = fs::symlink_metadata(&canonical_parent)
+        .map_err(|error| format!("output parent metadata failed: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("output parent must be a real directory".to_string());
+    }
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| "output has no leaf".to_string())?;
+    let candidate = canonical_parent.join(leaf);
+    match fs::symlink_metadata(&candidate) {
+        Ok(_) => return Err("normalized output root already exists".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("normalized output metadata failed: {error}")),
+    }
+    Ok(candidate)
+}
+
+fn ensure_output_outside_source_roots(
+    output: &Path,
+    source_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let candidate = canonical_output_candidate(output)?;
+    for source_root in source_roots {
+        reject_symlink_components(source_root)?;
+        let source_root = source_root
+            .canonicalize()
+            .map_err(|error| format!("source root canonicalization failed: {error}"))?;
+        let metadata = fs::symlink_metadata(&source_root)
+            .map_err(|error| format!("source root metadata failed: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("source root must be a real directory".to_string());
+        }
+        if candidate == source_root
+            || candidate.starts_with(&source_root)
+            || source_root.starts_with(&candidate)
+        {
+            return Err("normalized output candidate overlaps a source root".to_string());
+        }
+    }
+    Ok(candidate)
+}
+
+fn declared_source_roots_for_blocked_output(args: &Args) -> Result<Vec<PathBuf>, String> {
+    reject_symlink_components(&args.source_root)?;
+    let root = args
+        .source_root
+        .canonicalize()
+        .map_err(|error| format!("blocked output source root canonicalization failed: {error}"))?;
+    let manifest_bytes = read_regular(
+        &root.join("manifest.json"),
+        "blocked output source manifest",
+        MAX_JSON_BYTES,
+    )?;
+    let manifest = parse_strict_json(&manifest_bytes, "blocked output source manifest")?;
+    let mut roots = vec![root];
+    for (kind, label) in [
+        ("source_checkpoint", "source checkpoint"),
+        ("tokenizer", "source tokenizer"),
+    ] {
+        let declared = manifest
+            .get("identity")
+            .and_then(|identity| identity.get(kind))
+            .and_then(|identity| identity.get("root"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("blocked output {label} root is missing"))?;
+        let declared = PathBuf::from(declared);
+        if !declared.is_absolute() {
+            return Err(format!("blocked output {label} root must be absolute"));
+        }
+        roots.push(declared);
+    }
+    Ok(roots)
+}
+
 fn reject_symlink_components(path: &Path) -> Result<(), String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -505,57 +633,112 @@ fn reject_symlink_components(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_regular(path: &Path, label: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
-    reject_symlink_components(path)?;
-    let before =
-        fs::symlink_metadata(path).map_err(|error| format!("{label} metadata failed: {error}"))?;
-    if !before.file_type().is_file() || before.file_type().is_symlink() {
-        return Err(format!("{label} must be a regular non-symlink file"));
+fn metadata_identity(metadata: &fs::Metadata) -> FileIdentity {
+    FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        size: metadata.len(),
+        mode: metadata.mode(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+        nlink: metadata.nlink(),
     }
-    if before.len() > max_bytes as u64 {
-        return Err(format!("{label} exceeds {max_bytes} bytes"));
-    }
-    let mut file = File::open(path).map_err(|error| format!("{label} open failed: {error}"))?;
-    let opened = file
-        .metadata()
-        .map_err(|error| format!("{label} opened metadata failed: {error}"))?;
-    if metadata_identity(&before) != metadata_identity(&opened) {
-        return Err(format!("{label} identity changed while opening"));
-    }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("{label} read failed: {error}"))?;
-    let after = fs::symlink_metadata(path)
-        .map_err(|error| format!("{label} post-read metadata failed: {error}"))?;
-    if metadata_identity(&before) != metadata_identity(&after) {
-        return Err(format!("{label} changed while reading"));
-    }
-    Ok(bytes)
 }
 
-fn metadata_identity(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, u32) {
-    (
-        metadata.dev(),
-        metadata.ino(),
-        metadata.len(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.mode(),
-    )
+fn validate_regular_identity(metadata: &fs::Metadata, label: &str) -> Result<FileIdentity, String> {
+    let identity = metadata_identity(metadata);
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(format!("{label} must be a regular non-symlink file"));
+    }
+    if identity.nlink != 1 {
+        return Err(format!("{label} must have exactly one hard link"));
+    }
+    Ok(identity)
+}
+
+impl PinnedRegularFile {
+    fn open(path: &Path, label: &str, max_bytes: Option<usize>) -> Result<Self, String> {
+        reject_symlink_components(path)?;
+        let path_metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("{label} metadata failed: {error}"))?;
+        let identity = validate_regular_identity(&path_metadata, label)?;
+        if max_bytes.is_some_and(|maximum| identity.size > maximum as u64) {
+            return Err(format!(
+                "{label} exceeds {} bytes",
+                max_bytes.expect("checked maximum")
+            ));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(path)
+            .map_err(|error| format!("{label} O_NOFOLLOW open failed: {error}"))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| format!("{label} fd metadata failed: {error}"))?;
+        let opened_identity = validate_regular_identity(&opened, label)?;
+        if opened_identity != identity {
+            return Err(format!("{label} path/fd identity changed while opening"));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            label: label.to_string(),
+            file,
+            identity,
+        })
+    }
+
+    fn verify_unchanged(&self) -> Result<(), String> {
+        let fd_metadata = self
+            .file
+            .metadata()
+            .map_err(|error| format!("{} post-read fd metadata failed: {error}", self.label))?;
+        let fd_identity = validate_regular_identity(&fd_metadata, &self.label)?;
+        let path_metadata = fs::symlink_metadata(&self.path)
+            .map_err(|error| format!("{} post-read path metadata failed: {error}", self.label))?;
+        let path_identity = validate_regular_identity(&path_metadata, &self.label)?;
+        if fd_identity != self.identity || path_identity != self.identity {
+            return Err(format!(
+                "{} fd/path identity changed during read",
+                self.label
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_bounded(&mut self, maximum: usize) -> Result<Vec<u8>, String> {
+        let capacity = usize::try_from(self.identity.size)
+            .unwrap_or(maximum)
+            .min(maximum);
+        let mut bytes = Vec::with_capacity(capacity);
+        let read_result = Read::by_ref(&mut self.file)
+            .take((maximum as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("{} read failed: {error}", self.label));
+        let unchanged_result = self.verify_unchanged();
+        read_result?;
+        unchanged_result?;
+        if bytes.len() > maximum {
+            return Err(format!("{} exceeds {maximum} bytes", self.label));
+        }
+        Ok(bytes)
+    }
+}
+
+fn read_regular(path: &Path, label: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut pinned = PinnedRegularFile::open(path, label, Some(max_bytes))?;
+    pinned.read_bounded(max_bytes)
 }
 
 fn sha256_file(path: &Path, label: &str) -> Result<String, String> {
-    reject_symlink_components(path)?;
-    let before =
-        fs::symlink_metadata(path).map_err(|error| format!("{label} metadata failed: {error}"))?;
-    if !before.file_type().is_file() || before.file_type().is_symlink() {
-        return Err(format!("{label} must be a regular non-symlink file"));
-    }
-    let mut file = File::open(path).map_err(|error| format!("{label} open failed: {error}"))?;
+    let mut pinned = PinnedRegularFile::open(path, label, None)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];
     loop {
-        let read = file
+        let read = pinned
+            .file
             .read(&mut buffer)
             .map_err(|error| format!("{label} read failed: {error}"))?;
         if read == 0 {
@@ -563,11 +746,7 @@ fn sha256_file(path: &Path, label: &str) -> Result<String, String> {
         }
         digest.update(&buffer[..read]);
     }
-    let after = fs::symlink_metadata(path)
-        .map_err(|error| format!("{label} post-hash metadata failed: {error}"))?;
-    if metadata_identity(&before) != metadata_identity(&after) {
-        return Err(format!("{label} changed while hashing"));
-    }
+    pinned.verify_unchanged()?;
     Ok(format!("{:x}", digest.finalize()))
 }
 
@@ -1065,10 +1244,7 @@ fn load_common_binding(args: &Args) -> Result<CommonBinding, String> {
     if flag_enabled(env::var_os(DIRECT_TOP1_ENV)) {
         return Err("direct-top1 is incompatible with calibration full logits".to_string());
     }
-    reject_symlink_components(&args.output)?;
-    if fs::symlink_metadata(&args.output).is_ok() {
-        return Err("output root already exists; overwrite is forbidden".to_string());
-    }
+    ensure_output_outside_source_roots(&args.output, std::slice::from_ref(&args.source_root))?;
     let (case_value, case_link) = load_json_link(&args.case_binding, "P2 case")?;
     let declared_case_sha = case_value
         .get("case_sha256")
@@ -1085,8 +1261,21 @@ fn load_common_binding(args: &Args) -> Result<CommonBinding, String> {
     let (preflight, preflight_link) = load_json_link(&args.preflight, "P2 preflight")?;
     validate_preflight(&preflight)?;
     let fixture = load_fixture(&args.fixture, &args.case_id)?;
+    let mut served_manifest = PinnedRegularFile::open(
+        &args.served_model_manifest,
+        "served model manifest",
+        Some(MAX_JSON_BYTES),
+    )?;
+    let served_manifest_bytes = served_manifest.read_bounded(MAX_JSON_BYTES)?;
     let model = load_served_model(&args.served_model_manifest)
         .map_err(|error| format!("served model rejected: {error}"))?;
+    served_manifest.verify_unchanged()?;
+    if model.manifest_sha256 != sha256_bytes(&served_manifest_bytes) {
+        return Err("served model loader bytes differ from pinned manifest fd".to_string());
+    }
+    if sha256_file(&model.worker.binary, "served worker binary")? != model.worker.binary_sha256 {
+        return Err("served worker binary hash differs".to_string());
+    }
     validate_model(&model)?;
     validate_required_environment(&model)?;
     let profile = model.profile_snapshot();
@@ -1401,6 +1590,23 @@ fn validate_source_sums(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    maximum: usize,
+    label: &str,
+) -> Result<usize, String> {
+    line.clear();
+    let mut bounded = reader.take((maximum as u64).saturating_add(1));
+    let read = bounded
+        .read_until(b'\n', line)
+        .map_err(|error| format!("{label} read failed: {error}"))?;
+    if read > maximum {
+        return Err(format!("{label} exceeds {maximum} bytes"));
+    }
+    Ok(read)
+}
+
 fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArtifact, String> {
     reject_symlink_components(&args.source_root)?;
     let root_metadata = fs::symlink_metadata(&args.source_root)
@@ -1412,19 +1618,7 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
         .source_root
         .canonicalize()
         .map_err(|error| format!("source root canonicalization failed: {error}"))?;
-    let output_absolute = if args.output.is_absolute() {
-        args.output.clone()
-    } else {
-        env::current_dir()
-            .map_err(|error| format!("current directory lookup failed: {error}"))?
-            .join(&args.output)
-    };
-    if output_absolute == root
-        || output_absolute.starts_with(&root)
-        || root.starts_with(&output_absolute)
-    {
-        return Err("source and output roots must be distinct".to_string());
-    }
+    ensure_output_outside_source_roots(&args.output, std::slice::from_ref(&root))?;
     validate_source_sums(&root)?;
     let manifest_path = root.join("manifest.json");
     let (manifest, manifest_link) = load_json_link(&manifest_path, "source manifest")?;
@@ -1459,6 +1653,20 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
         return Err("source manifest is not available independent source evidence".to_string());
     }
     let tokenizer_sha256 = validate_source_identity(&manifest, common)?;
+    let declared_source_roots = [
+        root.clone(),
+        PathBuf::from(
+            manifest["identity"]["source_checkpoint"]["root"]
+                .as_str()
+                .expect("validated source checkpoint root"),
+        ),
+        PathBuf::from(
+            manifest["identity"]["tokenizer"]["root"]
+                .as_str()
+                .expect("validated tokenizer root"),
+        ),
+    ];
+    ensure_output_outside_source_roots(&args.output, &declared_source_roots)?;
     exact_fields(
         &manifest["vector_contract"],
         &[
@@ -1608,21 +1816,18 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
     {
         return Err("source sidecar sizes differ from row count".to_string());
     }
-    let rows_file =
-        File::open(&rows_path).map_err(|error| format!("source rows open failed: {error}"))?;
-    let mut reader = BufReader::new(rows_file);
-    let mut hidden =
-        File::open(&hidden_path).map_err(|error| format!("source hidden open failed: {error}"))?;
-    let mut logits =
-        File::open(&logits_path).map_err(|error| format!("source logits open failed: {error}"))?;
-    let source_metadata_before = [
-        fs::symlink_metadata(&rows_path)
-            .map_err(|error| format!("source rows metadata failed: {error}"))?,
-        fs::symlink_metadata(&hidden_path)
-            .map_err(|error| format!("source hidden metadata failed: {error}"))?,
-        fs::symlink_metadata(&logits_path)
-            .map_err(|error| format!("source logits metadata failed: {error}"))?,
-    ];
+    let max_rows_bytes = row_count
+        .checked_mul(MAX_ROW_LINE_BYTES)
+        .ok_or_else(|| "source rows byte bound overflows".to_string())?;
+    let mut rows_pinned = PinnedRegularFile::open(&rows_path, "source rows", Some(max_rows_bytes))?;
+    let mut hidden_pinned = PinnedRegularFile::open(&hidden_path, "source hidden", None)?;
+    let mut logits_pinned = PinnedRegularFile::open(&logits_path, "source logits", None)?;
+    if hidden_pinned.identity.size != hidden_expected
+        || logits_pinned.identity.size != logits_expected
+    {
+        return Err("source sidecar fd sizes differ from row count".to_string());
+    }
+    let mut reader = BufReader::new(&mut rows_pinned.file);
     let mut line = Vec::new();
     let mut hidden_offset = 0_u64;
     let mut logits_offset = 0_u64;
@@ -1635,12 +1840,12 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
         }
         let mut previous_greedy = None;
         for step in 0..source_case.step_count {
-            line.clear();
-            let read = reader
-                .read_until(b'\n', &mut line)
-                .map_err(|error| format!("source rows read failed: {error}"))?;
-            if read == 0 || line.len() > MAX_ROW_LINE_BYTES {
+            let read = read_line_bounded(&mut reader, &mut line, MAX_ROW_LINE_BYTES, "source row")?;
+            if read == 0 {
                 return Err("source rows are short or a row exceeds its bound".to_string());
+            }
+            if line.last() != Some(&b'\n') {
+                return Err("source row is not newline terminated".to_string());
             }
             let row_value = parse_strict_json(&line, "source row")?;
             let row_sha256 = sha256_bytes(&line);
@@ -1649,10 +1854,20 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
             validate_source_row_identity(&row, source_case, step, previous_greedy)?;
             validate_vector_ref(&row.hidden, hidden_offset, HIDDEN_SIZE, "source hidden")?;
             validate_vector_ref(&row.logits, logits_offset, VOCAB_SIZE, "source logits")?;
-            let (hidden_sha, hidden_nonfinite, _) =
-                scan_vector_region(&mut hidden, hidden_offset, HIDDEN_SIZE, source_chunk, false)?;
-            let (logits_sha, logits_nonfinite, topk) =
-                scan_vector_region(&mut logits, logits_offset, VOCAB_SIZE, source_chunk, true)?;
+            let (hidden_sha, hidden_nonfinite, _) = scan_vector_region(
+                &mut hidden_pinned.file,
+                hidden_offset,
+                HIDDEN_SIZE,
+                source_chunk,
+                false,
+            )?;
+            let (logits_sha, logits_nonfinite, topk) = scan_vector_region(
+                &mut logits_pinned.file,
+                logits_offset,
+                VOCAB_SIZE,
+                source_chunk,
+                true,
+            )?;
             if hidden_sha != row.hidden.sha256
                 || hidden_nonfinite != row.hidden.nonfinite_count
                 || logits_sha != row.logits.sha256
@@ -1674,28 +1889,22 @@ fn load_source_artifact(args: &Args, common: &CommonBinding) -> Result<SourceArt
             }
         }
     }
-    line.clear();
-    if reader
-        .read_until(b'\n', &mut line)
-        .map_err(|error| format!("source rows tail read failed: {error}"))?
-        != 0
+    if read_line_bounded(
+        &mut reader,
+        &mut line,
+        MAX_ROW_LINE_BYTES,
+        "source rows tail",
+    )? != 0
     {
         return Err("source rows contain extra records".to_string());
     }
+    drop(reader);
     if selected_rows.len() != selected.step_count {
         return Err("selected source row coverage differs".to_string());
     }
-    for (path, before) in [
-        (&rows_path, &source_metadata_before[0]),
-        (&hidden_path, &source_metadata_before[1]),
-        (&logits_path, &source_metadata_before[2]),
-    ] {
-        let after = fs::symlink_metadata(path)
-            .map_err(|error| format!("source post-scan metadata failed: {error}"))?;
-        if metadata_identity(before) != metadata_identity(&after) {
-            return Err("source artifact changed during row validation".to_string());
-        }
-    }
+    rows_pinned.verify_unchanged()?;
+    hidden_pinned.verify_unchanged()?;
+    logits_pinned.verify_unchanged()?;
     let replay_tokens = selected_rows
         .iter()
         .map(|row| row.greedy_token_id)
@@ -1959,8 +2168,11 @@ fn validate_terminal_audit(audit: &Value, case: &P2CaseBinding) -> Result<(), St
 fn create_temporary_root(output: &Path) -> Result<PathBuf, String> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     reject_symlink_components(parent)?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("output parent creation failed: {error}"))?;
+    let parent_metadata = fs::symlink_metadata(parent)
+        .map_err(|error| format!("output parent metadata failed: {error}"))?;
+    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+        return Err("output parent must be a real existing directory".to_string());
+    }
     let name = output
         .file_name()
         .ok_or_else(|| "output root has no file name".to_string())?
@@ -2381,11 +2593,12 @@ fn capture_into_temporary(
 fn run(args: &Args) -> Result<bool, String> {
     let common = load_common_binding(args)?;
     let source = load_source_artifact(args, &common)?;
-    let temporary = create_temporary_root(&args.output)?;
+    let output = canonical_output_candidate(&args.output)?;
+    let temporary = create_temporary_root(&output)?;
     let result = capture_into_temporary(args, &common, &source, &temporary);
     match result {
         Ok(available) => {
-            if let Err(error) = publish_root(&temporary, &args.output) {
+            if let Err(error) = publish_root(&temporary, &output) {
                 let _ = fs::remove_dir_all(&temporary);
                 return Err(error);
             }
@@ -2399,10 +2612,9 @@ fn run(args: &Args) -> Result<bool, String> {
 }
 
 fn publish_blocked(args: &Args, error: &str) -> Result<(), String> {
-    if fs::symlink_metadata(&args.output).is_ok() {
-        return Err("refusing to overwrite an existing output with blocked evidence".to_string());
-    }
-    let temporary = create_temporary_root(&args.output)?;
+    let source_roots = declared_source_roots_for_blocked_output(args)?;
+    let output = ensure_output_outside_source_roots(&args.output, &source_roots)?;
+    let temporary = create_temporary_root(&output)?;
     let reason_code = blocked_reason_code(error);
     let manifest = json!({
         "schema_version": TARGET_SCHEMA,
@@ -2426,7 +2638,7 @@ fn publish_blocked(args: &Args, error: &str) -> Result<(), String> {
         },
     });
     let result = write_manifest_and_sums(&temporary, &manifest)
-        .and_then(|_| publish_root(&temporary, &args.output));
+        .and_then(|_| publish_root(&temporary, &output));
     if result.is_err() {
         let _ = fs::remove_dir_all(&temporary);
     }
@@ -2618,13 +2830,14 @@ mod tests {
     }
 
     fn blocked_args(output: PathBuf) -> Args {
+        let source_root = output.parent().expect("test output parent").join("source");
         Args {
             served_model_manifest: "served.json".into(),
             fixture: "fixture.json".into(),
             case_binding: "case.json".into(),
             identity_binding: "identity.json".into(),
             preflight: "preflight.json".into(),
-            source_root: "source".into(),
+            source_root,
             output,
             case_id: "case-0".into(),
             policy_id: "policy-0".into(),
@@ -2717,6 +2930,26 @@ mod tests {
         fs::create_dir(&parent).unwrap();
         let output = parent.join("artifact");
         let args = blocked_args(output.clone());
+        fs::create_dir(&args.source_root).unwrap();
+        let checkpoint = parent.join("checkpoint");
+        let tokenizer = parent.join("tokenizer");
+        fs::create_dir(&checkpoint).unwrap();
+        fs::create_dir(&tokenizer).unwrap();
+        fs::write(
+            args.source_root.join("manifest.json"),
+            serde_json::to_vec(&json!({
+                "identity": {
+                    "source_checkpoint": {"root": checkpoint},
+                    "tokenizer": {"root": tokenizer},
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut overlap_args = args.clone();
+        overlap_args.output = checkpoint.join("blocked-artifact");
+        assert!(publish_blocked(&overlap_args, "identity failure").is_err());
+        assert!(!overlap_args.output.exists());
         publish_blocked(&args, "HIP out of memory").unwrap();
         let manifest = parse_strict_json(
             &read_regular(
@@ -2801,6 +3034,89 @@ mod tests {
     fn strict_json_rejects_duplicate_keys_and_nonfinite() {
         assert!(parse_strict_json(br#"{"a":1,"a":2}"#, "duplicate").is_err());
         assert!(parse_strict_json(br#"{"a":NaN}"#, "nonfinite").is_err());
+    }
+
+    #[test]
+    fn pinned_regular_file_rejects_hardlinks_and_bounded_overflow() {
+        let root = temp_path("pinned-hardlink-bound");
+        fs::create_dir(&root).unwrap();
+        let original = root.join("original");
+        let alias = root.join("alias");
+        fs::write(&original, b"01234567").unwrap();
+        fs::hard_link(&original, &alias).unwrap();
+        assert!(PinnedRegularFile::open(&original, "hardlinked", None).is_err());
+        fs::remove_file(&alias).unwrap();
+        assert!(PinnedRegularFile::open(&original, "oversized", Some(7)).is_err());
+        let mut pinned = PinnedRegularFile::open(&original, "bounded", None).unwrap();
+        assert!(pinned.read_bounded(7).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_regular_file_rejects_same_size_rewrite_with_restored_mtime() {
+        let root = temp_path("pinned-rewrite");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("input");
+        fs::write(&path, b"abcdefgh").unwrap();
+        let pinned = PinnedRegularFile::open(&path, "rewrite", None).unwrap();
+        let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        writer.write_all(b"ABCDEFGH").unwrap();
+        writer
+            .set_times(fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        writer.sync_all().unwrap();
+        assert!(pinned.verify_unchanged().is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_regular_file_rejects_rename_replacement_and_append() {
+        let root = temp_path("pinned-rename-append");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("input");
+        let moved = root.join("moved");
+        fs::write(&path, b"abcdefgh").unwrap();
+        let pinned = PinnedRegularFile::open(&path, "rename", None).unwrap();
+        fs::rename(&path, &moved).unwrap();
+        fs::write(&path, b"abcdefgh").unwrap();
+        assert!(pinned.verify_unchanged().is_err());
+
+        let mut append_pinned = PinnedRegularFile::open(&path, "append", None).unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
+        assert!(append_pinned.read_bounded(9).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn output_rejects_lexical_bypass_symlink_parent_and_source_overlap() {
+        let root = temp_path("output-negative");
+        let source = root.join("source");
+        let outside = root.join("outside");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&outside).unwrap();
+        assert!(validate_output_lexical(Path::new("a/../b")).is_err());
+        assert!(validate_output_lexical(Path::new("a/./b")).is_err());
+        assert!(validate_output_lexical(Path::new("a//b")).is_err());
+        assert!(
+            ensure_output_outside_source_roots(&source.join("artifact"), &[source.clone()])
+                .is_err()
+        );
+
+        let alias = root.join("source-alias");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        assert!(canonical_output_candidate(&alias.join("artifact")).is_err());
+        assert!(canonical_output_candidate(&outside.join("missing").join("artifact")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
