@@ -264,6 +264,21 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
+def test_canonical_execute_binding_pins_launcher_self_and_remains_blocked() -> None:
+    binding, trust = LAUNCHER.load_execute_binding(LAUNCHER.EXECUTE_BINDING_PATH)
+    assert binding["actual_eligible"] is False
+    assert trust["actual_eligible"] is False and trust["status"] == "qa_pending"
+    assert trust["sha256"] == LAUNCHER.sha_bytes(SCRIPT.read_bytes())
+    assert trust["commit"] == "bb7a5fb00c453d911cd0ccb9499a47863c6eb07c"
+
+
+def test_execute_rejects_untrusted_launcher_self_before_output_creation(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = _ready_binding(tmp_path)
+    with pytest.raises(LAUNCHER.LauncherError, match="self differs"):
+        LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha="0" * 64, gate_provider=_gates)
+    assert not evidence_path.exists() and not result_path.exists()
+
+
 def test_execute_binding_parent_chain_creation_rejects_symlink(tmp_path: Path) -> None:
     nested = tmp_path / "new" / "deep" / "parent"
     LAUNCHER.ensure_directory_chain(nested, "test parent")
