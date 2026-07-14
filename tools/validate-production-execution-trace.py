@@ -358,6 +358,12 @@ def validate_trace(trace: dict[str, Any], manifest: dict[str, Any], manifest_raw
     if trace["fallback"]["fallback_count"] != counts["fallback"] or trace["fallback"]["unexpected_fallback_count"] != counts["unexpected"] or trace["fallback"]["unsupported_count"] != counts["unsupported"] or trace["fallback"]["fail_closed_count"] != counts["fail_closed"]: raise ValidationError("fallback counts do not reconcile")
     for operator in trace["operator_resolutions"]:
         if operator["resolution_status"] != "selected" and not any(event["phase_kind"] == operator["phase_kind"] and event["op_kind"] == operator["op_kind"] and event["to_implementation_id"] == operator["implementation_id"] for event in trace["fallback"]["events"]): raise ValidationError("non-selected operator has no fallback event")
+    nonselected = {(item["phase_kind"], item["op_kind"], item["implementation_id"]) for item in trace["operator_resolutions"] if item["resolution_status"] != "selected"}
+    event_targets = {(item["phase_kind"], item["op_kind"], item["to_implementation_id"]) for item in trace["fallback"]["events"]}
+    if nonselected != event_targets:
+        raise ValidationError("fallback events do not reconstruct non-selected operators exactly")
+    if any(item["resolution_status"] in {"unsupported", "fail_closed"} for item in trace["operator_resolutions"]) and trace["status"] == "ok":
+        raise ValidationError("unsupported/fail-closed operator cannot be reported as ok")
     memory = exact(trace["memory"], {"vram_capacity_bytes", "resident_bytes", "persistent_state_bytes", "planned_temporary_bytes", "planned_total_bytes", "planned_headroom_bytes", "observed_peak_bytes", "observed_headroom_bytes", "observer", "oom"}, "memory")
     for name in ("vram_capacity_bytes", "resident_bytes", "persistent_state_bytes", "planned_temporary_bytes", "planned_total_bytes", "planned_headroom_bytes"): nonnegative(memory[name], f"memory.{name}")
     for name in ("observed_peak_bytes", "observed_headroom_bytes"): nonnegative(memory[name], f"memory.{name}", nullable=True)
