@@ -142,6 +142,7 @@ impl RowCollector {
         self,
         case_id: &str,
         step: usize,
+        context_length: usize,
         context_token_ids_sha256: String,
         predicted_token_id: usize,
     ) -> Result<Value, String> {
@@ -187,6 +188,7 @@ impl RowCollector {
         let row = json!({
             "case_id": case_id,
             "step": step,
+            "context_length": context_length,
             "context_token_ids_sha256": context_token_ids_sha256,
             "stages": stages,
             "greedy_token_id": predicted_token_id,
@@ -401,13 +403,12 @@ fn run(
                         let context_tokens = if step == 0 {
                             case.prompt_token_ids.clone()
                         } else {
-                            let mut context = case.prompt_token_ids.clone();
-                            context.extend_from_slice(&replay_tokens[..step]);
-                            context
+                            vec![replay_tokens[step - 1]]
                         };
                         let record = collector.finish_record(
                             &case.case_id,
                             step,
+                            context_tokens.len(),
                             canonical_token_hash(&context_tokens)?,
                             token_id,
                         )?;
@@ -552,12 +553,13 @@ mod tests {
             .expect("logit summary should fit contract");
         collector.finish().expect("collector finish should succeed");
         let row = collector
-            .finish_record("case", 0, canonical_token_hash(&[1, 2, 3]).unwrap(), 42)
+            .finish_record("case", 0, 3, canonical_token_hash(&[1, 2, 3]).unwrap(), 42)
             .expect("complete row should fit contract");
         let encoded = serde_json::to_vec(&row).expect("row should encode");
         assert!(encoded.len() <= MAX_ROW_BYTES);
         assert_eq!(row["stages"].as_array().unwrap().len(), 35);
         assert_eq!(row["stages"][0]["stage"], "embedding");
+        assert_eq!(row["context_length"], 3);
         assert_eq!(row["stages"][33]["stage"], "final_norm");
         assert_eq!(row["stages"][34]["stage"], "lm_head");
     }
