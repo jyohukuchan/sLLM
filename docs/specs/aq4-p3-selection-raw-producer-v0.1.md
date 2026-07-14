@@ -143,6 +143,7 @@ rocprof_config
 ```text
 kernel_dispatch
 hip_api
+memory_copy
 d2h_memcpy
 stream_synchronize
 device_synchronize
@@ -153,10 +154,12 @@ device_synchronize
 ```text
 kernel_trace = true
 hip_api_trace = true
+memory_copy_trace = true
+marker_trace = true
 api_filter = all_functions
 ```
 
-missing、unknown、false、型代用、self-hash不一致、file hash不一致はfail-closedである。同じcapability manifestは同一capture設定の複数runから参照できるが、kernel/API trace自体の再利用は禁止する。
+missing、unknown、false、型代用、self-hash不一致、file hash不一致はfail-closedである。同じcapability manifestは同一capture設定の複数runから参照できるが、kernel/API trace自体の再利用は禁止する。one-case diagnosticは単一run bindingに加え、markerでwarmupを除外したmeasured index 2..11のexactly 10 bindingを受理する。どちらもpromotion不可である。
 
 ## 5. kernel trace
 

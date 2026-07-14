@@ -152,9 +152,12 @@ CAPABILITY_FIELDS = {
 }
 CAPABILITY_TOOL_FIELDS = {"name", "version"}
 CAPABILITY_DOMAIN_FIELDS = {
-    "kernel_dispatch", "hip_api", "d2h_memcpy", "stream_synchronize", "device_synchronize",
+    "kernel_dispatch", "hip_api", "memory_copy", "d2h_memcpy", "stream_synchronize",
+    "device_synchronize",
 }
-CAPABILITY_CONFIG_FIELDS = {"kernel_trace", "hip_api_trace", "api_filter"}
+CAPABILITY_CONFIG_FIELDS = {
+    "kernel_trace", "hip_api_trace", "memory_copy_trace", "marker_trace", "api_filter"
+}
 
 D2H_APIS = {"hipmemcpydtoh", "hipmemcpydtohasync"}
 KNOWN_OTHER_MEMCPY_APIS = {
@@ -530,6 +533,16 @@ def validate_capture_capabilities(value: dict[str, Any], mode: str) -> None:
         or boolean(
             config.get("hip_api_trace"),
             "capture capabilities.rocprof_config.hip_api_trace",
+        )
+        is not True
+        or boolean(
+            config.get("memory_copy_trace"),
+            "capture capabilities.rocprof_config.memory_copy_trace",
+        )
+        is not True
+        or boolean(
+            config.get("marker_trace"),
+            "capture capabilities.rocprof_config.marker_trace",
         )
         is not True
         or config.get("api_filter") != "all_functions"
@@ -1033,11 +1046,13 @@ def trace_measurement(
     profile_runs = case["profile_runs"]
     if not isinstance(profile_runs, list):
         raise ProducerError("representative profile_runs must be an array")
-    required_indices = list(range(2, 12)) if mode == "promotion" else None
+    required_indices = (
+        list(range(2, 12)) if mode == "promotion" or len(profile_runs) == 10 else None
+    )
     if mode == "promotion" and len(profile_runs) != 10:
         raise ProducerError("promotion representative case requires 10 profile runs")
-    if mode == "diagnostic" and len(profile_runs) != 1:
-        raise ProducerError("diagnostic representative case requires one profile run")
+    if mode == "diagnostic" and len(profile_runs) not in {1, 10}:
+        raise ProducerError("diagnostic representative case requires one or 10 profile runs")
     observed_indices: list[int] = []
     exclusive_ms: list[float] = []
     d2h_count = 0

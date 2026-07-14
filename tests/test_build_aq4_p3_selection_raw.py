@@ -277,6 +277,7 @@ def capability_fixture(path: Path, *, diagnostic: bool = False) -> tuple[Path, d
         "domains": {
             "kernel_dispatch": True,
             "hip_api": True,
+            "memory_copy": True,
             "d2h_memcpy": True,
             "stream_synchronize": True,
             "device_synchronize": True,
@@ -284,6 +285,8 @@ def capability_fixture(path: Path, *, diagnostic: bool = False) -> tuple[Path, d
         "rocprof_config": {
             "kernel_trace": True,
             "hip_api_trace": True,
+            "memory_copy_trace": True,
+            "marker_trace": True,
             "api_filter": "all_functions",
         },
     }
