@@ -7,6 +7,9 @@
   "process_counts": {
     "capture_tool": 0,
     "container_curl": 0,
+    "container_curl_endpoint": 0,
+    "container_curl_total": 0,
+    "container_curl_version": 0,
     "docker": 0,
     "docker_exec": 0,
     "launcher": 0,
@@ -49,7 +52,7 @@
     "promotion_eligible": false
   },
   "promotion_eligible": false,
-  "ready_binding_sha256": "565f2e87b9a1ff63a5716806cd69775cf248f9a4e1a409721e0a8b689186290b",
+  "ready_binding_sha256": "dc1322d5e26c0850c1a04e636da29bf1223c3dfb18d79efd3721ff9d7c1578fa",
   "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
   "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
   "service_touched": false,

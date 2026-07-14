@@ -26,10 +26,10 @@
   "runner_strict_negative_count": 18,
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v1",
   "status": "passed",
-  "test_count": 246,
+  "test_count": 247,
   "test_suites": {
     "diagnostic_capture": 11,
-    "existing_and_profile_regression": 180,
+    "existing_and_profile_regression": 181,
     "marker_chain": 55
   }
 }

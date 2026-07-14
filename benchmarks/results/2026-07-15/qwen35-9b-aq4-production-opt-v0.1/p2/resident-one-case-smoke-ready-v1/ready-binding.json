@@ -224,7 +224,7 @@
     "sudo_keepalive_seconds": 30
   },
   "promotion_eligible": false,
-  "qa_attestation_sha256": "46c1bbd7e9a096f3538bdd8db14e1045e817af0d86f6db4db8476ee32c623b79",
+  "qa_attestation_sha256": "d59c61f2821452049fe234ee8212ebcd711f32c6658f127b9a3d68eca636d4e6",
   "schema_version": "ullm.aq4_p2_resident_smoke_ready_binding.v1",
   "status": "ready_for_one_case",
   "trust": {
@@ -267,11 +267,11 @@
       }
     },
     "harness": {
-      "commit": "3918c6e3ca8cb2fd65cc353759e41556ae26cbc8",
-      "git_blob": "8afe54c465decc1576598a53d1b6812e2c652855",
+      "commit": "76feccbeb5bca58c2127f05651cb7bdc51bcffa9",
+      "git_blob": "1bff1883332a1b711390080d3ddebbfd7f68a193",
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
-      "sha256": "1fbbea8410170274b679c55d1d304a3f1d7aa6cbc91fa8d0e6968cd485beb58e",
-      "tree": "16b9e92be247364bcab566ff790e892931383cbc"
+      "sha256": "3db750fb5ceea47c8b9173e652d480207605fd7bd300a7eb063e96d5d459036a",
+      "tree": "d65267370dc721d3fa33fecf8e124c97a41ed90b"
     },
     "launcher": {
       "commit": "eec6922fa9c90267213d2749c5dc816be54de527",
