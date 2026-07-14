@@ -559,6 +559,89 @@ def test_collect_execute_gates_rejects_active_service_duplicate_mapping_and_kfd_
         LAUNCHER.collect_execute_gates(run=_gate_router(), environment=dict(LAUNCHER.EXECUTE_ENV), kfd_owner_provider=lambda: [123], lock_provider=lambda: {})
 
 
+def _kfd_fixture(root: Path, pid: int = 123, gpuid: bytes = b"51545\n") -> Path:
+    queue = root / str(pid) / "queues" / "0"
+    queue.mkdir(parents=True)
+    source = queue / "gpuid"
+    source.write_bytes(gpuid)
+    return source
+
+
+def test_kfd_owner_snapshot_records_stable_raw_sources(tmp_path: Path) -> None:
+    raw = b"51545\n"
+    _kfd_fixture(tmp_path, gpuid=raw)
+    snapshot = LAUNCHER._kfd_owner_snapshot(tmp_path, allowed_owners={123})
+    assert snapshot["classification"] == "stable"
+    assert snapshot["attempt_count"] == 1
+    assert snapshot["owners"] == [123]
+    assert snapshot["sources"] == [{"pid": 123, "raw_sha256": LAUNCHER.sha_bytes(raw), "raw_bytes": len(raw), "parsed_gpuid": LAUNCHER.KFD_ID}]
+    assert snapshot["secret_material_recorded"] is False
+
+
+def test_kfd_owner_snapshot_rescans_followup_enoent_as_disappearance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _kfd_fixture(tmp_path)
+    original_open = LAUNCHER.os.open
+    injected = False
+
+    def disappearing_open(path, flags, *args, **kwargs):
+        nonlocal injected
+        if Path(path) == source and not injected:
+            injected = True
+            source.unlink()
+            source.parent.rmdir()
+            source.parent.parent.rmdir()
+            source.parent.parent.parent.rmdir()
+            raise FileNotFoundError(2, "synthetic KFD disappearance")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(LAUNCHER.os, "open", disappearing_open)
+    snapshot = LAUNCHER._kfd_owner_snapshot(tmp_path, allowed_owners=set())
+    assert injected is True
+    assert snapshot["classification"] == "stable_after_disappearance"
+    assert snapshot["attempt_count"] == 2
+    assert snapshot["attempts"][0] == {"attempt": 0, "classification": "entry_disappeared", "stage": "gpuid_open", "pid": 123}
+    assert snapshot["owners"] == []
+
+
+@pytest.mark.parametrize(
+    ("gpuid", "reason_code"),
+    ((b"not-a-gpuid\n", "gpuid_schema_differs"), (b"0\n", "gpuid_schema_differs")),
+)
+def test_kfd_owner_snapshot_rejects_malformed_gpuid(tmp_path: Path, gpuid: bytes, reason_code: str) -> None:
+    _kfd_fixture(tmp_path, gpuid=gpuid)
+    with pytest.raises(LAUNCHER.KfdOwnerScanError) as caught:
+        LAUNCHER._kfd_owner_snapshot(tmp_path)
+    assert caught.value.diagnostic["reason_code"] == reason_code
+
+
+def test_kfd_owner_snapshot_rejects_symlink_eacces_and_foreign_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _kfd_fixture(tmp_path)
+    source.unlink()
+    source.symlink_to(source.parent / "missing-gpuid-target")
+    with pytest.raises(LAUNCHER.KfdOwnerScanError) as symlink:
+        LAUNCHER._kfd_owner_snapshot(tmp_path)
+    assert symlink.value.diagnostic["reason_code"] == "source_type_or_symlink"
+    source.unlink()
+    source.write_bytes(b"51545\n")
+    original_open = LAUNCHER.os.open
+
+    def denied_open(path, flags, *args, **kwargs):
+        if Path(path) == source:
+            raise PermissionError(13, "synthetic KFD denial")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(LAUNCHER.os, "open", denied_open)
+    with pytest.raises(LAUNCHER.KfdOwnerScanError) as denied:
+        LAUNCHER._kfd_owner_snapshot(tmp_path)
+    assert denied.value.diagnostic["reason_code"] == "source_os_error"
+    assert denied.value.diagnostic["errno_name"] == "EACCES"
+    monkeypatch.setattr(LAUNCHER.os, "open", original_open)
+    with pytest.raises(LAUNCHER.KfdOwnerScanError) as foreign:
+        LAUNCHER._kfd_owner_snapshot(tmp_path, allowed_owners=set())
+    assert foreign.value.diagnostic["reason_code"] == "foreign_owner"
+    assert foreign.value.diagnostic["pid"] == 123
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

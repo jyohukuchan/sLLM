@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -53,17 +54,17 @@ INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10512713
 INPUT_FINGERPRINT_SHA = "9e2be7a00fb7cb4c085dc1bc3e8892d36bc8187a3f3e37bb802c97e0302a673a"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10495612
-BINDING_MANIFEST_SHA = "8302eb03329fd2c14fc5d9faa9ad24be2262a23a72c84d09049e84f7968cb86d"
-BINDING_PLAN_SHA = "4b80723caee35273a273c41de82e19dc03323530d38bb8b7436c583fbddf0ee1"
-RUNNER_COMMIT = "e93a2c162eb059cb2db883953d331f7a158d3a16"
-RUNNER_TREE = "65ac07cac2f025a6cde6eae153435e6ff86e679d"
-RUNNER_GIT_BLOB = "a4b0ea2bbae805441715a40b9c4ded406ede4414"
-RUNNER_SHA = "0d68f7141ea531e2200251597d601f9060b21b723faae2c8f96ae586c8cbeccc"
-VALIDATOR_COMMIT = "82635456825503c535ce0b662e72a7a233d18c40"
-VALIDATOR_TREE = "41300fac90b6ce821e24edd5f3b3cc479e35a6cb"
-VALIDATOR_GIT_BLOB = "51fd64a33fe8cbb7d2573d2c6c61abfad238ff4a"
-VALIDATOR_SHA = "02367c9369e2e25f2a768d4cd81812b82dc58973ad0882d938c283ddf7793ab7"
+BINDING_ROOT_INODE = 10517485
+BINDING_MANIFEST_SHA = "5071cf7b643d68b297d4d5f9588074ad09b71de26b0059bebefa3b6393bec146"
+BINDING_PLAN_SHA = "15716d7666f90ec127d793277a28a79d11b320b080099a3ac539a2a7c7e287dc"
+RUNNER_COMMIT = "c0480d1dfb90c385fe84ad2f6a5ffd9b0ff775db"
+RUNNER_TREE = "32e2a2c5d8435af2715d652e035f408c07eae2bf"
+RUNNER_GIT_BLOB = "75e2c8cd3b0d7f50de66a3f9ce92953d4b5c16e8"
+RUNNER_SHA = "d7795476a0006fc445d0879fd6cd680d8f969b5c3014e7c6a2f85b0e8e110907"
+VALIDATOR_COMMIT = "82c77957a8e53ea7ed0be4f3a83a8cce6f39a65f"
+VALIDATOR_TREE = "2c945b87b8f5b084ffab02233a033a409aaa642b"
+VALIDATOR_GIT_BLOB = "ce5dc11f65de018fb45f48413e3e1879ff4d8e33"
+VALIDATOR_SHA = "b6b7b249d39a8a6c7312535f220a008d058b9b979a9ee8efffb0ddef127bbc28"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
 RESIDENT_COMMIT = "319d6187b29e877536aa5dfe80c02bde0c77ed7a"
 RESIDENT_SHA = "62f720835de60a61bad0a9aab5b80d778624d4d97ef5c8998e179418dab730f1"
@@ -135,11 +136,11 @@ INPUT_MEMBER_SHA = {
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "f92734a1729066a4b88a86cf818a17122d156cb33a7d44ecec98021d6378106b",
+    "runner-subprocess-evidence.json": "445470a1264ba1133c72077d11f23f6b4ae98d285e4cc4a53fd2dedf4bc41d3d",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "4ea77d00eddb753506f3d01b5759b32d7b073326432212ef9356657d5fe1e9e1",
+    "SHA256SUMS": "8d9a1b5ae67376524677cb2f4bbb6b68ed7d5ae1595ab43bebce8d987e445dd7",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -156,6 +157,18 @@ class AmdProcessSchemaError(LauncherError):
     def __init__(self, diagnostic: dict[str, Any]) -> None:
         self.diagnostic = diagnostic
         super().__init__(f"amd-smi process schema rejected: {diagnostic['reason_code']}")
+
+
+class KfdOwnerScanError(LauncherError):
+    def __init__(self, diagnostic: dict[str, Any]) -> None:
+        self.diagnostic = diagnostic
+        super().__init__(f"KFD owner scan rejected: {diagnostic['reason_code']}")
+
+
+class _KfdEntryDisappeared(Exception):
+    def __init__(self, stage: str, pid: int | None = None) -> None:
+        self.stage = stage
+        self.pid = pid
 
 
 def canonical(value: Any) -> bytes:
@@ -814,23 +827,158 @@ def _service_value(raw: bytes, unit: str) -> dict[str, Any]:
     return {"unit": unit, "active_state": "inactive", "sub_state": "dead", "main_pid": 0}
 
 
-def _kfd_owners(root: Path = KFD_PROC_ROOT) -> list[int]:
+def _kfd_entry_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink)
+
+
+def _kfd_lstat(path: Path, stage: str, pid: int, *, directory: bool) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        raise _KfdEntryDisappeared(stage, pid) from None
+    except OSError as error:
+        diagnostic = {"reason_code": "source_os_error", "stage": stage, "pid": pid, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}
+        raise KfdOwnerScanError(diagnostic) from error
+    expected = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+    if stat.S_ISLNK(metadata.st_mode) or not expected:
+        raise KfdOwnerScanError({"reason_code": "source_type_or_symlink", "stage": stage, "pid": pid, "mode": stat.S_IFMT(metadata.st_mode)})
+    return metadata
+
+
+def _read_kfd_gpuid(path: Path, pid: int) -> tuple[int, dict[str, Any]]:
+    before = _kfd_lstat(path, "gpuid_lstat_before", pid, directory=False)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise _KfdEntryDisappeared("gpuid_open", pid) from None
+    except OSError as error:
+        raise KfdOwnerScanError({"reason_code": "source_os_error", "stage": "gpuid_open", "pid": pid, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+    raw = b""
+    try:
+        opened = os.fstat(descriptor)
+        if _kfd_entry_identity(opened) != _kfd_entry_identity(before) or not stat.S_ISREG(opened.st_mode):
+            raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "gpuid_open", "pid": pid})
+        try:
+            raw = os.read(descriptor, 65)
+            trailing = os.read(descriptor, 1)
+        except FileNotFoundError:
+            if raw:
+                raise KfdOwnerScanError({"reason_code": "source_disappeared_after_partial_read", "stage": "gpuid_read", "pid": pid}) from None
+            raise _KfdEntryDisappeared("gpuid_read", pid) from None
+        except OSError as error:
+            raise KfdOwnerScanError({"reason_code": "source_os_error", "stage": "gpuid_read", "pid": pid, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+    finally:
+        os.close(descriptor)
+    if trailing or len(raw) > 64:
+        raise KfdOwnerScanError({"reason_code": "gpuid_source_exceeds_bound", "stage": "gpuid_read", "pid": pid})
+    after = _kfd_lstat(path, "gpuid_lstat_after", pid, directory=False)
+    if _kfd_entry_identity(after) != _kfd_entry_identity(before):
+        raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "gpuid_lstat_after", "pid": pid})
+    try:
+        text = raw.decode("ascii")
+        if not text.endswith("\n") or not text[:-1].isdigit():
+            raise ValueError
+        gpuid = int(text[:-1])
+    except (UnicodeError, ValueError):
+        raise KfdOwnerScanError({"reason_code": "gpuid_schema_differs", "stage": "gpuid_parse", "pid": pid, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw)}) from None
+    if gpuid <= 0:
+        raise KfdOwnerScanError({"reason_code": "gpuid_schema_differs", "stage": "gpuid_parse", "pid": pid, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw)})
+    return gpuid, {"pid": pid, "raw_sha256": sha_bytes(raw), "raw_bytes": len(raw), "parsed_gpuid": gpuid}
+
+
+def _scan_kfd_owners_once(root: Path, allowed_owners: set[int] | None) -> dict[str, Any]:
+    try:
+        root_metadata = root.stat()
+        names = sorted(os.listdir(root))
+    except OSError as error:
+        raise KfdOwnerScanError({"reason_code": "root_unavailable", "stage": "root_enumeration", "pid": None, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise KfdOwnerScanError({"reason_code": "root_not_directory", "stage": "root_enumeration", "pid": None})
+    if any(not name.isdigit() or int(name) <= 0 for name in names):
+        raise KfdOwnerScanError({"reason_code": "pid_name_schema_differs", "stage": "root_enumeration", "pid": None, "entry_count": len(names)})
     owners: set[int] = set()
-    if not root.is_dir():
-        raise LauncherError("KFD proc root is unavailable")
-    for process in root.iterdir():
-        if not process.name.isdigit() or not process.is_dir():
-            continue
+    sources: list[dict[str, Any]] = []
+    for name in names:
+        pid = int(name)
+        process = root / name
+        process_before = _kfd_lstat(process, "pid_lstat_before", pid, directory=True)
         queues = process / "queues"
-        if not queues.is_dir():
+        queues_before = _kfd_lstat(queues, "queues_lstat_before", pid, directory=True)
+        try:
+            queue_names = sorted(os.listdir(queues))
+        except FileNotFoundError:
+            raise _KfdEntryDisappeared("queues_enumeration", pid) from None
+        except OSError as error:
+            raise KfdOwnerScanError({"reason_code": "source_os_error", "stage": "queues_enumeration", "pid": pid, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+        if any(not queue.isdigit() for queue in queue_names):
+            raise KfdOwnerScanError({"reason_code": "queue_name_schema_differs", "stage": "queues_enumeration", "pid": pid, "entry_count": len(queue_names)})
+        for queue in queue_names:
+            queue_path = queues / queue
+            _kfd_lstat(queue_path, "queue_lstat", pid, directory=True)
+            gpuid, source = _read_kfd_gpuid(queue_path / "gpuid", pid)
+            sources.append(source)
+            if gpuid == KFD_ID:
+                if allowed_owners is not None and pid not in allowed_owners:
+                    raise KfdOwnerScanError({"reason_code": "foreign_owner", "stage": "gpuid_parse", "pid": pid, "raw_sha256": source["raw_sha256"], "raw_bytes": source["raw_bytes"]})
+                owners.add(pid)
+        try:
+            final_queue_names = sorted(os.listdir(queues))
+        except FileNotFoundError:
+            raise _KfdEntryDisappeared("queues_revalidation", pid) from None
+        except OSError as error:
+            raise KfdOwnerScanError({"reason_code": "source_os_error", "stage": "queues_revalidation", "pid": pid, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+        if final_queue_names != queue_names:
+            raise _KfdEntryDisappeared("queue_membership_changed", pid)
+        queues_after = _kfd_lstat(queues, "queues_lstat_after", pid, directory=True)
+        process_after = _kfd_lstat(process, "pid_lstat_after", pid, directory=True)
+        if _kfd_entry_identity(queues_after) != _kfd_entry_identity(queues_before) or _kfd_entry_identity(process_after) != _kfd_entry_identity(process_before):
+            raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "pid_revalidation", "pid": pid})
+    try:
+        final_names = sorted(os.listdir(root))
+        root_after = root.stat()
+    except OSError as error:
+        raise KfdOwnerScanError({"reason_code": "root_unavailable", "stage": "root_revalidation", "pid": None, "errno": error.errno, "errno_name": errno.errorcode.get(error.errno, "UNKNOWN")}) from error
+    if final_names != names:
+        raise _KfdEntryDisappeared("root_membership_changed")
+    if _kfd_entry_identity(root_after) != _kfd_entry_identity(root_metadata):
+        raise KfdOwnerScanError({"reason_code": "source_identity_changed", "stage": "root_revalidation", "pid": None})
+    return {
+        "owners": sorted(owners),
+        "enumerated_pids": [int(name) for name in names],
+        "sources": sources,
+        "root": {"path": str(root), "device": root_metadata.st_dev, "inode": root_metadata.st_ino},
+    }
+
+
+def _kfd_owner_snapshot(root: Path = KFD_PROC_ROOT, *, allowed_owners: set[int] | None = None) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(2):
+        try:
+            result = _scan_kfd_owners_once(root, allowed_owners)
+        except _KfdEntryDisappeared as error:
+            attempts.append({"attempt": attempt, "classification": "entry_disappeared", "stage": error.stage, "pid": error.pid})
             continue
-        for gpuid in queues.glob("*/gpuid"):
-            try:
-                if int(gpuid.read_text().strip()) == KFD_ID:
-                    owners.add(int(process.name))
-            except (OSError, ValueError):
-                raise LauncherError("KFD owner schema differs")
-    return sorted(owners)
+        return {
+            "schema_version": "ullm.aq4_p2_kfd_owner_snapshot.v1",
+            "classification": "stable_after_disappearance" if attempts else "stable",
+            "attempt_count": attempt + 1,
+            "attempts": attempts + [{"attempt": attempt, "classification": "stable", "enumerated_pids_sha256": sha_bytes(canonical(result["enumerated_pids"])), "enumerated_pid_count": len(result["enumerated_pids"])}],
+            "owners": result["owners"],
+            "source_kind": "kernel_sysfs",
+            "root": result["root"],
+            "sources": result["sources"],
+            "secret_material_recorded": False,
+        }
+    raise KfdOwnerScanError({"reason_code": "entries_unstable_after_retry", "stage": attempts[-1]["stage"], "pid": attempts[-1]["pid"], "attempts": attempts})
+
+
+def _kfd_owners(root: Path = KFD_PROC_ROOT) -> list[int]:
+    return _kfd_owner_snapshot(root)["owners"]
+
+
+def _zero_kfd_owner_snapshot() -> dict[str, Any]:
+    return _kfd_owner_snapshot(allowed_owners=set())
 
 
 def validate_amd_smi_tool() -> None:
@@ -872,7 +1020,7 @@ def _lock_gate() -> dict[str, Any]:
     return {"path": str(LOCK_PATH), "free": True, "device": lock_before[0], "inode": lock_before[1]}
 
 
-def collect_execute_gates(*, run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run, environment: dict[str, str] | None = None, kfd_owner_provider: Callable[[], list[int]] = _kfd_owners, lock_provider: Callable[[], dict[str, Any]] = _lock_gate) -> dict[str, Any]:
+def collect_execute_gates(*, run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run, environment: dict[str, str] | None = None, kfd_owner_provider: Callable[[], list[int] | dict[str, Any]] = _zero_kfd_owner_snapshot, lock_provider: Callable[[], dict[str, Any]] = _lock_gate) -> dict[str, Any]:
     environment = dict(os.environ) if environment is None else environment
     controlled = {name: environment.get(name) for name in EXECUTE_ENV}
     if controlled != EXECUTE_ENV:
@@ -932,13 +1080,21 @@ def collect_execute_gates(*, run: Callable[..., subprocess.CompletedProcess[byte
     if static.returncode != 0 or static.stderr or len(gpu_data) != 1 or vram_item.get("gpu") != AMD_SMI_INDEX or size.get("unit") != "MB" or type(size.get("value")) is not int or size["value"] <= 0:
         raise LauncherError("amd-smi VRAM identity differs")
     total_bytes = size["value"] * 1_000_000
-    kfd_owners = kfd_owner_provider()
+    kfd_value = kfd_owner_provider()
+    if isinstance(kfd_value, dict):
+        kfd_owners = kfd_value.get("owners")
+        kfd_source = kfd_value
+    else:
+        kfd_owners = kfd_value
+        kfd_source = None
+    if not isinstance(kfd_owners, list) or any(type(pid) is not int or pid <= 0 for pid in kfd_owners):
+        raise LauncherError("KFD owner provider contract differs")
     if kfd_owners:
         raise LauncherError("target KFD compute owners are not zero")
     lock = lock_provider()
     if not isinstance(lock, dict) or set(lock) != {"path", "free", "device", "inode"} or lock.get("path") != str(LOCK_PATH) or lock.get("free") is not True or type(lock.get("device")) is not int or lock["device"] < 0 or type(lock.get("inode")) is not int or lock["inode"] < 0:
         raise LauncherError("device lock gate contract differs")
-    return {"passed": True, "environment": EXECUTE_ENV, "services": services, "old_worker_pids": [], "runtime_mapping": {"runtime_device_index": DEVICE_INDEX, "visible_token": "1", "amd_smi_index": AMD_SMI_INDEX, "bdf": GPU_BDF, "uuid": GPU_UUID, "kfd_id": KFD_ID, "node_id": matches[0]["node_id"]}, "amd_smi_owners": [], "amd_smi_process": parsed_processes["diagnostic"], "kfd_owners": [], "lock": lock, "vram": {"total_bytes": total_bytes, "used_bytes": 0, "free_bytes": total_bytes, "headroom_bytes": total_bytes}, "probes": probes}
+    return {"passed": True, "environment": EXECUTE_ENV, "services": services, "old_worker_pids": [], "runtime_mapping": {"runtime_device_index": DEVICE_INDEX, "visible_token": "1", "amd_smi_index": AMD_SMI_INDEX, "bdf": GPU_BDF, "uuid": GPU_UUID, "kfd_id": KFD_ID, "node_id": matches[0]["node_id"]}, "amd_smi_owners": [], "amd_smi_process": parsed_processes["diagnostic"], "kfd_owners": [], "kfd_source": kfd_source, "lock": lock, "vram": {"total_bytes": total_bytes, "used_bytes": 0, "free_bytes": total_bytes, "headroom_bytes": total_bytes}, "probes": probes}
 
 
 def _result_inventory(root: Path) -> dict[str, Any]:
@@ -1213,7 +1369,7 @@ def execute_bound(
         evidence["status"] = "passed"
         code = 0
     except (LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
-        if isinstance(error, AmdProcessSchemaError):
+        if isinstance(error, (AmdProcessSchemaError, KfdOwnerScanError)):
             evidence["gate_failure_diagnostic"] = error.diagnostic
         evidence["failure"] = {"stage": stage, "reason": str(error), "runner_started": evidence["process_counts"]["runner"] == 1}
         if runner_output.exists() and not runner_output.is_symlink():
