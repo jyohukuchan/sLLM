@@ -520,6 +520,7 @@ fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
         return Err("result exceeds the bounded size limit".to_string());
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    reject_symlink_components(parent)?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("result parent creation failed: {error}"))?;
     let file_name = path
@@ -549,6 +550,22 @@ fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
     parent_file
         .sync_all()
         .map_err(|error| format!("result parent fsync failed: {error}"))?;
+    Ok(())
+}
+
+fn reject_symlink_components(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "path component is a symlink: {}",
+                    current.display()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -622,6 +639,17 @@ mod tests {
         let dangling = root.join("dangling.json");
         std::os::unix::fs::symlink(root.join("missing.json"), &dangling).unwrap();
         assert!(write_atomic_json(&dangling, &serde_json::json!({"ok": false})).is_err());
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        let linked_dir = root.join("linked");
+        std::os::unix::fs::symlink(&target_dir, &linked_dir).unwrap();
+        assert!(
+            write_atomic_json(
+                &linked_dir.join("result.json"),
+                &serde_json::json!({"ok": false})
+            )
+            .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
