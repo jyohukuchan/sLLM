@@ -1,0 +1,43 @@
+{
+  "dtype": "f32",
+  "holdout": "not_run",
+  "input": {
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-family-isolation-v0.1/runtime-input.jsonl",
+    "rows": 3,
+    "schema": "ullm.aq4_layer0_input_normed_jsonl.v1",
+    "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "shape": [
+      4096
+    ]
+  },
+  "operation": "input_f32_matmul_source_bf16_weight_cast_f32_accumulate_f32",
+  "output": {
+    "bytes": 49152,
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-z-hybrid-fidelity-v0.1/source-z.f32le",
+    "sha256": "a087cb44d8c0f6831167a155fac67b1f8f991f5157fb33af89c51b0b4b497221"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "row_order": "input_jsonl_order",
+  "schema_version": "ullm.aq4_layer0_z_source_sidecar.v1",
+  "shape": [
+    3,
+    4096
+  ],
+  "source": {
+    "index_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors.index.json",
+    "index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "shard_bytes": 3325995712,
+    "shard_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+    "tensor_dtype": "BF16",
+    "tensor_payload_sha256": "d73ab8111d341b251988320567e213cb8d3be9359ce279e76eb2980609d94d90",
+    "tensor_shape": [
+      4096,
+      4096
+    ]
+  },
+  "status": "valid",
+  "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+  "thresholds": null
+}
