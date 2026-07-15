@@ -4,11 +4,11 @@
     "hidden": 4096,
     "row_chunk": 128,
     "rows": 3,
-    "ru_maxrss_kib": 869408,
+    "ru_maxrss_kib": 880336,
     "torch_threads": 1
   },
   "identity": {
-    "binding_manifest_sha256": "6b360a059e7eef0c3f4962919c149702e103de308b1dae43dba27c51f31b646b",
+    "binding_manifest_sha256": "3153546fd419a66cfda521cd4e3558165769e2d2f3786fda7e4092a3f337caea",
     "content_sha256": "b7d5ef6c3e4ebceae9c9dee8e3094c5a29a8d444bdb2ca1170a559c9539a13fc",
     "input_normed": {
       "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/baseline/input-normed.f32le",
@@ -19,7 +19,7 @@
     "source_index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
     "sq_manifest_sha256": "3a3beba37ba617531ac559453eea3251384278b0ef9e4c3640c4a967ca7be63e",
     "tensor_set_sha256": "6fbf047fe19b27a6c9075f06a76fa4bf376ba08ff9d39c84da43461fdf606846",
-    "tool_sha256": "4f5202954e6e355e3b1df65be9283787b6ba305902c53b8a4a5ae5be256b3752"
+    "tool_sha256": "4c9aa57f2fb91e811fe23a63f17a2a41863a90446b6d7ee4367b3a4409d243c0"
   },
   "interpretation": "implementation diagnostic only; no promotion threshold is applied",
   "promotion": false,
