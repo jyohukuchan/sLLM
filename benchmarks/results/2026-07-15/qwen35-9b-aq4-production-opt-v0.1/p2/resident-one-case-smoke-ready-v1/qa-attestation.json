@@ -2,16 +2,16 @@
   "actual_executed": false,
   "automated_tests": {
     "aggregate": {
-      "collected": 345,
+      "collected": 362,
       "deselected": 0,
-      "distinct_test_file_count": 11,
+      "distinct_test_file_count": 12,
       "failed": 0,
-      "passed": 345
+      "passed": 362
     },
     "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
     "suites": [
       {
-        "collected": 255,
+        "collected": 256,
         "command": [
           "python3",
           "-m",
@@ -28,11 +28,11 @@
         "failed": 0,
         "files": [
           {
-            "collected": 50,
-            "git_blob": "faed4cbd7edd36ae89e543d80144290db994c0f2",
-            "passed": 50,
+            "collected": 51,
+            "git_blob": "301b0df899590b28f9b9564866fbda80016580e2",
+            "passed": 51,
             "path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py",
-            "source_commit": "cd764a3ba3ca00d141c2e3aadde162d099a5ce87"
+            "source_commit": "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407"
           },
           {
             "collected": 37,
@@ -57,10 +57,10 @@
           },
           {
             "collected": 58,
-            "git_blob": "ea5c71899b096843902da3b237952fef35592dc6",
+            "git_blob": "f41c5ed91689ab19a99e9fd4b98142505c5f986c",
             "passed": 58,
             "path": "tests/test_launch_aq4_p2_resident_smoke_execute.py",
-            "source_commit": "438e8637c4bb0333ed321e7c6da63681d05a3a5f"
+            "source_commit": "564d3b51d080328415b2e62511b87562469b7734"
           },
           {
             "collected": 76,
@@ -71,7 +71,32 @@
           }
         ],
         "name": "resident_trust_chain",
-        "passed": 255
+        "passed": 256
+      },
+      {
+        "collected": 16,
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "ullm-engine",
+          "--bin",
+          "ullm-aq4-p2-resident-driver",
+          "--no-default-features"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 16,
+            "git_blob": "ea26726e95aeb73b4285fd36ea3f8b0be74578f4",
+            "passed": 16,
+            "path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs",
+            "source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+          }
+        ],
+        "name": "resident_driver_unit",
+        "passed": 16
       },
       {
         "collected": 5,
@@ -198,7 +223,9 @@
     "safety-success-start-failure-partial",
     "validator-runner-finalize-toctou",
     "identity-and-hash-bindings",
-    "worker-exact-two-hardlink-set-pre-open-post-and-rehash",
+    "source-family-and-runtime-gfx-vocabulary-separation",
+    "runtime-device-five-field-exact-binding",
+    "worker-fixture-driven-single-or-two-link-exact-topology-pre-open-post-and-rehash",
     "bounded-driver-stdout-and-streamed-stderr-failure-evidence",
     "driver-process-group-descendant-cleanup-and-secret-redaction",
     "strict-amd-process-active-owner-and-zero-sentinel-schema",
@@ -215,18 +242,18 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "b89acf82e78fc7e236c649ac7bcbd3bbac91e865",
-    "sha256": "35195d815fca42b4705ff0e9001674507a37149b1d70c0bdd183378417e8279c"
+    "commit": "bc382fc04293b8a6a3751ca2ab09b366a5179876",
+    "sha256": "382dca37f2fb5fb398a0c71128a96d58ad7f0d56543c0c418ae09532092ba3b4"
   },
   "manual_checks": {
     "boundary_count": 15,
     "status": "passed"
   },
   "runner": {
-    "commit": "e993016f4a62b9970423223db8702f77ee834b12",
+    "commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
     "sha256": "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
   },
   "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2",
   "status": "passed",
-  "strict_negative_contract_count": 40
+  "strict_negative_contract_count": 43
 }
