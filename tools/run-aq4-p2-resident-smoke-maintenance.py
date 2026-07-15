@@ -67,6 +67,7 @@ PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10"
 PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
 PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v10"
 PROFILE_TIMEOUT_SECONDS = 1800
 PROFILE_CAPTURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
 PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
@@ -3707,7 +3708,7 @@ def _seal_capture_output(root: Path) -> dict[str, Any]:
 
 
 def validate_profile_offline_reassembly(
-    capture_root: Path = PROFILE_OUTPUT_DIRECTORY,
+    capture_root: Path = PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY,
     evidence_root: Path = PROFILE_MAINTENANCE_EVIDENCE,
 ) -> dict[str, Any]:
     seal = actual_v12_seal()
@@ -3827,7 +3828,7 @@ def _capture_output_readback(root: Path) -> dict[str, Any]:
 
 
 def prepare_profile_offline_reassembly(
-    capture_root: Path = PROFILE_OUTPUT_DIRECTORY,
+    capture_root: Path = PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY,
     evidence_root: Path = PROFILE_MAINTENANCE_EVIDENCE,
 ) -> dict[str, Any]:
     if capture_root.exists() or capture_root.is_symlink() or evidence_root.exists() or evidence_root.is_symlink():
@@ -4482,10 +4483,10 @@ def main(argv: list[str] | None = None, *, dependencies: Dependencies | None = N
             raise HarnessError("artifact preparation/validation modes are mutually exclusive")
         if args.prepare_profile_offline_reassembly:
             value = prepare_profile_offline_reassembly()
-            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
+            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
         if args.validate_profile_offline_reassembly:
             value = validate_profile_offline_reassembly()
-            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
+            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
         if args.prepare_ready_artifact or args.prepare_profile_ready_artifact:
             profile = args.prepare_profile_ready_artifact
             value = prepare_ready_artifact(profile_diagnostic=profile)

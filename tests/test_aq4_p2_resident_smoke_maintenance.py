@@ -690,6 +690,9 @@ def test_profile_v13_is_invalid_preoperator_and_future_outputs_are_poststate_ind
     assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v15"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v10"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v10"
+    assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
+    assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.is_symlink()
     invalid_preoperator_v13_roots = (
         base / "p2/resident-one-case-smoke-profile-ready-v13",
         base / "p2/resident-one-case-smoke-profile-ready-dry-run-v13",
@@ -935,6 +938,34 @@ def test_profile_v13_is_invalid_preoperator_and_future_outputs_are_poststate_ind
     assert historical["sha256"] == "58619cb05c13cac5fed392d587c7d9878a53bba6ed02ace15e1c37d5969e99c5"
     value = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64})
     assert value["trust"]["production"]["expected_package_integrity_identity_sha256"] == HARNESS.PACKAGE_INTEGRITY_IDENTITY_SHA
+
+
+def test_offline_reassembly_poststate_does_not_change_canonical_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = {
+        "path": str(SCRIPT),
+        "commit": "1" * 40,
+        "tree": "2" * 40,
+        "git_blob": "3" * 40,
+        "sha256": "4" * 64,
+    }
+    before = HARNESS.ready_document(identity, profile_diagnostic=True)
+    offline = tmp_path / "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v10"
+    monkeypatch.setattr(HARNESS, "PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY", offline)
+    offline.mkdir()
+    (offline / "capture-artifact.json").write_text("{}\n", encoding="ascii")
+    after = HARNESS.ready_document(identity, profile_diagnostic=True)
+    assert after == before
+    assert after["actual_eligible"] is True
+    assert after["profile_diagnostic"]["output"] == {
+        "directory": str(HARNESS.PROFILE_OUTPUT_DIRECTORY),
+        "name": HARNESS.PROFILE_OUTPUT_NAME,
+        "artifact": str(HARNESS.PROFILE_ARTIFACT),
+        "must_not_exist_before_capture": True,
+    }
+    assert str(offline) not in json.dumps(after, sort_keys=True)
 
 
 def test_qa_manifest_strictly_resolves_all_source_commit_path_blobs(
