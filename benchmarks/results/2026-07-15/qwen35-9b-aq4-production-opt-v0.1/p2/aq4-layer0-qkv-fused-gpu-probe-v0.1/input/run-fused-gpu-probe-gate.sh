@@ -63,6 +63,7 @@ MOCK_OBSERVER_LOOP="${MOCK_OBSERVER_LOOP:-0}"
 MOCK_POST_START_READINESS="${MOCK_POST_START_READINESS:-0}"
 POST_START_TIMEOUT_SECONDS="${POST_START_TIMEOUT_SECONDS:-120}"
 POST_START_POLL_SECONDS="${POST_START_POLL_SECONDS:-1}"
+POST_START_MAX_ATTEMPTS="${POST_START_MAX_ATTEMPTS:-512}"
 if [[ "$PREFLIGHT_ONLY" = 1 && "$PREFLIGHT_LOCKED_ONLY" = 1 ]]; then
   echo "preflight modes are mutually exclusive" >&2
   exit 64
@@ -452,6 +453,34 @@ cleanup_lock_substrate() {
 post_start_monotonic_ns() {
   "$PYTHON" -c 'import time; print(time.monotonic_ns())'
 }
+post_start_validate_settings() {
+  "$PYTHON" - "$POST_START_TIMEOUT_SECONDS" "$POST_START_POLL_SECONDS" "$POST_START_MAX_ATTEMPTS" <<'PY'
+import math
+import sys
+
+timeout_raw, poll_raw, attempts_raw = sys.argv[1:]
+if not timeout_raw.isascii() or not timeout_raw.isdecimal() or not 1 <= int(timeout_raw) <= 3600:
+    raise SystemExit(1)
+try:
+    poll = float(poll_raw)
+except ValueError:
+    raise SystemExit(1)
+if not math.isfinite(poll) or poll <= 0:
+    raise SystemExit(1)
+if not attempts_raw.isascii() or not attempts_raw.isdecimal() or not 1 <= int(attempts_raw) <= 512:
+    raise SystemExit(1)
+PY
+}
+post_start_create_log() {
+  "$PYTHON" - "$POST_START_READINESS_LOG" <<'PY'
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+os.fchmod(fd, 0o644)
+os.close(fd)
+PY
+}
 post_start_json_map() {
   "$PYTHON" - "$@" <<'PY'
 import json
@@ -469,7 +498,8 @@ post_start_record_attempt() {
   local attempt="$1" elapsed_ns="$2" status="$3" conditions_json="$4" failures_json="$5"
   "$PYTHON" - "$POST_START_READINESS_LOG" "$attempt" "$elapsed_ns" "$status" "$conditions_json" "$failures_json" <<'PY'
 import json
-import pathlib
+import os
+import stat
 import sys
 
 path, attempt, elapsed_ns, status, conditions, failures = sys.argv[1:]
@@ -480,19 +510,28 @@ record = {
     "conditions": json.loads(conditions),
     "failure_reasons": json.loads(failures),
 }
-with pathlib.Path(path).open("a", encoding="utf-8") as stream:
-    stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+flags = os.O_WRONLY | os.O_APPEND
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags)
+metadata = os.fstat(fd)
+if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o644:
+    os.close(fd)
+    raise SystemExit(1)
+with os.fdopen(fd, "ab") as stream:
+    stream.write(raw)
 PY
 }
 post_start_write_artifact() {
   local result="$1" attempt_count="$2" elapsed_ns="$3" deadline_ns="$4" last_failure_json="$5" safety_json="$6"
-  "$PYTHON" - "$POST_START_READINESS_ARTIFACT" "$POST_START_READINESS_LOG" "$result" "$attempt_count" "$elapsed_ns" "$deadline_ns" "$last_failure_json" "$safety_json" <<'PY'
+  "$PYTHON" - "$POST_START_READINESS_ARTIFACT" "$POST_START_READINESS_LOG" "$result" "$attempt_count" "$elapsed_ns" "$deadline_ns" "$last_failure_json" "$safety_json" "$POST_START_TIMEOUT_SECONDS" "$POST_START_POLL_SECONDS" "$POST_START_MAX_ATTEMPTS" <<'PY'
 import json
 import os
 import pathlib
 import sys
 
-artifact, log_path, result, attempt_count, elapsed_ns, deadline_ns, last_failure, safety = sys.argv[1:]
+artifact, log_path, result, attempt_count, elapsed_ns, deadline_ns, last_failure, safety, timeout_seconds, poll_seconds, max_attempts = sys.argv[1:]
 log = pathlib.Path(log_path)
 attempts = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
 last = json.loads(last_failure)
@@ -502,6 +541,11 @@ payload = {
     "attempt_count": int(attempt_count),
     "elapsed_ns": int(elapsed_ns),
     "deadline_ns": int(deadline_ns),
+    "limits": {
+        "timeout_seconds": int(timeout_seconds),
+        "poll_seconds": float(poll_seconds),
+        "max_attempts": int(max_attempts),
+    },
     "predicate_order": [
         "service_active",
         "service_running",
@@ -537,21 +581,32 @@ PY
 )"
   [[ "$sleep_for" = 0 ]] || sleep "$sleep_for"
 }
+post_start_bounded_timeout() {
+  "$PYTHON" - "$1" "$2" <<'PY'
+import sys
+
+remaining_ns = int(sys.argv[1])
+cap_seconds = float(sys.argv[2])
+if remaining_ns <= 0:
+    raise SystemExit(1)
+print(min(cap_seconds, remaining_ns / 1_000_000_000))
+PY
+}
 post_start_check_mock() {
   local start_ns deadline_ns now_ns end_ns attempt=0
   local owner_failures="${MOCK_POST_START_OWNER_FAILURES:-0}"
   local health_failures="${MOCK_POST_START_HEALTH_FAILURES:-0}"
   local force_timeout="${MOCK_POST_START_FORCE_TIMEOUT:-0}"
-  local last_failure_json='{}' conditions_json failures_json
+  local last_failure_json='{}' conditions_json failures_json terminal_status=deadline_timeout
   [[ "$owner_failures" =~ ^[0-9]+$ && "$health_failures" =~ ^[0-9]+$ ]] || return 1
-  [[ "$POST_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$POST_START_POLL_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
-  : > "$POST_START_READINESS_LOG" || return 1
+  post_start_validate_settings || return 1
+  post_start_create_log || return 1
   start_ns="$(post_start_monotonic_ns)" || return 1
   deadline_ns=$((start_ns + POST_START_TIMEOUT_SECONDS * 1000000000))
   while :; do
     now_ns="$(post_start_monotonic_ns)" || return 1
-    if (( attempt > 0 && now_ns >= deadline_ns )); then break; fi
+    if (( now_ns >= deadline_ns )); then terminal_status=deadline_timeout; break; fi
+    if (( attempt >= POST_START_MAX_ATTEMPTS )); then terminal_status=attempt_limit; break; fi
     attempt=$((attempt + 1))
     local failures=() conditions=(
       "service_active=true" "service_running=true" "new_main_pid=true"
@@ -565,9 +620,10 @@ post_start_check_mock() {
       health_ok=false; failures+=("health_200=synthetic HTTP status was not 200")
     fi
     conditions+=("owner=$owner_ok" "health_200=$health_ok")
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    if (( now_ns >= deadline_ns )); then failures+=("deadline=attempt completed at or after absolute deadline"); fi
     conditions_json="$(post_start_json_map "${conditions[@]}")" || return 1
     failures_json="$(post_start_json_map "${failures[@]}")" || return 1
-    now_ns="$(post_start_monotonic_ns)" || return 1
     local elapsed_ns=$((now_ns - start_ns)) status=passed
     (( ${#failures[@]} == 0 )) || status=retry
     post_start_record_attempt "$attempt" "$elapsed_ns" "$status" "$conditions_json" "$failures_json" || return 1
@@ -580,28 +636,29 @@ post_start_check_mock() {
     fi
     last_failure_json="$failures_json"
     now_ns="$(post_start_monotonic_ns)" || return 1
-    (( now_ns >= deadline_ns )) && break
+    if (( now_ns >= deadline_ns )); then terminal_status=deadline_timeout; break; fi
+    if (( attempt >= POST_START_MAX_ATTEMPTS )); then terminal_status=attempt_limit; break; fi
     post_start_sleep "$((deadline_ns - now_ns))" || return 1
   done
   end_ns="$(post_start_monotonic_ns)" || return 1
-  post_start_write_artifact deadline_timeout "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
+  post_start_write_artifact "$terminal_status" "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
     '{"additional_gpu_probe_executed":false,"additional_probe_executed":false,"systemctl_operations":0}' || return 1
-  echo "mock_post_start_readiness=1 status=deadline_timeout attempts=$attempt elapsed_ns=$((end_ns - start_ns)) gpu_probe=0 systemctl_operations=0" >&2
+  echo "mock_post_start_readiness=1 status=$terminal_status attempts=$attempt elapsed_ns=$((end_ns - start_ns)) gpu_probe=0 systemctl_operations=0" >&2
   return 1
 }
 post_start_check() {
   [[ "$MOCK_POST_START_READINESS" = 1 ]] && { post_start_check_mock; return $?; }
   local start_ns deadline_ns now_ns end_ns attempt=0
-  local new_pid new_restarts active_state sub_state current_hashes lock_stat lock_rc owner health_code
-  local last_failure_json='{}' conditions_json failures_json
-  [[ "$POST_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$POST_START_POLL_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
-  : > "$POST_START_READINESS_LOG" || return 1
+  local new_pid new_restarts active_state sub_state current_hashes lock_stat lock_rc owner health_code curl_timeout
+  local last_failure_json='{}' conditions_json failures_json terminal_status=deadline_timeout
+  post_start_validate_settings || return 1
+  post_start_create_log || return 1
   start_ns="$(post_start_monotonic_ns)" || return 1
   deadline_ns=$((start_ns + POST_START_TIMEOUT_SECONDS * 1000000000))
   while :; do
     now_ns="$(post_start_monotonic_ns)" || return 1
-    if (( attempt > 0 && now_ns >= deadline_ns )); then break; fi
+    if (( now_ns >= deadline_ns )); then terminal_status=deadline_timeout; break; fi
+    if (( attempt >= POST_START_MAX_ATTEMPTS )); then terminal_status=attempt_limit; break; fi
     attempt=$((attempt + 1))
     local failures=() conditions=()
     active_state="$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null || true)"
@@ -627,11 +684,18 @@ post_start_check() {
       owner="$(sudo -n -- /usr/bin/sh -c 'for f in /proc/'"$new_pid"'/fd/*; do [ "$(readlink "$f" 2>/dev/null)" = "'"$LOCK"'" ] && echo found && exit 0; done; exit 1' 2>/dev/null || true)"
     fi
     if [[ "$owner" = found ]]; then conditions+=("owner=true"); else conditions+=("owner=false"); failures+=("owner=expected new MainPID to hold lock fd"); fi
-    health_code="$(/usr/bin/curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 http://127.0.0.1:3000/health 2>/dev/null || true)"
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    if (( now_ns < deadline_ns )); then
+      curl_timeout="$(post_start_bounded_timeout "$((deadline_ns - now_ns))" 5)" || return 1
+      health_code="$(/usr/bin/curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout "$curl_timeout" --max-time "$curl_timeout" http://127.0.0.1:3000/health 2>/dev/null || true)"
+    else
+      health_code="deadline-exhausted"
+    fi
     if [[ "$health_code" = 200 ]]; then conditions+=("health_200=true"); else conditions+=("health_200=false"); failures+=("health_200=expected HTTP 200 got ${health_code:-no response}"); fi
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    if (( now_ns >= deadline_ns )); then failures+=("deadline=attempt completed at or after absolute deadline"); fi
     conditions_json="$(post_start_json_map "${conditions[@]}")" || return 1
     failures_json="$(post_start_json_map "${failures[@]}")" || return 1
-    now_ns="$(post_start_monotonic_ns)" || return 1
     local elapsed_ns=$((now_ns - start_ns)) status=passed
     (( ${#failures[@]} == 0 )) || status=retry
     post_start_record_attempt "$attempt" "$elapsed_ns" "$status" "$conditions_json" "$failures_json" || return 1
@@ -644,13 +708,14 @@ post_start_check() {
     fi
     last_failure_json="$failures_json"
     now_ns="$(post_start_monotonic_ns)" || return 1
-    (( now_ns >= deadline_ns )) && break
+    if (( now_ns >= deadline_ns )); then terminal_status=deadline_timeout; break; fi
+    if (( attempt >= POST_START_MAX_ATTEMPTS )); then terminal_status=attempt_limit; break; fi
     post_start_sleep "$((deadline_ns - now_ns))" || return 1
   done
   end_ns="$(post_start_monotonic_ns)" || return 1
-  post_start_write_artifact deadline_timeout "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
+  post_start_write_artifact "$terminal_status" "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
     '{"additional_gpu_probe_executed":false,"additional_probe_executed":false}' || return 1
-  echo "post_start_readiness=deadline_timeout attempts=$attempt elapsed_ns=$((end_ns - start_ns))" >&2
+  echo "post_start_readiness=$terminal_status attempts=$attempt elapsed_ns=$((end_ns - start_ns))" >&2
   return 1
 }
 restore_after_failure() {

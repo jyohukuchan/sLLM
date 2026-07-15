@@ -44,6 +44,12 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 - `$ATTEMPT_ROOT/post-start-readiness.jsonl`へattemptごとの条件結果とfailure reasonを追記し、成功またはdeadline timeout時に`post-start-readiness.json`（schema `ullm.aq4_layer0_qkv_fused_gpu_post_start_readiness.v1`）をcreate-new保存する。成功artifactはattempt数・elapsed、timeout artifactは期限・attempt数・最終failed subcondition理由を保持し、追加GPU/probeを実行しないことを`safety`へ記録する。health predicateはcurlのHTTP statusを厳密に`200`へ固定した。
 - GPU/serviceに触れない`MOCK_POST_START_READINESS=1`経路を追加し、ownerとhealthの初回失敗後の成功（2 attempts）、期限切れrc1、timeout後の追加GPU/probeなし、epoch/hash/lock predicate保持をテストで確認した。`bash -n`、fused/standalone gate tests（12 tests）、post-start test、`git diff --check`を実行した。GPU kernel実行、service stop/start、systemctl実測、promotionは行っていない。
 
+## post-start readiness 独立監査修正（2026-07-15）
+
+- JSONLはshellのtruncate作成を廃止し、Pythonの`os.open(O_WRONLY|O_CREAT|O_EXCL, 0644)`と`fchmod(0644)`でcreate-newする。各attemptは`O_WRONLY|O_APPEND|O_NOFOLLOW`で開き、regular file、nlink=1、mode=0644をfd上で再検証してから追記する。既存pathはpreflightとcreate-newの両方で拒否し、既存内容を変更しない。
+- `POST_START_POLL_SECONDS`はfiniteかつ正数だけを受理する。timeoutは1〜3600秒、attempt上限は1〜512（既定512）へfail closedで制限し、上限到達時は`attempt_limit` artifactを保存する。各attemptは開始前と完了時にabsolute deadlineを検査し、health curlのconnect/max timeoutは実行直前のdeadline残時間と5秒の小さい方へ拘束する。
+- 既存JSONL拒否・非正数/nonfinite poll拒否・attempt 2件上限をmock testsへ追加した。fused/standalone gate testsは15件すべて成功し、`bash -n`、`py_compile`、fresh mock preflight、`git diff --check`を実行した。GPU kernel、service、systemctlは実行していない。
+
 ## 次の行動
 
-attempt3のGPU/output/observer/復旧証跡、閾値なし比較成果物、期限付きpost-start readiness診断を限定commitとして保存する。GPU/serviceの再実行・promotionは行わない。
+attempt3のGPU/output/observer/復旧証跡、閾値なし比較成果物、監査修正済みの期限付きpost-start readiness診断を限定commitとして保存する。GPU/serviceの再実行・promotionは行わない。

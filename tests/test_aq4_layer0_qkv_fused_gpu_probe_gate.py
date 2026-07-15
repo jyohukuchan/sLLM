@@ -45,9 +45,12 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             'ROCM_SMI_STATIC_ARGS=(static -g "$EXPECTED_PHYSICAL_CARD" -a --json)',
             'target_graphics_version', 'mem_usage',
             'POST_START_TIMEOUT_SECONDS="${POST_START_TIMEOUT_SECONDS:-120}"',
+            'POST_START_MAX_ATTEMPTS="${POST_START_MAX_ATTEMPTS:-512}"',
             'post_start_readiness.v1', 'post_start_record_attempt',
             'post_start_check_mock', 'deadline_timeout', 'health_200',
             'additional_gpu_probe_executed', 'systemctl_operations',
+            'os.O_WRONLY | os.O_CREAT | os.O_EXCL', 'os.O_WRONLY | os.O_APPEND',
+            '--connect-timeout "$curl_timeout" --max-time "$curl_timeout"',
         ):
             self.assertIn(token, text)
         self.assertNotIn("--showmeminfo", text)
@@ -253,6 +256,61 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertFalse(artifact["safety"]["additional_probe_executed"])
             self.assertEqual(artifact["safety"]["systemctl_operations"], 0)
             self.assertFalse((base / "attempts/attempt1/output").exists())
+
+    def test_mock_post_start_rejects_existing_jsonl_without_truncation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ullm-aq4-post-start-existing-") as directory:
+            base = Path(directory)
+            existing = base / "existing-readiness.jsonl"
+            original = b"existing evidence must remain\n"
+            existing.write_bytes(original)
+            env = self._mock_post_start_env(base, POST_START_READINESS_LOG=str(existing))
+            result = subprocess.run(
+                ["bash", str(GATE)], env=env, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("refusing to overwrite existing path", result.stderr)
+            self.assertEqual(existing.read_bytes(), original)
+            self.assertFalse((base / "attempts/attempt1/post-start-readiness.json").exists())
+
+    def test_mock_post_start_rejects_nonpositive_or_nonfinite_poll(self) -> None:
+        for poll in ("0", "-0.1", "nan", "inf"):
+            with self.subTest(poll=poll), tempfile.TemporaryDirectory(
+                prefix="ullm-aq4-post-start-poll-"
+            ) as directory:
+                base = Path(directory)
+                env = self._mock_post_start_env(base, POST_START_POLL_SECONDS=poll)
+                result = subprocess.run(
+                    ["bash", str(GATE)], env=env, text=True, capture_output=True, check=False
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse((base / "attempts/attempt1/post-start-readiness.jsonl").exists())
+
+    def test_mock_post_start_attempt_limit_bounds_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ullm-aq4-post-start-limit-") as directory:
+            base = Path(directory)
+            env = self._mock_post_start_env(
+                base,
+                MOCK_POST_START_FORCE_TIMEOUT="1",
+                POST_START_TIMEOUT_SECONDS="10",
+                POST_START_POLL_SECONDS="0.01",
+                POST_START_MAX_ATTEMPTS="2",
+            )
+            result = subprocess.run(
+                ["bash", str(GATE)], env=env, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("status=attempt_limit attempts=2", result.stderr)
+            attempt_root = base / "attempts/attempt1"
+            artifact = json.loads(
+                (attempt_root / "post-start-readiness.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(artifact["status"], "attempt_limit")
+            self.assertEqual(artifact["attempt_count"], 2)
+            self.assertEqual(artifact["limits"]["max_attempts"], 2)
+            lines = (attempt_root / "post-start-readiness.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(len(lines), 2)
 
     def test_restore_attempts_service_start_after_cleanup_failure(self) -> None:
         text = GATE.read_text(encoding="utf-8")
