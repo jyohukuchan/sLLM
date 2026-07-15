@@ -191,7 +191,9 @@ def _validate_v1_entry(entry: Any, index: int) -> None:
             or entry.get("actual") != "not_executed"
             or source.get("verdict") != entry["verdict"]
             or source.get("actual") != entry["actual"]
-            or source.get("authorization", {}).get("eligible_for_fresh_authorization_builder")
+            or source.get("authorization", {}).get(
+                "eligible_for_fresh_authorization_builder"
+            )
             is not True
         ):
             raise LineageError("implementation GO entry differs")
@@ -203,9 +205,7 @@ def _validate_v1_entry(entry: Any, index: int) -> None:
             or not isinstance(entry.get("reason_codes"), list)
             or len(entry["reason_codes"]) == 0
             or len(set(entry["reason_codes"])) != len(entry["reason_codes"])
-            or not all(
-                isinstance(code, str) and code for code in entry["reason_codes"]
-            )
+            or not all(isinstance(code, str) and code for code in entry["reason_codes"])
             or source.get("verdict") != entry["verdict"]
             or source.get("actual") != entry["actual"]
             or source.get("reason_codes") != entry["reason_codes"]
@@ -294,8 +294,7 @@ def _validate_v1_manifest(
         raise LineageError("authorization lineage manifest keys differ")
     if (
         document.get("schema_version") != MANIFEST_SCHEMA_V1
-        or document.get("disposition")
-        != "authorization_input_not_yet_runtime_bound"
+        or document.get("disposition") != "authorization_input_not_yet_runtime_bound"
     ):
         raise LineageError("authorization lineage manifest state differs")
     _validate_source(document.get("source"), expected_source)
@@ -349,7 +348,8 @@ def _migrated_v1_entries(validated: dict[str, Any]) -> list[dict[str, Any]]:
             request_id = candidate if isinstance(candidate, str) else None
         source_commit = _entry_commit(source, schema)
         if (
-            status not in {
+            status
+            not in {
                 "implementation_ready",
                 "implementation_no_go",
                 "actual_failed",
@@ -485,7 +485,8 @@ def _validate_v2_manifest(
         raise LineageError("authorization lineage v2 entries differ")
     paths: set[str] = set()
     digests: set[str] = set()
-    current: list[dict[str, str]] = []
+    current: list[tuple[int, str, dict[str, str]]] = []
+    current_sources: set[str] = set()
     counts = {
         "capture_implementation_no_go": 0,
         "restore_implementation_no_go": 0,
@@ -499,13 +500,25 @@ def _validate_v2_manifest(
         digests.add(entry["sha256"])
         relation = entry["relation"]
         if relation == "implementation_ready_current":
-            current.append({"path": entry["path"], "sha256": entry["sha256"]})
-            if entry["source_commit"] != document["source"]["commit"]:
-                raise LineageError("current implementation GO source differs")
+            if entry["source_commit"] in current_sources:
+                raise LineageError("current implementation GO source is duplicated")
+            current_sources.add(entry["source_commit"])
+            current.append(
+                (
+                    index,
+                    entry["source_commit"],
+                    {"path": entry["path"], "sha256": entry["sha256"]},
+                )
+            )
         if relation in counts:
             counts[relation] += 1
-    if len(current) != 1:
-        raise LineageError("exactly one current implementation GO is required")
+    if not current:
+        raise LineageError("at least one current implementation GO is required")
+    current_index, current_source, current_identity = current[-1]
+    if current_index != len(entries) - 1:
+        raise LineageError("latest current implementation GO must be the final entry")
+    if current_source != document["source"]["commit"]:
+        raise LineageError("current implementation GO source differs")
     if (
         counts["capture_implementation_no_go"] < 2
         or counts["restore_implementation_no_go"] < 1
@@ -514,7 +527,7 @@ def _validate_v2_manifest(
         raise LineageError("authorization lineage v2 minimum history differs")
     if (
         expected_current_implementation_audit is not None
-        and current[0] != expected_current_implementation_audit
+        and current_identity != expected_current_implementation_audit
     ):
         raise LineageError("current implementation GO receipt binding differs")
 
@@ -553,8 +566,7 @@ def _validate_v2_manifest(
             or len(entries) != len(migrated) + 2
             or entries[: len(migrated)] != migrated
             or entries[6]["relation"] != "actual_failure"
-            or entries[6]["source_commit"]
-            != previous_source["commit"]
+            or entries[6]["source_commit"] != previous_source["commit"]
             or latest_failure.get("source_provenance")
             != {
                 "tree_sha256": previous_source["tree_oid"],
@@ -582,8 +594,13 @@ def _validate_v2_manifest(
             predecessor.get("sha256") != previous["sha256"]
             or predecessor.get("entries_sha256") != previous["entries_sha256"]
             or predecessor.get("entry_count") != previous["entry_count"]
-            or len(entries) <= previous["entry_count"]
+            or len(entries) != previous["entry_count"] + 2
             or entries[: previous["entry_count"]] != previous["document"]["entries"]
+            or entries[previous["entry_count"]]["relation"] != "actual_failure"
+            or entries[previous["entry_count"]]["source_commit"]
+            != previous["document"]["source"]["commit"]
+            or entries[previous["entry_count"] + 1]["relation"]
+            != "implementation_ready_current"
         ):
             raise LineageError("authorization lineage is not append-only")
 
@@ -593,7 +610,7 @@ def _validate_v2_manifest(
         identity,
         document,
         authorization_eligible=True,
-        current_implementation_audit=current[0],
+        current_implementation_audit=current_identity,
     )
 
 
@@ -666,7 +683,10 @@ def validate_reference(
         raise LineageError("authorization lineage reference schema differs")
     input_path = Path(str(value.get("input_path", "")))
     runtime_path = Path(str(value.get("runtime_path", "")))
-    if expected_runtime_path is not None and runtime_path != expected_runtime_path.resolve():
+    if (
+        expected_runtime_path is not None
+        and runtime_path != expected_runtime_path.resolve()
+    ):
         raise LineageError("authorization lineage runtime path differs")
     validated = validate_manifest(input_path)
     runtime = validate_manifest(runtime_path)

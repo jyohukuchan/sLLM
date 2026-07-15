@@ -71,7 +71,7 @@ def test_promotion_authorization_audit_is_optional_and_typed(tmp_path: Path) -> 
     assert loaded.promotion.authorization_audit is None
 
     audit = path.parent / "authorization-audit.json"
-    audit.write_text("{\"verdict\":\"implementation_ready\"}\n", encoding="ascii")
+    audit.write_text('{"verdict":"implementation_ready"}\n', encoding="ascii")
     audit.chmod(0o444)
     value["promotion"]["authorization_audit"] = {
         "path": str(audit.resolve()),
@@ -94,7 +94,8 @@ def test_promotion_authorization_lineage_is_optional_typed_and_rehashed(
         "schema_version": "ullm.sq8_authorization_lineage_input.v1",
         "disposition": "authorization_input_not_yet_runtime_bound",
         "source": {
-            "commit": "a" * 40, "tree_oid": "b" * 40,
+            "commit": "a" * 40,
+            "tree_oid": "b" * 40,
             "archive_sha256": "c" * 64,
         },
         "entries": [{"index": index} for index in range(6)],
@@ -106,8 +107,11 @@ def test_promotion_authorization_lineage_is_optional_typed_and_rehashed(
         lineage_path.chmod(0o444)
     entries_sha256 = hashlib.sha256(
         json.dumps(
-            lineage["entries"], ensure_ascii=True, allow_nan=False,
-            separators=(",", ":"), sort_keys=True,
+            lineage["entries"],
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("ascii")
     ).hexdigest()
     value["promotion"]["authorization_lineage"] = {
@@ -140,8 +144,11 @@ def _publish_lineage(path: Path, value: Any) -> str:
 def _entries_sha(entries: list[Any]) -> str:
     return hashlib.sha256(
         json.dumps(
-            entries, ensure_ascii=True, allow_nan=False,
-            separators=(",", ":"), sort_keys=True,
+            entries,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("ascii")
     ).hexdigest()
 
@@ -149,41 +156,50 @@ def _entries_sha(entries: list[Any]) -> str:
 def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     request = "sq8-promotion-" + "9" * 64
     v1_source = {
-        "commit": "a" * 40, "tree_oid": "2" * 40,
+        "commit": "a" * 40,
+        "tree_oid": "2" * 40,
         "archive_sha256": "3" * 64,
     }
     source_receipts = [
         {
             "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
-            "verdict": "implementation_ready", "actual": "not_executed",
+            "verdict": "implementation_ready",
+            "actual": "not_executed",
             "audited_source": {"commit": "0" * 40},
             "authorization": {"eligible_for_fresh_authorization_builder": True},
         },
         {
             "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
-            "verdict": "implementation_no_go", "actual": "not_executed",
-            "audited_source": {"commit": "1" * 40}, "reason_codes": ["first"],
+            "verdict": "implementation_no_go",
+            "actual": "not_executed",
+            "audited_source": {"commit": "1" * 40},
+            "reason_codes": ["first"],
         },
         {
             "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
-            "verdict": "implementation_no_go", "actual": "not_executed",
-            "audited_source": {"commit": "2" * 40}, "reason_codes": ["second"],
+            "verdict": "implementation_no_go",
+            "actual": "not_executed",
+            "audited_source": {"commit": "2" * 40},
+            "reason_codes": ["second"],
         },
         {
             "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
-            "status": "actual_failed", "request_id": request,
+            "status": "actual_failed",
+            "request_id": request,
             "source_commit": "3" * 40,
             "actual": {"status": "failed", "request_id": request},
         },
         {
             "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
-            "status": "actual_failed", "request_id": request,
+            "status": "actual_failed",
+            "request_id": request,
             "source_commit": "4" * 40,
             "actual": {"status": "failed", "request_id": request},
         },
         {
             "schema_version": "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
-            "verdict": "implementation_no_go", "actual": "not_executed",
+            "verdict": "implementation_no_go",
+            "actual": "not_executed",
             "audited_source": {"commit": "5" * 40},
             "fixed_request_id": request,
             "reason_code": "restore_retry_terminal_identity_not_fail_closed",
@@ -198,8 +214,11 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
         "superseded_restore_implementation_no_go",
     )
     migrated_relations = (
-        "historical_implementation_audit", "capture_implementation_no_go",
-        "capture_implementation_no_go", "actual_failure", "actual_failure",
+        "historical_implementation_audit",
+        "capture_implementation_no_go",
+        "capture_implementation_no_go",
+        "actual_failure",
+        "actual_failure",
         "restore_implementation_no_go",
     )
     v1_entries = []
@@ -210,29 +229,38 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
         receipt_path = (tmp_path / f"v1-entry-{sequence}.json").resolve()
         digest = _publish_lineage(receipt_path, receipt)
         entry = {
-            "relation": relation, "path": str(receipt_path), "sha256": digest,
+            "relation": relation,
+            "path": str(receipt_path),
+            "sha256": digest,
             "schema_version": receipt["schema_version"],
-            "consumed": sequence != 0, "reusable_as_runtime_authorization": False,
+            "consumed": sequence != 0,
+            "reusable_as_runtime_authorization": False,
         }
         if sequence == 0:
             entry.update(verdict="implementation_ready", actual="not_executed")
         elif sequence in {1, 2}:
             entry.update(
-                verdict="implementation_no_go", actual="not_executed",
+                verdict="implementation_no_go",
+                actual="not_executed",
                 reason_codes=receipt["reason_codes"],
             )
         elif sequence in {3, 4}:
-            entry.update(status="actual_failed", actual_status="failed", request_id=request)
+            entry.update(
+                status="actual_failed", actual_status="failed", request_id=request
+            )
         else:
             entry.update(
-                verdict="implementation_no_go", actual="not_executed",
+                verdict="implementation_no_go",
+                actual="not_executed",
                 reason_code="restore_retry_terminal_identity_not_fail_closed",
             )
         v1_entries.append(entry)
         migrated.append(
             {
-                "sequence": sequence, "relation": migrated_relation,
-                "path": str(receipt_path), "sha256": digest,
+                "sequence": sequence,
+                "relation": migrated_relation,
+                "path": str(receipt_path),
+                "sha256": digest,
                 "schema_version": receipt["schema_version"],
                 "status": receipt.get("status", receipt.get("verdict")),
                 "request_id": request if sequence in {3, 4, 5} else None,
@@ -244,14 +272,16 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     v1 = {
         "schema_version": "ullm.sq8_authorization_lineage_input.v1",
         "disposition": "authorization_input_not_yet_runtime_bound",
-        "source": v1_source, "entries": v1_entries,
+        "source": v1_source,
+        "entries": v1_entries,
     }
     v1_path = (tmp_path / "lineage-v1.json").resolve()
     v1_sha = _publish_lineage(v1_path, v1)
     latest_request = "sq8-promotion-" + "6" * 64
     latest = {
         "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
-        "status": "actual_failed", "request_id": latest_request,
+        "status": "actual_failed",
+        "request_id": latest_request,
         "source_commit": v1_source["commit"],
         "source_provenance": {
             "tree_sha256": v1_source["tree_oid"],
@@ -263,16 +293,21 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     latest_sha = _publish_lineage(latest_path, latest)
     migrated.append(
         {
-            "sequence": 6, "relation": "actual_failure", "path": str(latest_path),
-            "sha256": latest_sha, "schema_version": latest["schema_version"],
-            "status": "actual_failed", "request_id": latest_request,
+            "sequence": 6,
+            "relation": "actual_failure",
+            "path": str(latest_path),
+            "sha256": latest_sha,
+            "schema_version": latest["schema_version"],
+            "status": "actual_failed",
+            "request_id": latest_request,
             "source_commit": v1_source["commit"],
         }
     )
     current_commit = "b" * 40
     current = {
         "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
-        "verdict": "implementation_ready", "actual": "not_executed",
+        "verdict": "implementation_ready",
+        "actual": "not_executed",
         "audited_source": {"commit": current_commit},
         "authorization": {"eligible_for_fresh_authorization_builder": True},
     }
@@ -280,10 +315,13 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     current_sha = _publish_lineage(current_path, current)
     migrated.append(
         {
-            "sequence": 7, "relation": "implementation_ready_current",
-            "path": str(current_path), "sha256": current_sha,
+            "sequence": 7,
+            "relation": "implementation_ready_current",
+            "path": str(current_path),
+            "sha256": current_sha,
             "schema_version": current["schema_version"],
-            "status": "implementation_ready", "request_id": None,
+            "status": "implementation_ready",
+            "request_id": None,
             "source_commit": current_commit,
         }
     )
@@ -291,12 +329,14 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
         "schema_version": "ullm.sq8_authorization_lineage_input.v2",
         "disposition": "authorization_input_not_yet_runtime_bound",
         "source": {
-            "commit": current_commit, "tree_oid": "c" * 40,
+            "commit": current_commit,
+            "tree_oid": "c" * 40,
             "archive_sha256": "d" * 64,
         },
         "predecessor": {
             "schema_version": "ullm.sq8_authorization_lineage_input.v1",
-            "path": str(v1_path), "sha256": v1_sha,
+            "path": str(v1_path),
+            "sha256": v1_sha,
             "migrated_prefix_sha256": _entries_sha(migrated[:6]),
             "migrated_prefix_count": 6,
         },
@@ -308,16 +348,23 @@ def _first_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     assert _publish_lineage(runtime_path, lineage) == lineage_sha
     reference = {
         "schema_version": "ullm.sq8_authorization_lineage_ref.v2",
-        "input_path": str(input_path), "runtime_path": str(runtime_path),
-        "sha256": lineage_sha, "entries_sha256": _entries_sha(migrated),
+        "input_path": str(input_path),
+        "runtime_path": str(runtime_path),
+        "sha256": lineage_sha,
+        "entries_sha256": _entries_sha(migrated),
         "entry_count": 8,
         "current_implementation_audit": {
-            "path": str(current_path), "sha256": current_sha,
+            "path": str(current_path),
+            "sha256": current_sha,
         },
     }
     return {
-        "lineage": lineage, "reference": reference, "v1": v1,
-        "v1_path": v1_path, "input_path": input_path, "runtime_path": runtime_path,
+        "lineage": lineage,
+        "reference": reference,
+        "v1": v1,
+        "v1_path": v1_path,
+        "input_path": input_path,
+        "runtime_path": runtime_path,
     }
 
 
@@ -372,9 +419,7 @@ def test_first_v2_migration_predecessor_shape_fails_closed(
 
 
 @pytest.mark.parametrize("field", ["commit", "tree_oid", "archive_sha256"])
-def test_first_v2_migration_rejects_v1_source_spoof(
-    tmp_path: Path, field: str
-) -> None:
+def test_first_v2_migration_rejects_v1_source_spoof(tmp_path: Path, field: str) -> None:
     fixture = _first_v2_lineage(tmp_path)
     fixture["v1"]["source"][field] = "e" * (64 if field == "archive_sha256" else 40)
     predecessor_sha = _publish_lineage(fixture["v1_path"], fixture["v1"])
@@ -391,7 +436,8 @@ def test_first_v2_migration_cannot_be_reused_for_ninth_entry(
     request_id = "sq8-promotion-" + "7" * 64
     receipt = {
         "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
-        "status": "actual_failed", "request_id": request_id,
+        "status": "actual_failed",
+        "request_id": request_id,
         "source_commit": "7" * 40,
         "actual": {"status": "failed", "request_id": request_id},
     }
@@ -399,10 +445,13 @@ def test_first_v2_migration_cannot_be_reused_for_ninth_entry(
     receipt_sha = _publish_lineage(receipt_path, receipt)
     fixture["lineage"]["entries"].append(
         {
-            "sequence": 8, "relation": "actual_failure",
-            "path": str(receipt_path), "sha256": receipt_sha,
+            "sequence": 8,
+            "relation": "actual_failure",
+            "path": str(receipt_path),
+            "sha256": receipt_sha,
             "schema_version": receipt["schema_version"],
-            "status": "actual_failed", "request_id": request_id,
+            "status": "actual_failed",
+            "request_id": request_id,
             "source_commit": "7" * 40,
         }
     )
@@ -417,13 +466,20 @@ def _subsequent_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     request_id = "sq8-promotion-" + "8" * 64
     receipt = {
         "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
-        "status": "actual_failed", "request_id": request_id,
-        "source_commit": "8" * 40,
+        "status": "actual_failed",
+        "request_id": request_id,
+        "source_commit": previous["source"]["commit"],
         "actual": {"status": "failed", "request_id": request_id},
     }
     receipt_path = (tmp_path / "appended-failure.json").resolve()
     receipt_sha = _publish_lineage(receipt_path, receipt)
     appended = json.loads(json.dumps(previous))
+    current_commit = "e" * 40
+    appended["source"] = {
+        "commit": current_commit,
+        "tree_oid": "f" * 40,
+        "archive_sha256": "7" * 64,
+    }
     appended["predecessor"] = {
         "schema_version": "ullm.sq8_authorization_lineage_input.v2",
         "path": str(fixture["input_path"]),
@@ -433,20 +489,46 @@ def _subsequent_v2_lineage(tmp_path: Path) -> dict[str, Any]:
     }
     appended["entries"].append(
         {
-            "sequence": 8, "relation": "actual_failure",
-            "path": str(receipt_path), "sha256": receipt_sha,
+            "sequence": 8,
+            "relation": "actual_failure",
+            "path": str(receipt_path),
+            "sha256": receipt_sha,
             "schema_version": receipt["schema_version"],
-            "status": "actual_failed", "request_id": request_id,
-            "source_commit": "8" * 40,
+            "status": "actual_failed",
+            "request_id": request_id,
+            "source_commit": previous["source"]["commit"],
+        }
+    )
+    current = {
+        "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+        "verdict": "implementation_ready",
+        "actual": "not_executed",
+        "audited_source": {"commit": current_commit},
+        "authorization": {"eligible_for_fresh_authorization_builder": True},
+    }
+    current_path = (tmp_path / "appended-current-go.json").resolve()
+    current_sha = _publish_lineage(current_path, current)
+    appended["entries"].append(
+        {
+            "sequence": 9,
+            "relation": "implementation_ready_current",
+            "path": str(current_path),
+            "sha256": current_sha,
+            "schema_version": current["schema_version"],
+            "status": "implementation_ready",
+            "request_id": None,
+            "source_commit": current_commit,
         }
     )
     fixture["lineage"] = appended
     fixture["input_path"] = (tmp_path / "lineage-v2-appended-input.json").resolve()
-    fixture["runtime_path"] = (
-        tmp_path / "lineage-v2-appended-runtime.json"
-    ).resolve()
+    fixture["runtime_path"] = (tmp_path / "lineage-v2-appended-runtime.json").resolve()
     fixture["reference"]["input_path"] = str(fixture["input_path"])
     fixture["reference"]["runtime_path"] = str(fixture["runtime_path"])
+    fixture["reference"]["current_implementation_audit"] = {
+        "path": str(current_path),
+        "sha256": current_sha,
+    }
     _refresh_lineage_fixture(fixture)
     return fixture
 
@@ -455,7 +537,82 @@ def test_subsequent_v2_predecessor_append_is_accepted(tmp_path: Path) -> None:
     fixture = _subsequent_v2_lineage(tmp_path)
     identity = _load_with_lineage(tmp_path, fixture).promotion.authorization_lineage
     assert identity is not None
-    assert identity.entry_count == 9
+    assert identity.entry_count == 10
+    assert identity.current_implementation_audit is not None
+    assert identity.current_implementation_audit.path == Path(
+        fixture["lineage"]["entries"][9]["path"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "old_current_ref",
+        "go_not_final",
+        "go_only",
+        "failure_only",
+        "fake_source",
+        "duplicate_source",
+    ],
+)
+def test_subsequent_v2_current_selection_fails_closed(
+    tmp_path: Path, mutation: str
+) -> None:
+    fixture = _subsequent_v2_lineage(tmp_path)
+    entries = fixture["lineage"]["entries"]
+    if mutation == "old_current_ref":
+        fixture["reference"]["current_implementation_audit"] = {
+            "path": entries[7]["path"],
+            "sha256": entries[7]["sha256"],
+        }
+    elif mutation == "go_not_final":
+        entries[8], entries[9] = entries[9], entries[8]
+        entries[8]["sequence"] = 8
+        entries[9]["sequence"] = 9
+        _refresh_lineage_fixture(fixture)
+    elif mutation == "go_only":
+        entries.pop(8)
+        entries[8]["sequence"] = 8
+        _refresh_lineage_fixture(fixture)
+    elif mutation == "failure_only":
+        request_id = "sq8-promotion-" + "f" * 64
+        receipt = {
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "status": "actual_failed",
+            "request_id": request_id,
+            "source_commit": fixture["lineage"]["source"]["commit"],
+            "actual": {"status": "failed", "request_id": request_id},
+        }
+        path = (tmp_path / "failure-after-current.json").resolve()
+        digest = _publish_lineage(path, receipt)
+        entries.append(
+            {
+                "sequence": 10,
+                "relation": "actual_failure",
+                "path": str(path),
+                "sha256": digest,
+                "schema_version": receipt["schema_version"],
+                "status": "actual_failed",
+                "request_id": request_id,
+                "source_commit": receipt["source_commit"],
+            }
+        )
+        _refresh_lineage_fixture(fixture)
+    elif mutation == "fake_source":
+        entries[9]["source_commit"] = "9" * 40
+        _refresh_lineage_fixture(fixture)
+    else:
+        fixture["lineage"]["source"]["commit"] = entries[7]["source_commit"]
+        current_path = Path(entries[9]["path"])
+        current = json.loads(current_path.read_text(encoding="ascii"))
+        current["audited_source"]["commit"] = entries[7]["source_commit"]
+        current_sha = _publish_lineage(current_path, current)
+        entries[9]["sha256"] = current_sha
+        entries[9]["source_commit"] = entries[7]["source_commit"]
+        fixture["reference"]["current_implementation_audit"]["sha256"] = current_sha
+        _refresh_lineage_fixture(fixture)
+    with pytest.raises(ServedModelError):
+        _load_with_lineage(tmp_path, fixture)
 
 
 @pytest.mark.parametrize("mutation", ["unknown", "missing", "type"])
@@ -497,7 +654,8 @@ def test_first_v2_external_runtime_copy_drift_fails_closed(tmp_path: Path) -> No
             "authorization_audit", {"path": "/tmp/audit.json", "sha256": "0" * 64}
         ),
         lambda value: value["promotion"].__setitem__(
-            "authorization_audit", {"path": "/tmp/audit.json", "sha256": "0" * 64, "extra": 1}
+            "authorization_audit",
+            {"path": "/tmp/audit.json", "sha256": "0" * 64, "extra": 1},
         ),
     ],
 )
@@ -517,17 +675,22 @@ def _readiness() -> dict[str, Any]:
     return {
         "schema": "ullm.bridge_container_readiness.v1",
         "container": {
-            "name": "open-webui", "id": "4" * 64,
+            "name": "open-webui",
+            "id": "4" * 64,
             "image_id": "sha256:" + "5" * 64,
             "config_image": "ullm/open-webui:test",
         },
         "network": {
-            "name": "open-webui-network", "id": "6" * 64,
-            "driver": "bridge", "bridge_interface": "br-" + "6" * 12,
+            "name": "open-webui-network",
+            "id": "6" * 64,
+            "driver": "bridge",
+            "bridge_interface": "br-" + "6" * 12,
         },
         "endpoint": {
-            "url": "http://172.20.0.1:8000/readyz", "path": "/readyz",
-            "expected_status": 200, "expected_body": body,
+            "url": "http://172.20.0.1:8000/readyz",
+            "path": "/readyz",
+            "expected_status": 200,
+            "expected_body": body,
             "expected_body_sha256": hashlib.sha256(body.encode("ascii")).hexdigest(),
             "timeout_seconds": 5,
         },
@@ -557,9 +720,13 @@ def test_promotion_readiness_is_optional_and_typed(tmp_path: Path) -> None:
         lambda value: value["container"].__setitem__("image_id", "5" * 64),
         lambda value: value["network"].__setitem__("driver", "host"),
         lambda value: value["network"].__setitem__("bridge_interface", "docker0"),
-        lambda value: value["endpoint"].__setitem__("url", "http://127.0.0.1:8000/readyz"),
+        lambda value: value["endpoint"].__setitem__(
+            "url", "http://127.0.0.1:8000/readyz"
+        ),
         lambda value: value["endpoint"].__setitem__("expected_status", 204),
-        lambda value: value["endpoint"].__setitem__("expected_body", '{"status":"ready"}\n'),
+        lambda value: value["endpoint"].__setitem__(
+            "expected_body", '{"status":"ready"}\n'
+        ),
         lambda value: value["endpoint"].__setitem__("timeout_seconds", 6),
         lambda value: value["endpoint"].__setitem__("extra", True),
     ],
@@ -652,7 +819,13 @@ def test_v2_manifest_loads_reasoning_dialect_without_changing_v1_loader() -> Non
     assert loaded.reasoning_dialect.effort_budgets[-1] == ("high", 128)
 
 
-@pytest.mark.parametrize("schema,worker_protocol", [("ullm.served_model.v1", "ullm.worker.v2"), ("ullm.served_model.v2", "ullm.worker.v1")])
+@pytest.mark.parametrize(
+    "schema,worker_protocol",
+    [
+        ("ullm.served_model.v1", "ullm.worker.v2"),
+        ("ullm.served_model.v2", "ullm.worker.v1"),
+    ],
+)
 def test_manifest_schema_and_worker_protocol_must_be_version_aligned(
     tmp_path: Path, schema: str, worker_protocol: str
 ) -> None:

@@ -21,8 +21,14 @@ v1 sourceのtreeとarchiveにも完全一致しなければならない。これ
 9件目以降にv1 migrationを再利用できず、直前v2 predecessorが必須となる。
 
 通常のv2追記ではpredecessorをlive readし、旧entriesが同じ順序・同じ内容で完全な
-prefixとして残り、少なくとも1件が末尾に追加された場合だけ受理する。v1/v2とも削除、
+prefixとして残り、predecessor sourceのactual failureと新sourceのcurrent GOをこの順で
+exact 2件追記した場合だけ受理する。v1/v2とも削除、
 置換、並べ替え、relation rewrite、重複、source spoof、predecessor cycleを拒否する。
+schema互換のため、過去の`implementation_ready_current` relationはprefix内で変更せず、
+当時のcurrent GOとして保持する。entries内で最後に現れる同relationだけを現在のGOとして
+選択し、そのentryはmanifestの最終entryかつmanifest source commitと一致しなければならない。
+同じsource commitのcurrent GOを複数置くこと、current GO後にfailureだけを追記すること、
+top-level referenceが最後より前のcurrent GOを指すことを拒否する。
 
 Python gatewayのserved-model loaderも同じ二分岐を実装する。v1 migration referenceと
 v2 predecessor referenceはschemaごとに異なるexact field setとして判別し、external
@@ -46,9 +52,10 @@ manifestとruntime copy、predecessor、全entry receiptをlive rehashする。g
 file、mode 0444、link count 1、non-symlink、bounded read、読み取り中identity不変を
 必須とする。
 
-認可可能なv2は、manifest source commitに一致するcurrent implementation GOをexactly
-1件、capture implementation No-Goを2件以上、restore implementation No-Goを1件以上、
-`actual_failed`を3件以上含む。
+認可可能なv2は、current implementation GOを1件以上、capture implementation No-Goを
+2件以上、restore implementation No-Goを1件以上、`actual_failed`を3件以上含む。
+最後のcurrent GOはentriesの末尾にあり、manifest source commitに一致する。v2 referenceの
+`current_implementation_audit`は、この最後のentryのpathとSHA-256にexact一致する。
 
 ## Reference and authorization
 
