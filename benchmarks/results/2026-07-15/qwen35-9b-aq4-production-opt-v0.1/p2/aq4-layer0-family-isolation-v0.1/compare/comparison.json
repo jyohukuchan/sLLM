@@ -1,0 +1,318 @@
+{
+  "aq4_probe": {
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "package_root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+    "report_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-family-isolation-v0.1/aq4-report.json",
+    "report_sha256": "82adc612934e0b0417290c9f84f2716cac5b1c1b0164d9840468ef52a67f8af1"
+  },
+  "classification": "unclassified",
+  "dominance_rule": "not_inferred_without_policy_thresholds; compare aggregate relative_l2/max_abs/cosine only",
+  "dominant_family_candidate": {
+    "family": "z",
+    "max_abs_family": "qkv",
+    "max_abs_value": 0.8943977355957031,
+    "metric": "aggregate.relative_l2",
+    "status": "diagnostic_candidate_only",
+    "value": 0.029411563091798532
+  },
+  "families": [
+    {
+      "aggregate": {
+        "cosine": 0.9996858734591487,
+        "finite_rows": 3,
+        "max_abs": 0.8943977355957031,
+        "nonfinite_rows": 0,
+        "policy_evaluation": "policy_not_evaluated",
+        "relative_l2": 0.025665445097130035,
+        "rows": 3,
+        "thresholds": null
+      },
+      "family": "qkv",
+      "per_row": [
+        {
+          "actual_sha256": "ddf114f8bc8ebda5530ef9cfd95cd02acb3a54d978caa2e5ca9c4673da68da83",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.9997431668208006,
+          "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
+          "max_abs": 0.8782234191894531,
+          "nonfinite": false,
+          "relative_l2": 0.023454284114153783,
+          "source_sha256": "e4ce5c29d037eca38ebdfabfe15fec631e386e223f9f2eb01de6a4a5d3915ac3",
+          "step": 0
+        },
+        {
+          "actual_sha256": "cd7ee51b360be801889f042a8c7a9d6407edda4e8db2234fbf5b83029933241c",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.9996408884455549,
+          "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
+          "max_abs": 0.7104549407958984,
+          "nonfinite": false,
+          "relative_l2": 0.027357323627093783,
+          "source_sha256": "9319ae57e6d04b163600325bd04c2fe71a4a17fe0df9aee599b5787302ff56fc",
+          "step": 1
+        },
+        {
+          "actual_sha256": "485a5ace800646ea036947e7002b74b4308c1a0fc7ca3fe699c6acd8d4e5ca67",
+          "case_id": "fixture-prompt-1",
+          "cosine": 0.9996522830061173,
+          "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
+          "max_abs": 0.8943977355957031,
+          "nonfinite": false,
+          "relative_l2": 0.02681327168497467,
+          "source_sha256": "387b0ae164296f3f5887442231323727257920c141d9e685484092da540be6c2",
+          "step": 0
+        }
+      ],
+      "shape": [
+        8192,
+        4096
+      ],
+      "source": {
+        "index_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors.index.json",
+        "index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+        "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+        "operation": "input_f32_matmul_weight_bf16_cast_f32_accumulate_f32",
+        "shard_bytes": 5368717440,
+        "shard_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00003-of-00004.safetensors",
+        "tensor_dtype": "BF16",
+        "tensor_payload_sha256": "21286bed37372105d182b20bc47c08e04e1fd3d3f0a968aa3af1f215ec7fb6a2",
+        "tensor_shape": [
+          8192,
+          4096
+        ]
+      },
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
+    },
+    {
+      "aggregate": {
+        "cosine": 0.9995795799750544,
+        "finite_rows": 3,
+        "max_abs": 0.42380857467651367,
+        "nonfinite_rows": 0,
+        "policy_evaluation": "policy_not_evaluated",
+        "relative_l2": 0.029411563091798532,
+        "rows": 3,
+        "thresholds": null
+      },
+      "family": "z",
+      "per_row": [
+        {
+          "actual_sha256": "f4a8c809d45abc39e65a3ea723425fc67beeaf8b9e2ce8faf4d5a14e6289c686",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.9996059823915132,
+          "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
+          "max_abs": 0.4193878173828125,
+          "nonfinite": false,
+          "relative_l2": 0.028520590571078697,
+          "source_sha256": "4c69c9fdb0e4c795b9f0a3fef8277f42e39ec0e060f244059877cc2996af0c89",
+          "step": 0
+        },
+        {
+          "actual_sha256": "a6dea2eff83a54b91d438f85da5d86838eed615971da04439208a423bba396f6",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.99957850876932,
+          "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
+          "max_abs": 0.42380857467651367,
+          "nonfinite": false,
+          "relative_l2": 0.029458558661201263,
+          "source_sha256": "a1c9c7483b90a8b9df7baeccc4fd53849e3371e1e21c75425b313f7f382a1d78",
+          "step": 1
+        },
+        {
+          "actual_sha256": "ec1a268b168e20ec95438677b526c9fced12c72238e9259dd9a804e595a80e51",
+          "case_id": "fixture-prompt-1",
+          "cosine": 0.999547175729752,
+          "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
+          "max_abs": 0.37828493118286133,
+          "nonfinite": false,
+          "relative_l2": 0.03045767341891722,
+          "source_sha256": "c7e37813566ca491ad789b345e9b3acb92a518f04ab60374351145e7950d07be",
+          "step": 0
+        }
+      ],
+      "shape": [
+        4096,
+        4096
+      ],
+      "source": {
+        "index_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors.index.json",
+        "index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+        "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+        "operation": "input_f32_matmul_weight_bf16_cast_f32_accumulate_f32",
+        "shard_bytes": 3325995712,
+        "shard_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+        "tensor_dtype": "BF16",
+        "tensor_payload_sha256": "d73ab8111d341b251988320567e213cb8d3be9359ce279e76eb2980609d94d90",
+        "tensor_shape": [
+          4096,
+          4096
+        ]
+      },
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight"
+    },
+    {
+      "aggregate": {
+        "cosine": 0.9997918242092604,
+        "finite_rows": 3,
+        "max_abs": 0.35114574432373047,
+        "nonfinite_rows": 0,
+        "policy_evaluation": "policy_not_evaluated",
+        "relative_l2": 0.020423715806985984,
+        "rows": 3,
+        "thresholds": null
+      },
+      "family": "a",
+      "per_row": [
+        {
+          "actual_sha256": "1e2c7985c97c0833b9875739c7d4a04f53d80e3d774775df15b77f9dfe410beb",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.9995603259437373,
+          "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
+          "max_abs": 0.281862735748291,
+          "nonfinite": false,
+          "relative_l2": 0.03008396509378602,
+          "source_sha256": "9aa0592c78d93af6028e7c5a466fe54016d80ee9e34cb863ede30ebe6263e0cc",
+          "step": 0
+        },
+        {
+          "actual_sha256": "cdf3e84ae75ab8aae3ccf04da3b0657f2bb2f0329ad8b6811654685048d0205d",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.999898198086906,
+          "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
+          "max_abs": 0.2037663459777832,
+          "nonfinite": false,
+          "relative_l2": 0.014300726024058937,
+          "source_sha256": "c0350bbb2a348289ed7977d3f04e5c1871561017d2ac471ec231590b4e6566b4",
+          "step": 1
+        },
+        {
+          "actual_sha256": "70971c048679e9bd7339d738f6ba77742b172135c33d50d04a745f7957ad2dd9",
+          "case_id": "fixture-prompt-1",
+          "cosine": 0.9997708916693968,
+          "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
+          "max_abs": 0.35114574432373047,
+          "nonfinite": false,
+          "relative_l2": 0.021446001895598296,
+          "source_sha256": "5528d15443c84488ad73ac14af63e84738b438e005cf330742fe53214abdbe0e",
+          "step": 0
+        }
+      ],
+      "shape": [
+        32,
+        4096
+      ],
+      "source": {
+        "index_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors.index.json",
+        "index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+        "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+        "operation": "input_f32_matmul_weight_bf16_cast_f32_accumulate_f32",
+        "shard_bytes": 3325995712,
+        "shard_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+        "tensor_dtype": "BF16",
+        "tensor_payload_sha256": "6af90e32a15676df7e383e624b6dda53b60e62c06dbd3ff4673486eceb7f712b",
+        "tensor_shape": [
+          32,
+          4096
+        ]
+      },
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_a.weight"
+    },
+    {
+      "aggregate": {
+        "cosine": 0.9998365786858802,
+        "finite_rows": 3,
+        "max_abs": 0.13602495193481445,
+        "nonfinite_rows": 0,
+        "policy_evaluation": "policy_not_evaluated",
+        "relative_l2": 0.018548390169659354,
+        "rows": 3,
+        "thresholds": null
+      },
+      "family": "b",
+      "per_row": [
+        {
+          "actual_sha256": "2749e7b828e08c28d2712e9d6ddd1ea1c453c3e36cda0122449612a6c22fea12",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.9996460145063838,
+          "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
+          "max_abs": 0.12146949768066406,
+          "nonfinite": false,
+          "relative_l2": 0.026688918697391716,
+          "source_sha256": "f1a6ff9d0cae356d4f9ece36412c64522e1bd2a1100ffc62c5bffbac332b1875",
+          "step": 0
+        },
+        {
+          "actual_sha256": "f129964271477c432248870e0634e59aac15027f158f81f6a37810c184635a78",
+          "case_id": "fixture-prompt-0",
+          "cosine": 0.999906082798745,
+          "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
+          "max_abs": 0.09249639511108398,
+          "nonfinite": false,
+          "relative_l2": 0.015485329315173275,
+          "source_sha256": "86595cfaf1f60f7d1637228d74a8b825666416c8075396c84c95018856db1dcf",
+          "step": 1
+        },
+        {
+          "actual_sha256": "d064ffb21e06d647e197f7e0073ac541898060560faf361d8668c3c18ccfeb7e",
+          "case_id": "fixture-prompt-1",
+          "cosine": 0.9998688282895545,
+          "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
+          "max_abs": 0.13602495193481445,
+          "nonfinite": false,
+          "relative_l2": 0.016344911121498256,
+          "source_sha256": "e0da322d58baf53ce1c7d89458fd623977563192d52b62c5b36064c909da7b58",
+          "step": 0
+        }
+      ],
+      "shape": [
+        32,
+        4096
+      ],
+      "source": {
+        "index_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors.index.json",
+        "index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+        "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+        "operation": "input_f32_matmul_weight_bf16_cast_f32_accumulate_f32",
+        "shard_bytes": 3325995712,
+        "shard_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+        "tensor_dtype": "BF16",
+        "tensor_payload_sha256": "2f139e1eb2518492b8f65768e678962141c37012fffbbefa4f74b531a6cbc473",
+        "tensor_shape": [
+          32,
+          4096
+        ]
+      },
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_b.weight"
+    }
+  ],
+  "holdout": "not_run",
+  "input": {
+    "dtype": "f32",
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-family-isolation-v0.1/runtime-input.jsonl",
+    "rows": 3,
+    "schema": "ullm.aq4_layer0_input_normed_jsonl.v1",
+    "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "shape": [
+      4096
+    ]
+  },
+  "notes": [
+    "Only raw per-family matvecs were compared. Layer norm, gate/beta transforms, recurrent state, residual, and hidden contribution are not synthesized.",
+    "AQ4 and source outputs use identical f32 input rows; source BF16 weights are explicitly cast to f32 for the bounded CPU matmul."
+  ],
+  "one_at_a_time_hybrid": {
+    "attempted": false,
+    "reason": "This probe has only the independently attributable raw matvec boundary; a full layer hidden-state hybrid would require production/source recurrent-state semantics and is intentionally not inferred here.",
+    "status": "not_implemented"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "schema_version": "ullm.aq4_layer0_family_isolation.source_compare.v1",
+  "source_model": {
+    "index_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors.index.json",
+    "index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B"
+  },
+  "status": "valid",
+  "thresholds": null
+}
