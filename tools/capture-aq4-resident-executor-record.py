@@ -11,11 +11,11 @@ reconfigured by this tool.
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import math
 import os
-import re
 import re
 import secrets
 import select
@@ -34,10 +34,190 @@ SQ8_PROMOTION_REQUEST_ENV = "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID"
 SQ8_PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 SQ8_OVERLAY_IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 SQ8_OVERLAY_EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
+WORKER_STDERR_SCHEMA_VERSION = "ullm.aq4_resident_worker_stderr.v1"
+WORKER_STDERR_PREVIEW_MAX_BYTES = 32 * 1024
+WORKER_STDERR_READ_CHUNK_BYTES = 64 * 1024
+WORKER_STDERR_JSON_LINE_MAX_BYTES = 1024 * 1024
+WORKER_STDERR_MAX_RECORDS = 8192
+WORKER_STDERR_REDACTION_RE = re.compile(
+    rb"(?i)(?:password|passwd|secret|credential|api[_-]?key|authorization|"
+    rb"access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|"
+    rb"bearer\s+|(?<![A-Za-z0-9])token\s*[:=]|"
+    rb"https?://[^/\s:@]+:[^@\s/]+@)"
+)
+WORKER_STDERR_REDACTED_LINE = b"<redacted sensitive diagnostic line>"
 
 
 class CaptureError(ValueError):
-    pass
+    """A capture failure that can carry bounded worker stderr evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        worker_stderr: dict[str, Any] | None = None,
+        stage: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.worker_stderr = worker_stderr
+        self.stage = stage
+
+
+class WorkerStderrCollector:
+    """Stream worker stderr while preserving only bounded derived evidence.
+
+    Raw bytes are never retained.  JSON objects are retained only for the
+    existing load/request-audit consumers and are capped independently from
+    the raw stream.  A complete line is either emitted to the preview or
+    omitted; this prevents a secret marker after the preview boundary from
+    leaking a prefix of that line.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self.stream = stream
+        self.records: list[dict[str, Any]] = []
+        self._digest = hashlib.sha256()
+        self._byte_count = 0
+        self._preview = bytearray()
+        self._preview_truncated = False
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        self._utf8_decoder_broken = False
+        self._utf8_replacement = False
+        self._redacted_lines = 0
+        self._line = bytearray()
+        self._line_size = 0
+        self._line_oversized = False
+        self._line_sensitive = False
+        self._marker_tail = b""
+        self._finished = False
+        self.stream_error: BaseException | None = None
+
+    @property
+    def byte_count(self) -> int:
+        return self._byte_count
+
+    def _observe_utf8(self, chunk: bytes) -> None:
+        # A strict incremental decoder distinguishes malformed input from a
+        # legitimate U+FFFD character.  Once malformed input is found, switch
+        # to replacement mode so later chunks continue to be drained safely.
+        if self._utf8_decoder_broken:
+            self._utf8_decoder.decode(chunk, final=False)
+            return
+        try:
+            self._utf8_decoder.decode(chunk, final=False)
+        except UnicodeDecodeError:
+            self._utf8_replacement = True
+            self._utf8_decoder_broken = True
+            self._utf8_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            self._utf8_decoder.decode(chunk, final=False)
+
+    def _observe_marker(self, fragment: bytes) -> None:
+        window = self._marker_tail + fragment
+        if WORKER_STDERR_REDACTION_RE.search(window) is not None:
+            self._line_sensitive = True
+        self._marker_tail = window[-256:]
+
+    def _feed_fragment(self, fragment: bytes) -> None:
+        if not fragment:
+            return
+        self._line_size += len(fragment)
+        self._observe_marker(fragment)
+        if self._line_size > WORKER_STDERR_JSON_LINE_MAX_BYTES:
+            self._line_oversized = True
+            return
+        self._line.extend(fragment)
+
+    def _append_preview(self, value: bytes) -> None:
+        if not value:
+            return
+        text = value.decode("utf-8", errors="replace")
+        encoded = text.encode("utf-8")
+        remaining = WORKER_STDERR_PREVIEW_MAX_BYTES - len(self._preview)
+        if len(encoded) > remaining:
+            self._preview_truncated = True
+            return
+        self._preview.extend(encoded)
+
+    def _finish_line(self, *, newline: bool) -> None:
+        line = bytes(self._line) if not self._line_oversized else None
+        if line is None or self._line_size + (1 if newline else 0) > (
+            WORKER_STDERR_PREVIEW_MAX_BYTES - len(self._preview)
+        ):
+            self._preview_truncated = True
+        if self._line_sensitive:
+            self._redacted_lines += 1
+            self._append_preview(WORKER_STDERR_REDACTED_LINE + (b"\n" if newline else b""))
+        elif line is None:
+            # A giant non-sensitive line cannot be retained or partially
+            # displayed.  Mark the display as lossy and continue draining.
+            self._preview_truncated = True
+        else:
+            self._append_preview(line + (b"\n" if newline else b""))
+
+        if line is not None and len(self.records) < WORKER_STDERR_MAX_RECORDS:
+            try:
+                value = json.loads(line)
+            except (UnicodeError, json.JSONDecodeError):
+                value = None
+            if isinstance(value, dict):
+                self.records.append(value)
+
+        self._line.clear()
+        self._line_size = 0
+        self._line_oversized = False
+        self._line_sensitive = False
+        self._marker_tail = b""
+
+    def _feed(self, chunk: bytes) -> None:
+        self._digest.update(chunk)
+        self._byte_count += len(chunk)
+        self._observe_utf8(chunk)
+        offset = 0
+        while offset < len(chunk):
+            newline_index = chunk.find(b"\n", offset)
+            if newline_index < 0:
+                self._feed_fragment(chunk[offset:])
+                return
+            self._feed_fragment(chunk[offset:newline_index])
+            self._finish_line(newline=True)
+            offset = newline_index + 1
+
+    def drain(self) -> None:
+        try:
+            while True:
+                chunk = self.stream.read(WORKER_STDERR_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    chunk = bytes(chunk)
+                self._feed(chunk)
+            if self._line_size:
+                self._finish_line(newline=False)
+            # Flush a pending incomplete UTF-8 sequence at EOF.
+            try:
+                self._utf8_decoder.decode(b"", final=True)
+            except UnicodeDecodeError:
+                self._utf8_replacement = True
+        except BaseException as error:
+            self.stream_error = error
+        finally:
+            self._finished = True
+
+    def summary(self) -> dict[str, Any]:
+        if not self._finished:
+            # This is only used as a last-resort failure envelope if a stream
+            # cannot be joined.  It remains structurally valid and secret-free.
+            self._preview_truncated = True
+        return {
+            "schema_version": WORKER_STDERR_SCHEMA_VERSION,
+            "byte_count": self._byte_count,
+            "sha256": self._digest.hexdigest(),
+            "preview_text": bytes(self._preview).decode("utf-8", errors="replace"),
+            "captured_bytes": len(self._preview),
+            "truncated": self._preview_truncated,
+            "utf8_replacement": self._utf8_replacement,
+            "redacted_lines": self._redacted_lines,
+        }
 
 
 def token_identity_digest(token_ids: list[int]) -> str:
@@ -421,6 +601,46 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _terminate_worker(proc: subprocess.Popen[bytes]) -> None:
+    """Terminate a worker and reap it, tolerating an already-exited process."""
+
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        # A second wait gives the process a final chance to reap.  Do not leave
+        # a child around merely because the first wait raced process teardown.
+        try:
+            proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        proc.wait()
+
+
+def _finish_worker_stderr(
+    proc: subprocess.Popen[bytes],
+    stderr_thread: threading.Thread,
+    collector: WorkerStderrCollector,
+) -> dict[str, Any]:
+    """Join the drain thread after EOF, closing the pipe as a bounded fallback."""
+
+    stderr_thread.join(timeout=3)
+    if stderr_thread.is_alive():
+        # This handles a descendant that inherited the pipe or a test double
+        # whose read end does not observe EOF after the parent exits.
+        try:
+            if proc.stderr is not None:
+                proc.stderr.close()
+        except (OSError, ValueError):
+            pass
+        stderr_thread.join(timeout=3)
+    return collector.summary()
+
+
 def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_json(args.manifest, "served-model manifest")
     manifest["_capture_manifest_path"] = str(args.manifest.resolve())
@@ -467,83 +687,96 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "eos_token_ids": manifest.get("generation", {}).get("eos_token_ids", []),
     }
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
-    stderr_records: list[dict[str, Any]] = []
-
-    def drain_stderr() -> None:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            try:
-                value = json.loads(line)
-                if isinstance(value, dict):
-                    stderr_records.append(value)
-            except (UnicodeError, json.JSONDecodeError):
-                continue
-
-    stderr_thread = threading.Thread(target=drain_stderr, name="aq4-stderr-drain", daemon=True)
+    assert proc.stderr is not None
+    stderr_collector = WorkerStderrCollector(proc.stderr)
+    stderr_records: list[dict[str, Any]] = stderr_collector.records
+    stderr_thread = threading.Thread(target=stderr_collector.drain, name="aq4-stderr-drain", daemon=True)
     stderr_thread.start()
     observer = VramObserver(str(worker.get("identity", {}).get("device", "gfx1201")))
-    observer.start()
-    assert proc.stdin is not None and proc.stdout is not None
-    proc.stdin.write((json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"))
-    proc.stdin.flush()
-    events: list[dict[str, Any]] = []
-    output_token_ids: list[int] = []
-    released: dict[str, Any] | None = None
-    deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([proc.stdout], [], [], 1.0)
-        if not ready:
-            if proc.poll() is not None:
-                break
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        try:
-            event = json.loads(line)
-        except (UnicodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(event, dict):
-            continue
-        event_type = event.get("type")
-        if event_type == "token":
-            if event.get("request_id") != internal_request_id or event.get("index") != len(output_token_ids):
-                raise CaptureError("resident worker token event identity is discontinuous")
-            token_id = event.get("token_id")
-            if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
-                raise CaptureError("resident worker emitted an invalid token id")
-            output_token_ids.append(token_id)
-        events.append({"type": event_type, "processed_prompt_tokens": event.get("processed_prompt_tokens"), "completion_tokens": event.get("completion_tokens")})
-        if event_type == "released":
-            released = event
-            break
-    if released is None:
-        proc.kill()
-        proc.wait()
-        observer.finish()
-        raise CaptureError("resident worker did not release the capture request")
-    proc.stdin.write((json.dumps({"schema_version": protocol, "type": "shutdown"}, separators=(",", ":")) + "\n").encode("ascii"))
-    proc.stdin.flush()
-    proc.stdin.close()
+    observer_data: dict[str, Any] | None = None
+    stderr_summary: dict[str, Any] | None = None
+    process_error: BaseException | None = None
     try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise CaptureError("resident worker did not shut down after capture")
-    observer_data = observer.finish()
-    stderr_thread.join(timeout=3)
+        observer.start()
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write((json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"))
+        proc.stdin.flush()
+        events: list[dict[str, Any]] = []
+        output_token_ids: list[int] = []
+        released: dict[str, Any] | None = None
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if not ready:
+                if proc.poll() is not None:
+                    break
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                break
+            try:
+                event = json.loads(line)
+            except (UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            if event_type == "token":
+                if event.get("request_id") != internal_request_id or event.get("index") != len(output_token_ids):
+                    raise CaptureError("resident worker token event identity is discontinuous")
+                token_id = event.get("token_id")
+                if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
+                    raise CaptureError("resident worker emitted an invalid token id")
+                output_token_ids.append(token_id)
+            events.append({"type": event_type, "processed_prompt_tokens": event.get("processed_prompt_tokens"), "completion_tokens": event.get("completion_tokens")})
+            if event_type == "released":
+                released = event
+                break
+        if released is None:
+            raise CaptureError("resident worker did not release the capture request", stage="request")
+        proc.stdin.write((json.dumps({"schema_version": protocol, "type": "shutdown"}, separators=(",", ":")) + "\n").encode("ascii"))
+        proc.stdin.flush()
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            raise CaptureError("resident worker did not shut down after capture", stage="shutdown")
+    except BaseException as error:
+        process_error = error
+    finally:
+        if process_error is not None or proc.poll() is None:
+            try:
+                _terminate_worker(proc)
+            except BaseException as error:
+                if process_error is None:
+                    process_error = CaptureError("resident worker could not be reaped", stage="cleanup")
+        try:
+            observer_data = observer.finish()
+        except BaseException as error:
+            if process_error is None:
+                process_error = CaptureError("resident worker resource observation failed", stage="cleanup")
+        stderr_summary = _finish_worker_stderr(proc, stderr_thread, stderr_collector)
+    if process_error is not None:
+        if isinstance(process_error, CaptureError):
+            process_error.worker_stderr = stderr_summary
+            raise process_error
+        raise CaptureError(str(process_error), worker_stderr=stderr_summary, stage="worker") from process_error
+    assert observer_data is not None and stderr_summary is not None
+
+    def worker_failure(message: str, stage: str = "validation") -> CaptureError:
+        return CaptureError(message, worker_stderr=stderr_summary, stage=stage)
+
     if proc.returncode != 0:
-        raise CaptureError(f"resident worker exited with status {proc.returncode}")
+        raise worker_failure(f"resident worker exited with status {proc.returncode}", "worker_exit")
     backend = next((x for x in reversed(stderr_records) if x.get("event") == "request_released" and isinstance(x.get("operation_execution_audit"), dict)), None)
     if backend is None:
-        raise CaptureError("resident worker request audit was not observed")
+        raise worker_failure("resident worker request audit was not observed", "audit_missing")
     audit = backend["operation_execution_audit"]
     if backend.get("request_id") != internal_request_id:
-        raise CaptureError("resident worker request audit identity differs")
+        raise worker_failure("resident worker request audit identity differs", "audit_missing")
     request_audit = backend.get("request_execution_audit")
     if not isinstance(request_audit, dict):
-        raise CaptureError("resident worker request execution audit was not observed")
+        raise worker_failure("resident worker request execution audit was not observed", "audit_missing")
     sq8_telemetry = None
     if sq8_promotion:
         sq8_telemetry = validate_sq8_promotion_telemetry(
@@ -552,7 +785,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     load_records = [x for x in stderr_records if x.get("schema_version") == "ullm.backend_operation.load.v1"]
     operators, fallback_events = operator_records(load_records, audit)
     if len(operators) == 0 or audit.get("coverage_complete") is not True:
-        raise CaptureError("full resident operator graph was not observed")
+        raise worker_failure("full resident operator graph was not observed", "audit_missing")
     audited_counts = {
         str(item.get("implementation_id")): int(item.get("count", 0))
         for item in audit.get("implementation_counts", [])
@@ -563,11 +796,11 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         implementation = str(item.get("implementation_id", ""))
         observed_counts[implementation] = observed_counts.get(implementation, 0) + int(item.get("invocation_count", 0))
     if observed_counts != audited_counts:
-        raise CaptureError("operator invocation counts do not reconcile with request audit")
+        raise worker_failure("operator invocation counts do not reconcile with request audit", "audit_missing")
     timings = released.get("timings", {})
     width = max((index for index, count in enumerate(audit.get("prefill_width_histogram", [])) if index and count), default=None)
     if width is None:
-        raise CaptureError("actual prefill execution width was not observed")
+        raise worker_failure("actual prefill execution width was not observed", "audit_missing")
     memory = {
         "vram_capacity_bytes": observer_data["capacity_bytes"],
         "resident_bytes": None,
@@ -584,10 +817,10 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     # allocations are derived from the package graph by the producer-side fixture contract.
     # Keep these facts explicit and fail closed if the package/runtime observer cannot provide them.
     if not observer_data["complete"] or observer_data["peak_bytes"] is None or observer_data["capacity_bytes"] is None:
-        raise CaptureError("complete R9700 VRAM observation was not available")
+        raise worker_failure("complete R9700 VRAM observation was not available", "resource_observation")
     completion_tokens = int(released.get("completion_tokens", 0))
     if completion_tokens != len(output_token_ids):
-        raise CaptureError("resident worker output token identity count differs")
+        raise worker_failure("resident worker output token identity count differs")
     phases = [
         {"phase_id": "cold-prefill-0", "kind": "cold_prefill", "executor_id": "generic_model_executor", "executor_version": "0.2.0", "prefill_mode": "cold", "chunk_width_tokens": prompt_tokens, "actual_token_batch_width": width, "actual_request_batch_width": 1, "request_count": 1, "input_token_count": prompt_tokens, "output_token_count": 0, "cached_prefix_token_count": 0, "context_tokens_before": 0, "context_tokens_after": prompt_tokens, "wall_time_ms": float(timings.get("prompt_ms", 0.0))},
         {"phase_id": "decode-0", "kind": "decode", "executor_id": "generic_model_executor", "executor_version": "0.2.0", "prefill_mode": None, "chunk_width_tokens": 1, "actual_token_batch_width": 1, "actual_request_batch_width": 1, "request_count": 1, "input_token_count": completion_tokens, "output_token_count": completion_tokens, "cached_prefix_token_count": 0, "context_tokens_before": prompt_tokens, "context_tokens_after": prompt_tokens + completion_tokens, "wall_time_ms": float(timings.get("predicted_ms", 0.001))},
@@ -616,11 +849,11 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         for field in ("index_file", "scale_file"):
             path = package_root / str(tensor.get(field, ""))
             if not path.is_file() or path.is_symlink():
-                raise CaptureError(f"package resident file is unavailable: {path}")
+                raise worker_failure(f"package resident file is unavailable: {path}", "package_validation")
             resident_bytes += path.stat().st_size
         codebook = package_root / str(tensor.get("codebook_file", ""))
         if not codebook.is_file() or codebook.is_symlink():
-            raise CaptureError(f"package codebook is unavailable: {codebook}")
+            raise worker_failure(f"package codebook is unavailable: {codebook}", "package_validation")
         match = LAYER_RE.search(str(tensor.get("name", "")))
         component = f"layer-{match.group(1)}" if match else str(tensor.get("name", ""))
         key = (component, str(codebook))
@@ -629,7 +862,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             resident_bytes += codebook.stat().st_size
     persistent_bytes = 24 * 2_228_224 + 8 * 33_554_432
     if workspace_bytes <= 0:
-        raise CaptureError("operator workspace observation was unavailable")
+        raise worker_failure("operator workspace observation was unavailable", "audit_missing")
     temporary_bytes = workspace_bytes
     planned_total = resident_bytes + persistent_bytes + temporary_bytes
     memory.update({
@@ -711,6 +944,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "ok", "output": str(args.output)}))
         return 0
     except (CaptureError, OSError, ValueError) as error:
+        worker_stderr = getattr(error, "worker_stderr", None)
+        envelope = {
+            "schema_version": "ullm.aq4_resident_capture_error.v1",
+            "status": "error",
+            "stage": getattr(error, "stage", None) or "capture",
+            "reason": str(error),
+            "worker_stderr": worker_stderr if isinstance(worker_stderr, dict) else None,
+        }
+        # The outer runner treats this as an opaque, single-line status record
+        # on failure.  The diagnostic text remains on stderr for operators.
+        print(json.dumps(envelope, ensure_ascii=True, separators=(",", ":")))
         print(f"resident executor capture failed: {error}", file=sys.stderr)
         return 1
 
