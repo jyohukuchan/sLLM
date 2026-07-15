@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,10 +42,19 @@ REQUIRED_OVERLAY_ENV = (
     "ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA",
 )
 MAX_JSON_BYTES = 16 * 1024 * 1024
+AUDIT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 
 
 class GateError(RuntimeError):
     pass
+
+
+def require_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise GateError(f"{label} must be lowercase SHA-256")
+    return value
 
 
 def sha_file(path: Path) -> str:
@@ -228,6 +238,150 @@ def validate_binding(binding: dict[str, Any], package_manifest: Path) -> None:
         raise GateError("overlay package manifest binding differs")
 
 
+def _audit_reference(record: Any, expected_path: Path, label: str) -> str:
+    if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+        raise GateError(f"independent audit {label} reference differs")
+    path = Path(str(record["path"])).resolve()
+    digest = require_sha256(record["sha256"], f"independent audit {label}")
+    if path != expected_path.resolve() or path.is_symlink() or not path.is_file() or sha_file(path) != digest:
+        raise GateError(f"independent audit {label} live identity differs")
+    return digest
+
+
+def validate_independent_audit(
+    path: Path,
+    *,
+    commit: str,
+    tree: str,
+    archive_sha256: str,
+) -> dict[str, Any]:
+    if path.is_symlink():
+        raise GateError("independent audit receipt must be immutable 0444 single-link non-symlink")
+    path = path.resolve()
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+        or metadata.st_nlink != 1
+    ):
+        raise GateError("independent audit receipt must be immutable 0444 single-link non-symlink")
+    audit_sha = sha_file(path)
+    audit = read_object(path, "independent audit receipt")
+    if set(audit) != {
+        "schema_version", "auditor_task_id", "audited_at_utc", "audited_source", "runtime",
+        "fixed_request_id", "gate_state", "topology", "verdict", "actual", "tests",
+    }:
+        raise GateError("independent audit receipt shape differs")
+    if audit.get("schema_version") != AUDIT_SCHEMA or audit.get("verdict") != "implementation_ready" or audit.get("actual") != "not_executed":
+        raise GateError("independent audit verdict differs")
+    source = audit.get("audited_source")
+    if source != {"commit": commit, "tree_sha256": tree, "archive_sha256": archive_sha256}:
+        raise GateError("independent audit source identity differs")
+    require_sha256(source["archive_sha256"], "independent audit source archive")
+    request_id = audit.get("fixed_request_id")
+    if not isinstance(request_id, str) or REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise GateError("independent audit fixed request ID differs")
+    runtime = audit.get("runtime")
+    if not isinstance(runtime, dict) or set(runtime) != {
+        "path", "gate", "worker", "profile", "served_model", "prepared_receipt",
+        "binding", "package", "sha256sums",
+    }:
+        raise GateError("independent audit runtime shape differs")
+    runtime_root = Path(str(runtime["path"])).resolve()
+    if runtime_root.is_symlink() or not runtime_root.is_dir() or stat.S_IMODE(runtime_root.stat().st_mode) != 0o555:
+        raise GateError("independent audit runtime topology differs")
+    if {entry.name for entry in runtime_root.iterdir()} != {
+        "gate.json", "ullm-aq4-worker", "profile.json", "served-model.json",
+        "promotion-receipt.json", "build-receipt.json", "SHA256SUMS",
+    }:
+        raise GateError("independent audit runtime member set differs")
+    for entry in runtime_root.iterdir():
+        item = entry.stat(follow_symlinks=False)
+        if entry.is_symlink() or not stat.S_ISREG(item.st_mode) or stat.S_IMODE(item.st_mode) not in {0o444, 0o555} or item.st_nlink != 1:
+            raise GateError("independent audit runtime file topology differs")
+    gate_path = runtime_root / "gate.json"
+    worker_path = runtime_root / "ullm-aq4-worker"
+    profile_path = runtime_root / "profile.json"
+    manifest_path = runtime_root / "served-model.json"
+    receipt_path = runtime_root / "promotion-receipt.json"
+    sums_path = runtime_root / "SHA256SUMS"
+    identities = {
+        "gate_sha256": _audit_reference(runtime["gate"], gate_path, "Gate"),
+        "worker_sha256": _audit_reference(runtime["worker"], worker_path, "worker"),
+        "profile_sha256": _audit_reference(runtime["profile"], profile_path, "profile"),
+        "manifest_sha256": _audit_reference(runtime["served_model"], manifest_path, "served model"),
+        "prepared_receipt_sha256": _audit_reference(runtime["prepared_receipt"], receipt_path, "prepared receipt"),
+        "sha256sums_sha256": _audit_reference(runtime["sha256sums"], sums_path, "SHA256SUMS"),
+    }
+    gate = read_object(gate_path, "audited Gate")
+    prepared = read_object(receipt_path, "audited prepared receipt")
+    build = read_object(runtime_root / "build-receipt.json", "audited build receipt")
+    profile = read_object(profile_path, "audited profile")
+    manifest = read_object(manifest_path, "audited served model")
+    if (
+        gate.get("status") != "ready_for_independent_audit"
+        or gate.get("actual_run_allowed") is not False
+        or gate.get("release_source_commit") != commit
+        or gate.get("request", {}).get("actual", {}).get("request_id") != request_id
+        or build.get("release_source_commit") != commit
+        or build.get("release_source_tree") != tree
+        or build.get("release_source_archive_sha256") != archive_sha256
+        or build.get("promotion_request_id") != request_id
+    ):
+        raise GateError("independent audit Gate/build state differs")
+    if (
+        prepared.get("status") != "prepared_not_executed"
+        or prepared.get("actual") != {"status": "pending", "required": True}
+        or prepared.get("request_id") != request_id
+        or prepared.get("source_commit") != commit
+        or prepared.get("source_provenance") != {"tree_sha256": tree, "archive_sha256": archive_sha256}
+        or manifest.get("promotion", {}).get("receipt_sha256") != identities["prepared_receipt_sha256"]
+        or Path(str(profile.get("promotion", {}).get("receipt", ""))).resolve() != receipt_path
+    ):
+        raise GateError("independent audit prepared/profile/manifest state differs")
+    product_root = Path(str(profile.get("product", {}).get("root", ""))).resolve()
+    binding_path = product_root / str(profile.get("product", {}).get("artifact", {}).get("manifest_path", ""))
+    package_path = product_root / str(profile.get("product", {}).get("package", {}).get("manifest_path", ""))
+    binding = read_object(binding_path, "audited overlay binding")
+    binding_ref = runtime.get("binding")
+    if not isinstance(binding_ref, dict) or set(binding_ref) != {"path", "sha256", "content_sha256", "tensor_set_sha256", "tensor_count"}:
+        raise GateError("independent audit binding reference differs")
+    if (
+        Path(str(binding_ref["path"])).resolve() != binding_path.resolve()
+        or require_sha256(binding_ref["sha256"], "independent audit binding") != sha_file(binding_path)
+        or binding_ref.get("content_sha256") != binding.get("content_sha256")
+        or binding_ref.get("tensor_set_sha256") != binding.get("tensor_set_sha256")
+        or binding_ref.get("tensor_count") != 48
+        or prepared.get("overlay", {}).get("binding_manifest_sha256") != binding_ref["sha256"]
+        or prepared.get("overlay", {}).get("content_sha256") != binding_ref["content_sha256"]
+        or prepared.get("overlay", {}).get("tensor_set_sha256") != binding_ref["tensor_set_sha256"]
+    ):
+        raise GateError("independent audit binding identity differs")
+    _audit_reference(runtime["package"], package_path, "package")
+    if prepared.get("package", {}).get("manifest_sha256") != runtime["package"]["sha256"]:
+        raise GateError("independent audit package identity differs")
+    gate_state = audit.get("gate_state")
+    if gate_state != {
+        "status": "ready_for_independent_audit", "actual_run_allowed": False,
+        "prepared_receipt_status": "prepared_not_executed",
+        "prepared_receipt_actual": {"status": "pending", "required": True},
+    }:
+        raise GateError("independent audit declared Gate state differs")
+    tests = audit.get("tests")
+    if not isinstance(tests, dict) or tests.get("gpu_or_service_execution") is not False:
+        raise GateError("independent audit execution boundary differs")
+    return {
+        "path": str(path),
+        "sha256": audit_sha,
+        "request_id": request_id,
+        "runtime": str(runtime_root),
+        "binding_sha256": binding_ref["sha256"],
+        "package_sha256": runtime["package"]["sha256"],
+        **identities,
+    }
+
+
 def materialize(args: argparse.Namespace) -> dict[str, Any]:
     output = args.output.resolve()
     if output.exists() or output.is_symlink():
@@ -246,6 +400,20 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     validate_binding(binding, package_manifest)
     source_tree = git_value("rev-parse", f"{commit}^{{tree}}")
     source_archive = source_archive_sha256(commit)
+    authorize = bool(getattr(args, "authorize_actual_run", False))
+    audit_path = getattr(args, "independent_audit_receipt", None)
+    if authorize != (audit_path is not None):
+        raise GateError("authorization flag and independent audit receipt are required together")
+    audit = None
+    if authorize:
+        audit = validate_independent_audit(
+            Path(audit_path), commit=commit, tree=source_tree, archive_sha256=source_archive
+        )
+        expected_output = Path(
+            f"/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-{audit['sha256'][:16]}"
+        )
+        if output != expected_output:
+            raise GateError(f"authorized output path must be create-new {expected_output}")
 
     output.mkdir(mode=0o700, parents=False)
     try:
@@ -261,6 +429,13 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             tensor_set_sha256=binding["tensor_set_sha256"],
             package_sha256=sha_file(package_manifest),
         )
+        if audit is not None and (
+            request_id != audit["request_id"]
+            or worker_identity["immutable_sha256"] != audit["worker_sha256"]
+            or sha_file(binding_path) != audit["binding_sha256"]
+            or sha_file(package_manifest) != audit["package_sha256"]
+        ):
+            raise GateError("authorized candidate differs from independently audited identity")
         receipt_path = output / "promotion-receipt.json"
         candidate_profile = json.loads(json.dumps(profile))
         candidate_profile["worker"]["binary"] = str(immutable_worker)
@@ -273,6 +448,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "package_from_receipt": ["package"],
             "actual_evidence_from_receipt": ["actual"],
             "request_id_from_receipt": ["request_id"],
+            "authorization_audit_from_receipt": ["authorization_audit"],
             "release_source_commit": commit,
         }
         profile_path = output / "profile.json"
@@ -287,6 +463,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             source_archive_sha256=source_archive,
             served_model_path=manifest_path,
             request_id=request_id,
+            authorization_audit_path=Path(audit["path"]) if audit is not None else None,
         )
         generator = load_module("_ullm_sq8_gate_generator", GENERATOR)
         generator.generate_prepared_candidate(profile_path, manifest_path)
@@ -324,8 +501,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
 
         gate = {
             "schema_version": SCHEMA,
-            "status": "ready_for_independent_audit",
-            "actual_run_allowed": False,
+            "status": "authorized_pending_execution" if authorize else "ready_for_independent_audit",
+            "actual_run_allowed": authorize,
             "release_source_commit": commit,
             "classification": {
                 "promotion": "unclassified",
@@ -334,10 +511,15 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "policy_relaxed": False,
             },
             "authorization": {
-                "blocked_until": "independent_executor_and_gate_audit",
+                "blocked_until": None if authorize else "independent_executor_and_gate_audit",
                 "fresh_output_required": True,
                 "maximum_actual_runs": 1,
+                "max_attempts": 1 if authorize else 0,
                 "service_or_gpu_commands_during_preparation": 0,
+                "independent_audit_receipt": (
+                    {"path": audit["path"], "sha256": audit["sha256"]}
+                    if audit is not None else None
+                ),
             },
             "device": {
                 "HIP_VISIBLE_DEVICES": "1",
@@ -443,7 +625,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "gate_sha256": sha_file(gate_path),
             "worker_sha256": worker_identity["immutable_sha256"],
             "manifest_sha256": sha_file(manifest_path),
-            "actual_run_allowed": False,
+            "actual_run_allowed": authorize,
         }
     except BaseException:
         shutil.rmtree(output, ignore_errors=True)
@@ -456,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", type=Path, default=PROFILE)
     parser.add_argument("--worker-binary", type=Path, default=WORKER)
+    parser.add_argument("--authorize-actual-run", action="store_true")
+    parser.add_argument("--independent-audit-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
         print(json.dumps(materialize(args), sort_keys=True))

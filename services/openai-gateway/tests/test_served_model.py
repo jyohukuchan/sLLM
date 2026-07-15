@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -58,6 +59,59 @@ def test_quantization_format_fixtures_use_the_same_loader(
     assert loaded.tokenizer.root.is_absolute()
 
 
+def test_promotion_authorization_audit_is_optional_and_typed(tmp_path: Path) -> None:
+    path = _copy_fixture(tmp_path)
+    loaded = load_served_model(path)
+    assert loaded.promotion.authorization_audit is None
+
+    value = _document(path)
+    value["promotion"]["authorization_audit"] = None
+    _write(path, value)
+    loaded = load_served_model(path)
+    assert loaded.promotion.authorization_audit is None
+
+    audit = path.parent / "authorization-audit.json"
+    audit.write_text("{\"verdict\":\"implementation_ready\"}\n", encoding="ascii")
+    audit.chmod(0o444)
+    value["promotion"]["authorization_audit"] = {
+        "path": str(audit.resolve()),
+        "sha256": _sha256(audit),
+    }
+    _write(path, value)
+    loaded = load_served_model(path)
+    assert loaded.promotion.authorization_audit is not None
+    assert loaded.promotion.authorization_audit.path == audit.resolve()
+    assert loaded.promotion.authorization_audit.sha256 == _sha256(audit)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["promotion"].__setitem__(
+            "authorization_audit", {"path": "audit.json", "sha256": "0" * 64}
+        ),
+        lambda value: value["promotion"].__setitem__(
+            "authorization_audit", {"path": "/tmp/audit.json", "sha256": "A" * 64}
+        ),
+        lambda value: value["promotion"].__setitem__(
+            "authorization_audit", {"path": "/tmp/audit.json", "sha256": "0" * 64}
+        ),
+        lambda value: value["promotion"].__setitem__(
+            "authorization_audit", {"path": "/tmp/audit.json", "sha256": "0" * 64, "extra": 1}
+        ),
+    ],
+)
+def test_promotion_authorization_audit_rejects_weak_or_mismatched_refs(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], Any]
+) -> None:
+    path = _copy_fixture(tmp_path)
+    value = _document(path)
+    mutate(value)
+    _write(path, value)
+    with pytest.raises(ServedModelError):
+        load_served_model(path)
+
+
 def _copy_fixture(tmp_path: Path, name: str = "sq8") -> Path:
     target = tmp_path / name
     shutil.copytree(FIXTURES / name, target)
@@ -75,6 +129,10 @@ def _write(path: Path, value: dict[str, Any]) -> None:
         json.dumps(value, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_virtual_format_changes_only_public_and_format_contracts() -> None:

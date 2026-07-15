@@ -109,6 +109,44 @@ def _require_hex(value: Any, pattern: re.Pattern[str], label: str) -> str:
     return value
 
 
+def _receipt_object(receipt: dict[str, Any], path: Any, label: str) -> Any:
+    """Resolve a profile receipt mapping while preserving an explicit null."""
+
+    if (
+        not isinstance(path, list)
+        or not path
+        or not all(isinstance(item, str) and item for item in path)
+    ):
+        raise GenerationError(f"{label} must be a nonempty string path")
+    value: Any = receipt
+    for component in path:
+        if not isinstance(value, dict) or component not in value:
+            raise GenerationError(f"{label} is absent from the promotion receipt")
+        value = value[component]
+    return value
+
+
+def _resolve_authorization_audit(value: Any, label: str) -> dict[str, str] | None:
+    """Validate and resolve the optional independent authorization audit ref."""
+
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        raise GenerationError(f"{label} must be null or an exact path/SHA object")
+    raw_path = value.get("path")
+    if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        raise GenerationError(f"{label} path must be absolute")
+    audit_path = Path(raw_path)
+    if audit_path == Path("/") or audit_path.resolve() != audit_path:
+        raise GenerationError(f"{label} path must be canonical")
+    if audit_path.is_symlink() or not audit_path.is_file():
+        raise GenerationError(f"{label} path must be a regular non-symlink file")
+    digest = _require_hex(value.get("sha256"), HEX64_RE, f"{label} SHA-256")
+    if _sha256_file(audit_path) != digest:
+        raise GenerationError(f"{label} SHA-256 differs")
+    return {"path": os.fspath(audit_path), "sha256": digest}
+
+
 def _validate_sq8_overlay_receipt(
     *,
     profile: dict[str, Any],
@@ -128,9 +166,10 @@ def _validate_sq8_overlay_receipt(
 ) -> dict[str, Any]:
     """Validate the immutable SQ8 overlay publication contract.
 
-    The receipt is intentionally self-contained: a three-SHA summary, stale
-    source commit, missing inventory, or any profile field that weakens the
-    receipt indirection is rejected before a served manifest can be written.
+    The receipt is intentionally self-contained: stale source identity,
+    missing inventory, an unbound authorization audit, or any profile field
+    that weakens the receipt indirection is rejected before a served manifest
+    can be written.
     """
 
     expected_promotion = {
@@ -142,6 +181,7 @@ def _validate_sq8_overlay_receipt(
         "package_from_receipt",
         "actual_evidence_from_receipt",
         "request_id_from_receipt",
+        "authorization_audit_from_receipt",
         "release_source_commit",
     }
     if set(promotion_profile) != expected_promotion:
@@ -160,6 +200,8 @@ def _validate_sq8_overlay_receipt(
         raise GenerationError("SQ8 overlay actual evidence receipt binding differs")
     if promotion_profile.get("request_id_from_receipt") != ["request_id"]:
         raise GenerationError("SQ8 overlay request ID receipt binding differs")
+    if promotion_profile.get("authorization_audit_from_receipt") != ["authorization_audit"]:
+        raise GenerationError("SQ8 overlay authorization audit receipt binding differs")
     release_commit = _require_hex(
         promotion_profile.get("release_source_commit"), HEX40_RE,
         "SQ8 overlay profile release source commit",
@@ -176,6 +218,7 @@ def _validate_sq8_overlay_receipt(
         "release",
         "overlay",
         "package",
+        "authorization_audit",
         "actual",
     }
     if set(receipt) != expected_receipt_keys:
@@ -200,6 +243,15 @@ def _validate_sq8_overlay_receipt(
         raise GenerationError("SQ8 overlay source provenance is incomplete")
     _require_hex(source.get("tree_sha256"), HEX40_RE, "SQ8 overlay source tree")
     _require_hex(source.get("archive_sha256"), HEX64_RE, "SQ8 overlay source archive")
+
+    authorization_audit = _resolve_authorization_audit(
+        _receipt_object(
+            receipt,
+            promotion_profile.get("authorization_audit_from_receipt"),
+            "SQ8 overlay authorization audit",
+        ),
+        "SQ8 overlay authorization audit",
+    )
 
     release = receipt.get("release")
     if not isinstance(release, dict) or set(release) != {"worker", "profile", "served_model"}:
@@ -335,7 +387,9 @@ def _validate_sq8_overlay_receipt(
             or prepared_value.get("actual") != {"status": "pending", "required": True}
         ):
             raise GenerationError("SQ8 overlay prepared receipt state differs")
-        for section in ("source_commit", "source_provenance", "overlay", "package"):
+        for section in (
+            "source_commit", "source_provenance", "overlay", "package", "authorization_audit"
+        ):
             if prepared_value.get(section) != receipt.get(section):
                 raise GenerationError(f"SQ8 overlay prepared receipt {section} differs")
         prepared_release = prepared_value.get("release")
@@ -382,6 +436,7 @@ def _validate_sq8_overlay_receipt(
     return {
         "source_commit": source_commit,
         "served_model_semantic_sha256": release_manifest["semantic_sha256"],
+        "authorization_audit": authorization_audit,
     }
 
 
@@ -756,6 +811,16 @@ def _materialize_profile_document(
         "promotion source commit",
     )
     overlay_receipt = None
+    authorization_audit: dict[str, str] | None = None
+    if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
+        authorization_audit = _resolve_authorization_audit(
+            _receipt_object(
+                receipt,
+                promotion_profile.get("authorization_audit_from_receipt"),
+                "SQ8 overlay authorization audit",
+            ),
+            "SQ8 overlay authorization audit",
+        )
     if validate_receipt:
         if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
             if artifact_manifest_path is None:
@@ -852,6 +917,8 @@ def _materialize_profile_document(
             ),
         },
     }
+    if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
+        document["promotion"]["authorization_audit"] = authorization_audit
     if reasoning_profile is not None:
         document["reasoning"] = reasoning_profile
     if overlay_receipt is not None:

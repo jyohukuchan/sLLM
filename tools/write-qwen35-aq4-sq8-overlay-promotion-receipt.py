@@ -215,6 +215,7 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         "package_from_receipt",
         "actual_evidence_from_receipt",
         "request_id_from_receipt",
+        "authorization_audit_from_receipt",
         "release_source_commit",
     }
     if set(promotion) != expected_keys:
@@ -235,6 +236,8 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         raise ReceiptError("overlay profile actual evidence binding differs")
     if promotion["request_id_from_receipt"] != ["request_id"]:
         raise ReceiptError("overlay profile request ID binding differs")
+    if promotion["authorization_audit_from_receipt"] != ["authorization_audit"]:
+        raise ReceiptError("overlay profile authorization audit binding differs")
     _hex(promotion["release_source_commit"], 40, "overlay profile release source commit")
     worker = profile.get("worker")
     product = profile.get("product")
@@ -314,6 +317,19 @@ def _absolute_evidence_ref(path: Path, label: str) -> dict[str, str]:
     if path.is_symlink() or not path.is_file():
         raise ReceiptError(f"{label} must be a regular non-symlink file")
     return {"path": os.fspath(path.resolve()), "sha256": sha256_file(path)}
+
+
+def _authorization_audit_ref(path: Path | None) -> dict[str, str] | None:
+    """Bind the optional independent authorization audit by absolute path/SHA."""
+
+    if path is None:
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ReceiptError("authorization audit receipt must be a regular non-symlink file")
+    resolved = path.resolve()
+    if not resolved.is_absolute() or resolved == Path("/"):
+        raise ReceiptError("authorization audit receipt path is invalid")
+    return {"path": os.fspath(resolved), "sha256": sha256_file(resolved)}
 
 
 def _validate_sq8_telemetry(value: Any) -> dict[str, Any]:
@@ -491,6 +507,7 @@ def write_receipt(
     source_archive_sha256: str,
     served_model_path: Path,
     request_id: str,
+    authorization_audit_path: Path | None = None,
 ) -> dict[str, Any]:
     """Create a strict receipt and publish it once, with no overwrite."""
 
@@ -504,6 +521,7 @@ def write_receipt(
     request_id = _request_id(request_id)
     source_tree_sha256 = _hex(source_tree_sha256, 40, "source tree SHA-256")
     source_archive_sha256 = _hex(source_archive_sha256, 64, "source archive SHA-256")
+    authorization_audit = _authorization_audit_ref(authorization_audit_path)
 
     worker_path = Path(str(worker_profile.get("binary", ""))).resolve()
     if worker_path.is_symlink() or not worker_path.is_file():
@@ -575,6 +593,7 @@ def write_receipt(
             "manifest_path": os.fspath(package_manifest_path),
             "manifest_sha256": package_manifest_sha256,
         },
+        "authorization_audit": authorization_audit,
         "actual": actual,
     }
     try:
@@ -602,7 +621,7 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
     prepared = _read_object(path, "prepared promotion receipt")
     if set(prepared) != {
         "schema_version", "status", "request_id", "source_commit", "source_provenance",
-        "release", "overlay", "package", "actual",
+        "release", "overlay", "package", "authorization_audit", "actual",
     }:
         raise ReceiptError("prepared receipt shape differs")
     if (
@@ -626,6 +645,21 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
     served = release.get("served_model") if isinstance(release, dict) else None
     overlay = prepared.get("overlay")
     package = prepared.get("package")
+    authorization_audit = prepared.get("authorization_audit")
+    if authorization_audit is not None:
+        if not isinstance(authorization_audit, dict) or set(authorization_audit) != {"path", "sha256"}:
+            raise ReceiptError("prepared authorization audit binding is incomplete")
+        raw_audit_path = authorization_audit.get("path")
+        if not isinstance(raw_audit_path, str) or not Path(raw_audit_path).is_absolute():
+            raise ReceiptError("prepared authorization audit path must be absolute")
+        audit_path = Path(raw_audit_path)
+        if audit_path.is_symlink() or not audit_path.is_file():
+            raise ReceiptError("prepared authorization audit path must be a regular non-symlink file")
+        _hex(authorization_audit.get("sha256"), 64, "prepared authorization audit SHA-256")
+        if audit_path.resolve() != audit_path:
+            raise ReceiptError("prepared authorization audit path must be canonical")
+        if sha256_file(audit_path) != authorization_audit["sha256"]:
+            raise ReceiptError("prepared authorization audit SHA-256 differs")
     for value, label in (
         (worker.get("sha256") if isinstance(worker, dict) else None, "prepared worker SHA-256"),
         (profile.get("sha256"), "prepared profile SHA-256"),
@@ -826,6 +860,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-archive-sha256", required=True)
     parser.add_argument("--served-model", required=True, type=Path)
     parser.add_argument("--request-id", required=True)
+    parser.add_argument("--authorization-audit-receipt", type=Path)
     return parser.parse_args(argv)
 
 
@@ -839,6 +874,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_archive_sha256=args.source_archive_sha256,
             served_model_path=args.served_model,
             request_id=args.request_id,
+            authorization_audit_path=args.authorization_audit_receipt,
         )
     except Exception as error:
         print(f"SQ8 overlay promotion receipt publication failed: {error}", file=sys.stderr)

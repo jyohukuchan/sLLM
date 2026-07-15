@@ -21,6 +21,10 @@
 - 最終監査でrequest identityの生成元がcapture側の乱数だった問題を修正した。builderがsource commit/tree/archive、worker、binding/content/tensor-set、packageのcanonical identityをSHA-256へ束縛し、`sq8-promotion-<64 hex>`を1件だけ生成する。Gate、build receipt、prepared receipt、profile、capture argv、worker telemetry環境、executor record、maintenance evidence、actual/failure receiptが同じrequest IDをexact照合する。promotion captureではexplicit `--sq8-promotion-request-id`が必須で、`capture-*`乱数request IDを生成しない。
 - prepared receiptは上書きせず、actual成功後だけ別のcreate-new `promotion-actual-receipt.json`を生成する。actual receiptはprepared receiptの絶対path/SHA、maintenance/executorの相対path/SHA、request ID、live worker/profile/overlay inventory/package、stable2 exclusivity、telemetry、manifest/output identityを束縛する。失敗時は別の`promotion-failure-receipt.json`だけを生成する。
 - production `generate`/`materialize`は`actual_verified` receiptだけを受理し、GPU前候補は明示的な`generate_prepared_candidate`経路に限定した。wrong request、replay/overwrite、prepared receipt置換、pending receiptのproduction利用を拒否する。
+- 独立監査receiptを正式な実行認可入力にした。`--authorize-actual-run`と`--independent-audit-receipt`は常に対で要求し、監査receiptの0444/single-link/non-symlink、source commit/tree/archive、旧Gate/worker/profile/manifest/prepared receipt/SHA256SUMS、request、binding/content/tensor-set/package、`implementation_ready`/`not_executed`をlive identityと照合する。
+- 認可候補は監査SHA由来のcreate-new固定pathだけへ生成し、Gateを`authorized_pending_execution`、`actual_run_allowed=true`、`max_attempts=1`にする。Gate、prepared receipt、profile、served manifestへ同一の監査絶対path/lowercase SHA-256を伝播し、片側flag、identity mismatch、writable/symlink audit、出力replayを拒否する。
+- gatewayは`promotion.authorization_audit`をtyped optional identityとして読み、旧manifestのabsent/null互換を維持しながら、object時はexact path/SHA、canonical absolute regular non-symlink file、lowercase SHA-256、live hashを検証する。SQ8 profileはauthorization auditのreceipt mappingを必須にし、認可候補ではnullを許さない実体bindingを生成する。
+- maintenance wrapperは未認可候補のactual executeをservice参照前に拒否する。認可候補ではGate/receipt/manifestの監査identity一致、監査ファイルの0444/single-link/non-symlink/live SHA、`max_attempts=1`を再検査する。
 
 ## 検証
 
@@ -34,9 +38,13 @@
 - combined related Python tests: 44 passed（worktree絶対pathに依存する既存1件は対象外）
 - final request/receipt auditを含むcombined related Python tests: 46 passed（同じ既存1件は対象外）
 - GPU command・service状態変更: 0。wrapper実装確認中にread-onlyの`systemctl cat`を1回実行したが、start/stop/restart/showやGPU commandは実行していない。
+- authorization builder/receipt/wrapper tests: 18 passed
+- openai-gateway full tests: 237 passed
+- 独立監査receipt実物照合: passed（SHA-256 `db71e280e6605118883f2de80ed308df85dc03a1b9b8b79f947dbc106cfa5146`）
+- 統合Python tests: 57 passed。既存deployment profileが元worktreeの絶対pathを持つため、別worktreeでは既存1件だけ失敗する。
 
 ## 次の行動
 
-1. Python-only lifecycle/receipt強化をcommitし、新HEADをrelease sourceとして`CARGO_BUILD_JOBS=1`で`ullm-aq4-worker`をrelease rebuildする。
-2. strict `prepared_not_executed` receiptを含むcreate-new candidate runtimeへGateを再materializeし、Gate/worker/manifest/receipt SHA-256を固定する。
-3. 独立監査が専用wrapper、失敗復旧、actual request telemetry、atomic evidence publicationを承認するまで、`actual_run_allowed=false`を維持する。
+1. authorization/gateway統合を通常commitとして固定し、`CARGO_BUILD_JOBS=1`でworkerをrelease rebuildする。
+2. 監査SHA由来のcreate-new authorized runtimeを正式materializeし、Gate/worker/manifest/receipt/SHA256SUMSとmodeを固定する。
+3. GPU/serviceは起動せず、認可候補を`authorized_pending_execution`のまま引き渡す。

@@ -44,7 +44,7 @@ class ReceiptWriter:
         )
 
 
-def snapshot(tag: str = "same") -> dict[str, Any]:
+def snapshot(tag: str = "same", *, authorized: bool = True) -> dict[str, Any]:
     return {
         "source": {"commit": "a" * 40, "tree": "b" * 40, "archive_sha256": "c" * 64},
         "files": {
@@ -52,6 +52,7 @@ def snapshot(tag: str = "same") -> dict[str, Any]:
             "package_manifest": {"sha256": "e" * 64},
         },
         "overlay": {"content_sha256": "f" * 64},
+        "authorization": {"actual_run_allowed": authorized},
         "tag": tag,
     }
 
@@ -259,3 +260,16 @@ def test_create_new_output_rejects_existing_directory(tmp_path: Path) -> None:
     output.mkdir()
     with pytest.raises(MODULE.PromotionError, match="create-new"):
         MODULE.finalize_directory(output, {"record.json": {"status": "ok"}})
+
+
+def test_execute_rejects_unauthorized_candidate_before_service_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(monkeypatch, [snapshot(authorized=False)])
+    deps, calls = dependencies(tmp_path)
+
+    with pytest.raises(MODULE.PromotionError, match="not authorized"):
+        MODULE.execute(candidate(tmp_path), tmp_path / "forbidden", deps)
+
+    assert calls["stop"] == calls["start"] == 0
+    assert calls["capture"] == []

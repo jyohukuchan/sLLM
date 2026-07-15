@@ -113,6 +113,7 @@ def fixture(tmp_path: Path) -> dict[str, Path | dict]:
             "package_from_receipt": ["package"],
             "actual_evidence_from_receipt": ["actual"],
             "request_id_from_receipt": ["request_id"],
+            "authorization_audit_from_receipt": ["authorization_audit"],
             "release_source_commit": "1" * 40,
         },
     }
@@ -146,6 +147,113 @@ def test_pre_gpu_receipt_is_pending_and_create_new(fixture: dict[str, Path | dic
         )
     with pytest.raises(GENERATOR.GenerationError, match="not executable"):
         GENERATOR.materialize(Path(fixture["profile"]))
+
+
+def test_authorization_audit_is_explicit_and_bound_for_prepared_candidate(
+    tmp_path: Path, fixture: dict[str, Path | dict]
+) -> None:
+    audit_path = tmp_path / "authorization-audit.json"
+    _write_json(
+        audit_path,
+        {
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+            "verdict": "implementation_ready",
+        },
+    )
+    prepared = Path(fixture["profile"]).with_name("promotion.json")
+    value = WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=prepared,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+        authorization_audit_path=audit_path,
+    )
+    expected_audit = {
+        "path": str(audit_path.resolve()),
+        "sha256": WRITER.sha256_file(audit_path),
+    }
+    assert value["authorization_audit"] == expected_audit
+
+    document = GENERATOR._materialize_profile_document(
+        Path(fixture["profile"]),
+        expected_manifest_path=Path(fixture["served"]),
+        allow_prepared=True,
+        prepared_only=True,
+    )
+    assert document["promotion"]["authorization_audit"] == expected_audit
+
+    _write_json(audit_path, {"schema_version": "tampered"})
+    with pytest.raises(GENERATOR.GenerationError, match="authorization audit SHA-256 differs"):
+        GENERATOR._materialize_profile_document(
+            Path(fixture["profile"]),
+            expected_manifest_path=Path(fixture["served"]),
+            allow_prepared=True,
+            prepared_only=True,
+        )
+
+    # Restore the audited file, then prove that a receipt SHA mismatch is also
+    # rejected even when the path remains unchanged.
+    _write_json(
+        audit_path,
+        {
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+            "verdict": "implementation_ready",
+        },
+    )
+    tampered = json.loads(prepared.read_text(encoding="utf-8"))
+    tampered["authorization_audit"]["sha256"] = "f" * 64
+    prepared.chmod(0o644)
+    _write_json(prepared, tampered)
+    with pytest.raises(GENERATOR.GenerationError, match="authorization audit SHA-256 differs"):
+        GENERATOR._materialize_profile_document(
+            Path(fixture["profile"]),
+            expected_manifest_path=Path(fixture["served"]),
+            allow_prepared=True,
+            prepared_only=True,
+        )
+
+
+def test_authorization_audit_null_and_profile_mapping_cannot_be_weakened(
+    fixture: dict[str, Path | dict]
+) -> None:
+    prepared = Path(fixture["profile"]).with_name("promotion.json")
+    value = WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=prepared,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+    )
+    assert value["authorization_audit"] is None
+    receipt = json.loads(prepared.read_text(encoding="utf-8"))
+    receipt.pop("authorization_audit")
+    prepared.chmod(0o644)
+    _write_json(prepared, receipt)
+    with pytest.raises(GENERATOR.GenerationError, match="authorization audit.*absent"):
+        GENERATOR._materialize_profile_document(
+            Path(fixture["profile"]),
+            expected_manifest_path=Path(fixture["served"]),
+            allow_prepared=True,
+            prepared_only=True,
+        )
+
+    profile = json.loads(Path(fixture["profile"]).read_text(encoding="utf-8"))
+    profile["promotion"]["authorization_audit_from_receipt"] = ["release"]
+    weakened_output = Path(fixture["profile"]).with_name("promotion-2.json")
+    profile["promotion"]["receipt"] = str(weakened_output)
+    _write_json(Path(fixture["profile"]), profile)
+    with pytest.raises(WRITER.ReceiptError, match="authorization audit binding differs"):
+        WRITER.write_receipt(
+            profile_path=Path(fixture["profile"]),
+            output_path=weakened_output,
+            source_tree_sha256="2" * 40,
+            source_archive_sha256="3" * 64,
+            served_model_path=Path(fixture["served"]),
+            request_id=REQUEST_ID,
+        )
 
 
 def test_profile_weakening_and_live_inventory_change_are_rejected(

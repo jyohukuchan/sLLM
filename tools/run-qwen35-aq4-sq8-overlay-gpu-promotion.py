@@ -219,13 +219,16 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "package_from_receipt",
         "actual_evidence_from_receipt",
         "request_id_from_receipt",
+        "authorization_audit_from_receipt",
         "release_source_commit",
     }:
         raise PromotionError("candidate strict promotion profile differs")
+    if promotion.get("authorization_audit_from_receipt") != ["authorization_audit"]:
+        raise PromotionError("candidate authorization audit profile binding differs")
     receipt_path = Path(str(promotion["receipt"])).resolve()
     receipt = read_object(receipt_path, "candidate promotion receipt")
-    if gate.get("schema_version") != GATE_SCHEMA or gate.get("actual_run_allowed") is not False:
-        raise PromotionError("candidate Gate authorization differs")
+    if gate.get("schema_version") != GATE_SCHEMA:
+        raise PromotionError("candidate Gate schema differs")
     if gate.get("release_source_commit") != build.get("release_source_commit"):
         raise PromotionError("candidate Gate and build source commits differ")
     identity = gate.get("profile_identity")
@@ -256,7 +259,10 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
     if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
         raise PromotionError("candidate Gate promotion request ID differs")
-    if set(receipt) != {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "actual"}:
+    if set(receipt) != {
+        "schema_version", "status", "request_id", "source_commit", "source_provenance",
+        "release", "overlay", "package", "authorization_audit", "actual",
+    }:
         raise PromotionError("candidate promotion receipt shape differs")
     source = receipt.get("source_provenance")
     if (
@@ -322,6 +328,58 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         raise PromotionError("candidate promotion receipt package differs")
     if manifest.get("promotion", {}).get("receipt_sha256") != sha_file(receipt_path):
         raise PromotionError("candidate served manifest receipt SHA differs")
+    authorization = gate.get("authorization")
+    actual_run_allowed = gate.get("actual_run_allowed")
+    authorization_audit = receipt.get("authorization_audit")
+    if not isinstance(authorization, dict) or actual_run_allowed not in {False, True}:
+        raise PromotionError("candidate Gate authorization differs")
+    expected_status = "authorized_pending_execution" if actual_run_allowed else "ready_for_independent_audit"
+    expected_attempts = 1 if actual_run_allowed else 0
+    if (
+        gate.get("status") != expected_status
+        or authorization.get("fresh_output_required") is not True
+        or authorization.get("maximum_actual_runs") != 1
+        or authorization.get("max_attempts") != expected_attempts
+        or authorization.get("service_or_gpu_commands_during_preparation") != 0
+    ):
+        raise PromotionError("candidate Gate authorization policy differs")
+    manifest_audit = manifest.get("promotion", {}).get("authorization_audit")
+    if actual_run_allowed:
+        if not isinstance(authorization_audit, dict) or set(authorization_audit) != {"path", "sha256"}:
+            raise PromotionError("authorized candidate audit binding is incomplete")
+        raw_audit_path = authorization_audit.get("path")
+        audit_sha256 = authorization_audit.get("sha256")
+        if (
+            not isinstance(raw_audit_path, str)
+            or not Path(raw_audit_path).is_absolute()
+            or not isinstance(audit_sha256, str)
+            or SHA256_RE.fullmatch(audit_sha256) is None
+        ):
+            raise PromotionError("authorized candidate audit identity differs")
+        audit_path = Path(raw_audit_path)
+        audit_stat = audit_path.stat(follow_symlinks=False)
+        if (
+            audit_path.is_symlink()
+            or not stat.S_ISREG(audit_stat.st_mode)
+            or stat.S_IMODE(audit_stat.st_mode) != 0o444
+            or audit_stat.st_nlink != 1
+            or audit_path.resolve() != audit_path
+            or sha_file(audit_path) != audit_sha256
+        ):
+            raise PromotionError("authorized candidate audit file differs")
+        if (
+            authorization.get("blocked_until") is not None
+            or authorization.get("independent_audit_receipt") != authorization_audit
+            or manifest_audit != authorization_audit
+        ):
+            raise PromotionError("authorized candidate audit propagation differs")
+    elif (
+        authorization.get("blocked_until") != "independent_executor_and_gate_audit"
+        or authorization.get("independent_audit_receipt") is not None
+        or authorization_audit is not None
+        or manifest_audit is not None
+    ):
+        raise PromotionError("unauthorized candidate audit state differs")
     return {
         "source": source_identity(candidate, build),
         "files": {
@@ -344,6 +402,12 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             "inventory": package_inventory,
         },
         "source_provenance_sha256": canonical_sha(binding_value.get("source")),
+        "authorization": {
+            "actual_run_allowed": actual_run_allowed,
+            "status": expected_status,
+            "max_attempts": expected_attempts,
+            "independent_audit_receipt": authorization_audit,
+        },
     }
 
 
@@ -873,6 +937,8 @@ def load_receipt_writer() -> Any:
 
 def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dict[str, Any]]:
     before_candidate = candidate_snapshot(candidate)
+    if before_candidate.get("authorization", {}).get("actual_run_allowed") is not True:
+        raise PromotionError("candidate is not authorized for actual execution")
     profile = read_object(candidate / "profile.json", "candidate profile")
     gate = read_object(candidate / "gate.json", "candidate Gate")
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")

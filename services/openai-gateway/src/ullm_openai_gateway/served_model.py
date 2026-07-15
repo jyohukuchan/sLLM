@@ -115,6 +115,12 @@ class PackageIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class AuthorizationAuditIdentity:
+    path: Path
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProductContract:
     root: Path
     artifact: ArtifactIdentity | None
@@ -126,6 +132,7 @@ class PromotionContract:
     source_commit: str
     receipt: Path
     receipt_sha256: str
+    authorization_audit: AuthorizationAuditIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,19 +561,44 @@ def _parse_product(value: Any, base: Path) -> ProductContract:
 
 def _parse_promotion(value: Any, base: Path) -> PromotionContract:
     item = _mapping(value, "promotion")
-    _exact_keys(item, {"source_commit", "receipt", "receipt_sha256"}, "promotion")
+    expected = {"source_commit", "receipt", "receipt_sha256"}
+    if set(item) not in (expected, expected | {"authorization_audit"}):
+        raise ServedModelError("promotion field set differs")
     receipt = _safe_regular_file(
         _resolve_root(base, _text(item["receipt"], "promotion.receipt", maximum=4096)),
         "promotion.receipt",
     )
     digest = _sha256(item["receipt_sha256"], "promotion.receipt_sha256")
     _verify_file_sha256(receipt, digest, "promotion.receipt")
+    authorization_audit: AuthorizationAuditIdentity | None = None
+    if "authorization_audit" in item and item["authorization_audit"] is not None:
+        audit_item = _mapping(item["authorization_audit"], "promotion.authorization_audit")
+        _exact_keys(audit_item, {"path", "sha256"}, "promotion.authorization_audit")
+        raw_audit_path = _text(
+            audit_item["path"], "promotion.authorization_audit.path", maximum=4096
+        )
+        audit_path = Path(raw_audit_path)
+        if not audit_path.is_absolute() or audit_path.resolve() != audit_path:
+            raise ServedModelError(
+                "promotion.authorization_audit.path must be a canonical absolute path"
+            )
+        audit_path = _safe_regular_file(
+            audit_path, "promotion.authorization_audit.path"
+        )
+        audit_digest = _sha256(
+            audit_item["sha256"], "promotion.authorization_audit.sha256"
+        )
+        _verify_file_sha256(
+            audit_path, audit_digest, "promotion.authorization_audit"
+        )
+        authorization_audit = AuthorizationAuditIdentity(audit_path, audit_digest)
     return PromotionContract(
         source_commit=_text(
             item["source_commit"], "promotion.source_commit", maximum=256
         ),
         receipt=receipt,
         receipt_sha256=digest,
+        authorization_audit=authorization_audit,
     )
 
 

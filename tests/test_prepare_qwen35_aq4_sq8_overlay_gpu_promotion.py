@@ -161,6 +161,7 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
         "package_from_receipt": ["package"],
         "actual_evidence_from_receipt": ["actual"],
         "request_id_from_receipt": ["request_id"],
+        "authorization_audit_from_receipt": ["authorization_audit"],
         "release_source_commit": commit,
     }
     request_id = gate["request"]["actual"]["request_id"]
@@ -206,3 +207,114 @@ def test_profile_and_binding_preflight_fail_closed(tmp_path: Path) -> None:
     package = Path(profile["product"]["root"]) / "package/manifest.json"
     with pytest.raises(TOOL.GateError, match="exactly 48"):
         TOOL.validate_binding(binding, package)
+
+
+def test_authorization_requires_paired_flags_and_exact_audited_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile, worker, binding_sha = fixture(tmp_path)
+    commit = "a" * 40
+    tree = "d" * 40
+    archive = "e" * 64
+    monkeypatch.setattr(
+        TOOL,
+        "git_value",
+        lambda *args: commit if args[0] == "rev-parse" and args[1].endswith("^{commit}") else tree,
+    )
+    monkeypatch.setattr(TOOL, "source_archive_sha256", lambda _: archive)
+    monkeypatch.setattr(TOOL, "command_text", lambda argv, **_: "fixture-version")
+    monkeypatch.setattr(
+        TOOL,
+        "load_module",
+        lambda _name, path: FakeReceiptWriter if path == TOOL.RECEIPT_WRITER else FakeGenerator,
+    )
+    audit_sha = "9" * 64
+    audit_path = tmp_path / "audit-receipt.json"
+    audit_path.write_text("{}\n", encoding="ascii")
+    audit_path.chmod(0o444)
+    expected_output = Path(f"/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-{audit_sha[:16]}")
+    if expected_output.exists():
+        import shutil
+
+        expected_output.chmod(0o755)
+        shutil.rmtree(expected_output)
+    worker_sha = sha(worker)
+    package_sha = sha(tmp_path / "product/package/manifest.json")
+    expected_request = TOOL.fixed_promotion_request_id(
+        commit=commit,
+        tree=tree,
+        archive_sha256=archive,
+        worker_sha256=worker_sha,
+        binding_sha256=binding_sha,
+        content_sha256="b" * 64,
+        tensor_set_sha256="c" * 64,
+        package_sha256=package_sha,
+    )
+    audit = {
+        "path": str(audit_path.resolve()),
+        "sha256": audit_sha,
+        "request_id": expected_request,
+        "worker_sha256": worker_sha,
+        "binding_sha256": binding_sha,
+        "package_sha256": package_sha,
+    }
+    monkeypatch.setattr(TOOL, "validate_independent_audit", lambda *args, **kwargs: audit)
+
+    common = dict(
+        release_source_commit=commit,
+        output=expected_output,
+        profile=profile,
+        worker_binary=worker,
+    )
+    with pytest.raises(TOOL.GateError, match="required together"):
+        TOOL.materialize(argparse.Namespace(**common, authorize_actual_run=True, independent_audit_receipt=None))
+    with pytest.raises(TOOL.GateError, match="required together"):
+        TOOL.materialize(argparse.Namespace(**common, authorize_actual_run=False, independent_audit_receipt=audit_path))
+
+    bad_audit = dict(audit)
+    bad_audit["worker_sha256"] = "0" * 64
+    monkeypatch.setattr(TOOL, "validate_independent_audit", lambda *args, **kwargs: bad_audit)
+    with pytest.raises(TOOL.GateError, match="differs from independently audited"):
+        TOOL.materialize(
+            argparse.Namespace(**common, authorize_actual_run=True, independent_audit_receipt=audit_path)
+        )
+    monkeypatch.setattr(TOOL, "validate_independent_audit", lambda *args, **kwargs: audit)
+
+    result = TOOL.materialize(
+        argparse.Namespace(**common, authorize_actual_run=True, independent_audit_receipt=audit_path)
+    )
+    gate = json.loads((expected_output / "gate.json").read_text())
+    assert result["actual_run_allowed"] is True
+    assert gate["status"] == "authorized_pending_execution"
+    assert gate["actual_run_allowed"] is True
+    assert gate["authorization"]["max_attempts"] == 1
+    assert gate["authorization"]["independent_audit_receipt"] == {
+        "path": str(audit_path.resolve()), "sha256": audit_sha,
+    }
+    with pytest.raises(TOOL.GateError, match="refusing to reuse"):
+        TOOL.materialize(
+            argparse.Namespace(**common, authorize_actual_run=True, independent_audit_receipt=audit_path)
+        )
+    import shutil
+
+    expected_output.chmod(0o755)
+    shutil.rmtree(expected_output)
+
+
+def test_audit_receipt_rejects_writable_and_symlink(tmp_path: Path) -> None:
+    writable = tmp_path / "audit.json"
+    writable.write_text("{}\n", encoding="ascii")
+    writable.chmod(0o644)
+    with pytest.raises(TOOL.GateError, match="immutable 0444"):
+        TOOL.validate_independent_audit(
+            writable, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64
+        )
+    target = tmp_path / "target.json"
+    target.write_text("{}\n", encoding="ascii")
+    target.chmod(0o444)
+    link = tmp_path / "audit-link.json"
+    link.symlink_to(target)
+    with pytest.raises(TOOL.GateError, match="immutable 0444"):
+        TOOL.validate_independent_audit(
+            link, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64
+        )
