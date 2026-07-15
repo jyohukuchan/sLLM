@@ -84,6 +84,51 @@ def test_promotion_authorization_audit_is_optional_and_typed(tmp_path: Path) -> 
     assert loaded.promotion.authorization_audit.sha256 == _sha256(audit)
 
 
+def test_promotion_authorization_lineage_is_optional_typed_and_rehashed(
+    tmp_path: Path,
+) -> None:
+    path = _copy_fixture(tmp_path)
+    assert load_served_model(path).promotion.authorization_lineage is None
+    value = _document(path)
+    lineage = {
+        "schema_version": "ullm.sq8_authorization_lineage_input.v1",
+        "disposition": "authorization_input_not_yet_runtime_bound",
+        "source": {
+            "commit": "a" * 40, "tree_oid": "b" * 40,
+            "archive_sha256": "c" * 64,
+        },
+        "entries": [{"index": index} for index in range(6)],
+    }
+    input_path = (tmp_path / "lineage-input.json").resolve()
+    runtime_path = (tmp_path / "lineage-runtime.json").resolve()
+    for lineage_path in (input_path, runtime_path):
+        lineage_path.write_text(json.dumps(lineage) + "\n", encoding="ascii")
+        lineage_path.chmod(0o444)
+    entries_sha256 = hashlib.sha256(
+        json.dumps(
+            lineage["entries"], ensure_ascii=True, allow_nan=False,
+            separators=(",", ":"), sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+    value["promotion"]["authorization_lineage"] = {
+        "schema_version": "ullm.sq8_authorization_lineage_ref.v1",
+        "input_path": str(input_path),
+        "runtime_path": str(runtime_path),
+        "sha256": _sha256(input_path),
+        "entries_sha256": entries_sha256,
+    }
+    _write(path, value)
+    loaded = load_served_model(path)
+    assert loaded.promotion.authorization_lineage is not None
+    assert loaded.promotion.authorization_lineage.entries_sha256 == entries_sha256
+
+    runtime_path.chmod(0o644)
+    runtime_path.write_text("{}\n", encoding="ascii")
+    runtime_path.chmod(0o444)
+    with pytest.raises(ServedModelError):
+        load_served_model(path)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
