@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import fcntl
 import hashlib
@@ -158,7 +159,8 @@ def verify_capture_helpers() -> None:
         helper.verify()
 
 
-SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
+SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v2"
+KERNEL_NORMALIZATION_SCHEMA = "ullm.aq4_p3_kernel_split_normalization.v1"
 TARGET_SCHEMA = "ullm.aq4_p3_profile_target_command.v1"
 FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
 READY_CANDIDATE_AUDIT_SCHEMA = "ullm.aq4_p2_ready_candidate_audit.v1"
@@ -199,6 +201,7 @@ MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 MARKER_CLOCK = "rocprofv3_monotonic_ns"
 MARKER_RANGE_DOMAIN = "MARKER_CORE_RANGE_API"
 MAX_ROWS = 500_000
+MAX_TRACE_TIMESTAMP = (1 << 63) - 1
 MARKER_KEYS = {
     "run_id", "session_id", "case_id", "case_sha256", "run_index", "run_kind"
 }
@@ -1924,6 +1927,209 @@ def rows_by_marker(
     return result
 
 
+def deterministic_kernel_rows(
+    fields: list[str], rows: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Canonicalize a marker-bounded derived kernel split without changing raw evidence."""
+    return [record[1] for record in sorted_kernel_records(fields, rows)]
+
+
+def kernel_records(
+    fields: list[str], rows: list[dict[str, str]]
+) -> list[tuple[tuple[int, int, int, int, int], dict[str, str]]]:
+    start_column, end_column = interval_columns(fields)
+    dispatch_column = one_column(
+        fields,
+        ("Dispatch_Id", "Dispatch_ID", "Index", "dispatch_id"),
+        "kernel dispatch id",
+    )
+    correlation_column = one_column(
+        fields,
+        ("Correlation_Id", "Correlation_ID", "correlation_id"),
+        "kernel correlation id",
+    )
+
+    dispatches: set[int] = set()
+    correlations: set[int] = set()
+    keyed: list[tuple[tuple[int, int, int, int, int], dict[str, str]]] = []
+    for ordinal, row in enumerate(rows):
+        line = ordinal + 2
+        values = [
+            row[start_column].strip(),
+            row[end_column].strip(),
+            row[dispatch_column].strip(),
+            row[correlation_column].strip(),
+        ]
+        if any(not value.isascii() or not value.isdecimal() for value in values):
+            raise CaptureError(f"kernel split row {line} numeric field is invalid")
+        if any(len(value) > 19 for value in values):
+            raise CaptureError(f"kernel split row {line} numeric field exceeds int63")
+        start, end, dispatch = (int(value) for value in values[:3])
+        correlation = int(values[3])
+        if (
+            start > MAX_TRACE_TIMESTAMP
+            or end > MAX_TRACE_TIMESTAMP
+            or dispatch > MAX_TRACE_TIMESTAMP
+            or correlation > MAX_TRACE_TIMESTAMP
+        ):
+            raise CaptureError(f"kernel split row {line} numeric field exceeds int63")
+        if end <= start:
+            raise CaptureError(f"kernel split row {line} interval is invalid")
+        if dispatch in dispatches:
+            raise CaptureError(f"kernel split row {line} dispatch id is duplicated")
+        if correlation in correlations:
+            raise CaptureError(f"kernel split row {line} correlation id is duplicated")
+        dispatches.add(dispatch)
+        correlations.add(correlation)
+        keyed.append(((start, end, dispatch, correlation, ordinal), row))
+    return keyed
+
+
+def sorted_kernel_records(
+    fields: list[str], rows: list[dict[str, str]]
+) -> list[tuple[tuple[int, int, int, int, int], dict[str, str]]]:
+    return sorted(kernel_records(fields, rows), key=lambda item: item[0])
+
+
+def _order_sha256(
+    records: list[tuple[tuple[int, int, int, int, int], dict[str, str]]]
+) -> str:
+    return hashlib.sha256(
+        canonical([list(key[:4]) for key, _row in records])
+    ).hexdigest()
+
+
+def _id_set_sha256(values: list[int]) -> str:
+    return hashlib.sha256(canonical(sorted(set(values)))).hexdigest()
+
+
+def _id_multiset_sha256(values: list[int]) -> str:
+    return hashlib.sha256(
+        canonical(
+            [
+                [value, count]
+                for value, count in sorted(collections.Counter(values).items())
+            ]
+        )
+    ).hexdigest()
+
+
+def _kernel_conservation(
+    before: list[tuple[tuple[int, int, int, int, int], dict[str, str]]],
+    after: list[tuple[tuple[int, int, int, int, int], dict[str, str]]],
+) -> dict[str, dict[str, Any]]:
+    def measures(
+        records: list[tuple[tuple[int, int, int, int, int], dict[str, str]]]
+    ) -> dict[str, Any]:
+        dispatches = [key[2] for key, _row in records]
+        correlations = [key[3] for key, _row in records]
+        return {
+            "row_count": len(records),
+            "dispatch_id_set_sha256": _id_set_sha256(dispatches),
+            "dispatch_id_multiset_sha256": _id_multiset_sha256(dispatches),
+            "correlation_id_set_sha256": _id_set_sha256(correlations),
+            "correlation_id_multiset_sha256": _id_multiset_sha256(correlations),
+            "duration_sum_ns": sum(key[1] - key[0] for key, _row in records),
+        }
+
+    before_values = measures(before)
+    after_values = measures(after)
+    if before_values != after_values:
+        raise CaptureError("kernel normalization conservation differs")
+    return {
+        name: {"before": before_values[name], "after": after_values[name]}
+        for name in before_values
+    }
+
+
+def _kernel_order_provenance(
+    records: list[tuple[tuple[int, int, int, int, int], dict[str, str]]]
+) -> dict[str, Any]:
+    ordered = sorted(records, key=lambda item: item[0])
+    inversions = sum(
+        current[0][:4] < previous[0][:4]
+        for previous, current in zip(records, records[1:])
+    )
+    return {
+        "row_count": len(records),
+        "raw_order_inversion_count": inversions,
+        "pre_order_sha256": _order_sha256(records),
+        "post_order_sha256": _order_sha256(ordered),
+        "conservation": _kernel_conservation(records, ordered),
+    }
+
+
+def kernel_normalization_provenance(
+    fields: list[str],
+    raw_rows: list[dict[str, str]],
+    groups: dict[int, list[dict[str, str]]],
+    source_sha256_before: str,
+    source_sha256_after: str,
+) -> dict[str, Any]:
+    if source_sha256_before != source_sha256_after:
+        raise CaptureError("raw kernel trace SHA-256 changed during normalization")
+    raw_records = kernel_records(fields, raw_rows)
+    return {
+        "schema_version": KERNEL_NORMALIZATION_SCHEMA,
+        "scope": "derived_marker_bounded_kernel_splits_only",
+        "numeric_order": [
+            "Start_Timestamp",
+            "End_Timestamp",
+            "Dispatch_Id",
+            "Correlation_Id",
+            "original_ordinal",
+        ],
+        "source_kernel_trace_sha256_before": source_sha256_before,
+        "source_kernel_trace_sha256_after": source_sha256_after,
+        "raw_trace": _kernel_order_provenance(raw_records),
+        "groups": [
+            {
+                "run_index": index,
+                "run_kind": "warmup" if index < 2 else "measured",
+                **_kernel_order_provenance(kernel_records(fields, groups[index])),
+            }
+            for index in range(12)
+        ],
+    }
+
+
+def validate_kernel_normalization_provenance(
+    value: Any,
+    fields: list[str],
+    raw_rows: list[dict[str, str]],
+    groups: dict[int, list[dict[str, str]]],
+    source_sha256_before: str,
+    source_sha256_after: str,
+    split_kernel_snapshots: dict[int, Any],
+) -> None:
+    expected = kernel_normalization_provenance(
+        fields,
+        raw_rows,
+        groups,
+        source_sha256_before,
+        source_sha256_after,
+    )
+    if value != expected:
+        raise CaptureError("kernel normalization provenance differs")
+    expected_fields = list(fields)
+    if "Phase" not in expected_fields:
+        expected_fields.append("Phase")
+    if set(split_kernel_snapshots) != set(range(2, 12)):
+        raise CaptureError("kernel normalization split inventory differs")
+    for index in range(2, 12):
+        output_fields, output_rows = csv_rows(
+            split_kernel_snapshots[index], f"normalized kernel split {index}"
+        )
+        expected_rows = [
+            dict(row) for row in deterministic_kernel_rows(fields, groups[index])
+        ]
+        if "Phase" not in fields:
+            for row in expected_rows:
+                row["Phase"] = "prefill"
+        if output_fields != expected_fields or output_rows != expected_rows:
+            raise CaptureError(f"normalized kernel split {index} differs")
+
+
 def validate_memory_copy_rows(fields: list[str], rows: list[dict[str, str]]) -> None:
     operation_aliases = ("Name", "Kind", "Direction", "Operation", "name")
     operation_columns = [field for field in operation_aliases if field in fields]
@@ -2089,7 +2295,10 @@ def _assemble(
     if len({snapshot.sha256 for snapshot in trace_snapshots.values()}) != len(trace_snapshots):
         raise CaptureError("source trace bytes were reused across domains")
     ranges = markers(trace_snapshots["marker"], raw, run_id)
-    parsed: dict[str, tuple[list[str], dict[int, list[dict[str, str]]]]] = {}
+    parsed: dict[
+        str,
+        tuple[list[str], list[dict[str, str]], dict[int, list[dict[str, str]]]],
+    ] = {}
     for kind in ("kernel", "hip_api", "memory_copy"):
         fields, rows = csv_rows(trace_snapshots[kind], f"{kind} trace")
         if kind == "kernel":
@@ -2098,7 +2307,11 @@ def _assemble(
             validate_all_hip_api_names(fields, rows)
         else:
             validate_memory_copy_rows(fields, rows)
-        parsed[kind] = (fields, rows_by_marker(fields, rows, ranges, f"{kind} trace"))
+        parsed[kind] = (
+            fields,
+            rows,
+            rows_by_marker(fields, rows, ranges, f"{kind} trace"),
+        )
     split_directory.mkdir(mode=0o700)
     capability_value = capability(profiler_value)
     capability_path = output_directory / "capture-capabilities.json"
@@ -2109,22 +2322,25 @@ def _assemble(
     PRODUCER.validate_capture_capabilities(capability_value, "diagnostic")
     profile_runs: list[dict[str, Any]] = []
     split_snapshots: list[Any] = []
+    split_kernel_snapshots: dict[int, Any] = {}
     used_kernel_traces: set[str] = set()
     used_api_traces: set[str] = set()
     for index in range(2, 12):
-        kernel_fields, kernel_runs = parsed["kernel"]
+        kernel_fields, _kernel_source_rows, kernel_runs = parsed["kernel"]
         if not kernel_runs[index]:
             raise CaptureError(f"measured run {index} kernel trace is empty")
         kernel_output_fields = list(kernel_fields)
-        kernel_rows = [dict(row) for row in kernel_runs[index]]
+        kernel_rows = deterministic_kernel_rows(
+            kernel_fields, [dict(row) for row in kernel_runs[index]]
+        )
         if "Phase" not in kernel_output_fields:
             kernel_output_fields.append("Phase")
             for row in kernel_rows:
                 row["Phase"] = "prefill"
-        api_fields, api_runs = parsed["hip_api"]
+        api_fields, _api_source_rows, api_runs = parsed["hip_api"]
         if not api_runs[index]:
             raise CaptureError(f"measured run {index} HIP API trace is empty")
-        memory_fields, memory_runs = parsed["memory_copy"]
+        memory_fields, _memory_source_rows, memory_runs = parsed["memory_copy"]
         kernel_snapshot = write_csv(
             split_directory / f"run-{index:02d}_kernel_trace.csv",
             kernel_output_fields,
@@ -2141,6 +2357,7 @@ def _assemble(
             memory_runs[index],
         )
         split_snapshots.extend((kernel_snapshot, api_snapshot, memory_snapshot))
+        split_kernel_snapshots[index] = kernel_snapshot
         if kernel_snapshot.sha256 in used_kernel_traces or api_snapshot.sha256 in used_api_traces:
             raise CaptureError("measured kernel or HIP API trace bytes were reused")
         used_kernel_traces.add(kernel_snapshot.sha256)
@@ -2163,6 +2380,31 @@ def _assemble(
                 "hip_api_trace": ref(api_snapshot),
             }
         )
+    kernel_source_after = PRODUCER.capture(
+        trace_snapshots["kernel"].path, "kernel trace after derived split normalization"
+    )
+    if (
+        kernel_source_after.identity != trace_snapshots["kernel"].identity
+        or kernel_source_after.sha256 != trace_snapshots["kernel"].sha256
+    ):
+        raise CaptureError("raw kernel trace changed during derived split normalization")
+    kernel_fields, kernel_source_rows, kernel_runs = parsed["kernel"]
+    kernel_normalization = kernel_normalization_provenance(
+        kernel_fields,
+        kernel_source_rows,
+        kernel_runs,
+        trace_snapshots["kernel"].sha256,
+        kernel_source_after.sha256,
+    )
+    validate_kernel_normalization_provenance(
+        kernel_normalization,
+        kernel_fields,
+        kernel_source_rows,
+        kernel_runs,
+        trace_snapshots["kernel"].sha256,
+        kernel_source_after.sha256,
+        split_kernel_snapshots,
+    )
     artifact = {
         "schema_version": SCHEMA,
         "status": "complete_diagnostic",
@@ -2187,6 +2429,7 @@ def _assemble(
             "subprocess_profile_runs": 1,
         },
         "source_traces": {kind: ref(snapshot) for kind, snapshot in trace_snapshots.items()},
+        "kernel_normalization": kernel_normalization,
         "capture_capabilities": ref(capability_snapshot),
         "marker_contract": {
             "schema_version": MARKER_PREFIX,

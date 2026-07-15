@@ -86,12 +86,16 @@ def write_source_traces(root: Path, run_id: str, case_id: str, case_sha: str) ->
     api = root / "diag_hip_api_trace.csv"
     memory = root / "diag_memory_copy_trace.csv"
     write_marker_trace(marker, run_id, case_id, case_sha)
-    kernel_rows = ["Dispatch_Id,Kernel_Name,Start_Timestamp,End_Timestamp"]
+    kernel_rows = [
+        "Dispatch_Id,Correlation_Id,Kernel_Name,Start_Timestamp,End_Timestamp"
+    ]
     api_rows = ["Correlation_Id,Function,Start_Timestamp,End_Timestamp"]
     memory_rows = ["Correlation_Id,Name,Start_Timestamp,End_Timestamp"]
     for index in range(12):
         base = index * 1000
-        kernel_rows.append(f"{index},hip_paged_kv_write_kernel,{base + 200},{base + 300}")
+        kernel_rows.append(
+            f"{index},{index + 100},hip_paged_kv_write_kernel,{base + 200},{base + 300}"
+        )
         api_rows.append(f"{index},hipMemcpyDtoHAsync,{base + 310},{base + 350}")
         memory_rows.append(f"{index},D2H,{base + 310},{base + 350}")
     kernel.write_text("\n".join(kernel_rows) + "\n", encoding="utf-8")
@@ -2201,6 +2205,338 @@ def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
             output_directory=output,
             artifact_path=artifact_path,
         )
+
+
+def test_assemble_sorts_only_derived_kernel_splits_and_records_conservation(
+    tmp_path: Path,
+) -> None:
+    identity_path, summary_path, raw_path, case_id, case_sha = resident_evidence(tmp_path)
+    output = tmp_path / "profile"
+    output.mkdir()
+    traces = write_source_traces(output, "diag-run", case_id, case_sha)
+    kernel_path = traces["kernel"]
+    with kernel_path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames is not None
+        fields = reader.fieldnames
+        rows = list(reader)
+    rows[2:3] = [
+        {
+            "Dispatch_Id": "300",
+            "Correlation_Id": "400",
+            "Kernel_Name": "hip_paged_kv_write_kernel",
+            "Start_Timestamp": "2400",
+            "End_Timestamp": "2500",
+        },
+        {
+            "Dispatch_Id": "100",
+            "Correlation_Id": "200",
+            "Kernel_Name": "hip_paged_kv_write_kernel",
+            "Start_Timestamp": "2200",
+            "End_Timestamp": "2300",
+        },
+        {
+            "Dispatch_Id": "22",
+            "Correlation_Id": "122",
+            "Kernel_Name": "hip_paged_kv_write_kernel",
+            "Start_Timestamp": "2200",
+            "End_Timestamp": "2300",
+        },
+    ]
+    with kernel_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    source_bytes = {kind: path.read_bytes() for kind, path in traces.items()}
+    source_hashes = {
+        kind: hashlib.sha256(data).hexdigest() for kind, data in source_bytes.items()
+    }
+
+    artifact = CAPTURE.assemble(
+        traces=traces,
+        identity_path=identity_path,
+        summary_path=summary_path,
+        raw_path=raw_path,
+        profiler_value={"tool": "rocprofv3", "version": "1.1.0"},
+        command=["rocprofv3", "--", "runner"],
+        output_directory=output,
+        artifact_path=tmp_path / "capture.json",
+    )
+
+    assert {kind: path.read_bytes() for kind, path in traces.items()} == source_bytes
+    assert {
+        kind: hashlib.sha256(path.read_bytes()).hexdigest()
+        for kind, path in traces.items()
+    } == source_hashes
+    with (output / "measured-runs/run-02_kernel_trace.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        split_rows = list(csv.DictReader(handle))
+    assert [int(row["Dispatch_Id"]) for row in split_rows] == [22, 100, 300]
+    assert all(row["Phase"] == "prefill" for row in split_rows)
+
+    provenance = artifact["kernel_normalization"]
+    assert artifact["schema_version"] == CAPTURE.SCHEMA
+    assert provenance["schema_version"] == CAPTURE.KERNEL_NORMALIZATION_SCHEMA
+    assert provenance["source_kernel_trace_sha256_before"] == source_hashes["kernel"]
+    assert provenance["source_kernel_trace_sha256_after"] == source_hashes["kernel"]
+    assert provenance["raw_trace"]["row_count"] == 14
+    assert provenance["raw_trace"]["raw_order_inversion_count"] == 2
+    run_two = provenance["groups"][2]
+    assert run_two["row_count"] == 3
+    assert run_two["raw_order_inversion_count"] == 2
+    assert run_two["pre_order_sha256"] != run_two["post_order_sha256"]
+    assert all(
+        values["before"] == values["after"]
+        for values in run_two["conservation"].values()
+    )
+
+    kernel_snapshot = CAPTURE.PRODUCER.capture(kernel_path.resolve(), "kernel source")
+    kernel_fields, kernel_rows = CAPTURE.csv_rows(kernel_snapshot, "kernel source")
+    marker_snapshot = CAPTURE.PRODUCER.capture(traces["marker"].resolve(), "marker")
+    _identity, _summary, raw, _snapshots, run_id = CAPTURE.validate_resident_evidence(
+        identity_path, summary_path, raw_path
+    )
+    ranges = CAPTURE.markers(marker_snapshot, raw, run_id)
+    groups = CAPTURE.rows_by_marker(kernel_fields, kernel_rows, ranges, "kernel trace")
+    split_snapshots = {
+        index: CAPTURE.PRODUCER.capture(
+            (output / f"measured-runs/run-{index:02d}_kernel_trace.csv").resolve(),
+            f"kernel split {index}",
+        )
+        for index in range(2, 12)
+    }
+    CAPTURE.validate_kernel_normalization_provenance(
+        provenance,
+        kernel_fields,
+        kernel_rows,
+        groups,
+        source_hashes["kernel"],
+        source_hashes["kernel"],
+        split_snapshots,
+    )
+    altered = json.loads(json.dumps(provenance))
+    altered["groups"][2]["conservation"]["duration_sum_ns"]["after"] += 1
+    with pytest.raises(CAPTURE.CaptureError, match="provenance differs"):
+        CAPTURE.validate_kernel_normalization_provenance(
+            altered,
+            kernel_fields,
+            kernel_rows,
+            groups,
+            source_hashes["kernel"],
+            source_hashes["kernel"],
+            split_snapshots,
+        )
+
+
+def test_kernel_normalization_numeric_tie_order_and_fail_closed_boundaries() -> None:
+    fields = [
+        "Dispatch_Id",
+        "Correlation_Id",
+        "Kernel_Name",
+        "Start_Timestamp",
+        "End_Timestamp",
+    ]
+
+    def row(dispatch: str, correlation: str, start: str, end: str) -> dict[str, str]:
+        return {
+            "Dispatch_Id": dispatch,
+            "Correlation_Id": correlation,
+            "Kernel_Name": "hip_paged_kv_write_kernel",
+            "Start_Timestamp": start,
+            "End_Timestamp": end,
+        }
+
+    ordered = CAPTURE.deterministic_kernel_rows(
+        fields,
+        [
+            row("300", "400", "200", "300"),
+            row("100", "200", "100", "150"),
+            row("22", "122", "100", "150"),
+        ],
+    )
+    assert [item["Dispatch_Id"] for item in ordered] == ["22", "100", "300"]
+
+    invalid_rows = [
+        (
+            fields[:-4] + fields[-3:],
+            [row("1", "2", "100", "200")],
+            "correlation id",
+        ),
+        (fields, [row("", "2", "100", "200")], "numeric field"),
+        (fields, [row("1", "", "100", "200")], "numeric field"),
+        (fields, [row("1", "2", "100", "100")], "interval is invalid"),
+        (
+            fields,
+            [row("1", "2", "100", str(1 << 63))],
+            "exceeds int63",
+        ),
+        (
+            fields,
+            [row("1", "2", "100", "200"), row("1", "3", "210", "220")],
+            "dispatch id is duplicated",
+        ),
+        (
+            fields,
+            [row("1", "2", "100", "200"), row("3", "2", "210", "220")],
+            "correlation id is duplicated",
+        ),
+    ]
+    for invalid_fields, invalid, message in invalid_rows:
+        with pytest.raises(CAPTURE.CaptureError, match=message):
+            CAPTURE.deterministic_kernel_rows(invalid_fields, invalid)
+
+
+def test_marker_overlap_crossing_and_exact_boundary_are_fail_closed(
+    tmp_path: Path,
+) -> None:
+    _identity_path, _summary_path, raw_path, case_id, case_sha = resident_evidence(tmp_path)
+    raw_snapshot = CAPTURE.PRODUCER.capture(raw_path.resolve(), "resident raw")
+    raw = CAPTURE.PRODUCER.parse_json(raw_snapshot, "resident raw")
+    marker = tmp_path / "overlap-marker.csv"
+    write_marker_trace(marker, "diag-run", case_id, case_sha)
+    lines = marker.read_text(encoding="utf-8").splitlines()
+    prefix, _start, end = lines[2].rsplit(",", 2)
+    lines[2] = f"{prefix},800,{end}"
+    marker.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(
+        CAPTURE.CaptureError, match="marker order/kind/identity/interval differs"
+    ):
+        CAPTURE.markers(
+            CAPTURE.PRODUCER.capture(marker.resolve(), "overlapping marker"),
+            raw,
+            "diag-run",
+        )
+
+    fields = ["Start_Timestamp", "End_Timestamp"]
+    ranges = [
+        {"run_index": 0, "start_ns": 100, "end_ns": 200},
+        {"run_index": 1, "start_ns": 200, "end_ns": 300},
+    ]
+    groups = CAPTURE.rows_by_marker(
+        fields,
+        [{"Start_Timestamp": "100", "End_Timestamp": "200"}],
+        ranges,
+        "kernel trace",
+    )
+    assert groups[0] == [{"Start_Timestamp": "100", "End_Timestamp": "200"}]
+    with pytest.raises(CAPTURE.CaptureError, match="crosses a run marker"):
+        CAPTURE.rows_by_marker(
+            fields,
+            [{"Start_Timestamp": "150", "End_Timestamp": "250"}],
+            ranges,
+            "kernel trace",
+        )
+
+
+def test_sealed_actual_v14_kernel_normalization_and_producer_boundary(
+    tmp_path: Path,
+) -> None:
+    identity_path = (
+        ROOT
+        / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-prepared-v2/identity.json"
+    )
+    execute_root = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-profile-execute-v10"
+    )
+    capture_root = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
+        / "aq4-p3-diagnostic-rocprof-capture-v10"
+    )
+    summary_path = execute_root / "resident-batch.summary.json"
+    raw_path = next(execute_root.glob("*.raw.json"))
+    traces = {
+        "kernel": capture_root / "aq4-p3-diagnostic_kernel_trace.csv",
+        "hip_api": capture_root / "aq4-p3-diagnostic_hip_api_trace.csv",
+        "memory_copy": capture_root / "aq4-p3-diagnostic_memory_copy_trace.csv",
+        "marker": capture_root / "aq4-p3-diagnostic_marker_api_trace.csv",
+    }
+    before = {kind: path.read_bytes() for kind, path in traces.items()}
+    expected_hashes = {
+        "kernel": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc",
+        "hip_api": "0f6db01548159fe82c831ed67b617820e610b2df3a5bdfdd98eea865d6980470",
+        "memory_copy": "e91bc82d7819509b5bbc841c6a037dccd74cc40abfa90d6e340b09a10e80eda2",
+        "marker": "4f848455354da857fb0bb89976639a03655784c086ec0311120b8139922e5280",
+    }
+    assert {
+        kind: hashlib.sha256(data).hexdigest() for kind, data in before.items()
+    } == expected_hashes
+
+    _identity, _summary, raw, _snapshots, run_id = CAPTURE.validate_resident_evidence(
+        identity_path, summary_path, raw_path
+    )
+    kernel_snapshot = CAPTURE.PRODUCER.capture(
+        traces["kernel"].resolve(), "actual-v14 kernel"
+    )
+    fields, rows = CAPTURE.csv_rows(kernel_snapshot, "actual-v14 kernel")
+    ranges = CAPTURE.markers(
+        CAPTURE.PRODUCER.capture(traces["marker"].resolve(), "actual-v14 marker"),
+        raw,
+        run_id,
+    )
+    groups = CAPTURE.rows_by_marker(fields, rows, ranges, "kernel trace")
+    assert len(rows) == 12_263
+    assert [len(groups[index]) for index in range(12)] == [928] * 12
+    line82, line83 = groups[2][80:82]
+    assert (
+        line82["Dispatch_Id"],
+        line82["Correlation_Id"],
+        line82["Start_Timestamp"],
+        line82["End_Timestamp"],
+    ) == ("3065", "55064", "1402529699792903", "1402529699794503")
+    assert (
+        line83["Dispatch_Id"],
+        line83["Correlation_Id"],
+        line83["Start_Timestamp"],
+        line83["End_Timestamp"],
+    ) == ("3064", "55062", "1402529699782863", "1402529699788463")
+
+    provenance = CAPTURE.kernel_normalization_provenance(
+        fields,
+        rows,
+        groups,
+        expected_hashes["kernel"],
+        expected_hashes["kernel"],
+    )
+    assert provenance["raw_trace"]["raw_order_inversion_count"] == 207
+    assert [item["raw_order_inversion_count"] for item in provenance["groups"]] == [
+        35, 10, 8, 19, 23, 16, 7, 20, 17, 26, 3, 15
+    ]
+    assert all(
+        item["row_count"] == 928
+        and all(pair["before"] == pair["after"] for pair in item["conservation"].values())
+        for item in provenance["groups"]
+    )
+
+    def write_kernel_split(path: Path, split_rows: list[dict[str, str]]) -> object:
+        output_fields = [*fields, "Phase"]
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=output_fields)
+            writer.writeheader()
+            writer.writerows([{**row, "Phase": "prefill"} for row in split_rows])
+        return CAPTURE.PRODUCER.capture(path.resolve(), path.name)
+
+    unsorted = write_kernel_split(tmp_path / "unsorted.csv", groups[2])
+    with pytest.raises(
+        CAPTURE.PRODUCER.ProducerError, match=r"row 83 interval/order is invalid"
+    ):
+        CAPTURE.PRODUCER.parse_kernel_trace(unsorted, "paged-kv-table-validation-v1")
+    for index in range(12):
+        sorted_rows = CAPTURE.deterministic_kernel_rows(fields, groups[index])
+        if index >= 2:
+            snapshot = write_kernel_split(tmp_path / f"sorted-{index}.csv", sorted_rows)
+            CAPTURE.PRODUCER.parse_kernel_trace(
+                snapshot, "paged-kv-table-validation-v1"
+            )
+    assert {kind: path.read_bytes() for kind, path in traces.items()} == before
+    assert {
+        kind: hashlib.sha256(path.read_bytes()).hexdigest()
+        for kind, path in traces.items()
+    } == expected_hashes
 
 
 @pytest.mark.parametrize("column", ["Name", "Kind", "Direction", "Operation", "name"])
