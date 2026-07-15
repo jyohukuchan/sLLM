@@ -22,7 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SELECTOR_PATH = ROOT / "tools/select-aq4-p3-candidate.py"
 SELECTOR_SHA256 = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
 PROFILER_PATH = ROOT / "tools/profile-aq4-p2-family-exclusive.py"
-PROFILER_SHA256 = "ef26005a364511ab8d0f7ca2fa46ad2108cac083d0a2a24721f6cef577e16c92"
+PROFILER_SHA256 = "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
+PROFILER_MAPPING_SHA256 = "d5a159dff6776fc1229d1bacf415715154fb3bb2e3d3051f59bc3dca2ec03b29"
+PROFILER_GIT_AUTHORITY = {
+    "commit": "e4f8583a0fc710d2146f70d06b8b49eb42f04a16",
+    "tree": "be5ac39ea05b0b79223d974487c6cddda8d84f0c",
+    "blob": "8c318849838f85cf2f2a687aef260506bfa4097c",
+}
 DEPENDENCY_MAX_BYTES = 2 * 1024 * 1024
 
 
@@ -81,6 +87,8 @@ elif isinstance(_injected, dict) and set(_injected) == {"selector", "profiler"} 
     PROFILER = _injected["profiler"]
 else:
     raise RuntimeError("verified producer dependency injection differs")
+if PROFILER.mapping_sha256() != PROFILER_MAPPING_SHA256:
+    raise RuntimeError("producer profiler mapping authority differs")
 
 INPUT_SCHEMA = "ullm.aq4_p3_selection_raw_producer_input.v1"
 PROFILE_BINDING_SCHEMA = "ullm.aq4_p3_rocprof_run_binding.v1"

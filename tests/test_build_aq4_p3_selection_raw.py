@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import collections
+import csv
 import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -630,6 +633,102 @@ def test_sealed_actual_v8_full_resident_pair_is_accepted() -> None:
     for field in ("device", "inode"):
         assert type(raw["device_lock"][field]) is int
         assert raw["device_lock"][field] > 0
+
+
+def test_profiler_family_authority_matches_current_git_and_mapping() -> None:
+    authority = PRODUCER.PROFILER_GIT_AUTHORITY
+    assert authority == {
+        "commit": "e4f8583a0fc710d2146f70d06b8b49eb42f04a16",
+        "tree": "be5ac39ea05b0b79223d974487c6cddda8d84f0c",
+        "blob": "8c318849838f85cf2f2a687aef260506bfa4097c",
+    }
+    commit_tree = subprocess.run(
+        ["git", "show", "-s", "--format=%T", authority["commit"]],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    committed_blob = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            f'{authority["commit"]}:tools/profile-aq4-p2-family-exclusive.py',
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    current_blob = subprocess.run(
+        ["git", "hash-object", str(PRODUCER.PROFILER_PATH)],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    assert commit_tree == authority["tree"]
+    assert committed_blob == current_blob == authority["blob"]
+    assert sha(PRODUCER.PROFILER_PATH) == PRODUCER.PROFILER_SHA256
+    assert PRODUCER.PROFILER.mapping_sha256() == PRODUCER.PROFILER_MAPPING_SHA256
+
+
+def test_sealed_actual_v9_full_resident_pair_and_kernel_families_are_accepted() -> None:
+    p2 = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+    )
+    identity_path = (
+        ROOT
+        / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-prepared-v1/identity.json"
+    )
+    execute_root = p2 / "resident-one-case-smoke-profile-execute-v8"
+    summary_path = execute_root / "resident-batch.summary.json"
+    raw_path = execute_root / (
+        "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-"
+        "r9700-rdna4-aq4_0_target.raw.json"
+    )
+    trace_path = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
+        / "aq4-p3-diagnostic-rocprof-capture-v8/aq4-p3-diagnostic_kernel_trace.csv"
+    )
+
+    assert sha(raw_path) == "1b2effa4c0ab44159919e32691d08329dec632cf56a1b22a78efc4fc607bf6f2"
+    assert sha(summary_path) == "7b122428ede8e7dd5cc8780386d2f1274ac679c4206990ba45d6a334c2e66c8e"
+    assert sha(trace_path) == "a9833a65cffd6cbc3e974edcfb32fdf5657a17f6e90321085bae734c51a07131"
+    summary, raw, run_id, runs = validate_resident_pair(
+        identity_path,
+        summary_path,
+        raw_path,
+    )
+
+    assert run_id == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v8"
+    assert raw["resident"]["session_id"] == (
+        "3fc38e24c47e904242a3d3f12c9bd3250e53097d62dababbaec5efc4af34e0dc"
+    )
+    assert len(runs) == 12
+    assert raw["device_lock"] == summary["device_lock"]
+    assert raw["links"]["live_preflight"] == summary["validation"]["live_preflight"]
+
+    family_counts: collections.Counter[str] = collections.Counter()
+    with trace_path.open(newline="", encoding="utf-8-sig") as source:
+        for row in csv.DictReader(source):
+            family = PRODUCER.PROFILER.classify_kernel(row["Kernel_Name"].strip())
+            assert family is not None
+            family_counts[family] += 1
+    assert family_counts == {
+        "runtime_support": 4071,
+        "embedding": 1537,
+        "paged_validation": 197,
+        "aq4_projection": 2986,
+        "attention": 104,
+        "recurrent": 1158,
+        "normalization": 2209,
+        "head": 1,
+    }
+    assert family_counts.total() == 12_263
 
 
 def rewrite_live_preflight_document(
