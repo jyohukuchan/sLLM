@@ -1,0 +1,22 @@
+{
+  "canonical_end_unix_ns": 1784091283022794701,
+  "canonical_start_unix_ns": 1784088403841085864,
+  "command_sha256": "7474807b74e7f460a7ab61e71d510321f394b3bd379636993b3fc9e52fb798dc",
+  "elapsed_ns": 2879181708837,
+  "invocation_count": 1,
+  "logical_combined_stdout_lines": [
+    "{\"amd_smi\": [1722613], \"command_sha256\": \"7474807b74e7f460a7ab61e71d510321f394b3bd379636993b3fc9e52fb798dc\", \"event\": \"canonical-start\", \"external_processes\": 0, \"fresh_outputs\": \"ABSENT\", \"kfd\": [1722613], \"lock_inode\": 762398, \"manifest_sha256\": \"d32ecad79dcbb04bee60237b98a324355b1b28aa956bb0d49124edd41d08aee4\", \"nrestarts\": 1, \"quiet_window\": \"GO\", \"service_main_pid\": 1722227, \"unix_ns\": 1784088403841085864, \"worker_pid\": 1722613}",
+    "{\"evidence\": \"/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v2/launcher-evidence.json\", \"mode\": \"execute\", \"status\": \"failed\"}",
+    "{\"elapsed_ns\": 2879181708837, \"event\": \"canonical-end\", \"returncode\": 1, \"unix_ns\": 1784091283022794701}"
+  ],
+  "logical_stderr_bytes": 0,
+  "logical_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "manifest_sha256": "d32ecad79dcbb04bee60237b98a324355b1b28aa956bb0d49124edd41d08aee4",
+  "maximum_invocations": 1,
+  "retry_performed": false,
+  "returncode": 1,
+  "schema_version": "ullm.aq4_p2_resident_profile_operator_result.v1",
+  "shell": false,
+  "status": "failed",
+  "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+}

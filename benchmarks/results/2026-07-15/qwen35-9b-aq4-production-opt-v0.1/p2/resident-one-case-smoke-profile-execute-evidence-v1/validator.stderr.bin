@@ -1,0 +1,4 @@
+W20260715 13:07:09.605996 139283158812032 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.004369 sec
+W20260715 13:07:09.606069 139283158812032 simple_timer.cpp:55] [rocprofv3] '/usr/bin/python3.12 /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py validate-binding --binding /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4 --validator-source-commit 614fea0808a4bbe044df734fbf530b2bd9a6e6ec --validator-sha256 0b3341d3e9d6e3dde8cff05eb8dd43fe2ec8b176a8a913183dbee638dd25c175' ::     0.000000 sec
+W20260715 13:07:18.697814 139283158812032 simple_timer.cpp:55] [rocprofv3] output generation ::     0.003231 sec
+W20260715 13:07:18.697843 139283158812032 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.003835 sec
