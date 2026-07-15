@@ -44,16 +44,16 @@ def finalizer_fixture(
 ) -> dict:
     paths = {
         "ROOT": tmp_path,
-        "PROFILE_READY_ROOT": tmp_path / "profile-ready-v11",
-        "PROFILE_READY": tmp_path / "profile-ready-v11/ready-binding.json",
-        "QUIET_ROOT": tmp_path / "quiet-v14",
-        "OPERATOR_ROOT": tmp_path / "operator-command-v9",
-        "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v8",
-        "OPERATOR_RESULT": tmp_path / "operator-result-v9",
-        "ACTUAL_AUDIT": tmp_path / "actual-audit-v9",
-        "PROFILE_RUNTIME": tmp_path / "runtime-v8",
-        "PROFILE_EXECUTE_EVIDENCE": tmp_path / "execute-evidence-v8",
-        "PROFILE_CAPTURE": tmp_path / "capture-v8",
+        "PROFILE_READY_ROOT": tmp_path / "profile-ready-v12",
+        "PROFILE_READY": tmp_path / "profile-ready-v12/ready-binding.json",
+        "QUIET_ROOT": tmp_path / "quiet-v15",
+        "OPERATOR_ROOT": tmp_path / "operator-command-v10",
+        "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v9",
+        "OPERATOR_RESULT": tmp_path / "operator-result-v10",
+        "ACTUAL_AUDIT": tmp_path / "actual-audit-v10",
+        "PROFILE_RUNTIME": tmp_path / "runtime-v9",
+        "PROFILE_EXECUTE_EVIDENCE": tmp_path / "execute-evidence-v9",
+        "PROFILE_CAPTURE": tmp_path / "capture-v9",
     }
     for name, path in paths.items():
         monkeypatch.setattr(OPERATOR, name, path)
@@ -113,31 +113,31 @@ def finalizer_fixture(
     return paths
 
 
-def test_v9_namespaces_bind_fresh_v11_ready_and_v8_profile_outputs() -> None:
-    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v11"
-    assert OPERATOR.QUIET_ROOT.name == "resident-one-case-smoke-profile-quiet-window-v14"
-    assert OPERATOR.OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v9"
-    assert OPERATOR.MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v8"
-    assert OPERATOR.PROFILE_RUNTIME.name == "resident-one-case-smoke-profile-execute-v8"
-    assert OPERATOR.PROFILE_EXECUTE_EVIDENCE.name == "resident-one-case-smoke-profile-execute-evidence-v8"
-    assert OPERATOR.PROFILE_CAPTURE.name == "aq4-p3-diagnostic-rocprof-capture-v8"
-    assert OPERATOR.OPERATOR_RESULT.name == "resident-one-case-smoke-profile-operator-result-v9"
-    assert OPERATOR.ACTUAL_AUDIT.name == "resident-one-case-smoke-profile-actual-audit-v9"
-    assert OPERATOR.PREVIOUS_OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v8"
-    assert OPERATOR.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v8"
+def test_v10_namespaces_bind_fresh_v12_ready_and_v9_profile_outputs() -> None:
+    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v12"
+    assert OPERATOR.QUIET_ROOT.name == "resident-one-case-smoke-profile-quiet-window-v15"
+    assert OPERATOR.OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v10"
+    assert OPERATOR.MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v9"
+    assert OPERATOR.PROFILE_RUNTIME.name == "resident-one-case-smoke-profile-execute-v9"
+    assert OPERATOR.PROFILE_EXECUTE_EVIDENCE.name == "resident-one-case-smoke-profile-execute-evidence-v9"
+    assert OPERATOR.PROFILE_CAPTURE.name == "aq4-p3-diagnostic-rocprof-capture-v9"
+    assert OPERATOR.OPERATOR_RESULT.name == "resident-one-case-smoke-profile-operator-result-v10"
+    assert OPERATOR.ACTUAL_AUDIT.name == "resident-one-case-smoke-profile-actual-audit-v10"
+    assert OPERATOR.PREVIOUS_OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v9"
+    assert OPERATOR.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v9"
 
 
-def test_v11_ready_execute_binding_and_fresh_output_authorities_are_exact() -> None:
+def test_v12_ready_execute_binding_and_fresh_output_authorities_are_exact() -> None:
     ready, inventory = OPERATOR.ready_authority()
     assert inventory["sha256sums_sha256"] == OPERATOR.READY_SHA256SUMS_SHA256
-    assert ready["authorization"]["run_id"] == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v8"
-    assert OPERATOR.QUIET_SCHEMA.endswith(".v14")
-    assert OPERATOR.OPERATOR_SCHEMA.endswith(".v9")
-    assert OPERATOR.OPERATOR_RESULT_SCHEMA.endswith(".v9")
-    assert OPERATOR.ACTUAL_AUDIT_SCHEMA.endswith(".v9")
+    assert ready["authorization"]["run_id"] == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v9"
+    assert OPERATOR.QUIET_SCHEMA.endswith(".v15")
+    assert OPERATOR.OPERATOR_SCHEMA.endswith(".v10")
+    assert OPERATOR.OPERATOR_RESULT_SCHEMA.endswith(".v10")
+    assert OPERATOR.ACTUAL_AUDIT_SCHEMA.endswith(".v10")
     roots = OPERATOR.root_set()
     assert OPERATOR.EXECUTE_BINDING_ROOT in roots
-    assert any(root.name == "resident-one-case-smoke-profile-ready-dry-run-v11" for root in roots)
+    assert any(root.name == "resident-one-case-smoke-profile-ready-dry-run-v12" for root in roots)
     execute_inventory = OPERATOR.verify_sums(OPERATOR.EXECUTE_BINDING_ROOT)
     OPERATOR.verify_inventory_commit(
         OPERATOR.EXECUTE_BINDING_ROOT,
@@ -147,16 +147,13 @@ def test_v11_ready_execute_binding_and_fresh_output_authorities_are_exact() -> N
     fresh = OPERATOR.fresh_paths(ready)
     assert len(fresh) == len({str(path) for path in fresh}) == 9
     historical = OPERATOR.historical_actual_v9_state()
-    assert historical["state"] in {"not_executed", "executed_sealed"}
-    if historical["state"] == "not_executed":
-        assert all(not item["present"] for item in historical["fresh_outputs"])
-    else:
-        assert historical["artifact_commit"] == OPERATOR.HISTORICAL_ACTUAL_V9_COMMIT
-        assert historical["artifact_tree"] == OPERATOR.HISTORICAL_ACTUAL_V9_TREE
-        assert historical["file_count"] == OPERATOR.HISTORICAL_ACTUAL_V9_FILE_COUNT
-        assert historical["returncode"] == 1
-        assert historical["invocation_count"] == historical["maximum_invocations"] == 1
-        assert historical["retry_performed"] is False
+    assert historical["state"] == "executed_sealed"
+    assert historical["artifact_commit"] == OPERATOR.HISTORICAL_ACTUAL_V9_COMMIT
+    assert historical["artifact_tree"] == OPERATOR.HISTORICAL_ACTUAL_V9_TREE
+    assert historical["file_count"] == OPERATOR.HISTORICAL_ACTUAL_V9_FILE_COUNT
+    assert historical["returncode"] == 1
+    assert historical["invocation_count"] == historical["maximum_invocations"] == 1
+    assert historical["retry_performed"] is False
 
 
 def patch_historical_actual_paths(
@@ -224,6 +221,8 @@ def test_historical_actual_v9_accepts_only_sealed_commit_authority(
     monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_V9_COMMIT", commit)
     monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_V9_TREE", tree)
     monkeypatch.setattr(OPERATOR, "HISTORICAL_OPERATOR_MANIFEST_V9_COMMIT", "e" * 40)
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_OPERATOR_RESULT_V9_SCHEMA", OPERATOR.OPERATOR_RESULT_SCHEMA)
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_AUDIT_V9_SCHEMA", OPERATOR.ACTUAL_AUDIT_SCHEMA)
     roots = [
         paths["MAINTENANCE_EVIDENCE"],
         paths["PROFILE_EXECUTE_EVIDENCE"],
@@ -376,8 +375,13 @@ def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: 
     sealed(previous_root, "command-manifest.json", {"schema_version": "historical.v8"})
     monkeypatch.setattr(OPERATOR, "QUIET_ROOT", quiet_root)
     monkeypatch.setattr(OPERATOR, "PREVIOUS_OPERATOR_ROOT", previous_root)
-    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: (ready, {"root": "ready-v11"}))
+    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: (ready, {"root": "ready-v12"}))
     monkeypatch.setattr(OPERATOR, "fresh_paths", lambda _ready: fresh)
+    monkeypatch.setattr(
+        OPERATOR,
+        "historical_actual_v9_state",
+        lambda: {"state": "executed_sealed", "artifact_commit": "f" * 40},
+    )
 
     value = OPERATOR.prepare_operator(output_root)
     validated = OPERATOR.validate_operator(output_root)["value"]
@@ -386,12 +390,30 @@ def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: 
     assert value["failure_contract"]["outer_restore_in_finally"] is True
     assert value["failure_contract"]["restore_timeout_seconds"] == 120.0
     assert value["failure_contract"]["children_remaining_must_be_empty"] is True
-    assert value["inputs"]["historical_operator_v8"]["root"] == str(previous_root)
-    assert value["pre_execution_audit"]["historical_operator_v8"] == "immutable_readback"
+    assert value["inputs"]["historical_operator_v9"]["root"] == str(previous_root)
+    assert value["inputs"]["historical_actual_v9"]["state"] == "executed_sealed"
+    assert value["pre_execution_audit"]["historical_operator_v9"] == "immutable_readback"
+    assert value["pre_execution_audit"]["historical_actual_v9"] == "executed_sealed"
     clone = json.loads(json.dumps(value))
     declared = clone["manifest_sha256"]
     clone["manifest_sha256"] = None
     assert declared == OPERATOR.sha_bytes(OPERATOR.canonical(clone))
+
+
+def test_prepare_operator_requires_historical_actual_v9_final_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: ({}, {}))
+    monkeypatch.setattr(OPERATOR, "validate_quiet", lambda _root: {"value": {}})
+    monkeypatch.setattr(OPERATOR, "verify_sums", lambda _root: {})
+    monkeypatch.setattr(
+        OPERATOR,
+        "historical_actual_v9_state",
+        lambda: {"state": "not_executed"},
+    )
+    with pytest.raises(OPERATOR.OperatorError, match="historical actual-v9 final state"):
+        OPERATOR.prepare_operator(tmp_path / "operator-v10")
 
 
 def test_validate_quiet_rejects_any_reset(tmp_path: Path) -> None:
