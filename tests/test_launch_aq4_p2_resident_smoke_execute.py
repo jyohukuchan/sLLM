@@ -211,19 +211,49 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
     def validator(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
 
-    def runner(command: list[str], environment: dict[str, str], on_started):
+    def runner(command: list[str], environment: dict[str, str], on_started, target):
         assert command == LAUNCHER.execute_runner_argv(binding)
+        assert target["path"].endswith(LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME)
         _write_profile_result(result_path, binding)
         on_started()
-        return {"completed": subprocess.CompletedProcess(command, 0, b"", b""), "keepalives": [], "keepalive_failed": False, "gpu_command_executed": True, "model_load_executed": True}
+        return {
+            "completed": subprocess.CompletedProcess(command, 0, b"", b""),
+            "keepalives": [],
+            "keepalive_failed": False,
+            "gpu_command_executed": True,
+            "model_load_executed": True,
+            "profile_capture": {
+                "status": "complete_diagnostic",
+                "runner_profiled": True,
+                "validator_profiled": False,
+                "gates_profiled": False,
+                "capture_tool_invocations": 1,
+                "rocprof_invocations": 1,
+                "target_manifest_sha256": target["sha256"],
+            },
+        }
 
-    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, runner_executor=runner)
+    code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, profile_runner_executor=runner)
     assert code == 0
     assert evidence["status"] == "passed"
     assert evidence["profile_diagnostic"]["run_id"] == run_id
     assert evidence["profile_diagnostic"]["resident_session_id"] == "profile-session-test"
     assert evidence["profile_diagnostic"]["ranges"]["count"] == 12
     assert evidence["profile_diagnostic"]["promotion_eligible"] is False
+
+
+def test_profile_execute_rejects_generic_runner_executor_before_evidence(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
+    with pytest.raises(LAUNCHER.LauncherError, match="generic runner executor is forbidden"):
+        LAUNCHER.execute_bound(
+            binding,
+            evidence_path,
+            result_path,
+            run_id,
+            trusted_launcher_sha=TRUSTED_LAUNCHER_SHA,
+            runner_executor=lambda *_args: {},
+        )
+    assert not evidence_path.exists() and not result_path.exists()
 
 
 @pytest.mark.parametrize("mutation", ("missing", "audit", "run-id", "library", "range"))

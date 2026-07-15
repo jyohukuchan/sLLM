@@ -31,6 +31,10 @@ CAPTURE = load(
     "capture_aq4_p3_diagnostic_profile",
     ROOT / "tools/capture-aq4-p3-diagnostic-profile.py",
 )
+LAUNCHER = load(
+    "launch_aq4_p2_resident_smoke_for_profile_boundary",
+    ROOT / "tools/launch-aq4-p2-resident-smoke.py",
+)
 FIXTURES = load(
     "aq4_p3_producer_test_fixtures",
     ROOT / "tests/test_build_aq4_p3_selection_raw.py",
@@ -101,6 +105,7 @@ def write_target_manifest(
         "status": "bound",
         "manifest_sha256": None,
         "argv": argv,
+        "environment": {"ULLM_TEST_PROFILE_TARGET": "1"},
         "input_files": [
             {
                 "argument_index": index,
@@ -110,9 +115,15 @@ def write_target_manifest(
             }
             for index in input_indices
         ],
+        "runtime_paths": [],
         "output_paths": [
             {"argument_index": index, "path": argv[index]} for index in output_indices
         ],
+        "authorization": {
+            "maximum_invocations": 1,
+            "target_role": "profile_runner_only",
+            "promotion_eligible": False,
+        },
     }
     value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
@@ -131,6 +142,7 @@ def test_profiler_command_enables_all_required_domains(tmp_path: Path) -> None:
     assert command.count("--hip-runtime-trace") == 1
     assert command.count("--memory-copy-trace") == 1
     assert command.count("--marker-trace") == 1
+    assert command[1:3] == ["--log-level", "error"]
     assert command[-2:] == ["--", "/bin/true"]
 
 
@@ -157,6 +169,33 @@ def test_fake_rocprof_runs_once_and_discovers_exact_trace_set(tmp_path: Path) ->
     with pytest.raises(CAPTURE.CaptureError, match="already exists"):
         CAPTURE.run_profile(command, output, 10.0)
     assert not (output / "capture-failure.json").exists()
+
+
+def test_run_profile_passes_only_bound_base_environment_and_signals_start_once(
+    tmp_path: Path,
+) -> None:
+    observed = tmp_path / "environment.json"
+    profiler = tmp_path / "environment-profiler"
+    profiler.write_text(
+        "#!/usr/bin/python3\n"
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps(dict(os.environ), sort_keys=True))\n",
+        encoding="utf-8",
+    )
+    profiler.chmod(0o555)
+    starts: list[str] = []
+    output = (tmp_path / "environment-capture").resolve()
+    CAPTURE.run_profile(
+        [str(profiler), str(observed)],
+        output,
+        10.0,
+        environment={"ULLM_EXACT_BASE": "bound"},
+        on_started=lambda: starts.append("runner-wrapper"),
+    )
+    environment = json.loads(observed.read_text(encoding="utf-8"))
+    assert environment["ULLM_EXACT_BASE"] == "bound"
+    assert "HOME" not in environment and "LD_PRELOAD" not in environment
+    assert starts == ["runner-wrapper"]
 
 
 def test_pinned_profiler_uses_verified_fd_and_rejects_sha_or_symlink_swap(
@@ -258,6 +297,52 @@ def test_target_command_manifest_binds_exact_argv_and_input_hashes(tmp_path: Pat
         CAPTURE.load_target_command_manifest(
             unbound, hashlib.sha256(unbound.read_bytes()).hexdigest()
         )
+
+    changed_environment = (tmp_path / "changed-environment.json").resolve()
+    changed = write_target_manifest(changed_environment, [str(executable.resolve())])
+    changed["environment"] = {"ULLM_TEST_PROFILE_TARGET": "changed"}
+    changed_environment.write_text(json.dumps(changed, sort_keys=True) + "\n")
+    with pytest.raises(CAPTURE.CaptureError, match="self-hash differs"):
+        CAPTURE.load_target_command_manifest(
+            changed_environment,
+            hashlib.sha256(changed_environment.read_bytes()).hexdigest(),
+        )
+
+
+def test_runtime_path_identity_is_pinned_by_target_manifest(tmp_path: Path) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o555)
+    runtime_directory = tmp_path / "bundle"
+    runtime_directory.mkdir()
+    manifest = (tmp_path / "runtime-target.json").resolve()
+    value = write_target_manifest(
+        manifest, [str(executable.resolve()), str(runtime_directory.resolve())]
+    )
+    metadata = runtime_directory.lstat()
+    value["runtime_paths"] = [
+        {
+            "argument_index": 1,
+            "path": str(runtime_directory.resolve()),
+            "kind": "directory",
+            "identity": list(CAPTURE.PROFILER._identity(metadata)),
+        }
+    ]
+    value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n")
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
+    try:
+        assert loaded["runtime_paths"] == value["runtime_paths"]
+        replacement = tmp_path / "replacement-bundle"
+        replacement.mkdir()
+        runtime_directory.rmdir()
+        replacement.rename(runtime_directory)
+        with pytest.raises(CAPTURE.CaptureError, match="identity changed"):
+            snapshots[-1].verify()
+    finally:
+        snapshots[0].close()
 
 
 def test_post_spawn_manifest_path_swap_emits_failure_and_blocks_success(
@@ -516,3 +601,261 @@ def test_warmup_unknown_source_rows_fail_and_partial_outputs_are_cleaned(
     assert not (output / "measured-runs").exists()
     assert not (output / "capture-capabilities.json").exists()
     assert not artifact_path.exists()
+
+
+def launcher_profile_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
+    evidence = tmp_path / "profile-launcher-evidence"
+    result = tmp_path / "profile-runner-output"
+    run_id = "profile-boundary-test-run"
+    value = json.loads(json.dumps(LAUNCHER.profile_execute_binding_document()))
+    value.update(
+        status="ready_for_explicit_execute",
+        actual_eligible=True,
+        blocked_reasons=[],
+        evidence_output=str(evidence),
+        runner_output=str(result),
+        run_id=run_id,
+    )
+    value["live_preflight"] = {
+        "required": True,
+        "path": str(evidence / "live-preflight.json"),
+        "sha256": None,
+        "replaces_synthetic_preflight": True,
+    }
+    return value, evidence, result, run_id
+
+
+def launcher_gates() -> dict:
+    commands = LAUNCHER.expected_live_probe_contracts()
+    return {
+        "passed": True,
+        "environment": LAUNCHER.EXECUTE_ENV,
+        "services": [
+            {"unit": unit, "active_state": "inactive", "sub_state": "dead", "main_pid": 0}
+            for unit in LAUNCHER.SERVICE_UNITS
+        ],
+        "old_worker_pids": [],
+        "runtime_mapping": {
+            "runtime_device_index": 1,
+            "visible_token": "1",
+            "amd_smi_index": 2,
+            "bdf": LAUNCHER.GPU_BDF,
+            "uuid": LAUNCHER.GPU_UUID,
+            "kfd_id": LAUNCHER.KFD_ID,
+            "node_id": 2,
+        },
+        "amd_smi_owners": [],
+        "kfd_owners": [],
+        "lock": {"path": str(LAUNCHER.LOCK_PATH), "free": True, "device": 1, "inode": 2},
+        "vram": {
+            "total_bytes": 32_000_000_000,
+            "used_bytes": 0,
+            "free_bytes": 32_000_000_000,
+            "headroom_bytes": 32_000_000_000,
+        },
+        "probes": [
+            {
+                "label": label,
+                "argv": argv,
+                "exit_code": exit_code,
+                "stdout_sha256": "0" * 64,
+                "stderr_sha256": "0" * 64,
+                "captured_unix_ns": index + 1,
+            }
+            for index, (label, (argv, exit_code)) in enumerate(commands.items())
+        ],
+    }
+
+
+def write_launcher_profile_result(root: Path, binding: dict) -> None:
+    session_id = "profile-boundary-session"
+    root.mkdir()
+    raw = {
+        "case_id": LAUNCHER.CASE_ID,
+        "case_sha256": LAUNCHER.CASE_SHA,
+        "baseline_identity": {"run_id": binding["run_id"]},
+        "resident": {"session_id": session_id},
+        "execution_mode": "one_case_smoke",
+        "promotion_eligible": False,
+    }
+    (root / f"{LAUNCHER.CASE_ID}.raw.json").write_text(json.dumps(raw) + "\n")
+    (root / "resident-batch.summary.json").write_text("{}\n")
+    ranges = []
+    for index in range(12):
+        kind = "warmup" if index < 2 else "measured"
+        ranges.append(
+            {
+                "name": (
+                    f"ullm.aq4_p2.run.v1/run_id={binding['run_id']}/session_id={session_id}/"
+                    f"case_id={LAUNCHER.CASE_ID}/case_sha256={LAUNCHER.CASE_SHA}/"
+                    f"run_index={index}/run_kind={kind}"
+                ),
+                "run_index": index,
+                "run_kind": kind,
+                "push_result": 0,
+                "pop_result": 0,
+            }
+        )
+    sidecar = {
+        "schema_version": "ullm.aq4_p2_resident_roctx_ranges.v1",
+        "status": "complete_diagnostic",
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "audit_sha256": None,
+        "pid": 123,
+        "thread_id": 456,
+        "library": {**binding["profile_diagnostic"]["roctx_library"], "components": []},
+        "ranges": ranges,
+    }
+    sidecar["audit_sha256"] = LAUNCHER.sha_bytes(LAUNCHER.canonical(sidecar))
+    (root / "resident-batch.roctx-ranges.json").write_text(
+        json.dumps(sidecar, sort_keys=True) + "\n"
+    )
+
+
+def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = launcher_profile_binding(tmp_path)
+    events: list[str] = []
+
+    def validator(argv, **kwargs):
+        events.append("validator")
+        assert "env" not in kwargs
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4", "status": "prepared_not_executed"}\n',
+            b"",
+        )
+
+    def gates() -> dict:
+        events.append("gates")
+        return launcher_gates()
+
+    def profile_executor(command, environment, on_started, target):
+        events.append("capture")
+        assert environment == LAUNCHER.EXECUTE_ENV
+        assert events == ["validator", "gates", "capture"]
+        loaded, snapshots = CAPTURE.load_target_command_manifest(
+            Path(target["path"]), target["sha256"]
+        )
+        try:
+            assert loaded["argv"] == command
+            assert loaded["environment"] == LAUNCHER.EXECUTE_ENV
+            assert loaded["authorization"]["target_role"] == "profile_runner_only"
+            assert loaded["output_paths"] == [{"argument_index": 19, "path": str(result_path)}]
+        finally:
+            snapshots[0].close()
+        on_started()
+        write_launcher_profile_result(result_path, binding)
+        return {
+            "completed": subprocess.CompletedProcess(command, 0, b"", b""),
+            "keepalives": [],
+            "keepalive_failed": False,
+            "gpu_command_executed": True,
+            "model_load_executed": True,
+            "profile_capture": {
+                "status": "complete_diagnostic",
+                "runner_profiled": True,
+                "validator_profiled": False,
+                "gates_profiled": False,
+                "capture_tool_invocations": 1,
+                "rocprof_invocations": 1,
+                "target_manifest_sha256": target["sha256"],
+            },
+        }
+
+    trusted = LAUNCHER.sha_bytes((ROOT / "tools/launch-aq4-p2-resident-smoke.py").read_bytes())
+    code, evidence = LAUNCHER.execute_bound(
+        binding,
+        evidence_path,
+        result_path,
+        run_id,
+        trusted_launcher_sha=trusted,
+        run=validator,
+        gate_provider=gates,
+        profile_runner_executor=profile_executor,
+    )
+    assert code == 0 and evidence["status"] == "passed"
+    assert events == ["validator", "gates", "capture"]
+    assert evidence["profile_capture"]["runner_profiled"] is True
+    assert evidence["profile_capture"]["validator_profiled"] is False
+    assert evidence["profile_capture"]["gates_profiled"] is False
+    assert evidence["profile_runner_target"]["path"].endswith(
+        LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME
+    )
+
+
+def test_captured_validator_warning_remains_fail_closed_before_profile_runner(
+    tmp_path: Path,
+) -> None:
+    binding, evidence_path, result_path, run_id = launcher_profile_binding(tmp_path)
+    calls: list[str] = []
+    # Regression fixture from the failed evidence committed in 4c89c602.
+    warning = (
+        b"W20260715 13:07:09.605996 139283158812032 simple_timer.cpp:55] "
+        b"[rocprofv3] tool initialization ::     0.004369 sec\n"
+    )
+
+    def validator(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4", "status": "prepared_not_executed"}\n',
+            warning,
+        )
+
+    def forbidden_executor(*_args):
+        calls.append("profile-runner")
+        raise AssertionError("profile runner must not start")
+
+    trusted = LAUNCHER.sha_bytes((ROOT / "tools/launch-aq4-p2-resident-smoke.py").read_bytes())
+    code, evidence = LAUNCHER.execute_bound(
+        binding,
+        evidence_path,
+        result_path,
+        run_id,
+        trusted_launcher_sha=trusted,
+        run=validator,
+        gate_provider=launcher_gates,
+        profile_runner_executor=forbidden_executor,
+    )
+    assert code == 1 and calls == []
+    assert evidence["failure"] == {
+        "stage": "validator",
+        "reason": "trusted validator subprocess rejected root/B",
+        "runner_started": False,
+    }
+    assert evidence["safety"]["gpu_command_executed"] is False
+    assert evidence["safety"]["model_load_executed"] is False
+
+
+def test_profile_launcher_without_capture_executor_never_starts_runner(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = launcher_profile_binding(tmp_path)
+
+    def validator(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4", "status": "prepared_not_executed"}\n',
+            b"",
+        )
+
+    trusted = LAUNCHER.sha_bytes((ROOT / "tools/launch-aq4-p2-resident-smoke.py").read_bytes())
+    code, evidence = LAUNCHER.execute_bound(
+        binding,
+        evidence_path,
+        result_path,
+        run_id,
+        trusted_launcher_sha=trusted,
+        run=validator,
+        gate_provider=launcher_gates,
+    )
+    assert code == 1
+    assert evidence["failure"] == {
+        "stage": "runner",
+        "reason": "profile runner executor is required",
+        "runner_started": False,
+    }
+    assert evidence["process_counts"]["runner"] == 0
+    assert evidence["safety"]["execution_state_source"] == "runner_not_started"
+    assert not result_path.exists()

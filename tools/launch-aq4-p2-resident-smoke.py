@@ -90,6 +90,7 @@ PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
 PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1"
 PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
+PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
 ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
 ROCTX_LIBRARY_RESOLVED = Path("/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201")
 ROCTX_LIBRARY_SHA = "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
@@ -606,6 +607,18 @@ def profile_execute_binding_document() -> dict[str, Any]:
         **value["execution_contract"],
         "profile_diagnostic": True,
         "rocprof_wrapper_required": True,
+        "execution_boundary": {
+            "order": ["launcher-validator", "launcher-gates", "capture-tool", "rocprofv3", "runner"],
+            "validator_profiled": False,
+            "gates_profiled": False,
+            "runner_profiled": True,
+        },
+        "target_manifest": {
+            "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+            "generated_after_live_preflight": True,
+            "file_name": PROFILE_RUNNER_TARGET_MANIFEST_NAME,
+            "maximum_invocations": 1,
+        },
         "measurement_eligible": False,
         "promotion_eligible": False,
     }
@@ -748,6 +761,92 @@ def execute_runner_argv(binding: dict[str, Any]) -> list[str]:
     if "profile_diagnostic" in binding:
         command.extend(binding["profile_diagnostic"]["runner_arguments"])
     return [*command, "--driver-command", *driver]
+
+
+def profile_runner_target_manifest(
+    binding: dict[str, Any],
+    command: list[str],
+    environment: dict[str, str],
+    live_preflight: dict[str, Any],
+) -> dict[str, Any]:
+    if "profile_diagnostic" not in binding or command != execute_runner_argv(binding):
+        raise LauncherError("profile runner target argv differs")
+    if environment != EXECUTE_ENV:
+        raise LauncherError("profile runner target base environment differs")
+    live_path = Path(live_preflight["path"])
+    live_sha = live_preflight.get("sha256")
+    if command[28] != str(live_path) or not isinstance(live_sha, str) or not SHA_RE.fullmatch(live_sha):
+        raise LauncherError("profile runner live preflight binding differs")
+    file_bindings = {
+        0: (PYTHON_SHA, True),
+        1: (RUNNER_SHA, False),
+        3: (INPUT_MEMBER_SHA["case-binding.json"], False),
+        5: (INPUT_MEMBER_SHA["fixture-index.json"], False),
+        7: (INPUT_MEMBER_SHA["identity.json"], False),
+        9: (INPUT_MEMBER_SHA["preflight.json"], False),
+        11: (INPUT_MEMBER_SHA["policy.json"], False),
+        15: (VALIDATOR_SHA, False),
+        28: (live_sha, False),
+        35: (RESIDENT_SHA, True),
+        37: (SERVED_SHA, False),
+    }
+    for index, (expected_sha, _executable) in file_bindings.items():
+        if sha_file(Path(command[index]), f"profile runner target argv[{index}]")[0] != expected_sha:
+            raise LauncherError("profile runner target input SHA differs")
+    bundle_metadata = INPUT_ROOT.lstat()
+    lock_metadata = LOCK_PATH.lstat()
+    resolved_roctx = ROCTX_LIBRARY.resolve(strict=True)
+    if resolved_roctx != ROCTX_LIBRARY_RESOLVED:
+        raise LauncherError("profile runner ROCTx resolution differs")
+    value: dict[str, Any] = {
+        "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+        "status": "bound",
+        "manifest_sha256": None,
+        "argv": command,
+        "environment": environment,
+        "input_files": [
+            {
+                "argument_index": index,
+                "path": command[index],
+                "sha256": digest,
+                "executable": executable,
+            }
+            for index, (digest, executable) in sorted(file_bindings.items())
+        ],
+        "runtime_paths": [
+            {
+                "argument_index": 13,
+                "path": command[13],
+                "kind": "directory",
+                "identity": list(file_identity(bundle_metadata)),
+            },
+            {
+                "argument_index": 25,
+                "path": command[25],
+                "kind": "regular_file",
+                "identity": list(file_identity(lock_metadata)),
+            },
+            {
+                "argument_index": 31,
+                "path": command[31],
+                "kind": "symlinked_file",
+                "resolved_path": str(resolved_roctx),
+                "sha256": ROCTX_LIBRARY_SHA,
+            },
+        ],
+        "output_paths": [{"argument_index": 19, "path": command[19]}],
+        "authorization": {
+            "maximum_invocations": 1,
+            "target_role": "profile_runner_only",
+            "promotion_eligible": False,
+        },
+    }
+    absolute_indices = {index for index, item in enumerate(command) if Path(item).is_absolute()}
+    classified = set(file_bindings) | {13, 25, 31, 19}
+    if classified != absolute_indices:
+        raise LauncherError("profile runner absolute argv coverage differs")
+    value["manifest_sha256"] = sha_bytes(canonical(value))
+    return value
 
 
 def _probe(command: list[str], label: str, run: Callable[..., subprocess.CompletedProcess[bytes]]) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
@@ -1256,6 +1355,7 @@ def execute_bound(
     gate_provider: Callable[[], dict[str, Any]] = collect_execute_gates,
     restore_provider: Callable[[], dict[str, Any]] | None = None,
     runner_executor: Callable[[list[str], dict[str, str], Callable[[], None]], dict[str, Any]] | None = None,
+    profile_runner_executor: Callable[[list[str], dict[str, str], Callable[[], None], dict[str, Any]], dict[str, Any]] | None = None,
     verification_hook: Callable[[str], None] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     validate_execute_binding(binding, permit_test_live_preflight=True)
@@ -1268,6 +1368,13 @@ def execute_bound(
         raise LauncherError("execute launcher self differs from trusted artifact")
     if binding["runner_output"] != str(runner_output) or binding["evidence_output"] != str(evidence_output) or binding["run_id"] != run_id:
         raise LauncherError("execute output/run-id differs from binding")
+    profile_enabled = "profile_diagnostic" in binding
+    if profile_runner_executor is not None and runner_executor is not None:
+        raise LauncherError("profile and generic runner executors are mutually exclusive")
+    if not profile_enabled and profile_runner_executor is not None:
+        raise LauncherError("profile runner executor is forbidden for normal execute")
+    if profile_enabled and runner_executor is not None:
+        raise LauncherError("generic runner executor is forbidden for profile execute")
     for path, label in ((evidence_output, "execute evidence"), (runner_output, "execute runner output")):
         reject_symlink_components(path, label, allow_missing_leaf=True)
         if path.exists() or path.is_symlink():
@@ -1275,13 +1382,13 @@ def execute_bound(
     evidence_output.mkdir(mode=0o700)
     self_sha = observed_self_sha
     evidence = make_evidence("execute", self_sha)
-    profile_enabled = "profile_diagnostic" in binding
-    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "gates": None, "gate_failure_diagnostic": None, "restore": None, "trust_verifications": []})
+    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "profile_runner_target": None, "profile_capture": None, "gates": None, "gate_failure_diagnostic": None, "restore": None, "trust_verifications": []})
     evidence["safety"]["execution_state_source"] = "runner_not_started"
     snapshot = Snapshot()
     snapshot_ready = False
     runner_after_verified = False
     live_preflight: dict[str, Any] | None = None
+    profile_target: dict[str, Any] | None = None
     stage = "constants"
 
     def verify_trust(point: str) -> None:
@@ -1318,14 +1425,37 @@ def execute_bound(
         evidence["sequence"].append("pre-exec-gates")
         live_preflight = make_live_preflight(binding, evidence["gates"], evidence_output)
         evidence["live_preflight"] = {"path": live_preflight["path"], "sha256": live_preflight["sha256"], "identity": list(live_preflight["identity"])}
+        if profile_enabled:
+            stage = "profile-runner-target"
+            target_value = profile_runner_target_manifest(
+                binding, execute_runner_argv(binding), EXECUTE_ENV, live_preflight
+            )
+            target_raw = pretty(target_value)
+            atomic_write(evidence_output, PROFILE_RUNNER_TARGET_MANIFEST_NAME, target_raw)
+            target_path = evidence_output / PROFILE_RUNNER_TARGET_MANIFEST_NAME
+            target_observed, target_identity = read_regular(target_path, "profile runner target manifest")
+            if target_observed != target_raw or stat.S_IMODE(target_path.lstat().st_mode) != 0o444:
+                raise LauncherError("profile runner target manifest creation differs")
+            profile_target = {
+                "path": str(target_path),
+                "sha256": sha_bytes(target_raw),
+                "manifest_sha256": target_value["manifest_sha256"],
+                "identity": list(target_identity),
+            }
+            evidence["profile_runner_target"] = profile_target
         verify_trust("runner-before")
         stage = "runner"
         command = execute_runner_argv(binding)
         try:
-            outcome = (
-                run_runner_with_sudo_keepalive(command, EXECUTE_ENV, sudo_run=run, on_started=mark_runner_started)
-                if runner_executor is None else runner_executor(command, EXECUTE_ENV, mark_runner_started)
-            )
+            if profile_enabled and profile_runner_executor is not None:
+                assert profile_target is not None
+                outcome = profile_runner_executor(command, EXECUTE_ENV, mark_runner_started, profile_target)
+            elif profile_enabled:
+                raise LauncherError("profile runner executor is required")
+            elif runner_executor is not None:
+                outcome = runner_executor(command, EXECUTE_ENV, mark_runner_started)
+            else:
+                outcome = run_runner_with_sudo_keepalive(command, EXECUTE_ENV, sudo_run=run, on_started=mark_runner_started)
         except Exception:
             if evidence["process_counts"]["runner"] == 1:
                 verify_trust("runner-after")
@@ -1340,8 +1470,25 @@ def execute_bound(
         load_state = outcome.get("model_load_executed") if isinstance(outcome, dict) else None
         valid_gpu_state = type(gpu_state) is bool or gpu_state == "unknown"
         valid_load_state = type(load_state) is bool or load_state == "unknown"
-        if not isinstance(outcome, dict) or set(outcome) != {"completed", "keepalives", "keepalive_failed", "gpu_command_executed", "model_load_executed"} or not isinstance(outcome.get("completed"), subprocess.CompletedProcess) or not isinstance(outcome.get("keepalives"), list) or type(outcome.get("keepalive_failed")) is not bool or not valid_gpu_state or not valid_load_state:
+        expected_outcome_fields = {"completed", "keepalives", "keepalive_failed", "gpu_command_executed", "model_load_executed"}
+        if profile_enabled and profile_runner_executor is not None:
+            expected_outcome_fields.add("profile_capture")
+        if not isinstance(outcome, dict) or set(outcome) != expected_outcome_fields or not isinstance(outcome.get("completed"), subprocess.CompletedProcess) or not isinstance(outcome.get("keepalives"), list) or type(outcome.get("keepalive_failed")) is not bool or not valid_gpu_state or not valid_load_state:
             raise LauncherError("execute runner outcome contract differs")
+        if "profile_capture" in expected_outcome_fields:
+            capture = outcome.get("profile_capture")
+            if (
+                not isinstance(capture, dict)
+                or capture.get("runner_profiled") is not True
+                or capture.get("validator_profiled") is not False
+                or capture.get("gates_profiled") is not False
+                or capture.get("capture_tool_invocations") != 1
+                or capture.get("rocprof_invocations") != 1
+                or capture.get("target_manifest_sha256") != profile_target["sha256"]
+                or capture.get("status") not in {"complete_diagnostic", "failed"}
+            ):
+                raise LauncherError("profile capture outcome contract differs")
+            evidence["profile_capture"] = capture
         completed = outcome["completed"]
         keepalives = outcome["keepalives"]
         keepalive_failed = outcome["keepalive_failed"]
@@ -1357,6 +1504,8 @@ def execute_bound(
             raise LauncherError("sudo credential keepalive failed; execute runner was interrupted")
         if completed.returncode != 0 or completed.stderr:
             raise LauncherError("execute runner subprocess failed")
+        if profile_enabled and profile_runner_executor is not None and evidence["profile_capture"]["status"] != "complete_diagnostic":
+            raise LauncherError("profile capture did not complete")
         if outcome["gpu_command_executed"] is not True or outcome["model_load_executed"] is not True:
             raise LauncherError("successful execute runner did not prove GPU command and model load")
         evidence["result"] = _result_inventory(runner_output)
@@ -1394,6 +1543,15 @@ def execute_bound(
         try:
             if live_preflight is not None:
                 verify_generated_live_preflight(live_preflight)
+            if profile_target is not None:
+                target_path = Path(profile_target["path"])
+                target_raw, target_identity = read_regular(target_path, "profile runner target manifest final")
+                if (
+                    target_identity != tuple(profile_target["identity"])
+                    or sha_bytes(target_raw) != profile_target["sha256"]
+                    or stat.S_IMODE(target_path.lstat().st_mode) != 0o444
+                ):
+                    raise LauncherError("profile runner target manifest changed after creation")
             if snapshot_ready:
                 verify_trust("finalize-before")
         except (LauncherError, OSError, ValueError) as error:

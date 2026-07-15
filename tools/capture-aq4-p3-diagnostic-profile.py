@@ -297,6 +297,49 @@ class PinnedTargetManifest:
         os.close(self.descriptor)
 
 
+class PinnedRuntimePath:
+    def __init__(self, value: dict[str, Any]) -> None:
+        self.value = value
+        self.path = Path(value["path"])
+        self.kind = value["kind"]
+        self.identity = tuple(value.get("identity", ()))
+        self.resolved_snapshot: Any | None = None
+        if self.kind == "symlinked_file":
+            resolved = Path(value["resolved_path"])
+            self.resolved_snapshot = PROFILER.capture(
+                resolved, "target symlinked runtime path", require_single_link=True
+            )
+            if self.resolved_snapshot.sha256 != value["sha256"]:
+                raise CaptureError("target symlinked runtime path SHA-256 differs")
+        self.verify()
+
+    def verify(self) -> None:
+        try:
+            if self.kind == "directory":
+                metadata = self.path.lstat()
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or PROFILER._identity(metadata) != self.identity
+                ):
+                    raise CaptureError("target runtime directory identity changed")
+            elif self.kind == "regular_file":
+                metadata = self.path.lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or PROFILER._identity(metadata) != self.identity
+                ):
+                    raise CaptureError("target runtime file identity changed")
+            elif self.kind == "symlinked_file":
+                if self.path.resolve(strict=True) != Path(self.value["resolved_path"]):
+                    raise CaptureError("target symlinked runtime path target changed")
+                assert self.resolved_snapshot is not None
+                self.resolved_snapshot.verify()
+            else:
+                raise CaptureError("target runtime path kind differs")
+        except OSError as error:
+            raise CaptureError(f"target runtime path is unavailable: {error}") from error
+
+
 def process_group_alive(process_group: int, process: subprocess.Popen[Any]) -> bool:
     process.poll()
     try:
@@ -396,7 +439,8 @@ def pinned_profiler_version(profiler: PinnedProfiler) -> dict[str, Any]:
 
 def validate_target_manifest_root(value: dict[str, Any]) -> None:
     fields = {
-        "schema_version", "status", "manifest_sha256", "argv", "input_files", "output_paths"
+        "schema_version", "status", "manifest_sha256", "argv", "environment",
+        "input_files", "runtime_paths", "output_paths", "authorization",
     }
     PRODUCER.exact(value, fields, "target command manifest")
     if value.get("schema_version") != TARGET_SCHEMA or value.get("status") != "bound":
@@ -404,6 +448,30 @@ def validate_target_manifest_root(value: dict[str, Any]) -> None:
     declared = PRODUCER.digest(value.get("manifest_sha256"), "target command manifest hash")
     if declared != self_hash(value, "manifest_sha256"):
         raise CaptureError("target command manifest self-hash differs")
+    environment = value.get("environment")
+    if (
+        not isinstance(environment, dict)
+        or not environment
+        or len(environment) > 128
+        or any(
+            not isinstance(key, str)
+            or not key
+            or "\x00" in key
+            or not isinstance(item, str)
+            or "\x00" in item
+            or len(key) > 256
+            or len(item) > 16 * 1024
+            for key, item in environment.items()
+        )
+    ):
+        raise CaptureError("target command environment is invalid")
+    authorization = value.get("authorization")
+    if authorization != {
+        "maximum_invocations": 1,
+        "target_role": "profile_runner_only",
+        "promotion_eligible": False,
+    }:
+        raise CaptureError("target command authorization differs")
 
 
 def load_target_command_manifest(
@@ -431,8 +499,14 @@ def load_target_command_manifest(
         ):
             raise CaptureError("target command argv is invalid")
         inputs = value.get("input_files")
+        runtime_paths = value.get("runtime_paths")
         outputs = value.get("output_paths")
-        if not isinstance(inputs, list) or not inputs or not isinstance(outputs, list):
+        if (
+            not isinstance(inputs, list)
+            or not inputs
+            or not isinstance(runtime_paths, list)
+            or not isinstance(outputs, list)
+        ):
             raise CaptureError("target command path bindings are invalid")
         snapshots: list[Any] = [manifest_snapshot]
         classified: set[int] = set()
@@ -468,6 +542,46 @@ def load_target_command_manifest(
             for item in inputs
         ):
             raise CaptureError("target argv[0] executable is not hash-bound")
+        for number, item in enumerate(runtime_paths):
+            if not isinstance(item, dict):
+                raise CaptureError("target runtime path binding must be an object")
+            common = {"argument_index", "path", "kind"}
+            kind = item.get("kind")
+            expected = (
+                common | {"identity"}
+                if kind in {"directory", "regular_file"}
+                else common | {"resolved_path", "sha256"}
+                if kind == "symlinked_file"
+                else set()
+            )
+            if not expected:
+                raise CaptureError("target runtime path kind differs")
+            PRODUCER.exact(item, expected, f"target runtime path {number}")
+            index = PRODUCER.count(
+                item.get("argument_index"), f"target runtime path {number} index"
+            )
+            if (
+                index >= len(argv)
+                or index in classified
+                or argv[index] != item.get("path")
+                or not Path(item["path"]).is_absolute()
+            ):
+                raise CaptureError("target runtime path index/path binding differs")
+            if kind in {"directory", "regular_file"}:
+                identity = item.get("identity")
+                if (
+                    not isinstance(identity, list)
+                    or len(identity) != 7
+                    or any(type(part) is not int for part in identity)
+                ):
+                    raise CaptureError("target runtime path identity differs")
+            else:
+                PRODUCER.digest(item.get("sha256"), "target symlinked runtime path hash")
+                resolved = item.get("resolved_path")
+                if not isinstance(resolved, str) or not Path(resolved).is_absolute():
+                    raise CaptureError("target symlinked runtime path resolution differs")
+            snapshots.append(PinnedRuntimePath(item))
+            classified.add(index)
         for number, item in enumerate(outputs):
             if not isinstance(item, dict):
                 raise CaptureError("target output binding must be an object")
@@ -519,6 +633,8 @@ def profiler_command(
     executable = profiler.fd_path if isinstance(profiler, PinnedProfiler) else str(profiler.path)
     return [
         executable,
+        "--log-level",
+        "error",
         "--kernel-trace",
         "--hip-runtime-trace",
         "--memory-copy-trace",
@@ -541,6 +657,8 @@ def _run_profile(
     *,
     pass_fds: tuple[int, ...] = (),
     spawn_verifier: Any = None,
+    environment: dict[str, str] | None = None,
+    on_started: Any = None,
 ) -> None:
     if timeout <= 0.0:
         raise CaptureError("profile timeout must be positive")
@@ -563,7 +681,14 @@ def _run_profile(
             shell=False,
             start_new_session=True,
             pass_fds=pass_fds,
+            env=None if environment is None else dict(environment),
         )
+        if on_started is not None:
+            try:
+                on_started()
+            except Exception:
+                terminate_process_group(process)
+                raise
         try:
             return_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as error:
@@ -622,6 +747,8 @@ def run_profile(
     pass_fds: tuple[int, ...] = (),
     verifier: Any = None,
     failure_context: dict[str, Any] | None = None,
+    environment: dict[str, str] | None = None,
+    on_started: Any = None,
 ) -> None:
     if verifier is not None:
         verifier()
@@ -635,6 +762,8 @@ def run_profile(
             timeout,
             pass_fds=pass_fds,
             spawn_verifier=verifier,
+            environment=environment,
+            on_started=on_started,
         )
     except (
         CaptureError,
@@ -1098,7 +1227,7 @@ def assemble(**kwargs: Any) -> dict[str, Any]:
         raise
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("capture", "assemble"))
     parser.add_argument("--profiler-path", type=Path, required=True)
@@ -1113,6 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=1800.0)
     args = parser.parse_args(argv)
+    if on_started is not None and args.command != "capture":
+        raise CaptureError("target start callback is reserved for capture")
     pinned_profiler: PinnedProfiler | None = None
     pinned_target_manifest: PinnedTargetManifest | None = None
     capture_completed = False
@@ -1135,6 +1266,12 @@ def main(argv: list[str] | None = None) -> int:
         pinned_target_manifest = target_snapshots[0]
         target_command = target_value["argv"]
         profiler_value["target_command_manifest"] = ref(target_snapshots[0])
+        profiler_value["target_environment"] = {
+            "sha256": hashlib.sha256(canonical(target_value["environment"])).hexdigest(),
+            "keys": sorted(target_value["environment"]),
+            "exact_base_environment": True,
+            "secret_material_recorded": False,
+        }
         command = profiler_command(
             pinned_profiler,
             args.profile_output_directory,
@@ -1163,6 +1300,8 @@ def main(argv: list[str] | None = None) -> int:
                 pass_fds=(pinned_profiler.descriptor,),
                 verifier=verify_launch_inputs,
                 failure_context=failure_context,
+                environment=target_value["environment"],
+                on_started=on_started,
             )
             capture_completed = True
         elif not args.profile_output_directory.is_dir():
