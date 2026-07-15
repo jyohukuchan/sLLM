@@ -30,17 +30,20 @@ PROFILE_READY_DRY_RUN_ROOT = P2 / "resident-one-case-smoke-profile-ready-dry-run
 HISTORICAL_READY_V15_ROOT = P2 / "resident-one-case-smoke-profile-ready-v15"
 HISTORICAL_READY_V15 = HISTORICAL_READY_V15_ROOT / "ready-binding.json"
 HISTORICAL_READY_DRY_RUN_V15_ROOT = P2 / "resident-one-case-smoke-profile-ready-dry-run-v15"
-QUIET_ROOT = P2 / "resident-one-case-smoke-profile-quiet-window-v18"
-OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v13"
+QUIET_ROOT = P2 / "resident-one-case-smoke-profile-quiet-window-v19"
+OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v14"
 MAINTENANCE_EVIDENCE = P2 / "resident-one-case-smoke-profile-maintenance-evidence-v11"
-OPERATOR_RESULT = P2 / "resident-one-case-smoke-profile-operator-result-v13"
-ACTUAL_AUDIT = P2 / "resident-one-case-smoke-profile-actual-audit-v13"
+OPERATOR_RESULT = P2 / "resident-one-case-smoke-profile-operator-result-v14"
+ACTUAL_AUDIT = P2 / "resident-one-case-smoke-profile-actual-audit-v14"
 PROFILE_RUNTIME = P2 / "resident-one-case-smoke-profile-execute-v10"
 PROFILE_EXECUTE_EVIDENCE = P2 / "resident-one-case-smoke-profile-execute-evidence-v10"
 PROFILE_CAPTURE = P3 / "aq4-p3-diagnostic-rocprof-capture-v10"
 OFFLINE_CAPTURE_ROOT = P3 / "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v11"
 OFFLINE_EVIDENCE_ROOT = P2 / "resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v11"
-PREVIOUS_OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v12"
+PREVIOUS_QUIET_V18_ROOT = P2 / "resident-one-case-smoke-profile-quiet-window-v18"
+PREVIOUS_OPERATOR_V13_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v13"
+PREVIOUS_OPERATOR_ROOT = PREVIOUS_OPERATOR_V13_ROOT
+PREVIOUS_OPERATOR_V12_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v12"
 PREVIOUS_OPERATOR_V11_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v11"
 PREVIOUS_OPERATOR_V10_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v10"
 PREVIOUS_OPERATOR_RESULT_V10 = P2 / "resident-one-case-smoke-profile-operator-result-v10"
@@ -57,14 +60,37 @@ PREVIOUS_ACTUAL_V12_PROFILE_EXECUTE_EVIDENCE = P2 / "resident-one-case-smoke-pro
 PREVIOUS_ACTUAL_V12_PROFILE_CAPTURE = P3 / "aq4-p3-diagnostic-rocprof-capture-v9"
 PREVIOUS_ACTUAL_V12_OPERATOR_RESULT = P2 / "resident-one-case-smoke-profile-operator-result-v12"
 PREVIOUS_ACTUAL_V12_AUDIT = P2 / "resident-one-case-smoke-profile-actual-audit-v12"
+PREVIOUS_V13_PROFILE_READY = P2 / "resident-one-case-smoke-profile-ready-v16/ready-binding.json"
+PREVIOUS_V13_PYTHON = Path("/usr/bin/python3.12")
+PREVIOUS_V13_MAINTENANCE = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
+PREVIOUS_V13_MAINTENANCE_EVIDENCE = P2 / "resident-one-case-smoke-profile-maintenance-evidence-v11"
+PREVIOUS_V13_PROFILE_RUNTIME = P2 / "resident-one-case-smoke-profile-execute-v10"
+PREVIOUS_V13_PROFILE_EXECUTE_EVIDENCE = P2 / "resident-one-case-smoke-profile-execute-evidence-v10"
+PREVIOUS_V13_PROFILE_CAPTURE = P3 / "aq4-p3-diagnostic-rocprof-capture-v10"
+PREVIOUS_V13_OPERATOR_RESULT = P2 / "resident-one-case-smoke-profile-operator-result-v13"
+PREVIOUS_V13_ACTUAL_AUDIT = P2 / "resident-one-case-smoke-profile-actual-audit-v13"
 EXECUTE_BINDING_ROOT = P2 / "resident-one-case-smoke-execute-binding-v10"
 EXECUTE_RUNTIME = P2 / "resident-one-case-smoke-execute-v10"
 EXECUTE_EVIDENCE = P2 / "resident-one-case-smoke-execute-evidence-v10"
 PYTHON = Path("/usr/bin/python3.12")
-QUIET_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v18"
-OPERATOR_SCHEMA = "ullm.aq4_p3_profile_operator_command.v13"
-OPERATOR_RESULT_SCHEMA = "ullm.aq4_p3_profile_operator_result.v13"
-ACTUAL_AUDIT_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v13"
+QUIET_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v19"
+OPERATOR_SCHEMA = "ullm.aq4_p3_profile_operator_command.v14"
+OPERATOR_RESULT_SCHEMA = "ullm.aq4_p3_profile_operator_result.v14"
+ACTUAL_AUDIT_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v14"
+PREVIOUS_QUIET_V18_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v18"
+PREVIOUS_OPERATOR_V13_SCHEMA = "ullm.aq4_p3_profile_operator_command.v13"
+PREVIOUS_OPERATOR_V13_COMMIT = "764045355ee06c3b5c53f296d4bcbe47e1495ece"
+PREVIOUS_OPERATOR_V13_TREE = "cb73e9c7c34c884eac567510f6d89da238b57a49"
+PREVIOUS_OPERATOR_V13_ROOT_TREE = "d187b2902aa9f83503c17d6c0c8665210744f2e0"
+PREVIOUS_OPERATOR_V13_MANIFEST_SHA256 = "78168089ff34e2eb8560bcaa85c94f49c0f3ae23ee4a614f0d0fc7e077a0d4f0"
+PREVIOUS_OPERATOR_V13_SEMANTIC_SHA256 = "42c8498adc6c8f97382ef17421d3145a14d50126a549a66d0693f114f8cad313"
+PREVIOUS_OPERATOR_V13_SUMS_SHA256 = "1c157f9d864b4e75d62e2acc7b5b5189b1765e3795b3109ef4e815df26b87fd6"
+PREVIOUS_OPERATOR_V13_COMMAND_SHA256 = "5693d75b17f91187b6841566815ad717d001a91280d651860aa127dc20277079"
+PREVIOUS_QUIET_V18_COMMIT = "cb774ac0090380d4fff5b613a942fad9b3d106c8"
+PREVIOUS_QUIET_V18_TREE = "add160bacc5f372cd21bbaa6840ebcb1735c94f4"
+PREVIOUS_QUIET_V18_ROOT_TREE = "18c7e4c0c83142bab61be025022e77696c259ea7"
+PREVIOUS_QUIET_V18_JSON_SHA256 = "0fb7e3346e7f38d0b9d844d3bac2815b533945eb7d25b3981ac3d5542eb36e00"
+PREVIOUS_QUIET_V18_SUMS_SHA256 = "081e220fd195c3576eeced4d59464c309be4d1304bb5cfbc771cbe197c59608b"
 PREVIOUS_OPERATOR_V12_SCHEMA = "ullm.aq4_p3_profile_operator_command.v12"
 PREVIOUS_OPERATOR_RESULT_V12_SCHEMA = "ullm.aq4_p3_profile_operator_result.v12"
 PREVIOUS_ACTUAL_AUDIT_V12_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v12"
@@ -535,8 +561,8 @@ def previous_operator_v12_fresh_paths() -> list[Path]:
 
 
 def previous_operator_v12_state() -> dict[str, Any]:
-    inventory = verify_sums(PREVIOUS_OPERATOR_ROOT)
-    manifest_path = PREVIOUS_OPERATOR_ROOT / "command-manifest.json"
+    inventory = verify_sums(PREVIOUS_OPERATOR_V12_ROOT)
+    manifest_path = PREVIOUS_OPERATOR_V12_ROOT / "command-manifest.json"
     if (
         inventory["sha256sums_sha256"] != PREVIOUS_OPERATOR_V12_SUMS_SHA256
         or sha_file(manifest_path) != PREVIOUS_OPERATOR_V12_MANIFEST_SHA256
@@ -545,11 +571,11 @@ def previous_operator_v12_state() -> dict[str, Any]:
     ):
         raise OperatorError("previous operator-v12 authority differs")
     verify_inventory_commit(
-        PREVIOUS_OPERATOR_ROOT,
+        PREVIOUS_OPERATOR_V12_ROOT,
         inventory,
         PREVIOUS_OPERATOR_V12_COMMIT,
     )
-    relative = str(PREVIOUS_OPERATOR_ROOT.relative_to(ROOT))
+    relative = str(PREVIOUS_OPERATOR_V12_ROOT.relative_to(ROOT))
     observed = set(
         filter(
             None,
@@ -636,6 +662,244 @@ def previous_operator_v12_state() -> dict[str, Any]:
         "historical_actual_v9": historical_v9,
         "maximum_invocations": 1,
         "actual_executed": False,
+    }
+
+
+def previous_quiet_v18_authority() -> dict[str, Any]:
+    inventory = verify_sums(PREVIOUS_QUIET_V18_ROOT)
+    relative = str(PREVIOUS_QUIET_V18_ROOT.relative_to(ROOT))
+    quiet_path = PREVIOUS_QUIET_V18_ROOT / "quiet-window.json"
+    if (
+        git("rev-parse", f"{PREVIOUS_QUIET_V18_COMMIT}^{{tree}}")
+        != PREVIOUS_QUIET_V18_TREE
+        or git("rev-parse", f"{PREVIOUS_QUIET_V18_COMMIT}:{relative}")
+        != PREVIOUS_QUIET_V18_ROOT_TREE
+        or inventory["sha256sums_sha256"] != PREVIOUS_QUIET_V18_SUMS_SHA256
+        or sha_file(quiet_path) != PREVIOUS_QUIET_V18_JSON_SHA256
+    ):
+        raise OperatorError("previous quiet-v18 authority differs")
+    verify_inventory_commit(
+        PREVIOUS_QUIET_V18_ROOT,
+        inventory,
+        PREVIOUS_QUIET_V18_COMMIT,
+    )
+    observed = set(
+        filter(
+            None,
+            git(
+                "ls-tree",
+                "-r",
+                "--name-only",
+                PREVIOUS_QUIET_V18_COMMIT,
+                "--",
+                relative,
+            ).splitlines(),
+        )
+    )
+    if observed != {
+        f"{relative}/SHA256SUMS",
+        f"{relative}/quiet-window.json",
+    }:
+        raise OperatorError("previous quiet-v18 Git file coverage differs")
+    value = load(quiet_path, "previous quiet-v18")
+    policy = value.get("policy", {})
+    summary = value.get("summary", {})
+    if (
+        value.get("schema_version") != PREVIOUS_QUIET_V18_SCHEMA
+        or value.get("status") != "go"
+        or value.get("decision") != "GO"
+        or value.get("resets") != []
+        or policy
+        != {
+            "interval_seconds": 5.0,
+            "maximum_monitoring_seconds": 900.0,
+            "minimum_sample_span_seconds": 130.0,
+            "required_consecutive_clean_samples": 27,
+            "reset_count_required": 0,
+        }
+        or summary.get("sample_count") != 27
+        or summary.get("final_streak_samples") != 27
+        or summary.get("final_streak_span_seconds", 0.0) < 130.0
+        or summary.get("reset_count") != 0
+        or summary.get("confirmation_passed") is not True
+        or summary.get("fresh_outputs_absent") is not True
+        or value.get("read_only") is not True
+        or value.get("actual_executed") is not False
+        or value.get("gpu_command_executed") is not False
+        or value.get("service_touched") is not False
+        or value.get("secret_material_recorded") is not False
+    ):
+        raise OperatorError("previous quiet-v18 semantic authority differs")
+    return {
+        "status": value["status"],
+        "decision": value["decision"],
+        "artifact_commit": PREVIOUS_QUIET_V18_COMMIT,
+        "artifact_tree": PREVIOUS_QUIET_V18_TREE,
+        "root_tree": PREVIOUS_QUIET_V18_ROOT_TREE,
+        "json_sha256": PREVIOUS_QUIET_V18_JSON_SHA256,
+        "inventory": inventory,
+        "summary": summary,
+    }
+
+
+def previous_operator_v13_argv() -> list[str]:
+    return [
+        str(PREVIOUS_V13_PYTHON),
+        str(PREVIOUS_V13_MAINTENANCE),
+        "--mode",
+        "execute",
+        "--profile-diagnostic",
+        "--ready-artifact",
+        str(PREVIOUS_V13_PROFILE_READY),
+        "--evidence-output",
+        str(PREVIOUS_V13_MAINTENANCE_EVIDENCE),
+        "--confirm-one-case",
+    ]
+
+
+def previous_operator_v13_fresh_paths() -> list[Path]:
+    paths = [
+        PREVIOUS_V13_PROFILE_RUNTIME,
+        PREVIOUS_V13_PROFILE_EXECUTE_EVIDENCE,
+        PREVIOUS_V13_MAINTENANCE_EVIDENCE,
+        PREVIOUS_V13_PROFILE_CAPTURE,
+        PREVIOUS_V13_PROFILE_CAPTURE / "capture-artifact.json",
+        PREVIOUS_V13_PROFILE_CAPTURE / "rocprof.stdout",
+        PREVIOUS_V13_PROFILE_CAPTURE / "rocprof.stderr",
+        PREVIOUS_V13_OPERATOR_RESULT,
+        PREVIOUS_V13_ACTUAL_AUDIT,
+    ]
+    if len({str(path) for path in paths}) != 9 or any(
+        not path.is_absolute() or ".." in path.parts for path in paths
+    ):
+        raise OperatorError("previous operator-v13 fresh output set differs")
+    return paths
+
+
+def previous_authorization_v13_state() -> dict[str, Any]:
+    inventory = verify_sums(PREVIOUS_OPERATOR_V13_ROOT)
+    manifest_path = PREVIOUS_OPERATOR_V13_ROOT / "command-manifest.json"
+    relative = str(PREVIOUS_OPERATOR_V13_ROOT.relative_to(ROOT))
+    if (
+        git("rev-parse", f"{PREVIOUS_OPERATOR_V13_COMMIT}^{{tree}}")
+        != PREVIOUS_OPERATOR_V13_TREE
+        or git("rev-parse", f"{PREVIOUS_OPERATOR_V13_COMMIT}:{relative}")
+        != PREVIOUS_OPERATOR_V13_ROOT_TREE
+        or inventory["sha256sums_sha256"] != PREVIOUS_OPERATOR_V13_SUMS_SHA256
+        or sha_file(manifest_path) != PREVIOUS_OPERATOR_V13_MANIFEST_SHA256
+    ):
+        raise OperatorError("previous operator-v13 authority differs")
+    verify_inventory_commit(
+        PREVIOUS_OPERATOR_V13_ROOT,
+        inventory,
+        PREVIOUS_OPERATOR_V13_COMMIT,
+    )
+    observed = set(
+        filter(
+            None,
+            git(
+                "ls-tree",
+                "-r",
+                "--name-only",
+                PREVIOUS_OPERATOR_V13_COMMIT,
+                "--",
+                relative,
+            ).splitlines(),
+        )
+    )
+    if observed != {
+        f"{relative}/SHA256SUMS",
+        f"{relative}/command-manifest.json",
+    }:
+        raise OperatorError("previous operator-v13 Git file coverage differs")
+
+    value = load(manifest_path, "previous operator-v13 manifest")
+    clone = json.loads(json.dumps(value))
+    declared = clone.get("manifest_sha256")
+    clone["manifest_sha256"] = None
+    authorization = value.get("authorization", {})
+    execution = value.get("execution", {})
+    argv = previous_operator_v13_argv()
+    paths = previous_operator_v13_fresh_paths()
+    if (
+        value.get("schema_version") != PREVIOUS_OPERATOR_V13_SCHEMA
+        or value.get("status")
+        != "audited_ready_for_single_explicit_profile_diagnostic"
+        or declared != PREVIOUS_OPERATOR_V13_SEMANTIC_SHA256
+        or declared != sha_bytes(canonical(clone))
+        or value.get("argv") != argv
+        or value.get("command_sha256") != PREVIOUS_OPERATOR_V13_COMMAND_SHA256
+        or value.get("command_sha256") != sha_bytes(canonical(argv))
+        or authorization.get("maximum_invocations") != 1
+        or authorization.get("explicit_confirmation_flag_count") != 1
+        or authorization.get("profile_diagnostic_flag_count") != 1
+        or authorization.get("ready_artifact_flag_count") != 1
+        or authorization.get("evidence_output_flag_count") != 1
+        or execution.get("maximum_invocations") != 1
+        or execution.get("shell") is not False
+        or execution.get("requires_fresh_output_recheck_immediately_before_execution")
+        is not True
+        or value.get("fresh_outputs")
+        != [{"path": str(path), "absent": True} for path in paths]
+        or value.get("actual_executed") is not False
+        or value.get("gpu_command_executed") is not False
+        or value.get("service_touched") is not False
+        or value.get("secret_material_embedded") is not False
+    ):
+        raise OperatorError("previous operator-v13 semantic authority differs")
+
+    quiet = previous_quiet_v18_authority()
+    quiet_input = value.get("inputs", {}).get("quiet_window", {})
+    previous_v12 = value.get("inputs", {}).get("previous_operator_v12", {})
+    previous_actual = value.get("inputs", {}).get("previous_actual_v12", {})
+    if (
+        quiet_input
+        != {
+            "path": str(PREVIOUS_QUIET_V18_ROOT / "quiet-window.json"),
+            "sha256": PREVIOUS_QUIET_V18_JSON_SHA256,
+            "decision": "GO",
+            "status": "go",
+        }
+        or value.get("quiet_final_streak") != quiet["summary"]
+        or previous_v12.get("state") != "authorized_sealed"
+        or previous_v12.get("authorization_commit")
+        != PREVIOUS_OPERATOR_V12_COMMIT
+        or previous_actual.get("state") != "executed_sealed"
+        or previous_actual.get("artifact_commit") != PREVIOUS_ACTUAL_V12_COMMIT
+        or previous_actual.get("artifact_tree") != PREVIOUS_ACTUAL_V12_TREE
+        or previous_actual.get("file_count") != PREVIOUS_ACTUAL_V12_FILE_COUNT
+        or previous_actual.get("invocation_count") != 1
+        or previous_actual.get("maximum_invocations") != 1
+        or previous_actual.get("retry_performed") is not False
+    ):
+        raise OperatorError("previous operator-v13 input authority differs")
+
+    present = [path.exists() or path.is_symlink() for path in paths]
+    if any(present):
+        raise OperatorError("previous operator-v13 partial outputs are present")
+    state = [
+        {"path": str(path), "present": observed}
+        for path, observed in zip(paths, present, strict=True)
+    ]
+    return {
+        "state": "authorized_not_invoked_preflight_blocked",
+        "reason": "external_owner_after_seal_before_invocation",
+        "authorization_commit": PREVIOUS_OPERATOR_V13_COMMIT,
+        "authorization_tree": PREVIOUS_OPERATOR_V13_TREE,
+        "authorization_root_tree": PREVIOUS_OPERATOR_V13_ROOT_TREE,
+        "manifest_file_sha256": PREVIOUS_OPERATOR_V13_MANIFEST_SHA256,
+        "manifest_semantic_sha256": declared,
+        "command_sha256": PREVIOUS_OPERATOR_V13_COMMAND_SHA256,
+        "inventory": inventory,
+        "quiet_v18": quiet,
+        "fresh_outputs": state,
+        "invocation_count": 0,
+        "maximum_invocations": 1,
+        "result_present": False,
+        "audit_present": False,
+        "actual_executed": False,
+        "gpu_command_executed": False,
+        "service_touched": False,
     }
 
 
@@ -892,6 +1156,25 @@ def offline_reassembly_authority() -> dict[str, Any]:
     }
 
 
+def current_fresh_paths() -> list[Path]:
+    paths = [
+        PROFILE_RUNTIME,
+        PROFILE_EXECUTE_EVIDENCE,
+        MAINTENANCE_EVIDENCE,
+        PROFILE_CAPTURE,
+        PROFILE_CAPTURE / "capture-artifact.json",
+        PROFILE_CAPTURE / "rocprof.stdout",
+        PROFILE_CAPTURE / "rocprof.stderr",
+        OPERATOR_RESULT,
+        ACTUAL_AUDIT,
+    ]
+    if len({str(path) for path in paths}) != 9 or any(
+        not path.is_absolute() or ".." in path.parts for path in paths
+    ):
+        raise OperatorError("fresh output set differs")
+    return paths
+
+
 def fresh_paths(ready: dict[str, Any]) -> list[Path]:
     binding = ready.get("launcher_binding")
     if not isinstance(binding, dict):
@@ -908,7 +1191,7 @@ def fresh_paths(ready: dict[str, Any]) -> list[Path]:
         OPERATOR_RESULT,
         ACTUAL_AUDIT,
     ]
-    if len({str(path) for path in paths}) != 9 or any(not path.is_absolute() or ".." in path.parts for path in paths):
+    if paths != current_fresh_paths():
         raise OperatorError("fresh output set differs")
     return paths
 
@@ -1071,6 +1354,9 @@ def relevant_snapshot(ready: dict[str, Any]) -> dict[str, Any]:
     sources = trusted_source_snapshot(ready)
     records.extend(sources)
     absent = {str(path): not path.exists() and not path.is_symlink() for path in fresh_paths(ready)}
+    previous = previous_authorization_v13_state()
+    if previous.get("state") != "authorized_not_invoked_preflight_blocked":
+        raise OperatorError("previous operator-v13 final state differs")
     previous_actual = previous_actual_v12_state()
     if previous_actual.get("state") != "executed_sealed":
         raise OperatorError("previous actual-v12 final state differs")
@@ -1079,7 +1365,7 @@ def relevant_snapshot(ready: dict[str, Any]) -> dict[str, Any]:
     if offline.get("file_count") != 42:
         raise OperatorError("offline reassembly-v11 file coverage differs")
     records.sort(key=lambda item: item["path"])
-    return {"root_count": len(roots), "file_count": len(records), "trusted_source_count": len(sources), "byte_aggregate_sha256": sha_bytes(canonical([{"path": item["path"], "sha256": item["sha256"]} for item in records])), "identity_aggregate_sha256": sha_bytes(canonical(records)), "fresh_absence": absent, "all_required_absent": all(absent.values()), "previous_actual_v12": previous_actual, "historical_ready_v15": {"status": historical_ready["status"], "actual_eligible": historical_ready["actual_eligible"], "artifact_commit": HISTORICAL_READY_V15_COMMIT}, "offline_reassembly_v11": offline}
+    return {"root_count": len(roots), "file_count": len(records), "trusted_source_count": len(sources), "byte_aggregate_sha256": sha_bytes(canonical([{"path": item["path"], "sha256": item["sha256"]} for item in records])), "identity_aggregate_sha256": sha_bytes(canonical(records)), "fresh_absence": absent, "all_required_absent": all(absent.values()), "previous_operator_v13": previous, "previous_actual_v12": previous_actual, "historical_ready_v15": {"status": historical_ready["status"], "actual_eligible": historical_ready["actual_eligible"], "artifact_commit": HISTORICAL_READY_V15_COMMIT}, "offline_reassembly_v11": offline}
 
 
 def load_maintenance() -> Any:
@@ -1224,9 +1510,9 @@ def actual_argv() -> list[str]:
 
 
 def prepare_operator(output: Path = OPERATOR_ROOT) -> dict[str, Any]:
-    ready, ready_inventory = ready_authority(); quiet = validate_quiet(QUIET_ROOT); previous = previous_operator_v12_state()
-    if previous.get("state") != "authorized_sealed":
-        raise OperatorError("previous operator-v12 final state differs")
+    ready, ready_inventory = ready_authority(); quiet = validate_quiet(QUIET_ROOT); previous = previous_authorization_v13_state()
+    if previous.get("state") != "authorized_not_invoked_preflight_blocked" or previous.get("reason") != "external_owner_after_seal_before_invocation":
+        raise OperatorError("previous operator-v13 final state differs")
     previous_actual = previous_actual_v12_state()
     if previous_actual.get("state") != "executed_sealed":
         raise OperatorError("previous actual-v12 final state differs")
@@ -1236,7 +1522,7 @@ def prepare_operator(output: Path = OPERATOR_ROOT) -> dict[str, Any]:
     if any(path.exists() or path.is_symlink() for path in fresh):
         raise OperatorError("operator fresh outputs are not absent")
     argv = actual_argv()
-    manifest: dict[str, Any] = {"schema_version": OPERATOR_SCHEMA, "status": "audited_ready_for_single_explicit_profile_diagnostic", "argv": argv, "command_sha256": sha_bytes(canonical(argv)), "authorization": {"maximum_invocations": 1, "explicit_confirmation_flag_count": argv.count("--confirm-one-case"), "profile_diagnostic_flag_count": argv.count("--profile-diagnostic"), "ready_artifact_flag_count": argv.count("--ready-artifact"), "evidence_output_flag_count": argv.count("--evidence-output"), "quiet_window_status_required": "go", "quiet_window_decision_required": "GO"}, "execution": {"argument_count": len(argv), "shell": False, "working_directory": str(ROOT), "same_pty_sudo_cache_required": True, "external_service_stop_required": True, "maximum_invocations": 1, "output_no_reuse": True, "operator_must_use_manifest_argv_exactly": True, "requires_fresh_output_recheck_immediately_before_execution": True, "promotion_eligible": False, "measurement_eligible": False}, "inputs": {"profile_ready": {"artifact_commit": READY_ARTIFACT_COMMIT, "ready_binding_sha256": READY_BINDING_SHA256, "inventory": ready_inventory}, "historical_ready_v15": {"artifact_commit": HISTORICAL_READY_V15_COMMIT, "status": historical_ready["status"], "actual_eligible": historical_ready["actual_eligible"]}, "offline_reassembly_v11": offline, "quiet_window": {"path": str(QUIET_ROOT / "quiet-window.json"), "sha256": sha_file(QUIET_ROOT / "quiet-window.json"), "decision": quiet["value"]["decision"], "status": quiet["value"]["status"]}, "previous_operator_v12": previous, "previous_actual_v12": previous_actual}, "fresh_outputs": [{"path": str(path), "absent": True} for path in fresh], "quiet_final_streak": quiet["value"]["summary"], "failure_contract": {"retry_forbidden": True, "preserve_operator_stdout_stderr": True, "preserve_maintenance_launcher_capture_and_ready_audits": True, "immutable_failure_capture_before_reporting": True, "outer_restore_in_finally": True, "restore_timeout_seconds": ready.get("maintenance", {}).get("restore_poll", {}).get("timeout_seconds"), "restore_requires_active_running_new_epoch_nrestarts_zero_worker_lock_gpu_kfd_formal_health_and_hashes": True, "children_remaining_must_be_empty": True}, "target_runner_manifest": {"schema_version": "ullm.aq4_p3_profile_target_command.v1", "fresh_per_execution": True, "generated_by": "launcher_after_live_preflight", "maximum_invocations": 1, "static_manifest_present": False}, "pre_execution_audit": {"quiet_window": "passed", "fresh_outputs": "9/9 absent", "historical_ready_v15": "validated_historical", "offline_reassembly_v11": "offline_reassembled_sealed", "previous_operator_v12": "authorized_sealed", "previous_actual_v12": "executed_sealed", "actual_executed": False}, "actual_executed": False, "gpu_command_executed": False, "service_touched": False, "secret_material_embedded": False, "manifest_sha256": None}
+    manifest: dict[str, Any] = {"schema_version": OPERATOR_SCHEMA, "status": "audited_ready_for_single_explicit_profile_diagnostic", "argv": argv, "command_sha256": sha_bytes(canonical(argv)), "authorization": {"maximum_invocations": 1, "explicit_confirmation_flag_count": argv.count("--confirm-one-case"), "profile_diagnostic_flag_count": argv.count("--profile-diagnostic"), "ready_artifact_flag_count": argv.count("--ready-artifact"), "evidence_output_flag_count": argv.count("--evidence-output"), "quiet_window_status_required": "go", "quiet_window_decision_required": "GO"}, "execution": {"argument_count": len(argv), "shell": False, "working_directory": str(ROOT), "same_pty_sudo_cache_required": True, "external_service_stop_required": True, "maximum_invocations": 1, "output_no_reuse": True, "operator_must_use_manifest_argv_exactly": True, "requires_fresh_output_recheck_immediately_before_execution": True, "promotion_eligible": False, "measurement_eligible": False}, "inputs": {"profile_ready": {"artifact_commit": READY_ARTIFACT_COMMIT, "ready_binding_sha256": READY_BINDING_SHA256, "inventory": ready_inventory}, "historical_ready_v15": {"artifact_commit": HISTORICAL_READY_V15_COMMIT, "status": historical_ready["status"], "actual_eligible": historical_ready["actual_eligible"]}, "offline_reassembly_v11": offline, "quiet_window": {"path": str(QUIET_ROOT / "quiet-window.json"), "sha256": sha_file(QUIET_ROOT / "quiet-window.json"), "decision": quiet["value"]["decision"], "status": quiet["value"]["status"]}, "previous_operator_v13": previous, "previous_actual_v12": previous_actual}, "fresh_outputs": [{"path": str(path), "absent": True} for path in fresh], "quiet_final_streak": quiet["value"]["summary"], "failure_contract": {"retry_forbidden": True, "preserve_operator_stdout_stderr": True, "preserve_maintenance_launcher_capture_and_ready_audits": True, "immutable_failure_capture_before_reporting": True, "outer_restore_in_finally": True, "restore_timeout_seconds": ready.get("maintenance", {}).get("restore_poll", {}).get("timeout_seconds"), "restore_requires_active_running_new_epoch_nrestarts_zero_worker_lock_gpu_kfd_formal_health_and_hashes": True, "children_remaining_must_be_empty": True}, "target_runner_manifest": {"schema_version": "ullm.aq4_p3_profile_target_command.v1", "fresh_per_execution": True, "generated_by": "launcher_after_live_preflight", "maximum_invocations": 1, "static_manifest_present": False}, "pre_execution_audit": {"quiet_window": "passed", "fresh_outputs": "9/9 absent", "historical_ready_v15": "validated_historical", "offline_reassembly_v11": "offline_reassembled_sealed", "previous_operator_v13": "authorized_not_invoked_preflight_blocked", "previous_operator_v13_reason": "external_owner_after_seal_before_invocation", "previous_actual_v12": "executed_sealed", "actual_executed": False}, "actual_executed": False, "gpu_command_executed": False, "service_touched": False, "secret_material_embedded": False, "manifest_sha256": None}
     manifest["manifest_sha256"] = sha_bytes(canonical(manifest))
     write_sealed(output, "command-manifest.json", manifest); validate_operator(output)
     return manifest
@@ -1249,23 +1535,48 @@ def validate_operator(root: Path = OPERATOR_ROOT) -> dict[str, Any]:
         raise OperatorError("operator manifest semantic binding differs")
     failure = value.get("failure_contract", {})
     execution = value.get("execution", {})
-    if value.get("authorization", {}).get("maximum_invocations") != 1 or execution.get("maximum_invocations") != 1 or execution.get("shell") is not False or execution.get("outer_restore_in_finally") is True or value.get("actual_executed") is not False or value.get("gpu_command_executed") is not False or value.get("service_touched") is not False or value.get("secret_material_embedded") is not False or len(value.get("fresh_outputs", [])) != 9 or not all(item.get("absent") is True for item in value["fresh_outputs"]):
+    if value.get("authorization", {}).get("maximum_invocations") != 1 or execution.get("maximum_invocations") != 1 or execution.get("shell") is not False or execution.get("outer_restore_in_finally") is True or value.get("actual_executed") is not False or value.get("gpu_command_executed") is not False or value.get("service_touched") is not False or value.get("secret_material_embedded") is not False or value.get("fresh_outputs") != [{"path": str(path), "absent": True} for path in current_fresh_paths()]:
         raise OperatorError("operator authorization/safety differs")
     if failure.get("retry_forbidden") is not True or failure.get("outer_restore_in_finally") is not True or failure.get("restore_timeout_seconds") != 120.0 or failure.get("children_remaining_must_be_empty") is not True:
         raise OperatorError("operator failure/restore contract differs")
     inputs = value.get("inputs", {})
-    previous = inputs.get("previous_operator_v12", {})
+    previous = inputs.get("previous_operator_v13", {})
     previous_actual = inputs.get("previous_actual_v12", {})
     historical_ready = inputs.get("historical_ready_v15", {})
     offline = inputs.get("offline_reassembly_v11", {})
     pre_audit = value.get("pre_execution_audit", {})
     if (
-        previous.get("state") != "authorized_sealed"
-        or previous.get("authorization_commit") != PREVIOUS_OPERATOR_V12_COMMIT
-        or previous.get("authorization_tree") != PREVIOUS_OPERATOR_V12_TREE
+        previous.get("state") != "authorized_not_invoked_preflight_blocked"
+        or previous.get("reason")
+        != "external_owner_after_seal_before_invocation"
+        or previous.get("authorization_commit") != PREVIOUS_OPERATOR_V13_COMMIT
+        or previous.get("authorization_tree") != PREVIOUS_OPERATOR_V13_TREE
+        or previous.get("authorization_root_tree")
+        != PREVIOUS_OPERATOR_V13_ROOT_TREE
         or previous.get("manifest_file_sha256")
-        != PREVIOUS_OPERATOR_V12_MANIFEST_SHA256
+        != PREVIOUS_OPERATOR_V13_MANIFEST_SHA256
+        or previous.get("manifest_semantic_sha256")
+        != PREVIOUS_OPERATOR_V13_SEMANTIC_SHA256
+        or previous.get("command_sha256")
+        != PREVIOUS_OPERATOR_V13_COMMAND_SHA256
+        or previous.get("invocation_count") != 0
         or previous.get("maximum_invocations") != 1
+        or previous.get("result_present") is not False
+        or previous.get("audit_present") is not False
+        or previous.get("actual_executed") is not False
+        or previous.get("gpu_command_executed") is not False
+        or previous.get("service_touched") is not False
+        or len(previous.get("fresh_outputs", [])) != 9
+        or not all(
+            item.get("present") is False
+            for item in previous.get("fresh_outputs", [])
+        )
+        or previous.get("quiet_v18", {}).get("artifact_commit")
+        != PREVIOUS_QUIET_V18_COMMIT
+        or previous.get("quiet_v18", {}).get("root_tree")
+        != PREVIOUS_QUIET_V18_ROOT_TREE
+        or previous.get("quiet_v18", {}).get("json_sha256")
+        != PREVIOUS_QUIET_V18_JSON_SHA256
         or previous_actual.get("state") != "executed_sealed"
         or previous_actual.get("artifact_commit") != PREVIOUS_ACTUAL_V12_COMMIT
         or previous_actual.get("artifact_tree") != PREVIOUS_ACTUAL_V12_TREE
@@ -1289,7 +1600,10 @@ def validate_operator(root: Path = OPERATOR_ROOT) -> dict[str, Any]:
         or pre_audit.get("historical_ready_v15") != "validated_historical"
         or pre_audit.get("offline_reassembly_v11")
         != "offline_reassembled_sealed"
-        or pre_audit.get("previous_operator_v12") != "authorized_sealed"
+        or pre_audit.get("previous_operator_v13")
+        != "authorized_not_invoked_preflight_blocked"
+        or pre_audit.get("previous_operator_v13_reason")
+        != "external_owner_after_seal_before_invocation"
         or pre_audit.get("previous_actual_v12") != "executed_sealed"
         or pre_audit.get("fresh_outputs") != "9/9 absent"
         or pre_audit.get("actual_executed") is not False
@@ -2420,11 +2734,31 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
 
 
 def validate_actual() -> dict[str, Any]:
+    manifest = validate_operator()["value"]
     result_inventory = verify_sums(OPERATOR_RESULT)
     audit_inventory = verify_sums(ACTUAL_AUDIT)
     result = load(OPERATOR_RESULT / "operator-result.json", "operator result")
     audit = load(ACTUAL_AUDIT / "actual-audit.json", "actual audit")
     validate_actual_documents(result, audit)
+    manifest_commit = git(
+        "log",
+        "-1",
+        "--format=%H",
+        "--",
+        str((OPERATOR_ROOT / "command-manifest.json").relative_to(ROOT)),
+    )
+    if (
+        result.get("operator_manifest_commit") != manifest_commit
+        or result.get("manifest_file_sha256")
+        != sha_file(OPERATOR_ROOT / "command-manifest.json")
+        or result.get("manifest_semantic_sha256") != manifest.get("manifest_sha256")
+        or result.get("command_sha256") != manifest.get("command_sha256")
+        or audit.get("authority_commit") != manifest_commit
+        or audit.get("authority_commit") != result.get("operator_manifest_commit")
+        or audit.get("manifest_file_sha256")
+        != result.get("manifest_file_sha256")
+    ):
+        raise OperatorError("actual operator manifest binding differs")
     validate_finalizer_source_authority(result.get("finalizer_authority"))
     verify_sums(MAINTENANCE_EVIDENCE)
     for root in (PROFILE_EXECUTE_EVIDENCE, PROFILE_RUNTIME, PROFILE_CAPTURE):
