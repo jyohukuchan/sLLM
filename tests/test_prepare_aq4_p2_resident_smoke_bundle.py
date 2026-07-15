@@ -724,10 +724,10 @@ def test_rejects_rebound_runner_plan_or_normal_profile(tmp_path: Path, trusted_r
         BUNDLE.validate(root, trusted_reconstruction)
 
 
-def test_binding_actual_runner_authority_matches_76c48aa_source() -> None:
+def test_binding_actual_runner_authority_matches_v4_source() -> None:
     commit = BUNDLE.BINDING_SOURCE_COMMIT
     source_path = "tools/run-aq4-p2-resident-batch.py"
-    assert commit == "76c48aa27c08f8cd5115a15e6be25b83d679d8fa"
+    assert commit == "d367b6da07393f55c720ded7250bda8cdc402a79"
     assert subprocess.run(
         ["git", "rev-parse", f"{commit}^{{tree}}"],
         cwd=ROOT,
@@ -750,7 +750,7 @@ def test_binding_actual_runner_authority_matches_76c48aa_source() -> None:
     ).stdout
     assert hashlib.sha256(source).hexdigest() == BUNDLE.BINDING_RUNNER_SHA
     assert BUNDLE.BINDING_RUNNER_SHA == (
-        "bbe978ede0e4662c33d0d12eee4194531f340b9c06001f37d619019197fd5138"
+        "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
     )
 
 
