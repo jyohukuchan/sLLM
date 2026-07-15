@@ -1,0 +1,58 @@
+{
+  "device": {
+    "backend": "cpu",
+    "requested_index": 0
+  },
+  "holdout": "not_run",
+  "input": {
+    "hidden": 4096,
+    "input_normed_sha256": "3364b07caf97c7a5261f275ebc09abc1fe9f5cdcc2099beceed2427ad7391e5c",
+    "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/combined/layer-output.f32le",
+    "residual_sha256": "3258d8545bc65ece4d42c91af8db34db4a2a750a96f1c6d23d2f7bc3b6220e34",
+    "rows": 3
+  },
+  "layer_index": 1,
+  "memory": {
+    "parallel_tracks": 1,
+    "vm_hwm_kib": 715804
+  },
+  "mode": "combined",
+  "outputs": {
+    "finite": true,
+    "layer_output_sha256": "c9b94e989f9adf514e1075af9c4b10ad6db5cdd75b0ff60d8c32d8da85d3dd72",
+    "qkv_sha256": "a4f223a78d547a762315a80cea1ac9f719208d08cef64623be54633da1049070",
+    "recurrent_sha256": "d54166496517d434b2cd5bc594eca8f8c5e5190dd7cd6ff98390982a2b4bbd46",
+    "z_sha256": "9b33442d5384013746365cff500f90b98039d8b2ee46f7a57a6854c92fb1bdea"
+  },
+  "override": {
+    "default_off": true,
+    "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+    "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-1/combined/source-qkv.f32le",
+    "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-1/combined/source-z.f32le",
+    "worker_reachable": false,
+    "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+  },
+  "package": {
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "recurrent_state_digests": [
+    {
+      "sha256": "f7b82e2759e830a5ee8d7cb41907ae7d61432577b12a76521dc6be30111ab655",
+      "step": 0
+    },
+    {
+      "sha256": "f68cd733c922df294a114c24430f47d31aa3a95628a972017c4df976f60f6f7a",
+      "step": 1
+    },
+    {
+      "sha256": "80fac9230e538cb6727ed46d89b52894b00a9d54fe4afc4304a37d4d43522b82",
+      "step": 2
+    }
+  ],
+  "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+  "status": "valid",
+  "thresholds": null
+}

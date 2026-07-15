@@ -1,0 +1,1556 @@
+{
+  "checkpoints": {
+    "1": {
+      "combined_amplification_vs_depth1": 1.0,
+      "depth": 1,
+      "hidden": {
+        "baseline": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/baseline/layer-output.f32le",
+          "sha256": "b56d271f7743e70ecbf1aefb45606c963a0456eb265932794015ebb9d978a75d",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "combined": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/combined/layer-output.f32le",
+          "sha256": "3258d8545bc65ece4d42c91af8db34db4a2a750a96f1c6d23d2f7bc3b6220e34",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "qkv_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/qkv_only/layer-output.f32le",
+          "sha256": "0f1e14a991328bf2ff9f83ab5286b96430bd19e36d27644c6a2dc5b52d7f9b6e",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "z_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/z_only/layer-output.f32le",
+          "sha256": "90d6b0daa18513aabe74b174276aba5eda9a116af8b37829b7fbd9f36fe51e37",
+          "shape": [
+            3,
+            4096
+          ]
+        }
+      },
+      "interaction": {
+        "additive_prediction_delta_l2": 0.19898942960907426,
+        "additive_prediction_delta_sha256": "8f184e4be45e26e07bd93943615fa0a8d8f04f398fbdc3c8948edeab413a0e3d",
+        "combined_delta_l2": 0.19902648684910598,
+        "combined_delta_sha256": "851e59c9097b107b2a06cf23c0b97eafb871b4cff9be90a02ffa64ffeec156c6",
+        "combined_delta_vs_additive_prediction": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.00047779083251953125,
+            "nonfinite": false,
+            "relative_l2": 0.022016863816047526,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.00015342235565185547,
+              "nonfinite": false,
+              "relative_l2": 0.01632751169609318,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.000377655029296875,
+              "nonfinite": false,
+              "relative_l2": 0.03200419232627932,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.00047779083251953125,
+              "nonfinite": false,
+              "relative_l2": 0.032197437182235784,
+              "rows": 1
+            }
+          ]
+        },
+        "definition": "(combined-baseline)-((qkv_only-baseline)+(z_only-baseline))",
+        "finite": true,
+        "interaction_residual_l2": 0.004381123172535963,
+        "interaction_residual_sha256": "1d81cd00ace088bac5fe62918cb615b9f06c346e4f7624d7c19eab6e946e0bec",
+        "observation": "amplification"
+      },
+      "last_layer_index": 0,
+      "linear_recurrent_states": {
+        "baseline": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/baseline/recurrent.f32le",
+          "sha256": "5485c37fcb2e0fad33f3496aae9b73a9541c87aed1ba3183ea4bc7ce9c4efb59",
+          "state_digests": [
+            {
+              "sha256": "3ca8f86b7c8ee1263f4a57149a8840d17191d8ac2f3a11d710b21a9a7840daef",
+              "step": 0
+            },
+            {
+              "sha256": "0afb2182d39fe2724d82c7b224dea03ad33290a9509a8de0bc79fb632b096e53",
+              "step": 1
+            },
+            {
+              "sha256": "9cb3fadba694d29eb041e6d7a9a3c4202518b2623e7464fe7e679277e6d66f8a",
+              "step": 2
+            }
+          ]
+        },
+        "combined": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/combined/recurrent.f32le",
+          "sha256": "e14111ae4c0c08d6daef40f93b1bf239846d54c6fe2d8b5a6a3805fb9fd4bea0",
+          "state_digests": [
+            {
+              "sha256": "a2db24e8a4433b2f4782ef43e14d71eeb1959fab5223461d2578fed5e301b612",
+              "step": 0
+            },
+            {
+              "sha256": "819d45b02944dfc64bd0045b455a2745c855acca1ba2200e87b8ccb37367f473",
+              "step": 1
+            },
+            {
+              "sha256": "91b77bf5decfcacb7a4acb73ed43e2c2e9bc8c90d4719eeebe9aee9e98d344e4",
+              "step": 2
+            }
+          ]
+        },
+        "qkv_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/qkv_only/recurrent.f32le",
+          "sha256": "e14111ae4c0c08d6daef40f93b1bf239846d54c6fe2d8b5a6a3805fb9fd4bea0",
+          "state_digests": [
+            {
+              "sha256": "a2db24e8a4433b2f4782ef43e14d71eeb1959fab5223461d2578fed5e301b612",
+              "step": 0
+            },
+            {
+              "sha256": "819d45b02944dfc64bd0045b455a2745c855acca1ba2200e87b8ccb37367f473",
+              "step": 1
+            },
+            {
+              "sha256": "91b77bf5decfcacb7a4acb73ed43e2c2e9bc8c90d4719eeebe9aee9e98d344e4",
+              "step": 2
+            }
+          ]
+        },
+        "z_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/z_only/recurrent.f32le",
+          "sha256": "5485c37fcb2e0fad33f3496aae9b73a9541c87aed1ba3183ea4bc7ce9c4efb59",
+          "state_digests": [
+            {
+              "sha256": "3ca8f86b7c8ee1263f4a57149a8840d17191d8ac2f3a11d710b21a9a7840daef",
+              "step": 0
+            },
+            {
+              "sha256": "0afb2182d39fe2724d82c7b224dea03ad33290a9509a8de0bc79fb632b096e53",
+              "step": 1
+            },
+            {
+              "sha256": "9cb3fadba694d29eb041e6d7a9a3c4202518b2623e7464fe7e679277e6d66f8a",
+              "step": 2
+            }
+          ]
+        }
+      },
+      "metrics": {
+        "combined_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.020940780639648438,
+            "nonfinite": false,
+            "relative_l2": 0.015450774765127233,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.011503994464874268,
+              "nonfinite": false,
+              "relative_l2": 0.02038443194173231,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.006145358085632324,
+              "nonfinite": false,
+              "relative_l2": 0.00998912885312078,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.020940780639648438,
+              "nonfinite": false,
+              "relative_l2": 0.011669918701727462,
+              "rows": 1
+            }
+          ]
+        },
+        "qkv_only_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.012856483459472656,
+            "nonfinite": false,
+            "relative_l2": 0.007487505953432163,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.012856483459472656,
+              "nonfinite": false,
+              "relative_l2": 0.006608018620189681,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.004159018397331238,
+              "nonfinite": false,
+              "relative_l2": 0.007706458557372741,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.0078105926513671875,
+              "nonfinite": false,
+              "relative_l2": 0.008464752279002792,
+              "rows": 1
+            }
+          ]
+        },
+        "z_only_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.016180992126464844,
+            "nonfinite": false,
+            "relative_l2": 0.01450927114321748,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.016180992126464844,
+              "nonfinite": false,
+              "relative_l2": 0.020922700295150313,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.006381034851074219,
+              "nonfinite": false,
+              "relative_l2": 0.005692718218808764,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.012652397155761719,
+              "nonfinite": false,
+              "relative_l2": 0.008837678463261061,
+              "rows": 1
+            }
+          ]
+        }
+      }
+    },
+    "2": {
+      "combined_amplification_vs_depth1": 1.551763454547415,
+      "depth": 2,
+      "hidden": {
+        "baseline": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/baseline/layer-output.f32le",
+          "sha256": "87e704793e842a512fcb9538209f8cf3aa00662365f1741a9da29ed12d8026f2",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "combined": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/combined/layer-output.f32le",
+          "sha256": "c9b94e989f9adf514e1075af9c4b10ad6db5cdd75b0ff60d8c32d8da85d3dd72",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "qkv_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/qkv_only/layer-output.f32le",
+          "sha256": "27da3d0a7394694e82d0d0e892db12ee42bde807d509038142c670a58f1c1dde",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "z_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/z_only/layer-output.f32le",
+          "sha256": "948ddb749b3c02d84a29c6c7a9c172697061ed7a9e10e8ca145d693ab87481e2",
+          "shape": [
+            3,
+            4096
+          ]
+        }
+      },
+      "interaction": {
+        "additive_prediction_delta_l2": 0.4471311044250359,
+        "additive_prediction_delta_sha256": "af150b805a39b55cedfff192432ece83a9d8a62c4edffb415a894ccdb747f72e",
+        "combined_delta_l2": 0.4476493197995365,
+        "combined_delta_sha256": "e0d8fc533fb542ec76445a56b2c40f49b858e5e32b930b697f8c45dcc83be430",
+        "combined_delta_vs_additive_prediction": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.0006740204989910126,
+            "nonfinite": false,
+            "relative_l2": 0.037037593891613575,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.0004350133240222931,
+              "nonfinite": false,
+              "relative_l2": 0.015589827894854623,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.0005680769681930542,
+              "nonfinite": false,
+              "relative_l2": 0.05146375452050892,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.0006740204989910126,
+              "nonfinite": false,
+              "relative_l2": 0.05238951553726162,
+              "rows": 1
+            }
+          ]
+        },
+        "definition": "(combined-baseline)-((qkv_only-baseline)+(z_only-baseline))",
+        "finite": true,
+        "interaction_residual_l2": 0.01656066026200314,
+        "interaction_residual_sha256": "1a5db06761c8f3c6150d94e8adc4699407e3faddf3b03716a06e8903f0ba6b85",
+        "observation": "amplification"
+      },
+      "last_layer_index": 1,
+      "linear_recurrent_states": {
+        "baseline": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/baseline/recurrent.f32le",
+          "sha256": "f512ee7cacf28d5803206dbe992c0f73f869f5355fed54a7078d3c5ff73144f9",
+          "state_digests": [
+            {
+              "sha256": "03aa2522bb993eece9ffade8fda6a49ef9037898b572f3f572708f224f16f682",
+              "step": 0
+            },
+            {
+              "sha256": "0c2f73f9040cf89239bb3826f16e2c0fff472de7bf7b18c310b0c186d76c4262",
+              "step": 1
+            },
+            {
+              "sha256": "52c81dced1c58d0dceccad47ce3ce14dc35cbc0bea01dc4d187ce94c0e69fd08",
+              "step": 2
+            }
+          ]
+        },
+        "combined": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/combined/recurrent.f32le",
+          "sha256": "d54166496517d434b2cd5bc594eca8f8c5e5190dd7cd6ff98390982a2b4bbd46",
+          "state_digests": [
+            {
+              "sha256": "f7b82e2759e830a5ee8d7cb41907ae7d61432577b12a76521dc6be30111ab655",
+              "step": 0
+            },
+            {
+              "sha256": "f68cd733c922df294a114c24430f47d31aa3a95628a972017c4df976f60f6f7a",
+              "step": 1
+            },
+            {
+              "sha256": "80fac9230e538cb6727ed46d89b52894b00a9d54fe4afc4304a37d4d43522b82",
+              "step": 2
+            }
+          ]
+        },
+        "qkv_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/qkv_only/recurrent.f32le",
+          "sha256": "64743a4ca17cf525a07deeb8dad8b16046b3e366ebacf86a18c231f98d8b288d",
+          "state_digests": [
+            {
+              "sha256": "829cc3c184872a8b3331502214f72ea3dde2e12e0a10574e0308b11b6481311f",
+              "step": 0
+            },
+            {
+              "sha256": "07d31e590a69c6f1f970298d6d1d212994b1fb85fa3df8cd24b2392525789496",
+              "step": 1
+            },
+            {
+              "sha256": "1ce11f8b76836bcf888de2bdf72ddde0ed1282e83239d35b8f53c51c64c3e01b",
+              "step": 2
+            }
+          ]
+        },
+        "z_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/z_only/recurrent.f32le",
+          "sha256": "9487e137888bafd5b69bdda7db022e5f84e4cc76398854652657025138bfc042",
+          "state_digests": [
+            {
+              "sha256": "a1283a2d914a230c77185a3eb6bc3eb326d63c00408a449fbfa45a06cf048fbf",
+              "step": 0
+            },
+            {
+              "sha256": "622f62beae39212c2c4f4c1cb388d2ab2a43203d1edcf9591073b78a53ef10e5",
+              "step": 1
+            },
+            {
+              "sha256": "a9eced23c3268d3a6f69106045cb9e9b61b90c06f72736d5c6bdcb755246a5d7",
+              "step": 2
+            }
+          ]
+        }
+      },
+      "metrics": {
+        "combined_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.2597942352294922,
+            "nonfinite": false,
+            "relative_l2": 0.02397594762496786,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.2597942352294922,
+              "nonfinite": false,
+              "relative_l2": 0.025448864368646542,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.01383945345878601,
+              "nonfinite": false,
+              "relative_l2": 0.01994169861567802,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.07526874542236328,
+              "nonfinite": false,
+              "relative_l2": 0.024737959295203865,
+              "rows": 1
+            }
+          ]
+        },
+        "qkv_only_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.01686859130859375,
+            "nonfinite": false,
+            "relative_l2": 0.0121412309705571,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.01686859130859375,
+              "nonfinite": false,
+              "relative_l2": 0.006989885567340581,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.016733169555664062,
+              "nonfinite": false,
+              "relative_l2": 0.015044807872411591,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.008776694536209106,
+              "nonfinite": false,
+              "relative_l2": 0.015809983919467842,
+              "rows": 1
+            }
+          ]
+        },
+        "z_only_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.24285888671875,
+            "nonfinite": false,
+            "relative_l2": 0.020740255981515802,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.24285888671875,
+              "nonfinite": false,
+              "relative_l2": 0.024273352842688424,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.022215843200683594,
+              "nonfinite": false,
+              "relative_l2": 0.013197469484917453,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.07249927520751953,
+              "nonfinite": false,
+              "relative_l2": 0.01966693394106708,
+              "rows": 1
+            }
+          ]
+        }
+      }
+    },
+    "3": {
+      "combined_amplification_vs_depth1": 1.9002310259992918,
+      "depth": 3,
+      "hidden": {
+        "baseline": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/baseline/layer-output.f32le",
+          "sha256": "4aad88b1134cf71e3c7a01fa6361e872c137b3bdbd95524cc5d6cb93a5b8505d",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "combined": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/combined/layer-output.f32le",
+          "sha256": "0cb7274a957a8f51a6cbfc528eea5bbf42f9ec10bc714f30d7c3fc9823d33a78",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "qkv_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/qkv_only/layer-output.f32le",
+          "sha256": "32cd43cba033a61b619a061cf5f66e925923db22e66f726018c3a0dcb383e110",
+          "shape": [
+            3,
+            4096
+          ]
+        },
+        "z_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/z_only/layer-output.f32le",
+          "sha256": "635be56001df82c3edc7c9cb3ff139019ab199724820e78c6d526cf114e9733f",
+          "shape": [
+            3,
+            4096
+          ]
+        }
+      },
+      "interaction": {
+        "additive_prediction_delta_l2": 0.704914441365569,
+        "additive_prediction_delta_sha256": "5e484edf948f0b83e887718622db5290197958274f2939bd456b01fda00c5405",
+        "combined_delta_l2": 0.7042558392234557,
+        "combined_delta_sha256": "5530e99c0bf0c8a2a00bc8072087648c11e0d10d2a6d32fb5f77bb39263f29d4",
+        "combined_delta_vs_additive_prediction": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.004573822021484375,
+            "nonfinite": false,
+            "relative_l2": 0.05761375670208611,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.0039653778076171875,
+              "nonfinite": false,
+              "relative_l2": 0.029067266740606137,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.004573822021484375,
+              "nonfinite": false,
+              "relative_l2": 0.06124130071037638,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.0018483996391296387,
+              "nonfinite": false,
+              "relative_l2": 0.06612959982186563,
+              "rows": 1
+            }
+          ]
+        },
+        "definition": "(combined-baseline)-((qkv_only-baseline)+(z_only-baseline))",
+        "finite": true,
+        "interaction_residual_l2": 0.04061276912062284,
+        "interaction_residual_sha256": "c7b90759a18bb40bb3f204a2a64df823710ef725f40a353fde812ffaa3b9a0a3",
+        "observation": "cancellation"
+      },
+      "last_layer_index": 2,
+      "linear_recurrent_states": {
+        "baseline": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/baseline/recurrent.f32le",
+          "sha256": "80c2cd6bd670e69ec02908a4086a3200fa28fd4d9c33d2edefaebec906931d79",
+          "state_digests": [
+            {
+              "sha256": "ba4dcc0b706503fae89f4ff80c8c8b63ba264ac59dd719c05e1753fc1326ed6a",
+              "step": 0
+            },
+            {
+              "sha256": "2484a6e1a6d3f06e309bd71ec50f848b0eacb5540d1bbbb00d223f329d9aa5b8",
+              "step": 1
+            },
+            {
+              "sha256": "6b1e449fb8b1454de18940a0d74c66e537b3a41c596f4a22376f40fa1f552482",
+              "step": 2
+            }
+          ]
+        },
+        "combined": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/combined/recurrent.f32le",
+          "sha256": "1e22a7a52d96a0d0d767b89262a29d46adcb36ef2cf3f3b42096bbb449e056c0",
+          "state_digests": [
+            {
+              "sha256": "a627b473f6fdc59421c4952b5ebecd8956367860155712ef9b76080457e91e67",
+              "step": 0
+            },
+            {
+              "sha256": "ac32f98fcc2b907592567a2af6a7f80feb4ccd4225163bb399cdef2cf9604488",
+              "step": 1
+            },
+            {
+              "sha256": "ee3394ba74c3d2accf27433b33cc56eabd987c3b6ebbea84cd68ea7d759ff011",
+              "step": 2
+            }
+          ]
+        },
+        "qkv_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/qkv_only/recurrent.f32le",
+          "sha256": "097d9e4f3dcfd64eb7c561c2ddf9a77c8c55e491505d984d300d41e750f07a9d",
+          "state_digests": [
+            {
+              "sha256": "6cab2e07cbeb1c2167ccf9fbfbe8e867160fcb9b9879dfbffa839d4b8abedb46",
+              "step": 0
+            },
+            {
+              "sha256": "00d94b5bf5388a39fe6deda0c7fd5b60af35607fdb060f77d3cd6c5855cefe80",
+              "step": 1
+            },
+            {
+              "sha256": "a80e2254df3f558685f351ec42fa3ecede9c5ec310b713a385277489b28b55c4",
+              "step": 2
+            }
+          ]
+        },
+        "z_only": {
+          "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/z_only/recurrent.f32le",
+          "sha256": "f77fc3698464eec5b2f87c8fcecb341a661763332ddada63a361203048b5369c",
+          "state_digests": [
+            {
+              "sha256": "869e87619d63e1ef9e3f293491f5fca0d0aab76d4f15ca45694655d625235f72",
+              "step": 0
+            },
+            {
+              "sha256": "cdb22ab0525ebaafa899341848cfdfd1b58a7ea0c4526cfb2ed5dee7245ab5cd",
+              "step": 1
+            },
+            {
+              "sha256": "f33d701500b64da9d483d5b7645df7c584652b1f7585330861abe4f6f8f34d72",
+              "step": 2
+            }
+          ]
+        }
+      },
+      "metrics": {
+        "combined_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.2251110076904297,
+            "nonfinite": false,
+            "relative_l2": 0.029360041584421688,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.2251110076904297,
+              "nonfinite": false,
+              "relative_l2": 0.016993217962673605,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.1172327995300293,
+              "nonfinite": false,
+              "relative_l2": 0.04160574688968985,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.029879093170166016,
+              "nonfinite": false,
+              "relative_l2": 0.050073766415326265,
+              "rows": 1
+            }
+          ]
+        },
+        "qkv_only_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.05235767364501953,
+            "nonfinite": false,
+            "relative_l2": 0.018479025919870166,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.03235816955566406,
+              "nonfinite": false,
+              "relative_l2": 0.007206001981184299,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.05235767364501953,
+              "nonfinite": false,
+              "relative_l2": 0.02674886776384706,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.02310093119740486,
+              "nonfinite": false,
+              "relative_l2": 0.03559972838155334,
+              "rows": 1
+            }
+          ]
+        },
+        "z_only_vs_baseline": {
+          "aggregate": {
+            "elements_per_row": 4096,
+            "max_abs": 0.1967182159423828,
+            "nonfinite": false,
+            "relative_l2": 0.021619665852166355,
+            "rows": 3
+          },
+          "per_step": [
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.1967182159423828,
+              "nonfinite": false,
+              "relative_l2": 0.014728858671239572,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.06944894790649414,
+              "nonfinite": false,
+              "relative_l2": 0.028803517131295735,
+              "rows": 1
+            },
+            {
+              "elements_per_row": 4096,
+              "max_abs": 0.02448749542236328,
+              "nonfinite": false,
+              "relative_l2": 0.03481159039909886,
+              "rows": 1
+            }
+          ]
+        }
+      }
+    }
+  },
+  "classification": "unclassified",
+  "decision": "measure mixed-layer depth accumulation after adding the missing external-residual self-attention sequence hook; do not infer depth4 from depth3",
+  "device": {
+    "backend": "cpu",
+    "requested_index": 0
+  },
+  "engine": {
+    "path": "target/debug/ullm-engine",
+    "sha256": "d8c7bc376432faadbf132ad8dbd87943c4b038b0fd5e9bf5f7ba9e32f35862a3"
+  },
+  "holdout": "not_run",
+  "input": {
+    "fixture_root": "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-8-seq16",
+    "metadata_path": "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-8-seq16/metadata.json",
+    "metadata_sha256": "3fb2851ec9b2b80194eaeec19be9b80c6b27d28db500c75356c34b7b29f3a090",
+    "output_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/input/residual-depth0.f32le",
+    "output_sha256": "ae13c3421c568811160a2a48ee3269caaa690fc0b8b7cd2aec9f5518f8daee23",
+    "slice": {
+      "hidden": 4096,
+      "rows": 3,
+      "token_ids": [
+        1,
+        2,
+        3
+      ]
+    },
+    "source_path": "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-8-seq16/layer_0_before.f32",
+    "source_sha256": "8bf1bfd174248cc3fd1ab8f5fe48cec417e353669fd26976a2d335c0dc3f057e"
+  },
+  "layer_topology": {
+    "full_attention_interval": 4,
+    "layer_types_0_3": [
+      "linear_attention",
+      "linear_attention",
+      "linear_attention",
+      "full_attention"
+    ]
+  },
+  "maximum_faithful_depth": 3,
+  "memory": {
+    "layer_parallelism": 1,
+    "max_child_vm_hwm_kib": 717568,
+    "python_ru_maxrss_kib": 850988,
+    "source_weight_row_chunk": 256,
+    "torch_threads": 1,
+    "track_parallelism": 1
+  },
+  "package": {
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "requested_depth4": {
+    "blocking_layer_index": 3,
+    "exact_blocker": "the mixed golden-prefix CPU loop is monolithic and does not expose a per-layer interface that accepts each track live external residual, preserves and returns track-local causal KV state, and composes with the existing linear-layer QKV/Z diagnostic hooks",
+    "layer_type": "full_attention",
+    "required_hook": "one mixed-decoder diagnostic step interface accepting external residual and track-local state, routing existing QKV/Z overrides on linear layers, and returning layer output plus updated linear or causal-KV state",
+    "status": "blocked_not_run"
+  },
+  "schema_version": "ullm.aq4_layer_depth_accumulation.cpu.v1",
+  "source_model": {
+    "config_sha256": "d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05",
+    "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B"
+  },
+  "state_reset": "each_track_independent_zero_state_per_linear_layer_sequence",
+  "status": "partial_valid_blocked_at_depth4",
+  "steps": {
+    "0": {
+      "baseline": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "e703066dd71b287d7fb6fa062b325d0b81878a5fb4e2b7902e650feb77b3fb72",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/input/residual-depth0.f32le",
+          "residual_sha256": "ae13c3421c568811160a2a48ee3269caaa690fc0b8b7cd2aec9f5518f8daee23",
+          "rows": 3
+        },
+        "layer_index": 0,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 714988
+        },
+        "mode": "baseline",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "b56d271f7743e70ecbf1aefb45606c963a0456eb265932794015ebb9d978a75d",
+          "qkv_sha256": "4a7102eb4a86ff3f0729efb569ba000670c301314810af409954dcec660a2870",
+          "recurrent_sha256": "5485c37fcb2e0fad33f3496aae9b73a9541c87aed1ba3183ea4bc7ce9c4efb59",
+          "z_sha256": "a1a337de191e5bc8af7851cf26bf843af7aafc47cf36c5caceee33efb2eb2091"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "-",
+          "source_z_path": "-",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "3ca8f86b7c8ee1263f4a57149a8840d17191d8ac2f3a11d710b21a9a7840daef",
+            "step": 0
+          },
+          {
+            "sha256": "0afb2182d39fe2724d82c7b224dea03ad33290a9509a8de0bc79fb632b096e53",
+            "step": 1
+          },
+          {
+            "sha256": "9cb3fadba694d29eb041e6d7a9a3c4202518b2623e7464fe7e679277e6d66f8a",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/baseline/report.json layer=0 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "combined": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "e703066dd71b287d7fb6fa062b325d0b81878a5fb4e2b7902e650feb77b3fb72",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/input/residual-depth0.f32le",
+          "residual_sha256": "ae13c3421c568811160a2a48ee3269caaa690fc0b8b7cd2aec9f5518f8daee23",
+          "rows": 3
+        },
+        "layer_index": 0,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 715764
+        },
+        "mode": "combined",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "3258d8545bc65ece4d42c91af8db34db4a2a750a96f1c6d23d2f7bc3b6220e34",
+          "qkv_sha256": "e1afdc6378778496a696076d45b3a9d2923e3032e0264236ab6df6086144ae92",
+          "recurrent_sha256": "e14111ae4c0c08d6daef40f93b1bf239846d54c6fe2d8b5a6a3805fb9fd4bea0",
+          "z_sha256": "852d1ef092f64b45443601f9698df30498332c3926d63c7e6653015e7efdad79"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-0/shared/source-qkv.f32le",
+          "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-0/shared/source-z.f32le",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "a2db24e8a4433b2f4782ef43e14d71eeb1959fab5223461d2578fed5e301b612",
+            "step": 0
+          },
+          {
+            "sha256": "819d45b02944dfc64bd0045b455a2745c855acca1ba2200e87b8ccb37367f473",
+            "step": 1
+          },
+          {
+            "sha256": "91b77bf5decfcacb7a4acb73ed43e2c2e9bc8c90d4719eeebe9aee9e98d344e4",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/combined/report.json layer=0 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "qkv_only": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "e703066dd71b287d7fb6fa062b325d0b81878a5fb4e2b7902e650feb77b3fb72",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/input/residual-depth0.f32le",
+          "residual_sha256": "ae13c3421c568811160a2a48ee3269caaa690fc0b8b7cd2aec9f5518f8daee23",
+          "rows": 3
+        },
+        "layer_index": 0,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 715784
+        },
+        "mode": "qkv_only",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "0f1e14a991328bf2ff9f83ab5286b96430bd19e36d27644c6a2dc5b52d7f9b6e",
+          "qkv_sha256": "e1afdc6378778496a696076d45b3a9d2923e3032e0264236ab6df6086144ae92",
+          "recurrent_sha256": "e14111ae4c0c08d6daef40f93b1bf239846d54c6fe2d8b5a6a3805fb9fd4bea0",
+          "z_sha256": "a1a337de191e5bc8af7851cf26bf843af7aafc47cf36c5caceee33efb2eb2091"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-0/shared/source-qkv.f32le",
+          "source_z_path": "-",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "a2db24e8a4433b2f4782ef43e14d71eeb1959fab5223461d2578fed5e301b612",
+            "step": 0
+          },
+          {
+            "sha256": "819d45b02944dfc64bd0045b455a2745c855acca1ba2200e87b8ccb37367f473",
+            "step": 1
+          },
+          {
+            "sha256": "91b77bf5decfcacb7a4acb73ed43e2c2e9bc8c90d4719eeebe9aee9e98d344e4",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/qkv_only/report.json layer=0 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "z_only": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "e703066dd71b287d7fb6fa062b325d0b81878a5fb4e2b7902e650feb77b3fb72",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/input/residual-depth0.f32le",
+          "residual_sha256": "ae13c3421c568811160a2a48ee3269caaa690fc0b8b7cd2aec9f5518f8daee23",
+          "rows": 3
+        },
+        "layer_index": 0,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 711588
+        },
+        "mode": "z_only",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "90d6b0daa18513aabe74b174276aba5eda9a116af8b37829b7fbd9f36fe51e37",
+          "qkv_sha256": "4a7102eb4a86ff3f0729efb569ba000670c301314810af409954dcec660a2870",
+          "recurrent_sha256": "5485c37fcb2e0fad33f3496aae9b73a9541c87aed1ba3183ea4bc7ce9c4efb59",
+          "z_sha256": "852d1ef092f64b45443601f9698df30498332c3926d63c7e6653015e7efdad79"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "-",
+          "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-0/shared/source-z.f32le",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "3ca8f86b7c8ee1263f4a57149a8840d17191d8ac2f3a11d710b21a9a7840daef",
+            "step": 0
+          },
+          {
+            "sha256": "0afb2182d39fe2724d82c7b224dea03ad33290a9509a8de0bc79fb632b096e53",
+            "step": 1
+          },
+          {
+            "sha256": "9cb3fadba694d29eb041e6d7a9a3c4202518b2623e7464fe7e679277e6d66f8a",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/z_only/report.json layer=0 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      }
+    },
+    "1": {
+      "baseline": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "2f45d49b38c76b3d3711f2ec03c8754b71dae6717151efc0a75e3429643056e7",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/baseline/layer-output.f32le",
+          "residual_sha256": "b56d271f7743e70ecbf1aefb45606c963a0456eb265932794015ebb9d978a75d",
+          "rows": 3
+        },
+        "layer_index": 1,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 713844
+        },
+        "mode": "baseline",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "87e704793e842a512fcb9538209f8cf3aa00662365f1741a9da29ed12d8026f2",
+          "qkv_sha256": "d003534a13c1de8df8f46c76d85c39720edb2377bc6960f516e2b889a55d5b0a",
+          "recurrent_sha256": "f512ee7cacf28d5803206dbe992c0f73f869f5355fed54a7078d3c5ff73144f9",
+          "z_sha256": "5c85ec78226dff275bdcc8962068bdf1f28a9625358397eb32951226cae18a8a"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "-",
+          "source_z_path": "-",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "03aa2522bb993eece9ffade8fda6a49ef9037898b572f3f572708f224f16f682",
+            "step": 0
+          },
+          {
+            "sha256": "0c2f73f9040cf89239bb3826f16e2c0fff472de7bf7b18c310b0c186d76c4262",
+            "step": 1
+          },
+          {
+            "sha256": "52c81dced1c58d0dceccad47ce3ce14dc35cbc0bea01dc4d187ce94c0e69fd08",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/baseline/report.json layer=1 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "combined": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "3364b07caf97c7a5261f275ebc09abc1fe9f5cdcc2099beceed2427ad7391e5c",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/combined/layer-output.f32le",
+          "residual_sha256": "3258d8545bc65ece4d42c91af8db34db4a2a750a96f1c6d23d2f7bc3b6220e34",
+          "rows": 3
+        },
+        "layer_index": 1,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 715804
+        },
+        "mode": "combined",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "c9b94e989f9adf514e1075af9c4b10ad6db5cdd75b0ff60d8c32d8da85d3dd72",
+          "qkv_sha256": "a4f223a78d547a762315a80cea1ac9f719208d08cef64623be54633da1049070",
+          "recurrent_sha256": "d54166496517d434b2cd5bc594eca8f8c5e5190dd7cd6ff98390982a2b4bbd46",
+          "z_sha256": "9b33442d5384013746365cff500f90b98039d8b2ee46f7a57a6854c92fb1bdea"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-1/combined/source-qkv.f32le",
+          "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-1/combined/source-z.f32le",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "f7b82e2759e830a5ee8d7cb41907ae7d61432577b12a76521dc6be30111ab655",
+            "step": 0
+          },
+          {
+            "sha256": "f68cd733c922df294a114c24430f47d31aa3a95628a972017c4df976f60f6f7a",
+            "step": 1
+          },
+          {
+            "sha256": "80fac9230e538cb6727ed46d89b52894b00a9d54fe4afc4304a37d4d43522b82",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/combined/report.json layer=1 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "qkv_only": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "d3bd699fd6f2fb7be1295e003a4dce719a1ac32b4db114e686d8dd63c066eaba",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/qkv_only/layer-output.f32le",
+          "residual_sha256": "0f1e14a991328bf2ff9f83ab5286b96430bd19e36d27644c6a2dc5b52d7f9b6e",
+          "rows": 3
+        },
+        "layer_index": 1,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 715280
+        },
+        "mode": "qkv_only",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "27da3d0a7394694e82d0d0e892db12ee42bde807d509038142c670a58f1c1dde",
+          "qkv_sha256": "3108655ed1dfd2b73f49e891580fa16fefec70e5b6962b82ec435f9cd9afd28b",
+          "recurrent_sha256": "64743a4ca17cf525a07deeb8dad8b16046b3e366ebacf86a18c231f98d8b288d",
+          "z_sha256": "49d89403d2caa1eda37d96e3c43060d03a33ffae8d4ee784c11def7140b6d380"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-1/qkv_only/source-qkv.f32le",
+          "source_z_path": "-",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "829cc3c184872a8b3331502214f72ea3dde2e12e0a10574e0308b11b6481311f",
+            "step": 0
+          },
+          {
+            "sha256": "07d31e590a69c6f1f970298d6d1d212994b1fb85fa3df8cd24b2392525789496",
+            "step": 1
+          },
+          {
+            "sha256": "1ce11f8b76836bcf888de2bdf72ddde0ed1282e83239d35b8f53c51c64c3e01b",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/qkv_only/report.json layer=1 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "z_only": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "4335e2e5a8fc410a0a441191701ac5244b74c66de2af8f8f5c416e7f3f5f396c",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/z_only/layer-output.f32le",
+          "residual_sha256": "90d6b0daa18513aabe74b174276aba5eda9a116af8b37829b7fbd9f36fe51e37",
+          "rows": 3
+        },
+        "layer_index": 1,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 717568
+        },
+        "mode": "z_only",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "948ddb749b3c02d84a29c6c7a9c172697061ed7a9e10e8ca145d693ab87481e2",
+          "qkv_sha256": "55e83559d32bae59d32003b70e55f74132c8736e7b5f12b8d09b2e3e0fd8e258",
+          "recurrent_sha256": "9487e137888bafd5b69bdda7db022e5f84e4cc76398854652657025138bfc042",
+          "z_sha256": "95e2392c52a4dafd006e9e9ddbf58632fee8a02b5fb03c2c4a3597b0fbbf9548"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "-",
+          "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-1/z_only/source-z.f32le",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "a1283a2d914a230c77185a3eb6bc3eb326d63c00408a449fbfa45a06cf048fbf",
+            "step": 0
+          },
+          {
+            "sha256": "622f62beae39212c2c4f4c1cb388d2ab2a43203d1edcf9591073b78a53ef10e5",
+            "step": 1
+          },
+          {
+            "sha256": "a9eced23c3268d3a6f69106045cb9e9b61b90c06f72736d5c6bdcb755246a5d7",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/z_only/report.json layer=1 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      }
+    },
+    "2": {
+      "baseline": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "bb323a8bdcc17177289808aeaf587920f5acdfb125b4f39778c57780ab081bf5",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/baseline/layer-output.f32le",
+          "residual_sha256": "87e704793e842a512fcb9538209f8cf3aa00662365f1741a9da29ed12d8026f2",
+          "rows": 3
+        },
+        "layer_index": 2,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 716548
+        },
+        "mode": "baseline",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "4aad88b1134cf71e3c7a01fa6361e872c137b3bdbd95524cc5d6cb93a5b8505d",
+          "qkv_sha256": "7db1c0c5dd6612474a28cd4c8d53d50275752a54236b2c8398d85a7e8226330c",
+          "recurrent_sha256": "80c2cd6bd670e69ec02908a4086a3200fa28fd4d9c33d2edefaebec906931d79",
+          "z_sha256": "d7c614d23ad320c7c4762c21b7b0cf49369072c7653c62f3237556951e63b098"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "-",
+          "source_z_path": "-",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "ba4dcc0b706503fae89f4ff80c8c8b63ba264ac59dd719c05e1753fc1326ed6a",
+            "step": 0
+          },
+          {
+            "sha256": "2484a6e1a6d3f06e309bd71ec50f848b0eacb5540d1bbbb00d223f329d9aa5b8",
+            "step": 1
+          },
+          {
+            "sha256": "6b1e449fb8b1454de18940a0d74c66e537b3a41c596f4a22376f40fa1f552482",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/baseline/report.json layer=2 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "combined": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "f9e1bd816d727cb2d659cb5ab73f7c1d26caf2d94e94e5fd85293af6d1088b41",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/combined/layer-output.f32le",
+          "residual_sha256": "c9b94e989f9adf514e1075af9c4b10ad6db5cdd75b0ff60d8c32d8da85d3dd72",
+          "rows": 3
+        },
+        "layer_index": 2,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 713808
+        },
+        "mode": "combined",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "0cb7274a957a8f51a6cbfc528eea5bbf42f9ec10bc714f30d7c3fc9823d33a78",
+          "qkv_sha256": "0f0e139e1432f6dd4eb3b15d24130f3fe6dee545c3a107f3a89c5ba3900c590a",
+          "recurrent_sha256": "1e22a7a52d96a0d0d767b89262a29d46adcb36ef2cf3f3b42096bbb449e056c0",
+          "z_sha256": "224f0a4ad18b6a9376f372bbc18ed493333629ec1dfa18282fbd59d5e0e0cccb"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-2/combined/source-qkv.f32le",
+          "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-2/combined/source-z.f32le",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "a627b473f6fdc59421c4952b5ebecd8956367860155712ef9b76080457e91e67",
+            "step": 0
+          },
+          {
+            "sha256": "ac32f98fcc2b907592567a2af6a7f80feb4ccd4225163bb399cdef2cf9604488",
+            "step": 1
+          },
+          {
+            "sha256": "ee3394ba74c3d2accf27433b33cc56eabd987c3b6ebbea84cd68ea7d759ff011",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/combined/report.json layer=2 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "qkv_only": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "241c8fd8cec18861e32efbb0638467714f1131d871cddc4542986800d48071a3",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/qkv_only/layer-output.f32le",
+          "residual_sha256": "27da3d0a7394694e82d0d0e892db12ee42bde807d509038142c670a58f1c1dde",
+          "rows": 3
+        },
+        "layer_index": 2,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 715204
+        },
+        "mode": "qkv_only",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "32cd43cba033a61b619a061cf5f66e925923db22e66f726018c3a0dcb383e110",
+          "qkv_sha256": "eac2cc9ea78ed8e77fa26ed81f0ddc2ad73bf367aa82dac6025bcdc05c2d0117",
+          "recurrent_sha256": "097d9e4f3dcfd64eb7c561c2ddf9a77c8c55e491505d984d300d41e750f07a9d",
+          "z_sha256": "4139a5bfa6939952a2c54f194505edae28e4be747cfe3f4968ac30d2558b9dcf"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-2/qkv_only/source-qkv.f32le",
+          "source_z_path": "-",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "6cab2e07cbeb1c2167ccf9fbfbe8e867160fcb9b9879dfbffa839d4b8abedb46",
+            "step": 0
+          },
+          {
+            "sha256": "00d94b5bf5388a39fe6deda0c7fd5b60af35607fdb060f77d3cd6c5855cefe80",
+            "step": 1
+          },
+          {
+            "sha256": "a80e2254df3f558685f351ec42fa3ecede9c5ec310b713a385277489b28b55c4",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/qkv_only/report.json layer=2 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      },
+      "z_only": {
+        "device": {
+          "backend": "cpu",
+          "requested_index": 0
+        },
+        "holdout": "not_run",
+        "input": {
+          "hidden": 4096,
+          "input_normed_sha256": "6818fc7e8ea30951546c529503a83e3f951438818cef22f2dbb4dde5598f75c5",
+          "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/z_only/layer-output.f32le",
+          "residual_sha256": "948ddb749b3c02d84a29c6c7a9c172697061ed7a9e10e8ca145d693ab87481e2",
+          "rows": 3
+        },
+        "layer_index": 2,
+        "memory": {
+          "parallel_tracks": 1,
+          "vm_hwm_kib": 713924
+        },
+        "mode": "z_only",
+        "outputs": {
+          "finite": true,
+          "layer_output_sha256": "635be56001df82c3edc7c9cb3ff139019ab199724820e78c6d526cf114e9733f",
+          "qkv_sha256": "7434a391cad4bf46ef2516f82990019bc36847dd8acc9cf6b84a21a6dcba3c85",
+          "recurrent_sha256": "f77fc3698464eec5b2f87c8fcecb341a661763332ddada63a361203048b5369c",
+          "z_sha256": "2a5c49bf63ccbe721062df71824dba5d5348d50e53d9b6b5db06d2df3c0282ac"
+        },
+        "override": {
+          "default_off": true,
+          "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+          "source_qkv_path": "-",
+          "source_z_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-2/z_only/source-z.f32le",
+          "worker_reachable": false,
+          "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+        },
+        "package": {
+          "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+          "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+        },
+        "policy_evaluation": "policy_not_evaluated",
+        "promotion": false,
+        "recurrent_state_digests": [
+          {
+            "sha256": "869e87619d63e1ef9e3f293491f5fca0d0aab76d4f15ca45694655d625235f72",
+            "step": 0
+          },
+          {
+            "sha256": "cdb22ab0525ebaafa899341848cfdfd1b58a7ea0c4526cfb2ed5dee7245ab5cd",
+            "step": 1
+          },
+          {
+            "sha256": "f33d701500b64da9d483d5b7645df7c584652b1f7585330861abe4f6f8f34d72",
+            "step": 2
+          }
+        ],
+        "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+        "status": "valid",
+        "stdout": "package-linear-attn-depth-step-diagnostic report=benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-2/z_only/report.json layer=2 rows=3 promotion=false holdout=not_run",
+        "thresholds": null
+      }
+    }
+  },
+  "thresholds": null,
+  "tracks": [
+    "baseline",
+    "qkv_only",
+    "z_only",
+    "combined"
+  ]
+}

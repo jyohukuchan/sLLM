@@ -1,0 +1,58 @@
+{
+  "device": {
+    "backend": "cpu",
+    "requested_index": 0
+  },
+  "holdout": "not_run",
+  "input": {
+    "hidden": 4096,
+    "input_normed_sha256": "f9e1bd816d727cb2d659cb5ab73f7c1d26caf2d94e94e5fd85293af6d1088b41",
+    "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-1/combined/layer-output.f32le",
+    "residual_sha256": "c9b94e989f9adf514e1075af9c4b10ad6db5cdd75b0ff60d8c32d8da85d3dd72",
+    "rows": 3
+  },
+  "layer_index": 2,
+  "memory": {
+    "parallel_tracks": 1,
+    "vm_hwm_kib": 710848
+  },
+  "mode": "baseline",
+  "outputs": {
+    "finite": true,
+    "layer_output_sha256": "866c2263a402c9cdfdae0609550cc1054109ab787502b4dba433e260af724c80",
+    "qkv_sha256": "feb3ebd9e033c9a8795fcc8d29ccdeb575f7e3e54ce9911dc541129c28e84797",
+    "recurrent_sha256": "c0bb0168dc6b189d851eb90caf57f8b39b76e7f7aa57c9b18674c319fd576a3d",
+    "z_sha256": "f5a464436b5260c31883014aee6872c8f6d3c523e34fd638ebf03bf19f3104c0"
+  },
+  "override": {
+    "default_off": true,
+    "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+    "source_qkv_path": "-",
+    "source_z_path": "-",
+    "worker_reachable": false,
+    "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+  },
+  "package": {
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "recurrent_state_digests": [
+    {
+      "sha256": "d957d67e267d959a23dc14076044539b8b3261b4f18e559e4e127e7116df0820",
+      "step": 0
+    },
+    {
+      "sha256": "7f985ce812f68e05edc00bebbb40493f5b4dfab856d8367ae8bbcac26390c065",
+      "step": 1
+    },
+    {
+      "sha256": "b04d1b47859426ab89a8e2da133afa40d5fc58afcc04c7fa5f17280f25b19859",
+      "step": 2
+    }
+  ],
+  "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+  "status": "valid",
+  "thresholds": null
+}

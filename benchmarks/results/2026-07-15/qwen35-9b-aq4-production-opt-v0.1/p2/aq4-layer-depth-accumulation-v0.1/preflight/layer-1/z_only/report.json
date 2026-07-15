@@ -1,0 +1,58 @@
+{
+  "device": {
+    "backend": "cpu",
+    "requested_index": 0
+  },
+  "holdout": "not_run",
+  "input": {
+    "hidden": 4096,
+    "input_normed_sha256": "4335e2e5a8fc410a0a441191701ac5244b74c66de2af8f8f5c416e7f3f5f396c",
+    "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/steps/layer-0/z_only/layer-output.f32le",
+    "residual_sha256": "90d6b0daa18513aabe74b174276aba5eda9a116af8b37829b7fbd9f36fe51e37",
+    "rows": 3
+  },
+  "layer_index": 1,
+  "memory": {
+    "parallel_tracks": 1,
+    "vm_hwm_kib": 716076
+  },
+  "mode": "baseline",
+  "outputs": {
+    "finite": true,
+    "layer_output_sha256": "9523d5691a255df00e4df78e68248efc3a04bc2a27c96a9f6706a773a755e33b",
+    "qkv_sha256": "55e83559d32bae59d32003b70e55f74132c8736e7b5f12b8d09b2e3e0fd8e258",
+    "recurrent_sha256": "9487e137888bafd5b69bdda7db022e5f84e4cc76398854652657025138bfc042",
+    "z_sha256": "39410b6c63b18d5d1485f55af354fc35665ba1be24f3b5262e99263a2af36f0c"
+  },
+  "override": {
+    "default_off": true,
+    "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+    "source_qkv_path": "-",
+    "source_z_path": "-",
+    "worker_reachable": false,
+    "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+  },
+  "package": {
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "recurrent_state_digests": [
+    {
+      "sha256": "a1283a2d914a230c77185a3eb6bc3eb326d63c00408a449fbfa45a06cf048fbf",
+      "step": 0
+    },
+    {
+      "sha256": "622f62beae39212c2c4f4c1cb388d2ab2a43203d1edcf9591073b78a53ef10e5",
+      "step": 1
+    },
+    {
+      "sha256": "a9eced23c3268d3a6f69106045cb9e9b61b90c06f72736d5c6bdcb755246a5d7",
+      "step": 2
+    }
+  ],
+  "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+  "status": "valid",
+  "thresholds": null
+}

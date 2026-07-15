@@ -2874,6 +2874,96 @@ fn package_linear_attn_qkv_z_combined_hybrid_diagnostic(
     }
 }
 
+fn depth_step_read_optional_override(
+    path: &str,
+    expected_values: usize,
+    label: &str,
+) -> Result<Option<Vec<f32>>, String> {
+    if path == "-" {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(|err| format!("failed to read {label} sidecar {path}: {err}"))?;
+    if bytes.len() != expected_values * std::mem::size_of::<f32>() {
+        return Err(format!("{label} sidecar byte size differs: got {} expected {}", bytes.len(), expected_values * std::mem::size_of::<f32>()));
+    }
+    let values = decode_f32_le_values(&bytes);
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(format!("{label} sidecar contains non-finite values"));
+    }
+    Ok(Some(values))
+}
+
+fn depth_step_rss_kib() -> Option<u64> {
+    fs::read_to_string("/proc/self/status").ok()?.lines().find_map(|line| {
+        line.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse().ok()
+    })
+}
+
+fn package_linear_attn_depth_step_diagnostic(
+    path: Option<String>, residual: Option<String>, source_qkv: Option<String>, source_z: Option<String>,
+    output: Option<String>, device_index: Option<String>, chunk_bytes: Option<String>,
+    layer_index: Option<String>, sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else { eprintln!("package-linear-attn-depth-step-diagnostic requires a .ullm.d path"); return ExitCode::from(2); };
+    let Some(residual) = residual else { eprintln!("package-linear-attn-depth-step-diagnostic requires residual f32le or -"); return ExitCode::from(2); };
+    let Some(source_qkv) = source_qkv else { eprintln!("package-linear-attn-depth-step-diagnostic requires source QKV f32le or -"); return ExitCode::from(2); };
+    let Some(source_z) = source_z else { eprintln!("package-linear-attn-depth-step-diagnostic requires source Z f32le or -"); return ExitCode::from(2); };
+    let Some(output) = output else { eprintln!("package-linear-attn-depth-step-diagnostic requires a new output directory"); return ExitCode::from(2); };
+    let device_index = match parse_optional_device_index(device_index) { Ok(value) => value, Err(code) => return code };
+    if device_index != 0 { eprintln!("package-linear-attn-depth-step-diagnostic is CPU-only and requires device index 0"); return ExitCode::from(2); }
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") { Ok(value) if value > 0 => value, Ok(_) => { eprintln!("chunk bytes must be greater than zero"); return ExitCode::from(2); }, Err(code) => return code };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") { Ok(value) => value, Err(code) => return code };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") { Ok(value) if value > 0 => value, Ok(_) => { eprintln!("sequence length must be greater than zero"); return ExitCode::from(2); }, Err(code) => return code };
+    if std::path::Path::new(&output).exists() { eprintln!("refusing to overwrite diagnostic output directory: {output}"); return ExitCode::from(2); }
+    let result = (|| -> Result<(), String> {
+        let hidden = 32_usize * 128;
+        let qkv_rows = 2_usize * 16 * 128 + hidden;
+        let expected_residual_values = sequence_len * hidden;
+        let residual_values = if residual == "-" {
+            let residual_base = deterministic_f32_vector(hidden);
+            let mut values = Vec::with_capacity(expected_residual_values);
+            for timestep in 0..sequence_len { values.extend(linear_attn_step_input(&residual_base, timestep)); }
+            values
+        } else {
+            depth_step_read_optional_override(&residual, expected_residual_values, "residual")?
+                .ok_or_else(|| "residual sidecar unexpectedly absent".to_string())?
+        };
+        let qkv_override = depth_step_read_optional_override(&source_qkv, sequence_len * qkv_rows, "source QKV")?;
+        let z_override = depth_step_read_optional_override(&source_z, sequence_len * hidden, "source Z")?;
+        let run = package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+            &path, device_index, chunk_bytes, layer_index, sequence_len, residual_values.clone(),
+            None, None, None, qkv_override.as_deref(), None, None, z_override.as_deref(),
+        )?;
+        fs::create_dir_all(&output).map_err(|err| format!("failed to create depth-step output: {err}"))?;
+        let output_dir = std::path::Path::new(&output);
+        let residual_sha256 = z_hybrid_write_f32(&output_dir.join("residual-input.f32le"), &residual_values)?;
+        let input_normed_sha256 = z_hybrid_write_f32(&output_dir.join("input-normed.f32le"), &run.attention_input_normed)?;
+        let qkv_sha256 = z_hybrid_write_f32(&output_dir.join("qkv.f32le"), &run.attention_qkv_projection)?;
+        let z_sha256 = z_hybrid_write_f32(&output_dir.join("z.f32le"), &run.attention_z_projection)?;
+        let recurrent_sha256 = z_hybrid_write_f32(&output_dir.join("recurrent.f32le"), &run.attention_recurrent)?;
+        let layer_output_sha256 = z_hybrid_write_f32(&output_dir.join("layer-output.f32le"), &run.layer_output)?;
+        let manifest_bytes = fs::read(std::path::Path::new(&path).join("manifest.json")).map_err(|err| format!("failed to read package manifest: {err}"))?;
+        let mode = match (qkv_override.is_some(), z_override.is_some()) { (false, false) => "baseline", (true, false) => "qkv_only", (false, true) => "z_only", (true, true) => "combined" };
+        let report = serde_json::json!({
+            "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1", "status": "valid",
+            "promotion": false, "holdout": "not_run", "policy_evaluation": "policy_not_evaluated", "thresholds": serde_json::Value::Null,
+            "device": {"backend": "cpu", "requested_index": device_index}, "mode": mode, "layer_index": layer_index,
+            "package": {"root": path, "manifest_sha256": z_hybrid_sha256(&manifest_bytes)},
+            "input": {"residual_path": residual, "residual_sha256": residual_sha256, "input_normed_sha256": input_normed_sha256, "rows": sequence_len, "hidden": hidden},
+            "override": {"source_qkv_path": source_qkv, "source_z_path": source_z, "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv", "z_boundary": "after_production_z_matvec_before_production_silu_mul", "default_off": true, "worker_reachable": false},
+            "outputs": {"qkv_sha256": qkv_sha256, "z_sha256": z_sha256, "recurrent_sha256": recurrent_sha256, "layer_output_sha256": layer_output_sha256, "finite": run.attention_input_normed.iter().chain(&run.attention_qkv_projection).chain(&run.attention_z_projection).chain(&run.attention_recurrent).chain(&run.layer_output).all(|value| value.is_finite())},
+            "recurrent_state_digests": qkv_hybrid_recurrent_state_digests(&run, sequence_len)?.iter().enumerate().map(|(step, sha256)| serde_json::json!({"step": step, "sha256": sha256})).collect::<Vec<_>>(),
+            "memory": {"parallel_tracks": 1, "vm_hwm_kib": depth_step_rss_kib()}
+        });
+        fs::write(output_dir.join("report.json"), serde_json::to_vec_pretty(&report).map_err(|err| format!("failed to encode depth-step report: {err}"))?).map_err(|err| format!("failed to write depth-step report: {err}"))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => { println!("package-linear-attn-depth-step-diagnostic report={output}/report.json layer={layer_index} rows={sequence_len} promotion=false holdout=not_run"); ExitCode::SUCCESS }
+        Err(err) => { eprintln!("package-linear-attn-depth-step-diagnostic: {err}"); ExitCode::from(1) }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
