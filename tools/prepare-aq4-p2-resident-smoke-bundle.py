@@ -932,7 +932,15 @@ def validate_launch_command(value: dict[str, Any]) -> None:
     expected_bindings = {
         "python": {"path": runner_argv[0], "sha256": sha_file(Path(runner_argv[0]), "Python interpreter", single_link=False)},
         "runner": {"path": runner_argv[1], "sha256": RUNNER_SOURCE_SHA, "source_commit": RUNNER_COMMIT},
-        "driver": {"path": driver_argv[0], "sha256": EXPECTED_DRIVER_SHA, "source_commit": DRIVER_COMMIT},
+        "driver": {
+            "path": driver_argv[0],
+            "sha256": EXPECTED_DRIVER_SHA,
+            "source_commit": DRIVER_COMMIT,
+            "source_tree": DRIVER_TREE,
+            "source_git_blob": DRIVER_SOURCE_GIT_BLOB,
+            "source_sha256": DRIVER_SOURCE_SHA,
+            "build": DRIVER_BUILD_METADATA,
+        },
         "served_model_manifest": {"path": driver_argv[2], "sha256": EXPECTED_SERVED_SHA},
         "device_index": 1,
         "build_git_commit": DRIVER_COMMIT,

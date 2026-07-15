@@ -317,6 +317,16 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["resident_driver"]["binary_bytes"] == BUNDLE.EXPECTED_DRIVER_BYTES
     assert value["resident_driver"]["binary_build_id_sha1"] == BUNDLE.EXPECTED_DRIVER_BUILD_ID
     assert value["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
+    launch = json.loads((ARTIFACT / "launch-command.json").read_text())
+    assert launch["bindings"]["driver"] == {
+        "path": str(ARTIFACT / "resident-driver"),
+        "sha256": BUNDLE.EXPECTED_DRIVER_SHA,
+        "source_commit": BUNDLE.DRIVER_COMMIT,
+        "source_tree": BUNDLE.DRIVER_TREE,
+        "source_git_blob": BUNDLE.DRIVER_SOURCE_GIT_BLOB,
+        "source_sha256": BUNDLE.DRIVER_SOURCE_SHA,
+        "build": BUNDLE.DRIVER_BUILD_METADATA,
+    }
     assert value["runner"]["source_commit"] == BUNDLE.RUNNER_COMMIT
     assert value["historical_predecessor"] == {
         "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
