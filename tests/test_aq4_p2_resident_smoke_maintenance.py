@@ -531,11 +531,11 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     assert evidence["secret_material_recorded"] is False
 
 
-def test_profile_ready_v7_through_v10_are_sealed_historical_preoperator_readback() -> None:
+def test_profile_ready_v7_through_v11_are_sealed_historical_readback() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
     roots = [
         base / f"p2/resident-one-case-smoke-profile-{kind}-v{version}"
-        for version in range(7, 11)
+        for version in range(7, 12)
         for kind in ("ready", "ready-dry-run")
     ]
     for root in roots:
@@ -574,17 +574,25 @@ def test_profile_ready_v7_through_v10_are_sealed_historical_preoperator_readback
     assert dry["service_touched"] is False and dry["gpu_command_executed"] is False
 
 
-def test_profile_actual_v4_v5_and_v6_failures_are_immutable_historical_readback() -> None:
+def test_profile_actual_failures_through_v9_are_immutable_historical_readback() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v11"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v8"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v11"
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v8"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v12"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v9"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v12"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v9"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
     assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
     assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
+    historical_v9_roots = (
+        base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v8",
+        base / "p2/resident-one-case-smoke-profile-execute-evidence-v8",
+        base / "p2/resident-one-case-smoke-profile-execute-v8",
+        base / "p3/aq4-p3-diagnostic-rocprof-capture-v8",
+        base / "p2/resident-one-case-smoke-profile-operator-result-v9",
+        base / "p2/resident-one-case-smoke-profile-actual-audit-v9",
+    )
     historical_v8_roots = (
         base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v7",
         base / "p2/resident-one-case-smoke-profile-execute-evidence-v7",
@@ -611,7 +619,7 @@ def test_profile_actual_v4_v5_and_v6_failures_are_immutable_historical_readback(
         base / "p2/resident-one-case-smoke-profile-actual-audit-v6",
     )
     assert not (base / "p2/resident-one-case-smoke-profile-execute-v5").exists()
-    for root in historical_v8_roots + historical_v6_roots + historical_v5_roots:
+    for root in historical_v9_roots + historical_v8_roots + historical_v6_roots + historical_v5_roots:
         completed = subprocess.run(
             ["sha256sum", "-c", "SHA256SUMS"],
             cwd=root,
@@ -620,6 +628,11 @@ def test_profile_actual_v4_v5_and_v6_failures_are_immutable_historical_readback(
             check=False,
         )
         assert completed.returncode == 0, (root, completed.stdout, completed.stderr)
+    assert json.loads((historical_v9_roots[0] / "launcher-evidence.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v9_roots[1] / "launcher-evidence.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v9_roots[3] / "capture-failure.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v9_roots[4] / "operator-result.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v9_roots[5] / "actual-audit.json").read_text())["status"] == "failed_immutable_evidence_preserved_restore_passed"
     assert json.loads((historical_v8_roots[0] / "launcher-evidence.json").read_text())["status"] == "failed"
     assert json.loads((historical_v8_roots[1] / "launcher-evidence.json").read_text())["status"] == "failed"
     assert json.loads((historical_v8_roots[3] / "capture-failure.json").read_text())["status"] == "failed"
