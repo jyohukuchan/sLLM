@@ -1,0 +1,47 @@
+{
+  "children_remaining": [],
+  "children_state_known": true,
+  "command_sha256": "99a18d341d0f778618f94fedff5e5122d58a40f9ada33b577a0c38b2784f815d",
+  "context": {
+    "profiler": {
+      "executable_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "invocation_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "resolved_identity": [
+        66306,
+        41551451,
+        33261,
+        1,
+        62506,
+        1773373040000000000,
+        1783630549665735286
+      ],
+      "resolved_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "symlink_chain": [],
+      "tool": "rocprofv3"
+    },
+    "target_command_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v3/runner-target-command-manifest.json",
+      "sha256": "05bbf54602cf07730803be30eed6fe575a73aa23bc7cf9e3fb88e3fc0934d22f"
+    }
+  },
+  "effective_command_sha256": "0e192d19ab2f891e38b21024a528afc4496ce0640f21b31b3a151e0ac87fd846",
+  "failure_sha256": "187744b7a30d70d93a322e4945fbd4b0b936dac9810b17bd7f044651ee13593e",
+  "measurement_eligible": false,
+  "outer_harness_signalled": false,
+  "process_group_cleanup_complete": true,
+  "promotion_eligible": false,
+  "reason": "rocprof diagnostic capture failed with exit 1",
+  "rocprof_child_new_session": true,
+  "schema_version": "ullm.aq4_p3_diagnostic_rocprof_failure.v1",
+  "status": "failed",
+  "streams": {
+    "rocprof.stderr": {
+      "bytes": 69,
+      "sha256": "d4e032c691321da93e28cbcaac192e4f6b0da28d5efc10bd445b9543fe51a01e"
+    },
+    "rocprof.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

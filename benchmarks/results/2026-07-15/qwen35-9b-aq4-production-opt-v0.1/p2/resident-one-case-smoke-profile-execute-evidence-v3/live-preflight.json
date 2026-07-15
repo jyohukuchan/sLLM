@@ -1,0 +1,198 @@
+{
+  "captured_unix_ns": 1784106998700708652,
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "captured_unix_ns": 1784106997592703340,
+      "exit_code": 0,
+      "label": "sudo-n",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/usr/bin/systemctl",
+        "show",
+        "ullm-openai.service",
+        "--property=ActiveState",
+        "--property=SubState",
+        "--property=MainPID",
+        "--no-pager"
+      ],
+      "captured_unix_ns": 1784106997598801055,
+      "exit_code": 0,
+      "label": "service-ullm-openai.service",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad"
+    },
+    {
+      "argv": [
+        "/usr/bin/systemctl",
+        "show",
+        "llama-qwen35-udq4.service",
+        "--property=ActiveState",
+        "--property=SubState",
+        "--property=MainPID",
+        "--no-pager"
+      ],
+      "captured_unix_ns": 1784106997604961280,
+      "exit_code": 0,
+      "label": "service-llama-qwen35-udq4.service",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad"
+    },
+    {
+      "argv": [
+        "/usr/bin/pgrep",
+        "-f",
+        "-x",
+        "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+      ],
+      "captured_unix_ns": 1784106997811558405,
+      "exit_code": 1,
+      "label": "old-worker",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "/opt/rocm/bin/amd-smi",
+        "list",
+        "--json"
+      ],
+      "captured_unix_ns": 1784106998053807555,
+      "exit_code": 0,
+      "label": "amd-smi-list",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "a7fc353f0234d1bb86e01c847fd7a330518dbf6b4f5636d2a6824cef3fd02243"
+    },
+    {
+      "argv": [
+        "/usr/bin/rocminfo"
+      ],
+      "captured_unix_ns": 1784106998177836230,
+      "exit_code": 0,
+      "label": "rocminfo",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "4b2e575d1afff4ff60b470160a3adcb324c5f79b62524d2115f3f91848149ff9"
+    },
+    {
+      "argv": [
+        "/opt/rocm/bin/amd-smi",
+        "process",
+        "--gpu",
+        "2",
+        "--general",
+        "--json"
+      ],
+      "captured_unix_ns": 1784106998430181816,
+      "exit_code": 0,
+      "label": "amd-smi-process",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "c623fc11440b2bf81199ddefe42cadc330fa31ecde1cd268ff0ab930889e09ca"
+    },
+    {
+      "argv": [
+        "/opt/rocm/bin/amd-smi",
+        "static",
+        "--gpu",
+        "2",
+        "--vram",
+        "--json"
+      ],
+      "captured_unix_ns": 1784106998700389365,
+      "exit_code": 0,
+      "label": "amd-smi-static-vram",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "3f1a7aa8dc1cdf943f1cfb4470607f73ee704f092ad98a3e38cceeca31dc1168"
+    }
+  ],
+  "compute_owners": {
+    "amd_smi": [],
+    "kfd": []
+  },
+  "environment": {
+    "HIP_VISIBLE_DEVICES": "1",
+    "ULLM_BUILD_GIT_COMMIT": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+    "ULLM_HIP_VISIBLE_DEVICES": "1",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
+    "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json"
+  },
+  "lock": {
+    "device": 26,
+    "free": true,
+    "inode": 779219,
+    "path": "/run/ullm/r9700.lock"
+  },
+  "prepared_preflight": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/preflight.json",
+    "role": "synthetic_bundle_contract_only",
+    "sha256": "294ddf1771251c4b1954ea663d73e85821749119da2a4f6c7528fdae510bbc6e"
+  },
+  "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+  "runtime_mapping": {
+    "amd_smi_index": 2,
+    "bdf": "0000:47:00.0",
+    "kfd_id": 51545,
+    "node_id": 2,
+    "runtime_device_index": 1,
+    "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+    "visible_token": "1"
+  },
+  "schema_version": "ullm.aq4_p2_resident_live_preflight.v1",
+  "services": [
+    {
+      "active_state": "inactive",
+      "main_pid": 0,
+      "sub_state": "dead",
+      "unit": "ullm-openai.service"
+    },
+    {
+      "active_state": "inactive",
+      "main_pid": 0,
+      "sub_state": "dead",
+      "unit": "llama-qwen35-udq4.service"
+    }
+  ],
+  "status": "passed",
+  "vram": {
+    "free_bytes": 32624000000,
+    "headroom_bytes": 32624000000,
+    "total_bytes": 32624000000,
+    "used_bytes": 0
+  },
+  "worker_pids": []
+}
