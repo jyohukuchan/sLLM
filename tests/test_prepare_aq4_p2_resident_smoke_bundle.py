@@ -17,8 +17,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v6"
+ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2"
+BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7"
 if (BINDING / "binding-manifest.json").is_file():
     _CHECKED_IN_BINDING_MANIFEST = json.loads(
         (BINDING / "binding-manifest.json").read_text()
@@ -303,6 +303,7 @@ def rebind_transport(root: Path) -> None:
 
 def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> None:
     value = BUNDLE.validate(ARTIFACT, trusted_reconstruction)
+    assert stat.S_IMODE(ARTIFACT.lstat().st_mode) == BUNDLE.BUNDLE_ROOT_MODE == 0o555
     assert value["status"] == "prepared_not_executed"
     assert value["promotion"] is False
     assert value["offline_evidence"] == {
@@ -325,7 +326,20 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["resident_driver"]["binary_sha256"] == BUNDLE.EXPECTED_DRIVER_SHA
     assert value["resident_driver"]["binary_bytes"] == BUNDLE.EXPECTED_DRIVER_BYTES
     assert value["resident_driver"]["binary_build_id_sha1"] == BUNDLE.EXPECTED_DRIVER_BUILD_ID
+    assert value["resident_driver"]["build_inputs"] == BUNDLE.DRIVER_BUILD_INPUTS
     assert value["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
+    assert value["resident_driver"]["build"]["reproducibility"] == {
+        "build_count": 2,
+        "commands": [
+            "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-a cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+            "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-b cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+        ],
+        "independent_initially_absent_target_directories": True,
+        "byte_identical": True,
+        "sha256_equal": True,
+        "bytes_equal": True,
+        "build_id_equal": True,
+    }
     launch = json.loads((ARTIFACT / "launch-command.json").read_text())
     assert launch["bindings"]["driver"] == {
         "path": str(ARTIFACT / "resident-driver"),
@@ -511,23 +525,27 @@ def test_rejects_unsafe_member_path(tmp_path: Path) -> None:
 
 def test_rejects_symlink_member(tmp_path: Path, trusted_reconstruction) -> None:
     root = copy_bundle(tmp_path)
+    root.chmod(0o755)
     fixture = root / "fixture.json"
     target = tmp_path / "external-fixture.json"
     shutil.copyfile(fixture, target)
     fixture.unlink()
     fixture.symlink_to(target)
+    root.chmod(BUNDLE.BUNDLE_ROOT_MODE)
     with pytest.raises(BUNDLE.BundleError, match="type/link/mode"):
         BUNDLE.validate(root, trusted_reconstruction)
 
 
 def test_rejects_hardlink_member(tmp_path: Path, trusted_reconstruction) -> None:
     root = copy_bundle(tmp_path)
+    root.chmod(0o755)
     fixture = root / "fixture.json"
     target = tmp_path / "external-fixture.json"
     shutil.copyfile(fixture, target)
     target.chmod(0o444)
     fixture.unlink()
     os.link(target, fixture)
+    root.chmod(BUNDLE.BUNDLE_ROOT_MODE)
     with pytest.raises(BUNDLE.BundleError, match="type/link/mode"):
         BUNDLE.validate(root, trusted_reconstruction)
 
@@ -621,6 +639,7 @@ def test_final_directory_reenumeration_rejects_late_mutation(tmp_path: Path, tru
     replacement.chmod(0o444)
 
     def mutate(bundle_root: Path) -> None:
+        bundle_root.chmod(0o755)
         if variant == "late_unknown":
             (bundle_root / "late-unknown.json").write_text("{}\n", encoding="utf-8")
         elif variant == "late_missing":
@@ -636,6 +655,13 @@ def test_final_directory_reenumeration_rejects_late_mutation(tmp_path: Path, tru
             BUNDLE.validate(root, trusted_reconstruction)
     finally:
         BUNDLE._VALIDATION_HOOK = None
+
+
+def test_rejects_writable_bundle_root(tmp_path: Path, trusted_reconstruction) -> None:
+    root = copy_bundle(tmp_path)
+    root.chmod(0o755)
+    with pytest.raises(BUNDLE.BundleError, match="bundle root mode differs"):
+        BUNDLE.validate(root, trusted_reconstruction)
 
 
 @pytest.mark.parametrize("variant", ("relative_served", "parent_driver", "served_sha", "extra_arg"))
@@ -728,15 +754,15 @@ def test_binding_actual_runner_authority_matches_76c48aa_source() -> None:
     )
 
 
-def test_checked_in_v6_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
+def test_checked_in_v7_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
     value = BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, BINDING)
     assert stat.S_IMODE(BINDING.lstat().st_mode) == BUNDLE.BINDING_ROOT_MODE == 0o555
-    assert value["schema_version"] == "ullm.aq4_p2_resident_smoke_binding.v6"
+    assert value["schema_version"] == "ullm.aq4_p2_resident_smoke_binding.v7"
     assert value["status"] == "prepared_not_executed"
     assert value["promotion"] is False
     assert value["launch_eligible"] is False
     assert value["requires_immutable_launcher"] is True
-    assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
+    assert value["predecessor"] == {"commit": BUNDLE.BINDING_PREDECESSOR_COMMIT, "status": "SUPERSEDED", "execution_eligible": False}
     roots = value["trust_roots"]
     assert roots["source_commit"] == BUNDLE.BINDING_SOURCE_COMMIT
     assert roots["source_tree"] == BUNDLE.BINDING_SOURCE_TREE
@@ -753,13 +779,14 @@ def test_checked_in_v6_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert roots["resident_driver"]["source_tree"] == BUNDLE.DRIVER_TREE
     assert roots["resident_driver"]["git_blob_at_binding_commit"] == BUNDLE.DRIVER_SOURCE_GIT_BLOB
     assert roots["resident_driver"]["source_sha256"] == BUNDLE.DRIVER_SOURCE_SHA
+    assert roots["resident_driver"]["build_inputs"] == BUNDLE.DRIVER_BUILD_INPUTS
     assert roots["resident_driver"]["binary_sha256"] == BUNDLE.EXPECTED_DRIVER_SHA
     assert roots["resident_driver"]["binary_bytes"] == BUNDLE.EXPECTED_DRIVER_BYTES
     assert roots["resident_driver"]["binary_build_id_sha1"] == BUNDLE.EXPECTED_DRIVER_BUILD_ID
     assert roots["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
 
 
-def test_v6_binding_runner_and_validator_archives_match_pinned_git_objects() -> None:
+def test_v7_binding_runner_and_validator_archives_match_pinned_git_objects() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
     for role, source_path, archive_name in (
         ("runner", "tools/run-aq4-p2-resident-batch.py", "trusted-runner.py"),
@@ -794,7 +821,7 @@ def test_v6_binding_runner_and_validator_archives_match_pinned_git_objects() -> 
         assert hashlib.sha256(archived).hexdigest() == authority["source_sha256" if role == "runner" else "sha256"]
 
 
-def test_v6_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
+def test_v7_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
     plan_raw = (BINDING / "runner-plan.json").read_bytes()
     plan = json.loads(plan_raw)
     evidence = json.loads((BINDING / "runner-subprocess-evidence.json").read_text())
@@ -830,7 +857,7 @@ def test_v6_binding_records_actual_runner_and_mandatory_validator_subprocesses()
     assert evidence["trusted_validator"]["report_file_sha256"] == hashlib.sha256(report_raw).hexdigest()
 
 
-def test_v6_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
+def test_v7_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
     assert manifest["binding_root_contract"] == {
         "type": "directory",
@@ -865,7 +892,7 @@ def test_v6_binding_keeps_generic_runner_outputs_outside_immutable_input_root() 
     assert manifest["next_stage"]["required"] is True
 
 
-def test_v6_binding_rejects_report_replacement(tmp_path: Path) -> None:
+def test_v7_binding_rejects_report_replacement(tmp_path: Path) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     report = root / "validator-report.json"
@@ -877,7 +904,7 @@ def test_v6_binding_rejects_report_replacement(tmp_path: Path) -> None:
         BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
 
 
-def test_v6_binding_rejects_writable_root(tmp_path: Path) -> None:
+def test_v7_binding_rejects_writable_root(tmp_path: Path) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     root.chmod(0o775)
@@ -886,7 +913,7 @@ def test_v6_binding_rejects_writable_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("variant", ("late_unknown", "late_missing", "late_replace"))
-def test_v6_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
+def test_v7_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     replacement = tmp_path / "replacement-report.json"
