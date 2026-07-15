@@ -1,0 +1,169 @@
+{
+  "children_remaining": [],
+  "children_state_known": true,
+  "command_sha256": "87d29f37fadfc147ad88619b2a397a438b11aa7c2c993aed8e28ed26b4be2ef1",
+  "context": {
+    "profiler": {
+      "executable_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "invocation_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "resolved_identity": [
+        66306,
+        41551451,
+        33261,
+        1,
+        62506,
+        1773373040000000000,
+        1783630549665735286
+      ],
+      "resolved_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "symlink_chain": [],
+      "tool": "rocprofv3"
+    },
+    "target_command_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v5/runner-target-command-manifest.json",
+      "sha256": "503e13e07fc5a1dea762652e1e866f16ff3a75df526f46be0237ee59c403c477"
+    }
+  },
+  "effective_command_sha256": "4d03a025700eab5bf4d88d5aa476f4e3685711e3a8e0a0bef78e6998dd9dd7bb",
+  "failure_sha256": "a7cc1f990b60518b6cee92e52d47bea46155993795da1b92aaacc3c1f23a0b68",
+  "measurement_eligible": false,
+  "outer_harness_signalled": false,
+  "process_group_cleanup_complete": true,
+  "promotion_eligible": false,
+  "ready_candidate_audit": {
+    "audit": {
+      "audit_sha256": "7605999fe337b7a171755bc1e11ea3f181d37e403d8b0d9ba2498a6ee5847570",
+      "nested": {
+        "driver_identity": {
+          "canonical_sha256": "6960162d76e5716703b6305bd88dd7627c13744babb0310555ba6aeb632904ac",
+          "json_type": "object",
+          "key_types": {
+            "binary_sha256": "string",
+            "build_git_commit": "string",
+            "format_id": "string",
+            "guard_set_sha256": "string",
+            "implementation_id": "string",
+            "model_id": "string",
+            "model_revision": "string",
+            "package_content_sha256": "string",
+            "package_manifest_sha256": "string",
+            "protocol": "string",
+            "runtime_device": "object",
+            "served_model_manifest_sha256": "string",
+            "worker_binary_sha256": "string"
+          },
+          "keys": [
+            "binary_sha256",
+            "build_git_commit",
+            "format_id",
+            "guard_set_sha256",
+            "implementation_id",
+            "model_id",
+            "model_revision",
+            "package_content_sha256",
+            "package_manifest_sha256",
+            "protocol",
+            "runtime_device",
+            "served_model_manifest_sha256",
+            "worker_binary_sha256"
+          ],
+          "present": true
+        },
+        "served_model_binding": {
+          "canonical_sha256": null,
+          "json_type": "absent",
+          "key_types": {},
+          "keys": [],
+          "present": false
+        }
+      },
+      "raw": {
+        "byte_count": 1091,
+        "raw_sha256": "337a3149e3a39b21cead118f22da5656e26dd232e89420dd5a77b449e4696da8"
+      },
+      "resident_session_id": {
+        "canonical_sha256": "aad0547de13496c58fd90057ed0dfe220fb3d70de595d2f546b58e1261a15457",
+        "json_type": "string",
+        "present": true,
+        "string_length": 31
+      },
+      "safe_scalars": {
+        "event": {
+          "canonical_sha256": "40ec7f71ea684c8b976e79e8e425f87779e6de57f4821dcfc8066dbcad2defe0",
+          "json_type": "string",
+          "present": true,
+          "string_length": 5,
+          "value": "ready"
+        },
+        "model_loads": {
+          "canonical_sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "json_type": "integer",
+          "present": true,
+          "string_length": null,
+          "value": 1
+        },
+        "schema_version": {
+          "canonical_sha256": "756eb641418399a935420286af662168327117f14f412629205af8b06d3abbf7",
+          "json_type": "string",
+          "present": true,
+          "string_length": 30,
+          "value": "ullm.aq4_p2_resident_driver.v2"
+        }
+      },
+      "schema_version": "ullm.aq4_p2_ready_candidate_audit.v1",
+      "top_level": {
+        "key_count": 5,
+        "key_types": {
+          "driver_identity": "object",
+          "event": "string",
+          "model_loads": "integer",
+          "resident_session_id": "string",
+          "schema_version": "string"
+        },
+        "keys": [
+          "driver_identity",
+          "event",
+          "model_loads",
+          "resident_session_id",
+          "schema_version"
+        ]
+      },
+      "validation": {
+        "predicates": {
+          "event_is_ready": true,
+          "field_set_exact": false,
+          "model_loads_is_integer": true,
+          "model_loads_is_one": true,
+          "resident_session_id_is_string": true,
+          "resident_session_id_nonempty": true,
+          "schema_version_exact": true
+        },
+        "reason_code": "ready_candidate_field_set_differs",
+        "status": "failed"
+      }
+    },
+    "audit_sha256": "7605999fe337b7a171755bc1e11ea3f181d37e403d8b0d9ba2498a6ee5847570",
+    "marker_count": 1,
+    "marker_sha256": "6ad03179fac9324bab6d4bd28b20334d5587c601e083ea58afc69a5de253eb91",
+    "reason_code": "ready_candidate_marker_bound",
+    "schema_version": "ullm.aq4_p3_ready_candidate_capture.v1",
+    "self_sha256": "03477021066333fd801529755430696dea639397f92c69c4e0da514f304c277c",
+    "source_stream": "rocprof.stderr",
+    "source_stream_sha256": "91e07fe5be2bf3a8fb46e80ce73393d94b46ea1a0d73874951aeba1bcb476f94",
+    "status": "valid"
+  },
+  "reason": "rocprof diagnostic capture failed with exit 1",
+  "rocprof_child_new_session": true,
+  "schema_version": "ullm.aq4_p3_diagnostic_rocprof_failure.v2",
+  "status": "failed",
+  "streams": {
+    "rocprof.stderr": {
+      "bytes": 2528,
+      "sha256": "91e07fe5be2bf3a8fb46e80ce73393d94b46ea1a0d73874951aeba1bcb476f94"
+    },
+    "rocprof.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

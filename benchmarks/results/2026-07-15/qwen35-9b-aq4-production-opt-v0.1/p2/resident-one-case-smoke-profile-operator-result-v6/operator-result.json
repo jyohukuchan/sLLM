@@ -1,0 +1,52 @@
+{
+  "argument_count": 10,
+  "authority_commit": "db6ee0fa005d2b25c6b86996b6c2c8bcbe3a33af",
+  "canonical_end_unix_ns": 1784123098029562807,
+  "canonical_start_unix_ns": 1784123045886520126,
+  "command_sha256": "001b98a9b2567f9d3f1d0ba1a92cc3319e23bf7cc56a013965ed4a0b06ab7d25",
+  "elapsed_ns": 52143042681,
+  "invocation_count": 1,
+  "manifest_file_sha256": "4c3b7ba685ecc465e77169d9ae186c93bdc548357ef883c396bbd06a18d685ce",
+  "manifest_semantic_sha256": "9f8f83c334696813e928eea01e5e8fb6711a7fc6997a962ece8e75eecdb8f269",
+  "maximum_invocations": 1,
+  "preflight": {
+    "amd_smi_owners": [
+      29805
+    ],
+    "blocking_identity_sha256": "4c35dc5e8cb7732d772c088ca5155c973df7660402fd601adcaf75d2f9f94514",
+    "dynamic_check_count": 13,
+    "dynamic_checks_passed": 13,
+    "formal_health_sha256": "51b37eda8771d36e154f6cd52a22be0bf2d33f2eafa0d90958afe57d14a7b82f",
+    "fresh_outputs_absent": 9,
+    "head": "db6ee0fa005d2b25c6b86996b6c2c8bcbe3a33af",
+    "kfd_owners": [
+      29805
+    ],
+    "passed": true,
+    "selected_tests": 5,
+    "service_main_pid": 29720,
+    "six_sha256sums_passed": true,
+    "static_checks_passed": true,
+    "targeted_external_processes": 0,
+    "tree": "6424d61b1fc332ecc1c4f637b97a495eef4c114f",
+    "worker_pid": 29805
+  },
+  "retry_performed": false,
+  "returncode": 1,
+  "same_pty_sudo_cache": true,
+  "schema_version": "ullm.aq4_p3_profile_operator_result.v6",
+  "secret_material_recorded": false,
+  "shell": false,
+  "status": "failed",
+  "stderr": {
+    "bytes": 0,
+    "path": "/tmp/ullm-profile-operator-v6.stderr.bin",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 254,
+    "path": "/tmp/ullm-profile-operator-v6.stdout.bin",
+    "sha256": "309420c9b009141b58ea87776d805cbbeb5f88520e893d4fd81f9698d00d5829"
+  },
+  "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+}
