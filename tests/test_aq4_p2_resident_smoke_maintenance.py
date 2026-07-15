@@ -1855,8 +1855,9 @@ def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Pat
 
 
 @pytest.mark.parametrize("failure", ("sudo-pre", "sudo-stop", "stop", "stopped-gate", "sudo-restore", "start", "health"))
-def test_actual_cli_with_each_fake_gate_fails_closed(tmp_path: Path, failure: str) -> None:
+def test_actual_cli_with_each_fake_gate_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
     runtime = FakeRuntime(fail=failure)
+    monkeypatch.setattr(HARNESS, "load_ready_artifact", lambda path: ready(tmp_path))
     output = tmp_path / f"cli-{failure}"
     code = HARNESS.main(["--mode", "execute", "--confirm-one-case", "--evidence-output", str(output)], dependencies=runtime.dependencies())
     assert code == 1
