@@ -112,14 +112,28 @@ def write_target_manifest(
                 "path": argv[index],
                 "sha256": hashlib.sha256(Path(argv[index]).read_bytes()).hexdigest(),
                 "executable": index == 0,
+                "role": (
+                    "python_interpreter" if number == 0
+                    else "resident_runner" if number == 1
+                    else f"control_argument_{index}"
+                ),
+                "closure": "code_execution" if number < 2 else "control_input",
+                "method": "exec" if number < 2 else "read",
             }
-            for index in input_indices
+            for number, index in enumerate(input_indices)
         ],
         "runtime_paths": [],
+        "control_files": [],
         "output_paths": [
             {"argument_index": index, "path": argv[index]} for index in output_indices
         ],
         "capture_helpers": CAPTURE.capture_helper_contract(),
+        "closure_contract": {
+            "code_execution_closure": "pinned_fd",
+            "control_input_closure": "pinned_fd",
+            "device_lock_closure": "pinned_fd",
+            "data_integrity": "trusted_pre_post_guarded",
+        },
         "authorization": {
             "maximum_invocations": 1,
             "target_role": "profile_runner_only",
@@ -327,6 +341,9 @@ def test_runtime_path_identity_is_pinned_by_target_manifest(tmp_path: Path) -> N
             "path": str(runtime_directory.resolve()),
             "kind": "directory",
             "identity": list(CAPTURE.PROFILER._identity(metadata)),
+            "role": "bundle_root",
+            "closure": "data_integrity",
+            "method": "pre_post_guard",
         }
     ]
     value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
@@ -424,8 +441,8 @@ def test_target_swap_between_verify_and_spawn_executes_only_pinned_fds(
         CAPTURE.close_target_snapshots(snapshots)
 
 
-def test_runtime_directory_and_lock_swap_execute_through_pinned_path_fds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_runtime_directory_is_guarded_and_lock_is_opened_read_write_without_argv_rewrite(
+    tmp_path: Path,
 ) -> None:
     bundle = (tmp_path / "bundle").resolve()
     bundle.mkdir()
@@ -437,81 +454,274 @@ def test_runtime_directory_and_lock_swap_execute_through_pinned_path_fds(
     lock.write_text("trusted-lock", encoding="utf-8")
     replacement_lock = tmp_path / "replacement.lock"
     replacement_lock.write_text("replacement-lock", encoding="utf-8")
-    observed = (tmp_path / "runtime-observed.json").resolve()
     runner = (tmp_path / "runtime-runner.py").resolve()
-    runner.write_text(
-        "import json,os,pathlib,sys\n"
-        "bundle=pathlib.Path(sys.argv[1]); lock=pathlib.Path(sys.argv[2]); observed=pathlib.Path(sys.argv[3])\n"
-        "fd=os.open(lock,os.O_RDWR); os.lseek(fd,0,os.SEEK_SET); os.write(fd,b'pinned-lock '); os.close(fd)\n"
-        "observed.write_text(json.dumps({'payload':(bundle/'payload.txt').read_text()}))\n",
-        encoding="utf-8",
-    )
+    runner.write_text("raise SystemExit(0)\n", encoding="utf-8")
     interpreter = Path(sys.executable).resolve()
     manifest = (tmp_path / "runtime-fd-target.json").resolve()
     value = write_target_manifest(
         manifest,
-        [str(interpreter), str(runner), str(bundle), str(lock), str(observed)],
+        [str(interpreter), str(runner), str(bundle), str(lock)],
         input_indices=(0, 1),
-        output_indices=(4,),
     )
     value["runtime_paths"] = [
-        {"argument_index": 2, "path": str(bundle), "kind": "directory", "identity": list(CAPTURE.PROFILER._identity(bundle.lstat()))},
-        {"argument_index": 3, "path": str(lock), "kind": "regular_file", "identity": list(CAPTURE.PROFILER._identity(lock.lstat()))},
+        {"argument_index": 2, "path": str(bundle), "kind": "directory", "identity": list(CAPTURE.PROFILER._identity(bundle.lstat())), "role": "bundle_root", "closure": "data_integrity", "method": "pre_post_guard"},
+        {"argument_index": 3, "path": str(lock), "kind": "regular_file", "identity": list(CAPTURE.PROFILER._identity(lock.lstat())), "role": "device_lock", "closure": "device_lock", "method": "flock"},
     ]
     value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
     manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     loaded, snapshots = CAPTURE.load_target_command_manifest(
         manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
     )
-    effective, target_fds = CAPTURE.pinned_target_argv(loaded, snapshots)
-    assert all(effective[index].startswith("/proc/self/fd/") for index in (0, 1, 2, 3))
-    fake_profiler = (tmp_path / "runtime-rocprofv3").resolve()
-    fake_profiler.write_text(
-        "#!/usr/bin/python3\n"
-        "import subprocess,sys\n"
-        "target=sys.argv[sys.argv.index('--')+1:]\n"
-        "fds=tuple(int(item.rsplit('/',1)[1]) for item in target if item.startswith('/proc/self/fd/'))\n"
-        "raise SystemExit(subprocess.run(target,pass_fds=fds).returncode)\n",
-        encoding="utf-8",
-    )
-    fake_profiler.chmod(0o555)
+    effective, _target_fds = CAPTURE.pinned_target_argv(loaded, snapshots)
+    pinned_map = CAPTURE.PinnedFdMap.create(loaded, snapshots)
+    assert all(effective[index].startswith("/proc/self/fd/") for index in (0, 1))
+    assert effective[2:] == loaded["argv"][2:]
+    lock_binding = next(item for item in pinned_map.value["bindings"] if item["role"] == "device_lock")
+    assert os.fstat(lock_binding["descriptor"]).st_mode & 0o222
     bundle_backup = tmp_path / "bundle-backup"
     lock_backup = tmp_path / "lock-backup"
-    real_popen = CAPTURE.subprocess.Popen
-
-    def swapping_popen(*args, **kwargs):
+    try:
         bundle.rename(bundle_backup)
         replacement_bundle.rename(bundle)
         lock.rename(lock_backup)
         replacement_lock.rename(lock)
         try:
-            process = real_popen(*args, **kwargs)
-            deadline = time.monotonic() + 5.0
-            while not observed.exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert json.loads(observed.read_text())["payload"] == "trusted-bundle"
+            with pytest.raises(CAPTURE.CaptureError, match="runtime directory identity changed"):
+                snapshots[-2].verify()
+            with pytest.raises(CAPTURE.CaptureError, match="runtime file identity changed"):
+                snapshots[-1].verify()
+            with pytest.raises(CAPTURE.CaptureError, match="bundle_root"):
+                pinned_map.verify()
+            bundle_binding = next(item for item in pinned_map.value["bindings"] if item["role"] == "bundle_root")
+            payload_fd = os.open("payload.txt", os.O_RDONLY, dir_fd=bundle_binding["descriptor"])
+            try:
+                assert os.read(payload_fd, 64) == b"trusted-bundle"
+            finally:
+                os.close(payload_fd)
+            os.pwrite(lock_binding["descriptor"], b"pinned-lock", 0)
             assert lock_backup.read_text().startswith("pinned-lock")
             assert lock.read_text() == "replacement-lock"
-            return process
         finally:
             bundle.rename(replacement_bundle)
             bundle_backup.rename(bundle)
             lock.rename(replacement_lock)
             lock_backup.rename(lock)
-
-    monkeypatch.setattr(CAPTURE.subprocess, "Popen", swapping_popen)
-    try:
-        with pytest.raises(CAPTURE.CaptureError, match="post-spawn.*identity changed"):
-            CAPTURE.run_profile(
-                [str(fake_profiler), "--", *effective],
-                (tmp_path / "runtime-fd-output").resolve(),
-                10.0,
-                pass_fds=target_fds,
-                verifier=lambda: [snapshot.verify() for snapshot in snapshots],
-            )
-        assert json.loads(observed.read_text())["payload"] == "trusted-bundle"
-        assert lock.read_text().startswith("pinned-lock")
     finally:
+        pinned_map.close()
+        CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_symlinked_roctx_fd_map_requires_digest_and_keeps_resolved_bytes_on_swap(
+    tmp_path: Path,
+) -> None:
+    runner = tmp_path / "runner.py"
+    runner.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    trusted = tmp_path / "libroctx-trusted.so"
+    trusted.write_bytes(b"trusted-roctx-bytes")
+    replacement = tmp_path / "libroctx-replacement.so"
+    replacement.write_bytes(b"replacement-roctx-bytes")
+    invocation = tmp_path / "libroctx.so"
+    invocation.symlink_to(trusted.name)
+    command = [str(Path(sys.executable).resolve()), str(runner.resolve()), str(invocation.resolve(strict=False))]
+    command[2] = str(invocation.absolute())
+    manifest = (tmp_path / "roctx-target.json").resolve()
+    value = write_target_manifest(manifest, command, input_indices=(0, 1))
+    digest = hashlib.sha256(trusted.read_bytes()).hexdigest()
+    value["runtime_paths"] = [
+        {
+            "argument_index": 2,
+            "path": command[2],
+            "kind": "symlinked_file",
+            "resolved_path": str(trusted.resolve()),
+            "sha256": digest,
+            "role": "roctx_library",
+            "closure": "code_execution",
+            "method": "dlopen",
+        }
+    ]
+    value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
+    pinned_map = CAPTURE.PinnedFdMap.create(loaded, snapshots)
+    binding = next(item for item in pinned_map.value["bindings"] if item["role"] == "roctx_library")
+    assert binding["sha256"] == digest
+    assert binding["resolved_path"] == str(trusted.resolve())
+    try:
+        invocation.unlink()
+        invocation.symlink_to(replacement.name)
+        with pytest.raises(CAPTURE.CaptureError, match="symlinked runtime path target changed"):
+            snapshots[-1].verify()
+        pinned_map.verify()
+        assert os.pread(binding["descriptor"], 1024, 0) == b"trusted-roctx-bytes"
+        assert hashlib.sha256(os.pread(binding["descriptor"], 1024, 0)).hexdigest() == digest
+    finally:
+        pinned_map.close()
+        CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_real_trusted_runner_dry_run_crosses_fake_rocprof_with_sealed_fd_map(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    bundle = LAUNCHER.INPUT_ROOT
+    runner = (ROOT / "tools/run-aq4-p2-resident-batch.py").resolve()
+    validator_source = (ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py").resolve()
+    validator_source_sha = hashlib.sha256(validator_source.read_bytes()).hexdigest()
+    private_tag = hashlib.sha256(str(tmp_path).encode()).hexdigest()[:12]
+    validator = ROOT / "tools" / f".fd-map-private-validator-{private_tag}.py"
+    validator_backup = validator.with_suffix(".backup")
+    validator_replacement = validator.with_suffix(".replacement")
+
+    def cleanup_private_validator() -> None:
+        for path in (validator, validator_backup, validator_replacement):
+            path.unlink(missing_ok=True)
+        assert hashlib.sha256(validator_source.read_bytes()).hexdigest() == validator_source_sha
+
+    request.addfinalizer(cleanup_private_validator)
+    validator.write_bytes(validator_source.read_bytes())
+    validator.chmod(0o555)
+    output = (tmp_path / "real-runner-output").resolve()
+    command = [
+        str(Path(sys.executable).resolve()), str(runner),
+        "--expanded", str(bundle / "case-binding.json"),
+        "--fixture-index", str(bundle / "fixture-index.json"),
+        "--identity", str(bundle / "identity.json"),
+        "--preflight", str(bundle / "preflight.json"),
+        "--policy", str(bundle / "policy.json"),
+        "--output-dir", str(output),
+        "--run-id", "fd-map-fake-rocprof-dry-run",
+        "--baseline-kind", "active-production",
+        "--dry-run", "--one-case-smoke",
+        "--bundle-root", str(bundle),
+        "--trusted-validator", str(validator),
+        "--trusted-validator-sha256", hashlib.sha256(validator.read_bytes()).hexdigest(),
+    ]
+    direct = {
+        0: ("python_interpreter", "code_execution", "exec", True),
+        1: ("resident_runner", "code_execution", "exec", False),
+        3: ("case_binding", "control_input", "read", False),
+        5: ("fixture_index", "control_input", "read", False),
+        7: ("identity", "control_input", "read", False),
+        9: ("prepared_preflight", "control_input", "read", False),
+        11: ("policy", "control_input", "read", False),
+        23: ("trusted_validator", "code_execution", "exec", False),
+    }
+    excluded = {Path(command[index]).name for index in (3, 5, 7, 9, 11)}
+    value: dict[str, object] = {
+        "schema_version": CAPTURE.TARGET_SCHEMA,
+        "status": "bound",
+        "manifest_sha256": None,
+        "argv": command,
+        "environment": {"ULLM_TEST_PROFILE_TARGET": "1"},
+        "input_files": [
+            {
+                "argument_index": index,
+                "path": command[index],
+                "sha256": hashlib.sha256(Path(command[index]).read_bytes()).hexdigest(),
+                "executable": executable,
+                "role": role,
+                "closure": closure,
+                "method": method,
+            }
+            for index, (role, closure, method, executable) in sorted(direct.items())
+        ],
+        "runtime_paths": [
+            {
+                "argument_index": 21,
+                "path": str(bundle),
+                "kind": "directory",
+                "identity": list(CAPTURE.PROFILER._identity(bundle.lstat())),
+                "role": "bundle_root",
+                "closure": "data_integrity",
+                "method": "pre_post_guard",
+            }
+        ],
+        "control_files": [
+            {
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "role": f"bundle_{path.name.lower().replace('-', '_').replace('.', '_')}",
+                "closure": "control_input",
+                "method": "read",
+            }
+            for path in sorted(bundle.iterdir())
+            if path.is_file() and path.name not in excluded
+        ],
+        "output_paths": [{"argument_index": 13, "path": str(output)}],
+        "closure_contract": {
+            "code_execution_closure": "pinned_fd",
+            "control_input_closure": "pinned_fd",
+            "device_lock_closure": "pinned_fd",
+            "data_integrity": "trusted_pre_post_guarded",
+        },
+        "capture_helpers": CAPTURE.capture_helper_contract(),
+        "authorization": {
+            "maximum_invocations": 1,
+            "target_role": "profile_runner_only",
+            "promotion_eligible": False,
+        },
+    }
+    value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
+    manifest = (tmp_path / "real-runner-target.json").resolve()
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
+    pinned_map = CAPTURE.PinnedFdMap.create(loaded, snapshots)
+    effective, descriptors = CAPTURE.pinned_target_argv(loaded, snapshots)
+    fake_rocprof = (tmp_path / "fake-rocprof.py").resolve()
+    fake_rocprof.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,os,subprocess,sys\n"
+        "m=int(os.environ['ULLM_AQ4_PINNED_FD_MAP'])\n"
+        "v=json.loads(os.pread(m,1048576,0))\n"
+        "fds=tuple(sorted({m,*[x['descriptor'] for x in v['bindings']]}))\n"
+        "target=sys.argv[sys.argv.index('--')+1:]\n"
+        "raise SystemExit(subprocess.run(target,pass_fds=fds,env=os.environ).returncode)\n",
+        encoding="utf-8",
+    )
+    fake_rocprof.chmod(0o555)
+    environment = dict(value["environment"])
+    environment[CAPTURE.FD_MAP_ENV] = str(pinned_map.descriptor)
+    malicious_marker = tmp_path / "replacement-validator-executed"
+    environment["ULLM_AQ4_TEST_MALICIOUS_MARKER"] = str(malicious_marker)
+    validator_replacement.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,os,pathlib\n"
+        "pathlib.Path(os.environ['ULLM_AQ4_TEST_MALICIOUS_MARKER']).write_text('executed')\n"
+        "print(json.dumps({'status':'prepared_not_executed','promotion':False,'run_id':'malicious'}))\n",
+        encoding="utf-8",
+    )
+    validator_replacement.chmod(0o555)
+    try:
+        validator.rename(validator_backup)
+        validator_replacement.rename(validator)
+        try:
+            CAPTURE._run_profile(
+                [str(fake_rocprof), "--", *effective],
+                (tmp_path / "fake-rocprof-output").resolve(),
+                30.0,
+                pass_fds=(*descriptors, pinned_map.descriptor),
+                environment=environment,
+            )
+        finally:
+            validator.rename(validator_replacement)
+            validator_backup.rename(validator)
+        plan = json.loads((output / "resident-batch.plan.json").read_text())
+        assert plan["execution_closure"]["fd_map_sha256"] == pinned_map.value["map_sha256"]
+        assert plan["validation"]["trusted_bundle_validator"]["subprocess_count"] == 1
+        assert not malicious_marker.exists()
+    finally:
+        if validator_backup.exists():
+            if validator.exists():
+                validator.unlink()
+            validator_backup.rename(validator)
+        validator_replacement.unlink(missing_ok=True)
+        validator.unlink(missing_ok=True)
+        assert hashlib.sha256(validator_source.read_bytes()).hexdigest() == validator_source_sha
+        pinned_map.close()
         CAPTURE.close_target_snapshots(snapshots)
 
 

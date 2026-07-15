@@ -766,6 +766,133 @@ def test_bound_device_lock_rejects_swap_between_lstat_and_open(tmp_path: Path, m
             pass
 
 
+def test_pinned_control_read_and_lock_flock_use_original_fds_after_logical_path_swap(
+    tmp_path: Path,
+) -> None:
+    control = tmp_path / "control.json"
+    control.write_bytes(b'{"trusted":true}\n')
+    control_replacement = tmp_path / "control-replacement.json"
+    control_replacement.write_bytes(b'{"trusted":false}\n')
+    lock = tmp_path / "device.lock"
+    lock.touch(mode=0o600)
+    lock_replacement = tmp_path / "lock-replacement"
+    lock_replacement.touch(mode=0o600)
+    control_descriptor = os.open(control, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    lock_descriptor = os.open(lock, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    control_metadata = os.fstat(control_descriptor)
+    lock_metadata = os.fstat(lock_descriptor)
+    bindings = [
+        {
+            "role": "control_fixture",
+            "logical_path": str(control),
+            "resolved_path": None,
+            "descriptor": control_descriptor,
+            "kind": "regular_file",
+            "closure": "control_input",
+            "method": "read",
+            "identity": BATCH._named_file_identity(control_metadata),
+            "sha256": hashlib.sha256(b'{"trusted":true}\n').hexdigest(),
+        },
+        {
+            "role": "device_lock",
+            "logical_path": str(lock),
+            "resolved_path": None,
+            "descriptor": lock_descriptor,
+            "kind": "regular_file",
+            "closure": "device_lock",
+            "method": "flock",
+            "identity": BATCH._named_file_identity(lock_metadata),
+            "sha256": None,
+        },
+    ]
+    value = {
+        "schema_version": BATCH.FD_MAP_SCHEMA,
+        "status": "bound",
+        "map_sha256": "0" * 64,
+        "logical_argv_sha256": "1" * 64,
+        "closure_contract": BATCH.FD_CLOSURE_CONTRACT,
+        "bindings": bindings,
+    }
+    pinned = BATCH.PinnedFdMap(-1, value)
+    control_backup = tmp_path / "control-backup.json"
+    lock_backup = tmp_path / "lock-backup"
+    assert BATCH.ACTIVE_FD_MAP is None
+    BATCH.ACTIVE_FD_MAP = pinned
+    try:
+        control.rename(control_backup)
+        control_replacement.rename(control)
+        lock.rename(lock_backup)
+        lock_replacement.rename(lock)
+        raw, digest, metadata = BATCH.read_regular(control, "pinned control")
+        assert raw == b'{"trusted":true}\n'
+        assert digest == bindings[0]["sha256"]
+        assert metadata.st_ino == control_metadata.st_ino
+        expected_lock = {"device": lock_metadata.st_dev, "inode": lock_metadata.st_ino}
+        with BATCH.acquire_device_lock(
+            lock,
+            "pinned-lock-test",
+            {"sha256": "a" * 64},
+            expected_identity=expected_lock,
+        ) as owner:
+            assert owner["inode"] == lock_metadata.st_ino
+        assert b"pinned-lock-test" in lock_backup.read_bytes()
+        assert lock.read_bytes() == b""
+    finally:
+        BATCH.ACTIVE_FD_MAP = None
+        if control_backup.exists():
+            control.unlink(missing_ok=True)
+            control_backup.rename(control)
+        if lock_backup.exists():
+            lock.unlink(missing_ok=True)
+            lock_backup.rename(lock)
+        os.close(control_descriptor)
+        os.close(lock_descriptor)
+
+
+def test_pinned_fd_map_rejects_null_sha_for_code_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = tmp_path / "code.py"
+    code.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    code_descriptor = os.open(code, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    map_descriptor = os.memfd_create(
+        "invalid-null-code-sha",
+        getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0),
+    )
+    try:
+        value = {
+            "schema_version": BATCH.FD_MAP_SCHEMA,
+            "status": "bound",
+            "map_sha256": None,
+            "logical_argv_sha256": "1" * 64,
+            "closure_contract": BATCH.FD_CLOSURE_CONTRACT,
+            "bindings": [
+                {
+                    "role": "resident_runner",
+                    "logical_path": str(code),
+                    "resolved_path": None,
+                    "descriptor": code_descriptor,
+                    "kind": "regular_file",
+                    "closure": "code_execution",
+                    "method": "exec",
+                    "identity": BATCH._named_file_identity(os.fstat(code_descriptor)),
+                    "sha256": None,
+                }
+            ],
+        }
+        value["map_sha256"] = BATCH.sha_bytes(BATCH.canonical(value))
+        raw = BATCH.canonical(value) + b"\n"
+        os.write(map_descriptor, raw)
+        seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+        fcntl.fcntl(map_descriptor, fcntl.F_ADD_SEALS, seals)
+        monkeypatch.setenv(BATCH.FD_MAP_ENV, str(map_descriptor))
+        with pytest.raises(BATCH.BatchError, match="binding value differs"):
+            BATCH.PinnedFdMap.from_environment(required=True)
+    finally:
+        os.close(map_descriptor)
+        os.close(code_descriptor)
+
+
 def test_fixture_index_rejects_relative_and_symlink_parent_paths(tmp_path: Path) -> None:
     for variant in ("relative", "symlink-parent"):
         root = tmp_path / variant

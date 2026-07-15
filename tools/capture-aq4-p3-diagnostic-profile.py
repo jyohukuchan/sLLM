@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import hashlib
 import json
 import os
@@ -30,6 +31,9 @@ SELECTOR_PATH = ROOT / "tools/select-aq4-p3-candidate.py"
 SELECTOR_SHA256 = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
 PROFILE_HELPER_PATH = ROOT / "tools/profile-aq4-p2-family-exclusive.py"
 PROFILE_HELPER_SHA256 = "ef26005a364511ab8d0f7ca2fa46ad2108cac083d0a2a24721f6cef577e16c92"
+FD_MAP_SCHEMA = "ullm.aq4_p3_inherited_fd_map.v1"
+FD_MAP_ENV = "ULLM_AQ4_PINNED_FD_MAP"
+FD_MAP_MAX_BYTES = 1024 * 1024
 
 
 class CaptureError(ValueError):
@@ -404,13 +408,15 @@ class PinnedTargetFile:
         expected_sha256: str,
         descriptor: int,
         identity: tuple[int, ...],
-        argument_index: int,
+        argument_index: int | None,
+        binding: dict[str, Any],
     ) -> None:
         self.path = path
         self.sha256 = expected_sha256
         self.descriptor = descriptor
         self.identity = identity
         self.argument_index = argument_index
+        self.binding = binding
 
     @property
     def fd_path(self) -> str:
@@ -421,9 +427,10 @@ class PinnedTargetFile:
         cls,
         path: Path,
         expected_sha256: str,
-        argument_index: int,
+        argument_index: int | None,
         *,
         require_executable: bool,
+        binding: dict[str, Any],
     ) -> "PinnedTargetFile":
         if not path.is_absolute() or ".." in path.parts or PRODUCER.SHA256_RE.fullmatch(expected_sha256) is None:
             raise CaptureError("target input file binding is invalid")
@@ -447,7 +454,14 @@ class PinnedTargetFile:
                 digest.update(chunk)
             if digest.hexdigest() != expected_sha256 or PROFILER._identity(os.fstat(descriptor)) != identity:
                 raise CaptureError("target input file SHA-256 or identity differs")
-            return cls(resolved, expected_sha256, descriptor, identity, argument_index)
+            return cls(
+                resolved,
+                expected_sha256,
+                descriptor,
+                identity,
+                argument_index,
+                binding,
+            )
         except Exception:
             os.close(descriptor)
             raise
@@ -478,10 +492,17 @@ class PinnedRuntimePath:
         self.kind = value["kind"]
         self.argument_index = argument_index
         self.identity = tuple(value.get("identity", ()))
+        self.binding = value
         self.path_descriptor: int | None = None
         self.resolved_snapshot: PinnedTargetFile | None = None
         if self.kind in {"directory", "regular_file"}:
-            flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                (os.O_RDWR if value.get("method") == "flock" else os.O_RDONLY)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            if self.kind == "directory":
+                flags |= getattr(os, "O_DIRECTORY", 0)
             self.path_descriptor = os.open(self.path, flags)
             if PROFILER._identity(os.fstat(self.path_descriptor)) != self.identity:
                 os.close(self.path_descriptor)
@@ -494,6 +515,7 @@ class PinnedRuntimePath:
                 value["sha256"],
                 argument_index,
                 require_executable=False,
+                binding=value,
             )
         try:
             self.verify()
@@ -525,11 +547,20 @@ class PinnedRuntimePath:
                     raise CaptureError("target runtime directory identity changed")
             elif self.kind == "regular_file":
                 metadata = self.path.lstat()
+                observed = PROFILER._identity(metadata)
+                opened = (
+                    () if self.path_descriptor is None
+                    else PROFILER._identity(os.fstat(self.path_descriptor))
+                )
+                matches = (
+                    observed[:4] == self.identity[:4] and opened[:4] == self.identity[:4]
+                    if self.value.get("method") == "flock"
+                    else observed == self.identity and opened == self.identity
+                )
                 if (
                     not stat.S_ISREG(metadata.st_mode)
-                    or PROFILER._identity(metadata) != self.identity
                     or self.path_descriptor is None
-                    or PROFILER._identity(os.fstat(self.path_descriptor)) != self.identity
+                    or not matches
                 ):
                     raise CaptureError("target runtime file identity changed")
             elif self.kind == "symlinked_file":
@@ -548,6 +579,152 @@ class PinnedRuntimePath:
             self.path_descriptor = None
         if self.resolved_snapshot is not None:
             self.resolved_snapshot.close()
+
+
+def named_identity(metadata: os.stat_result) -> dict[str, int]:
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "nlink": metadata.st_nlink,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+    }
+
+
+class PinnedFdMap:
+    def __init__(self, descriptor: int, value: dict[str, Any], data: bytes) -> None:
+        self.descriptor = descriptor
+        self.value = value
+        self.data = data
+        self.sha256 = hashlib.sha256(data).hexdigest()
+
+    @classmethod
+    def create(
+        cls,
+        target_value: dict[str, Any],
+        snapshots: list[Any],
+    ) -> "PinnedFdMap":
+        by_path: dict[str, Any] = {}
+        bindings: list[dict[str, Any]] = []
+        for snapshot in snapshots[1:]:
+            binding = getattr(snapshot, "binding", None)
+            descriptor = getattr(snapshot, "descriptor", None)
+            path = getattr(snapshot, "path", None)
+            if not isinstance(binding, dict) or type(descriptor) is not int or not isinstance(path, Path):
+                raise CaptureError("target FD map source contract differs")
+            logical_path = str(binding["path"])
+            if logical_path in by_path:
+                raise CaptureError("target FD map logical path is duplicated")
+            metadata = os.fstat(descriptor)
+            expected_sha256 = getattr(snapshot, "sha256", None)
+            if expected_sha256 is None and binding.get("kind") == "symlinked_file":
+                expected_sha256 = binding.get("sha256")
+            record = {
+                "role": binding["role"],
+                "logical_path": logical_path,
+                "resolved_path": (
+                    str(snapshot.resolved_snapshot.path)
+                    if isinstance(snapshot, PinnedRuntimePath)
+                    and snapshot.resolved_snapshot is not None
+                    else None
+                ),
+                "descriptor": descriptor,
+                "kind": binding["kind"] if "kind" in binding else "regular_file",
+                "closure": binding["closure"],
+                "method": binding["method"],
+                "identity": named_identity(metadata),
+                "sha256": expected_sha256,
+            }
+            if (
+                binding["method"] in {"exec", "dlopen", "read"}
+                and (
+                    not isinstance(expected_sha256, str)
+                    or HELPER_SHA256_RE.fullmatch(expected_sha256) is None
+                )
+            ):
+                raise CaptureError("target FD map content SHA coverage differs")
+            bindings.append(record)
+            by_path[logical_path] = snapshot
+        expected_count = (
+            len(target_value["input_files"])
+            + len(target_value["runtime_paths"])
+            + len(target_value["control_files"])
+        )
+        if len(bindings) != expected_count:
+            raise CaptureError("target FD map coverage differs")
+        value: dict[str, Any] = {
+            "schema_version": FD_MAP_SCHEMA,
+            "status": "bound",
+            "map_sha256": None,
+            "logical_argv_sha256": hashlib.sha256(canonical(target_value["argv"])).hexdigest(),
+            "closure_contract": target_value["closure_contract"],
+            "bindings": sorted(bindings, key=lambda item: (item["role"], item["logical_path"])),
+        }
+        value["map_sha256"] = self_hash(value, "map_sha256")
+        data = canonical(value) + b"\n"
+        if len(data) > FD_MAP_MAX_BYTES:
+            raise CaptureError("target FD map exceeds the byte bound")
+        flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+        try:
+            descriptor = os.memfd_create("ullm-aq4-p3-fd-map", flags)
+        except (AttributeError, OSError) as error:
+            raise CaptureError(f"sealed target FD map creation failed: {error}") from error
+        try:
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, data[offset:])
+                if written <= 0:
+                    raise CaptureError("target FD map write failed")
+                offset += written
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            required_seals = (
+                getattr(fcntl, "F_SEAL_SEAL", 0)
+                | getattr(fcntl, "F_SEAL_SHRINK", 0)
+                | getattr(fcntl, "F_SEAL_GROW", 0)
+                | getattr(fcntl, "F_SEAL_WRITE", 0)
+            )
+            if not required_seals:
+                raise CaptureError("target FD map sealing is unavailable")
+            fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, required_seals)
+            result = cls(descriptor, value, data)
+            result.verify()
+            return result
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def verify(self) -> None:
+        required_seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        if fcntl.fcntl(self.descriptor, fcntl.F_GET_SEALS) & required_seals != required_seals:
+            raise CaptureError("target FD map seals differ")
+        if os.pread(self.descriptor, len(self.data) + 1, 0) != self.data:
+            raise CaptureError("target FD map bytes changed")
+        for item in self.value["bindings"]:
+            observed = named_identity(os.fstat(item["descriptor"]))
+            expected = item["identity"]
+            stable_keys = {"device", "inode", "mode", "nlink"}
+            matches = (
+                all(observed[key] == expected[key] for key in stable_keys)
+                if item["method"] == "flock"
+                else all(
+                    observed[key] == expected[key]
+                    for key in {"device", "inode", "mode", "nlink", "size", "mtime_ns"}
+                )
+                if item["method"] != "pre_post_guard"
+                else observed == expected
+            )
+            if not matches:
+                raise CaptureError(f"target FD map identity changed: {item['role']}")
+
+    def close(self) -> None:
+        os.close(self.descriptor)
 
 
 def process_group_alive(process_group: int, process: subprocess.Popen[Any]) -> bool:
@@ -650,7 +827,8 @@ def pinned_profiler_version(profiler: PinnedProfiler) -> dict[str, Any]:
 def validate_target_manifest_root(value: dict[str, Any]) -> None:
     fields = {
         "schema_version", "status", "manifest_sha256", "argv", "environment",
-        "input_files", "runtime_paths", "output_paths", "capture_helpers", "authorization",
+        "input_files", "runtime_paths", "control_files", "output_paths",
+        "closure_contract", "capture_helpers", "authorization",
     }
     PRODUCER.exact(value, fields, "target command manifest")
     if value.get("schema_version") != TARGET_SCHEMA or value.get("status") != "bound":
@@ -684,6 +862,29 @@ def validate_target_manifest_root(value: dict[str, Any]) -> None:
         raise CaptureError("target command authorization differs")
     if value.get("capture_helpers") != capture_helper_contract():
         raise CaptureError("target command capture helper binding differs")
+    if value.get("closure_contract") != {
+        "code_execution_closure": "pinned_fd",
+        "control_input_closure": "pinned_fd",
+        "device_lock_closure": "pinned_fd",
+        "data_integrity": "trusted_pre_post_guarded",
+    }:
+        raise CaptureError("target command closure contract differs")
+
+
+def validate_fd_binding_fields(item: dict[str, Any], label: str) -> None:
+    role = item.get("role")
+    closure = item.get("closure")
+    method = item.get("method")
+    if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", role):
+        raise CaptureError(f"{label} role differs")
+    allowed = {
+        "code_execution": {"exec", "dlopen"},
+        "control_input": {"read"},
+        "device_lock": {"flock"},
+        "data_integrity": {"pre_post_guard"},
+    }
+    if closure not in allowed or method not in allowed[closure]:
+        raise CaptureError(f"{label} closure/method differs")
 
 
 def load_target_command_manifest(
@@ -712,11 +913,13 @@ def load_target_command_manifest(
             raise CaptureError("target command argv is invalid")
         inputs = value.get("input_files")
         runtime_paths = value.get("runtime_paths")
+        control_files = value.get("control_files")
         outputs = value.get("output_paths")
         if (
             not isinstance(inputs, list)
             or not inputs
             or not isinstance(runtime_paths, list)
+            or not isinstance(control_files, list)
             or not isinstance(outputs, list)
         ):
             raise CaptureError("target command path bindings are invalid")
@@ -727,9 +930,10 @@ def load_target_command_manifest(
                 raise CaptureError("target input binding must be an object")
             PRODUCER.exact(
                 item,
-                {"argument_index", "path", "sha256", "executable"},
+                {"argument_index", "path", "sha256", "executable", "role", "closure", "method"},
                 f"target input {number}",
             )
+            validate_fd_binding_fields(item, f"target input {number}")
             index = PRODUCER.count(
                 item.get("argument_index"), f"target input {number} index"
             )
@@ -742,6 +946,7 @@ def load_target_command_manifest(
                 PRODUCER.digest(item.get("sha256"), f"target input {number} hash"),
                 index,
                 require_executable=item["executable"],
+                binding=item,
             )
             snapshots.append(snapshot)
             classified.add(index)
@@ -753,7 +958,7 @@ def load_target_command_manifest(
         for number, item in enumerate(runtime_paths):
             if not isinstance(item, dict):
                 raise CaptureError("target runtime path binding must be an object")
-            common = {"argument_index", "path", "kind"}
+            common = {"argument_index", "path", "kind", "role", "closure", "method"}
             kind = item.get("kind")
             expected = (
                 common | {"identity"}
@@ -765,6 +970,7 @@ def load_target_command_manifest(
             if not expected:
                 raise CaptureError("target runtime path kind differs")
             PRODUCER.exact(item, expected, f"target runtime path {number}")
+            validate_fd_binding_fields(item, f"target runtime path {number}")
             index = PRODUCER.count(
                 item.get("argument_index"), f"target runtime path {number} index"
             )
@@ -790,6 +996,34 @@ def load_target_command_manifest(
                     raise CaptureError("target symlinked runtime path resolution differs")
             snapshots.append(PinnedRuntimePath(item, index))
             classified.add(index)
+        indirect_paths: set[str] = set()
+        for number, item in enumerate(control_files):
+            if not isinstance(item, dict):
+                raise CaptureError("target control binding must be an object")
+            PRODUCER.exact(
+                item,
+                {"path", "sha256", "role", "closure", "method"},
+                f"target control {number}",
+            )
+            validate_fd_binding_fields(item, f"target control {number}")
+            path_text = item.get("path")
+            if (
+                not isinstance(path_text, str)
+                or not Path(path_text).is_absolute()
+                or path_text in indirect_paths
+                or any(binding.get("path") == path_text for binding in inputs)
+                or any(binding.get("path") == path_text for binding in runtime_paths)
+            ):
+                raise CaptureError("target control path coverage differs")
+            snapshot = PinnedTargetFile.open(
+                Path(path_text),
+                PRODUCER.digest(item.get("sha256"), f"target control {number} hash"),
+                None,
+                require_executable=False,
+                binding=item,
+            )
+            snapshots.append(snapshot)
+            indirect_paths.add(path_text)
         for number, item in enumerate(outputs):
             if not isinstance(item, dict):
                 raise CaptureError("target output binding must be an object")
@@ -838,18 +1072,18 @@ def pinned_target_argv(value: dict[str, Any], snapshots: list[Any]) -> tuple[lis
         descriptor = getattr(snapshot, "descriptor", None)
         fd_path = getattr(snapshot, "fd_path", None)
         index = getattr(snapshot, "argument_index", None)
+        binding = getattr(snapshot, "binding", {})
         if descriptor is None and fd_path is None:
             continue
-        if type(descriptor) is not int or not isinstance(fd_path, str) or type(index) is not int:
+        if type(descriptor) is not int or not isinstance(fd_path, str):
             raise CaptureError("target FD binding contract differs")
-        if index in replacements or index >= len(argv):
+        descriptors.append(descriptor)
+        if binding.get("role") not in {"python_interpreter", "resident_runner"}:
+            continue
+        if type(index) is not int or index in replacements or index >= len(argv):
             raise CaptureError("target FD binding coverage differs")
         replacements[index] = fd_path
-        descriptors.append(descriptor)
-    expected = {item["argument_index"] for item in value["input_files"]} | {
-        item["argument_index"] for item in value["runtime_paths"]
-    }
-    if set(replacements) != expected or 0 not in replacements:
+    if set(replacements) != {0, 1}:
         raise CaptureError("target FD replacement coverage differs")
     for index, fd_path in replacements.items():
         argv[index] = fd_path
@@ -1516,6 +1750,7 @@ def main(
         raise CaptureError("capture lifecycle callbacks are reserved for capture")
     pinned_profiler: PinnedProfiler | None = None
     pinned_target_manifest: PinnedTargetManifest | None = None
+    pinned_fd_map: PinnedFdMap | None = None
     capture_completed = False
     failure_context: dict[str, Any] | None = None
     logical_command: list[str] | None = None
@@ -1536,12 +1771,41 @@ def main(
         )
         pinned_target_manifest = target_snapshots[0]
         target_command, target_descriptors = pinned_target_argv(target_value, target_snapshots)
+        pinned_fd_map = PinnedFdMap.create(target_value, target_snapshots)
+        if FD_MAP_ENV in target_value["environment"]:
+            raise CaptureError("target base environment reserves the FD map key")
+        effective_environment = dict(target_value["environment"])
+        effective_environment[FD_MAP_ENV] = str(pinned_fd_map.descriptor)
         profiler_value["target_command_manifest"] = ref(target_snapshots[0])
         profiler_value["target_environment"] = {
             "sha256": hashlib.sha256(canonical(target_value["environment"])).hexdigest(),
             "keys": sorted(target_value["environment"]),
             "exact_base_environment": True,
             "secret_material_recorded": False,
+            "injected_fd_map_key": FD_MAP_ENV,
+        }
+        profiler_value["execution_closure"] = {
+            **target_value["closure_contract"],
+            "fd_map_schema": FD_MAP_SCHEMA,
+            "fd_map_sha256": pinned_fd_map.value["map_sha256"],
+            "fd_map_file_sha256": pinned_fd_map.sha256,
+            "bindings": [
+                {
+                    "role": item["role"],
+                    "logical_path": item["logical_path"],
+                    "resolved_path": item["resolved_path"],
+                    "kind": item["kind"],
+                    "closure": item["closure"],
+                    "method": item["method"],
+                    "identity": item["identity"],
+                    "sha256": item["sha256"],
+                }
+                for item in pinned_fd_map.value["bindings"]
+            ],
+            "capture_helpers": [
+                {**item, "closure": "code_execution", "method": "verified_in_process"}
+                for item in capture_helper_contract()
+            ],
         }
         profiler_value["capture_helpers"] = capture_helper_contract()
         command = profiler_command(
@@ -1567,6 +1831,8 @@ def main(
         def verify_launch_inputs() -> None:
             pinned_profiler.verify()
             verify_capture_helpers()
+            assert pinned_fd_map is not None
+            pinned_fd_map.verify()
             try:
                 for snapshot in target_snapshots:
                     snapshot.verify()
@@ -1578,10 +1844,10 @@ def main(
                 command,
                 args.profile_output_directory,
                 args.timeout,
-                pass_fds=(pinned_profiler.descriptor, *target_descriptors),
+                pass_fds=(pinned_profiler.descriptor, *target_descriptors, pinned_fd_map.descriptor),
                 verifier=verify_launch_inputs,
                 failure_context=failure_context,
-                environment=target_value["environment"],
+                environment=effective_environment,
                 on_rocprof_started=on_rocprof_started,
                 logical_command=logical_command,
             )
@@ -1639,6 +1905,8 @@ def main(
     finally:
         if target_snapshots:
             close_target_snapshots(target_snapshots)
+        if pinned_fd_map is not None:
+            pinned_fd_map.close()
         if pinned_profiler is not None:
             pinned_profiler.close()
 

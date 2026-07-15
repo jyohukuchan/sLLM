@@ -813,19 +813,19 @@ def profile_runner_target_manifest(
     if command[28] != str(live_path) or not isinstance(live_sha, str) or not SHA_RE.fullmatch(live_sha):
         raise LauncherError("profile runner live preflight binding differs")
     file_bindings = {
-        0: (PYTHON_SHA, True),
-        1: (RUNNER_SHA, False),
-        3: (INPUT_MEMBER_SHA["case-binding.json"], False),
-        5: (INPUT_MEMBER_SHA["fixture-index.json"], False),
-        7: (INPUT_MEMBER_SHA["identity.json"], False),
-        9: (INPUT_MEMBER_SHA["preflight.json"], False),
-        11: (INPUT_MEMBER_SHA["policy.json"], False),
-        15: (VALIDATOR_SHA, False),
-        28: (live_sha, False),
-        35: (RESIDENT_SHA, True),
-        37: (SERVED_SHA, False),
+        0: (PYTHON_SHA, True, "python_interpreter", "code_execution", "exec"),
+        1: (RUNNER_SHA, False, "resident_runner", "code_execution", "exec"),
+        3: (INPUT_MEMBER_SHA["case-binding.json"], False, "case_binding", "control_input", "read"),
+        5: (INPUT_MEMBER_SHA["fixture-index.json"], False, "fixture_index", "control_input", "read"),
+        7: (INPUT_MEMBER_SHA["identity.json"], False, "identity", "control_input", "read"),
+        9: (INPUT_MEMBER_SHA["preflight.json"], False, "prepared_preflight", "control_input", "read"),
+        11: (INPUT_MEMBER_SHA["policy.json"], False, "policy", "control_input", "read"),
+        15: (VALIDATOR_SHA, False, "trusted_validator", "code_execution", "exec"),
+        28: (live_sha, False, "live_preflight", "control_input", "read"),
+        35: (RESIDENT_SHA, True, "resident_driver", "code_execution", "exec"),
+        37: (SERVED_SHA, False, "served_manifest", "control_input", "read"),
     }
-    for index, (expected_sha, _executable) in file_bindings.items():
+    for index, (expected_sha, _executable, _role, _closure, _method) in file_bindings.items():
         if sha_file(Path(command[index]), f"profile runner target argv[{index}]")[0] != expected_sha:
             raise LauncherError("profile runner target input SHA differs")
     bundle_metadata = INPUT_ROOT.lstat()
@@ -845,8 +845,11 @@ def profile_runner_target_manifest(
                 "path": command[index],
                 "sha256": digest,
                 "executable": executable,
+                "role": role,
+                "closure": closure,
+                "method": method,
             }
-            for index, (digest, executable) in sorted(file_bindings.items())
+            for index, (digest, executable, role, closure, method) in sorted(file_bindings.items())
         ],
         "runtime_paths": [
             {
@@ -854,12 +857,18 @@ def profile_runner_target_manifest(
                 "path": command[13],
                 "kind": "directory",
                 "identity": list(file_identity(bundle_metadata)),
+                "role": "bundle_root",
+                "closure": "data_integrity",
+                "method": "pre_post_guard",
             },
             {
                 "argument_index": 25,
                 "path": command[25],
                 "kind": "regular_file",
                 "identity": list(file_identity(lock_metadata)),
+                "role": "device_lock",
+                "closure": "device_lock",
+                "method": "flock",
             },
             {
                 "argument_index": 31,
@@ -867,9 +876,32 @@ def profile_runner_target_manifest(
                 "kind": "symlinked_file",
                 "resolved_path": str(resolved_roctx),
                 "sha256": ROCTX_LIBRARY_SHA,
+                "role": "roctx_library",
+                "closure": "code_execution",
+                "method": "dlopen",
             },
         ],
+        "control_files": [
+            {
+                "path": str(INPUT_ROOT / name),
+                "sha256": digest,
+                "role": f"bundle_{name.lower().replace('-', '_').replace('.', '_')}",
+                "closure": "control_input",
+                "method": "read",
+            }
+            for name, digest in sorted(INPUT_MEMBER_SHA.items())
+            if name not in {
+                "case-binding.json", "fixture-index.json", "identity.json",
+                "preflight.json", "policy.json", "resident-driver",
+            }
+        ],
         "output_paths": [{"argument_index": 19, "path": command[19]}],
+        "closure_contract": {
+            "code_execution_closure": "pinned_fd",
+            "control_input_closure": "pinned_fd",
+            "device_lock_closure": "pinned_fd",
+            "data_integrity": "trusted_pre_post_guarded",
+        },
         "capture_helpers": profile_capture_helper_bindings(),
         "authorization": {
             "maximum_invocations": 1,
