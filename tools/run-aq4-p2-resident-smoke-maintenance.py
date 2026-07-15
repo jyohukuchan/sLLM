@@ -33,10 +33,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "48cce1349eae0b58beac2851a05e40b2d522559e"
-LAUNCHER_TREE = "49904d7cd5d310d39a1d4ff44f4c8ab881fe4326"
-LAUNCHER_GIT_BLOB = "9346e88563038ac9df1140037d4129101ab445eb"
-LAUNCHER_SHA = "f620495153c836b65160c1575781985174fd86cb6dc40de8bf5c565e02ad37e4"
+LAUNCHER_COMMIT = "e8ed9baa0d4da9eec5ab1a20e4b8c5d7f087cb32"
+LAUNCHER_TREE = "6fc978c59fe98b326554f6237642914c19ba32cb"
+LAUNCHER_GIT_BLOB = "3ee4699e1910f91c1c11f05337efda000c9e6ee8"
+LAUNCHER_SHA = "aa1eaf0cafa62402151ffe03b4205b0f109868b2cc0c4879af45b7e030c529c6"
 RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -56,10 +56,10 @@ PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v3"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v3"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "48cce1349eae0b58beac2851a05e40b2d522559e"
-PROFILE_CAPTURE_TREE = "49904d7cd5d310d39a1d4ff44f4c8ab881fe4326"
-PROFILE_CAPTURE_GIT_BLOB = "5e87d7ec0b5c2c37a4ffc2591fa2d7bad8c9cbfd"
-PROFILE_CAPTURE_SHA = "53cbf20cce2219ed2f1033d7be60596c2f788b1496712c147547f383773a30f1"
+PROFILE_CAPTURE_COMMIT = "e8ed9baa0d4da9eec5ab1a20e4b8c5d7f087cb32"
+PROFILE_CAPTURE_TREE = "6fc978c59fe98b326554f6237642914c19ba32cb"
+PROFILE_CAPTURE_GIT_BLOB = "ac6b0f693afd0217a2eeb01e79fdfe6fce8d08ac"
+PROFILE_CAPTURE_SHA = "928511985128385b10f2a5c1fe1d9020d92528cc8de5afd11486989ea3ea1846"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v3"
@@ -2654,7 +2654,7 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 444, "passed": 444, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 449, "passed": 449, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
@@ -2690,8 +2690,8 @@ QA_ATTESTATION = {
             {
                 "name": "selection_raw_producer",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_build_aq4_p3_selection_raw.py"],
-                "collected": 21, "passed": 21, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_build_aq4_p3_selection_raw.py", "source_commit": "78ba33c982c994df47c8ff4541df85b8d7da4a63", "git_blob": "1227c0a4fd60b9730e2e9e8b9f663fbc5867914f", "collected": 21, "passed": 21}],
+                "collected": 26, "passed": 26, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_build_aq4_p3_selection_raw.py", "source_commit": "f7907dae3baff7518edb7fc89d67788aaf3aad34", "git_blob": "8167859108c68fa27c67fe21c3d772e4899e384a", "collected": 26, "passed": 26}],
             },
             {
                 "name": "profile_family_exclusion",
