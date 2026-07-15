@@ -20,6 +20,12 @@
 - ready-v8 と dry-run-v8 は pre-operator NO-GO の immutable artifact として保持し、downstream authority には使わない。
 - 次の profile ready と dry-run は未使用の v9 経路へ進める。
 
+## QA source placement 修正
+
+- operator の read-only trusted-source audit により、launcher execute test の attestation が source commit `60461d79` の blob を参照する一方、実行した current placement は artifact commit `c5d17d75` の blob であることを検出した。
+- `tests/test_launch_aq4_p2_resident_smoke_execute.py` を current placement commit `c5d17d7524608ea4438ba82a1fb51637b0876de6`、blob `5285531b3a6a952114ad3139a39a72a268dabb6a` へ修正した。
+- ready-v9 は invalid-preoperator として保持し、次の profile ready と dry-run を fresh v10 へ進める。
+
 ## Verification
 
 - maintenance 全 155 件: passed

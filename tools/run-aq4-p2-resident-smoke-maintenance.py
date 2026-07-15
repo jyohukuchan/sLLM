@@ -50,12 +50,12 @@ HARNESS_TRUST_PATH = READY_ROOT / "harness-trust.json"
 ATTESTATION_PATH = READY_ROOT / "qa-attestation.json"
 MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v10"
 DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-dry-run-v6"
-PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v9"
+PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v10"
 PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
 PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
 PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v7"
-PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v9"
+PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v10"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
 PROFILE_CAPTURE_COMMIT = "e86cf512183574340ddfc6564477395766262092"
 PROFILE_CAPTURE_TREE = "4ca4ba52084b15c78a95e5a7c4580e5bd2fd2a07"
@@ -3135,7 +3135,7 @@ QA_ATTESTATION = {
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "76c48aa27c08f8cd5115a15e6be25b83d679d8fa", "git_blob": "ebc41e27f6a7c734329298bc0f73c3f803241ebc", "collected": 54, "passed": 54},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "60461d796ba64a7f0ba28353cb4f263d08d18dab", "git_blob": "f1305f145f2c635754b6061fc4c5d1606345cefa", "collected": 8, "passed": 8},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "60461d796ba64a7f0ba28353cb4f263d08d18dab", "git_blob": "b414e9f3f4c3b9b43d85a2a3d0d56c77ba739b0e", "collected": 71, "passed": 71},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "c5d17d7524608ea4438ba82a1fb51637b0876de6", "git_blob": "5285531b3a6a952114ad3139a39a72a268dabb6a", "collected": 71, "passed": 71},
                     {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "2d991c7abd08e4ff39a1418bfad64f9d176265c6", "git_blob": "1a52d7220f4950ad273ac099410e3e6608bf17d9", "collected": 156, "passed": 156},
                 ],
             },
