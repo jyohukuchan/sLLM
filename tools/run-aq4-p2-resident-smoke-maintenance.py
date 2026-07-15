@@ -33,15 +33,15 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "48cce1349eae0b58beac2851a05e40b2d522559e"
-LAUNCHER_TREE = "49904d7cd5d310d39a1d4ff44f4c8ab881fe4326"
-LAUNCHER_GIT_BLOB = "9346e88563038ac9df1140037d4129101ab445eb"
-LAUNCHER_SHA = "f620495153c836b65160c1575781985174fd86cb6dc40de8bf5c565e02ad37e4"
-RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
+LAUNCHER_COMMIT = "868b9f72739bfb7aabc492ba5b4880b7f44e8b3d"
+LAUNCHER_TREE = "dad65bcd6ea925f1141d2e580259c1f36341a503"
+LAUNCHER_GIT_BLOB = "e9f6a11131faeb7d766b85e5ef512839f4071be9"
+LAUNCHER_SHA = "a62c054d7a0712a7aa1aedda71b38fae5378948dd6c9ad39ded70720e1ecea01"
+RUNNER_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
+RUNNER_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "614fea0808a4bbe044df734fbf530b2bd9a6e6ec"
-B_COMMIT = "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407"
+VALIDATOR_COMMIT = "ec25754440e4655750e3bc4ef11c0f1580dbf2f9"
+B_COMMIT = "71fc08aadc6bc1a0a3aed85be3502c7362ad8e55"
 RESIDENT_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
@@ -56,10 +56,10 @@ PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v3"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v3"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "48cce1349eae0b58beac2851a05e40b2d522559e"
-PROFILE_CAPTURE_TREE = "49904d7cd5d310d39a1d4ff44f4c8ab881fe4326"
-PROFILE_CAPTURE_GIT_BLOB = "5e87d7ec0b5c2c37a4ffc2591fa2d7bad8c9cbfd"
-PROFILE_CAPTURE_SHA = "53cbf20cce2219ed2f1033d7be60596c2f788b1496712c147547f383773a30f1"
+PROFILE_CAPTURE_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
+PROFILE_CAPTURE_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
+PROFILE_CAPTURE_GIT_BLOB = "9c0ae790011a614d6d44c39e33e5911f2ff358d3"
+PROFILE_CAPTURE_SHA = "e749e6e53f0daee596fa68bc374ad88241764a2ba4f149e166093ef525cd6da8"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v3"
@@ -2654,19 +2654,19 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 444, "passed": 444, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 462, "passed": 462, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 324, "passed": 324, "failed": 0, "deselected": 0,
+                "collected": 340, "passed": 340, "failed": 0, "deselected": 0,
                 "files": [
-                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407", "git_blob": "301b0df899590b28f9b9564866fbda80016580e2", "collected": 51, "passed": 51},
-                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "e57f7df362ced2fc6753519772b2e656b530ad7f", "collected": 37, "passed": 37},
+                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "71fc08aadc6bc1a0a3aed85be3502c7362ad8e55", "git_blob": "504aa74f2b05523144d23a5ff23c15a81de35324", "collected": 63, "passed": 63},
+                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd", "git_blob": "1dcc036971a238b5b48eb8147bfc8cbf8f629f39", "collected": 39, "passed": 39},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "48cce1349eae0b58beac2851a05e40b2d522559e", "git_blob": "6ff9cf684c9f7ec803ebb50348b28e74ec7343bb", "collected": 69, "passed": 69},
-                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "192eec2e319c66d5847993e965b5adbe5c69a887", "git_blob": "7536bba34eae2fb5c743327c88ceb5a9b3ac87c8", "collected": 133, "passed": 133},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "bae4c841fdbaf5b1308a9cd51624ffe1b6188f56", "git_blob": "4eb479191a7b9ecab7c5fc305fa2f89b362c08b4", "collected": 135, "passed": 135},
                 ],
             },
             {
@@ -2684,8 +2684,8 @@ QA_ATTESTATION = {
             {
                 "name": "diagnostic_capture",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
-                "collected": 25, "passed": 25, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "48cce1349eae0b58beac2851a05e40b2d522559e", "git_blob": "a1c99f777b092dcf31632b4c1f336e5bc7ab4f97", "collected": 25, "passed": 25}],
+                "collected": 27, "passed": 27, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd", "git_blob": "1eae6dbd21620ca7e6f465b061dc67244d1b7261", "collected": 27, "passed": 27}],
             },
             {
                 "name": "selection_raw_producer",
