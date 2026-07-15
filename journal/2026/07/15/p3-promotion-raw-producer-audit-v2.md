@@ -19,6 +19,12 @@
   - 同一directoryのtemporary fileをfsync後、hard-link createでno-replace発行する。
   - 発行名とtemporary名のdirectory更新後にparent directoryをfsyncする。
   - 既存pathおよび発行競合では相手のbytesを変更しない。
+- producer変更で連鎖的にstaleになったtrust pinを、通常commitだけで次の順に再固定した。
+  1. producer実装とdirect test
+  2. capture `PRODUCER_SHA256` と launcher `PROFILE_PRODUCER_HELPER_SHA`
+  3. maintenanceのcapture/launcher commit・tree・blob・file SHA、およびproducer test attestation
+  4. base/profile ready artifactの正規生成器による再生成
+- profile-ready rootに残っていた旧schemaの`target-command-manifest.json`を削除した。現契約ではtarget manifestはlive preflight後にlauncherがevidence outputへfresh生成するため、ready artifactへ固定fileとして同居させない。
 - selector互換の出力schema、既存の7代表case×10 measured、M=128+別M、D2H/sync一次trace再計算、trace hash非再利用、統計再計算、atomic create-new出力は変更していない。
 
 ## 契約監査結果
@@ -38,6 +44,9 @@
 ## 検証
 
 - `python3 -m pytest -q tests/test_build_aq4_p3_selection_raw.py` — **26 passed**。
+- `python3 -m pytest -q tests/test_build_aq4_p3_selection_raw.py tests/test_select_aq4_p3_candidate.py` — **52 passed**。
+- capture helper pinの直接回帰 — **5 passed**。
+- maintenanceのbase/profile ready readback、capture wrapper、fresh target binding回帰 — **3 passed**。
 - fixtureで次の fail-closed を確認した。
   - identity runtime device、package hash binding、worker hash の欠落
   - full-model pair の underlying measured run sample 再利用。別run IDの同一case/indexは受理
@@ -47,10 +56,13 @@
 - `python3 -m py_compile tools/build-aq4-p3-selection-raw.py tools/select-aq4-p3-candidate.py tests/test_build_aq4_p3_selection_raw.py tests/test_select_aq4_p3_candidate.py` — passed。
 - `git diff --check` — passed。
 - GPU、rocprof実capture、service、systemctl は実行していない。
-- capture/launcher全体の既存テストには、mainで並行更新されたbundle root identityとの不一致による4件の失敗がある。これは本laneのraw producer変更ではなく、capture実測を行わずに親agentへ引き渡す。
+- capture全体を含むproducer/selector/capture回帰は **75 passed / 4 failed**。4件はすべて既存prepared input root/bundle identity driftがprofile constantsより先にfail-closedするためで、producer pinのstaleではない。
+- launcher execute回帰は **50 passed / 19 failed**。19件は同じ既存input root identityとexecute-binding artifact driftによりconstants stageで停止する。今回のproducer pin chainと別のcachebuster作業として残す。
+- maintenance adapterの3件も、既存test target fixtureが現行sealed FD-map schemaを満たさずcapture開始前に停止した。ready readbackとhelper pinの直接回帰は通過している。
 
 ## 次の行動
 
-1. 親agentが `p3-promotion-raw` の通常commitをmainへ統合する。
+1. 親agentが `p3-promotion-raw` の通常follow-up commit列をmainへ統合する。
 2. 実GPU/profileを行う前に、7 case × 10 measured の各runへ unique kernel/HIP API trace、capture capability、resident identity、full-model pair を割り当てる。
-3. producer rawをselectorへ渡し、`selected` 以外ではP3 runtime候補を昇格させない。
+3. 別laneでprepared input rootとexecute-binding artifactを現行schemaへ正規再生成し、残るcapture/launcher constants-stage回帰を解消する。
+4. producer rawをselectorへ渡し、`selected` 以外ではP3 runtime候補を昇格させない。
