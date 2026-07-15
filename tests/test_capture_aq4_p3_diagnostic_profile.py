@@ -1977,7 +1977,7 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
         return subprocess.CompletedProcess(
             argv,
             0,
-            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4", "status": "prepared_not_executed"}\n',
+            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5", "status": "prepared_not_executed"}\n',
             b"",
         )
 
@@ -2081,7 +2081,7 @@ def test_captured_validator_warning_remains_fail_closed_before_profile_runner(
         return subprocess.CompletedProcess(
             argv,
             0,
-            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4", "status": "prepared_not_executed"}\n',
+            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5", "status": "prepared_not_executed"}\n',
             warning,
         )
 
@@ -2123,7 +2123,7 @@ def test_profile_launcher_without_capture_executor_never_starts_runner(tmp_path:
         return subprocess.CompletedProcess(
             argv,
             0,
-            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4", "status": "prepared_not_executed"}\n',
+            b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5", "status": "prepared_not_executed"}\n',
             b"",
         )
 

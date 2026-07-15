@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
 BINDING_MANIFEST = BINDING_ROOT / "binding-manifest.json"
 RUNNER = BINDING_ROOT / "trusted-runner.py"
 VALIDATOR = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
@@ -31,7 +31,7 @@ RESIDENT_DRIVER = INPUT_ROOT / "resident-driver"
 SERVED_MANIFEST = Path("/etc/ullm/served-models/active.json")
 LOCK_PATH = Path("/run/ullm/r9700.lock")
 RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
-EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v1"
+EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v5"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
 EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v6"
@@ -54,17 +54,18 @@ INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10491730
 INPUT_FINGERPRINT_SHA = "55b30d5d521abf98b0122144f59122b1030a885dbfd67d25bb9d4c6f2955bb14"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10495383
-BINDING_MANIFEST_SHA = "da0d7fe01a091a5c42b23435c9734c23f84af64460e5713b8aadca78225ab187"
-BINDING_PLAN_SHA = "10cfb1612aa7e4b0945a539bcb886782954accb535d104b6642a3b10b6239d80"
-RUNNER_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
-RUNNER_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
-RUNNER_GIT_BLOB = "b7a3af27b17bd9dfae926c320eda04f7c3afae4e"
-RUNNER_SHA = "5d4cf385a83961f8aedc37d36c3e4625d783ec7ddd6b17de4f93648516d42354"
-VALIDATOR_COMMIT = "a44074278d4bbd5e243153ab8c5be272489e23a2"
-VALIDATOR_TREE = "2bb2036e44c4e328c9f61f0400b462db5db11a85"
-VALIDATOR_GIT_BLOB = "392706210060499d1384ceb9bcf58d324e9cca05"
-VALIDATOR_SHA = "f11394f84cdf8b858634bab20a48ba24d19cd51a0f0c95783dfe329f33e1e976"
+BINDING_ROOT_INODE = 10617146
+BINDING_ROOT_MODE = 0o555
+BINDING_MANIFEST_SHA = "82a75a62a1b5ce254df5522f808ec1ffce00045265960342149eb9ddb29837d4"
+BINDING_PLAN_SHA = "8063dcc804cf48b2ceb890cc444c3f80279756c740968b9cab044ec5992e5009"
+RUNNER_COMMIT = "076c3662aad6a3c8c74b3875882df4b41c026de7"
+RUNNER_TREE = "8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca"
+RUNNER_GIT_BLOB = "c6f5f30a0a3bc64dca01787648f19bb74edc95f5"
+RUNNER_SHA = "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
+VALIDATOR_COMMIT = "a3f0527a200bfe14f81301789089c61b59047116"
+VALIDATOR_TREE = "becc037dbb3a4e91c10499ea3bc2cf9b7c011748"
+VALIDATOR_GIT_BLOB = "bec05f97ad9156ae49aab27ccda5c73fab346d8e"
+VALIDATOR_SHA = "8a151a4d3b44c266a667c1e902d284b019ed282639fa5f0f6e5339de0488e5bc"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
 RESIDENT_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
 RESIDENT_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
@@ -110,12 +111,12 @@ SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
 EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v6"
-PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
-PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v4"
-PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v4"
+PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v5"
+PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v5"
+PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v5"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
-PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v4"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v5"
 PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
 ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
@@ -170,11 +171,11 @@ INPUT_MEMBER_SHA = {
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "0e60bd3b6924be604a269b447e6dbea6ec9f5fbd8c2fd134334cd73991f36895",
+    "runner-subprocess-evidence.json": "a3646ec43d6c74e087fc16155c7e5ef0434331e4f2e3c903d0ed4f5f76ac19ba",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "6aa93fbb4cb709906c46ea2e497e052360f01ae9e3ae8d08b4d45323eea412fb",
+    "SHA256SUMS": "0971483a95925d352ef4f80af94631b1b9e323243d1fee236129a010d47a155d",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -452,11 +453,13 @@ class Snapshot:
 
 def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     manifest = parse_json(raw, "B binding manifest")
-    exact = {"schema_version", "status", "promotion", "launch_eligible", "requires_immutable_launcher", "predecessor", "trust_roots", "input_root", "outputs", "execution", "cycle_control", "next_stage", "runner_roles"}
+    exact = {"schema_version", "status", "promotion", "launch_eligible", "requires_immutable_launcher", "predecessor", "trust_roots", "input_root", "outputs", "execution", "cycle_control", "next_stage", "runner_roles", "binding_root_contract"}
     if set(manifest) != exact:
         raise LauncherError("B binding manifest exact schema differs")
-    if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v4" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
+    if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v5" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
         raise LauncherError("B binding status/promotion differs")
+    if manifest.get("binding_root_contract") != {"type": "directory", "mode": "0555", "members_read_only": True, "members_single_link": True}:
+        raise LauncherError("B binding root contract differs")
     if manifest.get("launch_eligible") is not False or manifest.get("requires_immutable_launcher") is not True:
         raise LauncherError("B binding L boundary differs")
     if manifest.get("runner_roles") != {
@@ -476,10 +479,16 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     }:
         raise LauncherError("B runner role boundary differs")
     roots = manifest.get("trust_roots")
-    if not isinstance(roots, dict) or roots.get("source_commit") != RUNNER_COMMIT or roots.get("source_tree") != RUNNER_TREE or roots.get("runner") != {"git_blob": RUNNER_GIT_BLOB, "sha256": RUNNER_SHA}:
+    if not isinstance(roots, dict) or roots.get("source_commit") != RUNNER_COMMIT or roots.get("source_tree") != RUNNER_TREE or roots.get("runner") != {
+        "archive_path": str(RUNNER),
+        "git_blob": RUNNER_GIT_BLOB,
+        "source_commit": RUNNER_COMMIT,
+        "source_sha256": RUNNER_SHA,
+        "source_tree": RUNNER_TREE,
+    }:
         raise LauncherError("B runner trust root differs")
     validator = roots.get("validator")
-    if not isinstance(validator, dict) or validator.get("source_commit") != VALIDATOR_COMMIT or validator.get("source_tree") != VALIDATOR_TREE or validator.get("git_blob") != VALIDATOR_GIT_BLOB or validator.get("sha256") != VALIDATOR_SHA or validator.get("execution_path") != str(VALIDATOR):
+    if validator != {"archive_path": str(BINDING_ROOT / "trusted-validator.py"), "execution_path": str(VALIDATOR), "git_blob": VALIDATOR_GIT_BLOB, "sha256": VALIDATOR_SHA, "source_commit": VALIDATOR_COMMIT, "source_tree": VALIDATOR_TREE}:
         raise LauncherError("B validator trust root differs")
     resident = roots.get("resident_driver")
     if resident != {
@@ -523,7 +532,7 @@ def runner_argv() -> list[str]:
         "--identity", str(INPUT_ROOT / "identity.json"), "--preflight", str(INPUT_ROOT / "preflight.json"),
         "--policy", str(INPUT_ROOT / "policy.json"), "--bundle-root", str(INPUT_ROOT),
         "--trusted-validator", str(VALIDATOR), "--trusted-validator-sha256", VALIDATOR_SHA,
-        "--output-dir", str(RUNNER_OUTPUT), "--run-id", "p2-r9700-resident-one-case-smoke-binding-v4-validate",
+        "--output-dir", str(RUNNER_OUTPUT), "--run-id", "p2-r9700-resident-one-case-smoke-binding-v5-validate",
         "--baseline-kind", "active-production", "--lock-path", str(LOCK_PATH), "--one-case-smoke", "--dry-run",
     ]
 
@@ -531,6 +540,8 @@ def runner_argv() -> list[str]:
 def validate_constants(snapshot: Snapshot) -> dict[str, Any]:
     snapshot.directory(INPUT_ROOT, INPUT_ROOT_DEVICE, INPUT_ROOT_INODE, "input root")
     snapshot.directory(BINDING_ROOT, BINDING_ROOT_DEVICE, BINDING_ROOT_INODE, "B root")
+    if stat.S_IMODE(BINDING_ROOT.lstat().st_mode) != BINDING_ROOT_MODE:
+        raise LauncherError("B root immutable mode differs")
     if {entry.name for entry in INPUT_ROOT.iterdir()} != set(INPUT_MEMBER_SHA):
         raise LauncherError("input root exact19 coverage differs")
     for name, digest in INPUT_MEMBER_SHA.items():
@@ -606,7 +617,7 @@ def process_record(argv: list[str], completed: subprocess.CompletedProcess[bytes
 
 def validate_validator_report(raw: bytes) -> dict[str, Any]:
     report = parse_json(raw, "validator report")
-    expected = {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4"}
+    expected = {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5"}
     if report != expected:
         raise LauncherError("validator report/root/B binding differs")
     return report

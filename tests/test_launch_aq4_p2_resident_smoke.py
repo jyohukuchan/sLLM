@@ -21,7 +21,7 @@ SPEC.loader.exec_module(LAUNCHER)
 
 
 def validator_success() -> bytes:
-    return (json.dumps({"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v4"}, sort_keys=True) + "\n").encode()
+    return (json.dumps({"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5"}, sort_keys=True) + "\n").encode()
 
 
 def test_real_dry_run_orders_validator_before_runner_and_writes_immutable_evidence(tmp_path: Path) -> None:
@@ -73,6 +73,21 @@ def test_binding_manifest_rejects_unknown_duplicate_and_rebound_values() -> None
     rebound["trust_roots"]["resident_driver"]["build"]["cargo_build_jobs"] = 2
     with pytest.raises(LAUNCHER.LauncherError, match="resident trust root"):
         LAUNCHER.validate_binding_manifest(LAUNCHER.pretty(rebound))
+
+    rebound = json.loads(raw)
+    rebound["binding_root_contract"]["mode"] = "0755"
+    with pytest.raises(LAUNCHER.LauncherError, match="root contract"):
+        LAUNCHER.validate_binding_manifest(LAUNCHER.pretty(rebound))
+
+
+def test_binding_root_is_sealed_read_only() -> None:
+    metadata = LAUNCHER.BINDING_ROOT.lstat()
+    assert metadata.st_mode & 0o777 == LAUNCHER.BINDING_ROOT_MODE == 0o555
+    assert metadata.st_nlink == 2
+    for path in LAUNCHER.BINDING_ROOT.iterdir():
+        member = path.lstat()
+        assert member.st_mode & 0o777 == 0o444
+        assert member.st_nlink == 1
 
 
 def test_rejects_symlinked_ancestor_and_existing_output(tmp_path: Path) -> None:
