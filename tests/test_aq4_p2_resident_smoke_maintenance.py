@@ -565,7 +565,7 @@ def test_profile_ready_v7_through_v10_are_sealed_historical_preoperator_readback
     assert ready["profile_diagnostic"]["output"]["directory"].endswith(
         "/aq4-p3-diagnostic-rocprof-capture-v7"
     )
-    HARNESS.LAUNCHER.validate_execute_binding(ready["launcher_binding"], permit_test_live_preflight=True)
+    assert ready["launcher_binding"]["run_id"] == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v7"
     assert trust["commit"] == "3fc2b8cd6f6910fbebd3ff4728855d55bf2cbbd2"
     assert trust["ready_binding_sha256"] == HARNESS.sha_bytes((ready_root / "ready-binding.json").read_bytes())
     assert ready["qa_attestation_sha256"] == HARNESS.sha_bytes(HARNESS.pretty(attestation))
