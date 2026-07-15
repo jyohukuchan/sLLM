@@ -533,13 +533,14 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
 
 def test_profile_actual_v4_failure_is_immutable_historical_v1_readback() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v4"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v4"
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v4"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v5"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v5"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v5"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
     assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
-    assert HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.is_dir()
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY.is_dir()
+    assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
+    assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
+    assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
     assert (
         base
         / "p2/resident-one-case-smoke-profile-execute-v3/resident-batch.failure.json"
@@ -547,7 +548,9 @@ def test_profile_actual_v4_failure_is_immutable_historical_v1_readback() -> None
     assert (
         base / "p3/aq4-p3-diagnostic-rocprof-capture-v3/capture-failure.json"
     ).is_file()
-    failure_path = HARNESS.PROFILE_OUTPUT_DIRECTORY / HARNESS.PROFILE_CAPTURE_FAILURE_NAME
+    historical_output = base / "p3/aq4-p3-diagnostic-rocprof-capture-v4"
+    assert historical_output.is_dir()
+    failure_path = historical_output / HARNESS.PROFILE_CAPTURE_FAILURE_NAME
     target_path = (
         base
         / "p2/resident-one-case-smoke-profile-execute-evidence-v4/runner-target-command-manifest.json"
@@ -562,17 +565,23 @@ def test_profile_actual_v4_failure_is_immutable_historical_v1_readback() -> None
         },
         profile_diagnostic=True,
     )["profile_diagnostic"]
+    contract["output"] = {
+        "directory": str(historical_output),
+        "name": HARNESS.PROFILE_OUTPUT_NAME,
+        "artifact": str(historical_output / "capture-artifact.json"),
+        "must_not_exist_before_capture": True,
+    }
     expected_command = HARNESS._expected_profile_command(target["argv"], contract)
     with pytest.raises(HARNESS.HarnessError, match="semantic binding differs"):
         HARNESS._validate_profile_failure_evidence(
             failure_path,
-            HARNESS.PROFILE_OUTPUT_DIRECTORY,
+            historical_output,
             target_binding,
             expected_command,
         )
     historical = HARNESS._read_historical_profile_failure_evidence(
         failure_path,
-        HARNESS.PROFILE_OUTPUT_DIRECTORY,
+        historical_output,
         target_binding,
         expected_command,
     )
@@ -2199,10 +2208,9 @@ def test_base_and_profile_mode_cannot_be_cross_invoked(tmp_path: Path, monkeypat
     assert code == 1 and runtime.calls == []
 
 
-def test_immutable_ready_artifact_is_stale_after_consumer_pin_update() -> None:
-    with pytest.raises(HARNESS.HarnessError, match="ready artifact semantic binding differs"):
-        HARNESS.load_ready_artifact()
-    historical = json.loads(HARNESS.READY_PATH.read_text())
+def test_immutable_ready_v1_artifact_is_stale_after_consumer_pin_update() -> None:
+    historical_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1/ready-binding.json"
+    historical = json.loads(historical_path.read_text())
     assert historical["actual_eligible"] is True
     assert historical["qa_attestation_sha256"] != HARNESS.sha_bytes(
         HARNESS.pretty(HARNESS.QA_ATTESTATION)
@@ -2211,18 +2219,18 @@ def test_immutable_ready_artifact_is_stale_after_consumer_pin_update() -> None:
 
 def test_stale_canonical_ready_dry_run_fails_before_processes(tmp_path: Path) -> None:
     output = tmp_path / "ready-dry-run"
-    code = HARNESS.main(["--mode", "dry-run", "--evidence-output", str(output)])
+    historical_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1/ready-binding.json"
+    code = HARNESS.main(["--mode", "dry-run", "--ready-artifact", str(historical_path), "--evidence-output", str(output)])
     assert code == 1
     assert not output.exists()
 
 
 def test_stale_profile_ready_pin_is_rejected_before_dry_run_processes(tmp_path: Path) -> None:
-    with pytest.raises(HARNESS.HarnessError, match="ready artifact semantic binding differs"):
-        HARNESS.load_ready_artifact(HARNESS.PROFILE_READY_PATH)
-    historical = json.loads(HARNESS.PROFILE_READY_PATH.read_text())
+    historical_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/ready-binding.json"
+    historical = json.loads(historical_path.read_text())
     assert historical["profile_diagnostic"]["capture_tool"]["sha256"] != HARNESS.PROFILE_CAPTURE_SHA
     output = tmp_path / "profile-ready-dry-run"
-    code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--evidence-output", str(output)])
+    code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(historical_path), "--evidence-output", str(output)])
     assert code == 1
     assert not output.exists()
 
