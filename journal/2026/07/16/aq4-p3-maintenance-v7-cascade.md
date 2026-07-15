@@ -19,3 +19,10 @@
 - resident trust chain 381、driver 22、ROCTX 5、capture 56、producer 26、family 27、selector 26 の合計 543 件: passed、failed 0
 - fresh v7 の ready、dry-run、execute、execute evidence、maintenance evidence、capture output: すべて未作成
 - 旧 v6/v5 failure evidence: `SHA256SUMS` 再確認済み
+
+## Pre-operator 再監査
+
+- ready-v7 と ready-dry-run-v7 の生成後、生成前 absence に依存したテストが再現不能になったため、存在する v7 artifact の checksum・意味境界検証へ分離した。
+- ready-v7 は pre-operator NO-GO の履歴 artifact として上書きせず保存する。
+- 次の profile ready と dry-run の出力先は fresh v8 へ進めた。profile runtime、execute evidence、maintenance evidence、capture は引き続き fresh v7 を参照する。
+- GPU、service、actual は実行していない。

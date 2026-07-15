@@ -531,11 +531,43 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     assert evidence["secret_material_recorded"] is False
 
 
+def test_profile_ready_v7_is_sealed_historical_preoperator_readback() -> None:
+    base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
+    ready_root = base / "p2/resident-one-case-smoke-profile-ready-v7"
+    dry_root = base / "p2/resident-one-case-smoke-profile-ready-dry-run-v7"
+    for root in (ready_root, dry_root):
+        completed = subprocess.run(
+            ["sha256sum", "-c", "SHA256SUMS"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert completed.returncode == 0, (root, completed.stdout, completed.stderr)
+    ready = json.loads((ready_root / "ready-binding.json").read_text())
+    trust = json.loads((ready_root / "harness-trust.json").read_text())
+    attestation = json.loads((ready_root / "qa-attestation.json").read_text())
+    dry = json.loads((dry_root / "launcher-evidence.json").read_text())
+    assert ready["status"] == "ready_for_one_case"
+    assert ready["actual_eligible"] is True
+    assert ready["execution_mode"] == "profile_diagnostic"
+    assert ready["launcher_binding"]["runner_output"] == str(HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT)
+    assert ready["launcher_binding"]["evidence_output"] == str(HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT)
+    assert ready["profile_diagnostic"]["output"]["directory"] == str(HARNESS.PROFILE_OUTPUT_DIRECTORY)
+    HARNESS.LAUNCHER.validate_execute_binding(ready["launcher_binding"], permit_test_live_preflight=True)
+    assert trust["commit"] == "3fc2b8cd6f6910fbebd3ff4728855d55bf2cbbd2"
+    assert trust["ready_binding_sha256"] == HARNESS.sha_bytes((ready_root / "ready-binding.json").read_bytes())
+    assert ready["qa_attestation_sha256"] == HARNESS.sha_bytes(HARNESS.pretty(attestation))
+    assert dry["status"] == "passed" and dry["mode"] == "dry-run"
+    assert all(count == 0 for count in dry["process_counts"].values())
+    assert dry["service_touched"] is False and dry["gpu_command_executed"] is False
+
+
 def test_profile_actual_v4_v5_and_v6_failures_are_immutable_historical_readback() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v7"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v8"
     assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v7"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v7"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v8"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v7"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
     assert not HARNESS.PROFILE_READY_ROOT.exists()
