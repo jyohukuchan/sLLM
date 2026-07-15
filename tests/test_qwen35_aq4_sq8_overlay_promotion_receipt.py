@@ -65,6 +65,15 @@ READINESS = {
 }
 
 
+def telemetry_binding(value: dict, request_id: str = REQUEST_ID) -> dict:
+    return {
+        "schema_version": WRITER.TELEMETRY_BINDING_SCHEMA,
+        "request_id": request_id,
+        "hash_encoding": WRITER.TELEMETRY_HASH_ENCODING,
+        "telemetry_sha256": hashlib.sha256(WRITER._canonical(value)).hexdigest(),
+    }
+
+
 @pytest.fixture
 def fixture(tmp_path: Path) -> dict[str, Path | dict]:
     tokenizer = tmp_path / "tokenizer"
@@ -356,6 +365,22 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
     maintenance_path = tmp_path / "maintenance-evidence.json"
     _write_json(maintenance_path, maintenance)
     executor_path = tmp_path / "executor-record.json"
+    telemetry = {
+        "schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
+        "projection": {
+            "single_matvec_count": 0,
+            "batch_matvec_count": 1,
+            "pair_matvec_count": 1,
+            "triple_matvec_count": 0,
+            "fallback_count": 0,
+        },
+        "diagnostic_host_staging": {
+            "read_count": 0,
+            "write_count": 0,
+            "read_bytes": 0,
+            "write_bytes": 0,
+        },
+    }
     _write_json(
         executor_path,
         {
@@ -371,11 +396,8 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
                     "artifact_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
                     "package_manifest_sha256": package_sha,
                 },
-                "telemetry": {
-                    "schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
-                    "projection": {"single_matvec_count": 0, "batch_matvec_count": 1, "pair_matvec_count": 1, "triple_matvec_count": 0, "fallback_count": 0},
-                    "diagnostic_host_staging": {"read_count": 0, "write_count": 0, "read_bytes": 0, "write_bytes": 0},
-                },
+                "telemetry": telemetry,
+                "telemetry_binding": telemetry_binding(telemetry),
                 "output_identity": {"token_count": 2, "token_ids_sha256": "4" * 64, "token_ids_recorded": False},
             },
         },
@@ -419,6 +441,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
     )
     assert value["status"] == "actual_verified"
     assert value["actual"]["gpu_exclusive_preflight"]["mode"] == "maintenance_stable2"
+    assert value["actual"]["telemetry_binding"] == telemetry_binding(telemetry)
     assert GENERATOR.materialize(
         Path(fixture["profile"]), receipt_path_override=output
     )["promotion"]["source_commit"] == "1" * 40
@@ -474,6 +497,46 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
             prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
         )
     executor["sq8_promotion_evidence"]["telemetry"]["projection"]["pair_matvec_count"] = 1
+    executor["sq8_promotion_evidence"]["telemetry_binding"]["telemetry_sha256"] = "0" * 64
+    _write_json(executor_path, executor)
+    with pytest.raises(WRITER.ReceiptError, match="telemetry binding differs"):
+        WRITER.validate_actual_evidence(
+            maintenance_path=maintenance_path,
+            executor_path=executor_path,
+            output_path=output,
+            profile=profile,
+            overlay={
+                "binding_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
+                "content_sha256": binding["content_sha256"],
+            },
+            package_sha256=package_sha,
+            request_id=REQUEST_ID,
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+        )
+    executor["sq8_promotion_evidence"]["telemetry_binding"] = telemetry_binding(
+        executor["sq8_promotion_evidence"]["telemetry"]
+    )
+    executor["sq8_promotion_evidence"]["telemetry_binding"]["request_id"] = (
+        "sq8-promotion-" + "b" * 64
+    )
+    _write_json(executor_path, executor)
+    with pytest.raises(WRITER.ReceiptError, match="telemetry binding differs"):
+        WRITER.validate_actual_evidence(
+            maintenance_path=maintenance_path,
+            executor_path=executor_path,
+            output_path=output,
+            profile=profile,
+            overlay={
+                "binding_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
+                "content_sha256": binding["content_sha256"],
+            },
+            package_sha256=package_sha,
+            request_id=REQUEST_ID,
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+        )
+    executor["sq8_promotion_evidence"]["telemetry_binding"] = telemetry_binding(
+        executor["sq8_promotion_evidence"]["telemetry"]
+    )
     for invalid_digest in ("A" * 64, "z" * 64):
         executor["sq8_promotion_evidence"]["output_identity"]["token_ids_sha256"] = invalid_digest
         _write_json(executor_path, executor)

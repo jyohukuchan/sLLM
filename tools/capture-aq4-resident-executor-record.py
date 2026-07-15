@@ -34,6 +34,10 @@ SQ8_PROMOTION_REQUEST_ENV = "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID"
 SQ8_PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 SQ8_OVERLAY_IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 SQ8_OVERLAY_EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
+SQ8_TELEMETRY_BINDING_SCHEMA = (
+    "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
+)
+SQ8_TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
 WORKER_STDERR_SCHEMA_VERSION = "ullm.aq4_resident_worker_stderr.v1"
 WORKER_STDERR_PREVIEW_MAX_BYTES = 32 * 1024
 WORKER_STDERR_READ_CHUNK_BYTES = 64 * 1024
@@ -61,6 +65,7 @@ class CaptureError(ValueError):
         worker_returncode: int | None = None,
         worker_signal: int | None = None,
         observed_sq8_promotion_telemetry: dict[str, Any] | None = None,
+        observed_sq8_promotion_telemetry_binding: dict[str, Any] | None = None,
         worker_terminal: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
@@ -70,6 +75,9 @@ class CaptureError(ValueError):
         self.worker_returncode = worker_returncode
         self.worker_signal = worker_signal
         self.observed_sq8_promotion_telemetry = observed_sq8_promotion_telemetry
+        self.observed_sq8_promotion_telemetry_binding = (
+            observed_sq8_promotion_telemetry_binding
+        )
         self.worker_terminal = worker_terminal
 
 
@@ -292,7 +300,7 @@ def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
 
 
 def diagnostic_sq8_promotion_telemetry(value: Any) -> dict[str, Any] | None:
-    """Preserve measured counters without accepting them as promotion evidence."""
+    """Preserve the raw telemetry object without accepting it as evidence."""
 
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
@@ -321,10 +329,29 @@ def diagnostic_sq8_promotion_telemetry(value: Any) -> dict[str, Any] | None:
         or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
     ):
         return None
+    return value
+
+
+def sq8_promotion_telemetry_binding(
+    telemetry: dict[str, Any], request_id: str
+) -> dict[str, Any]:
+    if SQ8_PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise CaptureError("SQ8 telemetry binding request ID differs")
+    try:
+        raw = json.dumps(
+            telemetry,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise CaptureError(f"cannot bind SQ8 telemetry: {error}") from error
     return {
-        "schema_version": value["schema_version"],
-        "projection": {key: projection[key] for key in sorted(projection_keys)},
-        "diagnostic_host_staging": {key: staging[key] for key in sorted(staging_keys)},
+        "schema_version": SQ8_TELEMETRY_BINDING_SCHEMA,
+        "request_id": request_id,
+        "hash_encoding": SQ8_TELEMETRY_HASH_ENCODING,
+        "telemetry_sha256": hashlib.sha256(raw).hexdigest(),
     }
 
 
@@ -1011,12 +1038,12 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     assert observer_data is not None and stderr_summary is not None
 
     worker_terminal: dict[str, Any] | None = None
+    observed_sq8_telemetry: dict[str, Any] | None = None
+    observed_sq8_telemetry_binding: dict[str, Any] | None = None
 
     def worker_failure(
         message: str,
         stage: str = "validation",
-        *,
-        observed_sq8_promotion_telemetry: dict[str, Any] | None = None,
     ) -> CaptureError:
         failure = CaptureError(
             message,
@@ -1026,39 +1053,64 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             worker_returncode=int(proc.returncode)
             if isinstance(proc.returncode, int)
             else None,
-            observed_sq8_promotion_telemetry=observed_sq8_promotion_telemetry,
+            observed_sq8_promotion_telemetry=observed_sq8_telemetry,
+            observed_sq8_promotion_telemetry_binding=(
+                observed_sq8_telemetry_binding
+            ),
             worker_terminal=worker_terminal,
         )
         if failure.worker_returncode is not None and failure.worker_returncode < 0:
             failure.worker_signal = -failure.worker_returncode
         return failure
 
+    backend = next(
+        (
+            item
+            for item in reversed(stderr_records)
+            if item.get("event") == "request_released"
+        ),
+        None,
+    )
+    request_audit = None
+    if backend is not None:
+        request_audit = backend.get("request_execution_audit")
+        worker_terminal = {
+            "schema_version": "ullm.aq4_resident_worker_terminal.v1",
+            "event": "request_released",
+            "request_id": backend.get("request_id"),
+            "request_id_matches": backend.get("request_id") == internal_request_id,
+            "operation_execution_audit_observed": isinstance(
+                backend.get("operation_execution_audit"), dict
+            ),
+            "request_execution_audit_observed": isinstance(request_audit, dict),
+        }
+        if sq8_promotion and isinstance(request_audit, dict):
+            observed_sq8_telemetry = diagnostic_sq8_promotion_telemetry(
+                request_audit.get("sq8_promotion_telemetry")
+            )
+            if observed_sq8_telemetry is not None:
+                observed_sq8_telemetry_binding = sq8_promotion_telemetry_binding(
+                    observed_sq8_telemetry, internal_request_id
+                )
     if proc.returncode != 0:
-        raise worker_failure(f"resident worker exited with status {proc.returncode}", "worker_exit")
-    backend = next((x for x in reversed(stderr_records) if x.get("event") == "request_released" and isinstance(x.get("operation_execution_audit"), dict)), None)
+        raise worker_failure(
+            f"resident worker exited with status {proc.returncode}",
+            "worker_exit",
+        )
     if backend is None:
         raise worker_failure("resident worker request audit was not observed", "audit_missing")
-    audit = backend["operation_execution_audit"]
-    worker_terminal = {
-        "schema_version": "ullm.aq4_resident_worker_terminal.v1",
-        "event": "request_released",
-        "request_id": backend.get("request_id"),
-        "request_id_matches": backend.get("request_id") == internal_request_id,
-        "operation_execution_audit_observed": True,
-        "request_execution_audit_observed": isinstance(
-            backend.get("request_execution_audit"), dict
-        ),
-    }
     if backend.get("request_id") != internal_request_id:
         raise worker_failure("resident worker request audit identity differs", "audit_missing")
-    request_audit = backend.get("request_execution_audit")
     if not isinstance(request_audit, dict):
         raise worker_failure("resident worker request execution audit was not observed", "audit_missing")
+    audit = backend.get("operation_execution_audit")
+    if not isinstance(audit, dict):
+        raise worker_failure(
+            "resident worker operation execution audit was not observed",
+            "audit_missing",
+        )
     sq8_telemetry = None
     if sq8_promotion:
-        observed_telemetry = diagnostic_sq8_promotion_telemetry(
-            request_audit.get("sq8_promotion_telemetry")
-        )
         try:
             sq8_telemetry = validate_sq8_promotion_telemetry(
                 request_audit.get("sq8_promotion_telemetry")
@@ -1067,7 +1119,6 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             raise worker_failure(
                 str(error),
                 "telemetry_validation",
-                observed_sq8_promotion_telemetry=observed_telemetry,
             ) from error
     load_records = [x for x in stderr_records if x.get("schema_version") == "ullm.backend_operation.load.v1"]
     operators, fallback_events = operator_records(load_records, audit)
@@ -1206,6 +1257,9 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
                 "package_manifest_sha256": manifest["product"]["package"]["manifest_sha256"],
             },
             "telemetry": sq8_telemetry,
+            "telemetry_binding": sq8_promotion_telemetry_binding(
+                sq8_telemetry, internal_request_id
+            ),
             "output_identity": {
                 "token_count": len(output_token_ids),
                 "token_ids_sha256": token_identity_digest(output_token_ids),
@@ -1238,7 +1292,7 @@ def main(argv: list[str] | None = None) -> int:
             "utf-8", errors="replace"
         )
         envelope = {
-            "schema_version": "ullm.aq4_resident_capture_error.v2",
+            "schema_version": "ullm.aq4_resident_capture_error.v3",
             "status": "failed",
             "stage": getattr(error, "stage", None) or "capture",
             "reason": reason,
@@ -1248,6 +1302,9 @@ def main(argv: list[str] | None = None) -> int:
             "worker_stderr": worker_stderr,
             "observed_sq8_promotion_telemetry": getattr(
                 error, "observed_sq8_promotion_telemetry", None
+            ),
+            "observed_sq8_promotion_telemetry_binding": getattr(
+                error, "observed_sq8_promotion_telemetry_binding", None
             ),
             "worker_terminal": getattr(error, "worker_terminal", None),
         }

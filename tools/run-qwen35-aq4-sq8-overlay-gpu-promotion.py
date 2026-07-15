@@ -39,6 +39,8 @@ RECEIPT_WRITER = ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py
 SCHEMA = "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1"
 GATE_SCHEMA = "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_gate.v1"
 TELEMETRY_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry.v1"
+TELEMETRY_BINDING_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
+TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
 IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
 SERVICE = "ullm-openai.service"
@@ -54,7 +56,7 @@ CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
 CAPTURE_ENVELOPE_MAX_BYTES = 512 * 1024
 CAPTURE_READ_CHUNK_BYTES = 64 * 1024
 CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 300.0
-CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v2"
+CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v3"
 WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v1"
 CAPTURE_ERROR_STAGES = frozenset(
     {
@@ -154,6 +156,31 @@ def canonical_sha(value: Any) -> str:
             sort_keys=True,
         ).encode("ascii")
     ).hexdigest()
+
+
+def sq8_telemetry_binding_valid(
+    binding: Any, telemetry: Any, expected_request_id: str
+) -> bool:
+    if (
+        PROMOTION_REQUEST_ID_RE.fullmatch(expected_request_id) is None
+        or not isinstance(binding, dict)
+        or set(binding) != {
+            "schema_version",
+            "request_id",
+            "hash_encoding",
+            "telemetry_sha256",
+        }
+        or binding.get("schema_version") != TELEMETRY_BINDING_SCHEMA
+        or binding.get("request_id") != expected_request_id
+        or binding.get("hash_encoding") != TELEMETRY_HASH_ENCODING
+        or not isinstance(binding.get("telemetry_sha256"), str)
+        or SHA256_RE.fullmatch(binding["telemetry_sha256"]) is None
+    ):
+        return False
+    try:
+        return binding["telemetry_sha256"] == canonical_sha(telemetry)
+    except (TypeError, ValueError, UnicodeError):
+        return False
 
 
 def validate_readiness_contract(value: Any) -> dict[str, Any]:
@@ -948,6 +975,15 @@ def validate_executor_record(
     evidence = value.get("sq8_promotion_evidence")
     if value.get("status") != "ok" or not isinstance(evidence, dict):
         raise PromotionError("SQ8 executor evidence is incomplete")
+    if set(evidence) != {
+        "schema_version",
+        "request_id",
+        "manifest_identity",
+        "telemetry",
+        "telemetry_binding",
+        "output_identity",
+    }:
+        raise PromotionError("SQ8 executor evidence shape differs")
     if evidence.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_executor.v1":
         raise PromotionError("SQ8 executor evidence schema differs")
     if evidence.get("request_id") != expected_request_id:
@@ -990,6 +1026,10 @@ def validate_executor_record(
         for key in ("read_count", "write_count", "read_bytes", "write_bytes")
     ):
         raise PromotionError("SQ8 executor used diagnostic host staging")
+    if not sq8_telemetry_binding_valid(
+        evidence.get("telemetry_binding"), telemetry, expected_request_id
+    ):
+        raise PromotionError("SQ8 executor telemetry binding differs")
     output = evidence.get("output_identity")
     if (
         not isinstance(output, dict)
@@ -2012,8 +2052,13 @@ def _capture_terminal_contract_valid(
     return False
 
 
-def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
+def _capture_error_envelope(
+    stream: CaptureStream, expected_request_id: str
+) -> dict[str, Any]:
     invalid: dict[str, Any] = {"validation": "invalid", "reason": None}
+    if PROMOTION_REQUEST_ID_RE.fullmatch(expected_request_id) is None:
+        invalid["reason"] = "expected_request_id_invalid"
+        return invalid
     if not stream.complete or stream.stream_error is not None:
         invalid["reason"] = "outer_stdout_collection_incomplete"
         return invalid
@@ -2038,6 +2083,7 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
         "worker_signal",
         "worker_stderr",
         "observed_sq8_promotion_telemetry",
+        "observed_sq8_promotion_telemetry_binding",
         "worker_terminal",
     }
     if set(value) != expected:
@@ -2189,6 +2235,15 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
         ):
             invalid["reason"] = "observed_sq8_promotion_telemetry_invalid"
             return invalid
+    observed_binding = value.get("observed_sq8_promotion_telemetry_binding")
+    if (observed_telemetry is None) != (observed_binding is None):
+        invalid["reason"] = "observed_sq8_promotion_telemetry_binding_missing"
+        return invalid
+    if observed_telemetry is not None and not sq8_telemetry_binding_valid(
+        observed_binding, observed_telemetry, expected_request_id
+    ):
+        invalid["reason"] = "observed_sq8_promotion_telemetry_binding_invalid"
+        return invalid
     terminal = value.get("worker_terminal")
     if terminal is not None:
         if (
@@ -2205,7 +2260,8 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
             != "ullm.aq4_resident_worker_terminal.v1"
             or terminal.get("event") != "request_released"
             or not isinstance(terminal.get("request_id"), str)
-            or len(terminal["request_id"].encode("utf-8")) > 256
+            or PROMOTION_REQUEST_ID_RE.fullmatch(terminal["request_id"]) is None
+            or terminal["request_id"] != expected_request_id
             or any(
                 type(terminal.get(key)) is not bool
                 for key in (
@@ -2217,6 +2273,12 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
         ):
             invalid["reason"] = "worker_terminal_invalid"
             return invalid
+        if terminal["request_id_matches"] is not True:
+            invalid["reason"] = "worker_terminal_request_id_mismatch"
+            return invalid
+    if observed_telemetry is not None and terminal is None:
+        invalid["reason"] = "observed_sq8_promotion_worker_terminal_missing"
+        return invalid
     if stage == "telemetry_validation" and (
         observed_telemetry is None
         or terminal is None
@@ -2227,6 +2289,7 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
         invalid["reason"] = "telemetry_validation_evidence_missing"
         return invalid
     result["observed_sq8_promotion_telemetry"] = observed_telemetry
+    result["observed_sq8_promotion_telemetry_binding"] = observed_binding
     result["worker_terminal"] = terminal
     return result
 
@@ -2673,7 +2736,7 @@ def execute(
                 stderr=completed.stderr,
             )
             evidence["capture_failure"]["capture_tool_error"] = _capture_error_envelope(
-                completed.stdout
+                completed.stdout, request_id
             )
             raise PromotionError("candidate SQ8 capture failed")
         try:

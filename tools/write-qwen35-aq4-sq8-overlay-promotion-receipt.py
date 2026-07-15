@@ -35,6 +35,8 @@ REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 HEX40 = set("0123456789abcdef")
 HEX64 = set("0123456789abcdef")
 MAX_JSON_BYTES = 32 * 1024 * 1024
+TELEMETRY_BINDING_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
+TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
 
 
 class ReceiptError(RuntimeError):
@@ -436,6 +438,33 @@ def _validate_sq8_telemetry(value: Any) -> dict[str, Any]:
     return value
 
 
+def _validate_sq8_telemetry_binding(
+    value: Any, telemetry: dict[str, Any], request_id: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "request_id",
+        "hash_encoding",
+        "telemetry_sha256",
+    }:
+        raise ReceiptError("SQ8 promotion telemetry binding shape differs")
+    if (
+        value.get("schema_version") != TELEMETRY_BINDING_SCHEMA
+        or value.get("request_id") != request_id
+        or value.get("hash_encoding") != TELEMETRY_HASH_ENCODING
+        or _hex(
+            value.get("telemetry_sha256"),
+            64,
+            "SQ8 telemetry SHA-256",
+        )
+        != value.get("telemetry_sha256")
+        or value["telemetry_sha256"]
+        != hashlib.sha256(_canonical(telemetry)).hexdigest()
+    ):
+        raise ReceiptError("SQ8 promotion telemetry binding differs")
+    return value
+
+
 def _actual_evidence(
     *,
     maintenance_path: Path | None,
@@ -463,7 +492,12 @@ def _actual_evidence(
         raise ReceiptError("executor record status/schema differs")
     promotion = executor.get("sq8_promotion_evidence")
     if not isinstance(promotion, dict) or set(promotion) != {
-        "schema_version", "request_id", "manifest_identity", "telemetry", "output_identity"
+        "schema_version",
+        "request_id",
+        "manifest_identity",
+        "telemetry",
+        "telemetry_binding",
+        "output_identity",
     }:
         raise ReceiptError("executor SQ8 promotion evidence is missing")
     if promotion["schema_version"] != "ullm.qwen35_aq4.sq8_promotion_executor.v1":
@@ -481,6 +515,9 @@ def _actual_evidence(
     if manifest_identity != expected_identity:
         raise ReceiptError("executor manifest identity differs")
     telemetry = _validate_sq8_telemetry(promotion["telemetry"])
+    telemetry_binding = _validate_sq8_telemetry_binding(
+        promotion["telemetry_binding"], telemetry, request_id
+    )
     output_identity = promotion["output_identity"]
     if (
         not isinstance(output_identity, dict)
@@ -499,6 +536,7 @@ def _actual_evidence(
         "executor_record": _relative_evidence_ref(executor_path, output_path, "executor record"),
         "gpu_exclusive_preflight": gpu,
         "telemetry": telemetry,
+        "telemetry_binding": telemetry_binding,
         "manifest_identity": manifest_identity,
         "output_identity": output_identity,
     }
@@ -512,10 +550,18 @@ def _actual_evidence(
             "status": actual["status"],
             "required": actual["required"],
             "prepared_receipt": actual["prepared_receipt"],
-            **{key: actual[key] for key in (
-                "maintenance_evidence", "executor_record", "gpu_exclusive_preflight",
-                "telemetry", "manifest_identity", "output_identity",
-            )},
+            **{
+                key: actual[key]
+                for key in (
+                    "maintenance_evidence",
+                    "executor_record",
+                    "gpu_exclusive_preflight",
+                    "telemetry",
+                    "telemetry_binding",
+                    "manifest_identity",
+                    "output_identity",
+                )
+            },
         }
     return actual
 

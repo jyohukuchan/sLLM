@@ -21,6 +21,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+REQUEST_ID = "sq8-promotion-" + "a" * 64
 
 
 class Lease:
@@ -220,6 +221,7 @@ def capture_error_envelope(
         "worker_signal": None,
         "worker_stderr": worker_stderr_envelope(preview),
         "observed_sq8_promotion_telemetry": None,
+        "observed_sq8_promotion_telemetry_binding": None,
         "worker_terminal": None,
     }
 
@@ -243,11 +245,28 @@ def failed_sq8_telemetry() -> dict[str, Any]:
     }
 
 
+def valid_sq8_telemetry() -> dict[str, Any]:
+    value = failed_sq8_telemetry()
+    value["projection"]["pair_matvec_count"] = 1
+    return value
+
+
+def telemetry_binding(
+    telemetry: dict[str, Any], request_id: str = REQUEST_ID
+) -> dict[str, Any]:
+    return {
+        "schema_version": MODULE.TELEMETRY_BINDING_SCHEMA,
+        "request_id": request_id,
+        "hash_encoding": MODULE.TELEMETRY_HASH_ENCODING,
+        "telemetry_sha256": MODULE.canonical_sha(telemetry),
+    }
+
+
 def released_worker_terminal() -> dict[str, Any]:
     return {
         "schema_version": "ullm.aq4_resident_worker_terminal.v1",
         "event": "request_released",
-        "request_id": "sq8-promotion-" + "a" * 64,
+        "request_id": REQUEST_ID,
         "request_id_matches": True,
         "operation_execution_audit_observed": True,
         "request_execution_audit_observed": True,
@@ -259,6 +278,59 @@ def capture_stream(raw: bytes, *, parse: bool = True) -> Any:
     collector.feed(raw)
     collector.finish()
     return collector.result(False)
+
+
+def parse_capture_error(stream: Any, request_id: str = REQUEST_ID) -> dict[str, Any]:
+    return MODULE._capture_error_envelope(stream, request_id)
+
+
+def executor_record() -> dict[str, Any]:
+    telemetry = valid_sq8_telemetry()
+    return {
+        "status": "ok",
+        "sq8_promotion_evidence": {
+            "schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1",
+            "request_id": REQUEST_ID,
+            "manifest_identity": {
+                "implementation_id": MODULE.IMPLEMENTATION_ID,
+                "execution_profile": MODULE.EXECUTION_PROFILE,
+                "artifact_content_sha256": "f" * 64,
+                "artifact_manifest_sha256": "d" * 64,
+                "package_manifest_sha256": "e" * 64,
+            },
+            "telemetry": telemetry,
+            "telemetry_binding": telemetry_binding(telemetry),
+            "output_identity": {
+                "token_count": 2,
+                "token_ids_recorded": False,
+                "token_ids_sha256": "1" * 64,
+            },
+        },
+    }
+
+
+def test_validate_executor_record_binds_telemetry_hash_and_request_id(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "executor.json"
+    value = executor_record()
+    path.write_text(json.dumps(value), encoding="ascii")
+    assert MODULE.validate_executor_record(path, snapshot(), REQUEST_ID) == value
+
+    value["sq8_promotion_evidence"]["telemetry_binding"][
+        "telemetry_sha256"
+    ] = "0" * 64
+    path.write_text(json.dumps(value), encoding="ascii")
+    with pytest.raises(MODULE.PromotionError, match="telemetry binding"):
+        MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
+
+    value = executor_record()
+    value["sq8_promotion_evidence"]["telemetry_binding"]["request_id"] = (
+        "sq8-promotion-" + "b" * 64
+    )
+    path.write_text(json.dumps(value), encoding="ascii")
+    with pytest.raises(MODULE.PromotionError, match="telemetry binding"):
+        MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
 
 
 def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
@@ -712,7 +784,7 @@ def test_exact_capture_error_envelope_preserves_large_worker_structure() -> None
     raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     assert len(raw) > MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
 
-    parsed = MODULE._capture_error_envelope(capture_stream(raw))
+    parsed = parse_capture_error(capture_stream(raw))
 
     assert parsed["validation"] == "valid"
     worker = parsed["worker_stderr"]
@@ -760,7 +832,7 @@ def test_capture_error_envelope_fails_closed_on_shape_and_stage(
         value["worker_stderr"]["stream_error"] = "drain incomplete"
     raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
 
-    parsed = MODULE._capture_error_envelope(capture_stream(raw))
+    parsed = parse_capture_error(capture_stream(raw))
 
     assert parsed["validation"] == "invalid"
     assert parsed.get("validation_reason", parsed.get("reason")) == reason
@@ -775,15 +847,15 @@ def test_capture_error_envelope_rejects_duplicate_invalid_and_truncated() -> Non
     duplicate = raw.replace(
         b'{"schema_version":', b'{"status":"failed","schema_version":', 1
     )
-    assert MODULE._capture_error_envelope(capture_stream(duplicate))["reason"] == (
+    assert parse_capture_error(capture_stream(duplicate))["reason"] == (
         "capture_error_envelope_duplicate_key"
     )
-    assert MODULE._capture_error_envelope(capture_stream(b"{\xff"))["reason"] == (
+    assert parse_capture_error(capture_stream(b"{\xff"))["reason"] == (
         "capture_error_envelope_invalid_json"
     )
     stream = capture_stream(raw)
     stream.parse_buffer_truncated = True
-    assert MODULE._capture_error_envelope(stream)["reason"] == (
+    assert parse_capture_error(stream)["reason"] == (
         "capture_error_envelope_truncated"
     )
 
@@ -792,7 +864,7 @@ def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
     signaled = capture_error_envelope()
     signaled["worker_returncode"] = -signal.SIGKILL
     signaled["worker_signal"] = signal.SIGKILL
-    parsed = MODULE._capture_error_envelope(
+    parsed = parse_capture_error(
         capture_stream(json.dumps(signaled).encode("utf-8"))
     )
     assert parsed["validation"] == "valid"
@@ -803,7 +875,7 @@ def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
     timed_out["timed_out"] = True
     timed_out["worker_returncode"] = -signal.SIGKILL
     timed_out["worker_signal"] = signal.SIGKILL
-    parsed = MODULE._capture_error_envelope(
+    parsed = parse_capture_error(
         capture_stream(json.dumps(timed_out).encode("utf-8"))
     )
     assert parsed["validation"] == "valid"
@@ -864,7 +936,7 @@ def test_capture_error_terminal_matrix_is_exact(
     value["worker_returncode"] = returncode
     value["worker_signal"] = worker_signal
 
-    parsed = MODULE._capture_error_envelope(
+    parsed = parse_capture_error(
         capture_stream(json.dumps(value).encode("utf-8"))
     )
 
@@ -878,16 +950,43 @@ def test_telemetry_failure_envelope_preserves_measured_counters_and_terminal() -
     value["reason"] = "SQ8 batch and pair projection evidence is required"
     value["worker_returncode"] = 0
     value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        failed_sq8_telemetry()
+    )
     value["worker_terminal"] = released_worker_terminal()
 
-    parsed = MODULE._capture_error_envelope(
+    parsed = parse_capture_error(
         capture_stream(json.dumps(value).encode("utf-8"))
     )
 
     assert parsed["validation"] == "valid"
     assert parsed["observed_sq8_promotion_telemetry"] == failed_sq8_telemetry()
+    assert parsed["observed_sq8_promotion_telemetry_binding"] == telemetry_binding(
+        failed_sq8_telemetry()
+    )
     assert parsed["worker_terminal"] == released_worker_terminal()
     assert parsed["worker_stderr"]["stream_error"] is None
+
+
+def test_nonzero_worker_exit_preserves_complete_telemetry_and_rejects_terminal_id() -> None:
+    value = capture_error_envelope(stage="worker_exit")
+    value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        failed_sq8_telemetry()
+    )
+    value["worker_terminal"] = released_worker_terminal()
+    parsed = parse_capture_error(
+        capture_stream(json.dumps(value).encode("utf-8"))
+    )
+    assert parsed["validation"] == "valid"
+    assert parsed["worker_returncode"] == 7
+    assert parsed["observed_sq8_promotion_telemetry"] == failed_sq8_telemetry()
+
+    value["worker_terminal"]["request_id"] = "sq8-promotion-" + "b" * 64
+    parsed = parse_capture_error(
+        capture_stream(json.dumps(value).encode("utf-8"))
+    )
+    assert parsed == {"validation": "invalid", "reason": "worker_terminal_invalid"}
 
 
 @pytest.mark.parametrize(
@@ -900,16 +999,31 @@ def test_telemetry_failure_envelope_preserves_measured_counters_and_terminal() -
             "request_execution_audit_observed", "yes"
         ),
         lambda value: value["worker_terminal"].__setitem__("unknown", True),
+        lambda value: value["observed_sq8_promotion_telemetry_binding"].__setitem__(
+            "telemetry_sha256", "0" * 64
+        ),
+        lambda value: value["observed_sq8_promotion_telemetry_binding"].__setitem__(
+            "request_id", "sq8-promotion-" + "b" * 64
+        ),
+        lambda value: value["worker_terminal"].__setitem__(
+            "request_id", "sq8-promotion-invalid"
+        ),
+        lambda value: value["worker_terminal"].__setitem__(
+            "request_id", "sq8-promotion-" + "b" * 64
+        ),
     ],
 )
 def test_telemetry_failure_envelope_fails_closed_on_diagnostic_tamper(tamper) -> None:
     value = capture_error_envelope(stage="telemetry_validation")
     value["worker_returncode"] = 0
     value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        failed_sq8_telemetry()
+    )
     value["worker_terminal"] = released_worker_terminal()
     tamper(value)
 
-    parsed = MODULE._capture_error_envelope(
+    parsed = parse_capture_error(
         capture_stream(json.dumps(value).encode("utf-8"))
     )
 
@@ -945,7 +1059,7 @@ def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() ->
     assert result.stderr.sha256 == hashlib.sha256(expected_stderr).hexdigest()
     stderr_evidence = MODULE._stream_diagnostic(result.stderr)
     assert "do-not-persist" not in stderr_evidence["display"]["text"]
-    parsed = MODULE._capture_error_envelope(result.stdout)
+    parsed = parse_capture_error(result.stdout)
     assert parsed["validation"] == "valid"
     assert parsed["worker_stderr"]["sha256"] == envelope["worker_stderr"]["sha256"]
 
@@ -1008,7 +1122,7 @@ def test_default_capture_preserves_timeout_signal_and_bounded_malformed_output(
     assert malformed.stdout.byte_count == len(malformed_raw)
     assert malformed.stdout.sha256 == hashlib.sha256(malformed_raw).hexdigest()
     assert malformed.stdout.parse_buffer_truncated is True
-    assert MODULE._capture_error_envelope(malformed.stdout)["reason"] == (
+    assert parse_capture_error(malformed.stdout)["reason"] == (
         "capture_error_envelope_truncated"
     )
 
@@ -1025,6 +1139,9 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
     envelope["worker_returncode"] = 0
     envelope["reason"] = "SQ8 batch and pair projection evidence is required"
     envelope["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    envelope["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        failed_sq8_telemetry()
+    )
     envelope["worker_terminal"] = released_worker_terminal()
     payload = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
     script = (
@@ -1047,6 +1164,9 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
     assert tool_error["validation"] == "valid"
     assert tool_error["worker_stderr"]["sha256"] == envelope["worker_stderr"]["sha256"]
     assert tool_error["observed_sq8_promotion_telemetry"] == failed_sq8_telemetry()
+    assert tool_error["observed_sq8_promotion_telemetry_binding"] == telemetry_binding(
+        failed_sq8_telemetry()
+    )
     assert tool_error["worker_terminal"] == released_worker_terminal()
     assert (
         "do-not-persist" not in evidence["capture_failure"]["stderr"]["display"]["text"]
