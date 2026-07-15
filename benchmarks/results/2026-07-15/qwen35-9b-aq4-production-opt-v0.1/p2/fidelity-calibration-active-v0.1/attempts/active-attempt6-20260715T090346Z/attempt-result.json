@@ -1,0 +1,104 @@
+{
+  "schema_version": "ullm.aq4_active_fidelity_gate_attempt_result.v1",
+  "attempt": "active-attempt6-20260715T090346Z",
+  "commit": "895acc948c8b9d20d039011e777f79010b835c57",
+  "gate_script_sha256": "a955cb01170db46c817638d0771cb70a96e1ce22479f0a25819320c496124b3d",
+  "gate_exit_code": 90,
+  "preflight": {
+    "passed": true,
+    "plan_sha256": "1b4f8c244e922ab73c0bb026216d8333a9cfe57c23e6695c4141554d117693c0",
+    "cases_sha256": "53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8",
+    "split_sha256": "966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887",
+    "policy_sha256": "302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03",
+    "calibration_sha256": "20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f",
+    "source_sums_verified": true,
+    "capture_binary_sums_verified": true,
+    "worker_nlink": 1,
+    "output_require_absent": true,
+    "device_mapping_pin": "physical_card2_to_logical_device0",
+    "device_architecture_pin": "gfx1201"
+  },
+  "capture": {
+    "run_started": true,
+    "gpu_compute_executed": false,
+    "failure": "runtime device differs from the pinned active identity",
+    "runtime_architecture_observed_in_run": null,
+    "runtime_architecture_observation_note": "run.log contains only the generic guard error; no runtime device detail was emitted",
+    "output_present": false,
+    "metrics_present": false,
+    "validator_executed": false,
+    "active_row_count": null,
+    "hidden_sidecar_bytes": null,
+    "logits_sidecar_bytes": null
+  },
+  "runtime_api_read_only": {
+    "source": "runtime/src/ullm_runtime_api_core.inc",
+    "device_info_index_zero_kind": "cpu",
+    "device_info_index_zero_gcn_arch_name": "",
+    "device_info_index_gt_zero_hip_index": "index - 1",
+    "capture_argument_device_index": 0,
+    "capture_guard_call": "ullm_runtime_sys::device_info(args.device_index)",
+    "guard_source": "crates/ullm-engine/src/bin/ullm-aq4-fidelity-capture.rs:1183-1188"
+  },
+  "read_only_device_observations": {
+    "rocr_visible_devices_0": "gfx1030 / AMD Radeon Pro V620 / GPU",
+    "rocr_visible_devices_1": "gfx1201 / AMD Radeon Graphics / GPU",
+    "rocr_visible_devices_2": "gfx1030 / AMD Radeon Pro V620 / GPU",
+    "hip_visible_devices_0": "rocminfo emitted GPU agents gfx1030, gfx1201, gfx1030",
+    "hip_visible_devices_1": "rocminfo emitted GPU agents gfx1030, gfx1201, gfx1030",
+    "hip_visible_devices_2": "rocminfo emitted GPU agents gfx1030, gfx1201, gfx1030",
+    "observation_scope": "direct rocminfo output only; no runtime architecture inferred"
+  },
+  "service": {
+    "pre_stop_main_pid": 839651,
+    "pre_stop_n_restarts": 0,
+    "stop_started_at": "2026-07-15T09:03:46+09:00",
+    "stop_returned_at": "2026-07-15T09:03:46+09:00",
+    "restore_started_at": "2026-07-15T09:04:07+09:00",
+    "restore_startup_complete_at": "2026-07-15T09:04:10+09:00",
+    "stop_window_seconds_observed": 21,
+    "post_active_state": "active",
+    "post_sub_state": "running",
+    "post_main_pid": 877038,
+    "post_n_restarts": 0,
+    "runtime_dir": {
+      "path": "/run/ullm",
+      "mode": "0750",
+      "uid": 1000,
+      "gid": 1000,
+      "nlink": 2,
+      "type": "directory"
+    },
+    "runtime_lock": {
+      "path": "/run/ullm/r9700.lock",
+      "inode": 753708,
+      "nlink": 1,
+      "mode": "0600",
+      "uid": 1000,
+      "gid": 1000,
+      "size": 0,
+      "owner_pid": 877038
+    }
+  },
+  "identity": {
+    "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "worker_nlink": 1,
+    "device_architecture_pinned": "gfx1201"
+  },
+  "observer": {
+    "observer_failed_marker": false,
+    "sample_count": 1,
+    "monitor_log_sha256": "06990dc6068275a974ae13b598afa728211ef592078fc1b4c5233aa363db8305",
+    "gpu_use_percent": {"card0": 0, "card1": 0, "card2": 0},
+    "vram_used_bytes": {"card0": 21401600, "card1": 21401600, "card2": 87384064}
+  },
+  "raw_artifacts": {
+    "monitor.log": "06990dc6068275a974ae13b598afa728211ef592078fc1b4c5233aa363db8305",
+    "observer-sample.marker": "bb3181db02a5f567340e67a5f8363c5ccf0c327571ce4ff40dbb16d180d9b326",
+    "run-started.marker": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "run.log": "5613ae2122d6941b27f0571168f3c875afe34cf5c4630fa21838e10989312a04",
+    "service-stopped.marker": "07d639cf982537ea7d917696a446870c1bbc53e9d95a19f610c87183f3a98862"
+  }
+}
