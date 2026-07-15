@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -30,7 +33,10 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL=1",
             "ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4",
             '"qkv-standalone.f32le"', '"ullm.aq4_layer0_qkv_z_gate_beta_runtime_probe.v2"',
-            "promotion_eligible=false",
+            "promotion_eligible=false", "observer_sample_once", "start_observer", "stop_observer",
+            "trap - EXIT INT TERM HUP", "cleanup_rc", "start_rc", '"${SYSTEMCTL[@]}" start "$SERVICE"',
+            '"architecture_default:gfx1201"', '"diagnostic_standalone_reference"',
+            '"concatenated_little_endian_f32_rows"', '"end_row_exclusive": 8192',
         ):
             self.assertIn(token, text)
 
@@ -52,6 +58,142 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertIn("mock_preflight=1 service_stop=0 gpu_run=0", result.stdout)
             self.assertEqual(list(Path(directory).iterdir()), [])
             self.assertNotIn("systemctl", result.stdout + result.stderr)
+
+    def test_mock_observer_samples_pinned_card_without_service_or_gpu(self) -> None:
+        self.assertTrue(PROBE_ROOT.is_dir())
+        with tempfile.TemporaryDirectory(prefix="ullm-aq4-fused-observer-") as directory:
+            base = Path(directory)
+            rocm_smi = base / "fake-amd-smi"
+            rocm_smi.write_text(
+                "#!/bin/sh\nprintf '%s\\n' '{\"card2\":{\"GFX Version\":\"gfx1201\"}}'\n",
+                encoding="utf-8",
+            )
+            rocm_smi.chmod(0o755)
+            env = os.environ.copy()
+            env.update(
+                MOCK_PREFLIGHT="1",
+                MOCK_OBSERVER="1",
+                MOCK_BASE=directory,
+                MOCK_PROBE_ROOT=str(PROBE_ROOT),
+                MOCK_PROBE=str(PROBE_ROOT / "ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe"),
+                MOCK_RECEIPT=str(PROBE_ROOT / "build-receipt.json"),
+                MOCK_SUMS=str(PROBE_ROOT / "SHA256SUMS"),
+                ROCM_SMI=str(rocm_smi),
+                PYTHON="/usr/bin/python3",
+            )
+            result = subprocess.run(["bash", str(GATE)], env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("mock_observer=1 service_stop=0 gpu_run=0", result.stdout)
+            self.assertIn('"physical_card":2', (base / "monitor.log").read_text(encoding="utf-8"))
+            self.assertTrue((base / "observer-sample.marker").is_file())
+            self.assertFalse((base / "observer-failed.marker").exists())
+            self.assertNotIn("systemctl", result.stdout + result.stderr)
+
+    def test_restore_attempts_service_start_after_cleanup_failure(self) -> None:
+        text = GATE.read_text(encoding="utf-8")
+        restore = text[text.index("restore_after_failure()"):text.index("execute_probe()", text.index("restore_after_failure()"))]
+        self.assertIn("cleanup_rc=$?", restore)
+        self.assertIn("start_rc=$?", restore)
+        self.assertIn('"${SYSTEMCTL[@]}" start "$SERVICE"', restore)
+        self.assertLess(restore.index("cleanup_lock_substrate"), restore.index('"${SYSTEMCTL[@]}" start "$SERVICE"'))
+        self.assertIn('[[ "$observer_rc" = 0 && "$cleanup_rc" = 0 && "$start_rc" = 0 ]] || code=1', restore)
+
+    @staticmethod
+    def _validator_script() -> str:
+        text = GATE.read_text(encoding="utf-8")
+        start = text.index("validate_output_contract()")
+        start = text.index("<<'PY'\n", start) + len("<<'PY'\n")
+        end = text.index("\nPY\n}", start)
+        return text[start:end]
+
+    @staticmethod
+    def _write_valid_output(root: Path) -> tuple[str, str, str]:
+        input_sha = "a" * 64
+        package_sha = "b" * 64
+        input_path = root / "runtime-input.jsonl"
+        input_path.write_text("{}\n", encoding="utf-8")
+        shapes = {"qkv": 8192, "qkv_standalone": 8192, "z": 4096, "gate": 32, "beta": 32}
+        outputs: dict[str, dict[str, object]] = {}
+        for key, shape in shapes.items():
+            name = "qkv-standalone.f32le" if key == "qkv_standalone" else f"{key}.f32le"
+            raw = struct.pack("<f", 1.0) * shape
+            (root / name).write_bytes(raw)
+            digest = hashlib.sha256(raw).hexdigest()
+            outputs[key] = {
+                "path": f"/immutable/{name}",
+                "row_shape": [shape],
+                "bytes": len(raw),
+                "sha256": digest,
+                "cases": [{
+                    "output_offset_bytes": 0,
+                    "output_elements": shape,
+                    "output_sha256": digest,
+                    "finite": True,
+                }],
+            }
+        report = {
+            "schema_version": "ullm.aq4_layer0_qkv_z_gate_beta_runtime_probe.v2",
+            "status": "valid", "classification": "unclassified", "promotion_eligible": False, "fused": True,
+            "operation": "aq4_matvec_qkv_z_gate_beta_f32",
+            "device": {"backend": "hip", "device_index": 1, "device_id": 0, "gcn_arch_name": "gfx1201"},
+            "visibility": {"hip_visible_devices": "1", "ullm_hip_visible_devices": "1"},
+            "guard": {
+                "hip_aq4_matvec_kernel_required": True, "fused_kernel_required": True, "fallback_allowed": False,
+                "fused_rpb_effective": 4,
+                "relevant_environment": {
+                    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL": "1",
+                    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL": "1",
+                    "ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB": "4",
+                    "ULLM_AQ4_MATVEC_RPB": None,
+                },
+            },
+            "input": {"rows": 1, "sidecar_sha256": input_sha, "identity": {"pre_stat": "1", "post_stat": "1"}},
+            "package": {"manifest_sha256": package_sha},
+            "qkv_component_reference": {
+                "reference_backend": "hip", "reference_kind": "diagnostic_standalone_reference",
+                "operation": "standalone_aq4_matvec_f32", "standalone_rpb_raw": None,
+                "standalone_rpb_effective": 32, "standalone_rpb_source": "architecture_default:gfx1201",
+                "standalone_output_key": "qkv_standalone", "max_abs": 0.0, "relative_l2": 0.0,
+            },
+            "qkv_row_segments": [
+                {"name": "Q", "start_row": 0, "end_row_exclusive": 2048},
+                {"name": "K", "start_row": 2048, "end_row_exclusive": 4096},
+                {"name": "V", "start_row": 4096, "end_row_exclusive": 8192},
+            ],
+            "output_layout": {
+                "format": "concatenated_little_endian_f32_rows", "dtype": "f32", "row_order": "input_jsonl_order",
+                "qkv_shape": [8192], "qkv_standalone_shape": [8192], "z_shape": [4096],
+                "gate_shape": [32], "beta_shape": [32],
+            },
+            "outputs": outputs,
+        }
+        (root / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        return str(input_path), input_sha, package_sha
+
+    def test_output_validator_rejects_wrong_reference_and_layout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ullm-aq4-fused-validator-") as directory:
+            root = Path(directory)
+            input_path, input_sha, package_sha = self._write_valid_output(root)
+            validator = root / "validate.py"
+            validator.write_text(self._validator_script(), encoding="utf-8")
+
+            def run_validator() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["/usr/bin/python3", str(validator), directory, input_path, input_sha, package_sha],
+                    text=True, capture_output=True, check=False,
+                )
+
+            valid = run_validator()
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            report_path = root / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["qkv_component_reference"]["reference_backend"] = "cpu"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            self.assertNotEqual(run_validator().returncode, 0)
+            report["qkv_component_reference"]["reference_backend"] = "hip"
+            report["output_layout"]["qkv_shape"] = [1]
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            self.assertNotEqual(run_validator().returncode, 0)
 
     def test_preflight_modes_are_mutually_exclusive(self) -> None:
         env = os.environ.copy()
