@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -21,13 +23,16 @@ SPEC.loader.exec_module(MODULE)
 
 
 class Lease:
-    def __init__(self) -> None:
+    def __init__(self, *, release_error: bool = False) -> None:
         self.released = False
+        self.release_error = release_error
 
     def evidence(self) -> dict[str, Any]:
         return {"path": "/run/ullm/device-1.lock", "device": 1, "inode": 2, "held": True}
 
     def release(self) -> None:
+        if self.release_error:
+            raise MODULE.PromotionError("injected cleanup failure")
         self.released = True
 
 
@@ -91,6 +96,7 @@ def service(active: bool, *, epoch: int = 100, worker: int = 200) -> dict[str, A
         "active": active,
         "running": active,
         "main_pid": epoch if active else 0,
+        "nrestarts": 0,
         "worker_pid": worker if active else 0,
         "healthy": active,
         "lock_owned": active,
@@ -132,6 +138,8 @@ def dependencies(
     capture_code: int = 0,
     stop_error: bool = False,
     start_error: bool = False,
+    acquire_error: bool = False,
+    cleanup_error: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     service_values = iter(
         [
@@ -146,7 +154,8 @@ def dependencies(
         "stop": 0,
         "start": 0,
         "capture": [],
-        "lease": Lease(),
+        "lease": Lease(release_error=cleanup_error),
+        "acquire": 0,
         "readiness": [],
     }
 
@@ -172,12 +181,18 @@ def dependencies(
         stdout = json.dumps({"status": "ok", "output": str(output)}) if capture_code == 0 else ""
         return subprocess.CompletedProcess(argv, capture_code, stdout=stdout, stderr="")
 
+    def acquire() -> Lease:
+        calls["acquire"] += 1
+        if acquire_error:
+            raise MODULE.PromotionError("injected acquire failure")
+        return calls["lease"]
+
     deps = MODULE.Dependencies(
         service_snapshot=service_probe,
         owner_snapshot=lambda: next(owner_values),
         stop_service=stop,
         start_service=start,
-        acquire_lock=lambda: calls["lease"],
+        acquire_lock=acquire,
         capture=capture_run,
         monotonic=lambda: 0.0,
         sleep=lambda _: None,
@@ -390,6 +405,7 @@ def test_stop_failure_attempts_restore(
     assert evidence["restore"]["passed"] is True
     assert calls["start"] == 1
     assert calls["capture"] == []
+    assert calls["acquire"] == 0
 
 
 def test_restore_failure_is_terminal(
@@ -405,6 +421,31 @@ def test_restore_failure_is_terminal(
     assert evidence["restore"]["attempted"] is True
     assert evidence["restore"]["passed"] is False
     assert calls["lease"].released is True
+
+
+def test_acquire_failure_restores_without_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(monkeypatch, [snapshot()])
+    deps, calls = dependencies(tmp_path, acquire_error=True)
+
+    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "acquire-failure", deps)
+
+    assert code == 1 and evidence["restore"]["passed"] is True
+    assert calls["acquire"] == 1 and calls["capture"] == [] and calls["start"] == 1
+
+
+def test_cleanup_failure_still_restores_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(monkeypatch)
+    deps, calls = dependencies(tmp_path, cleanup_error=True)
+
+    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "cleanup-failure", deps)
+
+    assert code == 1 and evidence["restore"]["passed"] is True
+    assert "cleanup failure" in evidence["failure"]["reason"]
+    assert calls["start"] == 1
 
 
 def test_candidate_identity_change_is_terminal_but_restores(
@@ -439,3 +480,157 @@ def test_execute_rejects_unauthorized_candidate_before_service_access(
 
     assert calls["stop"] == calls["start"] == 0
     assert calls["capture"] == []
+
+
+def _lock_runner(
+    lock_path: Path, *, wrong_mode: bool = False, cleanup_failure: bool = False
+) -> tuple[Any, list[list[str]]]:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[3] == "create":
+            lock_path.parent.mkdir(mode=0o750)
+            lock_path.parent.chmod(0o750)
+            lock_path.write_bytes(b"")
+            lock_path.chmod(0o644 if wrong_mode else 0o600)
+            lock = lock_path.stat(follow_symlinks=False)
+            directory = lock_path.parent.stat(follow_symlinks=False)
+            value = {
+                "status": "created",
+                "runtime_directory_created": True,
+                "runtime_directory": {
+                    "path": str(lock_path.parent), "device": directory.st_dev,
+                    "inode": directory.st_ino, "mode": "0750", "uid": os.getuid(),
+                    "gid": os.getgid(), "nlink": directory.st_nlink,
+                },
+                "lock": {
+                    "path": str(lock_path), "device": lock.st_dev, "inode": lock.st_ino,
+                    "mode": "0600", "uid": os.getuid(), "gid": os.getgid(), "nlink": 1,
+                },
+            }
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(value), stderr="")
+        if cleanup_failure:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="injected")
+        device = int(argv[5])
+        inode = int(argv[7])
+        lock_path.unlink()
+        lock_path.parent.rmdir()
+        value = {"status": "removed", "device": device, "inode": inode, "runtime_directory_removed": True}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(value), stderr="")
+
+    return runner, calls
+
+
+def test_lock_helper_exact_create_flock_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "run" / "device-1.lock"
+    monkeypatch.setattr(MODULE, "LOCK_PATH", lock_path)
+    monkeypatch.setattr(MODULE, "LOCK_UID", os.getuid())
+    monkeypatch.setattr(MODULE, "LOCK_GID", os.getgid())
+    runner, calls = _lock_runner(lock_path)
+
+    lease = MODULE.acquire_lock(lock_path, runner)
+    assert lease.evidence()["held"] is True
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    lease.release()
+
+    assert calls[0] == ["sudo", "-n", str(MODULE.LOCK_HELPER), "create"]
+    assert calls[1][:4] == ["sudo", "-n", str(MODULE.LOCK_HELPER), "remove"]
+    assert not lock_path.parent.exists()
+
+
+def test_lock_helper_rejects_non_whitelisted_argv() -> None:
+    called = False
+
+    def runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        called = True
+        raise AssertionError
+
+    with pytest.raises(MODULE.PromotionError, match="not whitelisted"):
+        MODULE._lock_helper_result(["sudo", "-n", str(MODULE.LOCK_HELPER), "shell"], runner, "bad")
+    assert called is False
+
+
+def test_lock_acquire_rejects_eacces_and_wrong_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "run" / "device-1.lock"
+    monkeypatch.setattr(MODULE, "LOCK_PATH", lock_path)
+    monkeypatch.setattr(MODULE, "LOCK_UID", os.getuid())
+    monkeypatch.setattr(MODULE, "LOCK_GID", os.getgid())
+    def denied(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="EACCES")
+    with pytest.raises(MODULE.PromotionError, match="helper create failed"):
+        MODULE.acquire_lock(lock_path, denied)
+
+    runner, _ = _lock_runner(lock_path, wrong_mode=True)
+    with pytest.raises(MODULE.PromotionError, match="lock substrate"):
+        MODULE.acquire_lock(lock_path, runner)
+    assert not lock_path.parent.exists()
+
+
+def test_lock_cleanup_failure_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "run" / "device-1.lock"
+    monkeypatch.setattr(MODULE, "LOCK_PATH", lock_path)
+    monkeypatch.setattr(MODULE, "LOCK_UID", os.getuid())
+    monkeypatch.setattr(MODULE, "LOCK_GID", os.getgid())
+    runner, _ = _lock_runner(lock_path, cleanup_failure=True)
+    lease = MODULE.acquire_lock(lock_path, runner)
+    with pytest.raises(MODULE.PromotionError, match="helper remove failed"):
+        lease.release()
+
+
+def test_restore_retries_transient_topology_and_reports_attempts() -> None:
+    clock = [0.0]
+    services: list[Any] = [
+        MODULE.PromotionError("active service process topology differs"),
+        service(True, epoch=101, worker=201),
+    ]
+
+    def service_snapshot(_: dict[str, Any]) -> dict[str, Any]:
+        value = services.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    deps = MODULE.Dependencies(
+        service_snapshot=service_snapshot,
+        owner_snapshot=lambda: owners(201),
+        stop_service=lambda: None,
+        start_service=lambda: None,
+        acquire_lock=lambda: Lease(),
+        capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+        monotonic=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    result = MODULE.poll_restored(deps, service(True), readiness())
+    assert result["passed"] is True
+    assert result["attempts"] == 2
+    assert result["elapsed_seconds"] == MODULE.POLL_SECONDS
+    assert result["last_failure"] is None
+    assert result["observations"][0] == {"failure": "active service process topology differs"}
+
+
+def test_restore_timeout_preserves_last_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(MODULE, "RESTORE_TIMEOUT_SECONDS", 0.5)
+    deps = MODULE.Dependencies(
+        service_snapshot=lambda _: service(False),
+        owner_snapshot=lambda: owners(),
+        stop_service=lambda: None,
+        start_service=lambda: None,
+        acquire_lock=lambda: Lease(),
+        capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+        monotonic=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    result = MODULE.poll_restored(deps, service(True), readiness())
+    assert result["passed"] is False
+    assert result["attempts"] == 2
+    assert result["elapsed_seconds"] == 0.5
+    assert result["last_failure"] == "service not active/running"

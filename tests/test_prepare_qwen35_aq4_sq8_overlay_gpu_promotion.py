@@ -274,6 +274,7 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         tensor_set_sha256="c" * 64,
         package_sha256=package_sha,
         readiness=readiness(),
+        authorization_lineage=None,
     )
     audit = {
         "path": str(audit_path.resolve()),
@@ -343,3 +344,39 @@ def test_audit_receipt_rejects_writable_and_symlink(tmp_path: Path) -> None:
         TOOL.validate_independent_audit(
             link, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64
         )
+
+
+def test_prior_failure_lineage_binds_consumed_receipt_and_rejects_weak_files(
+    tmp_path: Path,
+) -> None:
+    request_id = "sq8-promotion-" + "7" * 64
+    path = tmp_path / "promotion-failure-receipt.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+                "status": "actual_failed",
+                "request_id": request_id,
+                "actual": {"status": "failed", "request_id": request_id},
+            }
+        ) + "\n",
+        encoding="ascii",
+    )
+    path.chmod(0o444)
+
+    lineage = TOOL.prior_failure_lineage(path)
+
+    assert lineage == {
+        "schema": TOOL.AUTHORIZATION_LINEAGE_SCHEMA,
+        "disposition": "consumed_failed_not_reusable",
+        "prior_request_id": request_id,
+        "prior_failure_receipt": {"path": str(path.resolve()), "sha256": sha(path)},
+    }
+    path.chmod(0o644)
+    with pytest.raises(TOOL.GateError, match="immutable"):
+        TOOL.prior_failure_lineage(path)
+    path.chmod(0o444)
+    link = tmp_path / "failure-link.json"
+    link.symlink_to(path)
+    with pytest.raises(TOOL.GateError, match="immutable"):
+        TOOL.prior_failure_lineage(link)

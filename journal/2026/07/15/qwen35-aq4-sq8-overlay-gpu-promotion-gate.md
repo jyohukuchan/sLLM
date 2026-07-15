@@ -28,6 +28,10 @@
 - 最初のauthorized preflightで、host namespaceから`172.20.0.1:8000/readyz`へ到達できず`healthy=false`になった。service、worker、production lock、AMD/KFD ownerは正常で、actual commandは発行していない。
 - host `urllib` readinessを廃止し、既存の`open-webui` bridge namespaceだけからreadyを観測するfail-closed経路へ置き換えた。builderがcontainer name/full ID/image ID/config image、network name/full ID/driver/bridge interface、固定endpoint/status/body/body SHA/timeoutをread-onlyで取得し、request ID、Gate、profile、prepared receipt、served manifestへ同一objectを束縛する。
 - wrapperはGate/receipt/manifestのreadiness exact一致後、Docker container/network inspectとlive bridge interfaceを照合し、full container IDを指定したbounded `docker exec curl`だけで`/readyz`を検査する。HTTP 200と本文`{"status":"ready"}`のbyte完全一致を要求し、host fallback、iptables/nftables変更、container名だけの実行を許可しない。prestateとpost-restoreは同じpredicateを使う。
+- bridge readiness修正後の最初のone-shotは、service停止でsystemd `RuntimeDirectory=/run/ullm`自体が削除された後、非root wrapperが`/run/ullm/device-1.lock`を作成できず、GPU request前に失敗した。`actual_run_count=0`、executor recordなしで、failure receipt SHA-256は`c37c45c5a0975107cfa8033757f4ed9d45ab0ced8377daf5cb57f2e6effbeb30`。このauthorizationは消費済みで再利用しない。
+- root専用の固定path lock helperを追加した。service stopped/owner-free後だけ、`sudo -n`のexact argvで`/run/ullm`を0750 uid/gid 1000、`device-1.lock`をcreate-new 0600 uid/gid 1000 single-linkとして作る。wrapperは同userでopen/flockし、helperが返したdevice/inodeとの一致をcapture終了まで検証する。cleanupはservice stopped中に同inode lockだけを削除し、wrapper-created directoryがemptyの場合だけrmdirしてからserviceをstartする。
+- restoreは最大120秒のmonotonic deadlineで、一時的なsystemd/cgroup topology例外を含めてretryする。active/running、新main PID、`NRestarts=0`、新cgroup worker、production lock owner、AMD/KFD owner、Gate-bound bridge healthを順に要求し、attempt count、elapsed、last failure、全observationをmaintenance evidenceへ残す。
+- 新request/Gate/build receiptは、消費済みfailure receiptのimmutable path/SHA、prior request ID、`consumed_failed_not_reusable` dispositionをauthorization lineageとして束縛する。
 
 ## 検証
 

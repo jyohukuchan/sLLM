@@ -36,6 +36,9 @@ IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
 SERVICE = "ullm-openai.service"
 LOCK_PATH = Path("/run/ullm/device-1.lock")
+LOCK_HELPER = ROOT / "tools/manage-qwen35-aq4-sq8-overlay-lock.py"
+LOCK_UID = 1000
+LOCK_GID = 1000
 STOP_TIMEOUT_SECONDS = 30.0
 RESTORE_TIMEOUT_SECONDS = 120.0
 POLL_SECONDS = 0.25
@@ -46,6 +49,7 @@ DOCKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 READY_URL = "http://172.20.0.1:8000/readyz"
 READY_BODY = b'{"status":"ready"}'
 READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
+AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
 READY_CONTAINER_NAME = "open-webui"
 READY_PATH = "/readyz"
 READY_TIMEOUT_SECONDS = 5
@@ -163,6 +167,58 @@ def validate_readiness_contract(value: Any) -> dict[str, Any]:
         or type(endpoint.get("timeout_seconds")) is not int
     ):
         raise PromotionError("candidate readiness endpoint contract differs")
+    return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
+
+
+def validate_authorization_lineage(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "disposition", "prior_request_id", "prior_failure_receipt"
+    }:
+        raise PromotionError("candidate authorization lineage shape differs")
+    request_id = value.get("prior_request_id")
+    reference = value.get("prior_failure_receipt")
+    if (
+        value.get("schema") != AUTHORIZATION_LINEAGE_SCHEMA
+        or value.get("disposition") != "consumed_failed_not_reusable"
+        or not isinstance(request_id, str)
+        or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None
+        or not isinstance(reference, dict)
+        or set(reference) != {"path", "sha256"}
+    ):
+        raise PromotionError("candidate authorization lineage identity differs")
+    raw_path = reference.get("path")
+    digest = reference.get("sha256")
+    if (
+        not isinstance(raw_path, str)
+        or not Path(raw_path).is_absolute()
+        or not isinstance(digest, str)
+        or SHA256_RE.fullmatch(digest) is None
+    ):
+        raise PromotionError("candidate prior failure receipt identity differs")
+    path = Path(raw_path)
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+        or metadata.st_nlink != 1
+        or path.resolve() != path
+        or sha_file(path) != digest
+    ):
+        raise PromotionError("candidate prior failure receipt file differs")
+    receipt = read_object(path, "prior failure receipt")
+    actual = receipt.get("actual")
+    if (
+        receipt.get("schema_version") != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+        or receipt.get("status") != "actual_failed"
+        or receipt.get("request_id") != request_id
+        or not isinstance(actual, dict)
+        or actual.get("status") != "failed"
+        or actual.get("request_id") != request_id
+    ):
+        raise PromotionError("candidate prior failure receipt state differs")
     return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
 
 
@@ -429,6 +485,12 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     ):
         raise PromotionError("candidate Gate authorization policy differs")
     manifest_audit = manifest.get("promotion", {}).get("authorization_audit")
+    lineage = validate_authorization_lineage(authorization.get("lineage"))
+    build_inputs = build.get("inputs")
+    if not isinstance(build_inputs, dict) or build_inputs.get("prior_failure_receipt") != (
+        lineage["prior_failure_receipt"] if lineage is not None else None
+    ):
+        raise PromotionError("candidate authorization lineage build binding differs")
     manifest_readiness = manifest.get("promotion", {}).get("readiness")
     if receipt.get("readiness") != readiness or manifest_readiness != readiness:
         raise PromotionError("candidate readiness propagation differs")
@@ -495,6 +557,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             "status": expected_status,
             "max_attempts": expected_attempts,
             "independent_audit_receipt": authorization_audit,
+            "lineage": lineage,
         },
         "readiness": readiness,
     }
@@ -552,34 +615,147 @@ class LockLease:
     descriptor: int
     device: int
     inode: int
+    command_runner: Callable[..., subprocess.CompletedProcess[str]]
 
     def release(self) -> None:
-        fcntl.flock(self.descriptor, fcntl.LOCK_UN)
-        os.close(self.descriptor)
+        identity_error: BaseException | None = None
+        try:
+            before = os.fstat(self.descriptor)
+            current = self.path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or (before.st_dev, before.st_ino) != (self.device, self.inode)
+                or (current.st_dev, current.st_ino) != (self.device, self.inode)
+            ):
+                identity_error = PromotionError("candidate promotion lock inode changed while held")
+        except (OSError, PromotionError) as error:
+            identity_error = error
+        try:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self.descriptor)
+        if identity_error is not None:
+            if isinstance(identity_error, PromotionError):
+                raise identity_error
+            raise PromotionError(f"candidate promotion lock validation failed: {identity_error}") from identity_error
+        _lock_helper_remove(self.device, self.inode, self.command_runner)
 
     def evidence(self) -> dict[str, Any]:
         return {"path": str(self.path), "device": self.device, "inode": self.inode, "held": True}
 
 
-def acquire_lock(path: Path = LOCK_PATH) -> LockLease:
+def _lock_helper_result(
+    argv: list[str], command_runner: Callable[..., subprocess.CompletedProcess[str]], label: str
+) -> dict[str, Any]:
+    allowed_prefix = ["sudo", "-n", str(LOCK_HELPER)]
+    create_argv = argv == [*allowed_prefix, "create"]
+    remove_argv = (
+        len(argv) == 8
+        and argv[:4] == [*allowed_prefix, "remove"]
+        and argv[4] == "--device"
+        and argv[6] == "--inode"
+        and argv[5].isdigit()
+        and argv[7].isdigit()
+        and int(argv[5]) > 0
+        and int(argv[7]) > 0
+    )
+    if not create_argv and not remove_argv:
+        raise PromotionError("candidate lock helper argv is not whitelisted")
+    try:
+        completed = command_runner(argv, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PromotionError(f"candidate lock helper {label} failed") from error
+    if completed.returncode != 0 or completed.stderr or len(completed.stdout.encode("utf-8")) > 16 * 1024:
+        raise PromotionError(f"candidate lock helper {label} failed")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PromotionError(f"candidate lock helper {label} output differs") from error
+    if not isinstance(value, dict):
+        raise PromotionError(f"candidate lock helper {label} output differs")
+    return value
+
+
+def _lock_helper_remove(
+    device: int, inode: int, command_runner: Callable[..., subprocess.CompletedProcess[str]]
+) -> None:
+    argv = [
+        "sudo", "-n", str(LOCK_HELPER), "remove",
+        "--device", str(device), "--inode", str(inode),
+    ]
+    value = _lock_helper_result(argv, command_runner, "remove")
+    if value != {
+        "status": "removed", "device": device, "inode": inode,
+        "runtime_directory_removed": True,
+    }:
+        raise PromotionError("candidate lock helper remove output differs")
+
+
+def acquire_lock(
+    path: Path = LOCK_PATH,
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> LockLease:
     if path != LOCK_PATH:
         raise PromotionError("candidate promotion lock path differs")
-    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    value = os.fstat(descriptor)
-    if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1 or stat.S_IMODE(value.st_mode) != 0o600:
-        os.close(descriptor)
-        raise PromotionError("candidate promotion lock substrate differs")
+    if command_runner is None:
+        command_runner = _run
+    created = _lock_helper_result(
+        ["sudo", "-n", str(LOCK_HELPER), "create"], command_runner, "create"
+    )
+    lock = created.get("lock")
+    directory = created.get("runtime_directory")
+    if (
+        set(created) != {"status", "runtime_directory_created", "runtime_directory", "lock"}
+        or created.get("status") != "created"
+        or created.get("runtime_directory_created") is not True
+        or not isinstance(lock, dict)
+        or not isinstance(directory, dict)
+        or lock.get("path") != str(path)
+        or lock.get("mode") != "0600"
+        or lock.get("uid") != LOCK_UID
+        or lock.get("gid") != LOCK_GID
+        or lock.get("nlink") != 1
+        or directory.get("path") != str(path.parent)
+        or directory.get("mode") != "0750"
+        or directory.get("uid") != LOCK_UID
+        or directory.get("gid") != LOCK_GID
+    ):
+        raise PromotionError("candidate lock helper create output differs")
+    device = lock.get("device")
+    inode = lock.get("inode")
+    if not isinstance(device, int) or device <= 0 or not isinstance(inode, int) or inode <= 0:
+        raise PromotionError("candidate lock helper inode differs")
+    descriptor = -1
     try:
+        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        value = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+            or stat.S_IMODE(value.st_mode) != 0o600
+            or value.st_uid != LOCK_UID
+            or value.st_gid != LOCK_GID
+            or (value.st_dev, value.st_ino) != (device, inode)
+        ):
+            raise PromotionError("candidate promotion lock substrate differs")
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as error:
-        os.close(descriptor)
-        raise PromotionError("candidate promotion lock is busy") from error
-    current = path.stat(follow_symlinks=False)
-    if (current.st_dev, current.st_ino) != (value.st_dev, value.st_ino):
-        os.close(descriptor)
-        raise PromotionError("candidate promotion lock inode changed")
-    return LockLease(path, descriptor, value.st_dev, value.st_ino)
+        current = path.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (device, inode):
+            raise PromotionError("candidate promotion lock inode changed")
+        return LockLease(path, descriptor, device, inode, command_runner)
+    except BaseException as error:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            _lock_helper_remove(device, inode, command_runner)
+        except PromotionError as cleanup_error:
+            raise PromotionError(f"candidate lock acquire and cleanup failed: {cleanup_error}") from error
+        if isinstance(error, PromotionError):
+            raise
+        raise PromotionError(f"candidate promotion lock acquire failed: {error}") from error
 
 
 def _run(argv: list[str], *, env: dict[str, str] | None = None, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
@@ -1028,34 +1204,65 @@ def poll_stopped(
 
 def poll_restored(
     deps: Dependencies, before: dict[str, Any], readiness: dict[str, Any]
-) -> list[dict[str, Any]]:
-    deadline = deps.monotonic() + RESTORE_TIMEOUT_SECONDS
-    observations = []
+) -> dict[str, Any]:
+    started = deps.monotonic()
+    deadline = started + RESTORE_TIMEOUT_SECONDS
+    observations: list[dict[str, Any]] = []
+    attempts = 0
+    last_failure: str | None = None
     while deps.monotonic() < deadline:
-        current = deps.service_snapshot(readiness)
-        owners = deps.owner_snapshot()
-        observation = {"service": current, "owners": owners}
-        observations.append(observation)
-        worker_pid = current.get("worker_pid")
-        if (
-            current.get("active") is True
-            and current.get("running") is True
-            and current.get("healthy") is True
-            and current.get("lock_owned") is True
-            and isinstance(current.get("main_pid"), int)
-            and current["main_pid"] > 0
-            and current["main_pid"] != before.get("main_pid")
-            and isinstance(worker_pid, int)
-            and worker_pid > 0
-            and worker_pid != before.get("worker_pid")
-            and current.get("control_group") == before.get("control_group")
-            and owners.get("worker_pids") == [worker_pid]
-            and owners.get("amd_pids") == [worker_pid]
-            and owners.get("kfd_pids") == [worker_pid]
-        ):
-            return observations
+        attempts += 1
+        try:
+            current = deps.service_snapshot(readiness)
+            owners = deps.owner_snapshot()
+            observation = {"service": current, "owners": owners}
+            observations.append(observation)
+            worker_pid = current.get("worker_pid")
+            predicates = (
+                (current.get("active") is True and current.get("running") is True, "service not active/running"),
+                (
+                    isinstance(current.get("main_pid"), int)
+                    and current["main_pid"] > 0
+                    and current["main_pid"] != before.get("main_pid"),
+                    "service main PID is not a new epoch",
+                ),
+                (current.get("nrestarts") == 0, "service NRestarts differs"),
+                (
+                    current.get("control_group") == before.get("control_group")
+                    and isinstance(worker_pid, int)
+                    and worker_pid > 0
+                    and worker_pid != before.get("worker_pid"),
+                    "service cgroup worker is not a new epoch",
+                ),
+                (current.get("lock_owned") is True, "production lock owner differs"),
+                (
+                    owners.get("worker_pids") == [worker_pid]
+                    and owners.get("amd_pids") == [worker_pid]
+                    and owners.get("kfd_pids") == [worker_pid],
+                    "AMD/KFD worker owner differs",
+                ),
+                (current.get("healthy") is True, "bridge readiness is not healthy"),
+            )
+            last_failure = next((reason for passed, reason in predicates if not passed), None)
+            if last_failure is None:
+                return {
+                    "passed": True,
+                    "attempts": attempts,
+                    "elapsed_seconds": max(0.0, deps.monotonic() - started),
+                    "last_failure": None,
+                    "observations": observations,
+                }
+        except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
+            last_failure = str(error)
+            observations.append({"failure": last_failure})
         deps.sleep(POLL_SECONDS)
-    raise PromotionError("default service restore/new epoch/health timed out")
+    return {
+        "passed": False,
+        "attempts": attempts,
+        "elapsed_seconds": max(0.0, deps.monotonic() - started),
+        "last_failure": last_failure,
+        "observations": observations,
+    }
 
 
 def capture_environment(profile: dict[str, Any]) -> dict[str, str]:
@@ -1179,7 +1386,10 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
         "lock": None,
         "capture": None,
         "candidate_post": None,
-        "restore": {"attempted": False, "passed": False, "observations": []},
+        "restore": {
+            "attempted": False, "passed": False, "attempts": 0,
+            "elapsed_seconds": 0.0, "last_failure": None, "observations": [],
+        },
         "failure": None,
         "actual_run_count": 0,
     }
@@ -1235,7 +1445,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             try:
                 lease.release()
                 evidence["lock"]["released"] = True
-            except OSError as error:
+            except (OSError, PromotionError) as error:
                 evidence["lock"]["released"] = False
                 evidence["failure"] = {"reason": f"lock release failed: {error}"}
                 code = 1
@@ -1244,10 +1454,12 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             evidence["restore"]["attempted"] = True
             try:
                 deps.start_service()
-                evidence["restore"]["observations"] = poll_restored(
+                restored = poll_restored(
                     deps, evidence["service_prestate"], readiness
                 )
-                evidence["restore"]["passed"] = True
+                evidence["restore"].update(restored)
+                if not restored["passed"]:
+                    raise PromotionError("default service restore/new epoch/health timed out")
             except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
                 evidence["restore"]["error"] = str(error)
                 code = 1

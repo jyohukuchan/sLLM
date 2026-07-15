@@ -53,6 +53,7 @@ READY_URL = "http://172.20.0.1:8000/readyz"
 READY_BODY = '{"status":"ready"}'
 READY_TIMEOUT_SECONDS = 5
 READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
+AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
 
 
 class GateError(RuntimeError):
@@ -145,6 +146,7 @@ def fixed_promotion_request_id(
     tensor_set_sha256: str,
     package_sha256: str,
     readiness: dict[str, Any],
+    authorization_lineage: dict[str, Any] | None,
 ) -> str:
     identity = {
         "schema_version": "ullm.qwen35_aq4.sq8_overlay_promotion_request.v1",
@@ -157,11 +159,46 @@ def fixed_promotion_request_id(
         },
         "package_sha256": package_sha256,
         "readiness": readiness,
+        "authorization_lineage": authorization_lineage,
     }
     encoded = json.dumps(
         identity, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
     ).encode("ascii")
     return "sq8-promotion-" + hashlib.sha256(encoded).hexdigest()
+
+
+def prior_failure_lineage(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    if path.is_symlink():
+        raise GateError("prior failure receipt must be immutable 0444 single-link non-symlink")
+    path = path.resolve()
+    value = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_IMODE(value.st_mode) != 0o444
+        or value.st_nlink != 1
+    ):
+        raise GateError("prior failure receipt must be immutable 0444 single-link non-symlink")
+    receipt = read_object(path, "prior failure receipt")
+    request_id = receipt.get("request_id")
+    actual = receipt.get("actual")
+    if (
+        receipt.get("schema_version") != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+        or receipt.get("status") != "actual_failed"
+        or not isinstance(request_id, str)
+        or REQUEST_ID_RE.fullmatch(request_id) is None
+        or not isinstance(actual, dict)
+        or actual.get("status") != "failed"
+        or actual.get("request_id") != request_id
+    ):
+        raise GateError("prior failure receipt state differs")
+    return {
+        "schema": AUTHORIZATION_LINEAGE_SCHEMA,
+        "disposition": "consumed_failed_not_reusable",
+        "prior_request_id": request_id,
+        "prior_failure_receipt": {"path": str(path), "sha256": sha_file(path)},
+    }
 
 
 def _docker_inspect(kind: str, identity: str) -> dict[str, Any]:
@@ -491,6 +528,9 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     binding = read_object(binding_path, "overlay binding")
     validate_binding(binding, package_manifest)
     readiness = readiness_identity()
+    authorization_lineage = prior_failure_lineage(
+        getattr(args, "prior_failure_receipt", None)
+    )
     source_tree = git_value("rev-parse", f"{commit}^{{tree}}")
     source_archive = source_archive_sha256(commit)
     authorize = bool(getattr(args, "authorize_actual_run", False))
@@ -522,6 +562,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             tensor_set_sha256=binding["tensor_set_sha256"],
             package_sha256=sha_file(package_manifest),
             readiness=readiness,
+            authorization_lineage=authorization_lineage,
         )
         if audit is not None and (
             request_id != audit["request_id"]
@@ -590,6 +631,10 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "tensor_set_sha256": binding["tensor_set_sha256"],
                 "package_manifest_path": str(package_manifest),
                 "package_manifest_sha256": sha_file(package_manifest),
+                "prior_failure_receipt": (
+                    authorization_lineage["prior_failure_receipt"]
+                    if authorization_lineage is not None else None
+                ),
             },
         }
         build_receipt_path = output / "build-receipt.json"
@@ -616,6 +661,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     {"path": audit["path"], "sha256": audit["sha256"]}
                     if audit is not None else None
                 ),
+                "lineage": authorization_lineage,
             },
             "readiness": readiness,
             "device": {
@@ -737,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worker-binary", type=Path, default=WORKER)
     parser.add_argument("--authorize-actual-run", action="store_true")
     parser.add_argument("--independent-audit-receipt", type=Path)
+    parser.add_argument("--prior-failure-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
         print(json.dumps(materialize(args), sort_keys=True))
