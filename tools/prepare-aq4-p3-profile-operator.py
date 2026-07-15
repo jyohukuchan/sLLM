@@ -39,6 +39,18 @@ QUIET_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v14"
 OPERATOR_SCHEMA = "ullm.aq4_p3_profile_operator_command.v9"
 OPERATOR_RESULT_SCHEMA = "ullm.aq4_p3_profile_operator_result.v9"
 ACTUAL_AUDIT_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v9"
+HISTORICAL_ACTUAL_V9_COMMIT = "00358807d7f400d621c11e20b942ecd4fbbd656f"
+HISTORICAL_ACTUAL_V9_TREE = "6f0f61be424057a9fd8ca3c455d565e6dc3a6c08"
+HISTORICAL_ACTUAL_V9_FILE_COUNT = 35
+HISTORICAL_OPERATOR_MANIFEST_V9_COMMIT = "2df19a16723df952c0be58a5cff4a1d86bb80d99"
+HISTORICAL_OPERATOR_RESULT_V9_SCHEMA = "ullm.aq4_p3_profile_operator_result.v9"
+HISTORICAL_ACTUAL_AUDIT_V9_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v9"
+HISTORICAL_MAINTENANCE_EVIDENCE_V8 = P2 / "resident-one-case-smoke-profile-maintenance-evidence-v8"
+HISTORICAL_PROFILE_RUNTIME_V8 = P2 / "resident-one-case-smoke-profile-execute-v8"
+HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8 = P2 / "resident-one-case-smoke-profile-execute-evidence-v8"
+HISTORICAL_PROFILE_CAPTURE_V8 = P3 / "aq4-p3-diagnostic-rocprof-capture-v8"
+HISTORICAL_OPERATOR_RESULT_V9 = P2 / "resident-one-case-smoke-profile-operator-result-v9"
+HISTORICAL_ACTUAL_AUDIT_V9 = P2 / "resident-one-case-smoke-profile-actual-audit-v9"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 DEFAULT_INTERVAL = 5.0
 DEFAULT_MAXIMUM = 900.0
@@ -454,22 +466,250 @@ def seal_optional(root: Path, *, required: bool) -> dict[str, Any] | None:
     return seal_existing(root)
 
 
-def validate_actual_documents(result: dict[str, Any], audit: dict[str, Any]) -> None:
+def validate_actual_documents(
+    result: dict[str, Any],
+    audit: dict[str, Any],
+    *,
+    result_schema: str = OPERATOR_RESULT_SCHEMA,
+    audit_schema: str = ACTUAL_AUDIT_SCHEMA,
+) -> None:
     clone = json.loads(json.dumps(audit)); declared = clone.get("audit_sha256"); clone["audit_sha256"] = None
     returncode = result.get("returncode")
     succeeded = type(returncode) is int and returncode == 0
     expected_result = "passed" if succeeded else "failed"
     expected_audit = "passed_immutable_evidence_preserved_restore_passed" if succeeded else "failed_immutable_evidence_preserved_restore_passed"
-    if result.get("schema_version") != OPERATOR_RESULT_SCHEMA or result.get("status") != expected_result or type(returncode) is not int or result.get("invocation_count") != 1 or result.get("maximum_invocations") != 1 or result.get("shell") is not False or result.get("retry_performed") is not False or result.get("actual_executed") is not True or result.get("secret_material_recorded") is not False:
+    if result.get("schema_version") != result_schema or result.get("status") != expected_result or type(returncode) is not int or result.get("invocation_count") != 1 or result.get("maximum_invocations") != 1 or result.get("shell") is not False or result.get("retry_performed") is not False or result.get("actual_executed") is not True or result.get("secret_material_recorded") is not False:
         raise OperatorError("operator result semantic boundary differs")
     execution = audit.get("execution", {})
     profile = audit.get("profile_artifacts", {})
-    if audit.get("schema_version") != ACTUAL_AUDIT_SCHEMA or declared != sha_bytes(canonical(clone)) or audit.get("status") != expected_audit or execution.get("returncode") != returncode or execution.get("invocation_count") != 1 or execution.get("maximum_invocations") != 1 or execution.get("shell") is not False or execution.get("retry_performed") is not False or audit.get("restore", {}).get("passed") is not True or audit.get("package_integrity", {}).get("full_hash_count") != 1 or audit.get("cleanup", {}).get("residual_targeted_processes") != [] or audit.get("actual_executed") is not True or audit.get("retry_performed") is not False or audit.get("secret_material_recorded") is not False:
+    if audit.get("schema_version") != audit_schema or declared != sha_bytes(canonical(clone)) or audit.get("status") != expected_audit or execution.get("returncode") != returncode or execution.get("invocation_count") != 1 or execution.get("maximum_invocations") != 1 or execution.get("shell") is not False or execution.get("retry_performed") is not False or audit.get("restore", {}).get("passed") is not True or audit.get("package_integrity", {}).get("full_hash_count") != 1 or audit.get("cleanup", {}).get("residual_targeted_processes") != [] or audit.get("actual_executed") is not True or audit.get("retry_performed") is not False or audit.get("secret_material_recorded") is not False:
         raise OperatorError("actual audit semantic boundary differs")
     if succeeded and (audit.get("failure") is not None or profile.get("status") != "complete_diagnostic" or profile.get("measurement_eligible") is not False or profile.get("promotion_eligible") is not False):
         raise OperatorError("successful actual audit outcome differs")
     if not succeeded and (not isinstance(audit.get("failure"), dict) or profile.get("status") != "failure_evidence_only"):
         raise OperatorError("failed actual audit outcome differs")
+
+
+def historical_actual_v9_fresh_paths() -> list[Path]:
+    paths = [
+        HISTORICAL_PROFILE_RUNTIME_V8,
+        HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8,
+        HISTORICAL_MAINTENANCE_EVIDENCE_V8,
+        HISTORICAL_PROFILE_CAPTURE_V8,
+        HISTORICAL_PROFILE_CAPTURE_V8 / "capture-artifact.json",
+        HISTORICAL_PROFILE_CAPTURE_V8 / "rocprof.stdout",
+        HISTORICAL_PROFILE_CAPTURE_V8 / "rocprof.stderr",
+        HISTORICAL_OPERATOR_RESULT_V9,
+        HISTORICAL_ACTUAL_AUDIT_V9,
+    ]
+    if len({str(path) for path in paths}) != 9 or any(
+        not path.is_absolute() or ".." in path.parts for path in paths
+    ):
+        raise OperatorError("historical actual-v9 path set differs")
+    return paths
+
+
+def _stream_record_matches(record: Any, path: Path, label: str) -> None:
+    if not isinstance(record, dict) or record != stream_record(path):
+        raise OperatorError(f"historical actual-v9 {label} stream differs")
+
+
+def _historical_actual_v9_commit_authority(
+    inventories: dict[str, dict[str, Any]],
+) -> None:
+    if (
+        git("rev-parse", f"{HISTORICAL_ACTUAL_V9_COMMIT}^{{tree}}")
+        != HISTORICAL_ACTUAL_V9_TREE
+    ):
+        raise OperatorError("historical actual-v9 Git tree differs")
+    expected: set[str] = set()
+    for inventory in inventories.values():
+        root = Path(inventory["root"])
+        verify_inventory_commit(root, inventory, HISTORICAL_ACTUAL_V9_COMMIT)
+        expected.add(str((root / "SHA256SUMS").relative_to(ROOT)))
+        expected.update(
+            str(Path(member["path"]).relative_to(ROOT))
+            for member in inventory["members"].values()
+        )
+    roots = [str(Path(inventory["root"]).relative_to(ROOT)) for inventory in inventories.values()]
+    observed = set(
+        filter(
+            None,
+            git(
+                "ls-tree",
+                "-r",
+                "--name-only",
+                HISTORICAL_ACTUAL_V9_COMMIT,
+                "--",
+                *roots,
+            ).splitlines(),
+        )
+    )
+    if (
+        expected != observed
+        or len(expected) != HISTORICAL_ACTUAL_V9_FILE_COUNT
+    ):
+        raise OperatorError("historical actual-v9 Git file coverage differs")
+
+
+def historical_actual_v9_state() -> dict[str, Any]:
+    fresh = historical_actual_v9_fresh_paths()
+    present = [path.exists() or path.is_symlink() for path in fresh]
+    state = [
+        {"path": str(path), "present": observed}
+        for path, observed in zip(fresh, present, strict=True)
+    ]
+    if not any(present):
+        return {
+            "state": "not_executed",
+            "artifact_commit": HISTORICAL_ACTUAL_V9_COMMIT,
+            "artifact_tree": HISTORICAL_ACTUAL_V9_TREE,
+            "fresh_outputs": state,
+            "actual_executed": False,
+        }
+
+    required = {
+        HISTORICAL_MAINTENANCE_EVIDENCE_V8,
+        HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8,
+        HISTORICAL_PROFILE_RUNTIME_V8,
+        HISTORICAL_PROFILE_CAPTURE_V8,
+        HISTORICAL_PROFILE_CAPTURE_V8 / "rocprof.stdout",
+        HISTORICAL_PROFILE_CAPTURE_V8 / "rocprof.stderr",
+        HISTORICAL_OPERATOR_RESULT_V9,
+        HISTORICAL_ACTUAL_AUDIT_V9,
+        HISTORICAL_PROFILE_CAPTURE_V8 / "capture-failure.json",
+    }
+    if (
+        any(not path.exists() or path.is_symlink() for path in required)
+        or (HISTORICAL_PROFILE_CAPTURE_V8 / "capture-artifact.json").exists()
+        or (HISTORICAL_PROFILE_CAPTURE_V8 / "capture-artifact.json").is_symlink()
+    ):
+        raise OperatorError("historical actual-v9 state is partial or mixed")
+
+    roots = {
+        "maintenance": HISTORICAL_MAINTENANCE_EVIDENCE_V8,
+        "execute": HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8,
+        "runtime": HISTORICAL_PROFILE_RUNTIME_V8,
+        "capture": HISTORICAL_PROFILE_CAPTURE_V8,
+        "operator_result": HISTORICAL_OPERATOR_RESULT_V9,
+        "actual_audit": HISTORICAL_ACTUAL_AUDIT_V9,
+    }
+    inventories = {name: verify_sums(root) for name, root in roots.items()}
+    result = load(
+        HISTORICAL_OPERATOR_RESULT_V9 / "operator-result.json",
+        "historical operator-v9 result",
+    )
+    audit = load(
+        HISTORICAL_ACTUAL_AUDIT_V9 / "actual-audit.json",
+        "historical actual-v9 audit",
+    )
+    validate_actual_documents(
+        result,
+        audit,
+        result_schema=HISTORICAL_OPERATOR_RESULT_V9_SCHEMA,
+        audit_schema=HISTORICAL_ACTUAL_AUDIT_V9_SCHEMA,
+    )
+    if (
+        result.get("returncode") != 1
+        or result.get("operator_manifest_commit")
+        != HISTORICAL_OPERATOR_MANIFEST_V9_COMMIT
+        or audit.get("authority_commit")
+        != HISTORICAL_OPERATOR_MANIFEST_V9_COMMIT
+    ):
+        raise OperatorError("historical actual-v9 result authority differs")
+
+    operator_stdout = HISTORICAL_OPERATOR_RESULT_V9 / "operator.stdout.bin"
+    operator_stderr = HISTORICAL_OPERATOR_RESULT_V9 / "operator.stderr.bin"
+    rocprof_stdout = HISTORICAL_PROFILE_CAPTURE_V8 / "rocprof.stdout"
+    rocprof_stderr = HISTORICAL_PROFILE_CAPTURE_V8 / "rocprof.stderr"
+    _stream_record_matches(result.get("stdout"), operator_stdout, "operator stdout")
+    _stream_record_matches(result.get("stderr"), operator_stderr, "operator stderr")
+    streams = audit.get("all_returncodes_and_streams", {})
+    operator = streams.get("operator", {})
+    rocprof = streams.get("rocprof", {})
+    if operator.get("returncode") != 1 or rocprof.get("returncode") != 1:
+        raise OperatorError("historical actual-v9 subprocess returncodes differ")
+    _stream_record_matches(operator.get("stdout"), operator_stdout, "audit operator stdout")
+    _stream_record_matches(operator.get("stderr"), operator_stderr, "audit operator stderr")
+    _stream_record_matches(rocprof.get("stdout"), rocprof_stdout, "audit rocprof stdout")
+    _stream_record_matches(rocprof.get("stderr"), rocprof_stderr, "audit rocprof stderr")
+    launcher = load(
+        HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8 / "launcher-evidence.json",
+        "historical actual-v9 launcher evidence",
+    )
+    for name in ("runner", "validator"):
+        process = launcher.get(name, {})
+        audited_process = streams.get(name, {})
+        if audited_process.get("returncode") != process.get("exit_code"):
+            raise OperatorError("historical actual-v9 subprocess returncodes differ")
+        for direction in ("stdout", "stderr"):
+            expected_stream = optional_stream(
+                HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8,
+                process.get(direction),
+            )
+            if audited_process.get(direction) != expected_stream:
+                raise OperatorError(
+                    f"historical actual-v9 {name} {direction} stream differs"
+                )
+
+    maintenance = load(
+        HISTORICAL_MAINTENANCE_EVIDENCE_V8 / "launcher-evidence.json",
+        "historical actual-v9 maintenance evidence",
+    )
+    counts = maintenance.get("process_counts", {})
+    capture = maintenance.get("capture", {})
+    if (
+        maintenance.get("status") != "failed"
+        or maintenance.get("mode") != "execute"
+        or maintenance.get("secret_material_recorded") is not False
+        or any(counts.get(name) != 1 for name in ("capture_tool", "launcher", "rocprof"))
+        or capture.get("capture_tool_invocations") != 1
+        or capture.get("rocprof_invocations") != 1
+    ):
+        raise OperatorError("historical actual-v9 exact-one maintenance differs")
+
+    failure_path = HISTORICAL_PROFILE_CAPTURE_V8 / "capture-failure.json"
+    failure = load(failure_path, "historical actual-v9 capture failure")
+    if (
+        failure.get("schema_version")
+        != "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
+        or failure.get("status") != "failed"
+        or failure.get("children_remaining") != []
+        or failure.get("process_group_cleanup_complete") is not True
+        or audit.get("failure", {}).get("capture_failure_sha256")
+        != sha_file(failure_path)
+    ):
+        raise OperatorError("historical actual-v9 capture failure differs")
+    failure_streams = failure.get("streams", {})
+    for name, path in (("rocprof.stdout", rocprof_stdout), ("rocprof.stderr", rocprof_stderr)):
+        expected = stream_record(path)
+        if failure_streams.get(name) != {
+            "bytes": expected["bytes"],
+            "sha256": expected["sha256"],
+        }:
+            raise OperatorError("historical actual-v9 capture stream differs")
+
+    embedded = audit.get("evidence", {})
+    for name in ("maintenance", "execute", "runtime", "capture", "operator_result"):
+        if embedded.get(name) != inventories[name]:
+            raise OperatorError("historical actual-v9 embedded inventory differs")
+    _historical_actual_v9_commit_authority(inventories)
+    return {
+        "state": "executed_sealed",
+        "artifact_commit": HISTORICAL_ACTUAL_V9_COMMIT,
+        "artifact_tree": HISTORICAL_ACTUAL_V9_TREE,
+        "file_count": sum(
+            len(inventory["members"]) + 1 for inventory in inventories.values()
+        ),
+        "fresh_outputs": state,
+        "outcome": result["status"],
+        "returncode": result["returncode"],
+        "invocation_count": result["invocation_count"],
+        "maximum_invocations": result["maximum_invocations"],
+        "retry_performed": result["retry_performed"],
+        "inventories": inventories,
+        "actual_executed": True,
+    }
 
 
 def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) -> dict[str, Any]:

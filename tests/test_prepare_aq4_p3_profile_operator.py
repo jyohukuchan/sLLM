@@ -75,7 +75,9 @@ def finalizer_fixture(
         "package_integrity": {"full_hash_count": 1, "full_content": {"passed": True}, "integrity_identity": {"passed": True}},
         "restore": {"passed": True, "duration_ns": 1, "final_metadata_recheck": {"within_absolute_deadline": True}},
         "lock_substrate_cleanup": {"passed": True, "runner_children": [], "holder_pids": []},
-        "capture": {"exit_code": returncode},
+        "capture": {"exit_code": returncode, "capture_tool_invocations": 1, "rocprof_invocations": 1},
+        "process_counts": {"capture_tool": 1, "launcher": 1, "rocprof": 1},
+        "secret_material_recorded": False,
     }
     sealed(paths["MAINTENANCE_EVIDENCE"], "launcher-evidence.json", maintenance)
     launcher = {
@@ -96,7 +98,7 @@ def finalizer_fixture(
         nested.mkdir()
         (nested / "run-00_kernel_trace.csv").write_bytes(b"Kind,Name\nKERNEL,fixture\n")
     else:
-        unsealed_json(paths["PROFILE_CAPTURE"], "capture-failure.json", {"schema_version": "failure.v2", "status": "failed", "reason": "capture failed", "children_remaining": [], "process_group_cleanup_complete": True, "ready_candidate_audit": {"reason_code": "marker_missing"}})
+        unsealed_json(paths["PROFILE_CAPTURE"], "capture-failure.json", {"schema_version": "ullm.aq4_p3_diagnostic_rocprof_failure.v2", "status": "failed", "reason": "capture failed", "children_remaining": [], "process_group_cleanup_complete": True, "ready_candidate_audit": {"reason_code": "marker_missing"}, "streams": {"rocprof.stdout": {"bytes": 0, "sha256": OPERATOR.sha_bytes(b"")}, "rocprof.stderr": {"bytes": len(b"capture failed\n"), "sha256": OPERATOR.sha_bytes(b"capture failed\n")}}})
     (paths["PROFILE_CAPTURE"] / "rocprof.stdout").write_bytes(b"")
     (paths["PROFILE_CAPTURE"] / "rocprof.stderr").write_bytes(b"" if succeeded else b"capture failed\n")
     paths["OPERATOR_RESULT"].mkdir()
@@ -144,7 +146,125 @@ def test_v11_ready_execute_binding_and_fresh_output_authorities_are_exact() -> N
     )
     fresh = OPERATOR.fresh_paths(ready)
     assert len(fresh) == len({str(path) for path in fresh}) == 9
-    assert all(not path.exists() and not path.is_symlink() for path in fresh)
+    historical = OPERATOR.historical_actual_v9_state()
+    assert historical["state"] in {"not_executed", "executed_sealed"}
+    if historical["state"] == "not_executed":
+        assert all(not item["present"] for item in historical["fresh_outputs"])
+    else:
+        assert historical["artifact_commit"] == OPERATOR.HISTORICAL_ACTUAL_V9_COMMIT
+        assert historical["artifact_tree"] == OPERATOR.HISTORICAL_ACTUAL_V9_TREE
+        assert historical["file_count"] == OPERATOR.HISTORICAL_ACTUAL_V9_FILE_COUNT
+        assert historical["returncode"] == 1
+        assert historical["invocation_count"] == historical["maximum_invocations"] == 1
+        assert historical["retry_performed"] is False
+
+
+def patch_historical_actual_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    paths: dict[str, Path],
+) -> None:
+    for name, key in (
+        ("HISTORICAL_MAINTENANCE_EVIDENCE_V8", "MAINTENANCE_EVIDENCE"),
+        ("HISTORICAL_PROFILE_RUNTIME_V8", "PROFILE_RUNTIME"),
+        ("HISTORICAL_PROFILE_EXECUTE_EVIDENCE_V8", "PROFILE_EXECUTE_EVIDENCE"),
+        ("HISTORICAL_PROFILE_CAPTURE_V8", "PROFILE_CAPTURE"),
+        ("HISTORICAL_OPERATOR_RESULT_V9", "OPERATOR_RESULT"),
+        ("HISTORICAL_ACTUAL_AUDIT_V9", "ACTUAL_AUDIT"),
+    ):
+        monkeypatch.setattr(OPERATOR, name, paths[key])
+
+
+def test_historical_actual_v9_accepts_fully_absent_pre_execution_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = {
+        "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v8",
+        "PROFILE_RUNTIME": tmp_path / "runtime-v8",
+        "PROFILE_EXECUTE_EVIDENCE": tmp_path / "execute-evidence-v8",
+        "PROFILE_CAPTURE": tmp_path / "capture-v8",
+        "OPERATOR_RESULT": tmp_path / "operator-result-v9",
+        "ACTUAL_AUDIT": tmp_path / "actual-audit-v9",
+    }
+    patch_historical_actual_paths(monkeypatch, paths)
+    state = OPERATOR.historical_actual_v9_state()
+    assert state["state"] == "not_executed"
+    assert state["actual_executed"] is False
+    assert len(state["fresh_outputs"]) == 9
+    assert all(item["present"] is False for item in state["fresh_outputs"])
+
+
+def test_historical_actual_v9_rejects_partial_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = {
+        "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v8",
+        "PROFILE_RUNTIME": tmp_path / "runtime-v8",
+        "PROFILE_EXECUTE_EVIDENCE": tmp_path / "execute-evidence-v8",
+        "PROFILE_CAPTURE": tmp_path / "capture-v8",
+        "OPERATOR_RESULT": tmp_path / "operator-result-v9",
+        "ACTUAL_AUDIT": tmp_path / "actual-audit-v9",
+    }
+    patch_historical_actual_paths(monkeypatch, paths)
+    paths["OPERATOR_RESULT"].mkdir()
+    with pytest.raises(OPERATOR.OperatorError, match="partial or mixed"):
+        OPERATOR.historical_actual_v9_state()
+
+
+def test_historical_actual_v9_accepts_only_sealed_commit_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = finalizer_fixture(tmp_path, monkeypatch, returncode=1)
+    OPERATOR.finalize_actual(returncode=1, start_unix_ns=100, end_unix_ns=200)
+    patch_historical_actual_paths(monkeypatch, paths)
+    commit = "f" * 40
+    tree = "a" * 40
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_V9_COMMIT", commit)
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_V9_TREE", tree)
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_OPERATOR_MANIFEST_V9_COMMIT", "e" * 40)
+    roots = [
+        paths["MAINTENANCE_EVIDENCE"],
+        paths["PROFILE_EXECUTE_EVIDENCE"],
+        paths["PROFILE_RUNTIME"],
+        paths["PROFILE_CAPTURE"],
+        paths["OPERATOR_RESULT"],
+        paths["ACTUAL_AUDIT"],
+    ]
+    inventories = [OPERATOR.verify_sums(root) for root in roots]
+    expected = sorted(
+        {
+            str(path.relative_to(tmp_path))
+            for inventory in inventories
+            for path in [
+                Path(inventory["root"]) / "SHA256SUMS",
+                *(Path(item["path"]) for item in inventory["members"].values()),
+            ]
+        }
+    )
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_V9_FILE_COUNT", len(expected))
+    monkeypatch.setattr(OPERATOR, "verify_inventory_commit", lambda *_args: None)
+
+    def historical_git(*args: str) -> str:
+        if args[:1] == ("rev-parse",):
+            return tree
+        if args[:3] == ("ls-tree", "-r", "--name-only"):
+            return "\n".join(expected)
+        raise AssertionError(f"unexpected Git query: {args}")
+
+    monkeypatch.setattr(OPERATOR, "git", historical_git)
+    state = OPERATOR.historical_actual_v9_state()
+    assert state["state"] == "executed_sealed"
+    assert state["outcome"] == "failed"
+    assert state["returncode"] == 1
+    assert state["invocation_count"] == state["maximum_invocations"] == 1
+    assert state["retry_performed"] is False
+    assert state["file_count"] == len(expected)
+
+    monkeypatch.setattr(OPERATOR, "HISTORICAL_ACTUAL_V9_TREE", "b" * 40)
+    with pytest.raises(OPERATOR.OperatorError, match="Git tree differs"):
+        OPERATOR.historical_actual_v9_state()
 
 
 @pytest.mark.parametrize("returncode", (0, 17))
