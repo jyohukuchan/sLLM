@@ -877,6 +877,18 @@ fn main() -> ExitCode {
                 env::args().nth(8),
             )
         }
+        Some("package-linear-attn-ab-hybrid-diagnostic") => {
+            package_linear_attn_ab_hybrid_diagnostic(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+            )
+        }
         Some("package-linear-attn-stateful-step-smoke") => package_linear_attn_stateful_step_smoke(
             env::args().nth(2),
             env::args().nth(3),
