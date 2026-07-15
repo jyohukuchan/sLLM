@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import copy
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,16 @@ def load_tool(name: str, filename: str):
 
 BUILDER = load_tool("qwen35_aq4_sq8_overlay_builder_test", "build-qwen35-aq4-sq8-overlay.py")
 ORACLE = load_tool("qwen35_aq4_sq8_overlay_oracle_test", "run-qwen35-aq4-sq8-overlay-cpu-oracle.py")
+
+
+@pytest.fixture(autouse=True)
+def small_tensor_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = BUILDER._expected_entry
+    monkeypatch.setattr(
+        BUILDER,
+        "_expected_entry",
+        lambda name: (original(name)[0], [1, 1]),
+    )
 
 
 def production_config() -> dict:
@@ -47,9 +58,22 @@ def write_fixture(tmp_path: Path) -> tuple[Path, Path, Path, list[str]]:
     package.mkdir(parents=True)
     artifact.mkdir(parents=True)
     (source / "config.json").write_text(json.dumps(production_config()), encoding="utf-8")
-    (source / "model.safetensors.index.json").write_text('{"weight_map": {}}\n', encoding="utf-8")
     (package / "manifest.json").write_text('{"schema_version": "fixture"}\n', encoding="utf-8")
     names = BUILDER.exact_tensor_names(production_config())
+    weight_map = {name: "model.safetensors" for name in names}
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    header = {
+        name: {"dtype": "BF16", "shape": [1, 1], "data_offsets": [index * 2, index * 2 + 2]}
+        for index, name in enumerate(names)
+    }
+    header_bytes = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    with (source / "model.safetensors").open("wb") as handle:
+        handle.write(len(header_bytes).to_bytes(8, "little"))
+        handle.write(header_bytes)
+        for index in range(len(names)):
+            handle.write(index.to_bytes(2, "little"))
     entries = []
     for index, name in enumerate(names):
         payload = artifact / f"fp8/{index}.bin"
@@ -118,15 +142,70 @@ def test_binding_and_overlay_promotion_receipt_are_create_new(tmp_path: Path) ->
     binding = BUILDER.create_binding(artifact, source, package, names)
     assert binding["tensor_set_sha256"] == BUILDER.tensor_set_sha256(names)
     assert binding["content_sha256"] == BUILDER.validate_sq_manifest(artifact, names)[1]
-    receipt_path, receipt = BUILDER.create_overlay_promotion_receipt(
-        product, binding["content_sha256"]
+    BUILDER.validate_bound_source_provenance(
+        binding, source, artifact, BUILDER.validate_sq_manifest(artifact, names)[0], names
     )
-    assert receipt["overlay"] == {"content_sha256": binding["content_sha256"]}
-    assert receipt_path.name == BUILDER.OVERLAY_PROMOTION_NAME
+    BUILDER.harden_artifact(artifact)
+    inventory = BUILDER.artifact_inventory(artifact, binding)
+    receipt = BUILDER.overlay_promotion_receipt(
+        product, binding, sha(artifact / "binding.json"), inventory
+    )
+    assert receipt["overlay"]["content_sha256"] == binding["content_sha256"]
+    assert receipt["overlay"]["artifact_inventory"] == inventory
     with pytest.raises(BUILDER.BuildError, match="overwrite binding"):
         BUILDER.create_binding(artifact, source, package, names)
+    receipt_path = product / BUILDER.OVERLAY_PROMOTION_NAME
+    BUILDER.write_create_new_json(receipt_path, receipt)
     with pytest.raises(BUILDER.BuildError, match="overwrite JSON"):
-        BUILDER.create_overlay_promotion_receipt(product, binding["content_sha256"])
+        BUILDER.write_create_new_json(receipt_path, receipt)
+    BUILDER._make_tree_removable(artifact)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "mismatch"])
+def test_source_provenance_mutation_is_rejected(tmp_path: Path, mutation: str) -> None:
+    source, package, artifact, names = write_fixture(tmp_path)
+    binding = BUILDER.create_binding(artifact, source, package, names)
+    manifest = BUILDER.validate_sq_manifest(artifact, names)[0]
+    mutated = copy.deepcopy(binding)
+    if mutation == "missing":
+        mutated["source"]["tensors"].pop()
+    elif mutation == "duplicate":
+        mutated["source"]["tensors"].append(
+            copy.deepcopy(mutated["source"]["tensors"][0])
+        )
+    else:
+        mutated["source"]["tensors"][0]["source"]["logical_sha256"] = "0" * 64
+    with pytest.raises(BUILDER.BuildError, match="provenance"):
+        BUILDER.validate_bound_source_provenance(
+            mutated, source, artifact, manifest, names
+        )
+
+
+def test_artifact_inventory_rejects_mutable_file(tmp_path: Path) -> None:
+    source, package, artifact, names = write_fixture(tmp_path)
+    binding = BUILDER.create_binding(artifact, source, package, names)
+    BUILDER.harden_artifact(artifact)
+    assert BUILDER.artifact_inventory(artifact, binding)["regular_file_count"] == 98
+    target = artifact / "sq_manifest.json"
+    target.chmod(0o644)
+    with pytest.raises(BUILDER.BuildError, match="immutability differs"):
+        BUILDER.artifact_inventory(artifact, binding)
+    BUILDER._make_tree_removable(artifact)
+
+
+def test_existing_artifact_is_replaced_by_atomic_exchange(tmp_path: Path) -> None:
+    output = tmp_path / "artifact"
+    staged = tmp_path / "artifact.staged"
+    output.mkdir()
+    staged.mkdir()
+    for root, marker in ((output, "old"), (staged, "new")):
+        (root / "binding.json").write_text(
+            json.dumps({"content_sha256": "a" * 64}), encoding="utf-8"
+        )
+        (root / "marker").write_text(marker, encoding="utf-8")
+    BUILDER.atomic_publish_directory(staged, output, True, "a" * 64)
+    assert (output / "marker").read_text(encoding="utf-8") == "new"
+    assert not staged.exists()
 
 
 def test_sq_manifest_payload_tamper_is_rejected(tmp_path: Path) -> None:
