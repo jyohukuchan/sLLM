@@ -1486,6 +1486,159 @@ def test_ready_candidate_marker_drift_is_bound_and_fail_closed(
     assert binding["reason_code"] == expected_reason
 
 
+def _reseal_ready_candidate_audit(audit: dict) -> dict:
+    audit["audit_sha256"] = None
+    audit["audit_sha256"] = CAPTURE.self_hash(audit, "audit_sha256")
+    return audit
+
+
+@pytest.mark.parametrize(
+    "variant",
+    (
+        "secret-scalar",
+        "path-scalar",
+        "unsafe-charset-scalar",
+        "overlong-recorded-scalar",
+        "empty-string-hash-mismatch",
+        "numeric-type-confusion",
+        "unsafe-nested-key",
+        "secret-nested-key",
+        "omitted-type-confusion",
+        "unhashable-key-type",
+        "unhashable-status",
+        "wrong-first-failure-reason",
+        "passed-with-failed-predicate",
+        "predicate-value-contradiction",
+        "all-predicates-true-wrong-reason",
+    ),
+)
+def test_self_hashed_ready_candidate_cannot_bypass_capture_semantics(
+    tmp_path: Path, variant: str
+) -> None:
+    _marker, original = _failed_ready_candidate_marker()
+    audit = json.loads(json.dumps(original))
+    if variant in {
+        "secret-scalar",
+        "path-scalar",
+        "unsafe-charset-scalar",
+        "overlong-recorded-scalar",
+    }:
+        value = {
+            "secret-scalar": "api_key",
+            "path-scalar": "/proc/self/fd/91",
+            "unsafe-charset-scalar": "ready value",
+            "overlong-recorded-scalar": "x" * 129,
+        }[variant]
+        event = audit["safe_scalars"]["event"]
+        event.update(
+            {
+                "value": value,
+                "string_length": len(value),
+                "canonical_sha256": hashlib.sha256(
+                    CAPTURE.canonical(value)
+                ).hexdigest(),
+            }
+        )
+        audit["validation"]["predicates"]["event_is_ready"] = False
+        audit["validation"]["reason_code"] = "ready_candidate_event_differs"
+    elif variant == "numeric-type-confusion":
+        model_loads = audit["safe_scalars"]["model_loads"]
+        model_loads["value"] = True
+        model_loads["canonical_sha256"] = hashlib.sha256(
+            CAPTURE.canonical(True)
+        ).hexdigest()
+    elif variant == "empty-string-hash-mismatch":
+        event = audit["safe_scalars"]["event"]
+        event.update({"value": None, "string_length": 0})
+        audit["validation"]["predicates"]["event_is_ready"] = False
+        audit["validation"]["reason_code"] = "ready_candidate_event_differs"
+    elif variant in {"unsafe-nested-key", "secret-nested-key"}:
+        nested = audit["nested"]["driver_identity"]
+        replacement = (
+            "bad/key" if variant == "unsafe-nested-key" else "api_key"
+        )
+        old = nested["keys"][0]
+        nested["keys"][0] = replacement
+        nested["keys"].sort()
+        old_type = nested["key_types"].pop(old)
+        nested["key_types"][replacement] = old_type
+    elif variant == "omitted-type-confusion":
+        audit["nested"]["driver_identity"]["key_types"]["binary_sha256"] = (
+            "omitted"
+        )
+    elif variant == "unhashable-key-type":
+        audit["nested"]["driver_identity"]["key_types"]["binary_sha256"] = []
+    elif variant == "unhashable-status":
+        audit["validation"]["status"] = []
+    elif variant == "wrong-first-failure-reason":
+        audit["validation"]["reason_code"] = "ready_candidate_session_id_empty"
+    elif variant == "passed-with-failed-predicate":
+        audit["validation"].update(
+            {"status": "passed", "reason_code": "ready_candidate_valid"}
+        )
+    elif variant == "predicate-value-contradiction":
+        audit["validation"]["predicates"]["event_is_ready"] = False
+        audit["validation"]["reason_code"] = "ready_candidate_event_differs"
+    else:
+        model_loads = audit["safe_scalars"]["model_loads"]
+        model_loads["value"] = 1
+        model_loads["canonical_sha256"] = hashlib.sha256(
+            CAPTURE.canonical(1)
+        ).hexdigest()
+        audit["validation"]["predicates"]["model_loads_is_one"] = True
+        audit["validation"].update(
+            {"status": "passed", "reason_code": "ready_candidate_envelope_valid"}
+        )
+    _reseal_ready_candidate_audit(audit)
+    with pytest.raises(CAPTURE.CaptureError):
+        CAPTURE.validate_ready_candidate_audit(audit)
+
+    stream = tmp_path / f"{variant}.stderr"
+    stream.write_bytes(
+        CAPTURE.READY_CANDIDATE_MARKER_PREFIX
+        + CAPTURE.canonical(audit)
+        + b"\n"
+    )
+    binding = CAPTURE.parse_ready_candidate_marker(
+        stream, hashlib.sha256(stream.read_bytes()).hexdigest()
+    )
+    assert binding["status"] == "invalid"
+    assert binding["reason_code"] == "ready_candidate_marker_payload_invalid"
+    assert binding["audit"] is None
+
+
+def test_all_true_ready_predicates_accept_only_exact_downstream_failure_reason(
+    tmp_path: Path,
+) -> None:
+    _marker, original = _failed_ready_candidate_marker()
+    audit = json.loads(json.dumps(original))
+    model_loads = audit["safe_scalars"]["model_loads"]
+    model_loads["value"] = 1
+    model_loads["canonical_sha256"] = hashlib.sha256(
+        CAPTURE.canonical(1)
+    ).hexdigest()
+    audit["validation"]["predicates"]["model_loads_is_one"] = True
+    audit["validation"].update(
+        {
+            "status": "failed",
+            "reason_code": "ready_candidate_driver_identity_invalid",
+        }
+    )
+    _reseal_ready_candidate_audit(audit)
+    assert CAPTURE.validate_ready_candidate_audit(audit) == audit
+    stream = tmp_path / "downstream.stderr"
+    stream.write_bytes(
+        CAPTURE.READY_CANDIDATE_MARKER_PREFIX
+        + CAPTURE.canonical(audit)
+        + b"\n"
+    )
+    binding = CAPTURE.parse_ready_candidate_marker(
+        stream, hashlib.sha256(stream.read_bytes()).hexdigest()
+    )
+    assert binding["status"] == "valid"
+    assert binding["audit_sha256"] == audit["audit_sha256"]
+
+
 def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> None:
     sentinel_ready = tmp_path / "outer.ready"
     restore_request = tmp_path / "outer.restore-request"

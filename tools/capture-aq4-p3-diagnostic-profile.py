@@ -155,6 +155,36 @@ READY_CANDIDATE_AUDIT_SCHEMA = "ullm.aq4_p2_ready_candidate_audit.v1"
 READY_CANDIDATE_CAPTURE_SCHEMA = "ullm.aq4_p3_ready_candidate_capture.v1"
 READY_CANDIDATE_MARKER_PREFIX = b"ULLM_AQ4_READY_CANDIDATE_AUDIT_V1 "
 MAX_READY_CANDIDATE_MARKER_BYTES = 16 * 1024
+SAFE_AUDIT_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+SANITIZED_AUDIT_KEY_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+OMITTED_AUDIT_KEY_RE = re.compile(r"^omitted-sha256:[0-9a-f]{64}$")
+SENSITIVE_AUDIT_SCALAR_RE = re.compile(
+    r"authorization|bearer|api[-_]?key|token|secret|password|credential",
+    re.IGNORECASE,
+)
+READY_PREDICATE_ORDER = (
+    "field_set_exact",
+    "event_is_ready",
+    "schema_version_exact",
+    "model_loads_is_integer",
+    "model_loads_is_one",
+    "resident_session_id_is_string",
+    "resident_session_id_nonempty",
+)
+READY_PREDICATE_FAILURE_REASONS = {
+    "field_set_exact": "ready_candidate_field_set_differs",
+    "event_is_ready": "ready_candidate_event_differs",
+    "schema_version_exact": "ready_candidate_schema_differs",
+    "model_loads_is_integer": "ready_candidate_model_loads_type_differs",
+    "model_loads_is_one": "ready_candidate_model_loads_value_differs",
+    "resident_session_id_is_string": "ready_candidate_session_id_type_differs",
+    "resident_session_id_nonempty": "ready_candidate_session_id_empty",
+}
+READY_DOWNSTREAM_FAILURE_REASONS = {
+    "ready_candidate_driver_identity_invalid",
+    "ready_candidate_binary_sha256_differs",
+    "ready_candidate_served_model_binding_invalid",
+}
 MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 MARKER_CLOCK = "rocprofv3_monotonic_ns"
 MAX_ROWS = 500_000
@@ -793,7 +823,36 @@ def _require_exact_keys(value: Any, keys: set[str], label: str) -> dict[str, Any
     return value
 
 
-def _validate_key_type_summary(keys: Any, types: Any, label: str) -> None:
+def _json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    raise CaptureError("ready candidate audit contains an unsupported JSON value")
+
+
+def _safe_protocol_scalar_string(value: str) -> bool:
+    return (
+        len(value) <= 128
+        and SAFE_AUDIT_KEY_RE.fullmatch(value) is not None
+        and "/" not in value
+        and "\\" not in value
+        and SENSITIVE_AUDIT_SCALAR_RE.search(value) is None
+    )
+
+
+def _validate_key_type_summary(keys: Any, types: Any, label: str) -> bool:
+    json_types = {"null", "boolean", "integer", "number", "string", "array", "object"}
     if (
         not isinstance(keys, list)
         or any(not isinstance(key, str) or not key for key in keys)
@@ -801,12 +860,32 @@ def _validate_key_type_summary(keys: Any, types: Any, label: str) -> None:
         or len(keys) != len(set(keys))
         or not isinstance(types, dict)
         or set(types) != set(keys)
-        or any(
-            kind not in {"null", "boolean", "integer", "number", "string", "array", "object", "omitted"}
-            for kind in types.values()
-        )
     ):
         raise CaptureError(f"{label} key/type summary differs")
+    omitted = 0
+    for key in keys:
+        kind = types[key]
+        if OMITTED_AUDIT_KEY_RE.fullmatch(key) is not None:
+            omitted += 1
+            if kind != "omitted":
+                raise CaptureError(f"{label} omitted key/type differs")
+            continue
+        if (
+            not isinstance(kind, str)
+            or kind not in json_types
+            or (
+                SANITIZED_AUDIT_KEY_RE.fullmatch(key) is None
+                and (
+                    SAFE_AUDIT_KEY_RE.fullmatch(key) is None
+                    or SENSITIVE_AUDIT_SCALAR_RE.search(key) is not None
+                )
+            )
+            or kind == "omitted"
+        ):
+            raise CaptureError(f"{label} safe key/type differs")
+    if omitted > 1:
+        raise CaptureError(f"{label} omitted key count differs")
+    return omitted == 1
 
 
 def _validate_safe_scalar(value: Any, label: str) -> None:
@@ -815,20 +894,57 @@ def _validate_safe_scalar(value: Any, label: str) -> None:
         {"present", "json_type", "value", "string_length", "canonical_sha256"},
         label,
     )
-    if type(item["present"]) is not bool:
+    present = item["present"]
+    kind = item["json_type"]
+    safe_value = item["value"]
+    length = item["string_length"]
+    digest = item["canonical_sha256"]
+    if type(present) is not bool:
         raise CaptureError(f"{label} presence differs")
-    if item["json_type"] not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}:
+    if not isinstance(kind, str) or kind not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}:
         raise CaptureError(f"{label} JSON type differs")
-    if item["present"] != (item["json_type"] != "absent"):
-        raise CaptureError(f"{label} presence/type differs")
-    if item["canonical_sha256"] is not None and not _sha256_string(item["canonical_sha256"]):
-        raise CaptureError(f"{label} SHA-256 differs")
-    if item["present"] != (item["canonical_sha256"] is not None):
-        raise CaptureError(f"{label} SHA-256 presence differs")
-    if item["string_length"] is not None and (type(item["string_length"]) is not int or item["string_length"] < 0):
-        raise CaptureError(f"{label} string length differs")
-    if item["value"] is not None and not isinstance(item["value"], (bool, int, float, str)):
-        raise CaptureError(f"{label} safe value differs")
+    if not present:
+        if kind != "absent" or safe_value is not None or length is not None or digest is not None:
+            raise CaptureError(f"{label} absent scalar differs")
+        return
+    if kind == "absent" or not _sha256_string(digest):
+        raise CaptureError(f"{label} present scalar binding differs")
+    if kind == "string":
+        if type(length) is not int or length < 0:
+            raise CaptureError(f"{label} string length differs")
+        if safe_value is None:
+            if (
+                1 <= length <= 128
+                or (
+                    length == 0
+                    and hashlib.sha256(canonical("")).hexdigest() != digest
+                )
+            ):
+                raise CaptureError(f"{label} withheld bounded string differs")
+            return
+        if (
+            not isinstance(safe_value, str)
+            or len(safe_value) != length
+            or not _safe_protocol_scalar_string(safe_value)
+            or hashlib.sha256(canonical(safe_value)).hexdigest() != digest
+        ):
+            raise CaptureError(f"{label} safe string differs")
+        return
+    if length is not None:
+        raise CaptureError(f"{label} non-string length differs")
+    if kind in {"array", "object"}:
+        if safe_value is not None:
+            raise CaptureError(f"{label} composite value was recorded")
+        return
+    if kind == "null":
+        if safe_value is not None or hashlib.sha256(canonical(None)).hexdigest() != digest:
+            raise CaptureError(f"{label} null value differs")
+        return
+    if (
+        _json_type(safe_value) != kind
+        or hashlib.sha256(canonical(safe_value)).hexdigest() != digest
+    ):
+        raise CaptureError(f"{label} safe numeric value differs")
 
 
 def validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
@@ -853,12 +969,17 @@ def validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
     if len(canonical(audit)) > MAX_READY_CANDIDATE_MARKER_BYTES:
         raise CaptureError("ready candidate audit exceeds bound")
     raw = _require_exact_keys(audit["raw"], {"byte_count", "raw_sha256"}, "ready candidate raw")
-    if type(raw["byte_count"]) is not int or raw["byte_count"] < 0 or not _sha256_string(raw["raw_sha256"]):
+    if type(raw["byte_count"]) is not int or raw["byte_count"] <= 0 or not _sha256_string(raw["raw_sha256"]):
         raise CaptureError("ready candidate raw binding differs")
     top = _require_exact_keys(audit["top_level"], {"key_count", "keys", "key_types"}, "ready candidate top level")
     if type(top["key_count"]) is not int or top["key_count"] < 0:
         raise CaptureError("ready candidate key count differs")
-    _validate_key_type_summary(top["keys"], top["key_types"], "ready candidate top level")
+    top_omitted = _validate_key_type_summary(top["keys"], top["key_types"], "ready candidate top level")
+    if (
+        (not top_omitted and top["key_count"] != len(top["keys"]))
+        or (top_omitted and (len(top["keys"]) != 17 or top["key_count"] <= 16))
+    ):
+        raise CaptureError("ready candidate top-level key count differs")
     scalars = _require_exact_keys(audit["safe_scalars"], {"event", "schema_version", "model_loads"}, "ready candidate safe scalars")
     for name in ("event", "schema_version", "model_loads"):
         _validate_safe_scalar(scalars[name], f"ready candidate {name}")
@@ -867,15 +988,27 @@ def validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
         {"present", "json_type", "string_length", "canonical_sha256"},
         "ready candidate session ID",
     )
-    if (
-        type(session["present"]) is not bool
-        or session["json_type"] not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}
-        or session["present"] != (session["json_type"] != "absent")
-        or (session["string_length"] is not None and (type(session["string_length"]) is not int or session["string_length"] < 0))
-        or (session["canonical_sha256"] is not None and not _sha256_string(session["canonical_sha256"]))
-        or session["present"] != (session["canonical_sha256"] is not None)
-    ):
+    session_present = session["present"]
+    session_type = session["json_type"]
+    session_length = session["string_length"]
+    session_sha256 = session["canonical_sha256"]
+    if type(session_present) is not bool or not isinstance(session_type, str) or session_type not in {
+        "absent", "null", "boolean", "integer", "number", "string", "array", "object"
+    }:
         raise CaptureError("ready candidate session ID summary differs")
+    if not session_present:
+        if session_type != "absent" or session_length is not None or session_sha256 is not None:
+            raise CaptureError("ready candidate absent session ID differs")
+    elif (
+        session_type == "absent"
+        or not _sha256_string(session_sha256)
+        or (
+            session_type == "string"
+            and (type(session_length) is not int or session_length < 0)
+        )
+        or (session_type != "string" and session_length is not None)
+    ):
+        raise CaptureError("ready candidate present session ID differs")
     nested = _require_exact_keys(audit["nested"], {"driver_identity", "served_model_binding"}, "ready candidate nested summaries")
     for name in ("driver_identity", "served_model_binding"):
         item = _require_exact_keys(
@@ -883,27 +1016,36 @@ def validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
             {"present", "json_type", "canonical_sha256", "keys", "key_types"},
             f"ready candidate {name}",
         )
-        if (
-            type(item["present"]) is not bool
-            or item["json_type"] not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}
-            or item["present"] != (item["json_type"] != "absent")
-            or (item["canonical_sha256"] is not None and not _sha256_string(item["canonical_sha256"]))
-            or item["present"] != (item["canonical_sha256"] is not None)
-        ):
+        nested_present = item["present"]
+        nested_type = item["json_type"]
+        nested_sha256 = item["canonical_sha256"]
+        if type(nested_present) is not bool or not isinstance(nested_type, str) or nested_type not in {
+            "absent", "null", "boolean", "integer", "number", "string", "array", "object"
+        }:
             raise CaptureError(f"ready candidate {name} summary differs")
-        _validate_key_type_summary(item["keys"], item["key_types"], f"ready candidate {name}")
+        nested_omitted = _validate_key_type_summary(
+            item["keys"], item["key_types"], f"ready candidate {name}"
+        )
+        if not nested_present:
+            if (
+                nested_type != "absent"
+                or nested_sha256 is not None
+                or item["keys"]
+                or item["key_types"]
+            ):
+                raise CaptureError(f"ready candidate absent {name} differs")
+        elif (
+            nested_type == "absent"
+            or not _sha256_string(nested_sha256)
+            or (nested_type != "object" and (item["keys"] or item["key_types"]))
+            or (nested_omitted and len(item["keys"]) != 17)
+        ):
+            raise CaptureError(f"ready candidate present {name} differs")
     validation = _require_exact_keys(audit["validation"], {"status", "reason_code", "predicates"}, "ready candidate validation")
-    predicate_keys = {
-        "field_set_exact",
-        "event_is_ready",
-        "schema_version_exact",
-        "model_loads_is_integer",
-        "model_loads_is_one",
-        "resident_session_id_is_string",
-        "resident_session_id_nonempty",
-    }
+    predicate_keys = set(READY_PREDICATE_ORDER)
     if (
-        validation["status"] not in {"passed", "failed"}
+        not isinstance(validation["status"], str)
+        or validation["status"] not in {"passed", "failed"}
         or not isinstance(validation["reason_code"], str)
         or not validation["reason_code"]
         or not isinstance(validation["predicates"], dict)
@@ -911,6 +1053,76 @@ def validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
         or any(type(child) is not bool for child in validation["predicates"].values())
     ):
         raise CaptureError("ready candidate validation summary differs")
+    predicates = validation["predicates"]
+    top_types = top["key_types"]
+    expected_fields = {
+        "event",
+        "schema_version",
+        "model_loads",
+        "resident_session_id",
+        "driver_identity",
+        "served_model_binding",
+    }
+    derived_field_set_exact = (
+        not top_omitted
+        and set(top["keys"]) == expected_fields
+        and top["key_count"] == len(expected_fields)
+    )
+    if predicates["field_set_exact"] is not derived_field_set_exact:
+        raise CaptureError("ready candidate field-set predicate differs")
+    for name in ("event", "schema_version", "model_loads"):
+        summary = scalars[name]
+        if (
+            summary["present"] is not (name in top_types)
+            or (summary["present"] and summary["json_type"] != top_types[name])
+        ):
+            raise CaptureError(f"ready candidate {name} top-level binding differs")
+    if (
+        session_present is not ("resident_session_id" in top_types)
+        or (session_present and session_type != top_types["resident_session_id"])
+    ):
+        raise CaptureError("ready candidate session top-level binding differs")
+    for name in ("driver_identity", "served_model_binding"):
+        summary = nested[name]
+        if (
+            summary["present"] is not (name in top_types)
+            or (summary["present"] and summary["json_type"] != top_types[name])
+        ):
+            raise CaptureError(f"ready candidate {name} top-level binding differs")
+    event = scalars["event"]
+    schema = scalars["schema_version"]
+    model_loads = scalars["model_loads"]
+    derived_predicates = {
+        "field_set_exact": derived_field_set_exact,
+        "event_is_ready": event["present"] and event["json_type"] == "string" and event["value"] == "ready",
+        "schema_version_exact": schema["present"] and schema["json_type"] == "string" and schema["value"] == "ullm.aq4_p2_resident_driver.v2",
+        "model_loads_is_integer": model_loads["present"] and model_loads["json_type"] == "integer",
+        "model_loads_is_one": model_loads["present"] and model_loads["json_type"] == "integer" and model_loads["value"] == 1,
+        "resident_session_id_is_string": session_present and session_type == "string",
+        "resident_session_id_nonempty": session_present and session_type == "string" and bool(session_length),
+    }
+    if predicates != derived_predicates:
+        raise CaptureError("ready candidate predicate breakdown differs")
+    first_failed = next(
+        (predicate for predicate in READY_PREDICATE_ORDER if not predicates[predicate]),
+        None,
+    )
+    status = validation["status"]
+    reason_code = validation["reason_code"]
+    if first_failed is None:
+        if not (
+            (status == "passed" and reason_code == "ready_candidate_valid")
+            or (
+                status == "failed"
+                and reason_code in READY_DOWNSTREAM_FAILURE_REASONS
+            )
+        ):
+            raise CaptureError("ready candidate successful predicate semantics differ")
+    elif (
+        status != "failed"
+        or reason_code != READY_PREDICATE_FAILURE_REASONS[first_failed]
+    ):
+        raise CaptureError("ready candidate failed predicate semantics differ")
     return audit
 
 
@@ -1001,7 +1213,7 @@ def parse_ready_candidate_marker(path: Path, stream_sha256: str | None) -> dict[
         audit = validate_ready_candidate_audit(parsed)
         if audit["validation"]["status"] != "failed":
             raise CaptureError("ready candidate marker does not describe a failure")
-    except (CaptureError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (CaptureError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         return _ready_capture_binding(
             status="invalid",
             reason_code="ready_candidate_marker_payload_invalid",
