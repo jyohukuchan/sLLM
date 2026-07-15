@@ -187,6 +187,7 @@ struct OutputCaseReport {
     output_offset_bytes: u64,
     output_elements: usize,
     output_sha256: String,
+    finite: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,6 +392,7 @@ impl OutputSink {
             output_offset_bytes: offset,
             output_elements: self.shape,
             output_sha256: sha256_bytes(row),
+            finite: true,
         });
         Ok(())
     }
