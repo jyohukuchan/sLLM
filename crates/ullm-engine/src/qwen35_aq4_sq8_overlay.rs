@@ -5,15 +5,16 @@
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use crate::format_id::FORMAT_SQ8_0;
 use crate::sq::{SqFp8Artifact, read_sq_fp8_artifact};
 
-pub const QWEN35_AQ4_SQ8_OVERLAY_BINDING_SCHEMA: &str = "ullm.qwen35_aq4_sq8_qkv_z_overlay.v1";
+pub const QWEN35_AQ4_SQ8_OVERLAY_BINDING_SCHEMA: &str = "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2";
 pub const QWEN35_AQ4_SQ8_OVERLAY_IMPLEMENTATION_ID: &str = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1";
 pub const QWEN35_AQ4_SQ8_OVERLAY_EXECUTION_PROFILE: &str =
     "rdna4_aq4_resident_sq8_linear_qkv_z_overlay";
@@ -22,6 +23,7 @@ pub const QWEN35_AQ4_SQ8_OVERLAY_SCALE_BLOCK_COLS: u64 = 256;
 const CONTENT_DOMAIN: &[u8] = b"ullm.qwen35-aq4-sq8-overlay-content.v1\0";
 const TENSOR_SET_DOMAIN: &[u8] = b"ullm.qwen35-aq4-sq8-overlay-tensor-set.v1\0";
 const HASH_CHUNK_BYTES: usize = 1024 * 1024;
+const MAX_SAFETENSORS_HEADER_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Qwen35Aq4Sq8OverlayLoadConfig {
@@ -76,6 +78,7 @@ struct BindingManifest {
     tensor_set_sha256: String,
     tensor_names: Vec<String>,
     scale: BindingScale,
+    artifact_policy: BindingArtifactPolicy,
     source: BindingSource,
     package: BindingPackage,
 }
@@ -101,6 +104,58 @@ struct BindingSource {
     model_dir: String,
     config_sha256: String,
     index_sha256: String,
+    shards: Vec<BindingSourceShard>,
+    tensors: Vec<BindingSourceTensor>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingSourceShard {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingSourceTensor {
+    name: String,
+    source: BindingLogicalTensor,
+    overlay: BindingOverlayTensor,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingLogicalTensor {
+    file: String,
+    dtype: String,
+    shape: Vec<u64>,
+    logical_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingOverlayTensor {
+    payload: BoundSizedFile,
+    scale: BoundSizedFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundSizedFile {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingArtifactPolicy {
+    uid: u32,
+    gid: u32,
+    directory_mode: String,
+    file_mode: String,
+    regular_file_nlink: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +163,20 @@ struct BindingSource {
 struct BindingPackage {
     root: String,
     manifest_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceIndex {
+    weight_map: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SafetensorsTensorHeader {
+    dtype: String,
+    shape: Vec<u64>,
+    data_offsets: [u64; 2],
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -160,6 +229,164 @@ fn contained_file(root: &Path, relative: &str, label: &str) -> Result<PathBuf, S
         return Err(format!("{label} must be a regular file"));
     }
     Ok(path)
+}
+
+fn sha256_file_range(path: &Path, offset: u64, bytes: u64) -> Result<String, String> {
+    let mut file =
+        File::open(path).map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| format!("failed to seek {}: {error}", path.display()))?;
+    let mut remaining = bytes;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_CHUNK_BYTES];
+    while remaining != 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("bounded hash read fits usize");
+        let count = file
+            .read(&mut buffer[..wanted])
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        if count == 0 {
+            return Err(format!("{} tensor payload is truncated", path.display()));
+        }
+        digest.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn safetensors_headers(
+    path: &Path,
+) -> Result<(u64, BTreeMap<String, SafetensorsTensorHeader>), String> {
+    let mut file = File::open(path)
+        .map_err(|error| format!("failed to open source shard {}: {error}", path.display()))?;
+    let mut length_bytes = [0_u8; 8];
+    file.read_exact(&mut length_bytes)
+        .map_err(|error| format!("failed to read source shard header length: {error}"))?;
+    let header_len = u64::from_le_bytes(length_bytes);
+    let header_len_usize = usize::try_from(header_len)
+        .map_err(|_| "source shard header length exceeds usize".to_string())?;
+    if header_len_usize == 0 || header_len_usize > MAX_SAFETENSORS_HEADER_BYTES {
+        return Err("source shard safetensors header length is invalid".into());
+    }
+    let mut header = vec![0_u8; header_len_usize];
+    file.read_exact(&mut header)
+        .map_err(|error| format!("failed to read source shard header: {error}"))?;
+    let value: serde_json::Value = serde_json::from_slice(&header)
+        .map_err(|error| format!("failed to parse source shard header: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "source shard safetensors header must be an object".to_string())?;
+    let mut tensors = BTreeMap::new();
+    for (name, value) in object {
+        if name == "__metadata__" {
+            continue;
+        }
+        let tensor: SafetensorsTensorHeader = serde_json::from_value(value.clone())
+            .map_err(|error| format!("source tensor {name} header differs: {error}"))?;
+        if tensors.insert(name.clone(), tensor).is_some() {
+            return Err(format!("source shard contains duplicate tensor {name}"));
+        }
+    }
+    let data_start = 8_u64
+        .checked_add(header_len)
+        .ok_or_else(|| "source shard data start overflows".to_string())?;
+    Ok((data_start, tensors))
+}
+
+fn parse_mode(value: &str, expected: &str, label: &str) -> Result<u32, String> {
+    if value != expected {
+        return Err(format!(
+            "SQ8 overlay artifact {label} policy must be {expected}"
+        ));
+    }
+    u32::from_str_radix(value, 8)
+        .map_err(|_| format!("SQ8 overlay artifact {label} policy is invalid"))
+}
+
+fn validate_artifact_immutability(
+    artifact_root: &Path,
+    binding_path: &Path,
+    artifact: &SqFp8Artifact,
+    policy: &BindingArtifactPolicy,
+) -> Result<(), String> {
+    let directory_mode = parse_mode(&policy.directory_mode, "0555", "directory mode")?;
+    let file_mode = parse_mode(&policy.file_mode, "0444", "file mode")?;
+    if policy.regular_file_nlink != 1 {
+        return Err("SQ8 overlay artifact regular-file nlink policy must be 1".into());
+    }
+    let canonical_root = artifact_root
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize SQ8 overlay root: {error}"))?;
+    let mut expected_files = BTreeSet::from([
+        PathBuf::from("binding.json"),
+        PathBuf::from("sq_manifest.json"),
+    ]);
+    for entry in &artifact.manifest.fp8_tensors {
+        expected_files.insert(PathBuf::from(&entry.payload_file));
+        expected_files.insert(PathBuf::from(&entry.scale_file));
+    }
+    let expected_binding = binding_path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| "SQ8 overlay binding is outside canonical artifact root".to_string())?;
+    if expected_binding != Path::new("binding.json") {
+        return Err("SQ8 overlay binding must be artifact_dir/binding.json".into());
+    }
+    let mut found_files = BTreeSet::new();
+    let mut pending = vec![canonical_root.clone()];
+    while let Some(directory) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&directory)
+            .map_err(|error| format!("failed to stat {}: {error}", directory.display()))?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != policy.uid
+            || metadata.gid() != policy.gid
+            || metadata.permissions().mode() & 0o777 != directory_mode
+        {
+            return Err(format!(
+                "SQ8 overlay artifact directory policy differs: {}",
+                directory.display()
+            ));
+        }
+        for item in std::fs::read_dir(&directory)
+            .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?
+        {
+            let item = item.map_err(|error| format!("failed to enumerate artifact: {error}"))?;
+            let path = item.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "SQ8 overlay artifact contains symlink: {}",
+                    path.display()
+                ));
+            }
+            if metadata.file_type().is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.file_type().is_file()
+                || metadata.nlink() != policy.regular_file_nlink
+                || metadata.uid() != policy.uid
+                || metadata.gid() != policy.gid
+                || metadata.permissions().mode() & 0o777 != file_mode
+            {
+                return Err(format!(
+                    "SQ8 overlay artifact file policy differs: {}",
+                    path.display()
+                ));
+            }
+            let relative = path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| "SQ8 overlay artifact traversal escaped root".to_string())?
+                .to_path_buf();
+            if !found_files.insert(relative) {
+                return Err("SQ8 overlay artifact contains duplicate file path".into());
+            }
+        }
+    }
+    if found_files != expected_files {
+        return Err("SQ8 overlay artifact file inventory differs".into());
+    }
+    Ok(())
 }
 
 pub fn qwen35_aq4_sq8_overlay_tensor_names(
@@ -253,6 +480,159 @@ fn artifact_content_sha256(artifact: &SqFp8Artifact, names: &[String]) -> Result
         digest.update(b"\n");
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn source_provenance_maps<'a>(
+    source: &'a BindingSource,
+    expected_names: &[String],
+) -> Result<
+    (
+        BTreeMap<String, &'a BindingSourceTensor>,
+        BTreeMap<String, &'a BindingSourceShard>,
+    ),
+    String,
+> {
+    let expected_set = expected_names.iter().cloned().collect::<BTreeSet<_>>();
+    let mut tensor_by_name = BTreeMap::new();
+    for tensor in &source.tensors {
+        if tensor_by_name.insert(tensor.name.clone(), tensor).is_some() {
+            return Err(format!(
+                "SQ8 overlay source provenance duplicates tensor {}",
+                tensor.name
+            ));
+        }
+    }
+    if tensor_by_name.keys().cloned().collect::<BTreeSet<_>>() != expected_set {
+        return Err("SQ8 overlay source provenance tensor set differs".into());
+    }
+    let mut shard_by_path = BTreeMap::new();
+    for shard in &source.shards {
+        if shard_by_path.insert(shard.path.clone(), shard).is_some() {
+            return Err(format!(
+                "SQ8 overlay source provenance duplicates shard {}",
+                shard.path
+            ));
+        }
+    }
+    let referenced_shards = source
+        .tensors
+        .iter()
+        .map(|tensor| tensor.source.file.clone())
+        .collect::<BTreeSet<_>>();
+    if shard_by_path.keys().cloned().collect::<BTreeSet<_>>() != referenced_shards {
+        return Err("SQ8 overlay source shard set differs from tensor provenance".into());
+    }
+    Ok((tensor_by_name, shard_by_path))
+}
+
+fn validate_source_provenance(
+    source_root: &Path,
+    source: &BindingSource,
+    artifact: &SqFp8Artifact,
+    expected_names: &[String],
+) -> Result<(), String> {
+    let index_bytes = std::fs::read(source_root.join("model.safetensors.index.json"))
+        .map_err(|error| format!("failed to read source model index: {error}"))?;
+    let index: SourceIndex = serde_json::from_slice(&index_bytes)
+        .map_err(|error| format!("failed to parse source model index: {error}"))?;
+    let (tensor_by_name, shard_by_path) = source_provenance_maps(source, expected_names)?;
+
+    let artifact_by_name = artifact
+        .manifest
+        .fp8_tensors
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut shard_headers = BTreeMap::new();
+    for (relative, shard) in &shard_by_path {
+        if !is_sha256(&shard.sha256) {
+            return Err(format!(
+                "SQ8 overlay source shard {relative} SHA-256 is invalid"
+            ));
+        }
+        let path = contained_file(source_root, relative, "SQ8 overlay source shard")?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("failed to stat source shard {}: {error}", path.display()))?;
+        if metadata.len() != shard.bytes || sha256_file(&path)? != shard.sha256 {
+            return Err(format!(
+                "SQ8 overlay source shard {relative} identity differs"
+            ));
+        }
+        let headers = safetensors_headers(&path)?;
+        shard_headers.insert(relative.clone(), (path, headers));
+    }
+
+    for name in expected_names {
+        let binding = tensor_by_name
+            .get(name)
+            .ok_or_else(|| format!("SQ8 overlay source tensor {name} is missing"))?;
+        let artifact_entry = artifact_by_name
+            .get(name.as_str())
+            .ok_or_else(|| format!("SQ8 overlay artifact tensor {name} is missing"))?;
+        let expected_shape = if name.ends_with(".linear_attn.in_proj_qkv.weight") {
+            vec![8192_u64, 4096_u64]
+        } else {
+            vec![4096_u64, 4096_u64]
+        };
+        if binding.source.dtype != "BF16"
+            || binding.source.shape != expected_shape
+            || !is_sha256(&binding.source.logical_sha256)
+            || index.weight_map.get(name) != Some(&binding.source.file)
+        {
+            return Err(format!("SQ8 overlay source tensor {name} metadata differs"));
+        }
+        let (shard_path, (data_start, headers)) = shard_headers
+            .get(&binding.source.file)
+            .ok_or_else(|| format!("SQ8 overlay source tensor {name} shard is missing"))?;
+        let header = headers
+            .get(name)
+            .ok_or_else(|| format!("SQ8 overlay source shard omits tensor {name}"))?;
+        let logical_bytes = binding
+            .source
+            .shape
+            .iter()
+            .try_fold(2_u64, |bytes, dimension| bytes.checked_mul(*dimension))
+            .ok_or_else(|| format!("SQ8 overlay source tensor {name} byte length overflows"))?;
+        if header.dtype != binding.source.dtype
+            || header.shape != binding.source.shape
+            || header.data_offsets[1] < header.data_offsets[0]
+            || header.data_offsets[1] - header.data_offsets[0] != logical_bytes
+        {
+            return Err(format!(
+                "SQ8 overlay source tensor {name} safetensors header differs"
+            ));
+        }
+        let absolute_offset = data_start
+            .checked_add(header.data_offsets[0])
+            .ok_or_else(|| format!("SQ8 overlay source tensor {name} offset overflows"))?;
+        if sha256_file_range(shard_path, absolute_offset, logical_bytes)?
+            != binding.source.logical_sha256
+        {
+            return Err(format!(
+                "SQ8 overlay source tensor {name} logical SHA-256 differs"
+            ));
+        }
+        let payload_sha = artifact_entry
+            .payload_sha256
+            .as_deref()
+            .ok_or_else(|| format!("SQ8 overlay tensor {name} payload SHA-256 is missing"))?;
+        let scale_sha = artifact_entry
+            .scale_sha256
+            .as_deref()
+            .ok_or_else(|| format!("SQ8 overlay tensor {name} scale SHA-256 is missing"))?;
+        if binding.overlay.payload.path != artifact_entry.payload_file
+            || binding.overlay.payload.bytes != artifact_entry.payload_bytes
+            || binding.overlay.payload.sha256 != payload_sha
+            || binding.overlay.scale.path != artifact_entry.scale_file
+            || binding.overlay.scale.bytes != artifact_entry.scale_bytes
+            || binding.overlay.scale.sha256 != scale_sha
+        {
+            return Err(format!(
+                "SQ8 overlay tensor {name} source-to-overlay mapping differs"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_qwen35_aq4_sq8_overlay(
@@ -391,6 +771,12 @@ pub fn validate_qwen35_aq4_sq8_overlay(
     {
         return Err("SQ8 overlay artifact candidate/count identity differs".into());
     }
+    validate_artifact_immutability(
+        &artifact_root,
+        &binding_path,
+        &artifact,
+        &binding.artifact_policy,
+    )?;
     for entry in &artifact.manifest.fp8_tensors {
         let is_qkv = entry.name.ends_with(".linear_attn.in_proj_qkv.weight");
         let is_z = entry.name.ends_with(".linear_attn.in_proj_z.weight");
@@ -422,6 +808,7 @@ pub fn validate_qwen35_aq4_sq8_overlay(
     if content_sha != binding.content_sha256 {
         return Err("SQ8 overlay content SHA-256 differs".into());
     }
+    validate_source_provenance(&source_root, &binding.source, &artifact, &expected_names)?;
     let resident_bytes = artifact
         .manifest
         .storage
@@ -439,9 +826,107 @@ pub fn validate_qwen35_aq4_sq8_overlay(
     })
 }
 
+pub fn revalidate_qwen35_aq4_sq8_overlay_after_load(
+    config: &Qwen35Aq4Sq8OverlayLoadConfig,
+    validated: &ValidatedQwen35Aq4Sq8Overlay,
+) -> Result<(), String> {
+    let artifact_root = config
+        .artifact_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize SQ8 overlay artifact: {error}"))?;
+    let binding_path = config
+        .binding_manifest
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize SQ8 overlay binding: {error}"))?;
+    let binding_sha = sha256_file(&binding_path)?;
+    if binding_sha != config.expected_binding_manifest_sha256
+        || binding_sha != validated.binding_manifest_sha256
+    {
+        return Err("SQ8 overlay binding changed during model load".into());
+    }
+    let binding_bytes = std::fs::read(&binding_path)
+        .map_err(|error| format!("failed to reread SQ8 overlay binding: {error}"))?;
+    let binding: BindingManifest = serde_json::from_slice(&binding_bytes)
+        .map_err(|error| format!("failed to reparse SQ8 overlay binding: {error}"))?;
+    let artifact = read_sq_fp8_artifact(&artifact_root)?;
+    validate_artifact_immutability(
+        &artifact_root,
+        &binding_path,
+        &artifact,
+        &binding.artifact_policy,
+    )?;
+    let names = artifact
+        .manifest
+        .fp8_tensors
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    let tensor_set_sha = qwen35_aq4_sq8_overlay_tensor_set_sha256(&names);
+    let content_sha = artifact_content_sha256(&artifact, &validated.tensor_names)?;
+    if names.len() != QWEN35_AQ4_SQ8_OVERLAY_TENSOR_COUNT
+        || tensor_set_sha != validated.tensor_set_sha256
+        || tensor_set_sha != binding.tensor_set_sha256
+        || content_sha != validated.content_sha256
+        || content_sha != binding.content_sha256
+        || content_sha != config.expected_content_sha256
+    {
+        return Err("SQ8 overlay identity changed during model load".into());
+    }
+    let sq_manifest_path = contained_file(
+        &artifact_root,
+        &binding.sq_manifest.path,
+        "SQ8 overlay manifest",
+    )?;
+    if sha256_file(&sq_manifest_path)? != binding.sq_manifest.sha256 {
+        return Err("SQ8 overlay manifest changed during model load".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_tensor(name: &str, file: &str) -> BindingSourceTensor {
+        BindingSourceTensor {
+            name: name.into(),
+            source: BindingLogicalTensor {
+                file: file.into(),
+                dtype: "BF16".into(),
+                shape: vec![1, 1],
+                logical_sha256: "a".repeat(64),
+            },
+            overlay: BindingOverlayTensor {
+                payload: BoundSizedFile {
+                    path: format!("fp8/{name}.bin"),
+                    bytes: 1,
+                    sha256: "b".repeat(64),
+                },
+                scale: BoundSizedFile {
+                    path: format!("scales/{name}.bin"),
+                    bytes: 4,
+                    sha256: "c".repeat(64),
+                },
+            },
+        }
+    }
+
+    fn source_with(tensors: Vec<BindingSourceTensor>, shard_paths: &[&str]) -> BindingSource {
+        BindingSource {
+            model_dir: "/source".into(),
+            config_sha256: "d".repeat(64),
+            index_sha256: "e".repeat(64),
+            shards: shard_paths
+                .iter()
+                .map(|path| BindingSourceShard {
+                    path: (*path).into(),
+                    bytes: 1,
+                    sha256: "f".repeat(64),
+                })
+                .collect(),
+            tensors,
+        }
+    }
 
     #[test]
     fn production_tensor_set_is_exact_and_stable() {
@@ -470,5 +955,35 @@ mod tests {
     #[test]
     fn duplicated_linear_layer_is_rejected() {
         assert!(qwen35_aq4_sq8_overlay_tensor_names(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn source_provenance_rejects_missing_tensor() {
+        let source = source_with(
+            vec![source_tensor("a", "one.safetensors")],
+            &["one.safetensors"],
+        );
+        assert!(source_provenance_maps(&source, &["a".into(), "b".into()]).is_err());
+    }
+
+    #[test]
+    fn source_provenance_rejects_duplicate_tensor() {
+        let source = source_with(
+            vec![
+                source_tensor("a", "one.safetensors"),
+                source_tensor("a", "one.safetensors"),
+            ],
+            &["one.safetensors"],
+        );
+        assert!(source_provenance_maps(&source, &["a".into()]).is_err());
+    }
+
+    #[test]
+    fn source_provenance_rejects_mismatched_shard_set() {
+        let source = source_with(
+            vec![source_tensor("a", "one.safetensors")],
+            &["two.safetensors"],
+        );
+        assert!(source_provenance_maps(&source, &["a".into()]).is_err());
     }
 }

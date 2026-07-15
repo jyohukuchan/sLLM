@@ -184,6 +184,16 @@ def validate_binding(
     binding = builder.read_json(binding_path)
     names = builder.exact_tensor_names(builder.read_json(source_model_dir / "config.json"))
     manifest, content_sha = builder.validate_sq_manifest(artifact_dir, names)
+    builder.validate_bound_source_provenance(
+        binding, source_model_dir, artifact_dir, manifest, names
+    )
+    inventory = builder.artifact_inventory(artifact_dir, binding)
+    policy = binding.get("artifact_policy")
+    if not isinstance(policy, dict) or any(
+        policy.get(name) != inventory.get(name)
+        for name in ("uid", "gid", "directory_mode", "file_mode", "regular_file_nlink")
+    ):
+        raise OracleError("overlay artifact immutability policy differs")
     if (
         binding.get("schema_version") != builder.BINDING_SCHEMA
         or binding.get("tensor_names") != sorted(names)

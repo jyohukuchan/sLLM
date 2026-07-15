@@ -29,7 +29,8 @@ use crate::qwen35_aq4_layer_runtime::{
     PackageSelfAttnSequenceGeometry, PackageSelfAttnSequenceWorkspace,
 };
 use crate::qwen35_aq4_sq8_overlay::{
-    Qwen35Aq4Sq8OverlayIdentity, Qwen35Aq4Sq8OverlayLoadConfig, validate_qwen35_aq4_sq8_overlay,
+    Qwen35Aq4Sq8OverlayIdentity, Qwen35Aq4Sq8OverlayLoadConfig,
+    revalidate_qwen35_aq4_sq8_overlay_after_load, validate_qwen35_aq4_sq8_overlay,
 };
 use crate::qwen35_package_contract::{
     PackageDecoderLayerKind, PackageManifestLayerEntry, package_manifest_layer_entries,
@@ -931,6 +932,11 @@ impl Qwen35Aq4ModelRuntime {
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize Qwen3.5 AQ4 model load: {err}"))?;
+        if let (Some(overlay_config), Some(overlay)) =
+            (config.sq8_overlay.as_ref(), validated_overlay.as_ref())
+        {
+            revalidate_qwen35_aq4_sq8_overlay_after_load(overlay_config, overlay)?;
+        }
 
         Ok(Self {
             embedding,
