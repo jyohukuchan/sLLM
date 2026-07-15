@@ -37,6 +37,9 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             "trap - EXIT INT TERM HUP", "cleanup_rc", "start_rc", '"${SYSTEMCTL[@]}" start "$SERVICE"',
             '"architecture_default:gfx1201"', '"diagnostic_standalone_reference"',
             '"concatenated_little_endian_f32_rows"', '"end_row_exclusive": 8192',
+            'mkdir -p -- "$BASE/attempts"', "attempt directory create-new failed", "prepare_runtime_probe",
+            'install -m 0555 -- "$PROBE" "$RUNTIME_PROBE"', "runtime-probe-stat.json",
+            'MOCK_ARCHIVE_SETUP', 'runtime_probe_mode=0555',
         ):
             self.assertIn(token, text)
 
@@ -58,6 +61,29 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertIn("mock_preflight=1 service_stop=0 gpu_run=0", result.stdout)
             self.assertEqual(list(Path(directory).iterdir()), [])
             self.assertNotIn("systemctl", result.stdout + result.stderr)
+
+            archive_base = Path(directory) / "fresh-base"
+            archive_env = env.copy()
+            archive_env.update(MOCK_BASE=str(archive_base), MOCK_ARCHIVE_SETUP="1")
+            archive_result = subprocess.run(
+                ["bash", str(GATE)], env=archive_env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(archive_result.returncode, 0, archive_result.stderr)
+            self.assertIn("mock_archive_setup=1 runtime_probe_mode=0555 runtime_probe_nlink=1", archive_result.stdout)
+            attempt = archive_base / "attempts" / "attempt1"
+            runtime_probe = attempt / "ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe"
+            runtime_meta = attempt / "runtime-probe-stat.json"
+            self.assertTrue(runtime_probe.is_file() and not runtime_probe.is_symlink())
+            self.assertEqual(runtime_probe.stat().st_nlink, 1)
+            self.assertEqual(runtime_probe.stat().st_mode & 0o7777, 0o555)
+            self.assertEqual(hashlib.sha256(runtime_probe.read_bytes()).hexdigest(),
+                             "42752e7a29614f59f72f90bed6797c3e925b032bffb1a4196c462c8476386840")
+            metadata = json.loads(runtime_meta.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["runtime"]["sha256"],
+                             "42752e7a29614f59f72f90bed6797c3e925b032bffb1a4196c462c8476386840")
+            self.assertEqual(metadata["runtime"]["mode"], "0555")
+            self.assertEqual(metadata["runtime"]["nlink"], 1)
+            self.assertNotIn("systemctl", archive_result.stdout + archive_result.stderr)
 
     def test_mock_observer_samples_pinned_card_without_service_or_gpu(self) -> None:
         self.assertTrue(PROBE_ROOT.is_dir())
