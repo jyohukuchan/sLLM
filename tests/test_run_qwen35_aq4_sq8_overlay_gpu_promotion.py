@@ -409,7 +409,7 @@ def test_capture_failure_still_releases_and_restores(
     deps, calls = dependencies(
         tmp_path,
         capture_code=9,
-        capture_stdout=b"not-json\xff",
+        capture_stdout=b"Authorization: Bearer do-not-persist\n" * 5000,
         capture_stderr=stderr,
     )
 
@@ -428,15 +428,29 @@ def test_capture_failure_still_releases_and_restores(
     assert diagnostic["stage"] == "capture_subprocess_completed"
     assert diagnostic["returncode"] == 9
     assert diagnostic["signal"] is None
-    assert diagnostic["stderr"]["byte_count"] == len(stderr)
-    assert diagnostic["stderr"]["truncated"] is True
-    assert diagnostic["stderr"]["captured_bytes"] == MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
-    assert diagnostic["stderr"]["sha256"] == hashlib.sha256(stderr).hexdigest()
-    assert "API_KEY" not in diagnostic["stderr"]["text"]
-    assert "do-not-persist" not in diagnostic["stderr"]["text"]
-    assert "also-do-not-persist" not in diagnostic["stderr"]["text"]
-    assert "<redacted sensitive diagnostic line>" in diagnostic["stderr"]["text"]
-    assert "\ufffd" in diagnostic["stderr"]["text"]
+    stderr_source = diagnostic["stderr"]["source"]
+    stderr_display = diagnostic["stderr"]["display"]
+    assert stderr_source["byte_count"] == len(stderr)
+    assert stderr_source["prefix_truncated"] is True
+    assert stderr_source["captured_prefix_bytes"] == MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    assert stderr_source["sha256"] == hashlib.sha256(stderr).hexdigest()
+    assert "API_KEY" not in stderr_display["text"]
+    assert "do-not-persist" not in stderr_display["text"]
+    assert "also-do-not-persist" not in stderr_display["text"]
+    assert "<redacted sensitive diagnostic line>" in stderr_display["text"]
+    assert "\ufffd" in stderr_display["text"]
+    for stream_name in ("stdout", "stderr"):
+        stream = diagnostic[stream_name]
+        serialized = json.dumps(
+            stream,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        assert len(serialized) <= MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+        assert stream["display"]["serialized_byte_count"] == len(serialized)
+        assert "do-not-persist" not in stream["display"]["text"]
     persisted = json.loads((output / "maintenance-evidence.json").read_text())
     assert persisted["capture_failure"] == diagnostic
     failure_receipt = json.loads(
@@ -496,8 +510,43 @@ def test_capture_signal_and_timeout_are_preserved(
     assert diagnostic["returncode"] is None
     assert diagnostic["signal"] is None
     assert diagnostic["timeout_seconds"] == 300.0
-    assert "hunter2" not in diagnostic["stderr"]["text"]
+    assert "hunter2" not in diagnostic["stderr"]["display"]["text"]
     assert evidence["actual_run_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "prefix_truncated"),
+    [
+        (b"token=x\n" * 4000, False),
+        (b"password=x\n" * 2000, False),
+        (b"\xff" * 100000, True),
+        (b"x" * 100000, True),
+        (b"ordinary diagnostic line\n" * 10000, True),
+    ],
+)
+def test_bounded_diagnostic_recaps_redacted_and_invalid_display(
+    raw: bytes, prefix_truncated: bool
+) -> None:
+    value = MODULE._bounded_diagnostic(raw)
+    serialized = json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+
+    assert len(serialized) <= MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    assert value["display"]["serialized_byte_count"] == len(serialized)
+    assert value["source"]["byte_count"] == len(raw)
+    assert value["source"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert value["source"]["captured_prefix_bytes"] == min(
+        len(raw), MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    )
+    assert value["source"]["prefix_truncated"] is prefix_truncated
+    assert value["display"]["truncated_after_redaction"] is True
+    assert "token=x" not in value["display"]["text"]
+    assert "password=x" not in value["display"]["text"]
 
 
 def test_stop_failure_attempts_restore(

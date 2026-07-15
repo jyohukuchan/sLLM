@@ -1229,13 +1229,62 @@ def _redact_diagnostic(raw: bytes) -> str:
 def _bounded_diagnostic(value: Any) -> dict[str, Any]:
     raw = _diagnostic_bytes(value)
     captured = raw[:CAPTURE_DIAGNOSTIC_MAX_BYTES]
-    return {
+    redacted = _redact_diagnostic(captured)
+    source = {
         "byte_count": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "captured_bytes": len(captured),
-        "truncated": len(raw) > len(captured),
-        "text": _redact_diagnostic(captured),
+        "captured_prefix_bytes": len(captured),
+        "prefix_truncated": len(raw) > len(captured),
     }
+
+    def document(text: str, truncated: bool, serialized_bytes: int) -> dict[str, Any]:
+        return {
+            "source": source,
+            "display": {
+                "serialized_byte_limit": CAPTURE_DIAGNOSTIC_MAX_BYTES,
+                "serialized_byte_count": serialized_bytes,
+                "truncated_after_redaction": truncated,
+                "text": text,
+            },
+        }
+
+    def serialized_size(result: dict[str, Any]) -> int:
+        return len(
+            json.dumps(
+                result,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        )
+
+    # Reserve the maximum five-digit count while choosing the largest prefix.
+    if serialized_size(document(redacted, False, CAPTURE_DIAGNOSTIC_MAX_BYTES)) <= CAPTURE_DIAGNOSTIC_MAX_BYTES:
+        display = redacted
+        display_truncated = False
+    else:
+        low = 0
+        high = len(redacted)
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = document(
+                redacted[:middle], True, CAPTURE_DIAGNOSTIC_MAX_BYTES
+            )
+            if serialized_size(candidate) <= CAPTURE_DIAGNOSTIC_MAX_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        display = redacted[:low]
+        display_truncated = True
+
+    result = document(display, display_truncated, 0)
+    for _ in range(3):
+        size = serialized_size(result)
+        result["display"]["serialized_byte_count"] = size
+    if serialized_size(result) > CAPTURE_DIAGNOSTIC_MAX_BYTES:
+        raise PromotionError("capture diagnostic serialization exceeds its bound")
+    return result
 
 
 def capture_failure_diagnostic(
