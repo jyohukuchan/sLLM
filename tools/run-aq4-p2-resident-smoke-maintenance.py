@@ -2053,19 +2053,19 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 362, "passed": 362, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 386, "passed": 386, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 256, "passed": 256, "failed": 0, "deselected": 0,
+                "collected": 275, "passed": 275, "failed": 0, "deselected": 0,
                 "files": [
                     {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407", "git_blob": "301b0df899590b28f9b9564866fbda80016580e2", "collected": 51, "passed": 51},
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "e57f7df362ced2fc6753519772b2e656b530ad7f", "collected": 37, "passed": 37},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "564d3b51d080328415b2e62511b87562469b7734", "git_blob": "f41c5ed91689ab19a99e9fd4b98142505c5f986c", "collected": 58, "passed": 58},
-                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "9a3de26914fee595466644bc9f47f276ae7337c0", "git_blob": "c6f55e522435c037ee607d3bc661a2954371bd61", "collected": 76, "passed": 76},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553", "git_blob": "83737b05760ead8f0f0d0340567eb70b21c779bf", "collected": 59, "passed": 59},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "c25713ee08887057b3c49ca83111bb30f605873f", "git_blob": "59c5e8664b34bd429f1e24712166fed45b134ae6", "collected": 94, "passed": 94},
                 ],
             },
             {
@@ -2083,8 +2083,8 @@ QA_ATTESTATION = {
             {
                 "name": "diagnostic_capture",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
-                "collected": 11, "passed": 11, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "b4d515f9908136fa773f957775beab79edc3065d", "git_blob": "86b95305159a831151c12472e3366a937e38e0fd", "collected": 11, "passed": 11}],
+                "collected": 16, "passed": 16, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553", "git_blob": "b3255a585f8f7e4ef35bafcf77f44d45258b468b", "collected": 16, "passed": 16}],
             },
             {
                 "name": "selection_raw_producer",
