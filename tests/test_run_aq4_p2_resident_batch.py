@@ -15,7 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TRUSTED_ONE_CASE_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-TRUSTED_BUNDLE_VALIDATOR = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
+HISTORICAL_BUNDLE_VALIDATOR_SOURCE = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v6/trusted-validator.py"
 DRIVER_IDENTITY = {
     "binary_sha256": "d" * 64,
     "build_git_commit": "e" * 40,
@@ -157,10 +157,25 @@ def _bundle(tmp_path: Path, driver_sha256: str | None = None) -> tuple[Path, Pat
     return expanded_path, fixture_index_path, identity_path, preflight_path, policy_path
 
 
+def _historical_bundle_validator(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    validator = directory / "historical-v3-bundle-validator.py"
+    source = HISTORICAL_BUNDLE_VALIDATOR_SOURCE.read_text(encoding="utf-8")
+    source = source.replace(
+        'ROOT = Path(__file__).resolve().parents[1]',
+        f'ROOT = Path({str(ROOT)!r})',
+        1,
+    )
+    validator.write_text(source, encoding="utf-8")
+    validator.chmod(0o444)
+    return validator
+
+
 def _one_case_command(output: Path, *, bundle_root: Path = TRUSTED_ONE_CASE_ROOT) -> list[str]:
     expanded, index, identity, preflight, policy = tuple(bundle_root / name for name in ("case-binding.json", "fixture-index.json", "identity.json", "preflight.json", "policy.json"))
-    validator_sha256 = BATCH.sha_file(TRUSTED_BUNDLE_VALIDATOR, "trusted bundle validator", absolute=True)
-    return [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--bundle-root", str(bundle_root), "--trusted-validator", str(TRUSTED_BUNDLE_VALIDATOR), "--trusted-validator-sha256", validator_sha256, "--output-dir", str(output), "--run-id", "one-case", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
+    validator = _historical_bundle_validator(output.parent)
+    validator_sha256 = BATCH.sha_file(validator, "trusted bundle validator", absolute=True)
+    return [sys.executable, str(ROOT / "tools/run-aq4-p2-resident-batch.py"), "--expanded", str(expanded), "--fixture-index", str(index), "--identity", str(identity), "--preflight", str(preflight), "--policy", str(policy), "--bundle-root", str(bundle_root), "--trusted-validator", str(validator), "--trusted-validator-sha256", validator_sha256, "--output-dir", str(output), "--run-id", "one-case", "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run"]
 
 
 def _rewrite_json(path: Path, value: dict) -> None:
@@ -429,6 +444,49 @@ def test_driver_command_exact_schema_rejects_drift(variant: str) -> None:
         BATCH.validate_driver_argv_schema(command, identity, expected_argv=expected if variant == "one_case_swap" else None)
 
 
+def test_one_case_bundle_header_accepts_current_v4_and_historical_v3() -> None:
+    assert BATCH.ONE_CASE_BUNDLE_SCHEMA == "ullm.aq4_p2_resident_smoke_binding_bundle.v4"
+    assert BATCH.ONE_CASE_BUNDLE_SCHEMAS == {
+        "ullm.aq4_p2_resident_smoke_binding_bundle.v3",
+        "ullm.aq4_p2_resident_smoke_binding_bundle.v4",
+    }
+    for schema in BATCH.ONE_CASE_BUNDLE_SCHEMAS:
+        bundle = {
+            "schema_version": schema,
+            "status": "prepared_not_executed",
+            "promotion": False,
+        }
+        assert BATCH.validate_one_case_bundle_header(bundle) == schema
+
+
+def test_one_case_bundle_header_rejects_unknown_schema() -> None:
+    bundle = {
+        "schema_version": "ullm.aq4_p2_resident_smoke_binding_bundle.v999",
+        "status": "prepared_not_executed",
+        "promotion": False,
+    }
+    with pytest.raises(BATCH.BatchError, match="schema is not supported"):
+        BATCH.validate_one_case_bundle_header(bundle)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("status", "ready_for_execute"), ("promotion", True), ("promotion", 0)),
+)
+def test_one_case_bundle_header_preserves_status_and_promotion_contract(
+    field: str,
+    value: object,
+) -> None:
+    bundle = {
+        "schema_version": BATCH.ONE_CASE_BUNDLE_SCHEMA,
+        "status": "prepared_not_executed",
+        "promotion": False,
+    }
+    bundle[field] = value
+    with pytest.raises(BATCH.BatchError, match="status/promotion differs"):
+        BATCH.validate_one_case_bundle_header(bundle)
+
+
 def test_one_case_smoke_dry_run_validates_exact_root_and_subprocesses(tmp_path: Path) -> None:
     output = tmp_path / "one-case-dry-run"
     completed = subprocess.run(_one_case_command(output), text=True, capture_output=True)
@@ -683,11 +741,12 @@ def test_one_case_smoke_rejects_absolute_validator_symlink(tmp_path: Path, varia
     validator_index = command.index("--trusted-validator")
     if variant == "leaf":
         linked = tmp_path / "validator.py"
-        linked.symlink_to(TRUSTED_BUNDLE_VALIDATOR)
+        linked.symlink_to(Path(command[validator_index + 1]))
     else:
         linked_parent = tmp_path / "linked-tools"
-        linked_parent.symlink_to(TRUSTED_BUNDLE_VALIDATOR.parent, target_is_directory=True)
-        linked = linked_parent / TRUSTED_BUNDLE_VALIDATOR.name
+        validator = Path(command[validator_index + 1])
+        linked_parent.symlink_to(validator.parent, target_is_directory=True)
+        linked = linked_parent / validator.name
     command[validator_index + 1] = str(linked)
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0

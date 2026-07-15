@@ -47,7 +47,9 @@ PREPARED_PREFLIGHT_FIELDS = {
     "weights_bytes", "persistent_state_bytes", "kv_cache_bytes", "workspace_bytes",
     "temporary_bytes", "vram_headroom_bytes", "gpu_process_snapshot",
 }
-ONE_CASE_BUNDLE_SCHEMA = "ullm.aq4_p2_resident_smoke_binding_bundle.v3"
+ONE_CASE_BUNDLE_SCHEMA_V3 = "ullm.aq4_p2_resident_smoke_binding_bundle.v3"
+ONE_CASE_BUNDLE_SCHEMA = "ullm.aq4_p2_resident_smoke_binding_bundle.v4"
+ONE_CASE_BUNDLE_SCHEMAS = frozenset({ONE_CASE_BUNDLE_SCHEMA_V3, ONE_CASE_BUNDLE_SCHEMA})
 ONE_CASE_ROOT_CONTRACT = "ullm.aq4_p2_resident_smoke_bundle_root.v4"
 TRUSTED_ONE_CASE_ID = "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target"
 TRUSTED_ONE_CASE_SHA256 = "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7"
@@ -1159,6 +1161,15 @@ def _run_bundle_validator(path: Path, expected_sha256: str, root: Path, timeout:
     }
 
 
+def validate_one_case_bundle_header(bundle: dict[str, Any]) -> str:
+    schema = bundle.get("schema_version")
+    if schema not in ONE_CASE_BUNDLE_SCHEMAS:
+        raise BatchError("one-case smoke bundle schema is not supported")
+    if bundle.get("status") != "prepared_not_executed" or bundle.get("promotion") is not False:
+        raise BatchError("one-case smoke bundle status/promotion differs")
+    return schema
+
+
 def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str, Any], fixture_index: dict[str, Any], identity: dict[str, Any], preflight: dict[str, Any], policy: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     if args.bundle_root is None:
         raise BatchError("--bundle-root is required with --one-case-smoke")
@@ -1215,8 +1226,7 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         role = {"bundle.json": "bundle_manifest", "SHA256SUMS": "sha256_manifest"}[name] if name in {"bundle.json", "SHA256SUMS"} else ONE_CASE_MEMBER_CONTRACT[name][1]
         member_inventory[name] = {"path": str(member_path), "sha256": sha_file(member_path, f"one-case smoke {name}"), "role": role, "type": "regular_file", "nlink": metadata.st_nlink, "mode": f"{expected_mode:04o}"}
     bundle = load(bundle_path, "one-case smoke bundle")
-    if bundle.get("schema_version") != ONE_CASE_BUNDLE_SCHEMA or bundle.get("status") != "prepared_not_executed" or bundle.get("promotion") is not False:
-        raise BatchError("one-case smoke bundle v3 status/promotion differs")
+    validate_one_case_bundle_header(bundle)
     if bundle.get("canonical_root") != str(root):
         raise BatchError("one-case smoke bundle/root identity differs")
     if len(cases) != 1:
@@ -2720,7 +2730,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lock-path", type=Path, default=DEFAULT_LOCK_PATH)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--one-case-smoke", action="store_true", help="run the exact bundle-v3 one-case smoke; never promotion eligible")
+    parser.add_argument("--one-case-smoke", action="store_true", help="run an exact supported one-case smoke bundle; never promotion eligible")
     parser.add_argument("--bundle-root", type=Path, help="absolute complete 791a20c bundle root; required by --one-case-smoke")
     parser.add_argument("--trusted-validator", type=Path, help="trusted bundle validator Python source required by --one-case-smoke")
     parser.add_argument("--trusted-validator-sha256", help="expected lowercase SHA-256 of --trusted-validator")
