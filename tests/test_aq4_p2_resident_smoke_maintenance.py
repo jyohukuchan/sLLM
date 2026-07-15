@@ -574,19 +574,21 @@ def test_profile_ready_v7_through_v11_are_sealed_historical_readback() -> None:
     assert dry["service_touched"] is False and dry["gpu_command_executed"] is False
 
 
-def test_profile_actual_v11_is_sealed_and_v13_recascade_outputs_are_fresh() -> None:
+def test_profile_v13_is_invalid_preoperator_and_execution_outputs_are_fresh() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v13"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v14"
     assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v10"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v13"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v14"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v9"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
     assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
     assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
-    assert not HARNESS.PROFILE_READY_ROOT.exists()
-    assert not HARNESS.PROFILE_DRY_RUN_EVIDENCE.exists()
+    invalid_preoperator_v13_roots = (
+        base / "p2/resident-one-case-smoke-profile-ready-v13",
+        base / "p2/resident-one-case-smoke-profile-ready-dry-run-v13",
+    )
     actual_v11_roots = (
         base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v9",
         base / "p2/resident-one-case-smoke-profile-operator-result-v11",
@@ -626,7 +628,7 @@ def test_profile_actual_v11_is_sealed_and_v13_recascade_outputs_are_fresh() -> N
         base / "p2/resident-one-case-smoke-profile-actual-audit-v6",
     )
     assert not (base / "p2/resident-one-case-smoke-profile-execute-v5").exists()
-    for root in actual_v11_roots + historical_v9_roots + historical_v8_roots + historical_v6_roots + historical_v5_roots:
+    for root in invalid_preoperator_v13_roots + actual_v11_roots + historical_v9_roots + historical_v8_roots + historical_v6_roots + historical_v5_roots:
         completed = subprocess.run(
             ["sha256sum", "-c", "SHA256SUMS"],
             cwd=root,
@@ -635,6 +637,77 @@ def test_profile_actual_v11_is_sealed_and_v13_recascade_outputs_are_fresh() -> N
             check=False,
         )
         assert completed.returncode == 0, (root, completed.stdout, completed.stderr)
+    invalid_preoperator_v13_commit = "5f67d7edf9ea6285b6b5c01445b3dadbca65d562"
+    committed_tree = subprocess.run(
+        ["git", "rev-parse", f"{invalid_preoperator_v13_commit}^{{tree}}"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert committed_tree.returncode == 0 and not committed_tree.stderr
+    assert committed_tree.stdout.strip() == "6c01686cfa456ce17b34646627682b3afe8d59d1"
+    for root in invalid_preoperator_v13_roots:
+        for path in root.iterdir():
+            relative = str(path.relative_to(ROOT))
+            committed = subprocess.run(
+                ["git", "rev-parse", f"{invalid_preoperator_v13_commit}:{relative}"],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            observed = subprocess.run(
+                ["git", "hash-object", str(path)],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            assert committed.returncode == observed.returncode == 0
+            assert not committed.stderr and not observed.stderr
+            assert committed.stdout.strip() == observed.stdout.strip()
+    assert HARNESS.sha_bytes((invalid_preoperator_v13_roots[0] / "ready-binding.json").read_bytes()) == "d919d4addbda6338e7869ac185eeb47634e1da9d76793b5127357b638f31ec22"
+    assert HARNESS.sha_bytes((invalid_preoperator_v13_roots[0] / "SHA256SUMS").read_bytes()) == "2ad6093cae677b897a868918bfb68b98ae299016c150166b2c65ab15641a4f74"
+    assert HARNESS.sha_bytes((invalid_preoperator_v13_roots[1] / "launcher-evidence.json").read_bytes()) == "09012bb0a8e2c3f879718e560798fa5475473986729d205b07f9d1b29fc1cf92"
+    assert HARNESS.sha_bytes((invalid_preoperator_v13_roots[1] / "SHA256SUMS").read_bytes()) == "44d6e4bd039b98c20915b29096888ea1e2e7c95356c23620a6ab55aa16c20de1"
+    ready_v13 = json.loads((invalid_preoperator_v13_roots[0] / "ready-binding.json").read_text())
+    trust_v13 = json.loads((invalid_preoperator_v13_roots[0] / "harness-trust.json").read_text())
+    qa_v13 = json.loads((invalid_preoperator_v13_roots[0] / "qa-attestation.json").read_text())
+    dry_v13 = json.loads((invalid_preoperator_v13_roots[1] / "launcher-evidence.json").read_text())
+    assert ready_v13["status"] == "ready_for_one_case"
+    assert ready_v13["actual_eligible"] is True
+    assert ready_v13["execution_mode"] == "profile_diagnostic"
+    assert ready_v13["authorization"]["maximum_invocations"] == 1
+    assert ready_v13["launcher_binding"]["runner_output"] == str(HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT)
+    assert ready_v13["launcher_binding"]["evidence_output"] == str(HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT)
+    assert ready_v13["profile_diagnostic"]["output"]["directory"] == str(HARNESS.PROFILE_OUTPUT_DIRECTORY)
+    assert ready_v13["trust"]["harness"] == {
+        "commit": "576ab7d30f04742f4d48a200beb2e905b6ff83a9",
+        "git_blob": "e177fc8e95a051c3d9370b7cec0729ab4c89dc2d",
+        "path": str(SCRIPT),
+        "sha256": "6c5a49e82ea4f00163bce9d7edbfaf511ed3a78e3bade98b194234ee9cbb8187",
+        "tree": "f00a9380a901f63fde70fd6a647c334ba3250f1e",
+    }
+    assert trust_v13["commit"] == ready_v13["trust"]["harness"]["commit"]
+    assert trust_v13["ready_binding_sha256"] == HARNESS.sha_bytes((invalid_preoperator_v13_roots[0] / "ready-binding.json").read_bytes())
+    assert qa_v13["automated_tests"]["aggregate"] == {
+        "collected": 639,
+        "deselected": 0,
+        "distinct_test_file_count": 12,
+        "failed": 0,
+        "passed": 639,
+    }
+    assert dry_v13["status"] == "passed" and dry_v13["mode"] == "dry-run"
+    assert dry_v13["ready_binding_sha256"] == trust_v13["ready_binding_sha256"]
+    assert set(dry_v13["process_counts"].values()) == {0}
+    assert dry_v13["service_touched"] is False
+    assert dry_v13["gpu_command_executed"] is False
+    assert dry_v13["model_load_executed"] is False
+    assert dry_v13["profile_diagnostic"]["capture_executed"] is False
     actual_v11_commit = "854e5a348bd3c0f442f2371a0d3619308bce3b95"
     for root in actual_v11_roots:
         for path in (root / "SHA256SUMS", *(item for item in root.iterdir() if item.name != "SHA256SUMS")):
