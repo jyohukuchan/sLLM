@@ -574,17 +574,62 @@ def test_profile_ready_v7_through_v11_are_sealed_historical_readback() -> None:
     assert dry["service_touched"] is False and dry["gpu_command_executed"] is False
 
 
-def test_profile_v13_is_invalid_preoperator_and_execution_outputs_are_fresh() -> None:
+def test_actual_v12_exact_35_file_seal_and_capture_parser_authority() -> None:
+    seal = HARNESS.actual_v12_seal()
+    assert seal["commit"] == HARNESS.ACTUAL_V12_COMMIT == "44617f7fd46c39f71f04502b248739cc116fe095"
+    assert seal["tree"] == HARNESS.ACTUAL_V12_TREE == "813c4ffc88fb58cf8764b91d3c80cea9ef351f0f"
+    assert seal["member_count"] == len(seal["members"]) == 35
+    assert seal["members_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(seal["members"]))
+    assert len(seal["root_sums_sha256"]) == len(HARNESS.ACTUAL_V12_ROOTS) == 6
+    assert HARNESS.PROFILE_CAPTURE_COMMIT == "eb00cbd83b90d6fd8d519f6662ddea16d5f4438c"
+    assert HARNESS.PROFILE_CAPTURE_TREE == "545511060d95a02d69f4164d35bb56d89c22ea59"
+    assert HARNESS.PROFILE_CAPTURE_GIT_BLOB == "91f243ff5dcc0c36c63e471ac7c4581c74535a2f"
+    assert HARNESS.PROFILE_CAPTURE_SHA == "e326fb5c9f5ff04290fe0c37cfd25ad7e1e37bd7f76b5d7a62002465b9965df4"
+
+
+def test_offline_reassembly_generator_is_process_zero_and_self_validating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture-v10"
+    evidence = tmp_path / "maintenance-evidence-v11"
+    monkeypatch.setattr(
+        HARNESS,
+        "_git_identity",
+        lambda: {
+            "path": str(SCRIPT),
+            "commit": "1" * 40,
+            "tree": "2" * 40,
+            "git_blob": "3" * 40,
+            "sha256": HARNESS.sha_bytes(SCRIPT.read_bytes()),
+        },
+    )
+    before = HARNESS.actual_v12_seal()
+    value = HARNESS.prepare_profile_offline_reassembly(capture, evidence)
+    assert value == HARNESS.validate_profile_offline_reassembly(capture, evidence)
+    assert value["status"] == "offline_reassembled_sealed"
+    assert value["source_actual_seal"] == before == HARNESS.actual_v12_seal()
+    assert value["raw_inputs"]["count"] == len(HARNESS.PROFILE_CAPTURE_RAW_NAMES) == 7
+    assert value["output"]["capture_artifact"]["status"] == "complete_diagnostic"
+    assert value["execution"] == {
+        "offline_assemble_calls": 1,
+        "workload_processes": 0,
+        "rocprof_processes": 0,
+        "gpu_commands": 0,
+        "service_operations": 0,
+        "operator_invocations": 0,
+        "actual_invocations": 0,
+        "model_loads": 0,
+    }
+    assert capture.lstat().st_mode & 0o777 == evidence.lstat().st_mode & 0o777 == 0o555
+
+
+def test_profile_v13_is_invalid_preoperator_and_future_outputs_are_poststate_independent() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v14"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v10"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v14"
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v9"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v15"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v11"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v15"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v10"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
-    assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
-    assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
-    assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
-    assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
     invalid_preoperator_v13_roots = (
         base / "p2/resident-one-case-smoke-profile-ready-v13",
         base / "p2/resident-one-case-smoke-profile-ready-dry-run-v13",
@@ -682,9 +727,15 @@ def test_profile_v13_is_invalid_preoperator_and_execution_outputs_are_fresh() ->
     assert ready_v13["actual_eligible"] is True
     assert ready_v13["execution_mode"] == "profile_diagnostic"
     assert ready_v13["authorization"]["maximum_invocations"] == 1
-    assert ready_v13["launcher_binding"]["runner_output"] == str(HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT)
-    assert ready_v13["launcher_binding"]["evidence_output"] == str(HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT)
-    assert ready_v13["profile_diagnostic"]["output"]["directory"] == str(HARNESS.PROFILE_OUTPUT_DIRECTORY)
+    assert ready_v13["launcher_binding"]["runner_output"] == str(
+        base / "p2/resident-one-case-smoke-profile-execute-v9"
+    )
+    assert ready_v13["launcher_binding"]["evidence_output"] == str(
+        base / "p2/resident-one-case-smoke-profile-execute-evidence-v9"
+    )
+    assert ready_v13["profile_diagnostic"]["output"]["directory"] == str(
+        base / "p3/aq4-p3-diagnostic-rocprof-capture-v9"
+    )
     assert ready_v13["trust"]["harness"] == {
         "commit": "576ab7d30f04742f4d48a200beb2e905b6ff83a9",
         "git_blob": "e177fc8e95a051c3d9370b7cec0729ab4c89dc2d",

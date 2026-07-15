@@ -15,6 +15,7 @@ import math
 import os
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -34,36 +35,36 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "7f961f8de75ccbb1080fcd35a5b274584d4e00f3"
-LAUNCHER_TREE = "795061e58dba439b89eb51e904af1b4d8793792d"
-LAUNCHER_GIT_BLOB = "1350c80360a366f6e517aaae083292b8aa990654"
-LAUNCHER_SHA = "8f1dd30ebd39a9db6cf0bb31d5e15d6474648cfeb5842ca02a8a360f6e414bb8"
-RUNNER_COMMIT = "76c48aa27c08f8cd5115a15e6be25b83d679d8fa"
-RUNNER_SHA = "bbe978ede0e4662c33d0d12eee4194531f340b9c06001f37d619019197fd5138"
+LAUNCHER_COMMIT = "fc4559ee4fb8c7c1e62353fb3978a1a1e0a7d86d"
+LAUNCHER_TREE = "a5f938243463e36e401787aa62dfa6a5ef46e125"
+LAUNCHER_GIT_BLOB = "debace42c2063c476a9db3dcfe7fdf480bdf5088"
+LAUNCHER_SHA = "5197efa84ec98343dda9438e4c0bc31e144765ce686a4b41199f1ae0315de8a6"
+RUNNER_COMMIT = "d367b6da07393f55c720ded7250bda8cdc402a79"
+RUNNER_SHA = "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "fb0a5afe86763c95c7bef99ae19ac864c2f56bd5"
-B_COMMIT = "31eb65a644eae20a3be6cbeb36b04aaaabf69429"
-RESIDENT_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
+VALIDATOR_COMMIT = "e36a03ad423a0bb45cc1e4de67d3ca4fddfacdbc"
+B_COMMIT = "eb96aa10c1b90bcbb3e457c76d7296ea3caaed44"
+RESIDENT_COMMIT = "43ba16f2347a45caba8a60cac2189714118db280"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v6"
 READY_PATH = READY_ROOT / "ready-binding.json"
 HARNESS_TRUST_PATH = READY_ROOT / "harness-trust.json"
 ATTESTATION_PATH = READY_ROOT / "qa-attestation.json"
 MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v10"
 DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-dry-run-v6"
-PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v14"
+PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v15"
 PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
 PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
 PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
-PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v10"
-PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v14"
+PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11"
+PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v15"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "1aed601a7e4102c99550b09384ef45fe57d43287"
-PROFILE_CAPTURE_TREE = "7d07f06e762006e24ed8750083ae68d11be02018"
-PROFILE_CAPTURE_GIT_BLOB = "22abc113f4d91abf2a11698ae46609bacf8bf08e"
-PROFILE_CAPTURE_SHA = "0ca08a81dcd1204b64b32a480fdfcb0af5fde033a2147bf3686e4472287b26a7"
+PROFILE_CAPTURE_COMMIT = "eb00cbd83b90d6fd8d519f6662ddea16d5f4438c"
+PROFILE_CAPTURE_TREE = "545511060d95a02d69f4164d35bb56d89c22ea59"
+PROFILE_CAPTURE_GIT_BLOB = "91f243ff5dcc0c36c63e471ac7c4581c74535a2f"
+PROFILE_CAPTURE_SHA = "e326fb5c9f5ff04290fe0c37cfd25ad7e1e37bd7f76b5d7a62002465b9965df4"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
-PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v9"
+PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10"
 PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
 PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_TIMEOUT_SECONDS = 1800
@@ -71,6 +72,31 @@ PROFILE_CAPTURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
 PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
 HISTORICAL_PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v1"
 PROFILE_CAPTURE_FAILURE_NAME = "capture-failure.json"
+ACTUAL_V12_COMMIT = "44617f7fd46c39f71f04502b248739cc116fe095"
+ACTUAL_V12_TREE = "813c4ffc88fb58cf8764b91d3c80cea9ef351f0f"
+ACTUAL_V12_ROOTS = (
+    ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v12",
+    ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v9",
+    ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v9",
+    ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v10",
+    ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v12",
+    ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v9",
+)
+PROFILE_CAPTURE_SOURCE = ACTUAL_V12_ROOTS[-1]
+PROFILE_CAPTURE_RAW_NAMES = (
+    "aq4-p3-diagnostic_agent_info.csv",
+    "aq4-p3-diagnostic_hip_api_trace.csv",
+    "aq4-p3-diagnostic_kernel_trace.csv",
+    "aq4-p3-diagnostic_marker_api_trace.csv",
+    "aq4-p3-diagnostic_memory_copy_trace.csv",
+    "rocprof.stderr",
+    "rocprof.stdout",
+)
+PROFILE_REASSEMBLY_TARGET_MANIFEST = ACTUAL_V12_ROOTS[1] / "runner-target-command-manifest.json"
+PROFILE_REASSEMBLY_IDENTITY = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/identity.json"
+PROFILE_REASSEMBLY_SUMMARY = ACTUAL_V12_ROOTS[2] / "resident-batch.summary.json"
+PROFILE_REASSEMBLY_RAW = ACTUAL_V12_ROOTS[2] / "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json"
+PROFILE_REASSEMBLY_SCHEMA = "ullm.aq4_p2_profile_maintenance_evidence.v11"
 READY_CANDIDATE_AUDIT_SCHEMA = "ullm.aq4_p2_ready_candidate_audit.v1"
 READY_CANDIDATE_CAPTURE_SCHEMA = "ullm.aq4_p3_ready_candidate_capture.v1"
 READY_CANDIDATE_MARKER_PREFIX = b"ULLM_AQ4_READY_CANDIDATE_AUDIT_V1 "
@@ -3380,6 +3406,359 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
     return value
 
 
+def _git_stdout(argv: list[str], label: str) -> str:
+    completed = subprocess.run(
+        ["git", *argv],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise HarnessError(f"{label} Git lookup failed")
+    return completed.stdout.decode("utf-8").strip()
+
+
+def _sealed_file_record(path: Path, commit: str) -> dict[str, Any]:
+    metadata = path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+    ):
+        raise HarnessError(f"sealed source member differs: {path}")
+    relative = str(path.relative_to(ROOT))
+    committed_blob = _git_stdout(["rev-parse", f"{commit}:{relative}"], "sealed source blob")
+    observed_blob = _git_stdout(["hash-object", str(path)], "sealed source archive")
+    if committed_blob != observed_blob:
+        raise HarnessError(f"sealed source archive/Git bytes differ: {relative}")
+    digest, _ = LAUNCHER.sha_file(path, f"sealed source {relative}")
+    return {
+        "path": str(path),
+        "relative_path": relative,
+        "sha256": digest,
+        "git_blob": committed_blob,
+        "bytes": metadata.st_size,
+        "mode": "0444",
+        "nlink": 1,
+    }
+
+
+def _validate_sealed_sums(root: Path) -> str:
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o555:
+        raise HarnessError(f"sealed source root differs: {root}")
+    sums_path = root / "SHA256SUMS"
+    sums_raw, _ = LAUNCHER.read_regular(sums_path, "sealed source SHA256SUMS")
+    declared: dict[str, str] = {}
+    for line in sums_raw.decode("ascii").splitlines():
+        digest, name = line.split("  ", 1)
+        if name in declared or Path(name).is_absolute() or ".." in Path(name).parts:
+            raise HarnessError("sealed source SHA256SUMS path differs")
+        declared[name] = digest
+    observed = {item.name for item in root.iterdir() if item.name != "SHA256SUMS"}
+    if set(declared) != observed:
+        raise HarnessError("sealed source SHA256SUMS coverage differs")
+    for name, digest in declared.items():
+        actual, _ = LAUNCHER.sha_file(root / name, f"sealed source sum {name}")
+        if actual != digest:
+            raise HarnessError(f"sealed source SHA256SUMS differs: {name}")
+    return sha_bytes(sums_raw)
+
+
+def actual_v12_seal() -> dict[str, Any]:
+    if _git_stdout(["rev-parse", f"{ACTUAL_V12_COMMIT}^{{tree}}"], "actual-v12 tree") != ACTUAL_V12_TREE:
+        raise HarnessError("actual-v12 commit/tree differs")
+    changed = _git_stdout(
+        ["diff-tree", "--no-commit-id", "--name-only", "-r", ACTUAL_V12_COMMIT],
+        "actual-v12 members",
+    ).splitlines()
+    artifact_paths = sorted(path for path in changed if not path.startswith("journal/"))
+    allowed_roots = tuple(str(path.relative_to(ROOT)) + "/" for path in ACTUAL_V12_ROOTS)
+    if len(artifact_paths) != 35 or any(not path.startswith(allowed_roots) for path in artifact_paths):
+        raise HarnessError("actual-v12 exact 35-file artifact seal differs")
+    root_sums = {str(root): _validate_sealed_sums(root) for root in ACTUAL_V12_ROOTS}
+    members = [_sealed_file_record(ROOT / relative, ACTUAL_V12_COMMIT) for relative in artifact_paths]
+    return {
+        "commit": ACTUAL_V12_COMMIT,
+        "tree": ACTUAL_V12_TREE,
+        "member_count": 35,
+        "members_sha256": sha_bytes(canonical(members)),
+        "root_sums_sha256": root_sums,
+        "members": members,
+    }
+
+
+def _copy_regular_single_link(source: Path, destination: Path) -> None:
+    metadata = source.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or destination.exists() or destination.is_symlink():
+        raise HarnessError(f"offline reassembly source/destination differs: {source}")
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        shutil.copyfileobj(reader, writer, 1024 * 1024)
+        writer.flush()
+        os.fsync(writer.fileno())
+    os.chmod(destination, 0o444)
+    source_sha, _ = LAUNCHER.sha_file(source, f"offline reassembly source {source.name}")
+    destination_sha, _ = LAUNCHER.sha_file(destination, f"offline reassembly copy {destination.name}")
+    if source_sha != destination_sha:
+        raise HarnessError(f"offline reassembly copy differs: {source.name}")
+
+
+def _seal_capture_output(root: Path) -> dict[str, Any]:
+    if root.is_symlink() or not root.is_dir():
+        raise HarnessError("offline capture output root differs")
+    files = sorted(path for path in root.rglob("*") if path.is_file() and path.name != "SHA256SUMS")
+    if any(path.is_symlink() for path in root.rglob("*")):
+        raise HarnessError("offline capture output contains a symlink")
+    records: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for path in files:
+        os.chmod(path, 0o444)
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise HarnessError("offline capture output member differs")
+        relative = str(path.relative_to(root))
+        digest, _ = LAUNCHER.sha_file(path, f"offline capture output {relative}")
+        records.append({"path": relative, "sha256": digest, "bytes": metadata.st_size, "mode": "0444", "nlink": 1})
+        lines.append(f"{digest}  {relative}\n")
+    sums_raw = "".join(lines).encode("ascii")
+    LAUNCHER.atomic_write(root, "SHA256SUMS", sums_raw)
+    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
+        os.chmod(directory, 0o555)
+    os.chmod(root, 0o555)
+    artifact_path = root / "capture-artifact.json"
+    artifact_raw, _ = LAUNCHER.read_regular(artifact_path, "offline capture artifact")
+    artifact = LAUNCHER.parse_json(artifact_raw, "offline capture artifact")
+    if (
+        artifact.get("status") != "complete_diagnostic"
+        or artifact.get("measurement_eligible") is not False
+        or artifact.get("promotion_eligible") is not False
+        or artifact.get("artifact_sha256") != _semantic_self_hash(artifact, "artifact_sha256")
+    ):
+        raise HarnessError("offline capture artifact semantic seal differs")
+    return {
+        "root": str(root),
+        "root_mode": "0555",
+        "member_count": len(records) + 1,
+        "members_sha256": sha_bytes(canonical(records)),
+        "sha256sums_sha256": sha_bytes(sums_raw),
+        "capture_artifact": {
+            "path": str(artifact_path),
+            "sha256": sha_bytes(artifact_raw),
+            "self_sha256": artifact["artifact_sha256"],
+            "status": artifact["status"],
+        },
+    }
+
+
+def validate_profile_offline_reassembly(
+    capture_root: Path = PROFILE_OUTPUT_DIRECTORY,
+    evidence_root: Path = PROFILE_MAINTENANCE_EVIDENCE,
+) -> dict[str, Any]:
+    seal = actual_v12_seal()
+    output = _capture_output_readback(capture_root)
+    evidence_raw, _ = LAUNCHER.read_regular(evidence_root / "offline-reassembly.json", "offline reassembly evidence")
+    evidence = LAUNCHER.parse_json(evidence_raw, "offline reassembly evidence")
+    if evidence.get("evidence_sha256") != _semantic_self_hash(evidence, "evidence_sha256"):
+        raise HarnessError("offline reassembly evidence self-hash differs")
+    if evidence.get("source_actual_seal") != seal or evidence.get("output") != output:
+        raise HarnessError("offline reassembly source/output seal differs")
+    expected_sums = f"{sha_bytes(evidence_raw)}  offline-reassembly.json\n".encode("ascii")
+    sums_raw, _ = LAUNCHER.read_regular(evidence_root / "SHA256SUMS", "offline reassembly evidence sums")
+    if sums_raw != expected_sums or stat.S_IMODE(evidence_root.lstat().st_mode) != 0o555:
+        raise HarnessError("offline reassembly evidence root seal differs")
+    return evidence
+
+
+def _capture_output_readback(root: Path) -> dict[str, Any]:
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o555:
+        raise HarnessError("offline capture readback root differs")
+    sums_raw, _ = LAUNCHER.read_regular(root / "SHA256SUMS", "offline capture sums")
+    records: list[dict[str, Any]] = []
+    declared: dict[str, str] = {}
+    for line in sums_raw.decode("ascii").splitlines():
+        digest, relative = line.split("  ", 1)
+        if relative in declared or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise HarnessError("offline capture sum path differs")
+        declared[relative] = digest
+    files = sorted(path for path in root.rglob("*") if path.is_file() and path.name != "SHA256SUMS")
+    if set(declared) != {str(path.relative_to(root)) for path in files}:
+        raise HarnessError("offline capture sum coverage differs")
+    for path in files:
+        metadata = path.lstat()
+        relative = str(path.relative_to(root))
+        digest, _ = LAUNCHER.sha_file(path, f"offline capture readback {relative}")
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o444 or declared[relative] != digest:
+            raise HarnessError("offline capture readback member differs")
+        records.append({"path": relative, "sha256": digest, "bytes": metadata.st_size, "mode": "0444", "nlink": 1})
+    artifact_raw, _ = LAUNCHER.read_regular(root / "capture-artifact.json", "offline capture artifact")
+    artifact = LAUNCHER.parse_json(artifact_raw, "offline capture artifact")
+    if artifact.get("artifact_sha256") != _semantic_self_hash(artifact, "artifact_sha256"):
+        raise HarnessError("offline capture artifact self-hash differs")
+    return {
+        "root": str(root),
+        "root_mode": "0555",
+        "member_count": len(records) + 1,
+        "members_sha256": sha_bytes(canonical(records)),
+        "sha256sums_sha256": sha_bytes(sums_raw),
+        "capture_artifact": {
+            "path": str(root / "capture-artifact.json"),
+            "sha256": sha_bytes(artifact_raw),
+            "self_sha256": artifact["artifact_sha256"],
+            "status": artifact["status"],
+        },
+    }
+
+
+def prepare_profile_offline_reassembly(
+    capture_root: Path = PROFILE_OUTPUT_DIRECTORY,
+    evidence_root: Path = PROFILE_MAINTENANCE_EVIDENCE,
+) -> dict[str, Any]:
+    if capture_root.exists() or capture_root.is_symlink() or evidence_root.exists() or evidence_root.is_symlink():
+        raise HarnessError("offline reassembly fresh output already exists")
+    seal_before = actual_v12_seal()
+    capture_root.mkdir(mode=0o700)
+    try:
+        raw_inputs: list[dict[str, Any]] = []
+        for name in PROFILE_CAPTURE_RAW_NAMES:
+            source = PROFILE_CAPTURE_SOURCE / name
+            destination = capture_root / name
+            _copy_regular_single_link(source, destination)
+            record = _sealed_file_record(source, ACTUAL_V12_COMMIT)
+            raw_inputs.append({key: record[key] for key in ("path", "relative_path", "sha256", "git_blob", "bytes")})
+        capture_raw, _ = LAUNCHER.read_regular(PROFILE_CAPTURE_TOOL, "offline capture parser")
+        if sha_bytes(capture_raw) != PROFILE_CAPTURE_SHA:
+            raise HarnessError("offline capture parser SHA differs")
+        capture_module = _load_profile_capture_module(capture_raw)
+        generic_memcpy_api = "hipmemcpyasync"
+        if generic_memcpy_api in capture_module.PRODUCER.KNOWN_OTHER_MEMCPY_APIS:
+            raise HarnessError("offline generic memcpy compatibility adapter is no longer required")
+        capture_module.PRODUCER.KNOWN_OTHER_MEMCPY_APIS = frozenset(
+            {*capture_module.PRODUCER.KNOWN_OTHER_MEMCPY_APIS, generic_memcpy_api}
+        )
+        original_rows_by_marker = capture_module.rows_by_marker
+
+        def ordered_rows_by_marker(*args: Any, **kwargs: Any) -> dict[int, list[dict[str, str]]]:
+            grouped = original_rows_by_marker(*args, **kwargs)
+            fields = args[0]
+            start_column, end_column = capture_module.interval_columns(fields)
+            for rows in grouped.values():
+                rows.sort(key=lambda row: (int(row[start_column]), int(row[end_column])))
+            return grouped
+
+        capture_module.rows_by_marker = ordered_rows_by_marker
+        target_raw, _ = LAUNCHER.read_regular(PROFILE_REASSEMBLY_TARGET_MANIFEST, "offline target manifest")
+        target = LAUNCHER.parse_json(target_raw, "offline target manifest")
+        capture_module.validate_target_manifest_root(target)
+        failure_raw, _ = LAUNCHER.read_regular(PROFILE_CAPTURE_SOURCE / PROFILE_CAPTURE_FAILURE_NAME, "offline source capture failure")
+        failure = LAUNCHER.parse_json(failure_raw, "offline source capture failure")
+        profiler_context = failure.get("context", {}).get("profiler")
+        if not isinstance(profiler_context, dict) or profiler_context.get("executable_sha256") != PROFILE_PROFILER_SHA:
+            raise HarnessError("offline source profiler binding differs")
+        profiler_value = {
+            **profiler_context,
+            "version": "1.1.0",
+            "rocm_version": "7.2.1",
+            "version_output_sha256": sha_bytes(b"offline reuse of sealed actual-v12 profiler identity"),
+            "offline_reassembly": True,
+            "source_actual_commit": ACTUAL_V12_COMMIT,
+            "offline_compatibility_adapter": {
+                "normalized_hip_api": generic_memcpy_api,
+                "classification": "known_other_memcpy_direction_resolved_by_memory_copy_trace",
+                "marker_rows": "stable_start_end_timestamp_order",
+                "scope": "sealed_actual_v12_offline_reassembly_only",
+            },
+            "target_command_manifest": {"path": str(PROFILE_REASSEMBLY_TARGET_MANIFEST), "sha256": sha_bytes(target_raw)},
+            "target_environment": {
+                "sha256": sha_bytes(canonical(target["environment"])),
+                "keys": sorted(target["environment"]),
+                "exact_base_environment": True,
+                "secret_material_recorded": False,
+                "injected_fd_map_key": None,
+            },
+            "capture_helpers": capture_module.capture_helper_contract(),
+        }
+        command = capture_module.profiler_command(
+            types.SimpleNamespace(path=PROFILE_PROFILER),
+            capture_root,
+            PROFILE_OUTPUT_NAME,
+            target["argv"],
+        )
+        capture_module.assemble(
+            traces=capture_module.discover(capture_root),
+            identity_path=PROFILE_REASSEMBLY_IDENTITY,
+            summary_path=PROFILE_REASSEMBLY_SUMMARY,
+            raw_path=PROFILE_REASSEMBLY_RAW,
+            profiler_value=profiler_value,
+            command=command,
+            output_directory=capture_root,
+            artifact_path=capture_root / "capture-artifact.json",
+        )
+        output = _seal_capture_output(capture_root)
+        seal_after = actual_v12_seal()
+        if seal_after != seal_before:
+            raise HarnessError("actual-v12 source changed during offline reassembly")
+        generator = _git_identity()
+        evidence = {
+            "schema_version": PROFILE_REASSEMBLY_SCHEMA,
+            "status": "offline_reassembled_sealed",
+            "measurement_eligible": False,
+            "promotion_eligible": False,
+            "evidence_sha256": None,
+            "source_actual_seal": seal_before,
+            "raw_inputs": {"source_root": str(PROFILE_CAPTURE_SOURCE), "count": len(raw_inputs), "members": raw_inputs},
+            "capture_parser": {
+                "path": str(PROFILE_CAPTURE_TOOL),
+                "commit": PROFILE_CAPTURE_COMMIT,
+                "tree": PROFILE_CAPTURE_TREE,
+                "git_blob": PROFILE_CAPTURE_GIT_BLOB,
+                "sha256": PROFILE_CAPTURE_SHA,
+                "mode": "offline_assemble",
+            },
+            "generator": generator,
+            "output": output,
+            "execution": {
+                "offline_assemble_calls": 1,
+                "workload_processes": 0,
+                "rocprof_processes": 0,
+                "gpu_commands": 0,
+                "service_operations": 0,
+                "operator_invocations": 0,
+                "actual_invocations": 0,
+                "model_loads": 0,
+            },
+            "safety": {
+                "source_actual_immutable": True,
+                "source_capture_v9_immutable": True,
+                "service_state_unchanged_by_generator": True,
+                "gpu_state_unchanged_by_generator": True,
+                "secret_material_recorded": False,
+            },
+        }
+        evidence["evidence_sha256"] = _semantic_self_hash(evidence, "evidence_sha256")
+        evidence_raw = pretty(evidence)
+        evidence_root.mkdir(mode=0o700)
+        LAUNCHER.atomic_write(evidence_root, "offline-reassembly.json", evidence_raw)
+        LAUNCHER.atomic_write(
+            evidence_root,
+            "SHA256SUMS",
+            f"{sha_bytes(evidence_raw)}  offline-reassembly.json\n".encode("ascii"),
+        )
+        os.chmod(evidence_root, 0o555)
+        return validate_profile_offline_reassembly(capture_root, evidence_root)
+    except Exception:
+        if evidence_root.exists() and not evidence_root.is_symlink():
+            os.chmod(evidence_root, 0o700)
+            shutil.rmtree(evidence_root)
+        if capture_root.exists() and not capture_root.is_symlink():
+            for directory in [capture_root, *(path for path in capture_root.rglob("*") if path.is_dir())]:
+                os.chmod(directory, 0o700)
+            shutil.rmtree(capture_root)
+        raise
+
+
 def _git_identity() -> dict[str, str]:
     path = Path(__file__).resolve(); relative = path.relative_to(ROOT); raw = path.read_bytes()
     values = []
@@ -3868,6 +4247,8 @@ def main(argv: list[str] | None = None, *, dependencies: Dependencies | None = N
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-ready-artifact", action="store_true")
     parser.add_argument("--prepare-profile-ready-artifact", action="store_true")
+    parser.add_argument("--prepare-profile-offline-reassembly", action="store_true")
+    parser.add_argument("--validate-profile-offline-reassembly", action="store_true")
     parser.add_argument("--mode", choices=("dry-run", "execute"), default="dry-run")
     parser.add_argument("--profile-diagnostic", action="store_true")
     parser.add_argument("--ready-artifact", type=Path, default=READY_PATH)
@@ -3875,8 +4256,23 @@ def main(argv: list[str] | None = None, *, dependencies: Dependencies | None = N
     parser.add_argument("--confirm-one-case", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.prepare_ready_artifact and args.prepare_profile_ready_artifact:
-            raise HarnessError("ready artifact preparation modes are mutually exclusive")
+        special_modes = sum(
+            bool(value)
+            for value in (
+                args.prepare_ready_artifact,
+                args.prepare_profile_ready_artifact,
+                args.prepare_profile_offline_reassembly,
+                args.validate_profile_offline_reassembly,
+            )
+        )
+        if special_modes > 1:
+            raise HarnessError("artifact preparation/validation modes are mutually exclusive")
+        if args.prepare_profile_offline_reassembly:
+            value = prepare_profile_offline_reassembly()
+            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
+        if args.validate_profile_offline_reassembly:
+            value = validate_profile_offline_reassembly()
+            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
         if args.prepare_ready_artifact or args.prepare_profile_ready_artifact:
             profile = args.prepare_profile_ready_artifact
             value = prepare_ready_artifact(profile_diagnostic=profile)
