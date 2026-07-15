@@ -150,6 +150,9 @@ pub struct AuthorizationLineageIdentity {
     pub runtime_path: PathBuf,
     pub sha256: String,
     pub entries_sha256: String,
+    pub schema_version: String,
+    pub entry_count: Option<usize>,
+    pub current_implementation_audit: Option<AuthorizationAuditIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,13 +574,32 @@ struct RawAuthorizationAuditIdentity {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "schema_version")]
+enum RawAuthorizationLineageIdentity {
+    #[serde(rename = "ullm.sq8_authorization_lineage_ref.v1")]
+    V1(RawAuthorizationLineageReferenceV1),
+    #[serde(rename = "ullm.sq8_authorization_lineage_ref.v2")]
+    V2(RawAuthorizationLineageReferenceV2),
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAuthorizationLineageIdentity {
-    schema_version: String,
+struct RawAuthorizationLineageReferenceV1 {
     input_path: String,
     runtime_path: String,
     sha256: String,
     entries_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineageReferenceV2 {
+    input_path: String,
+    runtime_path: String,
+    sha256: String,
+    entries_sha256: String,
+    entry_count: usize,
+    current_implementation_audit: RawAuthorizationAuditIdentity,
 }
 
 #[derive(Deserialize)]
@@ -694,6 +716,7 @@ struct RawPreparedReceiptActual {
 #[serde(deny_unknown_fields)]
 struct RawAuditTopology {
     artifact_directory_count: usize,
+    artifact_payload_and_scale_bytes_hashed: Option<u64>,
     artifact_payload_and_scale_files_hashed: usize,
     artifact_regular_file_bytes: u64,
     artifact_regular_file_count: usize,
@@ -701,6 +724,7 @@ struct RawAuditTopology {
     executable_file_mode: String,
     historical_runtime_reference_count: usize,
     package_directory_count: usize,
+    package_regular_file_bytes: Option<u64>,
     package_regular_file_count: usize,
     regular_file_mode: String,
     regular_file_nlink: u64,
@@ -710,6 +734,12 @@ struct RawAuditTopology {
     special_file_count: usize,
     symlink_count: usize,
     worker_source_and_immutable_are_runtime_self: bool,
+    authorization_lineage_entries_sha256: Option<String>,
+    authorization_lineage_entry_count: Option<usize>,
+    authorization_lineage_migrated_prefix_count: Option<usize>,
+    authorization_lineage_migrated_prefix_sha256: Option<String>,
+    authorization_lineage_propagation_target_count: Option<usize>,
+    authorization_lineage_schema: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -725,6 +755,8 @@ struct RawAuditTests {
     gpu_or_service_execution: bool,
     historical_runtime_references: String,
     lineage_external_runtime_copy: String,
+    lineage_v1_authorization_rejection: Option<String>,
+    lineage_v1_migration: Option<String>,
     package_live_identity: String,
     runtime_modes_links_and_symlinks: String,
     runtime_sha256sums: String,
@@ -736,12 +768,83 @@ struct RawAuditTests {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "schema_version")]
+enum RawAuthorizationLineageManifest {
+    #[serde(rename = "ullm.sq8_authorization_lineage_input.v1")]
+    V1(RawAuthorizationLineageManifestV1),
+    #[serde(rename = "ullm.sq8_authorization_lineage_input.v2")]
+    V2(RawAuthorizationLineageManifestV2),
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAuthorizationLineageManifest {
-    schema_version: String,
+struct RawAuthorizationLineageManifestV1 {
     disposition: String,
     source: RawAuthorizationLineageSource,
     entries: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineageManifestV2 {
+    disposition: String,
+    source: RawAuthorizationLineageSource,
+    predecessor: RawAuthorizationLineagePredecessor,
+    entries: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "schema_version")]
+enum RawAuthorizationLineagePredecessor {
+    #[serde(rename = "ullm.sq8_authorization_lineage_input.v1")]
+    V1(RawAuthorizationLineagePredecessorV1),
+    #[serde(rename = "ullm.sq8_authorization_lineage_input.v2")]
+    V2(RawAuthorizationLineagePredecessorV2),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineagePredecessorV1 {
+    path: String,
+    sha256: String,
+    migrated_prefix_sha256: String,
+    migrated_prefix_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineagePredecessorV2 {
+    path: String,
+    sha256: String,
+    entries_sha256: String,
+    entry_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineageEntryV2 {
+    sequence: usize,
+    relation: String,
+    path: String,
+    sha256: String,
+    schema_version: String,
+    status: String,
+    request_id: Option<String>,
+    source_commit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditLineageBinding {
+    manifest_sha256: String,
+    entries_sha256: String,
+    entry_count: usize,
+    migrated_prefix_count: usize,
+    migrated_prefix_sha256: String,
+}
+
+struct ParsedAuthorizationAudit {
+    identity: AuthorizationAuditIdentity,
+    lineage: Option<AuditLineageBinding>,
 }
 
 #[derive(Deserialize)]
@@ -1062,7 +1165,7 @@ fn validate_audit_reference(raw: RawAuditReference, label: &str) -> Result<()> {
 fn parse_authorization_audit(
     raw: RawAuthorizationAuditIdentity,
     source_commit: &str,
-) -> Result<AuthorizationAuditIdentity> {
+) -> Result<ParsedAuthorizationAudit> {
     let path =
         canonical_absolute_regular_file(raw.path, "promotion.authorization_audit.path", true)?;
     let sha256 = validate_sha256(raw.sha256, "promotion.authorization_audit.sha256")?;
@@ -1135,6 +1238,7 @@ fn parse_authorization_audit(
         audit.runtime.path,
         "promotion.authorization_audit.runtime.path",
     )?;
+    let runtime_lineage_sha256 = audit.runtime.authorization_lineage_manifest.sha256.clone();
     for (reference, label) in [
         (audit.runtime.gate, "runtime.gate"),
         (audit.runtime.worker, "runtime.worker"),
@@ -1194,6 +1298,89 @@ fn parse_authorization_audit(
             "promotion.authorization_audit topology differs".into(),
         ));
     }
+    let topology_lineage_values = [
+        topology.artifact_payload_and_scale_bytes_hashed.is_some(),
+        topology.package_regular_file_bytes.is_some(),
+        topology.authorization_lineage_entries_sha256.is_some(),
+        topology.authorization_lineage_entry_count.is_some(),
+        topology
+            .authorization_lineage_migrated_prefix_count
+            .is_some(),
+        topology
+            .authorization_lineage_migrated_prefix_sha256
+            .is_some(),
+        topology
+            .authorization_lineage_propagation_target_count
+            .is_some(),
+        topology.authorization_lineage_schema.is_some(),
+    ];
+    let tests_lineage_values = [
+        audit.tests.lineage_v1_authorization_rejection.is_some(),
+        audit.tests.lineage_v1_migration.is_some(),
+    ];
+    if topology_lineage_values.iter().any(|present| *present)
+        != topology_lineage_values.iter().all(|present| *present)
+        || tests_lineage_values.iter().any(|present| *present)
+            != tests_lineage_values.iter().all(|present| *present)
+        || topology_lineage_values[0] != tests_lineage_values[0]
+    {
+        return Err(ServedModelError(
+            "promotion.authorization_audit lineage topology differs".into(),
+        ));
+    }
+    let lineage = if topology_lineage_values[0] {
+        let entries_sha256 = validate_sha256(
+            topology
+                .authorization_lineage_entries_sha256
+                .expect("presence checked"),
+            "promotion.authorization_audit.topology.authorization_lineage_entries_sha256",
+        )?;
+        let migrated_prefix_sha256 = validate_sha256(
+            topology
+                .authorization_lineage_migrated_prefix_sha256
+                .expect("presence checked"),
+            "promotion.authorization_audit.topology.authorization_lineage_migrated_prefix_sha256",
+        )?;
+        let entry_count = topology
+            .authorization_lineage_entry_count
+            .expect("presence checked");
+        let migrated_prefix_count = topology
+            .authorization_lineage_migrated_prefix_count
+            .expect("presence checked");
+        if topology
+            .artifact_payload_and_scale_bytes_hashed
+            .expect("presence checked")
+            == 0
+            || topology
+                .package_regular_file_bytes
+                .expect("presence checked")
+                == 0
+            || topology
+                .authorization_lineage_propagation_target_count
+                .expect("presence checked")
+                != 5
+            || topology.authorization_lineage_schema.as_deref()
+                != Some("ullm.sq8_authorization_lineage_input.v2")
+            || entry_count < 8
+            || migrated_prefix_count != 6
+        {
+            return Err(ServedModelError(
+                "promotion.authorization_audit lineage topology differs".into(),
+            ));
+        }
+        Some(AuditLineageBinding {
+            manifest_sha256: validate_sha256(
+                runtime_lineage_sha256,
+                "promotion.authorization_audit.runtime.authorization_lineage_manifest.sha256",
+            )?,
+            entries_sha256,
+            entry_count,
+            migrated_prefix_count,
+            migrated_prefix_sha256,
+        })
+    } else {
+        None
+    };
     for (text, label) in [
         (audit.tests.actual_output, "actual_output"),
         (audit.tests.artifact_live_content, "artifact_live_content"),
@@ -1245,92 +1432,677 @@ fn parse_authorization_audit(
             4096,
         )?;
     }
-    Ok(AuthorizationAuditIdentity { path, sha256 })
+    for (text, label) in [
+        (
+            audit.tests.lineage_v1_authorization_rejection,
+            "lineage_v1_authorization_rejection",
+        ),
+        (audit.tests.lineage_v1_migration, "lineage_v1_migration"),
+    ] {
+        if let Some(text) = text {
+            bounded_text(
+                text,
+                &format!("promotion.authorization_audit.tests.{label}"),
+                4096,
+            )?;
+        }
+    }
+    Ok(ParsedAuthorizationAudit {
+        identity: AuthorizationAuditIdentity { path, sha256 },
+        lineage,
+    })
 }
 
-fn validate_lineage_document(
-    bytes: &[u8],
-    source_commit: &str,
-    entries_sha256: &str,
-) -> Result<()> {
-    let value = decode_strict_json(bytes)?;
-    exact_keys(
-        &value,
-        &["schema_version", "disposition", "source", "entries"],
-        "promotion.authorization_lineage manifest",
+#[derive(Clone)]
+struct ValidatedLineageDocument {
+    schema_version: &'static str,
+    source_commit: String,
+    source_tree: String,
+    source_archive: String,
+    entries: Vec<Value>,
+    entries_sha256: String,
+    current_implementation_audit: Option<AuthorizationAuditIdentity>,
+    migrated_prefix: Option<(usize, String)>,
+}
+
+struct ParsedAuthorizationLineage {
+    identity: AuthorizationLineageIdentity,
+    migrated_prefix: Option<(usize, String)>,
+}
+
+fn canonical_json_sha256(value: &Value, label: &str) -> Result<String> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| ServedModelError(format!("{label} is not canonical JSON")))?;
+    Ok(sha256_bytes(&encoded))
+}
+
+fn lineage_source(
+    raw: RawAuthorizationLineageSource,
+    expected_commit: Option<&str>,
+) -> Result<(String, String, String)> {
+    let commit = validate_hex40(raw.commit, "promotion.authorization_lineage.source.commit")?;
+    let tree = validate_hex40(
+        raw.tree_oid,
+        "promotion.authorization_lineage.source.tree_oid",
     )?;
-    let document: RawAuthorizationLineageManifest =
-        serde_json::from_value(value).map_err(|_| {
+    let archive = validate_sha256(
+        raw.archive_sha256,
+        "promotion.authorization_lineage.source.archive_sha256",
+    )?;
+    if expected_commit.is_some_and(|expected| expected != commit) {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage source differs".into(),
+        ));
+    }
+    Ok((commit, tree, archive))
+}
+
+fn lineage_live_document(path: String, digest: String, label: &str) -> Result<(PathBuf, Value)> {
+    let path = canonical_absolute_regular_file(path, &format!("{label}.path"), true)?;
+    let digest = validate_sha256(digest, &format!("{label}.sha256"))?;
+    verify_file_sha256(&path, &digest, label)?;
+    let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, label)?;
+    Ok((path, decode_strict_json(&bytes)?))
+}
+
+fn lineage_entry_source(entry: &RawAuthorizationLineageEntryV2, index: usize) -> Result<Value> {
+    let (_, source) = lineage_live_document(
+        entry.path.clone(),
+        entry.sha256.clone(),
+        &format!("promotion.authorization_lineage entry {index}"),
+    )?;
+    if source.get("schema_version").and_then(Value::as_str) != Some(entry.schema_version.as_str()) {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage entry schema differs".into(),
+        ));
+    }
+    Ok(source)
+}
+
+fn source_commit_from_receipt(source: &Value, schema: &str) -> Option<String> {
+    let value = if schema == "ullm.qwen35_aq4_sq8_overlay_promotion.v1" {
+        source.get("source_commit")
+    } else {
+        source
+            .get("audited_source")
+            .and_then(|value| value.get("commit"))
+    };
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn parse_v2_entry(value: &Value, index: usize) -> Result<(RawAuthorizationLineageEntryV2, Value)> {
+    let entry: RawAuthorizationLineageEntryV2 =
+        serde_json::from_value(value.clone()).map_err(|_| {
             ServedModelError(
-                "promotion.authorization_lineage manifest typed schema is invalid".into(),
+                "promotion.authorization_lineage v2 entry typed schema is invalid".into(),
             )
         })?;
-    if document.schema_version != "ullm.sq8_authorization_lineage_input.v1"
-        || document.disposition != "authorization_input_not_yet_runtime_bound"
-        || document.source.commit != source_commit
-        || document.entries.len() != 6
-    {
+    if entry.sequence != index {
         return Err(ServedModelError(
-            "promotion.authorization_lineage manifest differs".into(),
+            "promotion.authorization_lineage v2 sequence differs".into(),
         ));
     }
     validate_sha256(
-        document.source.archive_sha256,
-        "promotion.authorization_lineage.source.archive_sha256",
+        entry.sha256.clone(),
+        "promotion.authorization_lineage entry SHA-256",
     )?;
     validate_hex40(
-        document.source.commit,
-        "promotion.authorization_lineage.source.commit",
+        entry.source_commit.clone(),
+        "promotion.authorization_lineage entry source commit",
     )?;
-    validate_hex40(
-        document.source.tree_oid,
-        "promotion.authorization_lineage.source.tree_oid",
-    )?;
-    let encoded = serde_json::to_vec(&document.entries).map_err(|_| {
-        ServedModelError("promotion.authorization_lineage entries are not canonical JSON".into())
-    })?;
-    if sha256_bytes(&encoded) != entries_sha256 {
+    if let Some(request_id) = entry.request_id.clone() {
+        validate_request_id(
+            request_id,
+            "promotion.authorization_lineage entry request ID",
+        )?;
+    }
+    let source = lineage_entry_source(&entry, index)?;
+    if source_commit_from_receipt(&source, &entry.schema_version).as_deref()
+        != Some(entry.source_commit.as_str())
+    {
         return Err(ServedModelError(
-            "promotion.authorization_lineage entries SHA-256 differs".into(),
+            "promotion.authorization_lineage entry source differs".into(),
         ));
     }
-    Ok(())
+    let status = source.get("status").and_then(Value::as_str);
+    let verdict = source.get("verdict").and_then(Value::as_str);
+    let actual = source.get("actual");
+    match entry.relation.as_str() {
+        "actual_failure" => {
+            if entry.schema_version != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+                || entry.status != "actual_failed"
+                || entry.request_id.is_none()
+                || status != Some(entry.status.as_str())
+                || source.get("request_id").and_then(Value::as_str) != entry.request_id.as_deref()
+                || actual
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    != Some("failed")
+                || actual
+                    .and_then(|value| value.get("request_id"))
+                    .and_then(Value::as_str)
+                    != entry.request_id.as_deref()
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage actual failure differs".into(),
+                ));
+            }
+        }
+        "implementation_ready_current"
+        | "capture_implementation_no_go"
+        | "restore_implementation_no_go"
+        | "historical_implementation_audit"
+        | "historical_runtime_audit" => {
+            let capture_schema = "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1";
+            let runtime_schema = "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1";
+            if ![capture_schema, runtime_schema].contains(&entry.schema_version.as_str())
+                || verdict != Some(entry.status.as_str())
+                || actual.and_then(Value::as_str) != Some("not_executed")
+                || entry.request_id.as_ref().is_some_and(|request_id| {
+                    source.get("fixed_request_id").and_then(Value::as_str)
+                        != Some(request_id.as_str())
+                })
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage audit entry differs".into(),
+                ));
+            }
+            let relation_ok = match entry.relation.as_str() {
+                "implementation_ready_current" => {
+                    entry.status == "implementation_ready"
+                        && (entry.schema_version != capture_schema
+                            || source
+                                .get("authorization")
+                                .and_then(|value| {
+                                    value.get("eligible_for_fresh_authorization_builder")
+                                })
+                                .and_then(Value::as_bool)
+                                == Some(true))
+                }
+                "capture_implementation_no_go" => {
+                    entry.schema_version == capture_schema && entry.status == "implementation_no_go"
+                }
+                "restore_implementation_no_go" => {
+                    entry.schema_version == runtime_schema
+                        && entry.status == "implementation_no_go"
+                        && source.get("reason_code").and_then(Value::as_str)
+                            == Some("restore_retry_terminal_identity_not_fail_closed")
+                }
+                "historical_implementation_audit" => {
+                    entry.schema_version == capture_schema
+                        && ["implementation_ready", "implementation_no_go"]
+                            .contains(&entry.status.as_str())
+                }
+                "historical_runtime_audit" => {
+                    entry.schema_version == runtime_schema
+                        && ["implementation_ready", "implementation_no_go"]
+                            .contains(&entry.status.as_str())
+                }
+                _ => false,
+            };
+            if !relation_ok {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage entry relation differs".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(ServedModelError(
+                "promotion.authorization_lineage entry relation differs".into(),
+            ));
+        }
+    }
+    Ok((entry, source))
+}
+
+fn migrate_v1_entries(entries: &[Value]) -> Result<Vec<Value>> {
+    const OLD_RELATIONS: [&str; 6] = [
+        "implementation_go_eligible_for_fresh_runtime_audit",
+        "superseded_capture_implementation_no_go",
+        "superseded_capture_implementation_no_go",
+        "consumed_actual_failure_latest",
+        "consumed_actual_failure_predecessor",
+        "superseded_restore_implementation_no_go",
+    ];
+    const NEW_RELATIONS: [&str; 6] = [
+        "historical_implementation_audit",
+        "capture_implementation_no_go",
+        "capture_implementation_no_go",
+        "actual_failure",
+        "actual_failure",
+        "restore_implementation_no_go",
+    ];
+    if entries.len() != 6 {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage v1 entry count differs".into(),
+        ));
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(sequence, value)| {
+            let object = value.as_object().ok_or_else(|| {
+                ServedModelError("promotion.authorization_lineage v1 entry differs".into())
+            })?;
+            let mut expected = vec![
+                "relation",
+                "path",
+                "sha256",
+                "schema_version",
+                "consumed",
+                "reusable_as_runtime_authorization",
+            ];
+            match sequence {
+                0 => expected.extend(["verdict", "actual"]),
+                1 | 2 => expected.extend(["verdict", "actual", "reason_codes"]),
+                3 | 4 => expected.extend(["status", "actual_status", "request_id"]),
+                _ => expected.extend(["verdict", "actual", "reason_code"]),
+            }
+            exact_keys(value, &expected, "promotion.authorization_lineage v1 entry")?;
+            if object.get("relation").and_then(Value::as_str) != Some(OLD_RELATIONS[sequence]) {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 relation differs".into(),
+                ));
+            }
+            if object
+                .get("reusable_as_runtime_authorization")
+                .and_then(Value::as_bool)
+                != Some(false)
+                || object.get("consumed").and_then(Value::as_bool) != Some(sequence != 0)
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 disposition differs".into(),
+                ));
+            }
+            let path = object.get("path").and_then(Value::as_str).ok_or_else(|| {
+                ServedModelError("promotion.authorization_lineage v1 path differs".into())
+            })?;
+            let digest = object
+                .get("sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    ServedModelError("promotion.authorization_lineage v1 SHA differs".into())
+                })?;
+            let schema = object
+                .get("schema_version")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    ServedModelError("promotion.authorization_lineage v1 schema differs".into())
+                })?;
+            let (_, source) = lineage_live_document(
+                path.to_owned(),
+                digest.to_owned(),
+                "promotion.authorization_lineage v1 entry",
+            )?;
+            if source.get("schema_version").and_then(Value::as_str) != Some(schema) {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 entry schema differs".into(),
+                ));
+            }
+            let status = object
+                .get("status")
+                .or_else(|| object.get("verdict"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    ServedModelError("promotion.authorization_lineage v1 status differs".into())
+                })?;
+            let request_id = object
+                .get("request_id")
+                .and_then(Value::as_str)
+                .or_else(|| source.get("fixed_request_id").and_then(Value::as_str));
+            if let Some(request_id) = request_id {
+                validate_request_id(
+                    request_id.to_owned(),
+                    "promotion.authorization_lineage migrated request ID",
+                )?;
+            }
+            let source_commit = source_commit_from_receipt(&source, schema).ok_or_else(|| {
+                ServedModelError("promotion.authorization_lineage v1 source differs".into())
+            })?;
+            validate_hex40(
+                source_commit.clone(),
+                "promotion.authorization_lineage migrated source commit",
+            )?;
+            Ok(serde_json::json!({
+                "sequence": sequence,
+                "relation": NEW_RELATIONS[sequence],
+                "path": path,
+                "sha256": digest,
+                "schema_version": schema,
+                "status": status,
+                "request_id": request_id,
+                "source_commit": source_commit,
+            }))
+        })
+        .collect()
+}
+
+fn validate_lineage_file(
+    path: &Path,
+    digest: &str,
+    expected_commit: Option<&str>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<ValidatedLineageDocument> {
+    let canonical = canonical_absolute_regular_file(
+        path.to_string_lossy().into_owned(),
+        "promotion.authorization_lineage manifest",
+        true,
+    )?;
+    if !seen.insert(canonical.clone()) {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage predecessor cycle differs".into(),
+        ));
+    }
+    let result = (|| {
+        verify_file_sha256(&canonical, digest, "promotion.authorization_lineage")?;
+        let bytes = bounded_read(
+            &canonical,
+            MAX_MANIFEST_BYTES,
+            "promotion.authorization_lineage",
+        )?;
+        let value = decode_strict_json(&bytes)?;
+        let document: RawAuthorizationLineageManifest = serde_json::from_value(value.clone())
+            .map_err(|_| {
+                ServedModelError(
+                    "promotion.authorization_lineage manifest typed schema is invalid".into(),
+                )
+            })?;
+        match document {
+            RawAuthorizationLineageManifest::V1(document) => {
+                if document.disposition != "authorization_input_not_yet_runtime_bound"
+                    || document.entries.len() != 6
+                {
+                    return Err(ServedModelError(
+                        "promotion.authorization_lineage v1 manifest differs".into(),
+                    ));
+                }
+                let (commit, tree, archive) = lineage_source(document.source, expected_commit)?;
+                let entries_value = Value::Array(document.entries.clone());
+                Ok(ValidatedLineageDocument {
+                    schema_version: "ullm.sq8_authorization_lineage_input.v1",
+                    source_commit: commit,
+                    source_tree: tree,
+                    source_archive: archive,
+                    entries: document.entries,
+                    entries_sha256: canonical_json_sha256(
+                        &entries_value,
+                        "promotion.authorization_lineage entries",
+                    )?,
+                    current_implementation_audit: None,
+                    migrated_prefix: None,
+                })
+            }
+            RawAuthorizationLineageManifest::V2(document) => {
+                if document.disposition != "authorization_input_not_yet_runtime_bound" {
+                    return Err(ServedModelError(
+                        "promotion.authorization_lineage v2 manifest differs".into(),
+                    ));
+                }
+                let (commit, tree, archive) = lineage_source(document.source, expected_commit)?;
+                let mut paths = HashSet::new();
+                let mut digests = HashSet::new();
+                let mut parsed = Vec::with_capacity(document.entries.len());
+                let mut sources = Vec::with_capacity(document.entries.len());
+                let mut current = Vec::new();
+                let mut capture_no_go = 0usize;
+                let mut restore_no_go = 0usize;
+                let mut actual_failure = 0usize;
+                for (index, value) in document.entries.iter().enumerate() {
+                    let (entry, source) = parse_v2_entry(value, index)?;
+                    if !paths.insert(entry.path.clone()) || !digests.insert(entry.sha256.clone()) {
+                        return Err(ServedModelError(
+                            "promotion.authorization_lineage v2 entry is duplicated".into(),
+                        ));
+                    }
+                    match entry.relation.as_str() {
+                        "implementation_ready_current" => {
+                            if entry.source_commit != commit {
+                                return Err(ServedModelError(
+                                    "promotion.authorization_lineage current GO source differs"
+                                        .into(),
+                                ));
+                            }
+                            current.push(AuthorizationAuditIdentity {
+                                path: canonical_absolute_regular_file(
+                                    entry.path.clone(),
+                                    "promotion.authorization_lineage current GO path",
+                                    true,
+                                )?,
+                                sha256: entry.sha256.clone(),
+                            });
+                        }
+                        "capture_implementation_no_go" => capture_no_go += 1,
+                        "restore_implementation_no_go" => restore_no_go += 1,
+                        "actual_failure" => actual_failure += 1,
+                        _ => {}
+                    }
+                    parsed.push(entry);
+                    sources.push(source);
+                }
+                if current.len() != 1
+                    || capture_no_go < 2
+                    || restore_no_go < 1
+                    || actual_failure < 3
+                {
+                    return Err(ServedModelError(
+                        "promotion.authorization_lineage v2 minimum history differs".into(),
+                    ));
+                }
+                let migrated_prefix = match document.predecessor {
+                    RawAuthorizationLineagePredecessor::V1(predecessor) => {
+                        let predecessor_digest = validate_sha256(
+                            predecessor.sha256,
+                            "promotion.authorization_lineage predecessor SHA-256",
+                        )?;
+                        let predecessor_path = canonical_absolute_regular_file(
+                            predecessor.path,
+                            "promotion.authorization_lineage predecessor path",
+                            true,
+                        )?;
+                        let previous = validate_lineage_file(
+                            &predecessor_path,
+                            &predecessor_digest,
+                            None,
+                            seen,
+                        )?;
+                        if previous.schema_version != "ullm.sq8_authorization_lineage_input.v1" {
+                            return Err(ServedModelError(
+                                "promotion.authorization_lineage migration predecessor differs"
+                                    .into(),
+                            ));
+                        }
+                        let migrated = migrate_v1_entries(&previous.entries)?;
+                        let migrated_value = Value::Array(migrated.clone());
+                        let migrated_sha = canonical_json_sha256(
+                            &migrated_value,
+                            "promotion.authorization_lineage migrated prefix",
+                        )?;
+                        if predecessor.migrated_prefix_count != migrated.len()
+                            || predecessor.migrated_prefix_sha256 != migrated_sha
+                            || document.entries.len() != migrated.len() + 2
+                            || document.entries[..migrated.len()] != migrated
+                            || parsed.get(6).map(|entry| entry.relation.as_str())
+                                != Some("actual_failure")
+                            || parsed.get(6).map(|entry| entry.source_commit.as_str())
+                                != Some(previous.source_commit.as_str())
+                            || sources
+                                .get(6)
+                                .and_then(|source| source.get("source_provenance"))
+                                != Some(&serde_json::json!({
+                                    "tree_sha256": previous.source_tree,
+                                    "archive_sha256": previous.source_archive,
+                                }))
+                            || parsed.get(7).map(|entry| entry.relation.as_str())
+                                != Some("implementation_ready_current")
+                        {
+                            return Err(ServedModelError(
+                                "promotion.authorization_lineage v1 migration differs".into(),
+                            ));
+                        }
+                        Some((migrated.len(), migrated_sha))
+                    }
+                    RawAuthorizationLineagePredecessor::V2(predecessor) => {
+                        let predecessor_digest = validate_sha256(
+                            predecessor.sha256,
+                            "promotion.authorization_lineage predecessor SHA-256",
+                        )?;
+                        let predecessor_entries_sha = validate_sha256(
+                            predecessor.entries_sha256,
+                            "promotion.authorization_lineage predecessor entries SHA-256",
+                        )?;
+                        let predecessor_path = canonical_absolute_regular_file(
+                            predecessor.path,
+                            "promotion.authorization_lineage predecessor path",
+                            true,
+                        )?;
+                        let previous = validate_lineage_file(
+                            &predecessor_path,
+                            &predecessor_digest,
+                            None,
+                            seen,
+                        )?;
+                        if previous.schema_version != "ullm.sq8_authorization_lineage_input.v2"
+                            || predecessor.entry_count != previous.entries.len()
+                            || predecessor_entries_sha != previous.entries_sha256
+                            || document.entries.len() <= previous.entries.len()
+                            || document.entries[..previous.entries.len()] != previous.entries
+                        {
+                            return Err(ServedModelError(
+                                "promotion.authorization_lineage is not append-only".into(),
+                            ));
+                        }
+                        previous.migrated_prefix
+                    }
+                };
+                let entries_value = Value::Array(document.entries.clone());
+                Ok(ValidatedLineageDocument {
+                    schema_version: "ullm.sq8_authorization_lineage_input.v2",
+                    source_commit: commit,
+                    source_tree: tree,
+                    source_archive: archive,
+                    entries: document.entries,
+                    entries_sha256: canonical_json_sha256(
+                        &entries_value,
+                        "promotion.authorization_lineage entries",
+                    )?,
+                    current_implementation_audit: current.into_iter().next(),
+                    migrated_prefix,
+                })
+            }
+        }
+    })();
+    seen.remove(&canonical);
+    result
 }
 
 fn parse_authorization_lineage(
     raw: RawAuthorizationLineageIdentity,
     source_commit: &str,
-) -> Result<AuthorizationLineageIdentity> {
-    if raw.schema_version != "ullm.sq8_authorization_lineage_ref.v1" {
-        return Err(ServedModelError(
-            "promotion.authorization_lineage schema differs".into(),
-        ));
-    }
-    let input_path = canonical_absolute_regular_file(
-        raw.input_path,
-        "promotion.authorization_lineage.input_path",
-        true,
-    )?;
+) -> Result<ParsedAuthorizationLineage> {
+    let (schema_version, input, runtime, sha256, entries_sha256, entry_count, current_raw) =
+        match raw {
+            RawAuthorizationLineageIdentity::V1(raw) => (
+                "ullm.sq8_authorization_lineage_ref.v1",
+                raw.input_path,
+                raw.runtime_path,
+                raw.sha256,
+                raw.entries_sha256,
+                None,
+                None,
+            ),
+            RawAuthorizationLineageIdentity::V2(raw) => (
+                "ullm.sq8_authorization_lineage_ref.v2",
+                raw.input_path,
+                raw.runtime_path,
+                raw.sha256,
+                raw.entries_sha256,
+                Some(raw.entry_count),
+                Some(raw.current_implementation_audit),
+            ),
+        };
+    let input_path =
+        canonical_absolute_regular_file(input, "promotion.authorization_lineage.input_path", true)?;
     let runtime_path = canonical_absolute_regular_file(
-        raw.runtime_path,
+        runtime,
         "promotion.authorization_lineage.runtime_path",
         true,
     )?;
-    let sha256 = validate_sha256(raw.sha256, "promotion.authorization_lineage.sha256")?;
+    let sha256 = validate_sha256(sha256, "promotion.authorization_lineage.sha256")?;
     let entries_sha256 = validate_sha256(
-        raw.entries_sha256,
+        entries_sha256,
         "promotion.authorization_lineage.entries_sha256",
     )?;
+    let mut validated = Vec::new();
     for path in [&input_path, &runtime_path] {
-        verify_file_sha256(path, &sha256, "promotion.authorization_lineage")?;
-        let bytes = bounded_read(path, MAX_MANIFEST_BYTES, "promotion.authorization_lineage")?;
-        validate_lineage_document(&bytes, source_commit, &entries_sha256)?;
+        let mut seen = HashSet::new();
+        validated.push(validate_lineage_file(
+            path,
+            &sha256,
+            Some(source_commit),
+            &mut seen,
+        )?);
     }
-    Ok(AuthorizationLineageIdentity {
-        input_path,
-        runtime_path,
-        sha256,
-        entries_sha256,
+    if validated[0].schema_version
+        != if entry_count.is_some() {
+            "ullm.sq8_authorization_lineage_input.v2"
+        } else {
+            "ullm.sq8_authorization_lineage_input.v1"
+        }
+        || validated[0].entries_sha256 != entries_sha256
+        || validated[1].entries_sha256 != entries_sha256
+        || validated[0].entries != validated[1].entries
+    {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage manifest differs".into(),
+        ));
+    }
+    let current_implementation_audit = if let Some(current_raw) = current_raw {
+        let current_path = canonical_absolute_regular_file(
+            current_raw.path,
+            "promotion.authorization_lineage.current_implementation_audit.path",
+            true,
+        )?;
+        let current_sha = validate_sha256(
+            current_raw.sha256,
+            "promotion.authorization_lineage.current_implementation_audit.sha256",
+        )?;
+        verify_file_sha256(
+            &current_path,
+            &current_sha,
+            "promotion.authorization_lineage.current_implementation_audit",
+        )?;
+        let current = AuthorizationAuditIdentity {
+            path: current_path,
+            sha256: current_sha,
+        };
+        if Some(&current) != validated[0].current_implementation_audit.as_ref()
+            || Some(&current) != validated[1].current_implementation_audit.as_ref()
+            || entry_count != Some(validated[0].entries.len())
+        {
+            return Err(ServedModelError(
+                "promotion.authorization_lineage current GO differs".into(),
+            ));
+        }
+        Some(current)
+    } else {
+        if validated[0].current_implementation_audit.is_some() {
+            return Err(ServedModelError(
+                "promotion.authorization_lineage v1 authorization differs".into(),
+            ));
+        }
+        None
+    };
+    Ok(ParsedAuthorizationLineage {
+        identity: AuthorizationLineageIdentity {
+            input_path,
+            runtime_path,
+            sha256,
+            entries_sha256,
+            schema_version: schema_version.to_owned(),
+            entry_count,
+            current_implementation_audit,
+        },
+        migrated_prefix: validated[0].migrated_prefix.clone(),
     })
 }
 
@@ -1425,20 +2197,51 @@ fn parse_promotion(raw: RawPromotion, base: &Path) -> Result<PromotionContract> 
     )?;
     let digest = validate_sha256(raw.receipt_sha256, "promotion.receipt_sha256")?;
     verify_file_sha256(&receipt, &digest, "promotion.receipt")?;
-    let authorization_audit = raw
+    let parsed_audit = raw
         .authorization_audit
         .map(|value| parse_authorization_audit(value, &source_commit))
         .transpose()?;
-    let authorization_lineage = raw
+    let parsed_lineage = raw
         .authorization_lineage
         .map(|value| parse_authorization_lineage(value, &source_commit))
         .transpose()?;
     let readiness = raw.readiness.map(parse_readiness).transpose()?;
-    if authorization_audit.is_some() && (authorization_lineage.is_none() || readiness.is_none()) {
+    if parsed_audit.is_some() && (parsed_lineage.is_none() || readiness.is_none()) {
         return Err(ServedModelError(
             "authorized promotion requires audit, lineage, and readiness".into(),
         ));
     }
+    if let (Some(audit), Some(lineage)) = (&parsed_audit, &parsed_lineage) {
+        match (&audit.lineage, lineage.identity.entry_count) {
+            (None, None) => {}
+            (Some(binding), Some(entry_count)) => {
+                let Some((migrated_prefix_count, migrated_prefix_sha256)) =
+                    lineage.migrated_prefix.as_ref()
+                else {
+                    return Err(ServedModelError(
+                        "promotion authorization lineage audit binding differs".into(),
+                    ));
+                };
+                if binding.manifest_sha256 != lineage.identity.sha256
+                    || binding.entries_sha256 != lineage.identity.entries_sha256
+                    || binding.entry_count != entry_count
+                    || binding.migrated_prefix_count != *migrated_prefix_count
+                    || binding.migrated_prefix_sha256 != *migrated_prefix_sha256
+                {
+                    return Err(ServedModelError(
+                        "promotion authorization lineage audit binding differs".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(ServedModelError(
+                    "promotion authorization lineage audit schema differs".into(),
+                ));
+            }
+        }
+    }
+    let authorization_audit = parsed_audit.map(|value| value.identity);
+    let authorization_lineage = parsed_lineage.map(|value| value.identity);
     Ok(PromotionContract {
         source_commit,
         receipt,
@@ -2075,6 +2878,313 @@ mod tests {
         }
     }
 
+    fn write_immutable_json(root: &Path, name: &str, value: &Value) -> (PathBuf, String) {
+        let path = root.join(name);
+        let bytes = serde_json::to_vec(value).unwrap();
+        let digest = sha256_bytes(&bytes);
+        write_immutable(&path, &bytes);
+        (path, digest)
+    }
+
+    fn first_v2_authorized_fixture() -> AuthorizationFixture {
+        let mut fixture = authorized_fixture(
+            "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+            "implementation_ready",
+        );
+        let current_commit = "a".repeat(40);
+        let predecessor_commit = "b".repeat(40);
+        let predecessor_tree = "c".repeat(40);
+        let predecessor_archive = "d".repeat(64);
+        let request = |byte: char| format!("sq8-promotion-{}", byte.to_string().repeat(64));
+        let capture = |verdict: &str, eligible: bool, auditor: &str| {
+            json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+                "auditor_task_id": auditor,
+                "audited_source": {
+                    "commit": predecessor_commit,
+                    "tree_sha256": predecessor_tree,
+                    "archive_sha256": predecessor_archive,
+                },
+                "verdict": verdict,
+                "actual": "not_executed",
+                "authorization": {
+                    "eligible_for_fresh_authorization_builder": eligible,
+                },
+                "reason_codes": if verdict == "implementation_no_go" {
+                    json!(["fixture_no_go"])
+                } else {
+                    json!([])
+                },
+            })
+        };
+        let mut receipts = Vec::new();
+        receipts.push(write_immutable_json(
+            &fixture.root,
+            "entry-0.json",
+            &capture("implementation_ready", true, "fixture-0"),
+        ));
+        receipts.push(write_immutable_json(
+            &fixture.root,
+            "entry-1.json",
+            &capture("implementation_no_go", false, "fixture-1"),
+        ));
+        receipts.push(write_immutable_json(
+            &fixture.root,
+            "entry-2.json",
+            &capture("implementation_no_go", false, "fixture-2"),
+        ));
+        for (index, request_byte) in [(3, '3'), (4, '4')] {
+            let request_id = request(request_byte);
+            receipts.push(write_immutable_json(
+                &fixture.root,
+                &format!("entry-{index}.json"),
+                &json!({
+                    "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+                    "status": "actual_failed",
+                    "request_id": request_id,
+                    "source_commit": predecessor_commit,
+                    "actual": {"status": "failed", "request_id": request_id},
+                }),
+            ));
+        }
+        receipts.push(write_immutable_json(
+            &fixture.root,
+            "entry-5.json",
+            &json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+                "audited_source": {
+                    "commit": predecessor_commit,
+                    "tree_sha256": predecessor_tree,
+                    "archive_sha256": predecessor_archive,
+                },
+                "fixed_request_id": request('5'),
+                "verdict": "implementation_no_go",
+                "actual": "not_executed",
+                "reason_code": "restore_retry_terminal_identity_not_fail_closed",
+            }),
+        ));
+        let v1_relations = [
+            "implementation_go_eligible_for_fresh_runtime_audit",
+            "superseded_capture_implementation_no_go",
+            "superseded_capture_implementation_no_go",
+            "consumed_actual_failure_latest",
+            "consumed_actual_failure_predecessor",
+            "superseded_restore_implementation_no_go",
+        ];
+        let schemas = [
+            "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+            "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+            "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+            "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+        ];
+        let v1_entries: Vec<Value> = (0..6)
+            .map(|index| {
+                let (path, digest) = &receipts[index];
+                let mut entry = json!({
+                    "relation": v1_relations[index],
+                    "path": path,
+                    "sha256": digest,
+                    "schema_version": schemas[index],
+                    "consumed": index != 0,
+                    "reusable_as_runtime_authorization": false,
+                });
+                let object = entry.as_object_mut().unwrap();
+                match index {
+                    0 => {
+                        object.insert("verdict".into(), json!("implementation_ready"));
+                        object.insert("actual".into(), json!("not_executed"));
+                    }
+                    1 | 2 => {
+                        object.insert("verdict".into(), json!("implementation_no_go"));
+                        object.insert("actual".into(), json!("not_executed"));
+                        object.insert("reason_codes".into(), json!(["fixture_no_go"]));
+                    }
+                    3 | 4 => {
+                        object.insert("status".into(), json!("actual_failed"));
+                        object.insert("actual_status".into(), json!("failed"));
+                        object.insert(
+                            "request_id".into(),
+                            json!(request(char::from(b'0' + index as u8))),
+                        );
+                    }
+                    _ => {
+                        object.insert("verdict".into(), json!("implementation_no_go"));
+                        object.insert("actual".into(), json!("not_executed"));
+                        object.insert(
+                            "reason_code".into(),
+                            json!("restore_retry_terminal_identity_not_fail_closed"),
+                        );
+                    }
+                }
+                entry
+            })
+            .collect();
+        let predecessor = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_input.v1",
+            "disposition": "authorization_input_not_yet_runtime_bound",
+            "source": {
+                "commit": predecessor_commit,
+                "tree_oid": predecessor_tree,
+                "archive_sha256": predecessor_archive,
+            },
+            "entries": v1_entries,
+        });
+        let (predecessor_path, predecessor_sha) =
+            write_immutable_json(&fixture.root, "lineage-predecessor.json", &predecessor);
+        let migrated = migrate_v1_entries(predecessor["entries"].as_array().unwrap()).unwrap();
+        let migrated_sha =
+            canonical_json_sha256(&Value::Array(migrated.clone()), "fixture migrated entries")
+                .unwrap();
+        let latest_request = request('6');
+        let (latest_path, latest_sha) = write_immutable_json(
+            &fixture.root,
+            "entry-6.json",
+            &json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+                "status": "actual_failed",
+                "request_id": latest_request,
+                "source_commit": predecessor_commit,
+                "source_provenance": {
+                    "tree_sha256": predecessor_tree,
+                    "archive_sha256": predecessor_archive,
+                },
+                "actual": {"status": "failed", "request_id": latest_request},
+            }),
+        );
+        let (current_path, current_sha) = write_immutable_json(
+            &fixture.root,
+            "entry-7.json",
+            &json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+                "audited_source": {
+                    "commit": current_commit,
+                    "tree_sha256": "e".repeat(40),
+                    "archive_sha256": "f".repeat(64),
+                },
+                "verdict": "implementation_ready",
+                "actual": "not_executed",
+                "authorization": {"eligible_for_fresh_authorization_builder": true},
+            }),
+        );
+        let mut entries = migrated;
+        entries.push(json!({
+            "sequence": 6,
+            "relation": "actual_failure",
+            "path": latest_path,
+            "sha256": latest_sha,
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "status": "actual_failed",
+            "request_id": latest_request,
+            "source_commit": predecessor_commit,
+        }));
+        entries.push(json!({
+            "sequence": 7,
+            "relation": "implementation_ready_current",
+            "path": current_path,
+            "sha256": current_sha,
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+            "status": "implementation_ready",
+            "request_id": null,
+            "source_commit": current_commit,
+        }));
+        let entries_sha =
+            canonical_json_sha256(&Value::Array(entries.clone()), "fixture lineage entries")
+                .unwrap();
+        let lineage = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_input.v2",
+            "disposition": "authorization_input_not_yet_runtime_bound",
+            "source": {
+                "commit": current_commit,
+                "tree_oid": "e".repeat(40),
+                "archive_sha256": "f".repeat(64),
+            },
+            "predecessor": {
+                "schema_version": "ullm.sq8_authorization_lineage_input.v1",
+                "path": predecessor_path,
+                "sha256": predecessor_sha,
+                "migrated_prefix_count": 6,
+                "migrated_prefix_sha256": migrated_sha,
+            },
+            "entries": entries,
+        });
+        let lineage_bytes = serde_json::to_vec(&lineage).unwrap();
+        let lineage_sha = sha256_bytes(&lineage_bytes);
+        for name in ["lineage-input.json", "lineage-runtime.json"] {
+            let path = fixture.root.join(name);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            write_immutable(&path, &lineage_bytes);
+        }
+        fixture.value["promotion"]["authorization_lineage"] = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_ref.v2",
+            "input_path": fixture.root.join("lineage-input.json"),
+            "runtime_path": fixture.root.join("lineage-runtime.json"),
+            "sha256": lineage_sha,
+            "entries_sha256": entries_sha,
+            "entry_count": 8,
+            "current_implementation_audit": {
+                "path": current_path,
+                "sha256": current_sha,
+            },
+        });
+        let audit_path = fixture.root.join("audit.json");
+        let mut audit: Value = serde_json::from_slice(
+            &bounded_read(&audit_path, MAX_MANIFEST_BYTES, "fixture audit").unwrap(),
+        )
+        .unwrap();
+        audit["runtime"]["authorization_lineage_manifest"]["sha256"] = json!(lineage_sha);
+        let topology = audit["topology"].as_object_mut().unwrap();
+        topology.insert("artifact_payload_and_scale_bytes_hashed".into(), json!(1));
+        topology.insert("package_regular_file_bytes".into(), json!(1));
+        topology.insert(
+            "authorization_lineage_entries_sha256".into(),
+            json!(entries_sha),
+        );
+        topology.insert("authorization_lineage_entry_count".into(), json!(8));
+        topology.insert(
+            "authorization_lineage_migrated_prefix_count".into(),
+            json!(6),
+        );
+        topology.insert(
+            "authorization_lineage_migrated_prefix_sha256".into(),
+            json!(migrated_sha),
+        );
+        topology.insert(
+            "authorization_lineage_propagation_target_count".into(),
+            json!(5),
+        );
+        topology.insert(
+            "authorization_lineage_schema".into(),
+            json!("ullm.sq8_authorization_lineage_input.v2"),
+        );
+        audit["tests"]["lineage_v1_authorization_rejection"] = json!("passed");
+        audit["tests"]["lineage_v1_migration"] = json!("passed");
+        let audit_bytes = serde_json::to_vec(&audit).unwrap();
+        fs::set_permissions(&audit_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&audit_path, &audit_bytes);
+        fixture.value["promotion"]["authorization_audit"]["sha256"] =
+            json!(sha256_bytes(&audit_bytes));
+        fixture
+    }
+
+    fn validate_mutated_first_v2(
+        mutate: impl FnOnce(&mut Value),
+    ) -> Result<ValidatedLineageDocument> {
+        let fixture = first_v2_authorized_fixture();
+        let path = fixture.root.join("lineage-input.json");
+        let mut value: Value = serde_json::from_slice(
+            &bounded_read(&path, MAX_MANIFEST_BYTES, "fixture lineage").unwrap(),
+        )
+        .unwrap();
+        mutate(&mut value);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let digest = sha256_bytes(&bytes);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&path, &bytes);
+        validate_lineage_file(&path, &digest, Some(&"a".repeat(40)), &mut HashSet::new())
+    }
+
     #[test]
     fn sq8_and_aq4_gateway_fixtures_use_the_same_loader() {
         let sq8 = load_served_model(fixture("sq8")).unwrap();
@@ -2194,6 +3304,209 @@ mod tests {
     }
 
     #[test]
+    fn portable_first_v2_authorization_lineage_is_typed() {
+        let fixture = first_v2_authorized_fixture();
+        let raw = serde_json::to_vec(&fixture.value).unwrap();
+        let model = load_served_model_bytes(&fixture.manifest_path, &raw).unwrap();
+        let lineage = model.promotion.authorization_lineage.unwrap();
+        assert_eq!(
+            lineage.schema_version,
+            "ullm.sq8_authorization_lineage_ref.v2"
+        );
+        assert_eq!(lineage.entry_count, Some(8));
+        assert!(lineage.current_implementation_audit.is_some());
+    }
+
+    #[test]
+    fn portable_v2_reference_tamper_matrix_is_rejected() {
+        let fixture = first_v2_authorized_fixture();
+        let mut cases = Vec::new();
+
+        let mut value = fixture.value.clone();
+        value["promotion"]["authorization_lineage"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), Value::Bool(true));
+        cases.push(value);
+
+        let mut value = fixture.value.clone();
+        value["promotion"]["authorization_lineage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("current_implementation_audit");
+        cases.push(value);
+
+        let mut value = fixture.value.clone();
+        value["promotion"]["authorization_lineage"]["entry_count"] = json!("8");
+        cases.push(value);
+
+        let mut value = fixture.value.clone();
+        value["promotion"]["authorization_lineage"]["entry_count"] = json!(9);
+        cases.push(value);
+
+        let mut value = fixture.value.clone();
+        value["promotion"]["authorization_lineage"]["entries_sha256"] = json!("0".repeat(64));
+        cases.push(value);
+
+        let mut value = fixture.value.clone();
+        value["promotion"]["authorization_lineage"]["current_implementation_audit"]["sha256"] =
+            json!("0".repeat(64));
+        cases.push(value);
+
+        for value in cases {
+            let raw = serde_json::to_vec(&value).unwrap();
+            assert!(load_served_model_bytes(&fixture.manifest_path, &raw).is_err());
+        }
+    }
+
+    #[test]
+    fn portable_v2_manifest_tamper_matrix_is_rejected() {
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unknown".into(), Value::Bool(true));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"][7]["sequence"] = json!(8);
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"][7]["path"] = value["entries"][0]["path"].clone();
+                value["entries"][7]["sha256"] = value["entries"][0]["sha256"].clone();
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"][7]["source_commit"] = json!("b".repeat(40));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["predecessor"]["migrated_prefix_sha256"] = json!("0".repeat(64));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["predecessor"]["sha256"] = json!("0".repeat(64));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"].as_array_mut().unwrap().push(json!({}));
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn portable_subsequent_v2_is_append_only() {
+        let mut fixture = first_v2_authorized_fixture();
+        let lineage_input = fixture.root.join("lineage-input.json");
+        let mut previous: Value = serde_json::from_slice(
+            &bounded_read(&lineage_input, MAX_MANIFEST_BYTES, "fixture lineage").unwrap(),
+        )
+        .unwrap();
+        let previous_bytes = serde_json::to_vec(&previous).unwrap();
+        let previous_sha = sha256_bytes(&previous_bytes);
+        let previous_entries_sha =
+            canonical_json_sha256(&previous["entries"], "fixture predecessor entries").unwrap();
+        let predecessor_path = fixture.root.join("lineage-v2-predecessor.json");
+        write_immutable(&predecessor_path, &previous_bytes);
+        let (entry_path, entry_sha) = write_immutable_json(
+            &fixture.root,
+            "entry-8.json",
+            &json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+                "auditor_task_id": "fixture-8",
+                "audited_source": {
+                    "commit": "a".repeat(40),
+                    "tree_sha256": "e".repeat(40),
+                    "archive_sha256": "f".repeat(64),
+                },
+                "verdict": "implementation_ready",
+                "actual": "not_executed",
+                "authorization": {"eligible_for_fresh_authorization_builder": true},
+            }),
+        );
+        previous["predecessor"] = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_input.v2",
+            "path": predecessor_path,
+            "sha256": previous_sha,
+            "entries_sha256": previous_entries_sha,
+            "entry_count": 8,
+        });
+        previous["entries"].as_array_mut().unwrap().push(json!({
+            "sequence": 8,
+            "relation": "historical_implementation_audit",
+            "path": entry_path,
+            "sha256": entry_sha,
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+            "status": "implementation_ready",
+            "request_id": null,
+            "source_commit": "a".repeat(40),
+        }));
+        let lineage_bytes = serde_json::to_vec(&previous).unwrap();
+        let lineage_sha = sha256_bytes(&lineage_bytes);
+        let entries_sha = canonical_json_sha256(&previous["entries"], "fixture entries").unwrap();
+        for name in ["lineage-input.json", "lineage-runtime.json"] {
+            let path = fixture.root.join(name);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            write_immutable(&path, &lineage_bytes);
+        }
+        fixture.value["promotion"]["authorization_lineage"]["sha256"] = json!(lineage_sha);
+        fixture.value["promotion"]["authorization_lineage"]["entries_sha256"] = json!(entries_sha);
+        fixture.value["promotion"]["authorization_lineage"]["entry_count"] = json!(9);
+        let audit_path = fixture.root.join("audit.json");
+        let mut audit: Value = serde_json::from_slice(
+            &bounded_read(&audit_path, MAX_MANIFEST_BYTES, "fixture audit").unwrap(),
+        )
+        .unwrap();
+        audit["runtime"]["authorization_lineage_manifest"]["sha256"] = json!(lineage_sha);
+        audit["topology"]["authorization_lineage_entries_sha256"] = json!(entries_sha);
+        audit["topology"]["authorization_lineage_entry_count"] = json!(9);
+        let audit_bytes = serde_json::to_vec(&audit).unwrap();
+        fs::set_permissions(&audit_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&audit_path, &audit_bytes);
+        fixture.value["promotion"]["authorization_audit"]["sha256"] =
+            json!(sha256_bytes(&audit_bytes));
+
+        let raw = serde_json::to_vec(&fixture.value).unwrap();
+        let model = load_served_model_bytes(&fixture.manifest_path, &raw).unwrap();
+        assert_eq!(
+            model.promotion.authorization_lineage.unwrap().entry_count,
+            Some(9)
+        );
+
+        previous["entries"].as_array_mut().unwrap().swap(0, 1);
+        previous["entries"][0]["sequence"] = json!(0);
+        previous["entries"][1]["sequence"] = json!(1);
+        let tampered = serde_json::to_vec(&previous).unwrap();
+        let tampered_sha = sha256_bytes(&tampered);
+        fs::set_permissions(&lineage_input, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&lineage_input, &tampered);
+        assert!(
+            validate_lineage_file(
+                &lineage_input,
+                &tampered_sha,
+                Some(&"a".repeat(40)),
+                &mut HashSet::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn actual_failed_authorized_sq8_manifest_is_accepted_when_available() {
         let path = PathBuf::from(
             "/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-6fef8baafda003b5/served-model.json",
@@ -2209,6 +3522,41 @@ mod tests {
         assert!(model.promotion.authorization_audit.is_some());
         assert!(model.promotion.authorization_lineage.is_some());
         assert!(model.promotion.readiness.is_some());
+    }
+
+    #[test]
+    fn first_v2_authorized_sq8_manifest_is_cpu_loadable_when_available() {
+        let path = PathBuf::from(
+            "/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-de76c4c3ceb3c69b/served-model.json",
+        );
+        if !path.exists() {
+            return;
+        }
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "31ba7f6483a5baf7d84f8b45a5d86d02c2c22d72d229ca74cfe593192e98ccdd"
+        );
+        let worker = PathBuf::from(
+            "/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-de76c4c3ceb3c69b/ullm-aq4-worker",
+        );
+        assert_eq!(
+            sha256_file(&worker).unwrap(),
+            "b4c3df3dd704b42ca6a6a2d353cf49fa95065fda737443f7da322bf7985e71ae"
+        );
+        let model = load_served_model(path).unwrap();
+        let lineage = model.promotion.authorization_lineage.unwrap();
+        assert_eq!(
+            lineage.schema_version,
+            "ullm.sq8_authorization_lineage_ref.v2"
+        );
+        assert_eq!(lineage.entry_count, Some(8));
+        assert_eq!(
+            lineage
+                .current_implementation_audit
+                .expect("v2 current implementation GO")
+                .sha256,
+            "058bc7f90c1c6cd93e2c5dae4a9a207749dc15bfc52e2d26203345fe3ebe01b4"
+        );
     }
 
     #[test]
