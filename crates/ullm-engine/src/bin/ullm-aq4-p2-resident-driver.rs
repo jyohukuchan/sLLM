@@ -2071,6 +2071,79 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn python_canonical_json(value: &Value) -> Vec<u8> {
+    fn push_hex_escape(output: &mut Vec<u8>, code_unit: u16) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        output.extend_from_slice(b"\\u");
+        for shift in [12, 8, 4, 0] {
+            output.push(HEX[((code_unit >> shift) & 0x0f) as usize]);
+        }
+    }
+
+    fn push_string(output: &mut Vec<u8>, value: &str) {
+        output.push(b'"');
+        for character in value.chars() {
+            match character {
+                '"' => output.extend_from_slice(b"\\\""),
+                '\\' => output.extend_from_slice(b"\\\\"),
+                '\u{0008}' => output.extend_from_slice(b"\\b"),
+                '\u{0009}' => output.extend_from_slice(b"\\t"),
+                '\u{000a}' => output.extend_from_slice(b"\\n"),
+                '\u{000c}' => output.extend_from_slice(b"\\f"),
+                '\u{000d}' => output.extend_from_slice(b"\\r"),
+                '\u{0020}'..='\u{007e}' => output.push(character as u8),
+                character if (character as u32) <= 0xffff => {
+                    push_hex_escape(output, character as u16);
+                }
+                character => {
+                    let scalar = character as u32 - 0x1_0000;
+                    push_hex_escape(output, 0xd800 + (scalar >> 10) as u16);
+                    push_hex_escape(output, 0xdc00 + (scalar & 0x03ff) as u16);
+                }
+            }
+        }
+        output.push(b'"');
+    }
+
+    fn push_value(output: &mut Vec<u8>, value: &Value) {
+        match value {
+            Value::Null => output.extend_from_slice(b"null"),
+            Value::Bool(true) => output.extend_from_slice(b"true"),
+            Value::Bool(false) => output.extend_from_slice(b"false"),
+            Value::Number(number) => output.extend_from_slice(number.to_string().as_bytes()),
+            Value::String(value) => push_string(output, value),
+            Value::Array(values) => {
+                output.push(b'[');
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    push_value(output, value);
+                }
+                output.push(b']');
+            }
+            Value::Object(values) => {
+                let mut fields = values.iter().collect::<Vec<_>>();
+                fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                output.push(b'{');
+                for (index, (key, value)) in fields.into_iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    push_string(output, key);
+                    output.push(b':');
+                    push_value(output, value);
+                }
+                output.push(b'}');
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    push_value(&mut output, value);
+    output
+}
+
 fn json_self_hash(value: &Value, field: &str) -> Result<String, String> {
     let mut value = value.clone();
     let object = value
@@ -2080,9 +2153,7 @@ fn json_self_hash(value: &Value, field: &str) -> Result<String, String> {
         return Err(format!("self-hash lacks {field}"));
     }
     object.insert(field.into(), Value::Null);
-    Ok(sha256_bytes(&serde_json::to_vec(&value).map_err(
-        |error| format!("self-hash serialization failed: {error}"),
-    )?))
+    Ok(sha256_bytes(&python_canonical_json(&value)))
 }
 
 struct StrictValue(Value);
@@ -2352,6 +2423,72 @@ mod tests {
     fn refresh_map_self_hash(value: &mut Value) {
         value["map_sha256"] = Value::Null;
         value["map_sha256"] = Value::String(json_self_hash(value, "map_sha256").unwrap());
+    }
+
+    #[test]
+    fn python_canonical_json_matches_cross_language_golden_vectors() {
+        let ascii = json!({
+            "ascii": "quote\" slash/ backslash\\ controls\u{0008}\t\n\u{000c}\r\u{0000}\u{001f}\u{007f}",
+            "array": [null, true, false, -7, 9],
+        });
+        let expected_ascii = br#"{"array":[null,true,false,-7,9],"ascii":"quote\" slash/ backslash\\ controls\b\t\n\f\r\u0000\u001f\u007f"}"#;
+        assert_eq!(python_canonical_json(&ascii), expected_ascii);
+        assert_eq!(
+            sha256_bytes(expected_ascii),
+            "80c3d28ec672057f46f2629ead7706fc8b961b68f27456d1fcdff6157f96a463"
+        );
+
+        let unicode = json!({
+            "z_ascii": "last",
+            "モデル": "値é",
+            "😀": "rocket🚀",
+            "combining_e\u{0301}": "A\u{030a}",
+        });
+        let expected_unicode = br#"{"combining_e\u0301":"A\u030a","z_ascii":"last","\u30e2\u30c7\u30eb":"\u5024\u00e9","\ud83d\ude00":"rocket\ud83d\ude80"}"#;
+        assert_eq!(python_canonical_json(&unicode), expected_unicode);
+        assert_eq!(
+            sha256_bytes(expected_unicode),
+            "ad81c48a720bef02a3b72a6cd695d1892b709bfa9a4838c9584cf060944d6f99"
+        );
+    }
+
+    #[test]
+    fn fd_map_self_hash_matches_python_unicode_golden() {
+        let value = json!({
+            "schema_version": FD_MAP_SCHEMA,
+            "status": "bound",
+            "map_sha256": null,
+            "logical_argv_sha256": "1".repeat(64),
+            "closure_contract": {
+                "code_execution_closure": "pinned_fd",
+                "control_input_closure": "pinned_fd",
+                "device_lock_closure": "pinned_fd",
+                "data_integrity": "trusted_pre_post_guarded"
+            },
+            "bindings": [{
+                "role": "served_manifest",
+                "logical_path": "/tmp/モデル/😀/e\u{0301}.json",
+                "resolved_path": null,
+                "descriptor": 37,
+                "kind": "regular_file",
+                "closure": "control_input",
+                "method": "read",
+                "identity": {
+                    "device": 1,
+                    "inode": 2,
+                    "mode": 33060,
+                    "nlink": 1,
+                    "size": 3,
+                    "mtime_ns": 4,
+                    "ctime_ns": 5
+                },
+                "sha256": "a".repeat(64)
+            }]
+        });
+        assert_eq!(
+            json_self_hash(&value, "map_sha256").unwrap(),
+            "1a5256e783626d829a4f06dd7dac47e891643faaed03f4a915e3a37b328ee084"
+        );
     }
 
     fn map_error_with(label: &str, mutate: impl FnOnce(&mut Value), sealed: bool) -> String {
