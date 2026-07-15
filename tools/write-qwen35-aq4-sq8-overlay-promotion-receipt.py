@@ -486,7 +486,7 @@ def _actual_evidence(
         not isinstance(output_identity, dict)
         or set(output_identity) != {"token_count", "token_ids_sha256", "token_ids_recorded"}
         or type(output_identity["token_count"]) is not int
-        or output_identity["token_count"] < 1
+        or output_identity["token_count"] != 2
         or _hex(output_identity.get("token_ids_sha256"), 64, "executor token IDs SHA-256")
         != output_identity.get("token_ids_sha256")
         or output_identity["token_ids_recorded"] is not False

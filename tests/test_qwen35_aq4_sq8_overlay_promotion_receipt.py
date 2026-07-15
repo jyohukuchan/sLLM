@@ -376,7 +376,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
                     "projection": {"single_matvec_count": 0, "batch_matvec_count": 1, "pair_matvec_count": 1, "triple_matvec_count": 0, "fallback_count": 0},
                     "diagnostic_host_staging": {"read_count": 0, "write_count": 0, "read_bytes": 0, "write_bytes": 0},
                 },
-                "output_identity": {"token_count": 1, "token_ids_sha256": "4" * 64, "token_ids_recorded": False},
+                "output_identity": {"token_count": 2, "token_ids_sha256": "4" * 64, "token_ids_recorded": False},
             },
         },
     )
@@ -400,6 +400,16 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
             output_path=output,
         )
     wrong_executor["sq8_promotion_evidence"]["request_id"] = REQUEST_ID
+    wrong_executor["sq8_promotion_evidence"]["output_identity"]["token_count"] = 1
+    _write_json(executor_path, wrong_executor)
+    with pytest.raises(WRITER.ReceiptError, match="output identity differs"):
+        WRITER.write_actual_receipt(
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+            maintenance_evidence_path=maintenance_path,
+            executor_record_path=executor_path,
+            output_path=output,
+        )
+    wrong_executor["sq8_promotion_evidence"]["output_identity"]["token_count"] = 2
     _write_json(executor_path, wrong_executor)
     value = WRITER.write_actual_receipt(
         prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),

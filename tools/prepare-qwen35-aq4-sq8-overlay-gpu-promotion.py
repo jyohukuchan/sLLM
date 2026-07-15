@@ -1159,7 +1159,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "actual": {
                     "request_id": request_id,
                     "prompt_token_ids": list(range(1, 129)),
-                    "max_new_tokens": 1,
+                    "max_new_tokens": 2,
+                    "eos_token_ids": [],
                     "sampling": {
                         "temperature": 0.0,
                         "top_p": 1.0,

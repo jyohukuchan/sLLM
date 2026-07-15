@@ -219,6 +219,8 @@ def test_builder_materializes_create_new_immutable_gate(
     assert gate["request"]["actual"]["telemetry_environment"] == {
         "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id
     }
+    assert gate["request"]["actual"]["max_new_tokens"] == 2
+    assert gate["request"]["actual"]["eos_token_ids"] == []
     assert gate["release_source_commit"] == commit
     assert gate["profile_identity"]["artifact_binding_sha256"] == binding_sha
     assert gate["actual_evidence_requirements"]["projection_counts"] == {

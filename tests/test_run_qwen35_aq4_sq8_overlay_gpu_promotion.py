@@ -219,6 +219,38 @@ def capture_error_envelope(
         "worker_returncode": 7,
         "worker_signal": None,
         "worker_stderr": worker_stderr_envelope(preview),
+        "observed_sq8_promotion_telemetry": None,
+        "worker_terminal": None,
+    }
+
+
+def failed_sq8_telemetry() -> dict[str, Any]:
+    return {
+        "schema_version": MODULE.TELEMETRY_SCHEMA,
+        "projection": {
+            "single_matvec_count": 0,
+            "batch_matvec_count": 24,
+            "pair_matvec_count": 0,
+            "triple_matvec_count": 0,
+            "fallback_count": 0,
+        },
+        "diagnostic_host_staging": {
+            "read_count": 0,
+            "write_count": 0,
+            "read_bytes": 0,
+            "write_bytes": 0,
+        },
+    }
+
+
+def released_worker_terminal() -> dict[str, Any]:
+    return {
+        "schema_version": "ullm.aq4_resident_worker_terminal.v1",
+        "event": "request_released",
+        "request_id": "sq8-promotion-" + "a" * 64,
+        "request_id_matches": True,
+        "operation_execution_audit_observed": True,
+        "request_execution_audit_observed": True,
     }
 
 
@@ -507,6 +539,7 @@ def test_success_runs_candidate_once_and_restores_new_epoch(
         "--sq8-promotion-request-id",
         "sq8-promotion-" + "a" * 64,
     ]
+    assert invocation["argv"][invocation["argv"].index("--max-new-tokens") + 1] == "2"
     assert invocation["environment"]["HIP_VISIBLE_DEVICES"] == "1"
     assert invocation["environment"]["ULLM_HIP_VISIBLE_DEVICES"] == "1"
     assert "ROCR_VISIBLE_DEVICES" not in invocation["environment"]
@@ -840,6 +873,49 @@ def test_capture_error_terminal_matrix_is_exact(
         assert parsed["reason"] == "capture_error_envelope_stage_terminal_mismatch"
 
 
+def test_telemetry_failure_envelope_preserves_measured_counters_and_terminal() -> None:
+    value = capture_error_envelope(stage="telemetry_validation")
+    value["reason"] = "SQ8 batch and pair projection evidence is required"
+    value["worker_returncode"] = 0
+    value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["worker_terminal"] = released_worker_terminal()
+
+    parsed = MODULE._capture_error_envelope(
+        capture_stream(json.dumps(value).encode("utf-8"))
+    )
+
+    assert parsed["validation"] == "valid"
+    assert parsed["observed_sq8_promotion_telemetry"] == failed_sq8_telemetry()
+    assert parsed["worker_terminal"] == released_worker_terminal()
+    assert parsed["worker_stderr"]["stream_error"] is None
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda value: value["observed_sq8_promotion_telemetry"]["projection"].__setitem__(
+            "pair_matvec_count", True
+        ),
+        lambda value: value["worker_terminal"].__setitem__(
+            "request_execution_audit_observed", "yes"
+        ),
+        lambda value: value["worker_terminal"].__setitem__("unknown", True),
+    ],
+)
+def test_telemetry_failure_envelope_fails_closed_on_diagnostic_tamper(tamper) -> None:
+    value = capture_error_envelope(stage="telemetry_validation")
+    value["worker_returncode"] = 0
+    value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["worker_terminal"] = released_worker_terminal()
+    tamper(value)
+
+    parsed = MODULE._capture_error_envelope(
+        capture_stream(json.dumps(value).encode("utf-8"))
+    )
+
+    assert parsed["validation"] == "invalid"
+
+
 def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() -> None:
     preview = (
         "non-JSON worker cause \ufffd\n"
@@ -943,7 +1019,13 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
     prepare(monkeypatch, [snapshot()])
     deps, _calls = dependencies(tmp_path)
     preview = "non-JSON worker cause \ufffd\n<redacted sensitive diagnostic line>\n"
-    envelope = capture_error_envelope(preview=preview)
+    envelope = capture_error_envelope(
+        preview=preview, stage="telemetry_validation"
+    )
+    envelope["worker_returncode"] = 0
+    envelope["reason"] = "SQ8 batch and pair projection evidence is required"
+    envelope["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    envelope["worker_terminal"] = released_worker_terminal()
     payload = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
     script = (
         "import sys;sys.stdout.write(sys.argv[1]+'\\n');sys.stdout.flush();"
@@ -964,6 +1046,8 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
     tool_error = evidence["capture_failure"]["capture_tool_error"]
     assert tool_error["validation"] == "valid"
     assert tool_error["worker_stderr"]["sha256"] == envelope["worker_stderr"]["sha256"]
+    assert tool_error["observed_sq8_promotion_telemetry"] == failed_sq8_telemetry()
+    assert tool_error["worker_terminal"] == released_worker_terminal()
     assert (
         "do-not-persist" not in evidence["capture_failure"]["stderr"]["display"]["text"]
     )

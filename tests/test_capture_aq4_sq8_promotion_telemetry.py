@@ -65,6 +65,27 @@ def test_sq8_promotion_telemetry_rejects_host_staging_and_shape_extensions() -> 
         TOOL.validate_sq8_promotion_telemetry(extended)
 
 
+def test_diagnostic_telemetry_preserves_observed_zero_without_accepting_it() -> None:
+    observed = telemetry(pair_matvec_count=0)
+    assert TOOL.diagnostic_sq8_promotion_telemetry(observed) == observed
+    with pytest.raises(TOOL.CaptureError, match="batch and pair"):
+        TOOL.validate_sq8_promotion_telemetry(observed)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["projection"].__setitem__("pair_matvec_count", True),
+        lambda value: value["projection"].__setitem__("unknown", 0),
+        lambda value: value.__setitem__("schema_version", "tampered"),
+    ],
+)
+def test_diagnostic_telemetry_rejects_tampered_counter_shapes(mutate) -> None:
+    observed = telemetry()
+    mutate(observed)
+    assert TOOL.diagnostic_sq8_promotion_telemetry(observed) is None
+
+
 def test_output_token_identity_is_domain_separated_and_order_sensitive() -> None:
     expected = hashlib.sha256(b"ullm.sq8-promotion-output-token-ids.v1\0")
     expected.update((7).to_bytes(8, "little"))

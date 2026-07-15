@@ -60,6 +60,8 @@ class CaptureError(ValueError):
         timed_out: bool = False,
         worker_returncode: int | None = None,
         worker_signal: int | None = None,
+        observed_sq8_promotion_telemetry: dict[str, Any] | None = None,
+        worker_terminal: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.worker_stderr = worker_stderr
@@ -67,6 +69,8 @@ class CaptureError(ValueError):
         self.timed_out = timed_out
         self.worker_returncode = worker_returncode
         self.worker_signal = worker_signal
+        self.observed_sq8_promotion_telemetry = observed_sq8_promotion_telemetry
+        self.worker_terminal = worker_terminal
 
 
 class WorkerStderrCollector:
@@ -285,6 +289,43 @@ def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
     if any(staging[key] != 0 for key in staging_keys):
         raise CaptureError("SQ8 promotion requires zero diagnostic host staging")
     return value
+
+
+def diagnostic_sq8_promotion_telemetry(value: Any) -> dict[str, Any] | None:
+    """Preserve measured counters without accepting them as promotion evidence."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "projection",
+        "diagnostic_host_staging",
+    }:
+        return None
+    projection = value.get("projection")
+    projection_keys = {
+        "single_matvec_count",
+        "batch_matvec_count",
+        "pair_matvec_count",
+        "triple_matvec_count",
+        "fallback_count",
+    }
+    staging = value.get("diagnostic_host_staging")
+    staging_keys = {"read_count", "write_count", "read_bytes", "write_bytes"}
+    if (
+        value.get("schema_version")
+        != "ullm.qwen35_aq4.sq8_promotion_telemetry.v1"
+        or not isinstance(projection, dict)
+        or set(projection) != projection_keys
+        or any(type(projection[key]) is not int or projection[key] < 0 for key in projection_keys)
+        or not isinstance(staging, dict)
+        or set(staging) != staging_keys
+        or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
+    ):
+        return None
+    return {
+        "schema_version": value["schema_version"],
+        "projection": {key: projection[key] for key in sorted(projection_keys)},
+        "diagnostic_host_staging": {key: staging[key] for key in sorted(staging_keys)},
+    }
 
 
 def configure_sq8_promotion_environment(
@@ -811,6 +852,10 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         promotion_request_id=getattr(args, "sq8_promotion_request_id", None),
     )
     if sq8_promotion:
+        if prompt_tokens != 128 or args.max_new_tokens != 2:
+            raise CaptureError(
+                "SQ8 promotion requires the fixed 128-token prefill and 2-token generation"
+            )
         if manifest.get("format", {}).get("implementation_id") != SQ8_OVERLAY_IMPLEMENTATION_ID:
             raise CaptureError("SQ8 promotion manifest implementation identity differs")
         if worker.get("identity", {}).get("execution_profile") != SQ8_OVERLAY_EXECUTION_PROFILE:
@@ -825,7 +870,11 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "prompt_token_ids": list(range(1, prompt_tokens + 1)),
         "max_new_tokens": args.max_new_tokens,
         "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
-        "eos_token_ids": manifest.get("generation", {}).get("eos_token_ids", []),
+        # Promotion evidence must execute one decode step even if the first
+        # sampled token is ordinarily terminal for this model.
+        "eos_token_ids": []
+        if sq8_promotion
+        else manifest.get("generation", {}).get("eos_token_ids", []),
     }
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
     assert proc.stderr is not None
@@ -961,7 +1010,14 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         raise failure from process_error
     assert observer_data is not None and stderr_summary is not None
 
-    def worker_failure(message: str, stage: str = "validation") -> CaptureError:
+    worker_terminal: dict[str, Any] | None = None
+
+    def worker_failure(
+        message: str,
+        stage: str = "validation",
+        *,
+        observed_sq8_promotion_telemetry: dict[str, Any] | None = None,
+    ) -> CaptureError:
         failure = CaptureError(
             message,
             worker_stderr=stderr_summary,
@@ -970,6 +1026,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             worker_returncode=int(proc.returncode)
             if isinstance(proc.returncode, int)
             else None,
+            observed_sq8_promotion_telemetry=observed_sq8_promotion_telemetry,
+            worker_terminal=worker_terminal,
         )
         if failure.worker_returncode is not None and failure.worker_returncode < 0:
             failure.worker_signal = -failure.worker_returncode
@@ -981,6 +1039,16 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     if backend is None:
         raise worker_failure("resident worker request audit was not observed", "audit_missing")
     audit = backend["operation_execution_audit"]
+    worker_terminal = {
+        "schema_version": "ullm.aq4_resident_worker_terminal.v1",
+        "event": "request_released",
+        "request_id": backend.get("request_id"),
+        "request_id_matches": backend.get("request_id") == internal_request_id,
+        "operation_execution_audit_observed": True,
+        "request_execution_audit_observed": isinstance(
+            backend.get("request_execution_audit"), dict
+        ),
+    }
     if backend.get("request_id") != internal_request_id:
         raise worker_failure("resident worker request audit identity differs", "audit_missing")
     request_audit = backend.get("request_execution_audit")
@@ -988,9 +1056,19 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         raise worker_failure("resident worker request execution audit was not observed", "audit_missing")
     sq8_telemetry = None
     if sq8_promotion:
-        sq8_telemetry = validate_sq8_promotion_telemetry(
+        observed_telemetry = diagnostic_sq8_promotion_telemetry(
             request_audit.get("sq8_promotion_telemetry")
         )
+        try:
+            sq8_telemetry = validate_sq8_promotion_telemetry(
+                request_audit.get("sq8_promotion_telemetry")
+            )
+        except CaptureError as error:
+            raise worker_failure(
+                str(error),
+                "telemetry_validation",
+                observed_sq8_promotion_telemetry=observed_telemetry,
+            ) from error
     load_records = [x for x in stderr_records if x.get("schema_version") == "ullm.backend_operation.load.v1"]
     operators, fallback_events = operator_records(load_records, audit)
     if len(operators) == 0 or audit.get("coverage_complete") is not True:
@@ -1160,7 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
             "utf-8", errors="replace"
         )
         envelope = {
-            "schema_version": "ullm.aq4_resident_capture_error.v1",
+            "schema_version": "ullm.aq4_resident_capture_error.v2",
             "status": "failed",
             "stage": getattr(error, "stage", None) or "capture",
             "reason": reason,
@@ -1168,6 +1246,10 @@ def main(argv: list[str] | None = None) -> int:
             "worker_returncode": getattr(error, "worker_returncode", None),
             "worker_signal": getattr(error, "worker_signal", None),
             "worker_stderr": worker_stderr,
+            "observed_sq8_promotion_telemetry": getattr(
+                error, "observed_sq8_promotion_telemetry", None
+            ),
+            "worker_terminal": getattr(error, "worker_terminal", None),
         }
         # The outer runner treats this as an opaque, single-line status record
         # on failure.  The diagnostic text remains on stderr for operators.

@@ -124,7 +124,7 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
     captured = capsys.readouterr()
     envelope = json.loads(captured.out)
     assert envelope == {
-        "schema_version": "ullm.aq4_resident_capture_error.v1",
+        "schema_version": "ullm.aq4_resident_capture_error.v2",
         "status": "failed",
         "stage": "request",
         "reason": "resident worker did not release",
@@ -132,6 +132,8 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
         "worker_returncode": -signal.SIGKILL,
         "worker_signal": signal.SIGKILL,
         "worker_stderr": summary,
+        "observed_sq8_promotion_telemetry": None,
+        "worker_terminal": None,
     }
     assert "resident worker did not release" in captured.err
 
@@ -210,6 +212,8 @@ def test_real_fake_worker_failure_envelope_preserves_terminal_identity(
         "worker_returncode",
         "worker_signal",
         "worker_stderr",
+        "observed_sq8_promotion_telemetry",
+        "worker_terminal",
     }
     assert envelope["status"] == "failed"
     assert envelope["timed_out"] is expected_timeout
@@ -288,3 +292,219 @@ json.loads(sys.stdin.buffer.readline())
     record = json.loads(output.read_text(encoding="utf-8"))
     assert record["status"] == "ok"
     assert record["request_summary"]["generated_token_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "projection_overrides",
+    [
+        {"batch_matvec_count": 0},
+        {"pair_matvec_count": 0},
+    ],
+)
+def test_fake_worker_sq8_counter_failure_preserves_terminal_and_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    projection_overrides: dict[str, int],
+) -> None:
+    projection = {
+        "single_matvec_count": 0,
+        "batch_matvec_count": 1,
+        "pair_matvec_count": 1,
+        "triple_matvec_count": 0,
+        "fallback_count": 0,
+        **projection_overrides,
+    }
+    telemetry = {
+        "schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
+        "projection": projection,
+        "diagnostic_host_staging": {
+            "read_count": 0,
+            "write_count": 0,
+            "read_bytes": 0,
+            "write_bytes": 0,
+        },
+    }
+    worker_source = f'''\
+import json, sys
+request = json.loads(sys.stdin.buffer.readline())
+assert request["max_new_tokens"] == 2
+assert request["eos_token_ids"] == []
+request_id = request["request_id"]
+for index, token_id in enumerate((42, 43)):
+    print(json.dumps({{"type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
+print(json.dumps({{"type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
+json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {{"coverage_complete": True, "implementation_counts": [], "prefill_width_histogram": [0, 1], "total_steps": 2}}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
+json.loads(sys.stdin.buffer.readline())
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["format"] = {
+        "implementation_id": TOOL.SQ8_OVERLAY_IMPLEMENTATION_ID
+    }
+    manifest_value["worker"]["identity"]["execution_profile"] = (
+        TOOL.SQ8_OVERLAY_EXECUTION_PROFILE
+    )
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    class CompleteObserver:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def finish(self) -> dict[str, object]:
+            return {
+                "kind": "fake",
+                "sample_count": 1,
+                "complete": True,
+                "capacity_bytes": 1_000_000,
+                "peak_bytes": 100,
+                "target_card": "fake",
+            }
+
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "VramObserver", CompleteObserver)
+    request_id = "sq8-promotion-" + "a" * 64
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--prompt-tokens",
+            "128",
+            "--max-new-tokens",
+            "2",
+            "--sq8-promotion-evidence",
+            "--sq8-promotion-request-id",
+            request_id,
+        ]
+    ) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["stage"] == "telemetry_validation"
+    assert envelope["worker_returncode"] == 0
+    assert envelope["worker_signal"] is None
+    assert envelope["worker_stderr"]["stream_error"] is None
+    assert envelope["observed_sq8_promotion_telemetry"] == telemetry
+    assert envelope["worker_terminal"] == {
+        "schema_version": "ullm.aq4_resident_worker_terminal.v1",
+        "event": "request_released",
+        "request_id": request_id,
+        "request_id_matches": True,
+        "operation_execution_audit_observed": True,
+        "request_execution_audit_observed": True,
+    }
+
+
+def test_fake_worker_sq8_positive_requires_prefill_and_decode_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    telemetry = {
+        "schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
+        "projection": {
+            "single_matvec_count": 0,
+            "batch_matvec_count": 24,
+            "pair_matvec_count": 24,
+            "triple_matvec_count": 0,
+            "fallback_count": 0,
+        },
+        "diagnostic_host_staging": {
+            "read_count": 0,
+            "write_count": 0,
+            "read_bytes": 0,
+            "write_bytes": 0,
+        },
+    }
+    worker_source = f'''\
+import json, sys
+request = json.loads(sys.stdin.buffer.readline())
+assert request["max_new_tokens"] == 2
+assert request["eos_token_ids"] == []
+request_id = request["request_id"]
+for index, token_id in enumerate((42, 43)):
+    print(json.dumps({{"type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
+print(json.dumps({{"type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
+json.dump({{"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {{"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 128, "chunk_width": 128}}}}, sys.stderr); sys.stderr.write("\\n")
+json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {{"coverage_complete": True, "implementation_counts": [{{"implementation_id": "impl", "count": 1}}], "prefill_width_histogram": [0] * 128 + [1], "total_steps": 129}}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
+json.loads(sys.stdin.buffer.readline())
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    package = tmp_path / "package.json"
+    package.write_text(
+        json.dumps(
+            {
+                "passthrough_tensors": [],
+                "tensors": [
+                    {
+                        "name": "model.layers.0.self_attn.q_proj.weight",
+                        "index_file": "weights.idx",
+                        "scale_file": "weights.scale",
+                        "codebook_file": "codebook.bin",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ("weights.idx", "weights.scale", "codebook.bin"):
+        (tmp_path / name).write_bytes(b"x")
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["format"] = {
+        "implementation_id": TOOL.SQ8_OVERLAY_IMPLEMENTATION_ID
+    }
+    manifest_value["worker"]["identity"]["execution_profile"] = (
+        TOOL.SQ8_OVERLAY_EXECUTION_PROFILE
+    )
+    manifest_value["product"]["artifact"] = {
+        "content_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+    }
+    manifest_value["product"]["package"]["manifest_sha256"] = "c" * 64
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    class CompleteObserver:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def finish(self) -> dict[str, object]:
+            return {
+                "kind": "fake",
+                "sample_count": 1,
+                "complete": True,
+                "capacity_bytes": 1_000_000_000,
+                "peak_bytes": 100,
+                "target_card": "fake",
+            }
+
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "VramObserver", CompleteObserver)
+    request_id = "sq8-promotion-" + "a" * 64
+    output = tmp_path / "sq8-record.json"
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(output),
+            "--prompt-tokens",
+            "128",
+            "--max-new-tokens",
+            "2",
+            "--sq8-promotion-evidence",
+            "--sq8-promotion-request-id",
+            request_id,
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+    evidence = json.loads(output.read_text(encoding="utf-8"))[
+        "sq8_promotion_evidence"
+    ]
+    assert evidence["telemetry"] == telemetry
+    assert evidence["output_identity"]["token_count"] == 2

@@ -54,7 +54,7 @@ CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
 CAPTURE_ENVELOPE_MAX_BYTES = 512 * 1024
 CAPTURE_READ_CHUNK_BYTES = 64 * 1024
 CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 300.0
-CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v1"
+CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v2"
 WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v1"
 CAPTURE_ERROR_STAGES = frozenset(
     {
@@ -67,6 +67,8 @@ CAPTURE_ERROR_STAGES = frozenset(
         "audit_missing",
         "resource_observation",
         "package_validation",
+        "telemetry_validation",
+        "validation",
     }
 )
 PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
@@ -991,6 +993,7 @@ def validate_executor_record(
     output = evidence.get("output_identity")
     if (
         not isinstance(output, dict)
+        or output.get("token_count") != 2
         or output.get("token_ids_recorded") is not False
         or not isinstance(output.get("token_ids_sha256"), str)
         or SHA256_RE.fullmatch(output["token_ids_sha256"]) is None
@@ -1996,7 +1999,13 @@ def _capture_terminal_contract_valid(
         return False
     if stage == "worker_exit":
         return isinstance(returncode, int) and returncode != 0
-    if stage in {"audit_missing", "resource_observation", "package_validation"}:
+    if stage in {
+        "audit_missing",
+        "resource_observation",
+        "package_validation",
+        "telemetry_validation",
+        "validation",
+    }:
         return returncode == 0
     if stage in {"request", "cleanup", "worker"}:
         return isinstance(returncode, int)
@@ -2028,6 +2037,8 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
         "worker_returncode",
         "worker_signal",
         "worker_stderr",
+        "observed_sq8_promotion_telemetry",
+        "worker_terminal",
     }
     if set(value) != expected:
         invalid["reason"] = "capture_error_envelope_keys_differ"
@@ -2145,6 +2156,78 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
     if complete is not True or stream_error is not None:
         result["validation"] = "invalid"
         result["validation_reason"] = "worker_stderr_incomplete"
+    observed_telemetry = value.get("observed_sq8_promotion_telemetry")
+    if observed_telemetry is not None:
+        projection = observed_telemetry.get("projection") if isinstance(observed_telemetry, dict) else None
+        staging = (
+            observed_telemetry.get("diagnostic_host_staging")
+            if isinstance(observed_telemetry, dict)
+            else None
+        )
+        projection_keys = {
+            "single_matvec_count",
+            "batch_matvec_count",
+            "pair_matvec_count",
+            "triple_matvec_count",
+            "fallback_count",
+        }
+        staging_keys = {"read_count", "write_count", "read_bytes", "write_bytes"}
+        if (
+            not isinstance(observed_telemetry, dict)
+            or set(observed_telemetry) != {
+                "schema_version",
+                "projection",
+                "diagnostic_host_staging",
+            }
+            or observed_telemetry.get("schema_version") != TELEMETRY_SCHEMA
+            or not isinstance(projection, dict)
+            or set(projection) != projection_keys
+            or any(type(projection[key]) is not int or projection[key] < 0 for key in projection_keys)
+            or not isinstance(staging, dict)
+            or set(staging) != staging_keys
+            or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
+        ):
+            invalid["reason"] = "observed_sq8_promotion_telemetry_invalid"
+            return invalid
+    terminal = value.get("worker_terminal")
+    if terminal is not None:
+        if (
+            not isinstance(terminal, dict)
+            or set(terminal) != {
+                "schema_version",
+                "event",
+                "request_id",
+                "request_id_matches",
+                "operation_execution_audit_observed",
+                "request_execution_audit_observed",
+            }
+            or terminal.get("schema_version")
+            != "ullm.aq4_resident_worker_terminal.v1"
+            or terminal.get("event") != "request_released"
+            or not isinstance(terminal.get("request_id"), str)
+            or len(terminal["request_id"].encode("utf-8")) > 256
+            or any(
+                type(terminal.get(key)) is not bool
+                for key in (
+                    "request_id_matches",
+                    "operation_execution_audit_observed",
+                    "request_execution_audit_observed",
+                )
+            )
+        ):
+            invalid["reason"] = "worker_terminal_invalid"
+            return invalid
+    if stage == "telemetry_validation" and (
+        observed_telemetry is None
+        or terminal is None
+        or terminal["request_id_matches"] is not True
+        or terminal["operation_execution_audit_observed"] is not True
+        or terminal["request_execution_audit_observed"] is not True
+    ):
+        invalid["reason"] = "telemetry_validation_evidence_missing"
+        return invalid
+    result["observed_sq8_promotion_telemetry"] = observed_telemetry
+    result["worker_terminal"] = terminal
     return result
 
 
@@ -2375,7 +2458,7 @@ def capture_command(candidate: Path, output: Path, request_id: str) -> list[str]
         "--prompt-tokens",
         "128",
         "--max-new-tokens",
-        "1",
+        "2",
         "--timeout",
         "240",
         "--sq8-promotion-evidence",
