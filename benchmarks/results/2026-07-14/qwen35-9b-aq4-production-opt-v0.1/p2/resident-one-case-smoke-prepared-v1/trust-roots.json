@@ -20,28 +20,30 @@
     },
     "worker": {
       "hardlink_set": {
-        "deps_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps",
-        "exact_path_count": 2,
+        "exact_path_count": 1,
         "expected": {
-          "ctime_ns": 1783937083521178513,
+          "ctime_ns": 1784072866140873703,
           "device": 66306,
           "gid": 1000,
-          "inode": 10506405,
+          "inode": 10490132,
           "mode": 33277,
-          "mtime_ns": 1783937083493176979,
-          "nlink": 2,
+          "mtime_ns": 1784072866130697763,
+          "nlink": 1,
           "size": 3729520,
           "uid": 1000
         },
         "fixture": {
           "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json",
-          "sha256": "600df04efa3f21aed9e089f6bcaace3fafddb033a093c4adb67af989f3663b87"
+          "sha256": "4a6bfe06d2ebd7bbabc1ad4e4c6df24b14a1c4837466c2a675953cb1d226d340"
         },
         "paths": [
-          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
-          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps/ullm_aq4_worker-03e49ec754c21dc7"
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker"
         ],
-        "release_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release",
+        "primary_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+        "roots": [
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps"
+        ],
         "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
         "unknown_hardlinks_possible": false
       },
@@ -52,19 +54,19 @@
   "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
   "source": {
     "active_case_device_fixture_sha256": "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73",
-    "commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
-    "driver_source_sha256": "6d7ae136c7abc3b9f7f675d27ff8ed05cd82b9b40a492e56f38e7f2282491345",
+    "commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+    "driver_source_sha256": "63821344747158f94e4934bb47da93e265a2a44fe8215979ef826fac0734bd4c",
     "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
     "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
     "normative_driver": {
       "blob_unchanged_at_current_source": true,
       "clean_build": {
         "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
-        "expected_binary_sha256": "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025",
+        "expected_binary_sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76",
         "provenance": "detached clean Git worktree at normative driver commit"
       },
-      "commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
-      "tree": "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+      "commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+      "tree": "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
     },
     "one_case_smoke_runner": {
       "flag": "--one-case-smoke",
@@ -87,6 +89,6 @@
     "runner_source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
     "runner_source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
     "runner_source_tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8",
-    "tree": "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+    "tree": "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
   }
 }

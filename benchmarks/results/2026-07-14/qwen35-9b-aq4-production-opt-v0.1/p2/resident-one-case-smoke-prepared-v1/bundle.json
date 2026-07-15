@@ -10,8 +10,8 @@
     "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
     "fixture_sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
     "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
-    "identity_file_sha256": "94f64c56e70adce2e5d3174bc319f19f9bb228d07923ce1ab42f7918edc58196",
-    "identity_self_sha256": "e3f2879d786589e0bd1b0810f74a026272b0d9b4cc40100004047b980d0f8954",
+    "identity_file_sha256": "d4cf0e3f2c6c1217a30b57c58943a7c2ec14084abbfd7fc9344799627571cb53",
+    "identity_self_sha256": "782f5650a5b46566398fdc084bd098f988918742cd0584da90ae3d6078c68dc8",
     "official_case_sha256": "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a",
     "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
     "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
@@ -70,7 +70,7 @@
     "SUPERSEDED-0fd7993.json": {
       "mode": "0444",
       "role": "historical_non_executable_bundle_record",
-      "sha256": "5e896176ab765eaa20a41b36357f98210219c0d0b8a34cfe775d21ea50078531"
+      "sha256": "c59552210b555d0bb7b721ea83302afd3cca20e042e0111b42dd8bda59558281"
     },
     "case-binding.json": {
       "mode": "0444",
@@ -80,7 +80,7 @@
     "fake-ready.json": {
       "mode": "0444",
       "role": "synthetic_ready_event",
-      "sha256": "84d995992bc9110e61f7f68a7af783c0263e488db77dbad29aec0b3b7c6139d5"
+      "sha256": "097b7dbce565363c1b5020ee73fb910ed378f47e005ee56f0b66fe4b2006fde6"
     },
     "fixture-index.json": {
       "mode": "0444",
@@ -95,17 +95,17 @@
     "identity.json": {
       "mode": "0444",
       "role": "resident_identity",
-      "sha256": "94f64c56e70adce2e5d3174bc319f19f9bb228d07923ce1ab42f7918edc58196"
+      "sha256": "d4cf0e3f2c6c1217a30b57c58943a7c2ec14084abbfd7fc9344799627571cb53"
     },
     "launch-command.json": {
       "mode": "0444",
       "role": "exact_resident_launch_command",
-      "sha256": "a7468678cea53b91bde0846cef505afc6d57ec743f58aa606376d0d2905f258a"
+      "sha256": "d412ee1829a629e793d03c28a473303bca69fe67667d54ff80e679b628157187"
     },
     "official-case.json": {
       "mode": "0444",
       "role": "trusted_official_expansion_case",
-      "sha256": "8ddfc953258b1435a65fdc5a62c11222f958b47d1ebea4a41098a9b20525fe00"
+      "sha256": "8fd8722b0b925474f6bcf85f59bfab5ec5acc2578f5c6ff94a79120b7bac4840"
     },
     "package-manifest.json": {
       "mode": "0444",
@@ -125,7 +125,7 @@
     "resident-driver": {
       "mode": "0555",
       "role": "detached_resident_driver",
-      "sha256": "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025"
+      "sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
     },
     "served-model.json": {
       "mode": "0444",
@@ -135,7 +135,7 @@
     "trust-roots.json": {
       "mode": "0444",
       "role": "independent_trust_roots",
-      "sha256": "5b5ec6ffdf175b3c01bc0ed56b04bed20dc615022231b23cd24d60b1ff1f5732"
+      "sha256": "607b089ff857fd85216b5c191dcb2b362d5950228222449e4e72cfd13cfcfe2f"
     },
     "trusted-runner.py": {
       "mode": "0444",
@@ -160,11 +160,11 @@
   },
   "promotion": false,
   "resident_driver": {
-    "binary_sha256": "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025",
-    "blob_unchanged_at_source_commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
+    "binary_sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76",
+    "blob_unchanged_at_source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
     "protocol": "ullm.aq4_p2_resident_driver.v2",
-    "source_commit": "7c61c0c32bef709b4f2884325385c6d189e04b4c",
-    "source_tree": "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+    "source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+    "source_tree": "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
   },
   "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3",
   "runner": {

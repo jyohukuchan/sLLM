@@ -13,8 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
 BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "b7ae536400cbb7b3e3ae24b617217820e6517c46"
-VALIDATOR_SHA = "409fc49ad19afdb67cfbc457ffc6f582af75f0a7dd8b6a24202a3169aa593d46"
+VALIDATOR_COMMIT = "614fea0808a4bbe044df734fbf530b2bd9a6e6ec"
+VALIDATOR_SHA = "0b3341d3e9d6e3dde8cff05eb8dd43fe2ec8b176a8a913183dbee638dd25c175"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -36,7 +36,7 @@ def rewrite_json(path: Path, value: dict) -> None:
     path.chmod(0o444)
 
 
-def worker_hardlink_fixture(tmp_path: Path) -> tuple[Path, dict]:
+def worker_hardlink_fixture(tmp_path: Path, *, exact_two: bool = True) -> tuple[Path, dict]:
     release = tmp_path / "release"
     deps = release / "deps"
     deps.mkdir(parents=True)
@@ -44,14 +44,14 @@ def worker_hardlink_fixture(tmp_path: Path) -> tuple[Path, dict]:
     alias = deps / "ullm_aq4_worker-03e49ec754c21dc7"
     primary.write_bytes(b"worker-hardlink-fixture")
     primary.chmod(0o755)
-    os.link(primary, alias)
+    if exact_two:
+        os.link(primary, alias)
     metadata = primary.lstat()
     value = {
-        "schema_version": "ullm.aq4_p2_resident_worker_hardlink_identity.v1",
-        "release_root": str(release),
-        "deps_root": str(deps),
+        "schema_version": "ullm.aq4_p2_resident_worker_link_identity.v2",
+        "roots": [str(release), str(deps)],
+        "paths": [str(primary), *([str(alias)] if exact_two else [])],
         "primary_path": str(primary),
-        "alias_path": str(alias),
         "sha256": hashlib.sha256(primary.read_bytes()).hexdigest(),
         "expected": {
             "device": metadata.st_dev,
@@ -79,25 +79,28 @@ def validate_worker_fixture(path: Path, *, hook=None) -> dict:
     )
 
 
-def test_active_worker_hardlink_fixture_matches_read_only_production() -> None:
+def test_active_worker_link_fixture_matches_read_only_production() -> None:
     value = BUNDLE.validate_worker_hardlink_fixture()
-    assert value["exact_path_count"] == 2
+    assert value["exact_path_count"] == 1
+    assert value["paths"] == [value["primary_path"]]
+    assert value["expected"]["nlink"] == 1
     assert value["unknown_hardlinks_possible"] is False
     assert value["sha256"] == BUNDLE.EXPECTED_WORKER_SHA
 
 
-def test_worker_hardlink_fixture_accepts_only_exact_two_paths(tmp_path: Path) -> None:
-    fixture, value = worker_hardlink_fixture(tmp_path)
+@pytest.mark.parametrize("exact_two", (False, True))
+def test_worker_link_fixture_accepts_declared_exact_topology(tmp_path: Path, exact_two: bool) -> None:
+    fixture, value = worker_hardlink_fixture(tmp_path, exact_two=exact_two)
     observed = validate_worker_fixture(fixture)
-    assert observed["paths"] == [value["primary_path"], value["alias_path"]]
-    assert observed["expected"]["nlink"] == 2
+    assert observed["paths"] == value["paths"]
+    assert observed["expected"]["nlink"] == len(value["paths"])
 
 
 @pytest.mark.parametrize("mutation", ("add", "remove", "different_inode", "content", "mode", "alias_name", "root_escape"))
 def test_worker_hardlink_fixture_rejects_initial_mutations(tmp_path: Path, mutation: str) -> None:
     fixture, value = worker_hardlink_fixture(tmp_path)
     primary = Path(value["primary_path"])
-    alias = Path(value["alias_path"])
+    alias = Path(value["paths"][1])
     if mutation == "add":
         os.link(primary, primary.parent / "third-worker-link")
     elif mutation == "remove":
@@ -114,9 +117,9 @@ def test_worker_hardlink_fixture_rejects_initial_mutations(tmp_path: Path, mutat
     else:
         escaped = tmp_path / "escaped-worker"
         alias.rename(escaped)
-        value["alias_path"] = str(escaped)
+        value["paths"][1] = str(escaped)
         rewrite_json(fixture, value)
-    with pytest.raises(BUNDLE.BundleError, match="worker hardlink"):
+    with pytest.raises(BUNDLE.BundleError, match="worker link"):
         validate_worker_fixture(fixture)
 
 
@@ -124,7 +127,7 @@ def test_worker_hardlink_fixture_rejects_initial_mutations(tmp_path: Path, mutat
 def test_worker_hardlink_fixture_rejects_late_mutations(tmp_path: Path, mutation: str) -> None:
     fixture, value = worker_hardlink_fixture(tmp_path)
     primary = Path(value["primary_path"])
-    alias = Path(value["alias_path"])
+    alias = Path(value["paths"][1])
 
     def mutate() -> None:
         if mutation == "add":
@@ -138,14 +141,14 @@ def test_worker_hardlink_fixture_rejects_late_mutations(tmp_path: Path, mutation
             primary.rename(moved)
             shutil.copy2(moved, primary)
 
-    with pytest.raises((BUNDLE.BundleError, FileNotFoundError), match="worker hardlink|No such file"):
+    with pytest.raises((BUNDLE.BundleError, FileNotFoundError), match="worker link|No such file"):
         validate_worker_fixture(fixture, hook=mutate)
 
 
 def test_worker_hardlink_fixture_rejects_symlinked_deps_root(tmp_path: Path) -> None:
     fixture, value = worker_hardlink_fixture(tmp_path)
-    deps = Path(value["deps_root"])
-    alias = Path(value["alias_path"])
+    deps = Path(value["roots"][1])
+    alias = Path(value["paths"][1])
     real_deps = deps.with_name("real-deps")
     deps.rename(real_deps)
     deps.symlink_to(real_deps, target_is_directory=True)
@@ -430,8 +433,8 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert value["requires_immutable_launcher"] is True
     assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
     roots = value["trust_roots"]
-    assert roots["source_commit"] == "7c61c0c32bef709b4f2884325385c6d189e04b4c"
-    assert roots["source_tree"] == "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+    assert roots["source_commit"] == "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+    assert roots["source_tree"] == "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
     assert roots["runner"] == {"git_blob": "dbace784cb291837e346dd6ca063fa3a5132cfe7", "sha256": "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"}
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
