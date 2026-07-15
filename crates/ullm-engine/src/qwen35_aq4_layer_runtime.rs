@@ -427,15 +427,47 @@ fn checked_f32_byte_len(elements: usize, label: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("{label} byte size overflows"))
 }
 
+/// Validates the caller-owned destination for the opt-in direct sequence path.
+///
+/// `RuntimeBuffer` intentionally exposes only size and transfer operations, so the runtime
+/// cannot inspect a device allocation address here.  The model runtime nevertheless passes the
+/// source/destination/workspace objects it owns, which lets this guard reject exact object alias
+/// mistakes before any operation mutates request state.  The pure size/alias predicate is kept
+/// separate so CPU tests can cover the contract without requiring a HIP device.
+fn validate_direct_sequence_output_contract(
+    output_bytes: usize,
+    required_bytes: usize,
+    aliases_residual: bool,
+    aliases_workspace: bool,
+    label: &str,
+) -> Result<(), String> {
+    if aliases_residual {
+        return Err(format!(
+            "{label} direct output buffer aliases the residual input"
+        ));
+    }
+    if aliases_workspace {
+        return Err(format!(
+            "{label} direct output buffer aliases the shared sequence workspace"
+        ));
+    }
+    if output_bytes < required_bytes {
+        return Err(format!(
+            "{label} direct output buffer is too small: got {output_bytes} expected at least {required_bytes}"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResidentRequestState {
+pub(crate) enum ResidentRequestState {
     Ready,
     ExecutionFailed,
     Poisoned,
 }
 
 impl ResidentRequestState {
-    fn begin_reset(&mut self, label: &str) -> Result<(), String> {
+    pub(crate) fn begin_reset(&mut self, label: &str) -> Result<(), String> {
         // Reset is deliberately fail-closed. The caller must mark the state ready only
         // after every queued zero and the final stream synchronization have succeeded.
         match self {
@@ -449,15 +481,15 @@ impl ResidentRequestState {
         }
     }
 
-    fn mark_ready(&mut self) {
+    pub(crate) fn mark_ready(&mut self) {
         *self = Self::Ready;
     }
 
-    fn mark_execution_failed(&mut self) {
+    pub(crate) fn mark_execution_failed(&mut self) {
         *self = Self::ExecutionFailed;
     }
 
-    fn ensure_ready(self, label: &str) -> Result<(), String> {
+    pub(crate) fn ensure_ready(self, label: &str) -> Result<(), String> {
         match self {
             Self::Ready => Ok(()),
             Self::ExecutionFailed => Err(format!(
@@ -3145,11 +3177,13 @@ impl PackageSelfAttnResidentStepLayer {
             let output_bytes = output
                 .size()
                 .map_err(|error| format!("failed to query {label} direct output bytes: {error}"))?;
-            if output_bytes < hidden_bytes {
-                return Err(format!(
-                    "{label} direct output buffer is too small: got {output_bytes} expected at least {hidden_bytes}"
-                ));
-            }
+            validate_direct_sequence_output_contract(
+                output_bytes,
+                hidden_bytes,
+                std::ptr::eq(output, residual),
+                std::ptr::eq(output, workspace.output_buffer()),
+                label,
+            )?;
         }
         let residual_bytes = residual
             .size()
@@ -4694,11 +4728,13 @@ impl PackageLinearAttnResidentStepLayer {
         let output_bytes = output
             .size()
             .map_err(|error| format!("failed to query {label} direct output bytes: {error}"))?;
-        if output_bytes < required_bytes {
-            return Err(format!(
-                "{label} direct output buffer is too small: got {output_bytes} expected at least {required_bytes}"
-            ));
-        }
+        validate_direct_sequence_output_contract(
+            output_bytes,
+            required_bytes,
+            std::ptr::eq(output, residual),
+            std::ptr::eq(output, workspace.output_buffer()),
+            label,
+        )?;
         self.operation_phase = phase;
         self.last_component_step_ms = None;
         self.last_operation_executions = [None, None];
@@ -7925,6 +7961,26 @@ mod linear_attn_step_state_tests {
             .err()
             .unwrap()
             .contains("overflows")
+        );
+    }
+
+    #[test]
+    fn direct_sequence_output_contract_rejects_aliases_and_short_buffers() {
+        assert!(validate_direct_sequence_output_contract(128, 128, false, false, "test").is_ok());
+        assert!(
+            validate_direct_sequence_output_contract(127, 128, false, false, "test")
+                .unwrap_err()
+                .contains("too small")
+        );
+        assert!(
+            validate_direct_sequence_output_contract(128, 128, true, false, "test")
+                .unwrap_err()
+                .contains("aliases the residual")
+        );
+        assert!(
+            validate_direct_sequence_output_contract(128, 128, false, true, "test")
+                .unwrap_err()
+                .contains("aliases the shared sequence workspace")
         );
     }
 

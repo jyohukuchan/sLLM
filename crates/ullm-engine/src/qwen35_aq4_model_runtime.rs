@@ -48,6 +48,68 @@ fn direct_prefill_sequence_output_enabled() -> bool {
     )
 }
 
+/// CPU-only routing seam for the opt-in direct sequence output path.
+///
+/// It models the ownership and failure decisions around the HIP operation while keeping the
+/// numerical payload as ordinary host `f32` values.  Tests using this seam prove route selection,
+/// finite/equal output, and admission-failure fallback; they are indirect evidence and do not
+/// replace a real R9700 execution/profile.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CpuSequenceOutputPath {
+    Copy,
+    Direct,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CpuDirectSequenceFailure {
+    Admission,
+    Execution,
+}
+
+#[cfg(test)]
+fn cpu_sequence_output_route(
+    workspace_output: &[f32],
+    destination: &mut [f32],
+    direct_requested: bool,
+    direct_failure: Option<CpuDirectSequenceFailure>,
+    aliases_workspace: bool,
+    label: &str,
+) -> Result<CpuSequenceOutputPath, String> {
+    if workspace_output.len() != destination.len() {
+        return Err(format!(
+            "{label} sequence output length mismatch: workspace={} destination={}",
+            workspace_output.len(),
+            destination.len()
+        ));
+    }
+    if aliases_workspace {
+        return Err(format!("{label} direct sequence output aliases workspace"));
+    }
+    if direct_requested {
+        match direct_failure {
+            Some(CpuDirectSequenceFailure::Execution) => {
+                return Err(format!("{label} direct sequence execution failed"));
+            }
+            Some(CpuDirectSequenceFailure::Admission) => {
+                destination.copy_from_slice(workspace_output);
+                return Ok(CpuSequenceOutputPath::Copy);
+            }
+            None => {
+                for (destination_value, source_value) in
+                    destination.iter_mut().zip(workspace_output.iter().copied())
+                {
+                    *destination_value = source_value;
+                }
+                return Ok(CpuSequenceOutputPath::Direct);
+            }
+        }
+    }
+    destination.copy_from_slice(workspace_output);
+    Ok(CpuSequenceOutputPath::Copy)
+}
+
 /// Borrowed, ordered view of one prepared generation step's post-final-RMSNorm hidden row and
 /// complete vocabulary logit row.
 ///
@@ -1117,7 +1179,7 @@ impl Qwen35Aq4ModelRuntime {
                         format!("{layer_label} has no shared linear sequence workspace")
                     })?;
                     let records_result = if direct_sequence_output {
-                        layer.run_device_sequence_for_phase_to_buffer(
+                        match layer.run_device_sequence_for_phase_to_buffer(
                             &mut self.stream,
                             source,
                             sequence_len,
@@ -1125,7 +1187,24 @@ impl Qwen35Aq4ModelRuntime {
                             workspace,
                             destination,
                             &layer_label,
-                        )
+                        ) {
+                            Ok(records) => Ok(records),
+                            Err(direct_error) if layer.request_state_is_reusable() => layer
+                                .run_device_sequence_for_phase(
+                                    &mut self.stream,
+                                    source,
+                                    sequence_len,
+                                    phase,
+                                    workspace,
+                                    &layer_label,
+                                )
+                                .map_err(|fallback_error| {
+                                    format!(
+                                        "{layer_label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
+                                    )
+                                }),
+                            Err(error) => Err(error),
+                        }
                     } else {
                         layer.run_device_sequence_for_phase(
                             &mut self.stream,
@@ -1223,7 +1302,7 @@ impl Qwen35Aq4ModelRuntime {
                     if let Some(workspace) = self.prefill_self_attention_sequence_workspace.as_mut()
                     {
                         let records_result = if direct_sequence_output {
-                            layer.run_device_sequence_for_phase_to_buffer(
+                            match layer.run_device_sequence_for_phase_to_buffer(
                                 &mut self.stream,
                                 source,
                                 sequence_len,
@@ -1234,7 +1313,27 @@ impl Qwen35Aq4ModelRuntime {
                                 workspace,
                                 destination,
                                 &layer_label,
-                            )
+                            ) {
+                                Ok(records) => Ok(records),
+                                Err(direct_error) if layer.request_state_is_reusable() => layer
+                                    .run_device_sequence_for_phase(
+                                        &mut self.stream,
+                                        source,
+                                        sequence_len,
+                                        rotary_dim,
+                                        rope_base,
+                                        absolute_start,
+                                        phase,
+                                        workspace,
+                                        &layer_label,
+                                    )
+                                    .map_err(|fallback_error| {
+                                        format!(
+                                            "{layer_label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
+                                        )
+                                    }),
+                                Err(error) => Err(error),
+                            }
                         } else {
                             layer.run_device_sequence_for_phase(
                                 &mut self.stream,
@@ -1617,6 +1716,7 @@ fn package_path_text(path: &Path) -> Result<&str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::qwen35_aq4_layer_runtime::ResidentRequestState;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1645,6 +1745,102 @@ mod tests {
         for value in ["1", "true", "TRUE", "yes", "YES"] {
             assert!(direct_prefill_sequence_output_enabled_value(Some(value)));
         }
+    }
+
+    #[test]
+    fn cpu_direct_sequence_output_matches_copy_for_m_grid_and_finite_values() {
+        for sequence_len in [1_usize, 2, 8, 16, 32, 64, 128] {
+            let hidden = 7_usize;
+            let source = (0..sequence_len * hidden)
+                .map(|index| (index as f32 * 0.25) - 7.0)
+                .collect::<Vec<_>>();
+            assert!(source.iter().all(|value| value.is_finite()));
+
+            let mut copy_output = vec![f32::NAN; source.len()];
+            assert_eq!(
+                cpu_sequence_output_route(&source, &mut copy_output, false, None, false, "copy",)
+                    .unwrap(),
+                CpuSequenceOutputPath::Copy
+            );
+
+            let mut direct_output = vec![f32::NAN; source.len()];
+            assert_eq!(
+                cpu_sequence_output_route(
+                    &source,
+                    &mut direct_output,
+                    true,
+                    None,
+                    false,
+                    "direct",
+                )
+                .unwrap(),
+                CpuSequenceOutputPath::Direct
+            );
+            assert_eq!(direct_output, copy_output);
+            assert!(direct_output.iter().all(|value| value.is_finite()));
+        }
+    }
+
+    #[test]
+    fn cpu_direct_sequence_admission_failure_falls_back_to_copy() {
+        let source = [1.0_f32, -2.0, 3.5, 9.0];
+        let mut output = [f32::NAN; 4];
+        assert_eq!(
+            cpu_sequence_output_route(
+                &source,
+                &mut output,
+                true,
+                Some(CpuDirectSequenceFailure::Admission),
+                false,
+                "direct-admission",
+            )
+            .unwrap(),
+            CpuSequenceOutputPath::Copy
+        );
+        assert_eq!(output, source);
+        assert!(output.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn cpu_direct_sequence_execution_failure_is_not_reused_without_reset() {
+        let source = [1.0_f32, 2.0, 3.0, 4.0];
+        let sentinel = [42.0_f32; 4];
+        let mut output = sentinel;
+        let error = cpu_sequence_output_route(
+            &source,
+            &mut output,
+            true,
+            Some(CpuDirectSequenceFailure::Execution),
+            false,
+            "direct-execution",
+        )
+        .unwrap_err();
+        assert!(error.contains("execution failed"));
+        assert_eq!(output, sentinel);
+
+        let mut request_state = ResidentRequestState::Ready;
+        request_state.mark_execution_failed();
+        assert!(request_state.ensure_ready("retry").is_err());
+        request_state.begin_reset("retry").unwrap();
+        request_state.mark_ready();
+        request_state.ensure_ready("next request").unwrap();
+    }
+
+    #[test]
+    fn cpu_direct_sequence_contract_rejects_alias_and_length_mismatch() {
+        let source = [1.0_f32, 2.0];
+        let mut output = [0.0_f32; 2];
+        assert!(
+            cpu_sequence_output_route(&source, &mut output, true, None, true, "alias")
+                .unwrap_err()
+                .contains("aliases workspace")
+        );
+        let mut short = [0.0_f32; 1];
+        assert!(
+            cpu_sequence_output_route(&source, &mut short, true, None, false, "length")
+                .unwrap_err()
+                .contains("length mismatch")
+        );
     }
 
     fn self_attention_admission_fixture(
