@@ -34,8 +34,8 @@ RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
 EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v1"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
-EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v5"
-EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v5"
+EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v6"
+EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v6"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_REAL = Path("/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py")
@@ -51,23 +51,23 @@ WORKER = ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
 KFD_PROC_ROOT = Path("/sys/class/kfd/kfd/proc")
 
 INPUT_ROOT_DEVICE = 66306
-INPUT_ROOT_INODE = 10490358
-INPUT_FINGERPRINT_SHA = "53a0aa9e66adac63b3836a386e86a30a83d7cb9f5c3302a24e4ad6f69dd07346"
+INPUT_ROOT_INODE = 10491730
+INPUT_FINGERPRINT_SHA = "985896b1075b227434e1de81f634bea0bf465c41da5278143ff62a20e4704e04"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10490384
-BINDING_MANIFEST_SHA = "80a5187103100c3a3239d65ccccb9791888d988d95f62fa38780b3d1b1e2af96"
-BINDING_PLAN_SHA = "0b58b092d5aec0550769f6e5c66b2c43c3f12a106b061071d1bf0d351029578c"
-RUNNER_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
-RUNNER_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+BINDING_ROOT_INODE = 10491751
+BINDING_MANIFEST_SHA = "a006bc50aff6ad7f7cc2edb37bf8578c8741b7ba570fa5e526014957486dee33"
+BINDING_PLAN_SHA = "dc8f695f728ad0511c9832ca47ad1ea27ebf8ba8d4cc3536e90bb86232ebd65b"
+RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+RUNNER_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
 RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
 RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
-VALIDATOR_COMMIT = "b7ae536400cbb7b3e3ae24b617217820e6517c46"
-VALIDATOR_TREE = "792c557d200e3e71215d08009407f3b019ab792e"
-VALIDATOR_GIT_BLOB = "80d24228916de48bbbec4a9a3a29390eeaf3ab2a"
-VALIDATOR_SHA = "409fc49ad19afdb67cfbc457ffc6f582af75f0a7dd8b6a24202a3169aa593d46"
+VALIDATOR_COMMIT = "614fea0808a4bbe044df734fbf530b2bd9a6e6ec"
+VALIDATOR_TREE = "f495a677b1c6a9ee36fbe8fce1eefe7bb6d0a108"
+VALIDATOR_GIT_BLOB = "2a4c98cab21a5455d92cad7580aa6c769426bf36"
+VALIDATOR_SHA = "0b3341d3e9d6e3dde8cff05eb8dd43fe2ec8b176a8a913183dbee638dd25c175"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
-RESIDENT_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
-RESIDENT_SHA = "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025"
+RESIDENT_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+RESIDENT_SHA = "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
 SERVED_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 DEVICE_INDEX = 1
 AMD_SMI_INDEX = 2
@@ -85,7 +85,7 @@ ROCMINFO_SHA = "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed
 SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
-EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v5"
+EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v6"
 PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
 PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1"
 PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1"
@@ -113,34 +113,34 @@ GUARD_NAMES = (
 EXECUTE_ENV = {"HIP_VISIBLE_DEVICES": "1", "ULLM_HIP_VISIBLE_DEVICES": "1", "ULLM_SERVED_MODEL_MANIFEST": str(SERVED_MANIFEST), "ULLM_BUILD_GIT_COMMIT": RESIDENT_COMMIT} | {name: "1" for name in GUARD_NAMES}
 
 INPUT_MEMBER_SHA = {
-    "SHA256SUMS": "d1b6a72397a183a2d3c834db447e07e9314b6e11a58e865ecbf64f5a9c7f5de4",
-    "SUPERSEDED-0fd7993.json": "5e896176ab765eaa20a41b36357f98210219c0d0b8a34cfe775d21ea50078531",
-    "bundle.json": "10f2bf38fb4dc247821bb4d5a7d7457af19665c517dd3709249556e4a2729826",
+    "SHA256SUMS": "d2d617fdbcca9e0b6b39b7e93e17b4ad1ae5cc2ce06693e587d05374a58c9477",
+    "SUPERSEDED-0fd7993.json": "c59552210b555d0bb7b721ea83302afd3cca20e042e0111b42dd8bda59558281",
+    "bundle.json": "85113bdc879cb1005a16a0bba9e38b6fbd08d180672a2ac49d37095d6e8a7d83",
     "case-binding.json": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5",
-    "dry-run.json": "22c83ee470f9961f151d1d4eae9e0df7aa6b1fedd45178687c9170e871a520a4",
-    "fake-ready.json": "84d995992bc9110e61f7f68a7af783c0263e488db77dbad29aec0b3b7c6139d5",
+    "dry-run.json": "25ce0c42722c450102e5a0bb32dac74b88c5b97c410225be9941b36ca9b5ec63",
+    "fake-ready.json": "097b7dbce565363c1b5020ee73fb910ed378f47e005ee56f0b66fe4b2006fde6",
     "fixture-index.json": "4bcc02ac22bfd19a55913943e5f28dc690c5917b0743b0b5f679c4a5610d353a",
     "fixture.json": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
-    "identity.json": "94f64c56e70adce2e5d3174bc319f19f9bb228d07923ce1ab42f7918edc58196",
-    "launch-command.json": "a7468678cea53b91bde0846cef505afc6d57ec743f58aa606376d0d2905f258a",
-    "official-case.json": "8ddfc953258b1435a65fdc5a62c11222f958b47d1ebea4a41098a9b20525fe00",
+    "identity.json": "d4cf0e3f2c6c1217a30b57c58943a7c2ec14084abbfd7fc9344799627571cb53",
+    "launch-command.json": "d412ee1829a629e793d03c28a473303bca69fe67667d54ff80e679b628157187",
+    "official-case.json": "8fd8722b0b925474f6bcf85f59bfab5ec5acc2578f5c6ff94a79120b7bac4840",
     "package-manifest.json": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
     "policy.json": "21dff8ecdbc17a1cd86a458fe7f8771eed0cdd18577a5f0fb6c7b96310a2de16",
     "preflight.json": "294ddf1771251c4b1954ea663d73e85821749119da2a4f6c7528fdae510bbc6e",
     "resident-driver": RESIDENT_SHA,
-    "runner-dry-run-evidence.json": "292c25ed2a50fb6269cfba62eed720fdf80fac6b5443b7c7fc7da25709b9ab88",
+    "runner-dry-run-evidence.json": "3a969aa0c323b4792203f17ad8f4f5ae773abd1a749f264863cc780a3cebff19",
     "served-model.json": SERVED_SHA,
-    "trust-roots.json": "5b5ec6ffdf175b3c01bc0ed56b04bed20dc615022231b23cd24d60b1ff1f5732",
+    "trust-roots.json": "607b089ff857fd85216b5c191dcb2b362d5950228222449e4e72cfd13cfcfe2f",
     "trusted-runner.py": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
 }
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "ee4be121fd222c4e06068d02557061ec21ec01fed27e092d5d61e791ec7257b1",
+    "runner-subprocess-evidence.json": "c1446c5b8fce9cddb4a5015d2f95d3f9cc878d58a70476d6671262ccf8f6aced",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "655d89244ff06cb84bee7840ea875bf391627aa41da0564c37cde92e1268030a",
+    "SHA256SUMS": "330d76218a8c48bc8d46e71cfea27265f57c48c6e43e5830938a9d71e815aa04",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
