@@ -43,6 +43,8 @@ PACKAGE_MANIFEST="$PACKAGE_ROOT/package/manifest.json"
 WORKER="$REPO/target/reasoning-v2/release/ullm-aq4-worker"
 GUARD_SHA256="4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0"
 DEVICE_ARCHITECTURE="gfx1201"
+EXPECTED_VISIBLE_PHYSICAL_DEVICE="2"
+EXPECTED_LOGICAL_DEVICE_INDEX=0
 QUANTIZED_ARTIFACT_REVISION="aq4-reasoning-v0.1-candidate"
 EXPECTED_SERVED_SHA256="feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 EXPECTED_PACKAGE_SHA256="a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
@@ -229,6 +231,7 @@ validate_service_identity() {
 
 validate_preflight() {
   [[ -x "$PYTHON" ]] || fail "fixed Python runtime is unavailable"
+  [[ "$EXPECTED_VISIBLE_PHYSICAL_DEVICE" = "2" && "$EXPECTED_LOGICAL_DEVICE_INDEX" = 0 && "$DEVICE_ARCHITECTURE" = "gfx1201" ]] || fail "device mapping differs"
   require_digest EXPECTED_SOURCE_ARTIFACT_SHA256 "$EXPECTED_SOURCE_ARTIFACT_SHA256"
   require_digest EXPECTED_SOURCE_MANIFEST_SHA256 "$EXPECTED_SOURCE_MANIFEST_SHA256"
   require_digest EXPECTED_CAPTURE_BINARY_SHA256 "$EXPECTED_CAPTURE_BINARY_SHA256"
@@ -252,6 +255,7 @@ echo "rows=$MAX_ROWS output=$OUTPUT metrics=$METRICS"
 echo "plan_sha256=$(sha256_file "$PLAN") cases_sha256=$(sha256_file "$CASES")"
 echo "split_sha256=$EXPECTED_SPLIT_SHA256 policy_sha256=$EXPECTED_POLICY_SHA256 calibration_sha256=$EXPECTED_CALIBRATION_SHA256"
 echo "served_sha256=$EXPECTED_SERVED_SHA256 package_sha256=$EXPECTED_PACKAGE_SHA256 worker_sha256=$EXPECTED_WORKER_SHA256 guard_sha256=$GUARD_SHA256 device_architecture=$DEVICE_ARCHITECTURE"
+echo "device_mapping=physical_card${EXPECTED_VISIBLE_PHYSICAL_DEVICE}->logical_device${EXPECTED_LOGICAL_DEVICE_INDEX} expected_architecture=$DEVICE_ARCHITECTURE"
 if [[ "$MOCK_PREFLIGHT" = 1 ]]; then
   echo "mock_preflight=1 service_stop=0 gpu_run=0"
   exit 0
@@ -352,12 +356,12 @@ exec {LOCK_FD}>"$LOCK"
 flock -n "$LOCK_FD" || fail "runtime lock acquisition failed"
 printf 'runtime_lock_acquired_at=%s\n' "$(date --iso-8601=seconds)" >>"$STOP_MARKER"
 touch "$RUN_STARTED_MARKER"
-guard_env=("ULLM_BUILD_GIT_COMMIT=$EXPECTED_BUILD_COMMIT" "ULLM_SERVED_MODEL_MANIFEST=$ACTIVE" "ULLM_HIP_VISIBLE_DEVICES=1" "HIP_VISIBLE_DEVICES=1")
+guard_env=("ULLM_BUILD_GIT_COMMIT=$EXPECTED_BUILD_COMMIT" "ULLM_SERVED_MODEL_MANIFEST=$ACTIVE" "ULLM_HIP_VISIBLE_DEVICES=$EXPECTED_VISIBLE_PHYSICAL_DEVICE" "HIP_VISIBLE_DEVICES=$EXPECTED_VISIBLE_PHYSICAL_DEVICE")
 for guard_name in "${REQUIRED_GUARDS[@]}"; do guard_env+=("$guard_name=1"); done
 env "${guard_env[@]}" \
   timeout --signal=TERM --kill-after=30s 1200s "$FIDELITY_BIN" \
     --served-model-manifest "$ACTIVE" --split-root "$SPLIT_ROOT" --source "$SOURCE_ARTIFACT" \
-    --cases "$CASES" --output "$OUTPUT" --device-index 0 --chunk-elements 65536 \
+    --cases "$CASES" --output "$OUTPUT" --device-index "$EXPECTED_LOGICAL_DEVICE_INDEX" --chunk-elements 65536 \
     --expected-split-manifest-sha256 "$EXPECTED_SPLIT_SHA256" --expected-policy-sha256 "$EXPECTED_POLICY_SHA256" \
     --expected-calibration-cases-sha256 "$EXPECTED_CALIBRATION_SHA256" \
     --expected-served-model-manifest-sha256 "$EXPECTED_SERVED_SHA256" \
