@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import pwd
 import re
@@ -56,10 +57,10 @@ PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v4"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v4"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "86fb3df33a18ee1b03934a58c7102ddcd6158128"
-PROFILE_CAPTURE_TREE = "539fe5a4a0c2878947207af8f2bb3c056a3d2816"
-PROFILE_CAPTURE_GIT_BLOB = "ac6b0f693afd0217a2eeb01e79fdfe6fce8d08ac"
-PROFILE_CAPTURE_SHA = "928511985128385b10f2a5c1fe1d9020d92528cc8de5afd11486989ea3ea1846"
+PROFILE_CAPTURE_COMMIT = "0e8bf9f47583d10cf4daf1092aef5a0e388aa496"
+PROFILE_CAPTURE_TREE = "c15f588e88bcba577c1a36a9b9a2bc4d720f1d10"
+PROFILE_CAPTURE_GIT_BLOB = "df5af6b86fff19b977c1bfffac243842d533bb5e"
+PROFILE_CAPTURE_SHA = "b66ef14ebaaa9b2828dbe17e93aeed13595284e361776e7c67dc197e318f01af"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v4"
@@ -67,8 +68,26 @@ PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
 PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_TIMEOUT_SECONDS = 1800
 PROFILE_CAPTURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
-PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v1"
+PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
+HISTORICAL_PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v1"
 PROFILE_CAPTURE_FAILURE_NAME = "capture-failure.json"
+READY_CANDIDATE_AUDIT_SCHEMA = "ullm.aq4_p2_ready_candidate_audit.v1"
+READY_CANDIDATE_CAPTURE_SCHEMA = "ullm.aq4_p3_ready_candidate_capture.v1"
+READY_CANDIDATE_MARKER_PREFIX = b"ULLM_AQ4_READY_CANDIDATE_AUDIT_V1 "
+MAX_READY_CANDIDATE_MARKER_BYTES = 16 * 1024
+MAX_READY_CANDIDATE_RAW_BYTES = 1024 * 1024
+READY_CANDIDATE_JSON_TYPES = {
+    "absent", "null", "boolean", "integer", "number", "string", "array", "object",
+}
+READY_CANDIDATE_PREDICATES = {
+    "field_set_exact",
+    "event_is_ready",
+    "schema_version_exact",
+    "model_loads_is_integer",
+    "model_loads_is_one",
+    "resident_session_id_is_string",
+    "resident_session_id_nonempty",
+}
 SERVICE = "ullm-openai.service"
 WORKER = ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
 WORKER_SHA = "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
@@ -1956,6 +1975,406 @@ def _semantic_self_hash(value: dict[str, Any], field: str) -> str:
     return sha_bytes(canonical(clone))
 
 
+def _sha256_string(value: Any) -> bool:
+    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+
+
+def _ready_exact(value: Any, expected: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise HarnessError(f"{label} fields differ")
+    return value
+
+
+def _ready_json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    raise HarnessError("ready candidate value has an unsupported JSON type")
+
+
+def _ready_string_is_secret_or_location(value: str) -> bool:
+    lowered = value.lower()
+    secret = re.search(
+        r"authorization|bearer|api[-_]?key|token|secret|password|credential",
+        value,
+        re.IGNORECASE,
+    )
+    return (
+        secret is not None
+        or value.startswith(("/", "./", "../", "file:"))
+        or "\\" in value
+        or "/proc/" in lowered
+        or "fd:" in lowered
+    )
+
+
+def _ready_summary_key_valid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value) is not None:
+        return not _ready_string_is_secret_or_location(value)
+    return re.fullmatch(r"(?:sha256|omitted-sha256):[0-9a-f]{64}", value) is not None
+
+
+def _validate_ready_key_types(
+    keys: Any,
+    key_types: Any,
+    label: str,
+    *,
+    key_count: int | None = None,
+) -> dict[str, str]:
+    if (
+        not isinstance(keys, list)
+        or len(keys) > 17
+        or keys != sorted(keys)
+        or len(keys) != len(set(keys))
+        or any(not _ready_summary_key_valid(key) for key in keys)
+        or not isinstance(key_types, dict)
+        or set(key_types) != set(keys)
+        or any(kind not in READY_CANDIDATE_JSON_TYPES | {"omitted"} for kind in key_types.values())
+    ):
+        raise HarnessError(f"{label} key/type summary differs")
+    omitted = [key for key in keys if key.startswith("omitted-sha256:")]
+    if len(omitted) > 1 or (omitted and key_types[omitted[0]] != "omitted"):
+        raise HarnessError(f"{label} omitted-key summary differs")
+    if any(kind == "omitted" for key, kind in key_types.items() if key not in omitted):
+        raise HarnessError(f"{label} omitted-key type differs")
+    if key_count is not None:
+        if key_count <= 16:
+            if omitted or key_count != len(keys):
+                raise HarnessError(f"{label} key count differs")
+        elif len(keys) != 17 or len(omitted) != 1:
+            raise HarnessError(f"{label} truncated key count differs")
+    return key_types
+
+
+def _validate_ready_safe_scalar(value: Any, label: str) -> dict[str, Any]:
+    item = _ready_exact(
+        value,
+        {"present", "json_type", "value", "string_length", "canonical_sha256"},
+        label,
+    )
+    present = item["present"]
+    kind = item["json_type"]
+    safe_value = item["value"]
+    string_length = item["string_length"]
+    digest = item["canonical_sha256"]
+    if type(present) is not bool or kind not in READY_CANDIDATE_JSON_TYPES:
+        raise HarnessError(f"{label} presence/type differs")
+    if present != (kind != "absent") or present != (digest is not None):
+        raise HarnessError(f"{label} presence/hash differs")
+    if digest is not None and not _sha256_string(digest):
+        raise HarnessError(f"{label} hash differs")
+    if kind == "string":
+        if type(string_length) is not int or not 0 <= string_length <= MAX_READY_CANDIDATE_RAW_BYTES:
+            raise HarnessError(f"{label} string length differs")
+        if safe_value is not None and (
+            not isinstance(safe_value, str)
+            or len(safe_value) != string_length
+            or len(safe_value) > 128
+            or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", safe_value) is None
+            or _ready_string_is_secret_or_location(safe_value)
+        ):
+            raise HarnessError(f"{label} safe string differs")
+        if safe_value is None and (
+            1 <= string_length <= 128
+            or (
+                string_length == 0
+                and sha_bytes(canonical("")) != digest
+            )
+        ):
+            raise HarnessError(f"{label} withheld bounded string differs")
+    elif string_length is not None:
+        raise HarnessError(f"{label} non-string length differs")
+    if kind in {"absent", "array", "object", "string"} and kind != "string" and safe_value is not None:
+        raise HarnessError(f"{label} unsafe value was retained")
+    if kind == "null" and safe_value is not None:
+        raise HarnessError(f"{label} null value differs")
+    if kind == "boolean" and type(safe_value) is not bool:
+        raise HarnessError(f"{label} boolean value differs")
+    if kind == "integer" and type(safe_value) is not int:
+        raise HarnessError(f"{label} integer value differs")
+    if kind == "number" and (type(safe_value) is not float or not math.isfinite(safe_value)):
+        raise HarnessError(f"{label} number value differs")
+    if present and (kind != "string" or safe_value is not None):
+        if sha_bytes(canonical(safe_value)) != digest:
+            raise HarnessError(f"{label} canonical hash differs")
+    return item
+
+
+def _validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
+    audit = _ready_exact(
+        value,
+        {
+            "schema_version", "audit_sha256", "raw", "top_level", "safe_scalars",
+            "resident_session_id", "nested", "validation",
+        },
+        "ready candidate audit",
+    )
+    if (
+        audit["schema_version"] != READY_CANDIDATE_AUDIT_SCHEMA
+        or not _sha256_string(audit["audit_sha256"])
+        or audit["audit_sha256"] != _semantic_self_hash(audit, "audit_sha256")
+        or len(canonical(audit))
+        > MAX_READY_CANDIDATE_MARKER_BYTES - len(READY_CANDIDATE_MARKER_PREFIX) - 1
+    ):
+        raise HarnessError("ready candidate audit identity/size differs")
+    raw = _ready_exact(audit["raw"], {"byte_count", "raw_sha256"}, "ready candidate raw")
+    if (
+        type(raw["byte_count"]) is not int
+        or not 0 < raw["byte_count"] <= MAX_READY_CANDIDATE_RAW_BYTES
+        or not _sha256_string(raw["raw_sha256"])
+    ):
+        raise HarnessError("ready candidate raw summary differs")
+    top = _ready_exact(
+        audit["top_level"], {"key_count", "keys", "key_types"}, "ready candidate top level"
+    )
+    if type(top["key_count"]) is not int or not 0 <= top["key_count"] <= MAX_READY_CANDIDATE_RAW_BYTES:
+        raise HarnessError("ready candidate top-level key count differs")
+    top_types = _validate_ready_key_types(
+        top["keys"], top["key_types"], "ready candidate top level", key_count=top["key_count"]
+    )
+    scalars = _ready_exact(
+        audit["safe_scalars"], {"event", "schema_version", "model_loads"},
+        "ready candidate safe scalars",
+    )
+    scalar_values = {
+        name: _validate_ready_safe_scalar(scalars[name], f"ready candidate {name}")
+        for name in ("event", "schema_version", "model_loads")
+    }
+    for name, item in scalar_values.items():
+        if name in top_types:
+            if item["present"] is not True or item["json_type"] != top_types[name]:
+                raise HarnessError(f"ready candidate {name} top-level binding differs")
+        elif item["present"] is not False:
+            raise HarnessError(f"ready candidate {name} presence differs")
+    session = _ready_exact(
+        audit["resident_session_id"],
+        {"present", "json_type", "string_length", "canonical_sha256"},
+        "ready candidate session ID",
+    )
+    if (
+        type(session["present"]) is not bool
+        or session["json_type"] not in READY_CANDIDATE_JSON_TYPES
+        or session["present"] != (session["json_type"] != "absent")
+        or session["present"] != (session["canonical_sha256"] is not None)
+        or (session["canonical_sha256"] is not None and not _sha256_string(session["canonical_sha256"]))
+        or (
+            session["json_type"] == "string"
+            and (
+                type(session["string_length"]) is not int
+                or not 0 <= session["string_length"] <= MAX_READY_CANDIDATE_RAW_BYTES
+            )
+        )
+        or (session["json_type"] != "string" and session["string_length"] is not None)
+    ):
+        raise HarnessError("ready candidate session ID summary differs")
+    if "resident_session_id" in top_types:
+        if session["present"] is not True or session["json_type"] != top_types["resident_session_id"]:
+            raise HarnessError("ready candidate session ID top-level binding differs")
+    elif session["present"] is not False:
+        raise HarnessError("ready candidate session ID presence differs")
+    nested = _ready_exact(
+        audit["nested"], {"driver_identity", "served_model_binding"},
+        "ready candidate nested summaries",
+    )
+    for name in ("driver_identity", "served_model_binding"):
+        item = _ready_exact(
+            nested[name], {"present", "json_type", "canonical_sha256", "keys", "key_types"},
+            f"ready candidate {name}",
+        )
+        if (
+            type(item["present"]) is not bool
+            or item["json_type"] not in READY_CANDIDATE_JSON_TYPES
+            or item["present"] != (item["json_type"] != "absent")
+            or item["present"] != (item["canonical_sha256"] is not None)
+            or (item["canonical_sha256"] is not None and not _sha256_string(item["canonical_sha256"]))
+        ):
+            raise HarnessError(f"ready candidate {name} summary differs")
+        nested_types = _validate_ready_key_types(
+            item["keys"], item["key_types"], f"ready candidate {name}"
+        )
+        if item["json_type"] != "object" and nested_types:
+            raise HarnessError(f"ready candidate {name} non-object keys differ")
+        if name in top_types and (
+            item["present"] is not True or item["json_type"] != top_types[name]
+        ):
+            raise HarnessError(f"ready candidate {name} top-level binding differs")
+        if name not in top_types:
+            if item["present"] is not False:
+                raise HarnessError(f"ready candidate {name} presence differs")
+    validation = _ready_exact(
+        audit["validation"], {"status", "reason_code", "predicates"},
+        "ready candidate validation",
+    )
+    predicates = validation["predicates"]
+    if (
+        validation["status"] != "failed"
+        or not isinstance(validation["reason_code"], str)
+        or not isinstance(predicates, dict)
+        or set(predicates) != READY_CANDIDATE_PREDICATES
+        or any(type(result) is not bool for result in predicates.values())
+    ):
+        raise HarnessError("ready candidate validation summary differs")
+    expected_fields = {
+        "event", "schema_version", "model_loads", "resident_session_id",
+        "driver_identity", "served_model_binding",
+    }
+    recomputed = {
+        "field_set_exact": top["key_count"] == 6 and top["keys"] == sorted(expected_fields),
+        "event_is_ready": scalar_values["event"]["json_type"] == "string" and scalar_values["event"]["value"] == "ready",
+        "schema_version_exact": scalar_values["schema_version"]["json_type"] == "string" and scalar_values["schema_version"]["value"] == "ullm.aq4_p2_resident_driver.v2",
+        "model_loads_is_integer": scalar_values["model_loads"]["json_type"] == "integer",
+        "model_loads_is_one": scalar_values["model_loads"]["json_type"] == "integer" and scalar_values["model_loads"]["value"] == 1,
+        "resident_session_id_is_string": session["json_type"] == "string",
+        "resident_session_id_nonempty": session["json_type"] == "string" and bool(session["string_length"]),
+    }
+    if predicates != recomputed:
+        raise HarnessError("ready candidate predicates differ from summaries")
+    ordered_failures = (
+        ("field_set_exact", "ready_candidate_field_set_differs"),
+        ("event_is_ready", "ready_candidate_event_differs"),
+        ("schema_version_exact", "ready_candidate_schema_differs"),
+        ("model_loads_is_integer", "ready_candidate_model_loads_type_differs"),
+        ("model_loads_is_one", "ready_candidate_model_loads_value_differs"),
+        ("resident_session_id_is_string", "ready_candidate_session_id_type_differs"),
+        ("resident_session_id_nonempty", "ready_candidate_session_id_empty"),
+    )
+    expected_reason = next((reason for predicate, reason in ordered_failures if not predicates[predicate]), None)
+    downstream_reasons = {
+        "ready_candidate_driver_identity_invalid",
+        "ready_candidate_binary_sha256_differs",
+        "ready_candidate_served_model_binding_invalid",
+    }
+    if (
+        (expected_reason is not None and validation["reason_code"] != expected_reason)
+        or (expected_reason is None and validation["reason_code"] not in downstream_reasons)
+    ):
+        raise HarnessError("ready candidate reason/predicate binding differs")
+    return audit
+
+
+def _ready_stream_markers(raw: bytes) -> tuple[list[bytes], bool]:
+    markers: list[bytes] = []
+    oversize = False
+    source = io.BytesIO(raw)
+    while True:
+        line = source.readline(MAX_READY_CANDIDATE_MARKER_BYTES + 2)
+        if not line:
+            break
+        starts_marker = line.startswith(READY_CANDIDATE_MARKER_PREFIX)
+        if len(line) > MAX_READY_CANDIDATE_MARKER_BYTES and not line.endswith(b"\n"):
+            while line and not line.endswith(b"\n"):
+                line = source.readline(MAX_READY_CANDIDATE_MARKER_BYTES + 2)
+            oversize = oversize or starts_marker
+            continue
+        if starts_marker:
+            if len(line.removesuffix(b"\n")) > MAX_READY_CANDIDATE_MARKER_BYTES:
+                oversize = True
+            else:
+                markers.append(line)
+    return markers, oversize
+
+
+def _validate_ready_candidate_capture(
+    value: Any,
+    *,
+    stderr_raw: bytes,
+    stderr_sha256: str,
+) -> dict[str, Any]:
+    envelope = _ready_exact(
+        value,
+        {
+            "schema_version", "self_sha256", "status", "reason_code", "source_stream",
+            "source_stream_sha256", "marker_count", "marker_sha256", "audit_sha256", "audit",
+        },
+        "ready candidate capture",
+    )
+    if (
+        envelope["schema_version"] != READY_CANDIDATE_CAPTURE_SCHEMA
+        or not _sha256_string(envelope["self_sha256"])
+        or envelope["self_sha256"] != _semantic_self_hash(envelope, "self_sha256")
+        or len(canonical(envelope)) > 2 * MAX_READY_CANDIDATE_MARKER_BYTES
+        or envelope["source_stream"] != "rocprof.stderr"
+        or envelope["source_stream_sha256"] != stderr_sha256
+        or type(envelope["marker_count"]) is not int
+        or envelope["marker_count"] < 0
+        or (envelope["marker_sha256"] is not None and not _sha256_string(envelope["marker_sha256"]))
+        or (envelope["audit_sha256"] is not None and not _sha256_string(envelope["audit_sha256"]))
+    ):
+        raise HarnessError("ready candidate capture identity/type/size differs")
+    markers, oversize = _ready_stream_markers(stderr_raw)
+    status = envelope["status"]
+    reason = envelope["reason_code"]
+    if status == "valid":
+        if (
+            reason != "ready_candidate_marker_bound"
+            or oversize
+            or len(markers) != 1
+            or envelope["marker_count"] != 1
+            or envelope["marker_sha256"] != sha_bytes(markers[0])
+            or envelope["audit"] is None
+        ):
+            raise HarnessError("valid ready candidate marker binding differs")
+        audit = _validate_ready_candidate_audit(envelope["audit"])
+        payload = markers[0][len(READY_CANDIDATE_MARKER_PREFIX):]
+        if not payload.endswith(b"\n") or payload.endswith(b"\r\n"):
+            raise HarnessError("valid ready candidate marker termination differs")
+        if (
+            payload[:-1] != canonical(audit)
+            or envelope["audit_sha256"] != audit["audit_sha256"]
+        ):
+            raise HarnessError("valid ready candidate marker/audit canonical binding differs")
+    elif status == "absent":
+        if (
+            reason != "ready_candidate_marker_absent"
+            or oversize
+            or markers
+            or envelope["marker_count"] != 0
+            or envelope["marker_sha256"] is not None
+            or envelope["audit_sha256"] is not None
+            or envelope["audit"] is not None
+        ):
+            raise HarnessError("absent ready candidate marker binding differs")
+    elif status == "invalid":
+        expected_reason: str | None = None
+        expected_count = len(markers)
+        expected_marker_sha: str | None = None
+        if oversize:
+            expected_reason = "ready_candidate_marker_oversize"
+            expected_count = len(markers)
+        elif len(markers) != 1:
+            expected_reason = "ready_candidate_marker_count_differs"
+        elif not markers[0].endswith(b"\n") or markers[0].endswith(b"\r\n"):
+            expected_reason = "ready_candidate_marker_termination_differs"
+            expected_marker_sha = sha_bytes(markers[0])
+        else:
+            expected_reason = "ready_candidate_marker_payload_invalid"
+            expected_marker_sha = sha_bytes(markers[0])
+        if (
+            reason != expected_reason
+            or envelope["marker_count"] != expected_count
+            or envelope["marker_sha256"] != expected_marker_sha
+            or envelope["audit_sha256"] is not None
+            or envelope["audit"] is not None
+        ):
+            raise HarnessError("invalid ready candidate marker diagnostic differs")
+    else:
+        raise HarnessError("ready candidate capture status differs")
+    return envelope
+
+
 def _read_profile_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
     raw, _ = LAUNCHER.read_regular(path, label)
     if len(raw) > LAUNCHER.MAX_BYTES:
@@ -2270,19 +2689,39 @@ def _validate_profile_failure_evidence(
     output_directory: Path,
     target_binding: dict[str, Any],
     expected_command: list[str],
+    *,
+    allow_historical_v1: bool = False,
 ) -> dict[str, Any]:
     value, raw = _read_profile_json(failure_path, "profile capture failure evidence")
     metadata = failure_path.lstat()
     context = value.get("context")
     streams = value.get("streams")
     reason = value.get("reason")
-    expected_keys = {
+    common_keys = {
         "schema_version", "status", "measurement_eligible", "promotion_eligible",
         "failure_sha256", "reason", "rocprof_child_new_session",
         "outer_harness_signalled", "process_group_cleanup_complete",
         "children_state_known", "children_remaining", "command_sha256",
         "effective_command_sha256", "context", "streams",
     }
+    v2_keys = common_keys | {"ready_candidate_audit"}
+    legacy_v1_keys = common_keys - {
+        "children_state_known", "children_remaining", "effective_command_sha256",
+    }
+    schema = value.get("schema_version")
+    historical_legacy_shape = False
+    if schema == PROFILE_CAPTURE_FAILURE_SCHEMA:
+        expected_keys = v2_keys
+    elif allow_historical_v1 and schema == HISTORICAL_PROFILE_CAPTURE_FAILURE_SCHEMA:
+        if set(value) == common_keys:
+            expected_keys = common_keys
+        elif set(value) == legacy_v1_keys:
+            expected_keys = legacy_v1_keys
+            historical_legacy_shape = True
+        else:
+            expected_keys = set()
+    else:
+        expected_keys = set()
     children_state_known = value.get("children_state_known")
     children_remaining = value.get("children_remaining")
     cleanup_complete = value.get("process_group_cleanup_complete")
@@ -2290,7 +2729,6 @@ def _validate_profile_failure_evidence(
     if (
         stat.S_IMODE(metadata.st_mode) != 0o444
         or set(value) != expected_keys
-        or value.get("schema_version") != PROFILE_CAPTURE_FAILURE_SCHEMA
         or value.get("status") != "failed"
         or value.get("measurement_eligible") is not False
         or value.get("promotion_eligible") is not False
@@ -2302,17 +2740,8 @@ def _validate_profile_failure_evidence(
         or value.get("rocprof_child_new_session") is not True
         or value.get("outer_harness_signalled") is not False
         or type(cleanup_complete) is not bool
-        or type(children_state_known) is not bool
-        or not isinstance(children_remaining, list)
-        or any(type(pid) is not int or pid <= 0 for pid in children_remaining)
-        or children_remaining != sorted(set(children_remaining))
-        or cleanup_complete is not (children_state_known and children_remaining == [])
-        or (not children_state_known and children_remaining != [])
         or not isinstance(value.get("command_sha256"), str)
         or value["command_sha256"] != logical_command_sha
-        or not isinstance(value.get("effective_command_sha256"), str)
-        or SHA_RE.fullmatch(value["effective_command_sha256"]) is None
-        or value["effective_command_sha256"] == logical_command_sha
         or not isinstance(context, dict)
         or set(context) != {"profiler", "target_command_manifest"}
         or not _profile_profiler_binding_valid(context.get("profiler"))
@@ -2322,6 +2751,19 @@ def _validate_profile_failure_evidence(
         or set(streams) != {"rocprof.stdout", "rocprof.stderr"}
     ):
         raise HarnessError("profile capture failure evidence semantic binding differs")
+    if not historical_legacy_shape and (
+        type(children_state_known) is not bool
+        or not isinstance(children_remaining, list)
+        or any(type(pid) is not int or pid <= 0 for pid in children_remaining)
+        or children_remaining != sorted(set(children_remaining))
+        or cleanup_complete is not (children_state_known and children_remaining == [])
+        or (not children_state_known and children_remaining != [])
+        or not isinstance(value.get("effective_command_sha256"), str)
+        or SHA_RE.fullmatch(value["effective_command_sha256"]) is None
+        or value["effective_command_sha256"] == logical_command_sha
+    ):
+        raise HarnessError("profile capture failure lifecycle binding differs")
+    stderr_raw: bytes | None = None
     for name, reference in streams.items():
         stream_path = output_directory / name
         stream_raw, _ = LAUNCHER.read_regular(stream_path, f"profile capture failure {name}")
@@ -2332,6 +2774,17 @@ def _validate_profile_failure_evidence(
             or reference.get("sha256") != sha_bytes(stream_raw)
         ):
             raise HarnessError("profile capture failure stream binding differs")
+        if name == "rocprof.stderr":
+            stderr_raw = stream_raw
+    ready_candidate_audit = None
+    if schema == PROFILE_CAPTURE_FAILURE_SCHEMA:
+        if stderr_raw is None:
+            raise HarnessError("profile capture failure READY source stream is unavailable")
+        ready_candidate_audit = _validate_ready_candidate_capture(
+            value["ready_candidate_audit"],
+            stderr_raw=stderr_raw,
+            stderr_sha256=streams["rocprof.stderr"]["sha256"],
+        )
     return {
         "path": str(failure_path),
         "sha256": sha_bytes(raw),
@@ -2341,13 +2794,30 @@ def _validate_profile_failure_evidence(
         "reason": reason,
         "timed_out": "timed out" in reason.lower(),
         "process_group_cleanup_complete": cleanup_complete,
-        "children_state_known": children_state_known,
-        "children_remaining": children_remaining,
+        "children_state_known": UNKNOWN_LIFECYCLE_STATE if historical_legacy_shape else children_state_known,
+        "children_remaining": UNKNOWN_LIFECYCLE_STATE if historical_legacy_shape else children_remaining,
+        "ready_candidate_audit": ready_candidate_audit,
+        "historical_readback": schema == HISTORICAL_PROFILE_CAPTURE_FAILURE_SCHEMA,
         "streams": {
             name: {"path": str(output_directory / name), **reference}
             for name, reference in sorted(streams.items())
         },
     }
+
+
+def _read_historical_profile_failure_evidence(
+    failure_path: Path,
+    output_directory: Path,
+    target_binding: dict[str, Any],
+    expected_command: list[str],
+) -> dict[str, Any]:
+    return _validate_profile_failure_evidence(
+        failure_path,
+        output_directory,
+        target_binding,
+        expected_command,
+        allow_historical_v1=True,
+    )
 
 
 def _load_profile_capture_module(trusted_capture_raw: bytes) -> types.ModuleType:
