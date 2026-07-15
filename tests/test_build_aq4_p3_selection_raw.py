@@ -146,6 +146,113 @@ def device_lock_fixture(run_id: str) -> dict[str, object]:
     }
 
 
+def live_preflight_fixture(
+    path: Path,
+    run_id: str,
+    identity: dict[str, object],
+) -> dict[str, object]:
+    runtime_index = identity["resident_driver_identity"]["runtime_device"][
+        "runtime_device_index"
+    ]
+    captured_unix_ns = 987654321
+    runtime_mapping = {
+        "amd_smi_index": 2,
+        "bdf": "0000:47:00.0",
+        "kfd_id": 51545,
+        "node_id": 2,
+        "runtime_device_index": runtime_index,
+        "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+        "visible_token": str(runtime_index),
+    }
+    lock = {
+        "path": "/tmp/fixture-device.lock",
+        "free": True,
+        "device": 26,
+        "inode": 123456,
+    }
+    vram = {
+        "total_bytes": 32_624_000_000,
+        "used_bytes": 0,
+        "free_bytes": 32_624_000_000,
+        "headroom_bytes": 32_624_000_000,
+    }
+    command_exits = {
+        "sudo-n": 0,
+        "service-ullm-openai.service": 0,
+        "service-llama-qwen35-udq4.service": 0,
+        "old-worker": 1,
+        "amd-smi-list": 0,
+        "rocminfo": 0,
+        "amd-smi-process": 0,
+        "amd-smi-static-vram": 0,
+    }
+    environment = {
+        field: "1"
+        for field in PRODUCER.LIVE_PREFLIGHT_ENVIRONMENT_FIELDS
+        if field.startswith("ULLM_REQUIRE_")
+    }
+    environment.update(
+        {
+            "HIP_VISIBLE_DEVICES": str(runtime_index),
+            "ULLM_BUILD_GIT_COMMIT": identity["resident_driver_identity"][
+                "build_git_commit"
+            ],
+            "ULLM_HIP_VISIBLE_DEVICES": str(runtime_index),
+            "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json",
+        }
+    )
+    document = {
+        "schema_version": "ullm.aq4_p2_resident_live_preflight.v1",
+        "status": "passed",
+        "run_id": run_id,
+        "captured_unix_ns": captured_unix_ns,
+        "runtime_mapping": runtime_mapping,
+        "lock": lock,
+        "vram": vram,
+        "commands": [
+            {
+                "argv": ["/fixture/tool", label],
+                "captured_unix_ns": captured_unix_ns - len(command_exits) + index,
+                "exit_code": exit_code,
+                "label": label,
+                "stderr_sha256": "e" * 64,
+                "stdout_sha256": "f" * 64,
+            }
+            for index, (label, exit_code) in enumerate(command_exits.items())
+        ],
+        "compute_owners": {"amd_smi": [], "kfd": []},
+        "environment": environment,
+        "prepared_preflight": {
+            "path": "/fixture/preflight.json",
+            "role": "synthetic_bundle_contract_only",
+            "sha256": "a" * 64,
+        },
+        "services": [
+            {
+                "unit": unit,
+                "active_state": "inactive",
+                "sub_state": "dead",
+                "main_pid": 0,
+            }
+            for unit in ("ullm-openai.service", "llama-qwen35-udq4.service")
+        ],
+        "worker_pids": [],
+    }
+    write_json(path, document)
+    path.chmod(0o444)
+    info = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "sha256": sha(path),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "captured_unix_ns": captured_unix_ns,
+        "runtime_mapping": runtime_mapping,
+        "lock": lock,
+        "vram": vram,
+    }
+
+
 def raw_fixture(
     path: Path,
     identity_path: Path,
@@ -157,6 +264,7 @@ def raw_fixture(
     prefill_ms: float,
     *,
     diagnostic: bool = False,
+    live_preflight: dict[str, object] | None = None,
 ) -> Path:
     runs = [
         run_record(case_id, index, resolved_m, prefill_ms + (index % 3) * 0.1)
@@ -203,6 +311,8 @@ def raw_fixture(
         },
     }
     if diagnostic:
+        assert live_preflight is not None
+        value["links"]["live_preflight"] = live_preflight
         value.update(
             {
                 "execution_mode": "one_case_smoke",
@@ -220,6 +330,7 @@ def summary_fixture(
     run_id: str,
     *,
     diagnostic: bool = False,
+    live_preflight: dict[str, object] | None = None,
 ) -> Path:
     value = {
         "schema_version": "ullm.aq4_p2_resident_batch.v1",
@@ -237,6 +348,8 @@ def summary_fixture(
         "device_lock": device_lock_fixture(run_id),
     }
     if diagnostic:
+        assert live_preflight is not None
+        value["validation"] = {"live_preflight": live_preflight}
         value.update(
             {
                 "execution_mode": "one_case_smoke",
@@ -431,11 +544,15 @@ def build_manifest(path: Path) -> dict[str, object]:
 def resident_pair_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     identity_path, identity = identity_fixture(tmp_path)
     run_id = "device-lock-fixture-run"
+    live_preflight = live_preflight_fixture(
+        tmp_path / "live-preflight.json", run_id, identity
+    )
     summary_path = summary_fixture(
         tmp_path / "resident-summary.json",
         identity_path,
         run_id,
         diagnostic=True,
+        live_preflight=live_preflight,
     )
     raw_path = raw_fixture(
         tmp_path / "resident-raw.json",
@@ -447,6 +564,7 @@ def resident_pair_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
         128,
         100.0,
         diagnostic=True,
+        live_preflight=live_preflight,
     )
     return identity_path, summary_path, raw_path
 
@@ -480,7 +598,7 @@ def validate_resident_pair(
     return summary_value, raw_value, validated_run_id, runs
 
 
-def test_sealed_actual_v8_device_lock_is_accepted_and_matches_summary() -> None:
+def test_sealed_actual_v8_full_resident_pair_is_accepted() -> None:
     result_root = (
         ROOT
         / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
@@ -499,34 +617,260 @@ def test_sealed_actual_v8_device_lock_is_accepted_and_matches_summary() -> None:
 
     assert sha(raw_path) == "397f02a2cd87e5d30eb9eb569b5d022351b1f994358e71535f2ce697af5df25c"
     assert sha(summary_path) == "b82409bf997e207df5576ba7e38ebefddff363440c256250ffc8f7b521dcb3f5"
-    identity_snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
-    identity = PRODUCER.validate_identity(
-        PRODUCER.parse_json(identity_snapshot, "identity"),
-        identity_snapshot,
-    )
-    summary_snapshot = PRODUCER.capture(summary_path.resolve(), "resident summary")
-    summary = PRODUCER.parse_json(summary_snapshot, "resident summary")
-    run_id = PRODUCER.validate_summary(
-        summary,
-        summary_snapshot,
-        identity,
-        "diagnostic",
-    )
-    raw_snapshot = PRODUCER.capture(raw_path.resolve(), "resident raw")
-    raw = PRODUCER.parse_json(raw_snapshot, "resident raw")
-    PRODUCER.validate_device_lock(
-        raw.get("device_lock"),
-        identity,
-        run_id,
-        "resident raw device_lock",
+    summary, raw, run_id, runs = validate_resident_pair(
+        identity_path,
+        summary_path,
+        raw_path,
     )
 
     assert run_id == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v7"
-    assert len(raw["runs"]) == 12
+    assert len(runs) == 12
     assert raw["device_lock"] == summary["device_lock"]
+    assert raw["links"]["live_preflight"] == summary["validation"]["live_preflight"]
     for field in ("device", "inode"):
         assert type(raw["device_lock"][field]) is int
         assert raw["device_lock"][field] > 0
+
+
+def rewrite_live_preflight_document(
+    summary_path: Path,
+    raw_path: Path,
+    mutation,
+) -> None:
+    summary = json.loads(summary_path.read_text())
+    raw = json.loads(raw_path.read_text())
+    document_path = Path(summary["validation"]["live_preflight"]["path"])
+    document = json.loads(document_path.read_text())
+    mutation(document)
+    document_path.chmod(0o644)
+    write_json(document_path, document)
+    document_path.chmod(0o444)
+    for link in (
+        summary["validation"]["live_preflight"],
+        raw["links"]["live_preflight"],
+    ):
+        link["sha256"] = sha(document_path)
+    write_json(summary_path, summary)
+    write_json(raw_path, raw)
+
+
+@pytest.mark.parametrize("artifact", ["summary", "raw"])
+def test_diagnostic_live_preflight_is_required(tmp_path: Path, artifact: str) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    target_path = summary_path if artifact == "summary" else raw_path
+    value = json.loads(target_path.read_text())
+    if artifact == "summary":
+        del value["validation"]["live_preflight"]
+    else:
+        del value["links"]["live_preflight"]
+    write_json(target_path, value)
+
+    with pytest.raises(PRODUCER.ProducerError, match="live_preflight|links fields differ"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+def test_diagnostic_live_preflight_rejects_legacy_ref_shape(tmp_path: Path) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    link = summary["validation"]["live_preflight"]
+    summary["validation"]["live_preflight"] = {
+        "path": link["path"],
+        "sha256": link["sha256"],
+    }
+    write_json(summary_path, summary)
+
+    with pytest.raises(PRODUCER.ProducerError, match="live_preflight fields differ"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+def test_promotion_summary_rejects_diagnostic_live_preflight(tmp_path: Path) -> None:
+    _path, manifest = promotion_manifest(tmp_path)
+    summary_path = Path(manifest["resident_summaries"][0]["path"])
+    summary = json.loads(summary_path.read_text())
+    summary["validation"] = {
+        "live_preflight": {"path": "/fixture/live.json", "sha256": "1" * 64}
+    }
+    write_json(summary_path, summary)
+    manifest["resident_summaries"][0] = ref(summary_path)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    manifest_path = tmp_path / "promotion-with-diagnostic-live-preflight.json"
+    write_json(manifest_path, manifest)
+
+    with pytest.raises(PRODUCER.ProducerError, match="must not carry diagnostic"):
+        build_manifest(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda link: link.pop("captured_unix_ns"), "fields differ"),
+        (lambda link: link.__setitem__("unknown", 1), "fields differ"),
+        (lambda link: link.__setitem__("path", "relative/live.json"), "absolute"),
+        (lambda link: link.__setitem__("path", "/tmp/../live.json"), "traversal-free"),
+        (lambda link: link.__setitem__("sha256", "invalid"), "lowercase SHA-256"),
+        (lambda link: link.__setitem__("sha256", "0" * 64), "path/SHA differs"),
+    ],
+)
+def test_live_preflight_link_shape_path_and_hash_fail_closed(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    mutation(summary["validation"]["live_preflight"])
+    write_json(summary_path, summary)
+
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize("field", ["device", "inode"])
+@pytest.mark.parametrize("replacement", [True, 0, -1, "1"])
+def test_live_preflight_file_identity_fields_require_positive_integers(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    summary["validation"]["live_preflight"][field] = replacement
+    write_json(summary_path, summary)
+
+    with pytest.raises(PRODUCER.ProducerError, match=rf"{field} must be a positive integer"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize("field", ["device", "inode"])
+def test_live_preflight_file_identity_must_match_stat(tmp_path: Path, field: str) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    summary["validation"]["live_preflight"][field] += 1
+    write_json(summary_path, summary)
+
+    with pytest.raises(PRODUCER.ProducerError, match="document identity/mode differs"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+def test_live_preflight_file_mode_must_be_0444(tmp_path: Path) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    document_path = Path(summary["validation"]["live_preflight"]["path"])
+    document_path.chmod(0o644)
+
+    with pytest.raises(PRODUCER.ProducerError, match="document identity/mode differs"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+def test_live_preflight_file_must_have_one_link(tmp_path: Path) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    document_path = Path(summary["validation"]["live_preflight"]["path"])
+    os.link(document_path, tmp_path / "second-live-preflight-link.json")
+
+    with pytest.raises(PRODUCER.ProducerError, match="document identity/mode differs"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value.pop("commands"), "document fields differ"),
+        (lambda value: value.__setitem__("unknown", 1), "document fields differ"),
+        (lambda value: value.__setitem__("schema_version", "v0"), "schema/status/run"),
+        (lambda value: value.__setitem__("status", "failed"), "schema/status/run"),
+        (lambda value: value.__setitem__("run_id", "different"), "schema/status/run"),
+        (lambda value: value.__setitem__("captured_unix_ns", True), "positive integer"),
+        (lambda value: value["runtime_mapping"].pop("bdf"), "runtime_mapping fields differ"),
+        (
+            lambda value: value["runtime_mapping"].__setitem__("unknown", 1),
+            "runtime_mapping fields differ",
+        ),
+        (
+            lambda value: value["runtime_mapping"].__setitem__("runtime_device_index", True),
+            "non-negative integer",
+        ),
+        (lambda value: value["lock"].__setitem__("free", False), "free lock"),
+        (lambda value: value["lock"].__setitem__("inode", 1), "device_lock"),
+        (lambda value: value["vram"].__setitem__("used_bytes", 1), "idle headroom"),
+        (lambda value: value["commands"][0].pop("argv"), "commands\\[0\\] fields differ"),
+        (lambda value: value["compute_owners"]["kfd"].append(1), "must be empty"),
+        (lambda value: value["environment"].pop("HIP_VISIBLE_DEVICES"), "fields differ"),
+        (
+            lambda value: value["prepared_preflight"].__setitem__("role", "unknown"),
+            "prepared_preflight.role differs",
+        ),
+        (lambda value: value["services"][0].__setitem__("main_pid", True), "integer"),
+        (lambda value: value["worker_pids"].append(1), "must be empty"),
+    ],
+)
+def test_live_preflight_document_and_nested_contract_fail_closed(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    rewrite_live_preflight_document(summary_path, raw_path, mutation)
+
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "replacement", "message"),
+    [
+        (("captured_unix_ns",), True, "positive integer"),
+        (("captured_unix_ns",), 0, "positive integer"),
+        (("captured_unix_ns",), -1, "positive integer"),
+        (("captured_unix_ns",), "1", "positive integer"),
+        (("runtime_mapping", "node_id"), True, "non-negative integer"),
+        (("runtime_mapping", "kfd_id"), 0, "positive integer"),
+        (("lock", "device"), -1, "positive integer"),
+        (("vram", "total_bytes"), "1", "positive integer"),
+    ],
+)
+def test_live_preflight_embedded_metadata_type_matrix(
+    tmp_path: Path,
+    field_path: tuple[str, ...],
+    replacement: object,
+    message: str,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    target = summary["validation"]["live_preflight"]
+    for field in field_path[:-1]:
+        target = target[field]
+    target[field_path[-1]] = replacement
+    write_json(summary_path, summary)
+
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+def test_live_preflight_lock_binds_to_device_lock(tmp_path: Path) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    summary = json.loads(summary_path.read_text())
+    summary["validation"]["live_preflight"]["lock"]["inode"] += 1
+    write_json(summary_path, summary)
+
+    with pytest.raises(PRODUCER.ProducerError, match="differs from device_lock"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+def test_live_preflight_raw_and_summary_must_match(tmp_path: Path) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    identity = json.loads(identity_path.read_text())
+    second_link = live_preflight_fixture(
+        tmp_path / "second-live-preflight.json",
+        "device-lock-fixture-run",
+        identity,
+    )
+    raw = json.loads(raw_path.read_text())
+    raw["links"]["live_preflight"] = second_link
+    write_json(raw_path, raw)
+
+    with pytest.raises(PRODUCER.ProducerError, match="raw/summary live_preflight differs"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
 
 
 @pytest.mark.parametrize("artifact", ["raw", "summary"])
@@ -581,13 +925,17 @@ def test_device_lock_rejects_unknown_field(tmp_path: Path, artifact: str) -> Non
 
 
 @pytest.mark.parametrize(
-    ("artifact", "field"),
-    [("raw", "device"), ("summary", "inode")],
+    ("artifact", "field", "message"),
+    [
+        ("raw", "device", "raw/summary device_lock differs"),
+        ("summary", "inode", "live_preflight.lock differs from device_lock"),
+    ],
 )
 def test_device_lock_raw_and_summary_must_match(
     tmp_path: Path,
     artifact: str,
     field: str,
+    message: str,
 ) -> None:
     identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
     target_path = raw_path if artifact == "raw" else summary_path
@@ -595,7 +943,7 @@ def test_device_lock_raw_and_summary_must_match(
     value["device_lock"][field] += 1
     write_json(target_path, value)
 
-    with pytest.raises(PRODUCER.ProducerError, match="raw/summary device_lock differs"):
+    with pytest.raises(PRODUCER.ProducerError, match=message):
         validate_resident_pair(identity_path, summary_path, raw_path)
 
 
@@ -929,8 +1277,15 @@ def test_one_case_diagnostic_is_explicitly_non_promotable(tmp_path: Path) -> Non
     capability_path, _capability = capability_fixture(
         tmp_path / "capture-capabilities.json", diagnostic=True
     )
+    live_preflight = live_preflight_fixture(
+        tmp_path / "live-preflight.json", "diagnostic-run", identity
+    )
     summary = summary_fixture(
-        tmp_path / "summary.json", identity_path, "diagnostic-run", diagnostic=True
+        tmp_path / "summary.json",
+        identity_path,
+        "diagnostic-run",
+        diagnostic=True,
+        live_preflight=live_preflight,
     )
     case_id = "diagnostic-case"
     case_sha = "8" * 64
@@ -944,6 +1299,7 @@ def test_one_case_diagnostic_is_explicitly_non_promotable(tmp_path: Path) -> Non
         128,
         100.0,
         diagnostic=True,
+        live_preflight=live_preflight,
     )
     kernel = tmp_path / "kernel.csv"
     api = tmp_path / "api.csv"

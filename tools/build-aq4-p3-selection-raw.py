@@ -218,6 +218,66 @@ DEVICE_LOCK_FIELDS = {
     "acquired_unix_ns", "driver",
 }
 DEVICE_LOCK_DRIVER_FIELDS = {"path", "sha256", "device", "inode", "nlink"}
+LIVE_PREFLIGHT_LINK_FIELDS = {
+    "path", "sha256", "device", "inode", "captured_unix_ns", "runtime_mapping",
+    "lock", "vram",
+}
+LIVE_PREFLIGHT_DOCUMENT_FIELDS = {
+    "schema_version", "status", "run_id", "captured_unix_ns", "runtime_mapping",
+    "lock", "vram", "commands", "compute_owners", "environment",
+    "prepared_preflight", "services", "worker_pids",
+}
+LIVE_PREFLIGHT_RUNTIME_FIELDS = {
+    "amd_smi_index", "bdf", "kfd_id", "node_id", "runtime_device_index", "uuid",
+    "visible_token",
+}
+LIVE_PREFLIGHT_LOCK_FIELDS = {"path", "free", "device", "inode"}
+LIVE_PREFLIGHT_VRAM_FIELDS = {
+    "total_bytes", "used_bytes", "free_bytes", "headroom_bytes",
+}
+LIVE_PREFLIGHT_COMMAND_FIELDS = {
+    "argv", "captured_unix_ns", "exit_code", "label", "stderr_sha256",
+    "stdout_sha256",
+}
+LIVE_PREFLIGHT_COMPUTE_OWNER_FIELDS = {"amd_smi", "kfd"}
+LIVE_PREFLIGHT_PREPARED_FIELDS = {"path", "role", "sha256"}
+LIVE_PREFLIGHT_SERVICE_FIELDS = {"unit", "active_state", "sub_state", "main_pid"}
+LIVE_PREFLIGHT_ENVIRONMENT_FIELDS = {
+    "HIP_VISIBLE_DEVICES",
+    "ULLM_BUILD_GIT_COMMIT",
+    "ULLM_HIP_VISIBLE_DEVICES",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+    "ULLM_SERVED_MODEL_MANIFEST",
+}
 WORKLOAD_FIELDS = {
     "scope", "phase", "mode", "prompt_tokens", "cached_prefix_tokens", "context_tokens",
     "prefill_requested_m", "resolved_m", "request_count", "generated_tokens",
@@ -626,7 +686,7 @@ def validate_summary(
     run_id = baseline.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         raise ProducerError("resident summary run_id is invalid")
-    validate_device_lock(
+    device_lock = validate_device_lock(
         value.get("device_lock"), identity, run_id, "resident summary device_lock"
     )
     smoke = value.get("smoke_only") is True or value.get("execution_mode") == "one_case_smoke"
@@ -636,6 +696,19 @@ def validate_summary(
         raise ProducerError("smoke/ineligible resident summary cannot produce promotion raw")
     if mode == "diagnostic" and not (smoke and promotion_false):
         raise ProducerError("diagnostic resident summary must be smoke-only and promotion-ineligible")
+    if mode == "diagnostic":
+        validation = value.get("validation")
+        if not isinstance(validation, dict):
+            raise ProducerError("diagnostic resident summary validation must be an object")
+        validate_live_preflight(
+            validation.get("live_preflight"),
+            identity,
+            run_id,
+            device_lock,
+            "resident summary validation.live_preflight",
+        )
+    elif isinstance(value.get("validation"), dict) and "live_preflight" in value["validation"]:
+        raise ProducerError("promotion resident summary must not carry diagnostic live_preflight")
     return run_id
 
 
@@ -667,6 +740,283 @@ def validate_device_lock(
         count(driver.get(field), f"{label}.driver.{field}", positive=True)
     if driver["sha256"] != identity["binary_sha256"]:
         raise ProducerError(f"{label} driver SHA differs")
+    return value
+
+
+def absolute_evidence_path(value: Any, label: str) -> Path:
+    path = Path(text_value(value, label))
+    if not path.is_absolute() or ".." in path.parts:
+        raise ProducerError(f"{label} must be absolute and traversal-free")
+    return path
+
+
+def validate_live_preflight_runtime(
+    value: Any,
+    identity: dict[str, str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, LIVE_PREFLIGHT_RUNTIME_FIELDS, label)
+    count(value.get("amd_smi_index"), f"{label}.amd_smi_index")
+    count(value.get("kfd_id"), f"{label}.kfd_id", positive=True)
+    count(value.get("node_id"), f"{label}.node_id")
+    runtime_index = count(
+        value.get("runtime_device_index"), f"{label}.runtime_device_index"
+    )
+    bdf = text_value(value.get("bdf"), f"{label}.bdf")
+    if re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", bdf) is None:
+        raise ProducerError(f"{label}.bdf differs")
+    uuid = text_value(value.get("uuid"), f"{label}.uuid")
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", uuid) is None:
+        raise ProducerError(f"{label}.uuid differs")
+    visible_token = text_value(value.get("visible_token"), f"{label}.visible_token")
+    resident_runtime = identity["_resident_driver_identity"]["runtime_device"]
+    if (
+        runtime_index != resident_runtime["runtime_device_index"]
+        or visible_token != str(runtime_index)
+    ):
+        raise ProducerError(f"{label} identity mapping differs")
+    return value
+
+
+def validate_live_preflight_lock(
+    value: Any,
+    device_lock: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, LIVE_PREFLIGHT_LOCK_FIELDS, label)
+    absolute_evidence_path(value.get("path"), f"{label}.path")
+    if boolean(value.get("free"), f"{label}.free") is not True:
+        raise ProducerError(f"{label} must prove a free lock")
+    count(value.get("device"), f"{label}.device", positive=True)
+    count(value.get("inode"), f"{label}.inode", positive=True)
+    expected = {
+        "path": device_lock["path"],
+        "free": True,
+        "device": device_lock["device"],
+        "inode": device_lock["inode"],
+    }
+    if not strict_json_equal(value, expected):
+        raise ProducerError(f"{label} differs from device_lock")
+    return value
+
+
+def validate_live_preflight_vram(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, LIVE_PREFLIGHT_VRAM_FIELDS, label)
+    total = count(value.get("total_bytes"), f"{label}.total_bytes", positive=True)
+    used = count(value.get("used_bytes"), f"{label}.used_bytes")
+    free = count(value.get("free_bytes"), f"{label}.free_bytes")
+    headroom = count(value.get("headroom_bytes"), f"{label}.headroom_bytes")
+    if used != 0 or free != total or headroom != free:
+        raise ProducerError(f"{label} does not prove full idle headroom")
+    return value
+
+
+def validate_live_preflight_document(
+    value: dict[str, Any],
+    link: dict[str, Any],
+    identity: dict[str, str],
+    run_id: str,
+    device_lock: dict[str, Any],
+    label: str,
+) -> None:
+    exact(value, LIVE_PREFLIGHT_DOCUMENT_FIELDS, label)
+    if (
+        value.get("schema_version") != "ullm.aq4_p2_resident_live_preflight.v1"
+        or value.get("status") != "passed"
+        or value.get("run_id") != run_id
+    ):
+        raise ProducerError(f"{label} schema/status/run binding differs")
+    captured = count(
+        value.get("captured_unix_ns"), f"{label}.captured_unix_ns", positive=True
+    )
+    runtime = validate_live_preflight_runtime(
+        value.get("runtime_mapping"), identity, f"{label}.runtime_mapping"
+    )
+    lock = validate_live_preflight_lock(
+        value.get("lock"), device_lock, f"{label}.lock"
+    )
+    vram = validate_live_preflight_vram(value.get("vram"), f"{label}.vram")
+    if not strict_json_equal(
+        {
+            "captured_unix_ns": captured,
+            "runtime_mapping": runtime,
+            "lock": lock,
+            "vram": vram,
+        },
+        {
+            field: link[field]
+            for field in ("captured_unix_ns", "runtime_mapping", "lock", "vram")
+        },
+    ):
+        raise ProducerError(f"{label} differs from embedded link metadata")
+
+    commands = value.get("commands")
+    expected_command_exits = {
+        "sudo-n": 0,
+        "service-ullm-openai.service": 0,
+        "service-llama-qwen35-udq4.service": 0,
+        "old-worker": 1,
+        "amd-smi-list": 0,
+        "rocminfo": 0,
+        "amd-smi-process": 0,
+        "amd-smi-static-vram": 0,
+    }
+    if not isinstance(commands, list) or len(commands) != len(expected_command_exits):
+        raise ProducerError(f"{label}.commands differs")
+    observed_labels: set[str] = set()
+    for index, command in enumerate(commands):
+        command_label = f"{label}.commands[{index}]"
+        if not isinstance(command, dict):
+            raise ProducerError(f"{command_label} must be an object")
+        exact(command, LIVE_PREFLIGHT_COMMAND_FIELDS, command_label)
+        argv = command.get("argv")
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or any(not isinstance(argument, str) or not argument for argument in argv)
+        ):
+            raise ProducerError(f"{command_label}.argv differs")
+        command_captured = count(
+            command.get("captured_unix_ns"),
+            f"{command_label}.captured_unix_ns",
+            positive=True,
+        )
+        if command_captured > captured:
+            raise ProducerError(f"{command_label} was captured after the document")
+        name = text_value(command.get("label"), f"{command_label}.label")
+        exit_code = count(command.get("exit_code"), f"{command_label}.exit_code")
+        digest(command.get("stderr_sha256"), f"{command_label}.stderr_sha256")
+        digest(command.get("stdout_sha256"), f"{command_label}.stdout_sha256")
+        if name in observed_labels or expected_command_exits.get(name) != exit_code:
+            raise ProducerError(f"{command_label} binding differs")
+        observed_labels.add(name)
+    if observed_labels != set(expected_command_exits):
+        raise ProducerError(f"{label}.commands labels differ")
+
+    owners = value.get("compute_owners")
+    if not isinstance(owners, dict):
+        raise ProducerError(f"{label}.compute_owners must be an object")
+    exact(owners, LIVE_PREFLIGHT_COMPUTE_OWNER_FIELDS, f"{label}.compute_owners")
+    if owners != {"amd_smi": [], "kfd": []}:
+        raise ProducerError(f"{label}.compute_owners must be empty")
+
+    environment = value.get("environment")
+    if not isinstance(environment, dict):
+        raise ProducerError(f"{label}.environment must be an object")
+    exact(environment, LIVE_PREFLIGHT_ENVIRONMENT_FIELDS, f"{label}.environment")
+    for field, item in environment.items():
+        text_value(item, f"{label}.environment.{field}")
+    visible_token = runtime["visible_token"]
+    resident = identity["_resident_driver_identity"]
+    if (
+        environment["HIP_VISIBLE_DEVICES"] != visible_token
+        or environment["ULLM_HIP_VISIBLE_DEVICES"] != visible_token
+        or environment["ULLM_BUILD_GIT_COMMIT"] != resident["build_git_commit"]
+        or any(
+            environment[field] != "1"
+            for field in LIVE_PREFLIGHT_ENVIRONMENT_FIELDS
+            if field.startswith("ULLM_REQUIRE_")
+        )
+    ):
+        raise ProducerError(f"{label}.environment binding differs")
+    absolute_evidence_path(
+        environment["ULLM_SERVED_MODEL_MANIFEST"],
+        f"{label}.environment.ULLM_SERVED_MODEL_MANIFEST",
+    )
+
+    prepared = value.get("prepared_preflight")
+    if not isinstance(prepared, dict):
+        raise ProducerError(f"{label}.prepared_preflight must be an object")
+    exact(prepared, LIVE_PREFLIGHT_PREPARED_FIELDS, f"{label}.prepared_preflight")
+    absolute_evidence_path(prepared.get("path"), f"{label}.prepared_preflight.path")
+    digest(prepared.get("sha256"), f"{label}.prepared_preflight.sha256")
+    if prepared.get("role") != "synthetic_bundle_contract_only":
+        raise ProducerError(f"{label}.prepared_preflight.role differs")
+
+    services = value.get("services")
+    expected_services = {
+        "ullm-openai.service": {"active_state": "inactive", "sub_state": "dead"},
+        "llama-qwen35-udq4.service": {"active_state": "inactive", "sub_state": "dead"},
+    }
+    if not isinstance(services, list) or len(services) != len(expected_services):
+        raise ProducerError(f"{label}.services differs")
+    observed_services: set[str] = set()
+    for index, service in enumerate(services):
+        service_label = f"{label}.services[{index}]"
+        if not isinstance(service, dict):
+            raise ProducerError(f"{service_label} must be an object")
+        exact(service, LIVE_PREFLIGHT_SERVICE_FIELDS, service_label)
+        unit = text_value(service.get("unit"), f"{service_label}.unit")
+        expected_service = expected_services.get(unit)
+        if (
+            expected_service is None
+            or unit in observed_services
+            or service.get("active_state") != expected_service["active_state"]
+            or service.get("sub_state") != expected_service["sub_state"]
+            or count(service.get("main_pid"), f"{service_label}.main_pid") != 0
+        ):
+            raise ProducerError(f"{service_label} binding differs")
+        observed_services.add(unit)
+    if observed_services != set(expected_services):
+        raise ProducerError(f"{label}.services units differ")
+    if value.get("worker_pids") != []:
+        raise ProducerError(f"{label}.worker_pids must be empty")
+
+
+def validate_live_preflight(
+    value: Any,
+    identity: dict[str, str],
+    run_id: str,
+    device_lock: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, LIVE_PREFLIGHT_LINK_FIELDS, label)
+    path = absolute_evidence_path(value.get("path"), f"{label}.path")
+    declared_sha = digest(value.get("sha256"), f"{label}.sha256")
+    declared_device = count(value.get("device"), f"{label}.device", positive=True)
+    declared_inode = count(value.get("inode"), f"{label}.inode", positive=True)
+    captured = count(
+        value.get("captured_unix_ns"), f"{label}.captured_unix_ns", positive=True
+    )
+    runtime = validate_live_preflight_runtime(
+        value.get("runtime_mapping"), identity, f"{label}.runtime_mapping"
+    )
+    lock = validate_live_preflight_lock(
+        value.get("lock"), device_lock, f"{label}.lock"
+    )
+    vram = validate_live_preflight_vram(value.get("vram"), f"{label}.vram")
+    snapshot = capture(path, f"{label} document")
+    if str(snapshot.path) != str(path) or snapshot.sha256 != declared_sha:
+        raise ProducerError(f"{label} document path/SHA differs")
+    if (
+        snapshot.identity[0] != declared_device
+        or snapshot.identity[1] != declared_inode
+        or stat.S_IMODE(snapshot.identity[2]) != 0o444
+        or snapshot.identity[3] != 1
+    ):
+        raise ProducerError(f"{label} document identity/mode differs")
+    document = parse_json(snapshot, f"{label} document")
+    validate_live_preflight_document(
+        document,
+        {
+            "captured_unix_ns": captured,
+            "runtime_mapping": runtime,
+            "lock": lock,
+            "vram": vram,
+        },
+        identity,
+        run_id,
+        device_lock,
+        f"{label} document",
+    )
     return value
 
 
@@ -817,17 +1167,35 @@ def validate_raw(
         raise ProducerError("resident raw workload scope/phase differs")
     links = value.get("links")
     expected_links = {"fixture", "identity", "policy"} | (
-        {"live_preflight"}
-        if mode == "diagnostic" and "live_preflight" in (links or {})
-        else set()
+        {"live_preflight"} if mode == "diagnostic" else set()
     )
     if not isinstance(links, dict):
         raise ProducerError("resident raw links must be an object")
     exact(links, expected_links, "resident raw links")
-    for field in expected_links:
+    for field in {"fixture", "identity", "policy"}:
         validate_ref_shape(links.get(field), f"resident raw links.{field}")
     if not strict_json_equal(links["identity"], baseline["identity_file"]):
         raise ProducerError("resident raw links.identity differs")
+    if mode == "diagnostic":
+        raw_live_preflight = validate_live_preflight(
+            links.get("live_preflight"),
+            identity,
+            run_id,
+            lock,
+            "resident raw links.live_preflight",
+        )
+        summary_validation = summary_value.get("validation")
+        if not isinstance(summary_validation, dict):
+            raise ProducerError("diagnostic resident summary validation must be an object")
+        summary_live_preflight = validate_live_preflight(
+            summary_validation.get("live_preflight"),
+            identity,
+            run_id,
+            summary_lock,
+            "resident summary validation.live_preflight",
+        )
+        if not strict_json_equal(raw_live_preflight, summary_live_preflight):
+            raise ProducerError("resident raw/summary live_preflight differs")
     smoke = value.get("smoke_only") is True or value.get("execution_mode") == "one_case_smoke"
     for field in smoke_fields & set(value):
         if field == "execution_mode":
