@@ -166,7 +166,7 @@ def fixed_promotion_request_id(
     package_sha256: str,
     readiness: dict[str, Any],
     authorization_lineage: dict[str, Any] | None,
-    authorization_lineage_manifest: dict[str, str] | None = None,
+    authorization_lineage_manifest: dict[str, Any] | None = None,
 ) -> str:
     identity = {
         "schema_version": "ullm.qwen35_aq4.sq8_overlay_promotion_request.v1",
@@ -888,6 +888,24 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     lineage_path = getattr(args, "authorization_lineage_manifest", None)
     lineage_input = None
     lineage_request_identity = None
+    current_audit_path = getattr(
+        args, "current_implementation_audit_receipt", None
+    )
+    current_audit_sha = getattr(
+        args, "current_implementation_audit_sha256", None
+    )
+    if (current_audit_path is None) != (current_audit_sha is None):
+        raise GateError(
+            "current implementation audit receipt path and SHA are required together"
+        )
+    expected_current_audit = None
+    if current_audit_path is not None:
+        expected_current_audit = {
+            "path": str(Path(current_audit_path).resolve()),
+            "sha256": require_sha256(
+                current_audit_sha, "current implementation audit receipt SHA"
+            ),
+        }
     if lineage_path is not None:
         try:
             lineage_input = lineage_tool.validate_manifest(
@@ -897,17 +915,30 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     "tree_oid": source_tree,
                     "archive_sha256": source_archive,
                 },
+                expected_current_implementation_audit=expected_current_audit,
             )
         except lineage_tool.LineageError as error:
             raise GateError(
                 f"authorization lineage manifest differs: {error}"
             ) from error
+        reference_schema = (
+            lineage_tool.REFERENCE_SCHEMA
+            if lineage_input["authorization_eligible"]
+            else lineage_tool.REFERENCE_SCHEMA_V1
+        )
         lineage_request_identity = {
-            "schema_version": lineage_tool.REFERENCE_SCHEMA,
+            "schema_version": reference_schema,
             "input_path": lineage_input["path"],
             "sha256": lineage_input["sha256"],
             "entries_sha256": lineage_input["entries_sha256"],
         }
+        if lineage_input["authorization_eligible"]:
+            lineage_request_identity.update(
+                entry_count=lineage_input["entry_count"],
+                current_implementation_audit=lineage_input[
+                    "current_implementation_audit"
+                ],
+            )
     authorize = bool(getattr(args, "authorize_actual_run", False))
     audit_path = getattr(args, "independent_audit_receipt", None)
     if authorize != (audit_path is not None):
@@ -917,6 +948,14 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     if authorize and lineage_input is None:
         raise GateError(
             "actual authorization requires an authorization lineage manifest"
+        )
+    if authorize and (
+        not lineage_input["authorization_eligible"]
+        or expected_current_audit is None
+    ):
+        raise GateError(
+            "actual authorization requires v2 lineage and an explicit current "
+            "implementation audit receipt path and SHA"
         )
     audit = None
     if authorize:
@@ -1285,6 +1324,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prior-failure-receipt", type=Path)
     parser.add_argument("--prior-no-go-audit-receipt", type=Path)
     parser.add_argument("--authorization-lineage-manifest", type=Path)
+    parser.add_argument("--current-implementation-audit-receipt", type=Path)
+    parser.add_argument("--current-implementation-audit-sha256")
     args = parser.parse_args(argv)
     try:
         print(json.dumps(materialize(args), sort_keys=True))

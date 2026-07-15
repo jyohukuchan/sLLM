@@ -300,6 +300,13 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         "path": str(lineage_path),
         "sha256": hashlib.sha256(lineage_raw).hexdigest(),
         "entries_sha256": "8" * 64,
+        "entry_count": 7,
+        "authorization_eligible": True,
+        "document": {"schema_version": TOOL.lineage_tool.MANIFEST_SCHEMA},
+        "current_implementation_audit": {
+            "path": str(audit_path.resolve()),
+            "sha256": audit_sha,
+        },
         "raw": lineage_raw,
     }
     monkeypatch.setattr(
@@ -336,6 +343,10 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
             "input_path": str(lineage_path),
             "sha256": lineage_validated["sha256"],
             "entries_sha256": lineage_validated["entries_sha256"],
+            "entry_count": lineage_validated["entry_count"],
+            "current_implementation_audit": lineage_validated[
+                "current_implementation_audit"
+            ],
         },
     )
     audit = {
@@ -357,6 +368,8 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         profile=profile,
         worker_binary=worker,
         authorization_lineage_manifest=lineage_path,
+        current_implementation_audit_receipt=audit_path,
+        current_implementation_audit_sha256=audit_sha,
     )
     with pytest.raises(TOOL.GateError, match="required together"):
         TOOL.materialize(
@@ -382,6 +395,23 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
                 independent_audit_receipt=audit_path,
             )
         )
+
+    lineage_validated["authorization_eligible"] = False
+    lineage_validated["document"] = {
+        "schema_version": TOOL.lineage_tool.MANIFEST_SCHEMA_V1
+    }
+    with pytest.raises(TOOL.GateError, match="requires v2 lineage"):
+        TOOL.materialize(
+            argparse.Namespace(
+                **common,
+                authorize_actual_run=True,
+                independent_audit_receipt=audit_path,
+            )
+        )
+    lineage_validated["authorization_eligible"] = True
+    lineage_validated["document"] = {
+        "schema_version": TOOL.lineage_tool.MANIFEST_SCHEMA
+    }
 
     bad_audit = dict(audit)
     bad_audit["worker_sha256"] = "0" * 64

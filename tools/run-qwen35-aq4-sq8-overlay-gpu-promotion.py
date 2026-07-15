@@ -822,6 +822,14 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
                 "candidate authorization lineage manifest propagation differs"
             )
         if lineage_manifest is not None:
+            if (
+                actual_run_allowed
+                and lineage_manifest.get("schema_version")
+                != lineage_tool.REFERENCE_SCHEMA
+            ):
+                raise PromotionError(
+                    "authorized candidate requires authorization lineage v2"
+                )
             try:
                 lineage_tool.validate_reference(
                     lineage_manifest,

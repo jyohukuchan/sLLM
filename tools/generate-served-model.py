@@ -909,7 +909,7 @@ def _materialize_profile_document(
     )
     overlay_receipt = None
     authorization_audit: dict[str, str] | None = None
-    authorization_lineage: dict[str, str] | None = None
+    authorization_lineage: dict[str, Any] | None = None
     readiness: dict[str, Any] | None = None
     if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
         authorization_audit = _resolve_authorization_audit(

@@ -129,6 +129,92 @@ def test_promotion_authorization_lineage_is_optional_typed_and_rehashed(
         load_served_model(path)
 
 
+def test_promotion_authorization_lineage_v2_is_typed_and_counted(
+    tmp_path: Path,
+) -> None:
+    path = _copy_fixture(tmp_path)
+    entries = []
+    specs = [
+        ("implementation_ready_current", "implementation_ready", None, "a" * 40),
+        ("capture_implementation_no_go", "implementation_no_go", None, "b" * 40),
+        ("capture_implementation_no_go", "implementation_no_go", None, "c" * 40),
+        ("actual_failure", "actual_failed", "1", "d" * 40),
+        ("actual_failure", "actual_failed", "2", "e" * 40),
+        ("actual_failure", "actual_failed", "3", "f" * 40),
+        ("restore_implementation_no_go", "implementation_no_go", "4", "1" * 40),
+    ]
+    for sequence, (relation, status, request_digit, commit) in enumerate(specs):
+        request_id = (
+            "sq8-promotion-" + request_digit * 64
+            if request_digit is not None else None
+        )
+        if relation == "actual_failure":
+            receipt = {
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+                "status": status, "request_id": request_id,
+                "source_commit": commit,
+                "actual": {"status": "failed", "request_id": request_id},
+            }
+        else:
+            receipt = {
+                "schema_version": (
+                    "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+                    if relation == "restore_implementation_no_go"
+                    else "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+                ),
+                "verdict": status, "actual": "not_executed",
+                "audited_source": {"commit": commit},
+            }
+        receipt_path = (tmp_path / f"lineage-entry-{sequence}.json").resolve()
+        receipt_path.write_text(json.dumps(receipt) + "\n", encoding="ascii")
+        receipt_path.chmod(0o444)
+        entries.append(
+            {
+                "sequence": sequence, "relation": relation,
+                "path": str(receipt_path), "sha256": _sha256(receipt_path),
+                "schema_version": receipt["schema_version"], "status": status,
+                "request_id": request_id, "source_commit": commit,
+            }
+        )
+    lineage = {
+        "schema_version": "ullm.sq8_authorization_lineage_input.v2",
+        "disposition": "authorization_input_not_yet_runtime_bound",
+        "source": {
+            "commit": "a" * 40, "tree_oid": "2" * 40,
+            "archive_sha256": "3" * 64,
+        },
+        "predecessor": None,
+        "entries": entries,
+    }
+    input_path = (tmp_path / "lineage-v2-input.json").resolve()
+    runtime_path = (tmp_path / "lineage-v2-runtime.json").resolve()
+    for lineage_path in (input_path, runtime_path):
+        lineage_path.write_text(json.dumps(lineage) + "\n", encoding="ascii")
+        lineage_path.chmod(0o444)
+    entries_sha256 = hashlib.sha256(
+        json.dumps(
+            entries, ensure_ascii=True, allow_nan=False,
+            separators=(",", ":"), sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+    value = _document(path)
+    value["promotion"]["authorization_lineage"] = {
+        "schema_version": "ullm.sq8_authorization_lineage_ref.v2",
+        "input_path": str(input_path), "runtime_path": str(runtime_path),
+        "sha256": _sha256(input_path), "entries_sha256": entries_sha256,
+        "entry_count": 7,
+        "current_implementation_audit": {
+            "path": entries[0]["path"], "sha256": entries[0]["sha256"]
+        },
+    }
+    _write(path, value)
+    loaded = load_served_model(path)
+    identity = loaded.promotion.authorization_lineage
+    assert identity is not None
+    assert identity.schema_version == "ullm.sq8_authorization_lineage_ref.v2"
+    assert identity.entry_count == 7
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
