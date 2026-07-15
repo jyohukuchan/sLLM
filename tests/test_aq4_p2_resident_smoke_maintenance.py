@@ -1553,6 +1553,133 @@ def test_default_profile_cleanup_state_controls_lock_substrate_unlink(
     assert evidence["capture"]["diagnostics"]["runner_finished"] is False
 
 
+@pytest.mark.parametrize("raw_mode", ("schema-rejected", "malicious-cleanup-safe"))
+def test_unvalidated_launcher_profile_outcome_never_authorizes_lock_unlink_and_still_restores(
+    tmp_path: Path,
+    raw_mode: str,
+) -> None:
+    runtime = FakeRuntime()
+    substrate = HARNESS.LockSubstrate(
+        tmp_path / "lock-dir",
+        tmp_path / "lock-dir/device.lock",
+        (7, 8),
+        (1, 2),
+        {"passed": True},
+    )
+    cleanup_calls: list[dict] = []
+
+    def stopped(old_worker_pid, old_service_pid, run, control):
+        value = runtime.stopped(old_worker_pid, old_service_pid, run, control)
+        value["lock"].update({
+            "source": "trusted_substrate",
+            "substrate": {
+                "directory": {"device": 7, "inode": 8},
+                "lock": {"device": 1, "inode": 2},
+            },
+        })
+        return value
+
+    def rejecting_launcher(binding, *, profile_runner_executor):
+        del binding
+        target = {
+            "path": str(tmp_path / "target-command-manifest.json"),
+            "sha256": "a" * 64,
+            "manifest_sha256": "b" * 64,
+            "identity": [1, 2, 3, 4, 1, 5, 6],
+        }
+        outcome = profile_runner_executor(
+            ["/fake/runner", "profile"],
+            dict(HARNESS.LAUNCHER.EXECUTE_ENV),
+            lambda: None,
+            target,
+        )
+        raw_capture = outcome["profile_capture"]
+        raw_capture["unknown_schema_field"] = True
+        if raw_mode == "malicious-cleanup-safe":
+            raw_capture["cleanup_passed"] = True
+            raw_capture["children_state_known"] = True
+            raw_capture["children_remaining"] = []
+            outcome["profile_diagnostics"]["runner_finished"] = True
+        else:
+            raw_capture["cleanup_passed"] = False
+            raw_capture["children_state_known"] = False
+            raw_capture["children_remaining"] = [4242]
+            outcome["profile_diagnostics"]["runner_finished"] = False
+        return 1, {
+            "status": "failed",
+            "safety": {
+                "gpu_command_executed": "unknown",
+                "model_load_executed": "unknown",
+            },
+            "failure": {
+                "reason": "profile capture summary schema differs",
+                "runner_started": True,
+            },
+            # The launcher rejected the callback result and deliberately did
+            # not persist profile_capture/profile_diagnostics as evidence.
+        }
+
+    def cleanup(value, run, *, runner_finished, runner_children):
+        cleanup_calls.append({
+            "runner_finished": runner_finished,
+            "runner_children": runner_children,
+        })
+        raise AssertionError("unvalidated profile state must not reach lock cleanup")
+
+    dependencies = replace(
+        runtime.dependencies(),
+        stopped_observation=stopped,
+        launcher_execute=rejecting_launcher,
+        lock_substrate_prepare=lambda run: substrate,
+        lock_substrate_cleanup=cleanup,
+    )
+    code, evidence = HARNESS.execute_maintenance(
+        profile_ready(tmp_path),
+        tmp_path / f"unvalidated-{raw_mode}",
+        dependencies,
+    )
+
+    assert code == 1 and evidence["status"] == "failed"
+    assert cleanup_calls == []
+    assert evidence["launcher"]["profile_lifecycle_evidence_validated"] is False
+    for key in (
+        "runner_finished",
+        "runner_not_started",
+        "runner_started",
+        "children_state_known",
+        "children_remaining",
+        "cleanup_passed",
+    ):
+        assert evidence["launcher"][key] == HARNESS.UNKNOWN_LIFECYCLE_STATE
+    assert evidence["lock_substrate_cleanup"] == {
+        "passed": False,
+        "attempted": False,
+        "reason": "trusted lock substrate retained because launcher profile lifecycle evidence is unverified",
+        "runner_finished": HARNESS.UNKNOWN_LIFECYCLE_STATE,
+        "runner_children": HARNESS.UNKNOWN_LIFECYCLE_STATE,
+        "secret_material_recorded": False,
+    }
+    assert evidence["capture"]["authority"] == "diagnostic_only_unvalidated"
+    assert evidence["capture"]["raw_profile_capture"]["cleanup_passed"] is (raw_mode == "malicious-cleanup-safe")
+    assert evidence["capture"]["raw_profile_capture"]["children_remaining"] == ([] if raw_mode == "malicious-cleanup-safe" else [4242])
+    for key in (
+        "rocprof_started",
+        "runner_start_known",
+        "runner_started",
+        "runner_completed",
+        "runner_finished",
+        "timed_out",
+        "children_state_known",
+        "children_remaining",
+        "cleanup_passed",
+    ):
+        assert evidence["capture"][key] == HARNESS.UNKNOWN_LIFECYCLE_STATE
+    assert evidence["restore"]["attempted"] is True
+    assert evidence["restore"]["passed"] is True
+    assert evidence["restore"]["lock_substrate_cleanup_passed"] is False
+    assert runtime.active is True and runtime.epoch == 1
+
+
 def test_profile_fake_maintenance_captures_child_then_restores(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     code, evidence = HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "profile-maintenance", runtime.dependencies())

@@ -126,6 +126,7 @@ INSTALL = Path("/usr/bin/install")
 INSTALL_SHA = "0e328ae109217200da3207ece12514b867d44fb90b444958b4d64b6007736f33"
 RMDIR = Path("/usr/bin/rmdir")
 RMDIR_SHA = "2450cf2f4eaad71378cfdc6ac6da5cd6b40a6aa772766ae9040d32bf2ee45193"
+UNKNOWN_LIFECYCLE_STATE = "unknown"
 
 
 class HarnessError(ValueError):
@@ -3103,7 +3104,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
         trust_records = []
     output.mkdir(mode=0o700)
     evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "package_integrity": {}, "pre_stop": None, "stopped_gates": None, "stopped_gate_poll": None, "lock_substrate": None, "lock_substrate_cleanup": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
-    stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; package_before: PackageTreeSnapshot | None = None; substrate: LockSubstrate | None = None; runner_finished = False; runner_not_started = False; runner_evidence: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
+    stop_attempted = False; capture_attempted = False; profile_lifecycle_validated = False; pre: dict[str, Any] | None = None; package_before: PackageTreeSnapshot | None = None; substrate: LockSubstrate | None = None; runner_finished = False; runner_not_started = False; runner_evidence: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
         stage = "pre-stop-package-integrity"; package_before = capture_package_integrity(dependencies, evidence["package_integrity"], expected_package_integrity)
@@ -3185,28 +3186,49 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             raise
         capture_summary = launcher_evidence.get("profile_capture") if profile_diagnostic else None
         profile_diagnostics = launcher_evidence.get("profile_diagnostics") if profile_diagnostic else None
-        if profile_diagnostic and isinstance(profile_outcome, dict):
-            if not isinstance(capture_summary, dict):
-                capture_summary = profile_outcome.get("profile_capture")
-            if not isinstance(profile_diagnostics, dict):
-                profile_diagnostics = profile_outcome.get("profile_diagnostics")
-        if isinstance(capture_summary, dict) and isinstance(profile_diagnostics, dict):
+        profile_lifecycle_validated = (
+            profile_diagnostic
+            and isinstance(capture_summary, dict)
+            and isinstance(profile_diagnostics, dict)
+        )
+        unverified_profile_outcome = profile_diagnostic and capture_attempted and not profile_lifecycle_validated
+        if profile_lifecycle_validated:
             runner_finished = profile_diagnostics.get("runner_finished") is True
             runner_not_started = (
                 capture_summary.get("rocprof_started") is False
                 and capture_summary.get("runner_started") is False
             )
-        capture_children = capture_summary.get("children_remaining", []) if isinstance(capture_summary, dict) else []
+        elif unverified_profile_outcome:
+            # The callback result is visible to maintenance before the launcher
+            # validates it.  It is diagnostic input only: lifecycle and cleanup
+            # authority comes exclusively from the launcher evidence.
+            runner_finished = False
+            runner_not_started = False
+        capture_children: list[int] | str
+        if profile_lifecycle_validated:
+            capture_children = capture_summary.get("children_remaining", [])
+        elif unverified_profile_outcome:
+            capture_children = UNKNOWN_LIFECYCLE_STATE
+        else:
+            capture_children = []
+        launcher_children = launcher_evidence.get("children_remaining", [])
+        recorded_children = (
+            UNKNOWN_LIFECYCLE_STATE
+            if unverified_profile_outcome
+            else capture_children or launcher_children
+        )
         evidence["launcher"] = {
             "code": launcher_code,
             "status": launcher_evidence.get("status"),
             "safety": launcher_evidence.get("safety"),
             "failure": launcher_evidence.get("failure"),
-            "children_remaining": capture_children or launcher_evidence.get("children_remaining", []),
-            "children_state_known": capture_summary.get("children_state_known") if isinstance(capture_summary, dict) else None,
-            "cleanup_passed": capture_summary.get("cleanup_passed") if isinstance(capture_summary, dict) else None,
-            "runner_finished": runner_finished,
-            "runner_not_started": runner_not_started,
+            "children_remaining": recorded_children,
+            "children_state_known": UNKNOWN_LIFECYCLE_STATE if unverified_profile_outcome else capture_summary.get("children_state_known") if isinstance(capture_summary, dict) else None,
+            "cleanup_passed": UNKNOWN_LIFECYCLE_STATE if unverified_profile_outcome else capture_summary.get("cleanup_passed") if isinstance(capture_summary, dict) else None,
+            "runner_started": UNKNOWN_LIFECYCLE_STATE if unverified_profile_outcome else capture_summary.get("runner_started") if isinstance(capture_summary, dict) else None,
+            "runner_finished": UNKNOWN_LIFECYCLE_STATE if unverified_profile_outcome else runner_finished,
+            "runner_not_started": UNKNOWN_LIFECYCLE_STATE if unverified_profile_outcome else runner_not_started,
+            "profile_lifecycle_evidence_validated": profile_lifecycle_validated if profile_diagnostic else None,
             "sequence": launcher_evidence.get("sequence"),
             "profile_runner_target": launcher_evidence.get("profile_runner_target"),
             "profile_capture": capture_summary,
@@ -3225,7 +3247,23 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                     "stderr_sha256": sha_bytes(completed.stderr),
                     **(capture_summary if isinstance(capture_summary, dict) else {}),
                     "diagnostics": profile_diagnostics,
+                    "launcher_evidence_validated": profile_lifecycle_validated,
                 }
+                if unverified_profile_outcome:
+                    evidence["capture"].update({
+                        "authority": "diagnostic_only_unvalidated",
+                        "rocprof_started": UNKNOWN_LIFECYCLE_STATE,
+                        "runner_start_known": UNKNOWN_LIFECYCLE_STATE,
+                        "runner_started": UNKNOWN_LIFECYCLE_STATE,
+                        "runner_completed": UNKNOWN_LIFECYCLE_STATE,
+                        "runner_finished": UNKNOWN_LIFECYCLE_STATE,
+                        "timed_out": UNKNOWN_LIFECYCLE_STATE,
+                        "children_state_known": UNKNOWN_LIFECYCLE_STATE,
+                        "children_remaining": UNKNOWN_LIFECYCLE_STATE,
+                        "cleanup_passed": UNKNOWN_LIFECYCLE_STATE,
+                        "raw_profile_capture": profile_outcome.get("profile_capture"),
+                        "raw_profile_diagnostics": profile_outcome.get("profile_diagnostics"),
+                    })
         if launcher_code != 0 or launcher_evidence.get("status") != "passed":
             raise HarnessError("immutable launcher failed")
         code = 0
@@ -3237,53 +3275,70 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             restore_error: str | None = None; post: dict[str, Any] | None = None
             cleanup_error: str | None = None
             if substrate is not None:
-                try:
-                    children = []
-                    if isinstance(runner_evidence, dict):
-                        for key in ("children_remaining", "child_pids", "children"):
-                            value_children = runner_evidence.get(key)
-                            if isinstance(value_children, list):
-                                children.extend(value_children)
-                    profile_cleanup_safe = (
-                        not capture_attempted
-                        or (
-                            isinstance(runner_evidence, dict)
-                            and runner_evidence.get("cleanup_passed") is True
-                            and runner_evidence.get("children_state_known") is True
-                            and children == []
-                        )
-                    ) if profile_diagnostic else runner_finished or runner_not_started
-                    if not profile_cleanup_safe and not children:
-                        # A failed/aborted runner has no trustworthy child
-                        # inventory.  Keep the service stopped only long
-                        # enough to record cleanup failure; never unlink a
-                        # substrate while an unknown child may still hold it.
-                        children = [-1]
-                    cleanup_runner_finished = runner_finished or (profile_diagnostic and profile_cleanup_safe)
-                    cleanup = (
-                        dependencies.lock_substrate_cleanup(
-                            substrate,
-                            dependencies.run,
-                            runner_finished=cleanup_runner_finished,
-                            runner_children=children,
-                        )
-                        if dependencies.lock_substrate_cleanup is not None
-                        else cleanup_lock_substrate(
-                            substrate,
-                            dependencies.run,
-                            runner_finished=cleanup_runner_finished,
-                            runner_children=children,
-                        )
-                    )
-                    if not isinstance(cleanup, dict) or cleanup.get("passed") is not True or cleanup.get("secret_material_recorded") is not False:
-                        raise HarnessError("trusted lock substrate cleanup contract differs")
-                    evidence["lock_substrate_cleanup"] = cleanup
-                    evidence["process_counts"]["lock_substrate_rmdir"] = 1
-                except Exception as error:
-                    cleanup_error = str(error)
-                    evidence["lock_substrate_cleanup"] = {"passed": False, "error": cleanup_error, "secret_material_recorded": False}
-                    evidence["failure"] = {"stage": "lock-substrate-cleanup", "reason": cleanup_error, "launcher_started": evidence["process_counts"]["launcher"] == 1}
+                if profile_diagnostic and capture_attempted and not profile_lifecycle_validated:
+                    cleanup_error = "trusted lock substrate retained because launcher profile lifecycle evidence is unverified"
+                    evidence["lock_substrate_cleanup"] = {
+                        "passed": False,
+                        "attempted": False,
+                        "reason": cleanup_error,
+                        "runner_finished": UNKNOWN_LIFECYCLE_STATE,
+                        "runner_children": UNKNOWN_LIFECYCLE_STATE,
+                        "secret_material_recorded": False,
+                    }
+                    evidence["failure"] = {
+                        "stage": "lock-substrate-cleanup",
+                        "reason": cleanup_error,
+                        "launcher_started": evidence["process_counts"]["launcher"] == 1,
+                    }
                     code = 1
+                else:
+                    try:
+                        children = []
+                        if isinstance(runner_evidence, dict):
+                            for key in ("children_remaining", "child_pids", "children"):
+                                value_children = runner_evidence.get(key)
+                                if isinstance(value_children, list):
+                                    children.extend(value_children)
+                        profile_cleanup_safe = (
+                            not capture_attempted
+                            or (
+                                isinstance(runner_evidence, dict)
+                                and runner_evidence.get("cleanup_passed") is True
+                                and runner_evidence.get("children_state_known") is True
+                                and children == []
+                            )
+                        ) if profile_diagnostic else runner_finished or runner_not_started
+                        if not profile_cleanup_safe and not children:
+                            # A failed/aborted runner has no trustworthy child
+                            # inventory.  Keep the service stopped only long
+                            # enough to record cleanup failure; never unlink a
+                            # substrate while an unknown child may still hold it.
+                            children = [-1]
+                        cleanup_runner_finished = runner_finished or (profile_diagnostic and profile_cleanup_safe)
+                        cleanup = (
+                            dependencies.lock_substrate_cleanup(
+                                substrate,
+                                dependencies.run,
+                                runner_finished=cleanup_runner_finished,
+                                runner_children=children,
+                            )
+                            if dependencies.lock_substrate_cleanup is not None
+                            else cleanup_lock_substrate(
+                                substrate,
+                                dependencies.run,
+                                runner_finished=cleanup_runner_finished,
+                                runner_children=children,
+                            )
+                        )
+                        if not isinstance(cleanup, dict) or cleanup.get("passed") is not True or cleanup.get("secret_material_recorded") is not False:
+                            raise HarnessError("trusted lock substrate cleanup contract differs")
+                        evidence["lock_substrate_cleanup"] = cleanup
+                        evidence["process_counts"]["lock_substrate_rmdir"] = 1
+                    except Exception as error:
+                        cleanup_error = str(error)
+                        evidence["lock_substrate_cleanup"] = {"passed": False, "error": cleanup_error, "secret_material_recorded": False}
+                        evidence["failure"] = {"stage": "lock-substrate-cleanup", "reason": cleanup_error, "launcher_started": evidence["process_counts"]["launcher"] == 1}
+                        code = 1
             restore_started_ns = dependencies.monotonic_ns()
             restore_state: dict[str, Any] = {
                 "attempted": True,
