@@ -142,6 +142,24 @@
       },
       "sha256": "e78b3cd5696839b16c8ef3b6830f0e199a4cdf7338f349253ef537b6289bf64a"
     },
+    "runtime input sidecar": {
+      "canonical_path": "/tmp/ultimateLLM-candidate1/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/runtime-input.jsonl",
+      "post_stat": {
+        "ctime_ns": 1784079484881328594,
+        "device": 66306,
+        "inode": 160040123,
+        "mtime_ns": 1784079484873328155,
+        "size_bytes": 250573
+      },
+      "pre_stat": {
+        "ctime_ns": 1784079484881328594,
+        "device": 66306,
+        "inode": 160040123,
+        "mtime_ns": 1784079484873328155,
+        "size_bytes": 250573
+      },
+      "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+    },
     "source embedding safetensor": {
       "canonical_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00001-of-00004.safetensors",
       "post_stat": {
@@ -247,6 +265,11 @@
       "step": 0
     }
   ],
+  "gpu_comparison_tolerance": {
+    "abs_tol": 0.001,
+    "basis": "predeclared AQ4-vs-GPU probe bound; not a promotion threshold; any finite mismatch is no-go",
+    "relative_tol": 0.0001
+  },
   "gpu_tensor_output_identity_contract": {
     "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
     "device": {
@@ -262,7 +285,7 @@
     "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
   },
   "group_size": 16,
-  "input_bindings_sha256": "9b88a0458e5f59499b06fbf7674d100d8465027e8c45407428efb75a6644c6c1",
+  "input_bindings_sha256": "e103f43b0c16444026a38c58eb2744f15ae431f915b8dcecdbb1f4d6ff83ac68",
   "input_contract": "source embedding row + effective layer-0 additive RMSNorm (raw BF16 weight + 1.0_f32; epsilon=1e-6_f32)",
   "input_norm_identity": {
     "effective_values_f32le_sha256": "d89b480c2fdae928d834461763aec25f4b55b341171d91d0fe5bc342ea76a554",
@@ -303,6 +326,7 @@
     "tensor_scale_f32": 0.02284233272075653,
     "tensor_scale_f32_bits_hex": "0x3cbb1fd8"
   },
+  "promotion_eligible": false,
   "reason": "attempt-3 trace has stage samples only; qkv tensor-level GPU output is absent",
   "required_gpu_tensor_output_schema": "ullm.aq4_layer0_matvec_tensor_output.v1",
   "rows": [
@@ -310,25 +334,25 @@
       "case_id": "fixture-prompt-0",
       "classification": "inconclusive_missing_gpu_tensor_output",
       "cpu_formula_vs_f32_reference": {
-        "bit_mismatch_count": 7924,
-        "bit_mismatch_rate": 0.96728515625,
-        "cosine": 0.9999999999996685,
+        "bit_mismatch_count": 7925,
+        "bit_mismatch_rate": 0.9674072265625,
+        "cosine": 0.9999999999996674,
         "finite": true,
-        "max_abs": 5.5977649417116027e-05,
-        "relative_l2": 8.144967302690075e-07
+        "max_abs": 5.570953268829726e-05,
+        "relative_l2": 8.159218994691679e-07
       },
       "cpu_vs_source": {
         "bit_mismatch_count": 8192,
         "bit_mismatch_rate": 1.0,
-        "cosine": 0.9997431678041715,
+        "cosine": 0.9997431678048342,
         "finite": true,
-        "max_abs": 0.8781851392273907,
-        "relative_l2": 0.023454233388572308
+        "max_abs": 0.8781851279487469,
+        "relative_l2": 0.023454233366280768
       },
       "input_binding": {
         "context_length": 3,
         "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
-        "input_sha256": "9368ece229ba27eee37faf7b917e3be829d2cdca9e03b62ca45f87206ab01495",
+        "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
         "token_id": 13
       },
       "runtime_cpu_f32_api_invoked": false,
@@ -340,25 +364,25 @@
       "case_id": "fixture-prompt-0",
       "classification": "inconclusive_missing_gpu_tensor_output",
       "cpu_formula_vs_f32_reference": {
-        "bit_mismatch_count": 7934,
-        "bit_mismatch_rate": 0.968505859375,
-        "cosine": 0.9999999999996859,
+        "bit_mismatch_count": 7928,
+        "bit_mismatch_rate": 0.9677734375,
+        "cosine": 0.9999999999996867,
         "finite": true,
-        "max_abs": 4.47916318861985e-05,
-        "relative_l2": 7.926230900570525e-07
+        "max_abs": 4.514357045692918e-05,
+        "relative_l2": 7.915081438708638e-07
       },
       "cpu_vs_source": {
         "bit_mismatch_count": 8192,
         "bit_mismatch_rate": 1.0,
-        "cosine": 0.999640887668662,
+        "cosine": 0.9996408876598419,
         "finite": true,
-        "max_abs": 0.7104448171033688,
-        "relative_l2": 0.027357358338349246
+        "max_abs": 0.7104448201580809,
+        "relative_l2": 0.027357358653161534
       },
       "input_binding": {
         "context_length": 4,
         "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
-        "input_sha256": "69bb7369c4f6919aa98565c9550dac0efb612df371535489014fc1def6e956de",
+        "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
         "token_id": 220
       },
       "runtime_cpu_f32_api_invoked": false,
@@ -370,25 +394,25 @@
       "case_id": "fixture-prompt-1",
       "classification": "inconclusive_missing_gpu_tensor_output",
       "cpu_formula_vs_f32_reference": {
-        "bit_mismatch_count": 7960,
-        "bit_mismatch_rate": 0.9716796875,
-        "cosine": 0.999999999999478,
+        "bit_mismatch_count": 7953,
+        "bit_mismatch_rate": 0.9708251953125,
+        "cosine": 0.9999999999994712,
         "finite": true,
-        "max_abs": 5.3692734372390305e-05,
-        "relative_l2": 1.0262270373589998e-06
+        "max_abs": 5.742374122164051e-05,
+        "relative_l2": 1.032638137857442e-06
       },
       "cpu_vs_source": {
         "bit_mismatch_count": 8192,
         "bit_mismatch_rate": 1.0,
-        "cosine": 0.9996522815600432,
+        "cosine": 0.9996522815642185,
         "finite": true,
-        "max_abs": 0.8944544453944836,
-        "relative_l2": 0.02681331368479369
+        "max_abs": 0.8944544301833943,
+        "relative_l2": 0.026813313527567727
       },
       "input_binding": {
         "context_length": 2,
         "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
-        "input_sha256": "f13653e64241d97d48b9e071b72e42e92675830aad3a28f0c6202cfd7b2bafc1",
+        "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
         "token_id": 22
       },
       "runtime_cpu_f32_api_invoked": false,
@@ -397,6 +421,12 @@
       "step": 0
     }
   ],
+  "runtime_input_sidecar": {
+    "canonical_path": "/tmp/ultimateLLM-candidate1/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/runtime-input.jsonl",
+    "rows": 3,
+    "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
+    "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+  },
   "schema_version": "ullm.aq4_layer0_matvec_oracle.v1",
   "source_canonical_root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
   "source_trace_manifest_sha256": "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692",

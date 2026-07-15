@@ -71,9 +71,8 @@ def test_runtime_identity_f32_encodings_are_explicit() -> None:
 
 
 def test_rmsnorm_f32_uses_sequential_f32_operations() -> None:
-    values = ORACLE.rmsnorm_f32_input([1.0, 2.0, 3.0], [1.0, 0.5, -1.0], 1.0e-6)
-    assert all(struct.pack("<f", value) == struct.pack("<f", value) for value in values)
-    assert values == pytest.approx([0.4629099965, 0.4629099965, -1.3887300491], rel=1e-7)
+    values = ORACLE.rmsnorm_f32_input([1.1, 2.2, 3.3], [1.111, 2.222, 3.333], 1.0e-6)
+    assert [f"{struct.unpack('<I', struct.pack('<f', value))[0]:08x}" for value in values] == ["3f03a8b5", "4003a8b5", "40941dcc"]
 
 
 def test_canonical_package_payload_rejects_escape(tmp_path: Path) -> None:
@@ -129,8 +128,20 @@ def test_gpu_output_identity_mismatch_is_rejected(tmp_path: Path) -> None:
         ORACLE._load_tensor_outputs(path, {"name": ORACLE.DEFAULT_TENSOR}, expected)
 
 
+def test_runtime_input_sidecar_is_atomic_and_probe_compatible(tmp_path: Path) -> None:
+    vectors = {key: [float(index) for index in range(4096)] for key in ORACLE.EXPECTED_ROWS}
+    bindings = {key: {"context_token_ids_sha256": "a" * 64, "context_length": 2, "input_sha256": ORACLE.vector_sha(vectors[key])} for key in ORACLE.EXPECTED_ROWS}
+    path = tmp_path / "input.jsonl"
+    identity = ORACLE.emit_runtime_input_jsonl(path, vectors, bindings)
+    assert identity["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    header = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert header == {"dtype": "f32", "kind": "header", "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1", "shape": [4096], "tensor_name": ORACLE.DEFAULT_TENSOR}
+    with pytest.raises(ORACLE.OracleError, match="refusing to overwrite"):
+        ORACLE.emit_runtime_input_jsonl(path, vectors, bindings)
+
+
 def test_candidate1_evidence_is_fail_closed_and_identity_bound() -> None:
-    report_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/report-v6.json"
+    report_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/report-v7.json"
     report = __import__("json").loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "blocked_missing_gpu_tensor_output"
     assert report["classification"] == "inconclusive_missing_gpu_tensor_output"
@@ -142,6 +153,9 @@ def test_candidate1_evidence_is_fail_closed_and_identity_bound() -> None:
     assert report["cpu_f32_reference_contract"]["bit_exact_required"] is False
     assert report["file_identities"]["package manifest"]["sha256"] == report["package_manifest_sha256"]
     assert report["gpu_tensor_output_identity_contract"]["effective_rpb"] == {"rows_per_block": 4, "threads_per_row": 64}
+    assert report["runtime_input_sidecar"]["sha256"] == "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+    assert report["gpu_comparison_tolerance"]["abs_tol"] == 1.0e-3
+    assert report["promotion_eligible"] is False
     for row in report["rows"]:
         assert "cosine" in row["cpu_vs_source"]
         assert "bit_mismatch_count" in row["cpu_formula_vs_f32_reference"]

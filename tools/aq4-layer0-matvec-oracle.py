@@ -33,6 +33,10 @@ DEFAULT_SOURCE_TRACE_SHA = "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463b
 DEFAULT_GPU_OPERATION = "fused_qkv_aq4_matvec"
 DEFAULT_GPU_RPB_ROWS = 4
 DEFAULT_GPU_THREADS_PER_ROW = 64
+MAX_TRACE_ROWS = 4096
+MAX_GPU_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_GPU_OUTPUT_ROWS = 4096
+MAX_GPU_ROW_ELEMENTS = 8192
 EXPECTED_ROWS = (("fixture-prompt-0", 0), ("fixture-prompt-0", 1), ("fixture-prompt-1", 0))
 F32 = struct.Struct("<f")
 _AUDIT_SPEC = importlib.util.spec_from_file_location("aq4_input_controls", Path(__file__).with_name("audit_aq4_p2_input_controls.py"))
@@ -167,17 +171,6 @@ def scale_values_e4m3() -> tuple[float, ...]:
     return tuple(sorted(values))
 
 
-def _safe_relative(root: Path, value: Any, label: str) -> Path:
-    if not isinstance(value, str) or not value or Path(value).is_absolute():
-        raise OracleError(f"{label} must be a relative path")
-    path = (root / value).resolve()
-    if root.resolve() not in path.parents:
-        raise OracleError(f"{label} escapes root")
-    if path.is_symlink() or not path.is_file():
-        raise OracleError(f"{label} must be a regular file")
-    return path
-
-
 class SafeTensorReader:
     def __init__(self, path: Path):
         self.path = path
@@ -258,7 +251,7 @@ def _load_trace(root: Path, expected_package_sha: str | None, expected_active_sh
     manifest_path = _canonical_file(root / "manifest.json", "trace manifest", root=root)
     payload = _canonical_file(root / "payload.jsonl", "trace payload", root=root)
     manifest = read_json(manifest_path)
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != TRACE_SCHEMA or manifest.get("rows") != 3:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != TRACE_SCHEMA or type(manifest.get("rows")) is not int or manifest.get("rows") != 3:
         raise OracleError("differential trace manifest schema/row count differs")
     identity = manifest.get("identity")
     if expected_package_sha is not None or expected_active_sha is not None:
@@ -285,6 +278,8 @@ def _load_trace(root: Path, expected_package_sha: str | None, expected_active_sh
             if key in rows:
                 raise OracleError(f"duplicate differential trace row: {key}")
             rows[key] = value
+            if len(rows) > MAX_TRACE_ROWS:
+                raise OracleError(f"differential trace rows exceed bound {MAX_TRACE_ROWS}")
     if set(rows) != set(EXPECTED_ROWS):
         raise OracleError("differential trace case set differs")
     return manifest, rows
@@ -453,7 +448,9 @@ def rmsnorm_f32_input(embedding: list[float], norm: list[float], epsilon: float)
     variance = _f32(mean_square + epsilon)
     rms = _f32(math.sqrt(variance))
     scale = _f32(_f32(1.0) / rms)
-    return [finite(_f32(_f32(_f32(value) * _f32(norm[index])) * scale), "layer-0 input_normed") for index, value in enumerate(embedding)]
+    # The host runtime computes f32(input * inv_rms), then f32(result * weight).
+    # Keep this order: input * weight * inv_rms differs by an observable ULP.
+    return [finite(_f32(_f32(_f32(value) * scale) * _f32(norm[index])), "layer-0 input_normed") for index, value in enumerate(embedding)]
 
 
 def _build_input_normed(package_manifest: dict[str, Any], cases_path: Path, source_rows: dict[tuple[str, int], dict[str, Any]], source_paths: dict[str, Path]) -> tuple[dict[tuple[str, int], list[float]], dict[tuple[str, int], dict[str, Any]], dict[str, Any]]:
@@ -539,6 +536,62 @@ def input_bindings_sha(bindings: dict[tuple[str, int], dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def emit_runtime_input_jsonl(path: Path, vectors: dict[tuple[str, int], list[float]], bindings: dict[tuple[str, int], dict[str, Any]]) -> dict[str, Any]:
+    if os.path.lexists(path):
+        raise OracleError(f"refusing to overwrite runtime input sidecar: {path}")
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if parent.is_symlink() or not parent.is_dir():
+        raise OracleError(f"runtime input sidecar parent must be a regular directory: {parent}")
+    parent = parent.resolve()
+    final_path = parent / path.name
+    if os.path.lexists(final_path):
+        raise OracleError(f"refusing to overwrite runtime input sidecar: {final_path}")
+    temp_path = parent / f".{path.name}.tmp-{os.getpid()}"
+    if os.path.lexists(temp_path):
+        raise OracleError(f"runtime input sidecar temporary path already exists: {temp_path}")
+    header = {
+        "kind": "header",
+        "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
+        "tensor_name": DEFAULT_TENSOR,
+        "dtype": "f32",
+        "shape": [4096],
+    }
+    try:
+        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(header, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
+            for case_id, step in EXPECTED_ROWS:
+                values = vectors[(case_id, step)]
+                binding = bindings[(case_id, step)]
+                row = {
+                    "kind": "case",
+                    "case_id": case_id,
+                    "step": step,
+                    "context_token_ids_sha256": binding["context_token_ids_sha256"],
+                    "context_length": binding["context_length"],
+                    "input_sha256": binding["input_sha256"],
+                    "values": [finite(value, "runtime input value") for value in values],
+                }
+                handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_path, final_path)
+        except FileExistsError as error:
+            raise OracleError(f"refusing to overwrite runtime input sidecar: {final_path}") from error
+    except OSError as error:
+        raise OracleError(f"failed to emit runtime input sidecar {final_path}: {error}") from error
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise OracleError(f"failed to remove runtime input sidecar temporary file: {error}") from error
+    return _capture_file_identity(final_path, "runtime input sidecar")
+
+
 def compare_vectors(left: list[float], right: list[float]) -> dict[str, float | bool]:
     if len(left) != len(right):
         raise OracleError("comparison vector lengths differ")
@@ -562,6 +615,9 @@ def compare_vectors(left: list[float], right: list[float]) -> dict[str, float | 
 
 def _load_tensor_outputs(path: Path, item: dict[str, Any], expected_identity: dict[str, Any]) -> tuple[dict[tuple[str, int], list[float]], dict[str, Any]]:
     path = _canonical_file(path, "GPU tensor output")
+    output_size = path.stat().st_size
+    if output_size > MAX_GPU_OUTPUT_BYTES:
+        raise OracleError(f"GPU tensor output exceeds bounded JSON size {MAX_GPU_OUTPUT_BYTES}")
     value = read_json(path)
     if value.get("schema_version") != TENSOR_OUTPUT_SCHEMA or value.get("tensor_name") != item["name"]:
         raise OracleError("GPU tensor output schema/tensor differs")
@@ -584,12 +640,16 @@ def _load_tensor_outputs(path: Path, item: dict[str, Any], expected_identity: di
     rows = value.get("rows")
     if not isinstance(rows, list):
         raise OracleError("GPU tensor output rows are missing")
+    if len(rows) > MAX_GPU_OUTPUT_ROWS:
+        raise OracleError(f"GPU tensor output rows exceed bound {MAX_GPU_OUTPUT_ROWS}")
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("case_id"), str) or type(row.get("step")) is not int or not isinstance(row.get("values"), list):
             raise OracleError("tensor output row fields differ")
         key = (row["case_id"], row["step"])
         if key in loaded or key not in EXPECTED_ROWS:
             raise OracleError("tensor output case set differs")
+        if len(row["values"]) > MAX_GPU_ROW_ELEMENTS:
+            raise OracleError("GPU tensor output row exceeds bounded element count")
         loaded[key] = [finite(number, "tensor output") for number in row["values"]]
     if set(loaded) != set(EXPECTED_ROWS):
         raise OracleError("tensor output must contain all fixed attempt-3 cases")
@@ -610,8 +670,10 @@ def _assert_identities(identities: dict[str, Any]) -> None:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    if not isinstance(args.expected_gpu_operation, str) or not args.expected_gpu_operation or args.expected_gpu_rpb_rows <= 0 or args.expected_gpu_threads_per_row <= 0:
-        raise OracleError("GPU operation/RPB binding is invalid")
+    if args.expected_gpu_operation != DEFAULT_GPU_OPERATION or args.expected_gpu_rpb_rows != DEFAULT_GPU_RPB_ROWS or args.expected_gpu_threads_per_row != DEFAULT_GPU_THREADS_PER_ROW:
+        raise OracleError("GPU operation/RPB overrides are not approved; use the pinned qkv binding")
+    if not math.isfinite(args.abs_tol) or not math.isfinite(args.relative_tol) or args.abs_tol < 0.0 or args.relative_tol < 0.0:
+        raise OracleError("GPU comparison tolerances must be finite and non-negative")
     package_manifest, item, package_dir, package_sha, package_manifest_identity = _load_package(args.package_dir, args.tensor_name)
     if package_sha != args.expected_package_sha256:
         raise OracleError("package manifest SHA differs from pinned identity")
@@ -692,6 +754,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "operation": args.expected_gpu_operation,
             "effective_rpb": {"rows_per_block": args.expected_gpu_rpb_rows, "threads_per_row": args.expected_gpu_threads_per_row},
         },
+        "gpu_comparison_tolerance": {
+            "abs_tol": args.abs_tol,
+            "relative_tol": args.relative_tol,
+            "basis": "predeclared AQ4-vs-GPU probe bound; not a promotion threshold; any finite mismatch is no-go",
+        },
+        "promotion_eligible": False,
         "nonfinite_counts": {"input_vectors": 0, "cpu_outputs": 0, "runtime_cpu_outputs": 0, "source_outputs": 0},
         "payload_identity": {
             "source_tensor_sha256": source_tensor_reader.digest_tensor(item["name"]),
@@ -711,6 +779,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     inputs, input_bindings, norm_identity = _build_input_normed(package_manifest, cases_path, source_rows, source_paths)
     base["input_norm_identity"] = norm_identity
     base["input_bindings_sha256"] = input_bindings_sha(input_bindings)
+    if args.emit_runtime_input_jsonl:
+        sidecar_identity = emit_runtime_input_jsonl(args.emit_runtime_input_jsonl, inputs, input_bindings)
+        file_identities["runtime input sidecar"] = sidecar_identity
+        base["runtime_input_sidecar"] = {
+            "canonical_path": sidecar_identity["canonical_path"],
+            "sha256": sidecar_identity["sha256"],
+            "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
+            "rows": len(EXPECTED_ROWS),
+        }
     expected_gpu_identity = {
         "package_manifest_sha256": package_sha,
         "active_manifest_sha256": active_identity["active_manifest_sha256"],
@@ -734,6 +811,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             base["rows"] = []
             return base
     rows: list[dict[str, Any]] = []
+    gpu_numeric_mismatch = False
     for key in EXPECTED_ROWS:
         vector = inputs[key]
         cpu = dequant_matvec(package_dir, item, vector)
@@ -748,8 +826,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise OracleError(f"GPU output length differs: {key}")
             record["cpu_vs_gpu"] = compare_vectors(cpu, gpu)
             record["source_vs_gpu"] = compare_vectors(source, gpu)
+            record["gpu_output_sha256"] = vector_sha(gpu)
+            record["gpu_output_elements"] = len(gpu)
             close = record["cpu_vs_gpu"]["max_abs"] <= args.abs_tol and record["cpu_vs_gpu"]["relative_l2"] <= args.relative_tol
             record["classification"] = "expected_quantization" if close else "kernel_or_decode_bug"
+            gpu_numeric_mismatch = gpu_numeric_mismatch or not close
         else:
             record["classification"] = "inconclusive_missing_gpu_tensor_output"
         rows.append(record)
@@ -759,8 +840,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if gpu_outputs is None:
         base["reason"] = "attempt-3 trace has stage samples only; qkv tensor-level GPU output is absent"
     base["rows"] = rows
-    base["status"] = "valid" if gpu_outputs is not None else "blocked_missing_gpu_tensor_output"
-    base["classification"] = "expected_quantization" if gpu_outputs is not None and all(row["classification"] == "expected_quantization" for row in rows) else "kernel_or_decode_bug" if gpu_outputs is not None else "inconclusive_missing_gpu_tensor_output"
+    if gpu_outputs is None:
+        base["status"] = "blocked_missing_gpu_tensor_output"
+        base["classification"] = "inconclusive_missing_gpu_tensor_output"
+    elif gpu_numeric_mismatch:
+        base["status"] = "no_go_gpu_numeric_mismatch"
+        base["classification"] = "no_go_gpu_numeric_mismatch"
+        base["reason"] = "GPU tensor output contained finite values outside the predeclared abs/relative tolerance"
+    else:
+        base["status"] = "valid"
+        base["classification"] = "expected_quantization"
     return base
 
 
@@ -770,6 +859,7 @@ def main() -> int:
     parser.add_argument("--source-trace", type=Path, required=True)
     parser.add_argument("--gpu-trace", type=Path, required=True)
     parser.add_argument("--gpu-tensor-output", type=Path)
+    parser.add_argument("--emit-runtime-input-jsonl", type=Path)
     parser.add_argument("--tensor-name", default=DEFAULT_TENSOR)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-active-sha256", dest="expected_active_sha256", default=DEFAULT_ACTIVE_SHA)
