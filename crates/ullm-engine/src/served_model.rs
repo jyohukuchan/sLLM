@@ -306,7 +306,23 @@ impl ServedModel {
 pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
     let manifest_path = safe_regular_file(path.as_ref(), "served-model manifest")?;
     let raw = bounded_read(&manifest_path, MAX_MANIFEST_BYTES, "served-model manifest")?;
-    let value = decode_strict_json(&raw)?;
+    load_served_model_bytes(manifest_path, &raw)
+}
+
+/// Parses one already-pinned served-model manifest snapshot.
+///
+/// `manifest_path` is deliberately used only as the logical path recorded in the model and as
+/// the base for resolving manifest-relative resources. This entry point never opens the manifest
+/// path; callers that establish an inherited-FD trust boundary can therefore parse and hash the
+/// exact bytes read from that descriptor without a path fallback.
+pub fn load_served_model_bytes(manifest_path: impl AsRef<Path>, raw: &[u8]) -> Result<ServedModel> {
+    if raw.len() > MAX_MANIFEST_BYTES {
+        return Err(ServedModelError(
+            "served-model manifest exceeds its size limit".into(),
+        ));
+    }
+    let manifest_path = manifest_path.as_ref().to_path_buf();
+    let value = decode_strict_json(raw)?;
     validate_exact_shape(&value)?;
     let raw_manifest: RawManifest = serde_json::from_value(value)
         .map_err(|_| ServedModelError("manifest typed schema is invalid".into()))?;
@@ -362,7 +378,7 @@ pub fn load_served_model(path: impl AsRef<Path>) -> Result<ServedModel> {
     let promotion = parse_promotion(raw_manifest.promotion, base)?;
     Ok(ServedModel {
         manifest_path,
-        manifest_sha256: sha256_bytes(&raw),
+        manifest_sha256: sha256_bytes(raw),
         public,
         generation,
         format,

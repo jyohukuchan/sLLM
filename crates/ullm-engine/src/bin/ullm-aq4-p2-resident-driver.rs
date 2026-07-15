@@ -13,9 +13,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
+use std::ffi::c_int;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::fs::FileExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -31,7 +34,9 @@ use ullm_engine::qwen35_aq4_model_runtime::{
 use ullm_engine::qwen35_aq4_session::{
     QWEN35_AQ4_PREFILL_CHUNK_GRID, QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DIM,
 };
-use ullm_engine::served_model::{ServedModel, load_served_model};
+use ullm_engine::served_model::{
+    MAX_MANIFEST_BYTES, ServedModel, load_served_model, load_served_model_bytes,
+};
 
 const PROTOCOL: &str = "ullm.aq4_p2_resident_driver.v2";
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
@@ -43,6 +48,15 @@ const MAX_WORKER_RELEASE_DEPTH: usize = 8;
 const HASH_CHUNK_BYTES: usize = 1024 * 1024;
 const O_NOFOLLOW: i32 = 0o00400000;
 const O_CLOEXEC: i32 = 0o02000000;
+const FD_MAP_ENV: &str = "ULLM_AQ4_PINNED_FD_MAP";
+const FD_MAP_SCHEMA: &str = "ullm.aq4_p3_inherited_fd_map.v1";
+const FD_MAP_MAX_BYTES: usize = 1024 * 1024;
+const F_GET_SEALS: c_int = 1034;
+const F_SEAL_SEAL: c_int = 0x0001;
+const F_SEAL_SHRINK: c_int = 0x0002;
+const F_SEAL_GROW: c_int = 0x0004;
+const F_SEAL_WRITE: c_int = 0x0008;
+const REQUIRED_MEMFD_SEALS: c_int = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
 const WORKER_HARDLINK_FIXTURE_RAW: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json"
@@ -65,11 +79,81 @@ const PREFLIGHT_FIELDS: &[&str] = &[
     "gpu_process_snapshot",
 ];
 
+unsafe extern "C" {
+    #[link_name = "fcntl"]
+    fn c_fcntl(fd: c_int, command: c_int, ...) -> c_int;
+    #[link_name = "dup"]
+    fn c_dup(fd: c_int) -> c_int;
+}
+
 #[derive(Debug, Clone)]
 struct Args {
     served_model_manifest: PathBuf,
     device_index: u32,
     build_git_commit: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PinnedFileIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    nlink: u64,
+    size: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ServedModelBinding {
+    schema_version: String,
+    mode: String,
+    logical_path: String,
+    effective_source: String,
+    descriptor_transport: String,
+    closure: String,
+    method: String,
+    identity: PinnedFileIdentity,
+    sha256: String,
+    byte_count: u64,
+    single_read: bool,
+    logical_path_opened: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinnedFdClosureContract {
+    code_execution_closure: String,
+    control_input_closure: String,
+    device_lock_closure: String,
+    data_integrity: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinnedFdBinding {
+    role: String,
+    logical_path: String,
+    resolved_path: Option<String>,
+    descriptor: i32,
+    kind: String,
+    closure: String,
+    method: String,
+    identity: PinnedFileIdentity,
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinnedFdMapDocument {
+    schema_version: String,
+    status: String,
+    map_sha256: Option<String>,
+    logical_argv_sha256: String,
+    closure_contract: PinnedFdClosureContract,
+    bindings: Vec<PinnedFdBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -505,16 +589,23 @@ fn top_token(model: &mut Qwen35Aq4ModelRuntime, case_id: &str) -> Result<usize, 
 struct ResidentDriver<E> {
     session_id: String,
     identity: DriverIdentity,
+    served_model_binding: ServedModelBinding,
     executor: E,
     active: Option<ActiveCase>,
     seen_cases: BTreeSet<String>,
 }
 
 impl<E: ResidentExecutor> ResidentDriver<E> {
-    fn new(session_id: String, identity: DriverIdentity, executor: E) -> Self {
+    fn new(
+        session_id: String,
+        identity: DriverIdentity,
+        served_model_binding: ServedModelBinding,
+        executor: E,
+    ) -> Self {
         Self {
             session_id,
             identity,
+            served_model_binding,
             executor,
             active: None,
             seen_cases: BTreeSet::new(),
@@ -525,6 +616,7 @@ impl<E: ResidentExecutor> ResidentDriver<E> {
         json!({
             "event": "ready", "schema_version": PROTOCOL, "model_loads": 1,
             "resident_session_id": self.session_id, "driver_identity": self.identity,
+            "served_model_binding": self.served_model_binding,
         })
     }
 
@@ -1226,11 +1318,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    let (model, identity, package_dir, worker_guard) = startup(&args)?;
+    let (model, served_model_binding, identity, package_dir, worker_guard) = startup(&args)?;
     let executor = RealExecutor::load(&model, package_dir, args.device_index)?;
     worker_guard.verify(&model.worker.binary, &model.worker.binary_sha256)?;
     let session_id = session_id(&identity);
-    let mut driver = ResidentDriver::new(session_id, identity, executor);
+    let mut driver = ResidentDriver::new(session_id, identity, served_model_binding, executor);
     write_event(&driver.ready())?;
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -1321,7 +1413,16 @@ fn run(args: Args) -> Result<(), String> {
 
 fn startup(
     args: &Args,
-) -> Result<(ServedModel, DriverIdentity, PathBuf, WorkerHardlinkGuard), String> {
+) -> Result<
+    (
+        ServedModel,
+        ServedModelBinding,
+        DriverIdentity,
+        PathBuf,
+        WorkerHardlinkGuard,
+    ),
+    String,
+> {
     require_absolute_normal_path(&args.served_model_manifest, "served model manifest")?;
     if args.build_git_commit.len() != 40
         || !args
@@ -1331,14 +1432,10 @@ fn startup(
     {
         return Err("build git commit must be 40 lowercase hex characters".into());
     }
-    let model = load_served_model(&args.served_model_manifest)
-        .map_err(|error| format!("served model rejected: {error}"))?;
+    let (model, served_model_binding) =
+        load_startup_served_model(&args.served_model_manifest, env::var_os(FD_MAP_ENV))?;
     validate_model(&model)?;
     validate_required_environment(&model.worker.required_environment)?;
-    let served_sha = sha256_file(&args.served_model_manifest)?;
-    if served_sha != model.manifest_sha256 {
-        return Err("served manifest hash differs".into());
-    }
     let worker_guard =
         WorkerHardlinkGuard::capture(&model.worker.binary, &model.worker.binary_sha256)?;
     let package_dir = model
@@ -1384,7 +1481,344 @@ fn startup(
         },
         guard_set_sha256: guard_set_sha256(&model.worker.required_environment)?,
     };
-    Ok((model, identity, package_dir, worker_guard))
+    Ok((
+        model,
+        served_model_binding,
+        identity,
+        package_dir,
+        worker_guard,
+    ))
+}
+
+fn load_startup_served_model(
+    logical_path: &Path,
+    raw_map_descriptor: Option<OsString>,
+) -> Result<(ServedModel, ServedModelBinding), String> {
+    require_absolute_normal_path(logical_path, "served model manifest")?;
+    match raw_map_descriptor {
+        None => {
+            let model = load_served_model(logical_path)
+                .map_err(|error| format!("served model rejected: {error}"))?;
+            let metadata = fs::symlink_metadata(logical_path)
+                .map_err(|error| format!("served model metadata failed: {error}"))?;
+            let identity = pinned_file_identity(&metadata);
+            let manifest_sha256 = model.manifest_sha256.clone();
+            Ok((
+                model,
+                ServedModelBinding {
+                    schema_version: "ullm.aq4_p2_served_model_binding.v2".into(),
+                    mode: "logical_path".into(),
+                    logical_path: logical_path.to_string_lossy().into_owned(),
+                    effective_source: "path_loader".into(),
+                    descriptor_transport: "none".into(),
+                    closure: "control_input".into(),
+                    method: "read".into(),
+                    identity,
+                    sha256: manifest_sha256,
+                    byte_count: metadata.len(),
+                    single_read: true,
+                    logical_path_opened: true,
+                },
+            ))
+        }
+        Some(raw_descriptor) => {
+            let raw_descriptor = raw_descriptor
+                .into_string()
+                .map_err(|_| "pinned FD map descriptor must be UTF-8".to_string())?;
+            if raw_descriptor.is_empty()
+                || !raw_descriptor.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err("pinned FD map descriptor is invalid".into());
+            }
+            let descriptor = raw_descriptor
+                .parse::<i32>()
+                .map_err(|_| "pinned FD map descriptor is invalid".to_string())?;
+            if descriptor < 3 {
+                return Err("pinned FD map descriptor is reserved".into());
+            }
+            load_served_model_from_fd_map(logical_path, descriptor)
+        }
+    }
+}
+
+fn load_served_model_from_fd_map(
+    logical_path: &Path,
+    map_descriptor: i32,
+) -> Result<(ServedModel, ServedModelBinding), String> {
+    let seals = unsafe { c_fcntl(map_descriptor, F_GET_SEALS) };
+    if seals < 0 {
+        return Err(format!(
+            "pinned FD map seal query failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if seals & REQUIRED_MEMFD_SEALS != REQUIRED_MEMFD_SEALS {
+        return Err("pinned FD map seals differ".into());
+    }
+    let (map_raw, map_metadata) =
+        read_fd_snapshot(map_descriptor, FD_MAP_MAX_BYTES, "pinned FD map")?;
+    if !map_metadata.is_file()
+        || map_metadata.nlink() != 0
+        || map_raw.is_empty()
+        || map_raw.last() != Some(&b'\n')
+        || !map_raw.is_ascii()
+    {
+        return Err("pinned FD map byte/memfd contract differs".into());
+    }
+    let map_value = parse_strict_json(&map_raw[..map_raw.len() - 1], "pinned FD map")?;
+    let declared_hash = map_value
+        .get("map_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pinned FD map self-hash is missing".to_string())?;
+    if !valid_sha256(declared_hash) || json_self_hash(&map_value, "map_sha256")? != declared_hash {
+        return Err("pinned FD map self-hash differs".into());
+    }
+    let map: PinnedFdMapDocument = serde_json::from_value(map_value)
+        .map_err(|error| format!("pinned FD map schema rejected: {error}"))?;
+    validate_pinned_fd_map(&map, map_descriptor)?;
+    let served = map
+        .bindings
+        .iter()
+        .find(|binding| binding.role == "served_manifest")
+        .ok_or_else(|| "pinned FD map served_manifest role is missing".to_string())?;
+    if served.logical_path != logical_path.to_string_lossy()
+        || served.kind != "regular_file"
+        || served.resolved_path.is_some()
+        || served.closure != "control_input"
+        || served.method != "read"
+    {
+        return Err("pinned served manifest semantic binding differs".into());
+    }
+    let expected_sha = served
+        .sha256
+        .as_deref()
+        .ok_or_else(|| "pinned served manifest SHA-256 is missing".to_string())?;
+    let pre_read_file = duplicate_fd(served.descriptor, "pinned served manifest")?;
+    let pre_read_metadata = pre_read_file
+        .metadata()
+        .map_err(|error| format!("pinned served manifest FD metadata failed: {error}"))?;
+    if !pre_read_metadata.is_file()
+        || pre_read_metadata.nlink() != 1
+        || pre_read_metadata.mode() & 0o022 != 0
+        || !pinned_identity_matches(&pre_read_metadata, &served.identity, false)
+    {
+        return Err("pinned served manifest FD identity/mode differs".into());
+    }
+    drop(pre_read_file);
+    let (raw, metadata) = read_fd_snapshot(
+        served.descriptor,
+        MAX_MANIFEST_BYTES,
+        "pinned served manifest",
+    )?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o022 != 0
+        || !pinned_identity_matches(&metadata, &served.identity, false)
+    {
+        return Err("pinned served manifest FD identity/mode differs".into());
+    }
+    let observed_sha = sha256_bytes(&raw);
+    if observed_sha != expected_sha {
+        return Err("pinned served manifest SHA-256 differs".into());
+    }
+    let model = load_served_model_bytes(logical_path, &raw)
+        .map_err(|error| format!("served model rejected: {error}"))?;
+    if model.manifest_sha256 != observed_sha {
+        return Err("pinned served manifest parsed hash differs".into());
+    }
+    Ok((
+        model,
+        ServedModelBinding {
+            schema_version: "ullm.aq4_p2_served_model_binding.v2".into(),
+            mode: "pinned_fd".into(),
+            logical_path: logical_path.to_string_lossy().into_owned(),
+            effective_source: "inherited_sealed_fd".into(),
+            descriptor_transport: "inherited_fd_map".into(),
+            closure: "control_input".into(),
+            method: "read".into(),
+            identity: served.identity,
+            sha256: observed_sha,
+            byte_count: raw.len() as u64,
+            single_read: true,
+            logical_path_opened: false,
+        },
+    ))
+}
+
+fn validate_pinned_fd_map(map: &PinnedFdMapDocument, map_descriptor: i32) -> Result<(), String> {
+    if map.schema_version != FD_MAP_SCHEMA
+        || map.status != "bound"
+        || map
+            .map_sha256
+            .as_deref()
+            .is_none_or(|value| !valid_sha256(value))
+        || !valid_sha256(&map.logical_argv_sha256)
+        || map.closure_contract.code_execution_closure != "pinned_fd"
+        || map.closure_contract.control_input_closure != "pinned_fd"
+        || map.closure_contract.device_lock_closure != "pinned_fd"
+        || map.closure_contract.data_integrity != "trusted_pre_post_guarded"
+        || map.bindings.is_empty()
+        || map.bindings.len() > 256
+    {
+        return Err("pinned FD map schema/status/closure differs".into());
+    }
+    let mut roles = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    let mut descriptors = BTreeSet::new();
+    for binding in &map.bindings {
+        if !valid_fd_role(&binding.role)
+            || !roles.insert(binding.role.clone())
+            || !paths.insert(binding.logical_path.clone())
+            || binding.descriptor < 3
+            || binding.descriptor == map_descriptor
+            || !descriptors.insert(binding.descriptor)
+        {
+            return Err("pinned FD map role/path/descriptor uniqueness differs".into());
+        }
+        require_absolute_normal_path(
+            Path::new(&binding.logical_path),
+            "pinned FD logical binding",
+        )?;
+        let allowed_method = matches!(
+            (binding.closure.as_str(), binding.method.as_str()),
+            ("code_execution", "exec" | "dlopen")
+                | ("control_input", "read")
+                | ("device_lock", "flock")
+                | ("data_integrity", "pre_post_guard")
+        );
+        let resolved_valid = match binding.kind.as_str() {
+            "regular_file" | "directory" => binding.resolved_path.is_none(),
+            "symlinked_file" => binding.resolved_path.as_deref().is_some_and(|path| {
+                require_absolute_normal_path(Path::new(path), "pinned FD resolved binding").is_ok()
+            }),
+            _ => false,
+        };
+        let sha_valid = match binding.method.as_str() {
+            "read" | "exec" | "dlopen" => binding.sha256.as_deref().is_some_and(valid_sha256),
+            "flock" | "pre_post_guard" => binding.sha256.is_none(),
+            _ => false,
+        };
+        if !allowed_method || !resolved_valid || !sha_valid {
+            return Err("pinned FD map binding contract differs".into());
+        }
+        let descriptor = duplicate_fd(binding.descriptor, &binding.role)?;
+        let metadata = descriptor
+            .metadata()
+            .map_err(|error| format!("pinned FD binding metadata failed: {error}"))?;
+        let exact = binding.method == "pre_post_guard";
+        let stable_only = binding.method == "flock";
+        if !pinned_identity_matches_with_policy(&metadata, &binding.identity, exact, stable_only) {
+            return Err(format!(
+                "pinned FD binding identity differs: {}",
+                binding.role
+            ));
+        }
+    }
+    if roles
+        .iter()
+        .filter(|role| role.as_str() == "served_manifest")
+        .count()
+        != 1
+    {
+        return Err("pinned FD map served_manifest role coverage differs".into());
+    }
+    Ok(())
+}
+
+fn duplicate_fd(descriptor: i32, label: &str) -> Result<File, String> {
+    let duplicate = unsafe { c_dup(descriptor) };
+    if duplicate < 0 {
+        return Err(format!(
+            "{label} FD duplicate failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(duplicate) })
+}
+
+fn read_fd_snapshot(
+    descriptor: i32,
+    maximum: usize,
+    label: &str,
+) -> Result<(Vec<u8>, fs::Metadata), String> {
+    let file = duplicate_fd(descriptor, label)?;
+    let before = file
+        .metadata()
+        .map_err(|error| format!("{label} FD metadata failed: {error}"))?;
+    if before.len() > maximum as u64 {
+        return Err(format!("{label} exceeds the byte bound"));
+    }
+    let length = usize::try_from(before.len()).map_err(|_| format!("{label} size overflows"))?;
+    let mut raw = vec![0u8; length];
+    let mut offset = 0usize;
+    while offset < length {
+        let read = file
+            .read_at(&mut raw[offset..], offset as u64)
+            .map_err(|error| format!("{label} pread failed: {error}"))?;
+        if read == 0 {
+            return Err(format!("{label} ended before its declared size"));
+        }
+        offset += read;
+    }
+    let mut tail = [0u8; 1];
+    if file
+        .read_at(&mut tail, length as u64)
+        .map_err(|error| format!("{label} trailing pread failed: {error}"))?
+        != 0
+    {
+        return Err(format!("{label} grew while reading"));
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| format!("{label} FD post metadata failed: {error}"))?;
+    if pinned_file_identity(&before) != pinned_file_identity(&after) {
+        return Err(format!("{label} identity changed while reading"));
+    }
+    Ok((raw, before))
+}
+
+fn pinned_file_identity(metadata: &fs::Metadata) -> PinnedFileIdentity {
+    PinnedFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+        nlink: metadata.nlink(),
+        size: metadata.len(),
+        mtime_ns: metadata.mtime() as i128 * 1_000_000_000 + metadata.mtime_nsec() as i128,
+        ctime_ns: metadata.ctime() as i128 * 1_000_000_000 + metadata.ctime_nsec() as i128,
+    }
+}
+
+fn pinned_identity_matches(
+    metadata: &fs::Metadata,
+    expected: &PinnedFileIdentity,
+    exact: bool,
+) -> bool {
+    pinned_identity_matches_with_policy(metadata, expected, exact, false)
+}
+
+fn pinned_identity_matches_with_policy(
+    metadata: &fs::Metadata,
+    expected: &PinnedFileIdentity,
+    exact: bool,
+    stable_only: bool,
+) -> bool {
+    let observed = pinned_file_identity(metadata);
+    observed.device == expected.device
+        && observed.inode == expected.inode
+        && observed.mode == expected.mode
+        && observed.nlink == expected.nlink
+        && (stable_only
+            || (observed.size == expected.size
+                && observed.mtime_ns == expected.mtime_ns
+                && (!exact || observed.ctime_ns == expected.ctime_ns)))
+}
+
+fn valid_fd_role(role: &str) -> bool {
+    let mut bytes = role.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && (2..=64).contains(&role.len())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_model(model: &ServedModel) -> Result<(), String> {
@@ -1518,7 +1952,8 @@ fn require_absolute_normal_path(path: &Path, label: &str) -> Result<(), String> 
     if !path.is_absolute()
         || path
             .components()
-            .any(|component| matches!(component, Component::ParentDir))
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        || path.starts_with("/proc/self/fd")
     {
         return Err(format!(
             "{label} path must be absolute without parent traversal"
@@ -1813,7 +2248,127 @@ fn write_event(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
+
+    const F_ADD_SEALS: c_int = 1033;
+    const MFD_ALLOW_SEALING: u32 = 0x0002;
+
+    unsafe extern "C" {
+        fn memfd_create(name: *const i8, flags: u32) -> c_int;
+    }
+
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        fn new(label: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = env::temp_dir().join(format!(
+                "ullm-aq4-resident-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn copy_tree(source: &Path, target: &Path) {
+        fs::create_dir_all(target).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let destination = target.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &destination);
+            } else {
+                fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+
+    fn aq4_served_tree(label: &str) -> (TemporaryDirectory, PathBuf) {
+        let directory = TemporaryDirectory::new(label);
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../services/openai-gateway/tests/fixtures/served-model/aq4");
+        copy_tree(&source, &directory.0);
+        let manifest = directory.0.join("served-model.json");
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
+        (directory, manifest)
+    }
+
+    fn fd_map_value(file: &File, logical_path: &Path) -> Value {
+        let metadata = file.metadata().unwrap();
+        let mut value = json!({
+            "schema_version": FD_MAP_SCHEMA,
+            "status": "bound",
+            "map_sha256": null,
+            "logical_argv_sha256": "1".repeat(64),
+            "closure_contract": {
+                "code_execution_closure": "pinned_fd",
+                "control_input_closure": "pinned_fd",
+                "device_lock_closure": "pinned_fd",
+                "data_integrity": "trusted_pre_post_guarded"
+            },
+            "bindings": [{
+                "role": "served_manifest",
+                "logical_path": logical_path,
+                "resolved_path": null,
+                "descriptor": file.as_raw_fd(),
+                "kind": "regular_file",
+                "closure": "control_input",
+                "method": "read",
+                "identity": pinned_file_identity(&metadata),
+                "sha256": sha256_bytes(&fs::read(logical_path).unwrap())
+            }]
+        });
+        value["map_sha256"] = Value::String(json_self_hash(&value, "map_sha256").unwrap());
+        value
+    }
+
+    fn sealed_map_file(value: &Value, sealed: bool) -> File {
+        let name = CString::new("ullm-aq4-resident-test-map").unwrap();
+        let descriptor = unsafe { memfd_create(name.as_ptr(), MFD_ALLOW_SEALING) };
+        assert!(descriptor >= 0, "{}", std::io::Error::last_os_error());
+        let mut file = unsafe { File::from_raw_fd(descriptor) };
+        let mut raw = serde_json::to_vec(value).unwrap();
+        raw.push(b'\n');
+        file.write_all(&raw).unwrap();
+        if sealed {
+            let result = unsafe { c_fcntl(file.as_raw_fd(), F_ADD_SEALS, REQUIRED_MEMFD_SEALS) };
+            assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+        }
+        file
+    }
+
+    fn refresh_map_self_hash(value: &mut Value) {
+        value["map_sha256"] = Value::Null;
+        value["map_sha256"] = Value::String(json_self_hash(value, "map_sha256").unwrap());
+    }
+
+    fn map_error_with(label: &str, mutate: impl FnOnce(&mut Value), sealed: bool) -> String {
+        let directory = TemporaryDirectory::new(label);
+        let logical_path = directory.0.join("served-model.json");
+        fs::write(&logical_path, b"{}").unwrap();
+        fs::set_permissions(&logical_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let file = File::open(&logical_path).unwrap();
+        let mut value = fd_map_value(&file, &logical_path);
+        mutate(&mut value);
+        if value["map_sha256"] != Value::String("0".repeat(64)) {
+            refresh_map_self_hash(&mut value);
+        }
+        let map = sealed_map_file(&value, sealed);
+        load_startup_served_model(&logical_path, Some(map.as_raw_fd().to_string().into()))
+            .unwrap_err()
+    }
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -1886,6 +2441,31 @@ mod tests {
                 architecture: "gfx1201".into(),
             },
             guard_set_sha256: "1".repeat(64),
+        }
+    }
+
+    fn served_binding() -> ServedModelBinding {
+        ServedModelBinding {
+            schema_version: "ullm.aq4_p2_served_model_binding.v2".into(),
+            mode: "logical_path".into(),
+            logical_path: "/fixture/served-model.json".into(),
+            effective_source: "path_loader".into(),
+            descriptor_transport: "none".into(),
+            closure: "control_input".into(),
+            method: "read".into(),
+            identity: PinnedFileIdentity {
+                device: 1,
+                inode: 2,
+                mode: 0o100_644,
+                nlink: 1,
+                size: 3,
+                mtime_ns: 4,
+                ctime_ns: 5,
+            },
+            sha256: "f".repeat(64),
+            byte_count: 3,
+            single_read: true,
+            logical_path_opened: true,
         }
     }
 
@@ -2253,7 +2833,240 @@ mod tests {
         );
         assert!(require_absolute_normal_path(&detached_binary, "driver").is_ok());
         assert!(require_absolute_normal_path(Path::new("relative-driver"), "driver").is_err());
+        assert!(
+            require_absolute_normal_path(Path::new("/proc/self/fd/37"), "served manifest").is_err()
+        );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pinned_served_manifest_uses_old_fd_bytes_after_logical_path_swap() {
+        let (_directory, logical_path) = aq4_served_tree("served-swap");
+        let original = fs::read(&logical_path).unwrap();
+        let original_sha = sha256_bytes(&original);
+        let file = File::open(&logical_path).unwrap();
+        let map_value = fd_map_value(&file, &logical_path);
+        let map = sealed_map_file(&map_value, true);
+
+        let pinned_name = logical_path.with_extension("pinned-original.json");
+        fs::rename(&logical_path, &pinned_name).unwrap();
+        fs::write(&logical_path, b"replacement-marker-must-not-be-opened").unwrap();
+
+        let (model, binding) =
+            load_startup_served_model(&logical_path, Some(map.as_raw_fd().to_string().into()))
+                .unwrap();
+        assert_eq!(model.manifest_sha256, original_sha);
+        assert_eq!(
+            binding.schema_version,
+            "ullm.aq4_p2_served_model_binding.v2"
+        );
+        assert_eq!(binding.mode, "pinned_fd");
+        assert_eq!(binding.logical_path, logical_path.to_string_lossy());
+        assert_eq!(binding.effective_source, "inherited_sealed_fd");
+        assert_eq!(binding.descriptor_transport, "inherited_fd_map");
+        assert_eq!(binding.closure, "control_input");
+        assert_eq!(binding.method, "read");
+        assert_eq!(binding.sha256, original_sha);
+        assert_eq!(binding.byte_count, original.len() as u64);
+        assert!(binding.single_read);
+        assert!(!binding.logical_path_opened);
+        let evidence = serde_json::to_value(&binding).unwrap();
+        assert!(!evidence.as_object().unwrap().contains_key("descriptor"));
+    }
+
+    #[test]
+    fn fd_map_absent_keeps_path_loader_compatibility() {
+        let (_directory, logical_path) = aq4_served_tree("served-legacy");
+        let expected = sha256_file(&logical_path).unwrap();
+        let (model, binding) = load_startup_served_model(&logical_path, None).unwrap();
+        assert_eq!(model.manifest_sha256, expected);
+        assert_eq!(binding.mode, "logical_path");
+        assert_eq!(binding.effective_source, "path_loader");
+        assert_eq!(binding.descriptor_transport, "none");
+        assert_eq!(binding.sha256, expected);
+        assert!(binding.single_read);
+        assert!(binding.logical_path_opened);
+        assert!(
+            load_startup_served_model(Path::new("/proc/self/fd/37"), None).is_err(),
+            "legacy effective FD paths must remain forbidden as logical argv"
+        );
+    }
+
+    #[test]
+    fn pinned_fd_map_schema_and_served_binding_negatives_fail_closed() {
+        assert!(
+            map_error_with(
+                "unknown-schema",
+                |value| {
+                    value["schema_version"] = Value::String("unknown".into());
+                },
+                true
+            )
+            .contains("schema")
+        );
+        assert!(
+            map_error_with(
+                "unknown-field",
+                |value| {
+                    value["extra"] = Value::Bool(true);
+                },
+                true
+            )
+            .contains("schema")
+        );
+        assert!(
+            map_error_with(
+                "self-hash",
+                |value| {
+                    value["map_sha256"] = Value::String("0".repeat(64));
+                },
+                true
+            )
+            .contains("self-hash")
+        );
+        assert!(
+            map_error_with(
+                "wrong-role",
+                |value| {
+                    value["bindings"][0]["role"] = Value::String("other_control".into());
+                },
+                true
+            )
+            .contains("served_manifest")
+        );
+        assert!(
+            map_error_with(
+                "wrong-method",
+                |value| {
+                    value["bindings"][0]["method"] = Value::String("exec".into());
+                },
+                true
+            )
+            .contains("contract")
+        );
+        assert!(
+            map_error_with(
+                "wrong-closure",
+                |value| {
+                    value["bindings"][0]["closure"] = Value::String("code_execution".into());
+                },
+                true
+            )
+            .contains("contract")
+        );
+        assert!(
+            map_error_with(
+                "wrong-path",
+                |value| {
+                    value["bindings"][0]["logical_path"] =
+                        Value::String("/different/served-model.json".into());
+                },
+                true
+            )
+            .contains("semantic")
+        );
+        assert!(
+            map_error_with(
+                "wrong-sha",
+                |value| {
+                    value["bindings"][0]["sha256"] = Value::String("0".repeat(64));
+                },
+                true
+            )
+            .contains("SHA-256")
+        );
+        assert!(
+            map_error_with(
+                "wrong-identity",
+                |value| {
+                    let inode = value["bindings"][0]["identity"]["inode"].as_u64().unwrap();
+                    value["bindings"][0]["identity"]["inode"] = Value::from(inode + 1);
+                },
+                true
+            )
+            .contains("identity")
+        );
+        assert!(map_error_with("nonsealed", |_| {}, false).contains("seals"));
+    }
+
+    #[test]
+    fn pinned_fd_map_rejects_closed_nonregular_unsafe_and_multilink_fds() {
+        let closed_directory = TemporaryDirectory::new("closed-fd");
+        let closed_path = closed_directory.0.join("served-model.json");
+        fs::write(&closed_path, b"{}").unwrap();
+        fs::set_permissions(&closed_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let closed_file = File::open(&closed_path).unwrap();
+        let closed_value = fd_map_value(&closed_file, &closed_path);
+        let closed_map = sealed_map_file(&closed_value, true);
+        drop(closed_file);
+        assert!(
+            load_startup_served_model(
+                &closed_path,
+                Some(closed_map.as_raw_fd().to_string().into())
+            )
+            .unwrap_err()
+            .contains("FD")
+        );
+
+        let map_directory = TemporaryDirectory::new("closed-map");
+        let map_path = map_directory.0.join("served-model.json");
+        fs::write(&map_path, b"{}").unwrap();
+        fs::set_permissions(&map_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let map_source = File::open(&map_path).unwrap();
+        let map_value = fd_map_value(&map_source, &map_path);
+        let map = sealed_map_file(&map_value, true);
+        let closed_map_descriptor = map.as_raw_fd();
+        drop(map);
+        assert!(
+            load_startup_served_model(&map_path, Some(closed_map_descriptor.to_string().into()))
+                .unwrap_err()
+                .contains("seal query")
+        );
+
+        let nonregular_directory = TemporaryDirectory::new("nonregular-fd");
+        let logical_path = nonregular_directory.0.join("served-model.json");
+        fs::write(&logical_path, b"{}").unwrap();
+        fs::set_permissions(&logical_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let regular = File::open(&logical_path).unwrap();
+        let directory_fd = File::open(&nonregular_directory.0).unwrap();
+        let mut value = fd_map_value(&regular, &logical_path);
+        value["bindings"][0]["descriptor"] = Value::from(directory_fd.as_raw_fd());
+        value["bindings"][0]["identity"] =
+            serde_json::to_value(pinned_file_identity(&directory_fd.metadata().unwrap())).unwrap();
+        refresh_map_self_hash(&mut value);
+        let map = sealed_map_file(&value, true);
+        assert!(
+            load_startup_served_model(&logical_path, Some(map.as_raw_fd().to_string().into()))
+                .unwrap_err()
+                .contains("identity/mode")
+        );
+
+        let unsafe_directory = TemporaryDirectory::new("unsafe-mode");
+        let unsafe_path = unsafe_directory.0.join("served-model.json");
+        fs::write(&unsafe_path, b"{}").unwrap();
+        fs::set_permissions(&unsafe_path, fs::Permissions::from_mode(0o666)).unwrap();
+        let unsafe_file = File::open(&unsafe_path).unwrap();
+        let value = fd_map_value(&unsafe_file, &unsafe_path);
+        let map = sealed_map_file(&value, true);
+        assert!(
+            load_startup_served_model(&unsafe_path, Some(map.as_raw_fd().to_string().into()))
+                .unwrap_err()
+                .contains("identity/mode")
+        );
+
+        let links_directory = TemporaryDirectory::new("multiple-links");
+        let links_path = links_directory.0.join("served-model.json");
+        fs::write(&links_path, b"{}").unwrap();
+        fs::set_permissions(&links_path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::hard_link(&links_path, links_directory.0.join("alias.json")).unwrap();
+        let links_file = File::open(&links_path).unwrap();
+        let value = fd_map_value(&links_file, &links_path);
+        let map = sealed_map_file(&value, true);
+        assert!(
+            load_startup_served_model(&links_path, Some(map.as_raw_fd().to_string().into()))
+                .unwrap_err()
+                .contains("identity/mode")
+        );
     }
 
     #[test]
@@ -2261,6 +3074,7 @@ mod tests {
         let mut d = ResidentDriver::new(
             "s".into(),
             identity(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 ..Default::default()
@@ -2278,6 +3092,7 @@ mod tests {
         let mut d = ResidentDriver::new(
             "s".into(),
             identity(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 ..Default::default()
@@ -2299,6 +3114,7 @@ mod tests {
         let d = ResidentDriver::new(
             "s".into(),
             id.clone(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 ..Default::default()
@@ -2308,12 +3124,39 @@ mod tests {
             d.ready()["driver_identity"],
             serde_json::to_value(id).unwrap()
         );
+        assert_eq!(
+            d.ready()["served_model_binding"],
+            serde_json::to_value(served_binding()).unwrap()
+        );
+        assert_eq!(
+            d.ready()["served_model_binding"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "schema_version",
+                "mode",
+                "logical_path",
+                "effective_source",
+                "descriptor_transport",
+                "closure",
+                "method",
+                "identity",
+                "sha256",
+                "byte_count",
+                "single_read",
+                "logical_path_opened",
+            ])
+        );
     }
     #[test]
     fn release_failure_and_oom_forbid_reuse() {
         let mut reset = ResidentDriver::new(
             "s".into(),
             identity(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 reset_fail: true,
@@ -2327,6 +3170,7 @@ mod tests {
         let mut oom = ResidentDriver::new(
             "s".into(),
             identity(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 fail: Some("hipErrorOutOfMemory".into()),
@@ -2344,6 +3188,7 @@ mod tests {
         let mut fallback = ResidentDriver::new(
             "s".into(),
             identity(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 actual_width: Some(1),
@@ -2359,6 +3204,7 @@ mod tests {
         let mut cancel = ResidentDriver::new(
             "s".into(),
             identity(),
+            served_binding(),
             MockExecutor {
                 clean: true,
                 ..Default::default()
