@@ -94,6 +94,11 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertEqual(metadata["runtime"]["mode"], "0555")
             self.assertEqual(metadata["runtime"]["nlink"], 1)
             self.assertNotIn("systemctl", archive_result.stdout + archive_result.stderr)
+            rerun = subprocess.run(
+                ["bash", str(GATE)], env=archive_env, text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(rerun.returncode, 0)
+            self.assertIn("refusing to overwrite existing path", rerun.stderr)
 
     def test_mock_observer_samples_pinned_card_without_service_or_gpu(self) -> None:
         self.assertTrue(PROBE_ROOT.is_dir())
