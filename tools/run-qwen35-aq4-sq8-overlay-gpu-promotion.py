@@ -55,14 +55,27 @@ MAX_JSON_BYTES = 16 * 1024 * 1024
 CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
 CAPTURE_ENVELOPE_MAX_BYTES = 512 * 1024
 CAPTURE_READ_CHUNK_BYTES = 64 * 1024
-CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 300.0
-CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v3"
-WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v1"
+CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 1200.0
+CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v4"
+WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v2"
+WORKER_LIFECYCLE_SCHEMA = "ullm.aq4_resident_worker_lifecycle.v1"
+CAPTURE_READY_TIMEOUT_SECONDS = 900
+CAPTURE_REQUEST_TIMEOUT_SECONDS = 240
+CAPTURE_SHUTDOWN_TIMEOUT_SECONDS = 30
+CAPTURE_TIMEOUTS = {
+    "ready_seconds": CAPTURE_READY_TIMEOUT_SECONDS,
+    "request_seconds": CAPTURE_REQUEST_TIMEOUT_SECONDS,
+    "shutdown_seconds": CAPTURE_SHUTDOWN_TIMEOUT_SECONDS,
+    "outer_seconds": int(CAPTURE_SUBPROCESS_TIMEOUT_SECONDS),
+}
 CAPTURE_ERROR_STAGES = frozenset(
     {
         "capture",
-        "request",
-        "shutdown",
+        "ready_timeout",
+        "ready_protocol",
+        "request_timeout",
+        "request_protocol",
+        "shutdown_timeout",
         "cleanup",
         "worker",
         "worker_exit",
@@ -717,6 +730,25 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None
     ):
         raise PromotionError("candidate Gate promotion request ID differs")
+    gate_actual = gate.get("request", {}).get("actual")
+    expected_gate_actual = {
+        "request_id": request_id,
+        "prompt_token_ids": list(range(1, 129)),
+        "max_new_tokens": 2,
+        "eos_token_ids": [],
+        "sampling": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 1,
+            "seed": 0,
+        },
+        "telemetry_environment": {
+            "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id
+        },
+        "timeouts": dict(CAPTURE_TIMEOUTS),
+    }
+    if gate_actual != expected_gate_actual:
+        raise PromotionError("candidate Gate fixed request/timeout contract differs")
     receipt_keys = {
         "schema_version",
         "status",
@@ -729,6 +761,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "authorization_audit",
         "actual",
         "readiness",
+        "execution_timeouts",
     }
     if has_lineage_contract:
         receipt_keys.add("authorization_lineage")
@@ -739,6 +772,8 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         receipt.get("schema_version") != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
         or receipt.get("status") != "prepared_not_executed"
         or receipt.get("actual") != {"status": "pending", "required": True}
+        or receipt.get("execution_timeouts") != CAPTURE_TIMEOUTS
+        or gate_actual.get("timeouts") != receipt.get("execution_timeouts")
         or receipt.get("request_id") != request_id
         or build.get("promotion_request_id") != request_id
         or receipt.get("source_commit") != build.get("release_source_commit")
@@ -2028,15 +2063,13 @@ def _capture_terminal_contract_valid(
 
     if timed_out:
         return (
-            stage in {"request", "shutdown"}
+            stage in {"ready_timeout", "request_timeout", "shutdown_timeout"}
             and isinstance(returncode, int)
             and returncode < 0
             and worker_signal == -returncode
         )
     if stage == "capture":
         return returncode is None and worker_signal is None
-    if stage == "shutdown":
-        return False
     if stage == "worker_exit":
         return isinstance(returncode, int) and returncode != 0
     if stage in {
@@ -2047,7 +2080,12 @@ def _capture_terminal_contract_valid(
         "validation",
     }:
         return returncode == 0
-    if stage in {"request", "cleanup", "worker"}:
+    if stage in {
+        "ready_protocol",
+        "request_protocol",
+        "cleanup",
+        "worker",
+    }:
         return isinstance(returncode, int)
     return False
 
@@ -2079,9 +2117,12 @@ def _capture_error_envelope(
         "stage",
         "reason",
         "timed_out",
+        "request_id",
+        "timeouts",
         "worker_returncode",
         "worker_signal",
         "worker_stderr",
+        "worker_lifecycle",
         "observed_sq8_promotion_telemetry",
         "observed_sq8_promotion_telemetry_binding",
         "worker_terminal",
@@ -2094,6 +2135,7 @@ def _capture_error_envelope(
     timed_out = value.get("timed_out")
     returncode = value.get("worker_returncode")
     worker_signal = value.get("worker_signal")
+    capture_timeouts = value.get("timeouts")
     if (
         value.get("schema_version") != CAPTURE_ERROR_SCHEMA
         or value.get("status") != "failed"
@@ -2103,6 +2145,13 @@ def _capture_error_envelope(
         or not reason
         or len(reason.encode("utf-8")) > 4096
         or type(timed_out) is not bool
+        or value.get("request_id") != expected_request_id
+        or capture_timeouts
+        != {
+            "ready_seconds": CAPTURE_READY_TIMEOUT_SECONDS,
+            "request_seconds": CAPTURE_REQUEST_TIMEOUT_SECONDS,
+            "shutdown_seconds": CAPTURE_SHUTDOWN_TIMEOUT_SECONDS,
+        }
         or not (
             returncode is None
             or (type(returncode) is int and -(2**31) <= returncode < 2**31)
@@ -2127,11 +2176,18 @@ def _capture_error_envelope(
         "schema_version",
         "byte_count",
         "sha256",
-        "preview_text",
-        "captured_bytes",
+        "head_text",
+        "head_bytes",
+        "tail_text",
+        "tail_bytes",
         "truncated",
         "utf8_replacement",
         "redacted_lines",
+        "record_count",
+        "records_retained",
+        "records_truncated",
+        "schema_counts",
+        "last_complete_record",
         "complete",
         "stream_error",
     }
@@ -2139,9 +2195,14 @@ def _capture_error_envelope(
         invalid["reason"] = "worker_stderr_keys_differ"
         return invalid
     byte_count = worker.get("byte_count")
-    captured_bytes = worker.get("captured_bytes")
+    head_bytes = worker.get("head_bytes")
+    tail_bytes = worker.get("tail_bytes")
     redacted_lines = worker.get("redacted_lines")
-    preview_text = worker.get("preview_text")
+    head_text = worker.get("head_text")
+    tail_text = worker.get("tail_text")
+    record_count = worker.get("record_count")
+    records_retained = worker.get("records_retained")
+    schema_counts = worker.get("schema_counts")
     complete = worker.get("complete")
     stream_error = worker.get("stream_error")
     if (
@@ -2150,14 +2211,34 @@ def _capture_error_envelope(
         or not 0 <= byte_count <= 9_007_199_254_740_991
         or not isinstance(worker.get("sha256"), str)
         or SHA256_RE.fullmatch(worker["sha256"]) is None
-        or not isinstance(preview_text, str)
-        or type(captured_bytes) is not int
-        or not 0 <= captured_bytes <= CAPTURE_DIAGNOSTIC_MAX_BYTES
-        or len(preview_text.encode("utf-8")) != captured_bytes
+        or not isinstance(head_text, str)
+        or not isinstance(tail_text, str)
+        or type(head_bytes) is not int
+        or type(tail_bytes) is not int
+        or not 0 <= head_bytes <= 16 * 1024
+        or not 0 <= tail_bytes <= 16 * 1024
+        or len(head_text.encode("utf-8")) != head_bytes
+        or len(tail_text.encode("utf-8")) != tail_bytes
         or type(worker.get("truncated")) is not bool
         or type(worker.get("utf8_replacement")) is not bool
         or type(redacted_lines) is not int
         or redacted_lines < 0
+        or type(record_count) is not int
+        or not 0 <= record_count <= 9_007_199_254_740_991
+        or type(records_retained) is not int
+        or not 0 <= records_retained <= min(record_count, 512)
+        or type(worker.get("records_truncated")) is not bool
+        or not isinstance(schema_counts, dict)
+        or len(schema_counts) > 33
+        or any(
+            not isinstance(key, str)
+            or len(key.encode("utf-8")) > 128
+            or _redact_diagnostic(key.encode("utf-8")) != key
+            or type(count) is not int
+            or count < 0
+            for key, count in schema_counts.items()
+        )
+        or sum(schema_counts.values()) != record_count
         or type(complete) is not bool
         or not (
             stream_error is None
@@ -2169,16 +2250,70 @@ def _capture_error_envelope(
     ):
         invalid["reason"] = "worker_stderr_type_or_value_differs"
         return invalid
+    last_record = worker.get("last_complete_record")
+    if last_record is not None:
+        load_record = (
+            isinstance(last_record, dict)
+            and set(last_record) == {"schema_version", "layer_position", "trace"}
+            and last_record.get("schema_version") == "ullm.backend_operation.load.v1"
+            and (
+                last_record.get("layer_position") is None
+                or type(last_record.get("layer_position")) is int
+            )
+            and isinstance(last_record.get("trace"), dict)
+            and set(last_record["trace"]).issubset(
+                {
+                    "implementation_id",
+                    "kind",
+                    "phase",
+                    "executable",
+                    "batch_width",
+                    "chunk_width",
+                }
+            )
+            and all(
+                (
+                    isinstance(item, str)
+                    and len(item.encode("utf-8")) <= 256
+                    and _redact_diagnostic(item.encode("utf-8")) == item
+                )
+                or (type(item) is int and 0 <= item <= 9_007_199_254_740_991)
+                for item in last_record["trace"].values()
+            )
+        )
+        released_record = (
+            isinstance(last_record, dict)
+            and set(last_record)
+            == {
+                "event",
+                "request_id",
+                "operation_execution_audit_observed",
+                "request_execution_audit_observed",
+            }
+            and last_record.get("event") == "request_released"
+            and last_record.get("request_id") in {None, expected_request_id}
+            and type(last_record.get("operation_execution_audit_observed")) is bool
+            and type(last_record.get("request_execution_audit_observed")) is bool
+        )
+        if not (load_record or released_record):
+            invalid["reason"] = "worker_stderr_last_record_invalid"
+            return invalid
     normalized_worker = {
         key: worker[key]
         for key in (
             "schema_version",
             "byte_count",
             "sha256",
-            "captured_bytes",
+            "head_bytes",
+            "tail_bytes",
             "truncated",
             "utf8_replacement",
             "redacted_lines",
+            "record_count",
+            "records_retained",
+            "records_truncated",
+            "schema_counts",
+            "last_complete_record",
             "complete",
             "stream_error",
         )
@@ -2187,7 +2322,105 @@ def _capture_error_envelope(
         normalized_worker["stream_error"] = _redact_diagnostic(
             stream_error.encode("utf-8")
         )
-    normalized_worker["preview"] = _bounded_diagnostic(preview_text)
+    normalized_worker["head"] = _bounded_diagnostic(head_text)
+    normalized_worker["tail"] = _bounded_diagnostic(tail_text)
+
+    lifecycle = value.get("worker_lifecycle")
+    lifecycle_keys = {
+        "schema_version",
+        "request_id",
+        "request_sent",
+        "request_sent_offset_ms",
+        "event_count",
+        "events_retained",
+        "events_truncated",
+        "events",
+        "last_event",
+    }
+    event_keys = {
+        "type",
+        "offset_ms",
+        "request_id_matches",
+        "processed_prompt_tokens",
+        "completion_tokens",
+        "token_index",
+    }
+
+    def valid_lifecycle_event(item: Any) -> bool:
+        if not isinstance(item, dict) or set(item) != event_keys:
+            return False
+        offset = item.get("offset_ms")
+        return (
+            item.get("type")
+            in {
+                "ready",
+                "started",
+                "progress",
+                "token",
+                "released",
+                "error",
+                "fatal",
+                "unknown",
+            }
+            and isinstance(offset, (int, float))
+            and not isinstance(offset, bool)
+            and 0 <= float(offset) <= 86_400_000
+            and item.get("request_id_matches") in {True, False, None}
+            and all(
+                item.get(key) is None
+                or (type(item.get(key)) is int and 0 <= item[key] <= 9_007_199_254_740_991)
+                for key in (
+                    "processed_prompt_tokens",
+                    "completion_tokens",
+                    "token_index",
+                )
+            )
+        )
+
+    if not isinstance(lifecycle, dict) or set(lifecycle) != lifecycle_keys:
+        invalid["reason"] = "worker_lifecycle_keys_differ"
+        return invalid
+    lifecycle_events = lifecycle.get("events")
+    lifecycle_count = lifecycle.get("event_count")
+    sent_offset = lifecycle.get("request_sent_offset_ms")
+    last_event = lifecycle.get("last_event")
+    if (
+        lifecycle.get("schema_version") != WORKER_LIFECYCLE_SCHEMA
+        or lifecycle.get("request_id") != expected_request_id
+        or type(lifecycle.get("request_sent")) is not bool
+        or not isinstance(lifecycle_events, list)
+        or len(lifecycle_events) > 64
+        or any(not valid_lifecycle_event(item) for item in lifecycle_events)
+        or any(
+            float(lifecycle_events[index]["offset_ms"])
+            < float(lifecycle_events[index - 1]["offset_ms"])
+            for index in range(1, len(lifecycle_events))
+        )
+        or type(lifecycle_count) is not int
+        or not len(lifecycle_events) <= lifecycle_count <= 9_007_199_254_740_991
+        or lifecycle.get("events_retained") != len(lifecycle_events)
+        or type(lifecycle.get("events_truncated")) is not bool
+        or (last_event is not None and not valid_lifecycle_event(last_event))
+        or ((sent_offset is not None) != lifecycle.get("request_sent"))
+        or (
+            sent_offset is not None
+            and (
+                not isinstance(sent_offset, (int, float))
+                or isinstance(sent_offset, bool)
+                or not 0 <= float(sent_offset) <= 86_400_000
+            )
+        )
+    ):
+        invalid["reason"] = "worker_lifecycle_type_or_value_differs"
+        return invalid
+    if stage == "ready_timeout" and lifecycle.get("request_sent") is not False:
+        invalid["reason"] = "worker_lifecycle_stage_mismatch"
+        return invalid
+    if stage in {"request_timeout", "shutdown_timeout"} and lifecycle.get(
+        "request_sent"
+    ) is not True:
+        invalid["reason"] = "worker_lifecycle_stage_mismatch"
+        return invalid
     result = {
         "validation": "valid",
         "schema_version": value["schema_version"],
@@ -2195,9 +2428,12 @@ def _capture_error_envelope(
         "stage": stage,
         "reason": _redact_diagnostic(reason.encode("utf-8")),
         "timed_out": timed_out,
+        "request_id": expected_request_id,
+        "timeouts": capture_timeouts,
         "worker_returncode": returncode,
         "worker_signal": worker_signal,
         "worker_stderr": normalized_worker,
+        "worker_lifecycle": lifecycle,
     }
     if complete is not True or stream_error is not None:
         result["validation"] = "invalid"
@@ -2522,8 +2758,10 @@ def capture_command(candidate: Path, output: Path, request_id: str) -> list[str]
         "128",
         "--max-new-tokens",
         "2",
+        "--ready-timeout",
+        str(CAPTURE_READY_TIMEOUT_SECONDS),
         "--timeout",
-        "240",
+        str(CAPTURE_REQUEST_TIMEOUT_SECONDS),
         "--sq8-promotion-evidence",
         "--sq8-promotion-request-id",
         request_id,
@@ -2690,6 +2928,7 @@ def execute(
         environment = capture_environment(profile)
         evidence["capture"] = {
             "argv": command,
+            "timeouts": dict(CAPTURE_TIMEOUTS),
             "environment": {
                 name: environment[name]
                 for name in (
@@ -2704,7 +2943,7 @@ def execute(
             completed = _coerce_capture_result(deps.capture(command, environment))
         except subprocess.TimeoutExpired as error:
             evidence["capture_failure"] = capture_failure_diagnostic(
-                stage="capture_subprocess_timeout",
+                stage="capture_outer_timeout",
                 returncode=None,
                 stdout=error.stdout,
                 stderr=error.stderr,
@@ -2713,7 +2952,7 @@ def execute(
             raise PromotionError("candidate SQ8 capture timed out") from error
         if completed.timed_out:
             evidence["capture_failure"] = capture_failure_diagnostic(
-                stage="capture_subprocess_timeout",
+                stage="capture_outer_timeout",
                 returncode=completed.returncode,
                 stdout=completed.stdout,
                 stderr=completed.stderr,

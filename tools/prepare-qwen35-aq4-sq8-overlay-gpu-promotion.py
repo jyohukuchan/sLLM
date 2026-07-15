@@ -60,6 +60,12 @@ READY_URL = "http://172.20.0.1:8000/readyz"
 READY_BODY = '{"status":"ready"}'
 READY_TIMEOUT_SECONDS = 5
 READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
+EXECUTION_TIMEOUTS = {
+    "ready_seconds": 900,
+    "request_seconds": 240,
+    "shutdown_seconds": 30,
+    "outer_seconds": 1200,
+}
 AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
 RUNTIME_MEMBERS = frozenset(
     {
@@ -751,11 +757,27 @@ def validate_independent_audit(
     build = read_object(runtime_root / "build-receipt.json", "audited build receipt")
     profile = read_object(profile_path, "audited profile")
     manifest = read_object(manifest_path, "audited served model")
+    expected_actual_request = {
+        "request_id": request_id,
+        "prompt_token_ids": list(range(1, 129)),
+        "max_new_tokens": 2,
+        "eos_token_ids": [],
+        "sampling": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 1,
+            "seed": 0,
+        },
+        "telemetry_environment": {
+            "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id
+        },
+        "timeouts": dict(EXECUTION_TIMEOUTS),
+    }
     if (
         gate.get("status") != "ready_for_independent_audit"
         or gate.get("actual_run_allowed") is not False
         or gate.get("release_source_commit") != commit
-        or gate.get("request", {}).get("actual", {}).get("request_id") != request_id
+        or gate.get("request", {}).get("actual") != expected_actual_request
         or build.get("release_source_commit") != commit
         or build.get("release_source_tree") != tree
         or build.get("release_source_archive_sha256") != archive_sha256
@@ -768,6 +790,7 @@ def validate_independent_audit(
     if (
         prepared.get("status") != "prepared_not_executed"
         or prepared.get("actual") != {"status": "pending", "required": True}
+        or prepared.get("execution_timeouts") != EXECUTION_TIMEOUTS
         or prepared.get("request_id") != request_id
         or prepared.get("source_commit") != commit
         or prepared.get("source_provenance")
@@ -1170,6 +1193,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     "telemetry_environment": {
                         "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id
                     },
+                    "timeouts": dict(EXECUTION_TIMEOUTS),
                 },
             },
             "sequence": [

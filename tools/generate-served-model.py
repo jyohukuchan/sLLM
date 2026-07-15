@@ -285,12 +285,20 @@ def _validate_sq8_overlay_receipt(
         "package",
         "authorization_audit",
         "readiness",
+        "execution_timeouts",
         "actual",
     }
     if has_lineage_contract:
         expected_receipt_keys.add("authorization_lineage")
     if set(receipt) != expected_receipt_keys:
         raise GenerationError("SQ8 overlay promotion receipt shape differs")
+    if receipt.get("execution_timeouts") != {
+        "ready_seconds": 900,
+        "request_seconds": 240,
+        "shutdown_seconds": 30,
+        "outer_seconds": 1200,
+    }:
+        raise GenerationError("SQ8 overlay execution timeout receipt binding differs")
     source_commit = _require_hex(
         receipt.get("source_commit"), HEX40_RE, "SQ8 overlay receipt source commit"
     )
@@ -484,6 +492,7 @@ def _validate_sq8_overlay_receipt(
         for section in (
             "source_commit", "source_provenance", "overlay", "package",
             "authorization_audit", "authorization_lineage", "readiness",
+            "execution_timeouts",
         ):
             if prepared_value.get(section) != receipt.get(section):
                 raise GenerationError(f"SQ8 overlay prepared receipt {section} differs")

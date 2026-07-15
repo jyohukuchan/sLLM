@@ -37,6 +37,12 @@ HEX64 = set("0123456789abcdef")
 MAX_JSON_BYTES = 32 * 1024 * 1024
 TELEMETRY_BINDING_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
 TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+EXECUTION_TIMEOUTS = {
+    "ready_seconds": 900,
+    "request_seconds": 240,
+    "shutdown_seconds": 30,
+    "outer_seconds": 1200,
+}
 
 
 class ReceiptError(RuntimeError):
@@ -486,6 +492,9 @@ def _actual_evidence(
     maintenance = _read_object(maintenance_path, "maintenance evidence")
     if maintenance.get("promotion_request_id") != request_id:
         raise ReceiptError("maintenance promotion request ID differs")
+    capture = maintenance.get("capture")
+    if not isinstance(capture, dict) or capture.get("timeouts") != EXECUTION_TIMEOUTS:
+        raise ReceiptError("maintenance execution timeout receipt binding differs")
     gpu = _gpu_evidence_from_maintenance(maintenance)
     executor = _read_object(executor_path, "executor record")
     if executor.get("schema_version") != "ullm.production_executor_record.v1" or executor.get("status") != "ok":
@@ -696,6 +705,7 @@ def write_receipt(
             "tree_sha256": source_tree_sha256,
             "archive_sha256": source_archive_sha256,
         },
+        "execution_timeouts": dict(EXECUTION_TIMEOUTS),
         "release": {
             "worker": {
                 "path": os.fspath(worker_path),
@@ -756,7 +766,8 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
     prepared = _read_object(path, "prepared promotion receipt")
     expected_prepared = {
         "schema_version", "status", "request_id", "source_commit", "source_provenance",
-        "release", "overlay", "package", "authorization_audit", "readiness", "actual",
+        "release", "overlay", "package", "authorization_audit", "readiness",
+        "execution_timeouts", "actual",
     }
     prepared_keys = set(prepared)
     if prepared_keys != expected_prepared and prepared_keys != expected_prepared | {
@@ -767,6 +778,7 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
         prepared.get("schema_version") != RECEIPT_SCHEMA
         or prepared.get("status") != "prepared_not_executed"
         or prepared.get("actual") != {"status": "pending", "required": True}
+        or prepared.get("execution_timeouts") != EXECUTION_TIMEOUTS
     ):
         raise ReceiptError("prepared receipt is not pending")
     request_id = _request_id(prepared.get("request_id"))
@@ -983,6 +995,12 @@ def write_failure_receipt(
         raise ReceiptError("maintenance promotion request ID differs")
     if maintenance.get("status") != "failed":
         raise ReceiptError("maintenance evidence is not a failed run")
+    capture = maintenance.get("capture")
+    if capture is not None and (
+        not isinstance(capture, dict)
+        or capture.get("timeouts") != prepared.get("execution_timeouts")
+    ):
+        raise ReceiptError("maintenance execution timeout receipt binding differs")
     receipt = json.loads(json.dumps(prepared, ensure_ascii=True, allow_nan=False))
     receipt["status"] = "actual_failed"
     receipt["actual"] = {

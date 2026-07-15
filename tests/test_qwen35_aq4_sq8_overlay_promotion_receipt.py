@@ -169,6 +169,7 @@ def test_pre_gpu_receipt_is_pending_and_create_new(fixture: dict[str, Path | dic
     )
     assert value["status"] == "prepared_not_executed"
     assert value["actual"] == {"status": "pending", "required": True}
+    assert value["execution_timeouts"] == WRITER.EXECUTION_TIMEOUTS
     metadata = receipt_path.lstat()
     assert stat.S_IMODE(metadata.st_mode) == 0o444 and metadata.st_nlink == 1
     with pytest.raises(WRITER.ReceiptError, match="already exists"):
@@ -182,6 +183,13 @@ def test_pre_gpu_receipt_is_pending_and_create_new(fixture: dict[str, Path | dic
         )
     with pytest.raises(GENERATOR.GenerationError, match="not executable"):
         GENERATOR.materialize(Path(fixture["profile"]))
+
+    tampered = json.loads(receipt_path.read_text(encoding="utf-8"))
+    tampered["execution_timeouts"]["ready_seconds"] = 899
+    receipt_path.chmod(0o644)
+    _write_json(receipt_path, tampered)
+    with pytest.raises(WRITER.ReceiptError, match="pending"):
+        WRITER._load_prepared_receipt(receipt_path)
 
 
 def test_authorization_audit_is_explicit_and_bound_for_prepared_candidate(
@@ -353,6 +361,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
         "status": "passed",
         "actual_run_count": 1,
         "failure": None,
+        "capture": {"timeouts": dict(WRITER.EXECUTION_TIMEOUTS)},
         "candidate_pre": snapshot,
         "candidate_post": snapshot,
         "stopped_observations": [

@@ -198,13 +198,42 @@ def worker_stderr_envelope(preview: str = "worker failed\n") -> dict[str, Any]:
         "schema_version": MODULE.WORKER_STDERR_SCHEMA,
         "byte_count": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "preview_text": preview,
-        "captured_bytes": len(raw),
+        "head_text": preview,
+        "head_bytes": len(raw),
+        "tail_text": preview,
+        "tail_bytes": len(raw),
         "truncated": False,
         "utf8_replacement": "\ufffd" in preview,
         "redacted_lines": preview.count("<redacted sensitive diagnostic line>"),
+        "record_count": 0,
+        "records_retained": 0,
+        "records_truncated": False,
+        "schema_counts": {},
+        "last_complete_record": None,
         "complete": True,
         "stream_error": None,
+    }
+
+
+def worker_lifecycle_envelope(*, request_sent: bool = True) -> dict[str, Any]:
+    ready = {
+        "type": "ready",
+        "offset_ms": 1.0,
+        "request_id_matches": None,
+        "processed_prompt_tokens": None,
+        "completion_tokens": None,
+        "token_index": None,
+    }
+    return {
+        "schema_version": MODULE.WORKER_LIFECYCLE_SCHEMA,
+        "request_id": REQUEST_ID,
+        "request_sent": request_sent,
+        "request_sent_offset_ms": 2.0 if request_sent else None,
+        "event_count": 1,
+        "events_retained": 1,
+        "events_truncated": False,
+        "events": [ready],
+        "last_event": ready,
     }
 
 
@@ -217,9 +246,16 @@ def capture_error_envelope(
         "stage": stage,
         "reason": "resident worker exited with status 7",
         "timed_out": False,
+        "request_id": REQUEST_ID,
+        "timeouts": {
+            "ready_seconds": MODULE.CAPTURE_READY_TIMEOUT_SECONDS,
+            "request_seconds": MODULE.CAPTURE_REQUEST_TIMEOUT_SECONDS,
+            "shutdown_seconds": MODULE.CAPTURE_SHUTDOWN_TIMEOUT_SECONDS,
+        },
         "worker_returncode": 7,
         "worker_signal": None,
         "worker_stderr": worker_stderr_envelope(preview),
+        "worker_lifecycle": worker_lifecycle_envelope(),
         "observed_sq8_promotion_telemetry": None,
         "observed_sq8_promotion_telemetry_binding": None,
         "worker_terminal": None,
@@ -336,7 +372,25 @@ def test_validate_executor_record_binds_telemetry_hash_and_request_id(
 def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
     root = candidate(tmp_path)
     worker = root / "fake-worker.py"
-    worker.write_text("#!/usr/bin/env python3\n" + worker_source, encoding="utf-8")
+    ready_source = r'''
+import json as _json
+print(_json.dumps({
+    "schema_version": "ullm.worker.v1",
+    "type": "ready",
+    "model": "test-model",
+    "model_revision": "test-revision",
+    "artifact_content_sha256": "f" * 64,
+    "package_manifest_sha256": "e" * 64,
+    "device": "gfx1201",
+    "execution_profile": "rdna4_aq4_resident_sq8_linear_qkv_z_overlay",
+    "context_length": 4096,
+    "max_new_tokens": 2,
+}, separators=(",", ":")), flush=True)
+'''
+    worker.write_text(
+        "#!/usr/bin/env python3\n" + ready_source + worker_source,
+        encoding="utf-8",
+    )
     worker.chmod(0o755)
     (root / "package.json").write_text(
         json.dumps({"passthrough_tensors": [], "tensors": []}),
@@ -347,7 +401,11 @@ def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
             {
                 "product": {
                     "root": ".",
-                    "package": {"manifest_path": "package.json"},
+                    "artifact": {"content_sha256": "f" * 64},
+                    "package": {
+                        "manifest_path": "package.json",
+                        "manifest_sha256": "e" * 64,
+                    },
                 },
                 "worker": {
                     "binary": worker.name,
@@ -358,8 +416,15 @@ def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
                     },
                     "arguments": [],
                 },
-                "public": {"context_length": 4096},
-                "generation": {"eos_token_ids": []},
+                "public": {
+                    "id": "test-model",
+                    "revision": "test-revision",
+                    "context_length": 4096,
+                },
+                "generation": {
+                    "eos_token_ids": [],
+                    "max_completion_tokens": 2,
+                },
                 "format": {"implementation_id": MODULE.IMPLEMENTATION_ID},
             }
         ),
@@ -735,7 +800,7 @@ def test_capture_signal_and_timeout_are_preserved(
     code, evidence = MODULE.execute(candidate(timeout_root), tmp_path / "timeout", deps)
     assert code == 1
     diagnostic = evidence["capture_failure"]
-    assert diagnostic["stage"] == "capture_subprocess_timeout"
+    assert diagnostic["stage"] == "capture_outer_timeout"
     assert diagnostic["returncode"] is None
     assert diagnostic["signal"] is None
     assert diagnostic["timeout_seconds"] == 300.0
@@ -779,7 +844,7 @@ def test_bounded_diagnostic_recaps_redacted_and_invalid_display(
 
 
 def test_exact_capture_error_envelope_preserves_large_worker_structure() -> None:
-    preview = "\ufffd" * 10000
+    preview = "\ufffd" * 5000
     value = capture_error_envelope(preview=preview)
     raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     assert len(raw) > MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
@@ -790,7 +855,7 @@ def test_exact_capture_error_envelope_preserves_large_worker_structure() -> None
     worker = parsed["worker_stderr"]
     assert worker["byte_count"] == len(preview.encode("utf-8"))
     assert worker["sha256"] == hashlib.sha256(preview.encode("utf-8")).hexdigest()
-    display = worker["preview"]
+    display = worker["head"]
     serialized = json.dumps(
         display,
         ensure_ascii=True,
@@ -860,6 +925,55 @@ def test_capture_error_envelope_rejects_duplicate_invalid_and_truncated() -> Non
     )
 
 
+@pytest.mark.parametrize(
+    ("tamper", "reason"),
+    [
+        (
+            lambda value: value.__setitem__(
+                "request_id", "sq8-promotion-" + "b" * 64
+            ),
+            "capture_error_envelope_type_or_value_differs",
+        ),
+        (
+            lambda value: value["timeouts"].__setitem__("ready_seconds", 899),
+            "capture_error_envelope_type_or_value_differs",
+        ),
+        (
+            lambda value: value["worker_lifecycle"].__setitem__(
+                "request_sent_offset_ms", None
+            ),
+            "worker_lifecycle_type_or_value_differs",
+        ),
+        (
+            lambda value: value["worker_stderr"]["schema_counts"].__setitem__(
+                "tampered", 1
+            ),
+            "worker_stderr_type_or_value_differs",
+        ),
+    ],
+)
+def test_capture_timeout_and_lifecycle_evidence_rejects_tamper(
+    tamper, reason: str
+) -> None:
+    value = capture_error_envelope()
+    tamper(value)
+    parsed = parse_capture_error(
+        capture_stream(json.dumps(value).encode("utf-8"))
+    )
+    assert parsed == {"validation": "invalid", "reason": reason}
+
+
+def test_outer_capture_cap_exceeds_all_inner_bounded_stages() -> None:
+    assert MODULE.CAPTURE_SUBPROCESS_TIMEOUT_SECONDS > (
+        MODULE.CAPTURE_READY_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_REQUEST_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_SHUTDOWN_TIMEOUT_SECONDS
+    )
+    command = MODULE.capture_command(Path("/candidate"), Path("/output"), REQUEST_ID)
+    assert command[command.index("--ready-timeout") + 1] == "900"
+    assert command[command.index("--timeout") + 1] == "240"
+
+
 def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
     signaled = capture_error_envelope()
     signaled["worker_returncode"] = -signal.SIGKILL
@@ -871,7 +985,7 @@ def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
     assert parsed["worker_returncode"] == -signal.SIGKILL
     assert parsed["worker_signal"] == signal.SIGKILL
 
-    timed_out = capture_error_envelope(stage="request")
+    timed_out = capture_error_envelope(stage="request_timeout")
     timed_out["timed_out"] = True
     timed_out["worker_returncode"] = -signal.SIGKILL
     timed_out["worker_signal"] = signal.SIGKILL
@@ -888,22 +1002,23 @@ def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
         ("capture", False, None, None, True),
         ("capture", False, 0, None, False),
         ("capture", True, -9, 9, False),
-        ("request", False, 0, None, True),
-        ("request", False, 0, 9, False),
-        ("request", False, 7, None, True),
-        ("request", False, 7, 7, False),
-        ("request", False, -15, 15, True),
-        ("request", False, None, None, False),
-        ("request", False, None, 9, False),
-        ("request", True, -9, 9, True),
-        ("request", True, 0, None, False),
-        ("request", True, 7, None, False),
-        ("request", True, None, None, False),
-        ("request", True, -9, None, False),
-        ("request", True, -9, 15, False),
-        ("shutdown", True, -9, 9, True),
-        ("shutdown", False, 0, None, False),
-        ("shutdown", True, 0, None, False),
+        ("request_protocol", False, 0, None, True),
+        ("request_protocol", False, 0, 9, False),
+        ("request_protocol", False, 7, None, True),
+        ("request_protocol", False, 7, 7, False),
+        ("request_protocol", False, -15, 15, True),
+        ("request_protocol", False, None, None, False),
+        ("request_protocol", False, None, 9, False),
+        ("request_timeout", True, -9, 9, True),
+        ("request_timeout", True, 0, None, False),
+        ("request_timeout", True, 7, None, False),
+        ("request_timeout", True, None, None, False),
+        ("request_timeout", True, -9, None, False),
+        ("request_timeout", True, -9, 15, False),
+        ("ready_timeout", True, -9, 9, True),
+        ("shutdown_timeout", True, -9, 9, True),
+        ("shutdown_timeout", False, 0, None, False),
+        ("shutdown_timeout", True, 0, None, False),
         ("cleanup", False, 0, None, True),
         ("cleanup", False, -9, 9, True),
         ("cleanup", True, -9, 9, False),
@@ -935,6 +1050,8 @@ def test_capture_error_terminal_matrix_is_exact(
     value["timed_out"] = timed_out
     value["worker_returncode"] = returncode
     value["worker_signal"] = worker_signal
+    if stage == "ready_timeout":
+        value["worker_lifecycle"] = worker_lifecycle_envelope(request_sent=False)
 
     parsed = parse_capture_error(
         capture_stream(json.dumps(value).encode("utf-8"))
@@ -1035,7 +1152,7 @@ def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() ->
         "non-JSON worker cause \ufffd\n"
         "<redacted sensitive diagnostic line>\n" + "ordinary worker detail\n" * 1400
     )
-    preview = preview.encode("utf-8")[: MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES].decode(
+    preview = preview.encode("utf-8")[: 16 * 1024].decode(
         "utf-8", errors="ignore"
     )
     envelope = capture_error_envelope(preview=preview)
@@ -1185,18 +1302,12 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
         assert stat.S_IMODE(metadata.st_mode) == 0o444
 
 
-@pytest.mark.parametrize("failure_kind", ["signal", "timeout"])
 def test_actual_capture_tool_fake_worker_chain_binds_terminal_and_raw_stderr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_kind: str,
 ) -> None:
     raw_stderr = b"non-json\xff\npassword=secret\n" + b"x" * 40000
-    terminal = (
-        "import os,signal;os.kill(os.getpid(),signal.SIGTERM)"
-        if failure_kind == "signal"
-        else "import time;time.sleep(10)"
-    )
+    terminal = "import os,signal;os.kill(os.getpid(),signal.SIGTERM)"
     worker_source = (
         "import sys\n"
         "sys.stdin.buffer.readline()\n"
@@ -1208,21 +1319,13 @@ def test_actual_capture_tool_fake_worker_chain_binds_terminal_and_raw_stderr(
     prepare(monkeypatch, [snapshot()])
     deps, calls = dependencies(tmp_path)
     deps.capture = MODULE.default_capture
-    original_capture_command = MODULE.capture_command
-
-    def short_capture(candidate_path: Path, output: Path, request_id: str) -> list[str]:
-        command = original_capture_command(candidate_path, output, request_id)
-        command[command.index("--timeout") + 1] = "0.1"
-        return command
-
-    monkeypatch.setattr(MODULE, "capture_command", short_capture)
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     fake_rocm_smi = fake_bin / "rocm-smi"
     fake_rocm_smi.write_text("#!/bin/sh\nexit 1\n", encoding="ascii")
     fake_rocm_smi.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
-    output = tmp_path / f"actual-capture-chain-{failure_kind}"
+    output = tmp_path / "actual-capture-chain-signal"
 
     code, evidence = MODULE.execute(root, output, deps)
 
@@ -1232,12 +1335,11 @@ def test_actual_capture_tool_fake_worker_chain_binds_terminal_and_raw_stderr(
     failure = evidence["capture_failure"]
     tool_error = failure["capture_tool_error"]
     assert tool_error["validation"] == "valid"
-    assert tool_error["stage"] == "request"
-    assert tool_error["timed_out"] is (failure_kind == "timeout")
+    assert tool_error["stage"] == "request_protocol"
+    assert tool_error["timed_out"] is False
     assert tool_error["worker_returncode"] < 0
     assert tool_error["worker_signal"] == -tool_error["worker_returncode"]
-    if failure_kind == "signal":
-        assert tool_error["worker_signal"] == signal.SIGTERM
+    assert tool_error["worker_signal"] == signal.SIGTERM
     worker = tool_error["worker_stderr"]
     assert worker["byte_count"] == len(raw_stderr)
     assert worker["sha256"] == hashlib.sha256(raw_stderr).hexdigest()
@@ -1245,8 +1347,10 @@ def test_actual_capture_tool_fake_worker_chain_binds_terminal_and_raw_stderr(
     assert worker["stream_error"] is None
     assert worker["utf8_replacement"] is True
     assert worker["redacted_lines"] == 1
-    preview = worker["preview"]
-    assert preview["display"]["serialized_byte_count"] <= (
+    assert worker["head"]["display"]["serialized_byte_count"] <= (
+        MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    )
+    assert worker["tail"]["display"]["serialized_byte_count"] <= (
         MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
     )
     persisted_raw = (output / "maintenance-evidence.json").read_text()

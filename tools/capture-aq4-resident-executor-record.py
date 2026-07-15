@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+from collections import deque
 import hashlib
 import json
 import math
@@ -38,11 +39,22 @@ SQ8_TELEMETRY_BINDING_SCHEMA = (
     "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
 )
 SQ8_TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
-WORKER_STDERR_SCHEMA_VERSION = "ullm.aq4_resident_worker_stderr.v1"
-WORKER_STDERR_PREVIEW_MAX_BYTES = 32 * 1024
+WORKER_STDERR_SCHEMA_VERSION = "ullm.aq4_resident_worker_stderr.v2"
+WORKER_LIFECYCLE_SCHEMA_VERSION = "ullm.aq4_resident_worker_lifecycle.v1"
+WORKER_STDERR_HEAD_MAX_BYTES = 16 * 1024
+WORKER_STDERR_TAIL_MAX_BYTES = 16 * 1024
+WORKER_STDERR_PREVIEW_MAX_BYTES = (
+    WORKER_STDERR_HEAD_MAX_BYTES + WORKER_STDERR_TAIL_MAX_BYTES
+)
 WORKER_STDERR_READ_CHUNK_BYTES = 64 * 1024
 WORKER_STDERR_JSON_LINE_MAX_BYTES = 1024 * 1024
-WORKER_STDERR_MAX_RECORDS = 8192
+WORKER_STDERR_MAX_RECORDS = 512
+WORKER_STDERR_RECORD_BYTES_MAX = 4 * 1024 * 1024
+WORKER_LIFECYCLE_MAX_EVENTS = 64
+WORKER_STDOUT_BUFFER_MAX_BYTES = 4 * 1024 * 1024
+DEFAULT_READY_TIMEOUT_SECONDS = 900.0
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 240.0
+WORKER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 WORKER_STDERR_REDACTION_RE = re.compile(
     rb"(?i)(?:password|passwd|secret|credential|api[_-]?key|authorization|"
     rb"access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|"
@@ -67,6 +79,9 @@ class CaptureError(ValueError):
         observed_sq8_promotion_telemetry: dict[str, Any] | None = None,
         observed_sq8_promotion_telemetry_binding: dict[str, Any] | None = None,
         worker_terminal: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        timeouts: dict[str, float] | None = None,
+        worker_lifecycle: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.worker_stderr = worker_stderr
@@ -79,6 +94,9 @@ class CaptureError(ValueError):
             observed_sq8_promotion_telemetry_binding
         )
         self.worker_terminal = worker_terminal
+        self.request_id = request_id
+        self.timeouts = timeouts
+        self.worker_lifecycle = worker_lifecycle
 
 
 class WorkerStderrCollector:
@@ -94,10 +112,19 @@ class WorkerStderrCollector:
     def __init__(self, stream: Any) -> None:
         self.stream = stream
         self.records: list[dict[str, Any]] = []
+        self._records_bytes = 0
+        self._records_truncated = False
+        self._record_count = 0
+        self._schema_counts: dict[str, int] = {}
+        self._other_schema_count = 0
+        self._last_complete_record: dict[str, Any] | None = None
         self._digest = hashlib.sha256()
         self._byte_count = 0
-        self._preview = bytearray()
-        self._preview_truncated = False
+        self._head = bytearray()
+        self._head_closed = False
+        self._tail: deque[bytes] = deque()
+        self._tail_bytes = 0
+        self._tail_truncated = False
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self._utf8_decoder_broken = False
         self._utf8_replacement = False
@@ -150,35 +177,105 @@ class WorkerStderrCollector:
             return
         text = value.decode("utf-8", errors="replace")
         encoded = text.encode("utf-8")
-        remaining = WORKER_STDERR_PREVIEW_MAX_BYTES - len(self._preview)
-        if len(encoded) > remaining:
-            self._preview_truncated = True
+        if not self._head_closed:
+            remaining = WORKER_STDERR_HEAD_MAX_BYTES - len(self._head)
+            if len(encoded) <= remaining:
+                self._head.extend(encoded)
+            else:
+                self._head_closed = True
+        if len(encoded) > WORKER_STDERR_TAIL_MAX_BYTES:
+            self._tail_truncated = True
             return
-        self._preview.extend(encoded)
+        while self._tail and self._tail_bytes + len(encoded) > WORKER_STDERR_TAIL_MAX_BYTES:
+            self._tail_bytes -= len(self._tail.popleft())
+            self._tail_truncated = True
+        self._tail.append(encoded)
+        self._tail_bytes += len(encoded)
+
+    @staticmethod
+    def _bounded_last_record(value: dict[str, Any]) -> dict[str, Any] | None:
+        if value.get("schema_version") == "ullm.backend_operation.load.v1":
+            trace = value.get("trace")
+            if not isinstance(trace, dict):
+                return None
+            return {
+                "schema_version": "ullm.backend_operation.load.v1",
+                "layer_position": value.get("layer_position")
+                if type(value.get("layer_position")) is int
+                else None,
+                "trace": {
+                    key: trace.get(key)
+                    for key in (
+                        "implementation_id",
+                        "kind",
+                        "phase",
+                        "executable",
+                        "batch_width",
+                        "chunk_width",
+                    )
+                    if isinstance(trace.get(key), (str, int))
+                    and not isinstance(trace.get(key), bool)
+                },
+            }
+        if value.get("event") == "request_released":
+            request_id = value.get("request_id")
+            return {
+                "event": "request_released",
+                "request_id": request_id
+                if isinstance(request_id, str)
+                and SQ8_PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is not None
+                else None,
+                "operation_execution_audit_observed": isinstance(
+                    value.get("operation_execution_audit"), dict
+                ),
+                "request_execution_audit_observed": isinstance(
+                    value.get("request_execution_audit"), dict
+                ),
+            }
+        return None
+
+    def _observe_record(self, line: bytes, value: dict[str, Any]) -> None:
+        self._record_count += 1
+        schema = value.get("schema_version")
+        if isinstance(schema, str) and len(schema.encode("utf-8")) <= 128:
+            if schema in self._schema_counts or len(self._schema_counts) < 32:
+                self._schema_counts[schema] = self._schema_counts.get(schema, 0) + 1
+            else:
+                self._other_schema_count += 1
+        else:
+            self._other_schema_count += 1
+        bounded = self._bounded_last_record(value)
+        if bounded is not None:
+            self._last_complete_record = bounded
+        if (
+            len(self.records) < WORKER_STDERR_MAX_RECORDS
+            and self._records_bytes + len(line) <= WORKER_STDERR_RECORD_BYTES_MAX
+        ):
+            self.records.append(value)
+            self._records_bytes += len(line)
+        else:
+            self._records_truncated = True
 
     def _finish_line(self, *, newline: bool) -> None:
         line = bytes(self._line) if not self._line_oversized else None
-        if line is None or self._line_size + (1 if newline else 0) > (
-            WORKER_STDERR_PREVIEW_MAX_BYTES - len(self._preview)
-        ):
-            self._preview_truncated = True
         if self._line_sensitive:
             self._redacted_lines += 1
             self._append_preview(WORKER_STDERR_REDACTED_LINE + (b"\n" if newline else b""))
         elif line is None:
             # A giant non-sensitive line cannot be retained or partially
             # displayed.  Mark the display as lossy and continue draining.
-            self._preview_truncated = True
+            self._head_closed = True
+            self._tail_truncated = True
         else:
             self._append_preview(line + (b"\n" if newline else b""))
 
-        if line is not None and len(self.records) < WORKER_STDERR_MAX_RECORDS:
+        if line is not None and not self._line_sensitive:
             try:
                 value = json.loads(line)
             except (UnicodeError, json.JSONDecodeError):
                 value = None
             if isinstance(value, dict):
-                self.records.append(value)
+                self._observe_record(line, value)
 
         self._line.clear()
         self._line_size = 0
@@ -235,19 +332,164 @@ class WorkerStderrCollector:
         if not self._finished:
             # This is only used as a last-resort failure envelope if a stream
             # cannot be joined.  It remains structurally valid and secret-free.
-            self._preview_truncated = True
+            self._head_closed = True
+            self._tail_truncated = True
+        head_text = bytes(self._head).decode("utf-8", errors="replace")
+        tail_raw = b"".join(self._tail)
+        tail_text = tail_raw.decode("utf-8", errors="replace")
         return {
             "schema_version": WORKER_STDERR_SCHEMA_VERSION,
             "byte_count": self._byte_count,
             "sha256": self._digest.hexdigest(),
-            "preview_text": bytes(self._preview).decode("utf-8", errors="replace"),
-            "captured_bytes": len(self._preview),
-            "truncated": self._preview_truncated,
+            "head_text": head_text,
+            "head_bytes": len(self._head),
+            "tail_text": tail_text,
+            "tail_bytes": len(tail_raw),
+            "truncated": self._head_closed or self._tail_truncated,
             "utf8_replacement": self._utf8_replacement,
             "redacted_lines": self._redacted_lines,
+            "record_count": self._record_count,
+            "records_retained": len(self.records),
+            "records_truncated": self._records_truncated,
+            "schema_counts": {
+                **dict(sorted(self._schema_counts.items())),
+                **({"<other>": self._other_schema_count} if self._other_schema_count else {}),
+            },
+            "last_complete_record": self._last_complete_record,
             "complete": self._finished and self.stream_error is None,
             "stream_error": self.stream_error,
         }
+
+
+class WorkerLifecycleEvidence:
+    """Keep bounded, content-free worker stdout lifecycle evidence."""
+
+    _ALLOWED_TYPES = frozenset(
+        {"ready", "started", "progress", "token", "released", "error", "fatal"}
+    )
+
+    def __init__(self, request_id: str, started_at: float) -> None:
+        self.request_id = request_id
+        self.started_at = started_at
+        self.request_sent_offset_ms: float | None = None
+        self.event_count = 0
+        self.events_truncated = False
+        self.events: list[dict[str, Any]] = []
+        self.last_event: dict[str, Any] | None = None
+
+    def mark_request_sent(self, observed_at: float) -> None:
+        self.request_sent_offset_ms = self._offset(observed_at)
+
+    def _offset(self, observed_at: float) -> float:
+        return round(max(0.0, observed_at - self.started_at) * 1000.0, 3)
+
+    def observe(self, value: dict[str, Any], observed_at: float) -> None:
+        raw_type = value.get("type")
+        event_type = raw_type if raw_type in self._ALLOWED_TYPES else "unknown"
+        request_id = value.get("request_id")
+        summary: dict[str, Any] = {
+            "type": event_type,
+            "offset_ms": self._offset(observed_at),
+            "request_id_matches": (
+                request_id == self.request_id if isinstance(request_id, str) else None
+            ),
+        }
+        for source, target in (
+            ("processed_prompt_tokens", "processed_prompt_tokens"),
+            ("completion_tokens", "completion_tokens"),
+            ("index", "token_index"),
+        ):
+            item = value.get(source)
+            summary[target] = (
+                item
+                if type(item) is int and 0 <= item <= SAFE_INT
+                else None
+            )
+        self.event_count += 1
+        self.last_event = summary
+        if len(self.events) < WORKER_LIFECYCLE_MAX_EVENTS:
+            self.events.append(summary)
+        else:
+            self.events_truncated = True
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "schema_version": WORKER_LIFECYCLE_SCHEMA_VERSION,
+            "request_id": self.request_id,
+            "request_sent": self.request_sent_offset_ms is not None,
+            "request_sent_offset_ms": self.request_sent_offset_ms,
+            "event_count": self.event_count,
+            "events_retained": len(self.events),
+            "events_truncated": self.events_truncated,
+            "events": list(self.events),
+            "last_event": self.last_event,
+        }
+
+
+def _capture_timeouts(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "ready_seconds": float(args.ready_timeout),
+        "request_seconds": float(args.timeout),
+        "shutdown_seconds": WORKER_SHUTDOWN_TIMEOUT_SECONDS,
+    }
+
+
+def _strict_ready_event(
+    event: Any, manifest: dict[str, Any], protocol: str
+) -> bool:
+    if not isinstance(event, dict) or event.get("type") != "ready":
+        return False
+    if set(event) != {
+        "schema_version",
+        "type",
+        "model",
+        "model_revision",
+        "artifact_content_sha256",
+        "package_manifest_sha256",
+        "device",
+        "execution_profile",
+        "context_length",
+        "max_new_tokens",
+    }:
+        return False
+    if event.get("schema_version") != protocol or "request_id" in event:
+        return False
+    public = manifest.get("public")
+    generation = manifest.get("generation")
+    worker = manifest.get("worker")
+    identity = worker.get("identity") if isinstance(worker, dict) else None
+    product = manifest.get("product")
+    package = product.get("package") if isinstance(product, dict) else None
+    artifact = product.get("artifact") if isinstance(product, dict) else None
+    expected = {
+        "model": public.get("id") if isinstance(public, dict) else None,
+        "model_revision": public.get("revision") if isinstance(public, dict) else None,
+        "artifact_content_sha256": (
+            artifact.get("content_sha256") if isinstance(artifact, dict) else None
+        ),
+        "package_manifest_sha256": (
+            package.get("manifest_sha256") if isinstance(package, dict) else None
+        ),
+        "device": identity.get("device") if isinstance(identity, dict) else None,
+        "execution_profile": (
+            identity.get("execution_profile") if isinstance(identity, dict) else None
+        ),
+        "context_length": (
+            public.get("context_length") if isinstance(public, dict) else None
+        ),
+        "max_new_tokens": (
+            generation.get("max_completion_tokens")
+            if isinstance(generation, dict)
+            else None
+        ),
+    }
+    if any(
+        expected[key] is None
+        for key in expected
+        if key != "artifact_content_sha256"
+    ):
+        return False
+    return all(key in event and event.get(key) == value for key, value in expected.items())
 
 
 def token_identity_digest(token_ids: list[int]) -> str:
@@ -706,13 +948,17 @@ def _terminate_worker(proc: subprocess.Popen[bytes]) -> None:
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        # A second wait gives the process a final chance to reap.  Do not leave
-        # a child around merely because the first wait raced process teardown.
         try:
             proc.kill()
         except (OSError, ProcessLookupError):
             pass
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise CaptureError(
+                "resident worker could not be reaped within the cleanup bound",
+                stage="cleanup",
+            ) from error
 
 
 def _finish_worker_stderr(
@@ -789,11 +1035,18 @@ def _empty_worker_stderr() -> dict[str, Any]:
         "schema_version": WORKER_STDERR_SCHEMA_VERSION,
         "byte_count": 0,
         "sha256": hashlib.sha256(b"").hexdigest(),
-        "preview_text": "",
-        "captured_bytes": 0,
+        "head_text": "",
+        "head_bytes": 0,
+        "tail_text": "",
+        "tail_bytes": 0,
         "truncated": False,
         "utf8_replacement": False,
         "redacted_lines": 0,
+        "record_count": 0,
+        "records_retained": 0,
+        "records_truncated": False,
+        "schema_counts": {},
+        "last_complete_record": None,
         "complete": False,
         "stream_error": "worker_not_started",
     }
@@ -804,12 +1057,16 @@ def _normalize_worker_stderr(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, dict):
         return _empty_worker_stderr()
-    preview = value.get("preview_text")
-    if not isinstance(preview, str):
-        preview = ""
-    original_preview_bytes = preview.encode("utf-8", errors="replace")
-    preview_bytes = original_preview_bytes[:WORKER_STDERR_PREVIEW_MAX_BYTES]
-    preview = preview_bytes.decode("utf-8", errors="replace")
+    def bounded_text(name: str, limit: int) -> tuple[str, int, bool]:
+        text = value.get(name)
+        if not isinstance(text, str):
+            text = ""
+        original = text.encode("utf-8", errors="replace")
+        bounded = original[:limit]
+        return bounded.decode("utf-8", errors="replace"), len(bounded), len(bounded) < len(original)
+
+    head, head_bytes, head_cut = bounded_text("head_text", WORKER_STDERR_HEAD_MAX_BYTES)
+    tail, tail_bytes, tail_cut = bounded_text("tail_text", WORKER_STDERR_TAIL_MAX_BYTES)
     byte_count = value.get("byte_count")
     if type(byte_count) is not int or byte_count < 0:
         byte_count = 0
@@ -824,17 +1081,121 @@ def _normalize_worker_stderr(value: Any) -> dict[str, Any]:
     complete = value.get("complete") is True and stream_error is None
     if not complete and stream_error is None:
         stream_error = "worker_stderr_incomplete"
+    record_count = value.get("record_count")
+    if type(record_count) is not int or not 0 <= record_count <= SAFE_INT:
+        record_count = 0
+    records_retained = value.get("records_retained")
+    if (
+        type(records_retained) is not int
+        or not 0 <= records_retained <= min(record_count, WORKER_STDERR_MAX_RECORDS)
+    ):
+        records_retained = 0
+    raw_counts = value.get("schema_counts")
+    schema_counts: dict[str, int] = {}
+    if isinstance(raw_counts, dict) and len(raw_counts) <= 33:
+        for key, count in raw_counts.items():
+            if (
+                isinstance(key, str)
+                and len(key.encode("utf-8")) <= 128
+                and type(count) is int
+                and 0 <= count <= record_count
+            ):
+                schema_counts[key] = count
+    raw_last = value.get("last_complete_record")
+    last = (
+        WorkerStderrCollector._bounded_last_record(raw_last)
+        if isinstance(raw_last, dict)
+        else None
+    )
     return {
         "schema_version": WORKER_STDERR_SCHEMA_VERSION,
         "byte_count": byte_count,
         "sha256": digest,
-        "preview_text": preview,
-        "captured_bytes": len(preview_bytes),
-        "truncated": value.get("truncated") is True or len(preview_bytes) < len(original_preview_bytes),
+        "head_text": head,
+        "head_bytes": head_bytes,
+        "tail_text": tail,
+        "tail_bytes": tail_bytes,
+        "truncated": value.get("truncated") is True or head_cut or tail_cut,
         "utf8_replacement": value.get("utf8_replacement") is True,
         "redacted_lines": value.get("redacted_lines") if type(value.get("redacted_lines")) is int and value.get("redacted_lines") >= 0 else 0,
+        "record_count": record_count,
+        "records_retained": records_retained,
+        "records_truncated": value.get("records_truncated") is True,
+        "schema_counts": dict(sorted(schema_counts.items())),
+        "last_complete_record": last,
         "complete": complete,
         "stream_error": stream_error,
+    }
+
+
+def _normalize_worker_lifecycle(
+    value: Any, request_id: str | None
+) -> dict[str, Any]:
+    def event_summary(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict) or item.get("type") not in (
+            WorkerLifecycleEvidence._ALLOWED_TYPES | {"unknown"}
+        ):
+            return None
+        offset = item.get("offset_ms")
+        if not isinstance(offset, (int, float)) or isinstance(offset, bool) or not math.isfinite(float(offset)) or not 0 <= float(offset) <= 86_400_000:
+            return None
+        result: dict[str, Any] = {
+            "type": item["type"],
+            "offset_ms": float(offset),
+            "request_id_matches": item.get("request_id_matches")
+            if item.get("request_id_matches") in {True, False, None}
+            else None,
+        }
+        for key in ("processed_prompt_tokens", "completion_tokens", "token_index"):
+            number = item.get(key)
+            result[key] = number if type(number) is int and 0 <= number <= SAFE_INT else None
+        return result
+
+    empty = {
+        "schema_version": WORKER_LIFECYCLE_SCHEMA_VERSION,
+        "request_id": request_id,
+        "request_sent": False,
+        "request_sent_offset_ms": None,
+        "event_count": 0,
+        "events_retained": 0,
+        "events_truncated": False,
+        "events": [],
+        "last_event": None,
+    }
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != WORKER_LIFECYCLE_SCHEMA_VERSION
+        or value.get("request_id") != request_id
+    ):
+        return empty
+    raw_events = value.get("events")
+    if not isinstance(raw_events, list) or len(raw_events) > WORKER_LIFECYCLE_MAX_EVENTS:
+        return empty
+    events = [event_summary(item) for item in raw_events]
+    if any(item is None for item in events):
+        return empty
+    event_count = value.get("event_count")
+    if type(event_count) is not int or not len(events) <= event_count <= SAFE_INT:
+        return empty
+    sent_offset = value.get("request_sent_offset_ms")
+    if sent_offset is not None and (
+        not isinstance(sent_offset, (int, float))
+        or isinstance(sent_offset, bool)
+        or not math.isfinite(float(sent_offset))
+        or not 0 <= float(sent_offset) <= 86_400_000
+    ):
+        return empty
+    last = event_summary(value.get("last_event")) if value.get("last_event") is not None else None
+    return {
+        "schema_version": WORKER_LIFECYCLE_SCHEMA_VERSION,
+        "request_id": request_id,
+        "request_sent": sent_offset is not None,
+        "request_sent_offset_ms": float(sent_offset) if sent_offset is not None else None,
+        "event_count": event_count,
+        "events_retained": len(events),
+        "events_truncated": value.get("events_truncated") is True,
+        "events": events,
+        "last_event": last,
     }
 
 
@@ -848,6 +1209,65 @@ def _bind_worker_terminal(error: CaptureError, proc: subprocess.Popen[bytes]) ->
         if isinstance(error.worker_returncode, int) and error.worker_returncode < 0
         else None
     )
+
+
+def _next_worker_event(
+    proc: subprocess.Popen[bytes],
+    stdout_fd: int,
+    stdout_buffer: bytearray,
+    pending: deque[dict[str, Any]],
+    *,
+    deadline: float,
+    timeout_stage: str,
+    protocol_stage: str,
+    timeout_reason: str,
+) -> dict[str, Any]:
+    while True:
+        if pending:
+            return pending.popleft()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CaptureError(timeout_reason, stage=timeout_stage, timed_out=True)
+        ready, _, _ = select.select([stdout_fd], [], [], min(1.0, remaining))
+        if not ready:
+            if proc.poll() is not None:
+                raise CaptureError(
+                    "resident worker exited before the expected lifecycle event",
+                    stage=protocol_stage,
+                )
+            continue
+        try:
+            chunk = os.read(stdout_fd, 64 * 1024)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            raise CaptureError(
+                "resident worker stdout ended before the expected lifecycle event",
+                stage=protocol_stage,
+            )
+        stdout_buffer.extend(chunk)
+        if len(stdout_buffer) > WORKER_STDOUT_BUFFER_MAX_BYTES:
+            raise CaptureError(
+                "resident worker stdout record exceeds the bounded lifecycle limit",
+                stage=protocol_stage,
+            )
+        while b"\n" in stdout_buffer:
+            newline_index = stdout_buffer.index(b"\n")
+            line = bytes(stdout_buffer[:newline_index])
+            del stdout_buffer[: newline_index + 1]
+            try:
+                event = json.loads(line)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise CaptureError(
+                    "resident worker emitted invalid lifecycle JSON",
+                    stage=protocol_stage,
+                ) from error
+            if not isinstance(event, dict):
+                raise CaptureError(
+                    "resident worker emitted a non-object lifecycle event",
+                    stage=protocol_stage,
+                )
+            pending.append(event)
 
 
 def run_capture(args: argparse.Namespace) -> dict[str, Any]:
@@ -887,6 +1307,19 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             raise CaptureError("SQ8 promotion manifest implementation identity differs")
         if worker.get("identity", {}).get("execution_profile") != SQ8_OVERLAY_EXECUTION_PROFILE:
             raise CaptureError("SQ8 promotion manifest execution profile differs")
+    if (
+        not math.isfinite(float(args.ready_timeout))
+        or not math.isfinite(float(args.timeout))
+        or not 0 < float(args.ready_timeout) <= 3600
+        or not 0 < float(args.timeout) <= 3600
+    ):
+        raise CaptureError("capture timeout bounds are invalid")
+    if sq8_promotion and (
+        float(args.ready_timeout) != DEFAULT_READY_TIMEOUT_SECONDS
+        or float(args.timeout) != DEFAULT_REQUEST_TIMEOUT_SECONDS
+    ):
+        raise CaptureError("SQ8 promotion timeout contract differs")
+    timeouts = _capture_timeouts(args)
     environment = configure_sq8_promotion_environment(
         environment, enabled=sq8_promotion, request_id=internal_request_id
     )
@@ -904,6 +1337,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         else manifest.get("generation", {}).get("eos_token_ids", []),
     }
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+    process_started = time.monotonic()
+    lifecycle = WorkerLifecycleEvidence(internal_request_id, process_started)
     assert proc.stderr is not None
     stderr_collector = WorkerStderrCollector(proc.stderr)
     stderr_records: list[dict[str, Any]] = stderr_collector.records
@@ -917,72 +1352,88 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     try:
         observer.start()
         assert proc.stdin is not None and proc.stdout is not None
-        proc.stdin.write((json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"))
-        proc.stdin.flush()
-        events: list[dict[str, Any]] = []
-        output_token_ids: list[int] = []
-        released: dict[str, Any] | None = None
-        deadline = time.monotonic() + args.timeout
         stdout_fd = proc.stdout.fileno()
         os.set_blocking(stdout_fd, False)
         stdout_buffer = bytearray()
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
+        pending_events: deque[dict[str, Any]] = deque()
+        ready_event = _next_worker_event(
+            proc,
+            stdout_fd,
+            stdout_buffer,
+            pending_events,
+            deadline=process_started + float(args.ready_timeout),
+            timeout_stage="ready_timeout",
+            protocol_stage="ready_protocol",
+            timeout_reason="resident worker ready timed out",
+        )
+        lifecycle.observe(ready_event, time.monotonic())
+        if not _strict_ready_event(ready_event, manifest, str(protocol)):
+            raise CaptureError(
+                "resident worker ready identity differs",
+                stage="ready_protocol",
+            )
+        proc.stdin.write((json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"))
+        proc.stdin.flush()
+        request_started = time.monotonic()
+        lifecycle.mark_request_sent(request_started)
+        output_token_ids: list[int] = []
+        released: dict[str, Any] | None = None
+        request_deadline = request_started + float(args.timeout)
+        while released is None:
+            event = _next_worker_event(
+                proc,
+                stdout_fd,
+                stdout_buffer,
+                pending_events,
+                deadline=request_deadline,
+                timeout_stage="request_timeout",
+                protocol_stage="request_protocol",
+                timeout_reason="resident worker request timed out",
+            )
+            lifecycle.observe(event, time.monotonic())
+            event_type = event.get("type")
+            if event.get("schema_version") != protocol or event_type not in {
+                "started",
+                "progress",
+                "token",
+                "released",
+                "error",
+                "fatal",
+            }:
                 raise CaptureError(
-                    "resident worker request timed out",
-                    stage="request",
-                    timed_out=True,
+                    "resident worker request lifecycle differs",
+                    stage="request_protocol",
                 )
-            ready, _, _ = select.select([proc.stdout], [], [], min(1.0, remaining))
-            if not ready:
-                if proc.poll() is not None:
-                    break
-                continue
-            try:
-                chunk = os.read(stdout_fd, 64 * 1024)
-            except BlockingIOError:
-                continue
-            if not chunk:
-                break
-            stdout_buffer.extend(chunk)
-            while b"\n" in stdout_buffer:
-                newline_index = stdout_buffer.index(b"\n")
-                line = bytes(stdout_buffer[:newline_index])
-                del stdout_buffer[: newline_index + 1]
-                try:
-                    event = json.loads(line)
-                except (UnicodeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                event_type = event.get("type")
-                if event_type == "token":
-                    if event.get("request_id") != internal_request_id or event.get("index") != len(output_token_ids):
-                        raise CaptureError("resident worker token event identity is discontinuous")
-                    token_id = event.get("token_id")
-                    if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
-                        raise CaptureError("resident worker emitted an invalid token id")
-                    output_token_ids.append(token_id)
-                events.append({"type": event_type, "processed_prompt_tokens": event.get("processed_prompt_tokens"), "completion_tokens": event.get("completion_tokens")})
-                if event_type == "released":
-                    released = event
-                    break
-            if released is not None:
-                break
-        if released is None:
-            raise CaptureError("resident worker did not release the capture request", stage="request")
+            if event_type not in {"fatal"} and event.get("request_id") != internal_request_id:
+                raise CaptureError(
+                    "resident worker request lifecycle identity differs",
+                    stage="request_protocol",
+                )
+            if event_type == "token":
+                if event.get("index") != len(output_token_ids):
+                    raise CaptureError(
+                        "resident worker token event identity is discontinuous",
+                        stage="request_protocol",
+                    )
+                token_id = event.get("token_id")
+                if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
+                    raise CaptureError(
+                        "resident worker emitted an invalid token id",
+                        stage="request_protocol",
+                    )
+                output_token_ids.append(token_id)
+            if event_type == "released":
+                released = event
         proc.stdin.write((json.dumps({"schema_version": protocol, "type": "shutdown"}, separators=(",", ":")) + "\n").encode("ascii"))
         proc.stdin.flush()
         proc.stdin.close()
         try:
-            proc.wait(timeout=30)
+            proc.wait(timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             timed_out = True
             raise CaptureError(
                 "resident worker did not shut down after capture",
-                stage="shutdown",
+                stage="shutdown_timeout",
                 timed_out=True,
             )
     except BaseException as error:
@@ -1018,6 +1469,9 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             )
         if isinstance(process_error, CaptureError):
             process_error.timed_out = process_error.timed_out or timed_out
+            process_error.request_id = internal_request_id
+            process_error.timeouts = timeouts
+            process_error.worker_lifecycle = lifecycle.summary()
             _bind_worker_terminal(process_error, proc)
     if process_error is not None:
         if isinstance(process_error, CaptureError):
@@ -1031,6 +1485,9 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             worker_returncode=int(proc.returncode)
             if isinstance(proc.returncode, int)
             else None,
+            request_id=internal_request_id,
+            timeouts=timeouts,
+            worker_lifecycle=lifecycle.summary(),
         )
         if failure.worker_returncode is not None and failure.worker_returncode < 0:
             failure.worker_signal = -failure.worker_returncode
@@ -1058,6 +1515,9 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
                 observed_sq8_telemetry_binding
             ),
             worker_terminal=worker_terminal,
+            request_id=internal_request_id,
+            timeouts=timeouts,
+            worker_lifecycle=lifecycle.summary(),
         )
         if failure.worker_returncode is not None and failure.worker_returncode < 0:
             failure.worker_signal = -failure.worker_returncode
@@ -1275,7 +1735,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt-tokens", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=1)
-    parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument(
+        "--ready-timeout", type=float, default=DEFAULT_READY_TIMEOUT_SECONDS
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT_SECONDS
+    )
     parser.add_argument("--sq8-promotion-evidence", action="store_true")
     parser.add_argument("--sq8-promotion-request-id")
     args = parser.parse_args(argv)
@@ -1285,6 +1750,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (CaptureError, OSError, ValueError) as error:
         worker_stderr = _normalize_worker_stderr(getattr(error, "worker_stderr", None))
+        request_id = getattr(error, "request_id", None)
+        if request_id is None:
+            requested = getattr(args, "sq8_promotion_request_id", None)
+            request_id = requested if isinstance(requested, str) else None
+        timeouts = getattr(error, "timeouts", None)
+        if not isinstance(timeouts, dict):
+            timeouts = _capture_timeouts(args)
+        worker_lifecycle = _normalize_worker_lifecycle(
+            getattr(error, "worker_lifecycle", None), request_id
+        )
         reason = str(error)
         # Keep the status line bounded even when an exception originates in a
         # dependency.  The worker stderr preview has its own independent cap.
@@ -1292,14 +1767,17 @@ def main(argv: list[str] | None = None) -> int:
             "utf-8", errors="replace"
         )
         envelope = {
-            "schema_version": "ullm.aq4_resident_capture_error.v3",
+            "schema_version": "ullm.aq4_resident_capture_error.v4",
             "status": "failed",
             "stage": getattr(error, "stage", None) or "capture",
             "reason": reason,
             "timed_out": bool(getattr(error, "timed_out", False)),
+            "request_id": request_id,
+            "timeouts": timeouts,
             "worker_returncode": getattr(error, "worker_returncode", None),
             "worker_signal": getattr(error, "worker_signal", None),
             "worker_stderr": worker_stderr,
+            "worker_lifecycle": worker_lifecycle,
             "observed_sq8_promotion_telemetry": getattr(
                 error, "observed_sq8_promotion_telemetry", None
             ),

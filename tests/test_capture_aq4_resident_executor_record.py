@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import time
 
 import pytest
 
@@ -25,6 +26,10 @@ def collect(raw: bytes) -> tuple[TOOL.WorkerStderrCollector, dict]:
     return collector, collector.summary()
 
 
+def preview_text(summary: dict) -> str:
+    return summary["head_text"] + summary["tail_text"]
+
+
 def test_stderr_json_dict_compatibility_and_raw_digest() -> None:
     raw = b'{"event":"load","count":1}\n[1,2]\nnot-json\n{"event":"release"}\n'
     collector, summary = collect(raw)
@@ -32,7 +37,10 @@ def test_stderr_json_dict_compatibility_and_raw_digest() -> None:
     assert collector.records == [{"event": "load", "count": 1}, {"event": "release"}]
     assert summary["byte_count"] == len(raw)
     assert summary["sha256"] == hashlib.sha256(raw).hexdigest()
-    assert summary["captured_bytes"] == len(summary["preview_text"].encode("utf-8"))
+    assert summary["head_bytes"] == len(summary["head_text"].encode("utf-8"))
+    assert summary["tail_bytes"] == len(summary["tail_text"].encode("utf-8"))
+    assert summary["record_count"] == 2
+    assert summary["records_retained"] == 2
     assert summary["utf8_replacement"] is False
     assert summary["complete"] is True
     assert summary["stream_error"] is None
@@ -44,7 +52,7 @@ def test_stderr_invalid_utf8_is_drained_and_preview_is_valid_utf8() -> None:
 
     assert collector.records == [{"ok": True}]
     assert summary["utf8_replacement"] is True
-    preview = summary["preview_text"]
+    preview = preview_text(summary)
     assert "\ufffd" in preview
     assert len(preview.encode("utf-8")) <= TOOL.WORKER_STDERR_PREVIEW_MAX_BYTES
 
@@ -57,10 +65,11 @@ def test_secret_marker_after_32k_boundary_redacts_the_whole_long_line() -> None:
     assert summary["sha256"] == hashlib.sha256(raw).hexdigest()
     assert summary["byte_count"] == len(raw)
     assert summary["redacted_lines"] == 1
-    assert secret.decode() not in summary["preview_text"]
-    assert "<redacted sensitive diagnostic line>" in summary["preview_text"]
-    assert summary["truncated"] is True
-    assert len(summary["preview_text"].encode("utf-8")) <= TOOL.WORKER_STDERR_PREVIEW_MAX_BYTES
+    preview = preview_text(summary)
+    assert secret.decode() not in preview
+    assert "<redacted sensitive diagnostic line>" in preview
+    assert summary["truncated"] is False
+    assert len(preview.encode("utf-8")) <= TOOL.WORKER_STDERR_PREVIEW_MAX_BYTES
 
 
 def test_many_secret_lines_never_expose_secret_and_preview_has_final_cap() -> None:
@@ -68,10 +77,12 @@ def test_many_secret_lines_never_expose_secret_and_preview_has_final_cap() -> No
     _, summary = collect(raw)
 
     assert summary["redacted_lines"] == 5000
-    assert "secret-" not in summary["preview_text"]
-    assert "authorization" not in summary["preview_text"]
-    assert summary["captured_bytes"] <= TOOL.WORKER_STDERR_PREVIEW_MAX_BYTES
-    assert len(summary["preview_text"].encode("utf-8")) <= TOOL.WORKER_STDERR_PREVIEW_MAX_BYTES
+    preview = preview_text(summary)
+    assert "secret-" not in preview
+    assert "authorization" not in preview
+    assert summary["head_bytes"] <= TOOL.WORKER_STDERR_HEAD_MAX_BYTES
+    assert summary["tail_bytes"] <= TOOL.WORKER_STDERR_TAIL_MAX_BYTES
+    assert len(preview.encode("utf-8")) <= TOOL.WORKER_STDERR_PREVIEW_MAX_BYTES
 
 
 def test_giant_non_json_line_is_bounded_without_retaining_the_line() -> None:
@@ -80,6 +91,20 @@ def test_giant_non_json_line_is_bounded_without_retaining_the_line() -> None:
 
     assert collector.records == []
     assert summary["byte_count"] == len(raw)
+    assert summary["truncated"] is True
+
+
+def test_stderr_head_and_tail_preserve_final_bounded_context() -> None:
+    raw = b"".join(
+        f"diagnostic-{index:05d}-".encode() + b"x" * 96 + b"\n"
+        for index in range(1000)
+    )
+    _, summary = collect(raw)
+
+    assert "diagnostic-00000" in summary["head_text"]
+    assert "diagnostic-00999" in summary["tail_text"]
+    assert summary["head_bytes"] <= TOOL.WORKER_STDERR_HEAD_MAX_BYTES
+    assert summary["tail_bytes"] <= TOOL.WORKER_STDERR_TAIL_MAX_BYTES
     assert summary["truncated"] is True
 
 
@@ -101,11 +126,18 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
         "schema_version": TOOL.WORKER_STDERR_SCHEMA_VERSION,
         "byte_count": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "preview_text": raw.decode(),
-        "captured_bytes": len(raw),
+        "head_text": raw.decode(),
+        "head_bytes": len(raw),
+        "tail_text": raw.decode(),
+        "tail_bytes": len(raw),
         "truncated": False,
         "utf8_replacement": False,
         "redacted_lines": 0,
+        "record_count": 0,
+        "records_retained": 0,
+        "records_truncated": False,
+        "schema_counts": {},
+        "last_complete_record": None,
         "complete": True,
         "stream_error": None,
     }
@@ -124,14 +156,31 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
     captured = capsys.readouterr()
     envelope = json.loads(captured.out)
     assert envelope == {
-        "schema_version": "ullm.aq4_resident_capture_error.v3",
+        "schema_version": "ullm.aq4_resident_capture_error.v4",
         "status": "failed",
         "stage": "request",
         "reason": "resident worker did not release",
         "timed_out": False,
+        "request_id": None,
+        "timeouts": {
+            "ready_seconds": TOOL.DEFAULT_READY_TIMEOUT_SECONDS,
+            "request_seconds": TOOL.DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            "shutdown_seconds": TOOL.WORKER_SHUTDOWN_TIMEOUT_SECONDS,
+        },
         "worker_returncode": -signal.SIGKILL,
         "worker_signal": signal.SIGKILL,
         "worker_stderr": summary,
+        "worker_lifecycle": {
+            "schema_version": TOOL.WORKER_LIFECYCLE_SCHEMA_VERSION,
+            "request_id": None,
+            "request_sent": False,
+            "request_sent_offset_ms": None,
+            "event_count": 0,
+            "events_retained": 0,
+            "events_truncated": False,
+            "events": [],
+            "last_event": None,
+        },
         "observed_sq8_promotion_telemetry": None,
         "observed_sq8_promotion_telemetry_binding": None,
         "worker_terminal": None,
@@ -139,9 +188,47 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
     assert "resident worker did not release" in captured.err
 
 
-def _fake_manifest(tmp_path: Path, worker_source: str) -> Path:
+def _fake_manifest(
+    tmp_path: Path,
+    worker_source: str,
+    *,
+    emit_ready: bool = True,
+    ready_delay: float = 0.0,
+) -> Path:
     worker = tmp_path / "fake-worker.py"
-    worker.write_text("#!/usr/bin/env python3\n" + worker_source, encoding="utf-8")
+    ready_source = f'''\
+import time as _ready_time
+_ready_time.sleep({ready_delay!r})
+''' + r'''
+import json as _ready_json
+from pathlib import Path as _ReadyPath
+_ready_manifest = _ready_json.loads(
+    _ReadyPath(__file__).with_name("manifest.json").read_text(encoding="utf-8")
+)
+_ready_product = _ready_manifest["product"]
+_ready_identity = _ready_manifest["worker"]["identity"]
+_ready_artifact = _ready_product.get("artifact")
+print(_ready_json.dumps({
+    "schema_version": _ready_manifest["worker"]["protocol"],
+    "type": "ready",
+    "model": _ready_manifest["public"]["id"],
+    "model_revision": _ready_manifest["public"]["revision"],
+    "artifact_content_sha256": (
+        _ready_artifact.get("content_sha256") if isinstance(_ready_artifact, dict) else None
+    ),
+    "package_manifest_sha256": _ready_product["package"]["manifest_sha256"],
+    "device": _ready_identity["device"],
+    "execution_profile": _ready_identity["execution_profile"],
+    "context_length": _ready_manifest["public"]["context_length"],
+    "max_new_tokens": _ready_manifest["generation"]["max_completion_tokens"],
+}, separators=(",", ":")), flush=True)
+'''
+    worker.write_text(
+        "#!/usr/bin/env python3\n"
+        + (ready_source if emit_ready else "")
+        + worker_source,
+        encoding="utf-8",
+    )
     worker.chmod(0o755)
     (tmp_path / "package.json").write_text(
         json.dumps({"passthrough_tensors": [], "tensors": []}), encoding="utf-8"
@@ -150,15 +237,29 @@ def _fake_manifest(tmp_path: Path, worker_source: str) -> Path:
     manifest.write_text(
         json.dumps(
             {
-                "product": {"root": ".", "package": {"manifest_path": "package.json"}},
+                "product": {
+                    "root": ".",
+                    "package": {
+                        "manifest_path": "package.json",
+                        "manifest_sha256": "c" * 64,
+                    },
+                },
                 "worker": {
                     "binary": worker.name,
                     "protocol": "ullm.worker.v1",
-                    "identity": {"device": "gfx1201", "device_index": 0},
+                    "identity": {
+                        "device": "gfx1201",
+                        "device_index": 0,
+                        "execution_profile": "test-profile",
+                    },
                     "arguments": [],
                 },
-                "public": {"context_length": 4096},
-                "generation": {"eos_token_ids": []},
+                "public": {
+                    "id": "test-model",
+                    "revision": "test-revision",
+                    "context_length": 4096,
+                },
+                "generation": {"eos_token_ids": [], "max_completion_tokens": 2},
                 "format": {},
             }
         ),
@@ -210,15 +311,22 @@ def test_real_fake_worker_failure_envelope_preserves_terminal_identity(
         "stage",
         "reason",
         "timed_out",
+        "request_id",
+        "timeouts",
         "worker_returncode",
         "worker_signal",
         "worker_stderr",
+        "worker_lifecycle",
         "observed_sq8_promotion_telemetry",
         "observed_sq8_promotion_telemetry_binding",
         "worker_terminal",
     }
     assert envelope["status"] == "failed"
     assert envelope["timed_out"] is expected_timeout
+    assert envelope["stage"] == (
+        "request_timeout" if expected_timeout else "request_protocol"
+    )
+    assert envelope["worker_lifecycle"]["request_sent"] is True
     if expected_signal is not None:
         assert envelope["worker_returncode"] == -expected_signal
         assert envelope["worker_signal"] == expected_signal
@@ -231,7 +339,78 @@ def test_real_fake_worker_failure_envelope_preserves_terminal_identity(
     assert stderr["utf8_replacement"] is True
     assert stderr["redacted_lines"] == 1
     assert stderr["truncated"] is True
-    assert "password=secret" not in stderr["preview_text"]
+    assert "password=secret" not in preview_text(stderr)
+
+
+def test_ready_timeout_occurs_before_request_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = _fake_manifest(
+        tmp_path,
+        "import time\ntime.sleep(10)\n",
+        emit_ready=False,
+    )
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--ready-timeout",
+            "0.05",
+        ]
+    ) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["stage"] == "ready_timeout"
+    assert envelope["timed_out"] is True
+    assert envelope["worker_lifecycle"]["request_sent"] is False
+    assert envelope["worker_lifecycle"]["event_count"] == 0
+
+
+def test_partial_token_timeout_records_only_bounded_lifecycle_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_token_id = 987654321
+    worker_source = f'''\
+import json, sys, time
+request = json.loads(sys.stdin.buffer.readline())
+print(json.dumps({{
+    "schema_version": "ullm.worker.v1",
+    "type": "token",
+    "request_id": request["request_id"],
+    "index": 0,
+    "token_id": {secret_token_id},
+}}, separators=(",", ":")), flush=True)
+time.sleep(10)
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--timeout",
+            "0.05",
+        ]
+    ) == 1
+    captured = capsys.readouterr().out
+    envelope = json.loads(captured)
+    assert envelope["stage"] == "request_timeout"
+    assert envelope["worker_lifecycle"]["last_event"]["type"] == "token"
+    assert envelope["worker_lifecycle"]["last_event"]["token_index"] == 0
+    assert "token_id" not in envelope["worker_lifecycle"]["last_event"]
+    assert str(secret_token_id) not in captured
 
 
 def test_real_fake_worker_json_success_path_is_unchanged(
@@ -241,13 +420,13 @@ def test_real_fake_worker_json_success_path_is_unchanged(
 import json, sys
 request = json.loads(sys.stdin.buffer.readline())
 request_id = request["request_id"]
-print(json.dumps({"type": "token", "request_id": request_id, "index": 0, "token_id": 42}, separators=(",", ":")), flush=True)
-print(json.dumps({"type": "released", "request_id": request_id, "completion_tokens": 1, "timings": {"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}, "reset_complete": True}, separators=(",", ":")), flush=True)
+print(json.dumps({"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": 0, "token_id": 42}, separators=(",", ":")), flush=True)
+print(json.dumps({"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 1, "timings": {"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}, "reset_complete": True}, separators=(",", ":")), flush=True)
 json.dump({"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 1, "chunk_width": 1}}, sys.stderr); sys.stderr.write("\n")
 json.dump({"event": "request_released", "request_id": request_id, "operation_execution_audit": {"coverage_complete": True, "implementation_counts": [{"implementation_id": "impl", "count": 1}], "prefill_width_histogram": [0, 1], "total_steps": 1}, "request_execution_audit": {}}, sys.stderr); sys.stderr.write("\n"); sys.stderr.flush()
 json.loads(sys.stdin.buffer.readline())
 '''
-    manifest = _fake_manifest(tmp_path, worker_source)
+    manifest = _fake_manifest(tmp_path, worker_source, ready_delay=0.05)
     package = tmp_path / "package.json"
     package.write_text(
         json.dumps(
@@ -288,7 +467,9 @@ json.loads(sys.stdin.buffer.readline())
     monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
     monkeypatch.setattr(TOOL, "VramObserver", CompleteObserver)
     output = tmp_path / "record.json"
+    started = time.monotonic()
     assert TOOL.main(["--manifest", str(manifest), "--output", str(output)]) == 0
+    assert time.monotonic() - started >= 0.04
     status = json.loads(capsys.readouterr().out)
     assert status["status"] == "ok"
     record = json.loads(output.read_text(encoding="utf-8"))
@@ -351,8 +532,8 @@ assert request["max_new_tokens"] == 2
 assert request["eos_token_ids"] == []
 request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
-    print(json.dumps({{"type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
-print(json.dumps({{"type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
+    print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
+print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
 json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {operation_audit!r}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
 json.loads(sys.stdin.buffer.readline())
 sys.exit({worker_exit_code})
@@ -449,8 +630,8 @@ import json, sys
 request = json.loads(sys.stdin.buffer.readline())
 request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
-    print(json.dumps({{"type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
-print(json.dumps({{"type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
+    print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
+print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
 json.dump({{"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {{"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 128, "chunk_width": 128}}}}, sys.stderr); sys.stderr.write("\\n")
 json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {{"coverage_complete": True, "implementation_counts": [{{"implementation_id": "impl", "count": 1}}], "prefill_width_histogram": [0] * 128 + [1], "total_steps": 129}}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
 json.loads(sys.stdin.buffer.readline())
@@ -555,8 +736,8 @@ assert request["max_new_tokens"] == 2
 assert request["eos_token_ids"] == []
 request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
-    print(json.dumps({{"type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
-print(json.dumps({{"type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
+    print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
+print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
 json.dump({{"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {{"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 128, "chunk_width": 128}}}}, sys.stderr); sys.stderr.write("\\n")
 json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {{"coverage_complete": True, "implementation_counts": [{{"implementation_id": "impl", "count": 1}}], "prefill_width_histogram": [0] * 128 + [1], "total_steps": 129}}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
 json.loads(sys.stdin.buffer.readline())
