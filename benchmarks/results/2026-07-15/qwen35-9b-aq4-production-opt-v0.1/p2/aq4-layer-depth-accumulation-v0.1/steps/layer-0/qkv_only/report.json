@@ -1,0 +1,58 @@
+{
+  "device": {
+    "backend": "cpu",
+    "requested_index": 0
+  },
+  "holdout": "not_run",
+  "input": {
+    "hidden": 4096,
+    "input_normed_sha256": "e703066dd71b287d7fb6fa062b325d0b81878a5fb4e2b7902e650feb77b3fb72",
+    "residual_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/input/residual-depth0.f32le",
+    "residual_sha256": "ae13c3421c568811160a2a48ee3269caaa690fc0b8b7cd2aec9f5518f8daee23",
+    "rows": 3
+  },
+  "layer_index": 0,
+  "memory": {
+    "parallel_tracks": 1,
+    "vm_hwm_kib": 715784
+  },
+  "mode": "qkv_only",
+  "outputs": {
+    "finite": true,
+    "layer_output_sha256": "0f1e14a991328bf2ff9f83ab5286b96430bd19e36d27644c6a2dc5b52d7f9b6e",
+    "qkv_sha256": "e1afdc6378778496a696076d45b3a9d2923e3032e0264236ab6df6086144ae92",
+    "recurrent_sha256": "e14111ae4c0c08d6daef40f93b1bf239846d54c6fe2d8b5a6a3805fb9fd4bea0",
+    "z_sha256": "a1a337de191e5bc8af7851cf26bf843af7aafc47cf36c5caceee33efb2eb2091"
+  },
+  "override": {
+    "default_off": true,
+    "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv",
+    "source_qkv_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer-depth-accumulation-v0.1/source/layer-0/shared/source-qkv.f32le",
+    "source_z_path": "-",
+    "worker_reachable": false,
+    "z_boundary": "after_production_z_matvec_before_production_silu_mul"
+  },
+  "package": {
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "promotion": false,
+  "recurrent_state_digests": [
+    {
+      "sha256": "a2db24e8a4433b2f4782ef43e14d71eeb1959fab5223461d2578fed5e301b612",
+      "step": 0
+    },
+    {
+      "sha256": "819d45b02944dfc64bd0045b455a2745c855acca1ba2200e87b8ccb37367f473",
+      "step": 1
+    },
+    {
+      "sha256": "91b77bf5decfcacb7a4acb73ed43e2c2e9bc8c90d4719eeebe9aee9e98d344e4",
+      "step": 2
+    }
+  ],
+  "schema_version": "ullm.aq4_linear_attn_depth_step.cpu.v1",
+  "status": "valid",
+  "thresholds": null
+}
