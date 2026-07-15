@@ -327,6 +327,54 @@ def _entry_commit(source: dict[str, Any], schema: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _migrated_v1_entries(validated: dict[str, Any]) -> list[dict[str, Any]]:
+    relations = (
+        "historical_implementation_audit",
+        "capture_implementation_no_go",
+        "capture_implementation_no_go",
+        "actual_failure",
+        "actual_failure",
+        "restore_implementation_no_go",
+    )
+    migrated: list[dict[str, Any]] = []
+    for sequence, (entry, relation) in enumerate(
+        zip(validated["document"]["entries"], relations, strict=True)
+    ):
+        source = _entry_source(entry, sequence)
+        schema = entry["schema_version"]
+        status = entry.get("status", entry.get("verdict"))
+        request_id = entry.get("request_id")
+        if request_id is None:
+            candidate = source.get("fixed_request_id")
+            request_id = candidate if isinstance(candidate, str) else None
+        source_commit = _entry_commit(source, schema)
+        if (
+            status not in {
+                "implementation_ready",
+                "implementation_no_go",
+                "actual_failed",
+            }
+            or request_id is not None
+            and REQUEST_RE.fullmatch(request_id) is None
+            or source_commit is None
+            or HEX40_RE.fullmatch(source_commit) is None
+        ):
+            raise LineageError("v1 lineage entry cannot be canonically migrated")
+        migrated.append(
+            {
+                "sequence": sequence,
+                "relation": relation,
+                "path": entry["path"],
+                "sha256": entry["sha256"],
+                "schema_version": schema,
+                "status": status,
+                "request_id": request_id,
+                "source_commit": source_commit,
+            }
+        )
+    return migrated
+
+
 def _validate_v2_entry(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict) or set(entry) != ENTRY_KEYS:
         raise LineageError("lineage v2 entry keys differ")
@@ -471,12 +519,19 @@ def _validate_v2_manifest(
         raise LineageError("current implementation GO receipt binding differs")
 
     predecessor = document.get("predecessor")
-    if predecessor is not None:
-        if not isinstance(predecessor, dict) or set(predecessor) != {
+    if not isinstance(predecessor, dict) or predecessor.get("schema_version") not in {
+        MANIFEST_SCHEMA_V1,
+        MANIFEST_SCHEMA,
+    }:
+        raise LineageError("authorization lineage predecessor shape differs")
+    predecessor_schema = predecessor["schema_version"]
+    if predecessor_schema == MANIFEST_SCHEMA_V1:
+        if set(predecessor) != {
+            "schema_version",
             "path",
             "sha256",
-            "entries_sha256",
-            "entry_count",
+            "migrated_prefix_sha256",
+            "migrated_prefix_count",
         }:
             raise LineageError("authorization lineage predecessor shape differs")
         predecessor_path = Path(str(predecessor.get("path", "")))
@@ -486,6 +541,41 @@ def _validate_v2_manifest(
             predecessor_path,
             _seen=seen | {path},
         )
+        if previous["document"].get("schema_version") != MANIFEST_SCHEMA_V1:
+            raise LineageError("authorization lineage migration predecessor differs")
+        migrated = _migrated_v1_entries(previous)
+        latest_failure = _entry_source(entries[6], 6)
+        previous_source = previous["document"]["source"]
+        if (
+            predecessor.get("sha256") != previous["sha256"]
+            or predecessor.get("migrated_prefix_sha256") != canonical_sha(migrated)
+            or predecessor.get("migrated_prefix_count") != len(migrated)
+            or len(entries) != len(migrated) + 2
+            or entries[: len(migrated)] != migrated
+            or entries[6]["relation"] != "actual_failure"
+            or entries[6]["source_commit"]
+            != previous_source["commit"]
+            or latest_failure.get("source_provenance")
+            != {
+                "tree_sha256": previous_source["tree_oid"],
+                "archive_sha256": previous_source["archive_sha256"],
+            }
+            or entries[7]["relation"] != "implementation_ready_current"
+        ):
+            raise LineageError("authorization lineage v1 migration differs")
+    else:
+        if set(predecessor) != {
+            "schema_version",
+            "path",
+            "sha256",
+            "entries_sha256",
+            "entry_count",
+        }:
+            raise LineageError("authorization lineage predecessor shape differs")
+        predecessor_path = Path(str(predecessor.get("path", "")))
+        if predecessor_path in seen:
+            raise LineageError("authorization lineage predecessor cycle differs")
+        previous = validate_manifest(predecessor_path, _seen=seen | {path})
         if previous["document"].get("schema_version") != MANIFEST_SCHEMA:
             raise LineageError("authorization lineage predecessor must be v2")
         if (

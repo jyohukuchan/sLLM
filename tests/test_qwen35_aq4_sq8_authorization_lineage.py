@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,36 +32,43 @@ def fixture(tmp_path: Path) -> tuple[Path, dict]:
             "schema_version": TOOL.CAPTURE_AUDIT_SCHEMA,
             "verdict": "implementation_ready",
             "actual": "not_executed",
+            "audited_source": {"commit": "0" * 40},
             "authorization": {"eligible_for_fresh_authorization_builder": True},
         },
         {
             "schema_version": TOOL.CAPTURE_AUDIT_SCHEMA,
             "verdict": "implementation_no_go",
             "actual": "not_executed",
+            "audited_source": {"commit": "1" * 40},
             "reason_codes": ["first"],
         },
         {
             "schema_version": TOOL.CAPTURE_AUDIT_SCHEMA,
             "verdict": "implementation_no_go",
             "actual": "not_executed",
+            "audited_source": {"commit": "2" * 40},
             "reason_codes": ["second"],
         },
         {
             "schema_version": TOOL.PROMOTION_SCHEMA,
             "status": "actual_failed",
             "request_id": request,
+            "source_commit": "3" * 40,
             "actual": {"status": "failed", "request_id": request},
         },
         {
             "schema_version": TOOL.PROMOTION_SCHEMA,
             "status": "actual_failed",
             "request_id": request,
+            "source_commit": "4" * 40,
             "actual": {"status": "failed", "request_id": request},
         },
         {
             "schema_version": TOOL.RUNTIME_AUDIT_SCHEMA,
             "verdict": "implementation_no_go",
             "actual": "not_executed",
+            "audited_source": {"commit": "5" * 40},
+            "fixed_request_id": request,
             "reason_code": "restore_retry_terminal_identity_not_fail_closed",
         },
     ]
@@ -179,65 +187,72 @@ def test_path_alias_symlink_hardlink_and_mode_fail_closed(tmp_path: Path) -> Non
 
 
 def v2_fixture(tmp_path: Path) -> tuple[Path, dict]:
+    v1_path, _v1_document = fixture(tmp_path)
+    v1 = TOOL.validate_manifest(v1_path)
+    entries = TOOL._migrated_v1_entries(v1)
     source_identity = {
         "commit": "b" * 40,
         "tree_oid": "c" * 40,
         "archive_sha256": "d" * 64,
     }
-    specifications = [
-        ("implementation_ready_current", TOOL.CAPTURE_AUDIT_SCHEMA, "implementation_ready", None, "b" * 40),
-        ("capture_implementation_no_go", TOOL.CAPTURE_AUDIT_SCHEMA, "implementation_no_go", None, "1" * 40),
-        ("capture_implementation_no_go", TOOL.CAPTURE_AUDIT_SCHEMA, "implementation_no_go", None, "2" * 40),
-        ("actual_failure", TOOL.PROMOTION_SCHEMA, "actual_failed", "sq8-promotion-" + "3" * 64, "3" * 40),
-        ("actual_failure", TOOL.PROMOTION_SCHEMA, "actual_failed", "sq8-promotion-" + "4" * 64, "4" * 40),
-        ("actual_failure", TOOL.PROMOTION_SCHEMA, "actual_failed", "sq8-promotion-" + "5" * 64, "5" * 40),
-        ("restore_implementation_no_go", TOOL.RUNTIME_AUDIT_SCHEMA, "implementation_no_go", "sq8-promotion-" + "6" * 64, "6" * 40),
-    ]
-    entries = []
-    for sequence, (relation, schema, status, request_id, commit) in enumerate(specifications):
-        if schema == TOOL.PROMOTION_SCHEMA:
-            source = {
-                "schema_version": schema,
-                "status": status,
-                "request_id": request_id,
-                "source_commit": commit,
-                "actual": {"status": "failed", "request_id": request_id},
-            }
-        else:
-            source = {
-                "schema_version": schema,
-                "verdict": status,
-                "actual": "not_executed",
-                "audited_source": {"commit": commit},
-            }
-            if relation == "implementation_ready_current":
-                source["authorization"] = {
-                    "eligible_for_fresh_authorization_builder": True
-                }
-            if relation == "restore_implementation_no_go":
-                source["fixed_request_id"] = request_id
-                source["reason_code"] = (
-                    "restore_retry_terminal_identity_not_fail_closed"
-                )
-        entry_path = (tmp_path / f"v2-source-{sequence}.json").resolve()
-        digest = publish(entry_path, source)
-        entries.append(
-            {
-                "sequence": sequence,
-                "relation": relation,
-                "path": str(entry_path),
-                "sha256": digest,
-                "schema_version": schema,
-                "status": status,
-                "request_id": request_id,
-                "source_commit": commit,
-            }
-        )
+    latest_request = "sq8-promotion-" + "6" * 64
+    latest_source = {
+        "schema_version": TOOL.PROMOTION_SCHEMA,
+        "status": "actual_failed",
+        "request_id": latest_request,
+        "source_commit": v1["document"]["source"]["commit"],
+        "source_provenance": {
+            "tree_sha256": v1["document"]["source"]["tree_oid"],
+            "archive_sha256": v1["document"]["source"]["archive_sha256"],
+        },
+        "actual": {"status": "failed", "request_id": latest_request},
+    }
+    latest_path = (tmp_path / "v2-latest-failure.json").resolve()
+    latest_sha = publish(latest_path, latest_source)
+    entries.append(
+        {
+            "sequence": 6,
+            "relation": "actual_failure",
+            "path": str(latest_path),
+            "sha256": latest_sha,
+            "schema_version": TOOL.PROMOTION_SCHEMA,
+            "status": "actual_failed",
+            "request_id": latest_request,
+            "source_commit": v1["document"]["source"]["commit"],
+        }
+    )
+    current_source = {
+        "schema_version": TOOL.CAPTURE_AUDIT_SCHEMA,
+        "verdict": "implementation_ready",
+        "actual": "not_executed",
+        "audited_source": {"commit": source_identity["commit"]},
+        "authorization": {"eligible_for_fresh_authorization_builder": True},
+    }
+    current_path = (tmp_path / "v2-current-go.json").resolve()
+    current_sha = publish(current_path, current_source)
+    entries.append(
+        {
+            "sequence": 7,
+            "relation": "implementation_ready_current",
+            "path": str(current_path),
+            "sha256": current_sha,
+            "schema_version": TOOL.CAPTURE_AUDIT_SCHEMA,
+            "status": "implementation_ready",
+            "request_id": None,
+            "source_commit": source_identity["commit"],
+        }
+    )
     document = {
         "schema_version": TOOL.MANIFEST_SCHEMA,
         "disposition": "authorization_input_not_yet_runtime_bound",
         "source": source_identity,
-        "predecessor": None,
+        "predecessor": {
+            "schema_version": TOOL.MANIFEST_SCHEMA_V1,
+            "path": str(v1_path),
+            "sha256": v1["sha256"],
+            "migrated_prefix_sha256": TOOL.canonical_sha(entries[:6]),
+            "migrated_prefix_count": 6,
+        },
         "entries": entries,
     }
     manifest = (tmp_path / "lineage-v2.json").resolve()
@@ -247,7 +262,7 @@ def v2_fixture(tmp_path: Path) -> tuple[Path, dict]:
 
 def test_v2_manifest_and_typed_reference_are_accepted(tmp_path: Path) -> None:
     manifest, document = v2_fixture(tmp_path)
-    current = document["entries"][0]
+    current = document["entries"][7]
     validated = TOOL.validate_manifest(
         manifest,
         expected_source=document["source"],
@@ -256,12 +271,12 @@ def test_v2_manifest_and_typed_reference_are_accepted(tmp_path: Path) -> None:
         },
     )
     assert validated["authorization_eligible"] is True
-    assert validated["entry_count"] == 7
+    assert validated["entry_count"] == 8
     runtime = (tmp_path / "runtime-v2.json").resolve()
     runtime.write_bytes(validated["raw"])
     runtime.chmod(0o444)
     reference = TOOL.make_reference(validated, runtime)
-    assert reference["entry_count"] == 7
+    assert reference["entry_count"] == 8
     assert TOOL.validate_reference(reference, expected_runtime_path=runtime) == reference
 
 
@@ -270,6 +285,75 @@ def test_v1_is_diagnostic_only(tmp_path: Path) -> None:
     validated = TOOL.validate_manifest(manifest)
     assert validated["authorization_eligible"] is False
     assert TOOL.make_reference(validated, manifest)["schema_version"] == TOOL.REFERENCE_SCHEMA_V1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "delete", "reorder", "relation", "hash", "source_commit",
+        "source_tree", "source_archive",
+    ],
+)
+def test_v1_migration_rejects_predecessor_spoof(
+    tmp_path: Path, mutation: str
+) -> None:
+    manifest, document = v2_fixture(tmp_path)
+    predecessor_path = Path(document["predecessor"]["path"])
+    predecessor = json.loads(predecessor_path.read_text(encoding="ascii"))
+    if mutation == "delete":
+        predecessor["entries"].pop()
+    elif mutation == "reorder":
+        predecessor["entries"][1], predecessor["entries"][2] = (
+            predecessor["entries"][2], predecessor["entries"][1]
+        )
+    elif mutation == "relation":
+        predecessor["entries"][1]["relation"] = (
+            "implementation_go_eligible_for_fresh_runtime_audit"
+        )
+    elif mutation == "hash":
+        predecessor["entries"][1]["sha256"] = "0" * 64
+    elif mutation == "source_commit":
+        predecessor["source"]["commit"] = "e" * 40
+    elif mutation == "source_tree":
+        predecessor["source"]["tree_oid"] = "e" * 40
+    else:
+        predecessor["source"]["archive_sha256"] = "e" * 64
+    republish(predecessor_path, predecessor)
+    document["predecessor"]["sha256"] = hashlib.sha256(
+        predecessor_path.read_bytes()
+    ).hexdigest()
+    republish(manifest, document)
+    with pytest.raises(TOOL.LineageError):
+        TOOL.validate_manifest(manifest)
+
+
+def test_v1_migration_can_only_be_used_for_exact_first_v2(tmp_path: Path) -> None:
+    manifest, document = v2_fixture(tmp_path)
+    request_id = "sq8-promotion-" + "9" * 64
+    source = {
+        "schema_version": TOOL.PROMOTION_SCHEMA,
+        "status": "actual_failed",
+        "request_id": request_id,
+        "source_commit": "9" * 40,
+        "actual": {"status": "failed", "request_id": request_id},
+    }
+    source_path = (tmp_path / "second-migration-failure.json").resolve()
+    source_sha = publish(source_path, source)
+    document["entries"].append(
+        {
+            "sequence": 8,
+            "relation": "actual_failure",
+            "path": str(source_path),
+            "sha256": source_sha,
+            "schema_version": TOOL.PROMOTION_SCHEMA,
+            "status": "actual_failed",
+            "request_id": request_id,
+            "source_commit": "9" * 40,
+        }
+    )
+    republish(manifest, document)
+    with pytest.raises(TOOL.LineageError, match="v1 migration"):
+        TOOL.validate_manifest(manifest)
 
 
 def test_v2_fourth_failure_appends_without_schema_change(tmp_path: Path) -> None:
@@ -287,6 +371,7 @@ def test_v2_fourth_failure_appends_without_schema_change(tmp_path: Path) -> None
     digest = publish(source_path, source)
     document = json.loads(json.dumps(previous_document))
     document["predecessor"] = {
+        "schema_version": TOOL.MANIFEST_SCHEMA,
         "path": str(previous_path),
         "sha256": previous["sha256"],
         "entries_sha256": previous["entries_sha256"],
@@ -294,7 +379,7 @@ def test_v2_fourth_failure_appends_without_schema_change(tmp_path: Path) -> None
     }
     document["entries"].append(
         {
-            "sequence": 7,
+            "sequence": 8,
             "relation": "actual_failure",
             "path": str(source_path),
             "sha256": digest,
@@ -308,7 +393,7 @@ def test_v2_fourth_failure_appends_without_schema_change(tmp_path: Path) -> None
     publish(appended_path, document)
     appended = TOOL.validate_manifest(appended_path)
     assert appended["document"]["schema_version"] == TOOL.MANIFEST_SCHEMA
-    assert appended["entry_count"] == 8
+    assert appended["entry_count"] == 9
 
 
 @pytest.mark.parametrize("mutation", ["delete", "replace", "reorder", "duplicate"])
@@ -319,13 +404,14 @@ def test_v2_append_only_history_mutation_fails_closed(
     previous = TOOL.validate_manifest(previous_path)
     document = json.loads(json.dumps(previous_document))
     document["predecessor"] = {
+        "schema_version": TOOL.MANIFEST_SCHEMA,
         "path": str(previous_path),
         "sha256": previous["sha256"],
         "entries_sha256": previous["entries_sha256"],
         "entry_count": previous["entry_count"],
     }
     document["entries"].append(json.loads(json.dumps(document["entries"][-1])))
-    document["entries"][-1]["sequence"] = 7
+    document["entries"][-1]["sequence"] = 8
     if mutation == "delete":
         document["entries"].pop(1)
         for index, entry in enumerate(document["entries"]):
@@ -339,7 +425,7 @@ def test_v2_append_only_history_mutation_fails_closed(
         document["entries"][1]["sequence"] = 1
         document["entries"][2]["sequence"] = 2
     else:
-        document["entries"][-1]["sequence"] = 7
+        document["entries"][-1]["sequence"] = 8
     candidate = (tmp_path / f"mutated-{mutation}.json").resolve()
     publish(candidate, document)
     with pytest.raises(TOOL.LineageError):

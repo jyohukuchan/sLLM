@@ -8,13 +8,21 @@ authorizationには使用できない。
 
 manifestは`schema_version`、`disposition`、`source`、`predecessor`、`entries`の
 exact objectである。`source`は認可対象のcommit、tree OID、source archive
-SHA-256を固定する。`predecessor`は初版だけ`null`を許し、追記版では直前のv2
-manifestについてcanonical absolute path、manifest SHA-256、canonical entries
-SHA-256、entry countを指定する。
+SHA-256を固定する。`predecessor`は常に必須である。初版v2だけはv1 predecessorの
+schema、canonical absolute path、manifest SHA-256、migrated prefix SHA-256、count 6を
+指定する。以降は直前のv2 manifestについてschema、path、manifest SHA-256、canonical
+entries SHA-256、entry countを指定する。
 
-validatorはpredecessorをlive readし、旧entriesが同じ順序・同じ内容で完全な
-prefixとして残り、少なくとも1件が末尾に追加された場合だけ受理する。削除、
-置換、並べ替え、重複、predecessor cycleは拒否する。
+初版migrationではv1 exact 6 entriesをlive typed validationし、旧GOをhistorical
+implementation auditとして保持した共通v2 entryへ、意味と順序を変えずsequence 0..5に
+正規化する。sequence 6にはv1 source commitに対応する最新actual failure、sequence 7には
+v2 source commitに対応するcurrent GOだけを追記できる。最新failureのsource provenanceは
+v1 sourceのtreeとarchiveにも完全一致しなければならない。これにより初版はexact 8となる。
+9件目以降にv1 migrationを再利用できず、直前v2 predecessorが必須となる。
+
+通常のv2追記ではpredecessorをlive readし、旧entriesが同じ順序・同じ内容で完全な
+prefixとして残り、少なくとも1件が末尾に追加された場合だけ受理する。v1/v2とも削除、
+置換、並べ替え、relation rewrite、重複、source spoof、predecessor cycleを拒否する。
 
 ## Entry
 
