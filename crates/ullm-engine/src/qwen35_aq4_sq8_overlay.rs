@@ -168,7 +168,14 @@ struct BindingPackage {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceIndex {
+    metadata: SourceIndexMetadata,
     weight_map: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceIndexMetadata {
+    total_size: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -535,6 +542,9 @@ fn validate_source_provenance(
         .map_err(|error| format!("failed to read source model index: {error}"))?;
     let index: SourceIndex = serde_json::from_slice(&index_bytes)
         .map_err(|error| format!("failed to parse source model index: {error}"))?;
+    if index.metadata.total_size == 0 {
+        return Err("SQ8 overlay source model index total_size must be positive".into());
+    }
     let (tensor_by_name, shard_by_path) = source_provenance_maps(source, expected_names)?;
 
     let artifact_by_name = artifact
@@ -887,6 +897,10 @@ pub fn revalidate_qwen35_aq4_sq8_overlay_after_load(
 mod tests {
     use super::*;
 
+    const PRODUCTION_SOURCE_ROOT: &str =
+        "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B";
+    const PRODUCTION_OVERLAY_ROOT: &str = "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/artifacts/sq8-linear-qkv-z-rowblock256-v0.1";
+
     fn source_tensor(name: &str, file: &str) -> BindingSourceTensor {
         BindingSourceTensor {
             name: name.into(),
@@ -955,6 +969,76 @@ mod tests {
     #[test]
     fn duplicated_linear_layer_is_rejected() {
         assert!(qwen35_aq4_sq8_overlay_tensor_names(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn source_index_accepts_production_schema() {
+        let index: SourceIndex = serde_json::from_str(
+            r#"{
+                "metadata":{"total_size":19306216416},
+                "weight_map":{"tensor.weight":"model-00001-of-00002.safetensors"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(index.metadata.total_size, 19_306_216_416);
+        assert_eq!(
+            index.weight_map.get("tensor.weight").map(String::as_str),
+            Some("model-00001-of-00002.safetensors")
+        );
+    }
+
+    #[test]
+    fn source_index_rejects_missing_invalid_and_unknown_metadata() {
+        assert!(
+            serde_json::from_str::<SourceIndex>(
+                r#"{"weight_map":{"tensor.weight":"model.safetensors"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SourceIndex>(
+                r#"{
+                    "metadata":{"total_size":"19306216416"},
+                    "weight_map":{"tensor.weight":"model.safetensors"}
+                }"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SourceIndex>(
+                r#"{
+                    "metadata":{"total_size":19306216416,"unknown":true},
+                    "weight_map":{"tensor.weight":"model.safetensors"}
+                }"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SourceIndex>(
+                r#"{
+                    "metadata":{"total_size":19306216416},
+                    "weight_map":{"tensor.weight":"model.safetensors"},
+                    "unknown":true
+                }"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn production_source_provenance_validates_cpu_when_available() {
+        let source_root = Path::new(PRODUCTION_SOURCE_ROOT);
+        let artifact_root = Path::new(PRODUCTION_OVERLAY_ROOT);
+        if !source_root.is_dir() || !artifact_root.is_dir() {
+            return;
+        }
+        let binding: BindingManifest =
+            serde_json::from_slice(&std::fs::read(artifact_root.join("binding.json")).unwrap())
+                .unwrap();
+        let artifact = read_sq_fp8_artifact(artifact_root).unwrap();
+        let layers = (0..32).filter(|layer| layer % 4 != 3).collect::<Vec<_>>();
+        let names = qwen35_aq4_sq8_overlay_tensor_names(&layers).unwrap();
+        validate_source_provenance(source_root, &binding.source, &artifact, &names).unwrap();
     }
 
     #[test]
