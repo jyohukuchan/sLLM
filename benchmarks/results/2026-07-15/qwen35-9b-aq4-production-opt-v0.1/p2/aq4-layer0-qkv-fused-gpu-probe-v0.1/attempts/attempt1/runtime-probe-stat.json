@@ -1,0 +1,17 @@
+{
+  "runtime": {
+    "bytes": 1558288,
+    "mode": "0555",
+    "nlink": 1,
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempts/attempt1/ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe",
+    "sha256": "42752e7a29614f59f72f90bed6797c3e925b032bffb1a4196c462c8476386840"
+  },
+  "schema_version": "ullm.aq4_layer0_qkv_fused_gpu_probe_runtime_binary.v1",
+  "source": {
+    "bytes": 1558288,
+    "mode": "0775",
+    "nlink": 1,
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/input/probe-binary-v0.1/ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe",
+    "sha256": "42752e7a29614f59f72f90bed6797c3e925b032bffb1a4196c462c8476386840"
+  }
+}
