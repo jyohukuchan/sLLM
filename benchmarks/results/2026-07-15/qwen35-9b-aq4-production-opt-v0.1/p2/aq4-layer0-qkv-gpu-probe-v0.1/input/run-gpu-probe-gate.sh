@@ -185,10 +185,11 @@ execute_probe() {
   local cleanup_status=0
   cleanup() {
     cleanup_status=$?
+    trap - EXIT INT TERM
     set +e
     if [[ -n "$observer_pid" ]]; then kill "$observer_pid" 2>/dev/null || true; wait "$observer_pid" 2>/dev/null || true; fi
     if [[ "$service_started" = 1 ]]; then
-      "${SYSTEMCTL[@]}" start "$SERVICE" >/dev/null 2>&1 || true
+      timeout --signal=TERM --kill-after=5s 60s "${SYSTEMCTL[@]}" start "$SERVICE" >/dev/null 2>&1 || true
       for _ in $(seq 1 60); do [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active ]] && break; sleep 1; done
       [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active ]] || cleanup_status=1
       [[ "$(service_active_hashes)" = "$active_hashes_before" ]] || cleanup_status=1
@@ -198,7 +199,7 @@ execute_probe() {
     if [[ -d "$RUNTIME_DIR" && -z "$(find "$RUNTIME_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then "${RUNTIME_DIR_REMOVE[@]}" "$RUNTIME_DIR" 2>/dev/null || true; fi
     exit "$cleanup_status"
   }
-  trap cleanup EXIT
+  trap cleanup EXIT INT TERM
   [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE")" = active ]] || fail "service is not active"
   mainpid_before=$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)
   restart_before=$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value)
@@ -206,8 +207,8 @@ execute_probe() {
   run_observer & observer_pid=$!
   sleep 2
   [[ -e "$OBSERVER_SAMPLE_MARKER" ]] || fail "observer did not produce a sample"
-  "${SYSTEMCTL[@]}" stop "$SERVICE" >/dev/null
   service_started=1
+  timeout --signal=TERM --kill-after=5s 60s "${SYSTEMCTL[@]}" stop "$SERVICE" >/dev/null
   : > "$STOP_MARKER"
   for _ in $(seq 1 60); do [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = inactive ]] && break; sleep 1; done
   [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = inactive ]] || fail "service did not stop"
@@ -220,7 +221,7 @@ execute_probe() {
   {
     exec 9>"$LOCK"
     flock -n 9 || fail "failed to acquire probe lock"
-    HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1 \
+    timeout --signal=TERM --kill-after=30s 1200s env HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1 \
       "$PROBE" --package "$PACKAGE_ROOT" --input "$INPUT" --output-dir "$OUTPUT" --device-index "$EXPECTED_LOGICAL_DEVICE_INDEX"
   } >"$RUN_LOG" 2>&1
   validate_output_contract
