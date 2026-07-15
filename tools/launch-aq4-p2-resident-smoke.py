@@ -54,17 +54,17 @@ INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10491730
 INPUT_FINGERPRINT_SHA = "985896b1075b227434e1de81f634bea0bf465c41da5278143ff62a20e4704e04"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10491751
-BINDING_MANIFEST_SHA = "a006bc50aff6ad7f7cc2edb37bf8578c8741b7ba570fa5e526014957486dee33"
-BINDING_PLAN_SHA = "dc8f695f728ad0511c9832ca47ad1ea27ebf8ba8d4cc3536e90bb86232ebd65b"
-RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-RUNNER_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
-RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
-RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
-VALIDATOR_COMMIT = "614fea0808a4bbe044df734fbf530b2bd9a6e6ec"
-VALIDATOR_TREE = "f495a677b1c6a9ee36fbe8fce1eefe7bb6d0a108"
-VALIDATOR_GIT_BLOB = "2a4c98cab21a5455d92cad7580aa6c769426bf36"
-VALIDATOR_SHA = "0b3341d3e9d6e3dde8cff05eb8dd43fe2ec8b176a8a913183dbee638dd25c175"
+BINDING_ROOT_INODE = 10493962
+BINDING_MANIFEST_SHA = "29ab8991950c0618e11e62e9a3815643fe9cb8f072051080ae221d556bd16975"
+BINDING_PLAN_SHA = "9897d1940af78d6c89a75d824c9a141e961c9571787e3199cabed70888ec7256"
+RUNNER_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
+RUNNER_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
+RUNNER_GIT_BLOB = "7adc7f9258f491c29a8f2d7842d5ece20488867f"
+RUNNER_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
+VALIDATOR_COMMIT = "ec25754440e4655750e3bc4ef11c0f1580dbf2f9"
+VALIDATOR_TREE = "ce304dde805a7ece1a1c4697e1e9645e67234867"
+VALIDATOR_GIT_BLOB = "13de5f3d2b96ef1936356e04c12773d674fa4488"
+VALIDATOR_SHA = "c14bff3cd1ca0d18ace1d0e511e28ed01ad96f5b66024b5228343d329b56a154"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
 RESIDENT_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 RESIDENT_SHA = "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
@@ -146,11 +146,11 @@ INPUT_MEMBER_SHA = {
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "c1446c5b8fce9cddb4a5015d2f95d3f9cc878d58a70476d6671262ccf8f6aced",
+    "runner-subprocess-evidence.json": "d04172f396aa1cab60e1cd9f142f6bb1c48c70f8bdc8443af7875722f0c29a67",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "330d76218a8c48bc8d46e71cfea27265f57c48c6e43e5830938a9d71e815aa04",
+    "SHA256SUMS": "703d686d4d110a84fed9f66900654ab52ce1780a8fb27a6ee053e0a0c8b8500e",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -428,13 +428,29 @@ class Snapshot:
 
 def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     manifest = parse_json(raw, "B binding manifest")
-    exact = {"schema_version", "status", "promotion", "launch_eligible", "requires_immutable_launcher", "predecessor", "trust_roots", "input_root", "outputs", "execution", "cycle_control", "next_stage"}
+    exact = {"schema_version", "status", "promotion", "launch_eligible", "requires_immutable_launcher", "predecessor", "trust_roots", "input_root", "outputs", "execution", "cycle_control", "next_stage", "runner_roles"}
     if set(manifest) != exact:
         raise LauncherError("B binding manifest exact schema differs")
     if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v4" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
         raise LauncherError("B binding status/promotion differs")
     if manifest.get("launch_eligible") is not False or manifest.get("requires_immutable_launcher") is not True:
         raise LauncherError("B binding L boundary differs")
+    if manifest.get("runner_roles") != {
+        "binding_actual": {
+            "commit": RUNNER_COMMIT,
+            "execution_closure": "code_execution/exec",
+            "role": "actual_generic_runner",
+            "sha256": RUNNER_SHA,
+        },
+        "prepared_bootstrap": {
+            "commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
+            "execution_closure": "control_input/read",
+            "role": "historical_control_member",
+            "sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
+        },
+        "same_runner": False,
+    }:
+        raise LauncherError("B runner role boundary differs")
     roots = manifest.get("trust_roots")
     if not isinstance(roots, dict) or roots.get("source_commit") != RUNNER_COMMIT or roots.get("source_tree") != RUNNER_TREE or roots.get("runner") != {"git_blob": RUNNER_GIT_BLOB, "sha256": RUNNER_SHA}:
         raise LauncherError("B runner trust root differs")
