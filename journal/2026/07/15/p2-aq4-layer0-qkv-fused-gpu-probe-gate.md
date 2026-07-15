@@ -10,10 +10,11 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 - 今回はgateの観測と復旧を強化した。lock取得後、物理card 2かつgfx1201を検証するamd-smi JSON observerを別プロセスで開始し、初回sample/failure markerを待ってからprobeを実行する。終了時はobserver停止、failure marker不在、sample存在を検証する。observer子プロセスへ親の終了シグナルtrapを継承させない。
 - 失敗trapはobserver停止、lock cleanup、service startを独立した戻り値で保持し、lock cleanupが失敗してもservice startを必ず試行する。start後にhealth/GPU/worker操作は実行しない。
 - 出力契約はHIP standalone QKV reference（operation `standalone_aq4_matvec_f32`、raw RPB unset、effective 32、source `architecture_default:gfx1201`）、Q/K/V row segments、全sidecarのshape/bytes/rows/case offset/SHA/finite、output layout、report/sidecarのnlink=1までfail closedで検証する。promotionは常にfalseである。
+- execute準備ではfresh BASEの`attempts` parentを作成した後、attemptディレクトリをcreate-newで確保する。source checkoutのmodeを信頼せず、probeをattempt内へinstall/chmod `0555`し、runtime copyのregular/nlink=1/SHA-256を検証して、runtime binaryのstat/hashを`runtime-probe-stat.json`へarchiveする。実行対象はこのruntime copyだけである。
 
 ## 検証
 
-- 実行: `bash -n`、binary/receipt SHA256SUMS検証、`PREFLIGHT_ONLY=1`、`MOCK_PREFLIGHT=1`、5 tests（observer mock、read-only mock、validatorのwrong-reference/layout negativeを含む）。
+- 実行: `bash -n`、binary/receipt SHA256SUMS検証、fresh BASEの`MOCK_ARCHIVE_SETUP=1`、`PREFLIGHT_ONLY=1`、`MOCK_PREFLIGHT=1`、6 tests（observer mock、runtime copy archive、read-only mock、validatorのwrong-reference/layout negativeを含む）。
 - 未実施: GPU probe、service stop/start、ROCm SMI/KFD実測、health実測、holdout、数値閾値判定、promotion。
 
 ## 次の行動

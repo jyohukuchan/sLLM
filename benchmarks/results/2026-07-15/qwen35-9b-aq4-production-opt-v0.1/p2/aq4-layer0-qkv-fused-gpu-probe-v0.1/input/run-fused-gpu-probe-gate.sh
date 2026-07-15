@@ -60,7 +60,8 @@ if [[ "$PREFLIGHT_ONLY" = 1 && "$PREFLIGHT_LOCKED_ONLY" = 1 ]]; then
   exit 64
 fi
 if [[ "$MOCK_PREFLIGHT" = 1 ]]; then
-  # Mock mode is strictly read-only and cannot reach systemctl, rocm-smi, or the probe.
+  # Mock mode cannot reach systemctl, rocm-smi, or the probe. Explicit archive setup
+  # below is the only mock path that materializes the pinned runtime copy.
   REPO="${MOCK_REPO:-$REPO}"
   BASE="${MOCK_BASE:-$BASE}"
   INPUT="${MOCK_INPUT:-$INPUT}"
@@ -80,6 +81,10 @@ if [[ "$MOCK_PREFLIGHT" = 1 ]]; then
   OBSERVER_SAMPLE_MARKER="${MOCK_OBSERVER_SAMPLE_MARKER:-$BASE/observer-sample.marker}"
   EXECUTE_GPU_PROBE=0
 fi
+
+ATTEMPT_ROOT="${ATTEMPT_ROOT:-$BASE/attempts/attempt1}"
+RUNTIME_PROBE="${RUNTIME_PROBE:-$ATTEMPT_ROOT/ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe}"
+RUNTIME_PROBE_META="${RUNTIME_PROBE_META:-$ATTEMPT_ROOT/runtime-probe-stat.json}"
 
 fail() { echo "AQ4 GPU probe gate: $*" >&2; exit 1; }
 sha256_file() { sha256sum -- "$1" | awk '{print $1}'; }
@@ -128,6 +133,56 @@ p = pathlib.Path(binary_path)
 assert b["path"] == p.name and b["nlink"] == 1 and b["mode"] == 0o555 and b["bytes"] == p.stat().st_size
 assert b["sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()
 print("fused_probe_build=clean_commit receipt command jobs1 immutable_mode0555 binary_sha nlink1")
+PY
+}
+
+prepare_runtime_probe() {
+  require_absent "$RUNTIME_PROBE"
+  require_absent "$RUNTIME_PROBE_META"
+  install -m 0555 -- "$PROBE" "$RUNTIME_PROBE" || fail "runtime probe copy failed"
+  chmod 0555 -- "$RUNTIME_PROBE" || fail "runtime probe chmod failed"
+  require_regular "$RUNTIME_PROBE" runtime_probe_binary
+  [[ "$(stat -Lc '%a' "$RUNTIME_PROBE")" = 555 ]] || fail "runtime probe mode differs"
+  [[ "$(sha256_file "$RUNTIME_PROBE")" = "$EXPECTED_PROBE_BINARY_SHA256" ]] || fail "runtime probe SHA differs"
+  "$PYTHON" - "$RUNTIME_PROBE_META" "$PROBE" "$RUNTIME_PROBE" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+
+meta_path, source_path, runtime_path = map(pathlib.Path, sys.argv[1:])
+source_stat = source_path.stat()
+runtime_stat = runtime_path.stat()
+payload = {
+    "schema_version": "ullm.aq4_layer0_qkv_fused_gpu_probe_runtime_binary.v1",
+    "source": {
+        "path": str(source_path),
+        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "bytes": source_stat.st_size,
+        "mode": format(stat.S_IMODE(source_stat.st_mode), "04o"),
+        "nlink": source_stat.st_nlink,
+    },
+    "runtime": {
+        "path": str(runtime_path),
+        "sha256": hashlib.sha256(runtime_path.read_bytes()).hexdigest(),
+        "bytes": runtime_stat.st_size,
+        "mode": format(stat.S_IMODE(runtime_stat.st_mode), "04o"),
+        "nlink": runtime_stat.st_nlink,
+    },
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+fd = os.open(meta_path, flags, 0o644)
+with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, sort_keys=True, indent=2)
+    stream.write("\n")
+PY
+  require_regular "$RUNTIME_PROBE_META" runtime_probe_archive
+  "$PYTHON" - "$RUNTIME_PROBE_META" "$EXPECTED_PROBE_BINARY_SHA256" <<'PY'
+import json, pathlib, sys
+
+meta_path, expected_sha = sys.argv[1:]
+r = json.loads(pathlib.Path(meta_path).read_text(encoding="utf-8"))
+assert r["schema_version"] == "ullm.aq4_layer0_qkv_fused_gpu_probe_runtime_binary.v1"
+assert r["runtime"]["sha256"] == expected_sha
+assert r["runtime"]["mode"] == "0555" and r["runtime"]["nlink"] == 1
+assert r["source"]["sha256"] == expected_sha
 PY
 }
 
@@ -220,7 +275,9 @@ validate_preflight() {
   [[ -x "$PYTHON" ]] || fail "fixed Python runtime is unavailable"
   [[ "$EXPECTED_PHYSICAL_CARD" = 2 && "$EXPECTED_HIP_VISIBLE_TOKEN" = 1 && "$EXPECTED_FILTERED_HIP_ORDINAL" = 0 && "$EXPECTED_CPU_GLOBAL_DEVICE_INDEX" = 0 && "$EXPECTED_LOGICAL_DEVICE_INDEX" = 1 && "$EXPECTED_DEVICE_ARCHITECTURE" = gfx1201 ]] || fail "device mapping pins changed"
   validate_identity
-  require_absent "$BASE/attempts/attempt1"
+  require_absent "$ATTEMPT_ROOT"
+  require_absent "$RUNTIME_PROBE"
+  require_absent "$RUNTIME_PROBE_META"
   require_absent "$OUTPUT"
   require_absent "$RUN_LOG"
   require_absent "$MONITOR_LOG"
@@ -403,13 +460,18 @@ restore_after_failure() {
   exit "$code"
 }
 execute_probe() {
-  mkdir -m 0750 "$BASE/attempts/attempt1"
+  [[ ! -L "$BASE" ]] || fail "BASE must not be a symlink"
+  mkdir -p -- "$BASE/attempts" || fail "attempt parent creation failed"
+  [[ -d "$BASE/attempts" && ! -L "$BASE/attempts" ]] || fail "attempt parent must be a directory"
+  require_absent "$ATTEMPT_ROOT"
+  mkdir -m 0750 -- "$ATTEMPT_ROOT" || fail "attempt directory create-new failed"
+  prepare_runtime_probe
   [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE")" = active ]] || fail "service is not active"
   [[ "$("${SYSTEMCTL[@]}" show "$SERVICE" -p SubState --value)" = running ]] || fail "service is not running"
   OLD_PID="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)"
   OLD_RESTARTS="$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value)"
   OLD_HASHES="$(service_active_hashes)"
-  printf 'old_main_pid=%s\nold_nrestarts=%s\nactive_package_worker_sha=%s\n' "$OLD_PID" "$OLD_RESTARTS" "$OLD_HASHES" > "$BASE/attempts/attempt1/prestate.txt"
+  printf 'old_main_pid=%s\nold_nrestarts=%s\nactive_package_worker_sha=%s\n' "$OLD_PID" "$OLD_RESTARTS" "$OLD_HASHES" > "$ATTEMPT_ROOT/prestate.txt"
   "${SYSTEMCTL[@]}" stop "$SERVICE" >/dev/null
   STOPPED=1
   : > "$STOP_MARKER"
@@ -427,7 +489,7 @@ execute_probe() {
     flock -n 9 || fail "failed to acquire exact runtime lock inode"
     start_observer
     timeout --signal=TERM --kill-after=30s 1200s env -u ULLM_AQ4_MATVEC_RPB -u ULLM_AQ4_FUSED_RPB HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL=1 ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4 \
-      "$PROBE" --package "$PACKAGE_ROOT" --input "$INPUT" --output-dir "$OUTPUT" --device-index "$EXPECTED_LOGICAL_DEVICE_INDEX"
+      "$RUNTIME_PROBE" --package "$PACKAGE_ROOT" --input "$INPUT" --output-dir "$OUTPUT" --device-index "$EXPECTED_LOGICAL_DEVICE_INDEX"
   } >"$RUN_LOG" 2>&1
   stop_observer || fail "observer did not stop cleanly"
   [[ ! -e "$OBSERVER_FAIL_MARKER" ]] || fail "observer failure marker is present"
@@ -440,6 +502,16 @@ execute_probe() {
 }
 
 validate_preflight
+if [[ "${MOCK_ARCHIVE_SETUP:-0}" = 1 ]]; then
+  [[ ! -L "$BASE" ]] || fail "BASE must not be a symlink"
+  mkdir -p -- "$BASE/attempts" || fail "attempt parent creation failed"
+  [[ -d "$BASE/attempts" && ! -L "$BASE/attempts" ]] || fail "attempt parent must be a directory"
+  require_absent "$ATTEMPT_ROOT"
+  mkdir -m 0750 -- "$ATTEMPT_ROOT" || fail "attempt directory create-new failed"
+  prepare_runtime_probe
+  echo "mock_archive_setup=1 runtime_probe_mode=0555 runtime_probe_nlink=1 runtime_probe_sha256=$EXPECTED_PROBE_BINARY_SHA256 service_stop=0 gpu_run=0"
+  exit 0
+fi
 if [[ "$MOCK_OBSERVER" = 1 ]]; then
   observer_sample_once || fail "mock observer sample failed"
   [[ ! -e "$OBSERVER_FAIL_MARKER" ]] || fail "mock observer failure marker is present"
