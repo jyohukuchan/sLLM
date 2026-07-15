@@ -1,0 +1,452 @@
+{
+  "comparisons": {
+    "gpu_beta_vs_cpu_formal_beta": {
+      "left": {
+        "key": "beta",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/beta.f32le",
+        "sha256": "47844e8b1fb2b3dfefa2df8dcf1b489ed2d2a98c86ce0b32f7ef2e27d63d2302",
+        "source": "gpu"
+      },
+      "metrics": {
+        "aggregate": {
+          "byte_count_left": 384,
+          "byte_count_right": 384,
+          "byte_mismatch_count": 67,
+          "cosine": 0.9999999999999825,
+          "element_count": 96,
+          "max_abs": 4.76837158203125e-07,
+          "nonfinite_left": 0,
+          "nonfinite_right": 0,
+          "relative_l2": 1.9279977243837735e-07
+        },
+        "rows": [
+          {
+            "byte_count_left": 128,
+            "byte_count_right": 128,
+            "byte_mismatch_count": 20,
+            "cosine": 0.9999999999999873,
+            "element_count": 32,
+            "max_abs": 2.384185791015625e-07,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 1.591329376570536e-07
+          },
+          {
+            "byte_count_left": 128,
+            "byte_count_right": 128,
+            "byte_mismatch_count": 24,
+            "cosine": 0.999999999999978,
+            "element_count": 32,
+            "max_abs": 4.76837158203125e-07,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 2.2495243761639772e-07
+          },
+          {
+            "byte_count_left": 128,
+            "byte_count_right": 128,
+            "byte_mismatch_count": 23,
+            "cosine": 0.9999999999999846,
+            "element_count": 32,
+            "max_abs": 4.172325134277344e-07,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 1.774124347813261e-07
+          }
+        ]
+      },
+      "right": {
+        "key": "beta",
+        "path": "/tmp/ullm-fused-cpu-followup6/beta.f32le",
+        "sha256": "ed4a3a57629fddf561f4f115f5b598a59a10984e579d5a8bff23dbaf0478bf64",
+        "source": "cpu"
+      },
+      "row_shape": 32,
+      "rows": 3
+    },
+    "gpu_fused_qkv_vs_cpu_formal_qkv": {
+      "left": {
+        "key": "qkv",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/qkv.f32le",
+        "sha256": "d6a238abc5cd8ac7dd687b7c86dba48e25327a754425bb39ec671f3d01e33a03",
+        "source": "gpu"
+      },
+      "metrics": {
+        "aggregate": {
+          "byte_count_left": 98304,
+          "byte_count_right": 98304,
+          "byte_mismatch_count": 25934,
+          "cosine": 0.9999999999995889,
+          "element_count": 24576,
+          "max_abs": 5.7220458984375e-05,
+          "nonfinite_left": 0,
+          "nonfinite_right": 0,
+          "relative_l2": 8.815654484874577e-07
+        },
+        "rows": [
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 8581,
+            "cosine": 0.9999999999996602,
+            "element_count": 8192,
+            "max_abs": 5.7220458984375e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 8.154757857902154e-07
+          },
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 8690,
+            "cosine": 0.9999999999996768,
+            "element_count": 8192,
+            "max_abs": 4.57763671875e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 7.972234198988638e-07
+          },
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 8663,
+            "cosine": 0.9999999999994639,
+            "element_count": 8192,
+            "max_abs": 5.7220458984375e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 1.0299652011760399e-06
+          }
+        ]
+      },
+      "right": {
+        "key": "qkv",
+        "path": "/tmp/ullm-fused-cpu-followup6/qkv.f32le",
+        "sha256": "9683b8c5decd545c35e416da0b0f9568e6f51463ae5395fcd872dc9cbd82b473",
+        "source": "cpu"
+      },
+      "row_shape": 8192,
+      "rows": 3
+    },
+    "gpu_fused_qkv_vs_gpu_standalone_qkv": {
+      "left": {
+        "key": "qkv",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/qkv.f32le",
+        "sha256": "d6a238abc5cd8ac7dd687b7c86dba48e25327a754425bb39ec671f3d01e33a03",
+        "source": "gpu"
+      },
+      "metrics": {
+        "aggregate": {
+          "byte_count_left": 98304,
+          "byte_count_right": 98304,
+          "byte_mismatch_count": 16285,
+          "cosine": 0.9999999999999886,
+          "element_count": 24576,
+          "max_abs": 3.814697265625e-06,
+          "nonfinite_left": 0,
+          "nonfinite_right": 0,
+          "relative_l2": 7.107261355045151e-08
+        },
+        "rows": [
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 5212,
+            "cosine": 0.9999999999999915,
+            "element_count": 8192,
+            "max_abs": 3.814697265625e-06,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 6.960129572253035e-08
+          },
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 5348,
+            "cosine": 0.999999999999992,
+            "element_count": 8192,
+            "max_abs": 3.814697265625e-06,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 6.748654724181483e-08
+          },
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 5725,
+            "cosine": 0.9999999999999922,
+            "element_count": 8192,
+            "max_abs": 3.814697265625e-06,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 7.614309427148362e-08
+          }
+        ]
+      },
+      "right": {
+        "key": "qkv_standalone",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/qkv-standalone.f32le",
+        "sha256": "24248fd1c4b4b7186f9b048a7fa4c69925904a04b265a273390089df7312545e",
+        "source": "gpu"
+      },
+      "row_shape": 8192,
+      "rows": 3
+    },
+    "gpu_gate_vs_cpu_formal_gate": {
+      "left": {
+        "key": "gate",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/gate.f32le",
+        "sha256": "49e42d6d6ea71af7915a13cd81b462c6882064912cb048ae755338fe798863e6",
+        "source": "gpu"
+      },
+      "metrics": {
+        "aggregate": {
+          "byte_count_left": 384,
+          "byte_count_right": 384,
+          "byte_mismatch_count": 98,
+          "cosine": 0.9999999999996194,
+          "element_count": 96,
+          "max_abs": 1.5795230865478516e-06,
+          "nonfinite_left": 0,
+          "nonfinite_right": 0,
+          "relative_l2": 8.724489477997521e-07
+        },
+        "rows": [
+          {
+            "byte_count_left": 128,
+            "byte_count_right": 128,
+            "byte_mismatch_count": 29,
+            "cosine": 0.9999999999999436,
+            "element_count": 32,
+            "max_abs": 6.556510925292969e-07,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 3.375562382028374e-07
+          },
+          {
+            "byte_count_left": 128,
+            "byte_count_right": 128,
+            "byte_mismatch_count": 33,
+            "cosine": 0.9999999999978569,
+            "element_count": 32,
+            "max_abs": 1.5795230865478516e-06,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 2.0709999118184235e-06
+          },
+          {
+            "byte_count_left": 128,
+            "byte_count_right": 128,
+            "byte_mismatch_count": 36,
+            "cosine": 0.9999999999996314,
+            "element_count": 32,
+            "max_abs": 1.2442469596862793e-06,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 8.658701903465117e-07
+          }
+        ]
+      },
+      "right": {
+        "key": "gate",
+        "path": "/tmp/ullm-fused-cpu-followup6/gate.f32le",
+        "sha256": "dbf470352abb0bbe31e23018d5770608a424048f83191f3e063360f6ba857857",
+        "source": "cpu"
+      },
+      "row_shape": 32,
+      "rows": 3
+    },
+    "gpu_standalone_qkv_vs_cpu_formal_qkv": {
+      "left": {
+        "key": "qkv_standalone",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/qkv-standalone.f32le",
+        "sha256": "24248fd1c4b4b7186f9b048a7fa4c69925904a04b265a273390089df7312545e",
+        "source": "gpu"
+      },
+      "metrics": {
+        "aggregate": {
+          "byte_count_left": 98304,
+          "byte_count_right": 98304,
+          "byte_mismatch_count": 25939,
+          "cosine": 0.9999999999995917,
+          "element_count": 24576,
+          "max_abs": 5.91278076171875e-05,
+          "nonfinite_left": 0,
+          "nonfinite_right": 0,
+          "relative_l2": 8.828352279004388e-07
+        },
+        "rows": [
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 8596,
+            "cosine": 0.9999999999996597,
+            "element_count": 8192,
+            "max_abs": 5.7220458984375e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 8.177709276839324e-07
+          },
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 8683,
+            "cosine": 0.9999999999996797,
+            "element_count": 8192,
+            "max_abs": 4.57763671875e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 7.925954378038477e-07
+          },
+          {
+            "byte_count_left": 32768,
+            "byte_count_right": 32768,
+            "byte_mismatch_count": 8660,
+            "cosine": 0.9999999999994627,
+            "element_count": 8192,
+            "max_abs": 5.91278076171875e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 1.0344757576312935e-06
+          }
+        ]
+      },
+      "right": {
+        "key": "qkv_standalone",
+        "path": "/tmp/ullm-fused-cpu-followup6/qkv-standalone.f32le",
+        "sha256": "9683b8c5decd545c35e416da0b0f9568e6f51463ae5395fcd872dc9cbd82b473",
+        "source": "cpu"
+      },
+      "row_shape": 8192,
+      "rows": 3
+    },
+    "gpu_z_vs_cpu_formal_z": {
+      "left": {
+        "key": "z",
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/z.f32le",
+        "sha256": "0785b49c69c8a6ead41c7905e6ef1f07f5708cad3dbd4f82f81f2617b3ec502e",
+        "source": "gpu"
+      },
+      "metrics": {
+        "aggregate": {
+          "byte_count_left": 49152,
+          "byte_count_right": 49152,
+          "byte_mismatch_count": 12421,
+          "cosine": 0.9999999999995598,
+          "element_count": 12288,
+          "max_abs": 2.86102294921875e-05,
+          "nonfinite_left": 0,
+          "nonfinite_right": 0,
+          "relative_l2": 9.195597723437779e-07
+        },
+        "rows": [
+          {
+            "byte_count_left": 16384,
+            "byte_count_right": 16384,
+            "byte_mismatch_count": 4089,
+            "cosine": 0.9999999999996451,
+            "element_count": 4096,
+            "max_abs": 2.47955322265625e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 8.41938751907919e-07
+          },
+          {
+            "byte_count_left": 16384,
+            "byte_count_right": 16384,
+            "byte_mismatch_count": 4101,
+            "cosine": 0.9999999999996528,
+            "element_count": 4096,
+            "max_abs": 2.765655517578125e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 8.36438813531748e-07
+          },
+          {
+            "byte_count_left": 16384,
+            "byte_count_right": 16384,
+            "byte_mismatch_count": 4231,
+            "cosine": 0.9999999999994016,
+            "element_count": 4096,
+            "max_abs": 2.86102294921875e-05,
+            "nonfinite_left": 0,
+            "nonfinite_right": 0,
+            "relative_l2": 1.0913352818136662e-06
+          }
+        ]
+      },
+      "right": {
+        "key": "z",
+        "path": "/tmp/ullm-fused-cpu-followup6/z.f32le",
+        "sha256": "7ed98f1c7f8988958377b548f44afe3a2ddc5180150d1e3191c7d0e2a408b286",
+        "source": "cpu"
+      },
+      "row_shape": 4096,
+      "rows": 3
+    }
+  },
+  "holdout": "not_run",
+  "input_identity": {
+    "consumed_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "dtype": "f32",
+    "rows": 3,
+    "schema": "ullm.aq4_layer0_input_normed_jsonl.v1",
+    "shape": [
+      4096
+    ],
+    "sidecar_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+  },
+  "output_layout": {
+    "beta_shape": [
+      32
+    ],
+    "dtype": "f32",
+    "format": "concatenated_little_endian_f32_rows",
+    "gate_shape": [
+      32
+    ],
+    "qkv_shape": [
+      8192
+    ],
+    "qkv_standalone_shape": [
+      8192
+    ],
+    "row_order": "input_jsonl_order",
+    "z_shape": [
+      4096
+    ]
+  },
+  "policy_decision": "not_evaluated",
+  "promotion": "not_evaluated",
+  "qkv_row_segments": [
+    {
+      "end_row_exclusive": 2048,
+      "name": "Q",
+      "start_row": 0
+    },
+    {
+      "end_row_exclusive": 4096,
+      "name": "K",
+      "start_row": 2048
+    },
+    {
+      "end_row_exclusive": 8192,
+      "name": "V",
+      "start_row": 4096
+    }
+  ],
+  "reports": {
+    "cpu_formal": {
+      "path": "/tmp/ullm-fused-cpu-followup6/report.json",
+      "sha256": "7876ee835c25c2b312c4f288e40a559883bdc875ff5026363f019bd339a5085c"
+    },
+    "gpu_attempt3": {
+      "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/attempts/attempt1/output/report.json",
+      "sha256": "458f998116be75b1c363ec49965d55fbfbf286d7c6ecbf3e1158df3ccabe547c"
+    }
+  },
+  "schema_version": "ullm.aq4_layer0_qkv_fused_attempt3_comparison.v1",
+  "scope": "descriptive_numeric_comparison_only",
+  "status": "measured",
+  "thresholds": null
+}
