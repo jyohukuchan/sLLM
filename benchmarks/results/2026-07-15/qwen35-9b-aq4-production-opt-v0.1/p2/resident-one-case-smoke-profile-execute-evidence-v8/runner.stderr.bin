@@ -1,0 +1,2 @@
+E20260716 02:19:56.319983 126083072517504 output_stream.cpp:111] Opened result file: /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v8/aq4-p3-diagnostic_marker_api_trace.csv
+E20260716 02:19:56.322797 126083072517504 output_stream.cpp:111] Opened result file: /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v8/aq4-p3-diagnostic_agent_info.csv
