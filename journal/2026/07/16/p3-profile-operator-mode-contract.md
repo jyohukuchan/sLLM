@@ -17,7 +17,7 @@
 
 ## 検証
 
-- source/tests commit: `dd725b6db8b9c34a77995ea710a19ff5aad8b724`
+- source/tests commit: `dd725b6db382c757530459f857c94288ed1d2035`
 - targeted: `4 passed, 40 deselected`
 - operator full: `44 passed in 4.66s`
 - `py_compile`: 成功
