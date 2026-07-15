@@ -66,4 +66,3 @@ def test_z_hybrid_sidecar_hashes_and_shapes_are_frozen() -> None:
     for line in sums:
         digest, relative = line.split("  ", 1)
         assert sha256(ARTIFACT / relative) == digest
-
