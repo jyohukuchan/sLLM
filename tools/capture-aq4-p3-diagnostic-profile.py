@@ -150,7 +150,11 @@ def verify_capture_helpers() -> None:
 
 SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
 TARGET_SCHEMA = "ullm.aq4_p3_profile_target_command.v1"
-FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v1"
+FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
+READY_CANDIDATE_AUDIT_SCHEMA = "ullm.aq4_p2_ready_candidate_audit.v1"
+READY_CANDIDATE_CAPTURE_SCHEMA = "ullm.aq4_p3_ready_candidate_capture.v1"
+READY_CANDIDATE_MARKER_PREFIX = b"ULLM_AQ4_READY_CANDIDATE_AUDIT_V1 "
+MAX_READY_CANDIDATE_MARKER_BYTES = 16 * 1024
 MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 MARKER_CLOCK = "rocprofv3_monotonic_ns"
 MAX_ROWS = 500_000
@@ -779,6 +783,242 @@ def self_hash(value: dict[str, Any], field: str) -> str:
     return hashlib.sha256(canonical(clone)).hexdigest()
 
 
+def _sha256_string(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _require_exact_keys(value: Any, keys: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise CaptureError(f"{label} fields differ")
+    return value
+
+
+def _validate_key_type_summary(keys: Any, types: Any, label: str) -> None:
+    if (
+        not isinstance(keys, list)
+        or any(not isinstance(key, str) or not key for key in keys)
+        or keys != sorted(keys)
+        or len(keys) != len(set(keys))
+        or not isinstance(types, dict)
+        or set(types) != set(keys)
+        or any(
+            kind not in {"null", "boolean", "integer", "number", "string", "array", "object", "omitted"}
+            for kind in types.values()
+        )
+    ):
+        raise CaptureError(f"{label} key/type summary differs")
+
+
+def _validate_safe_scalar(value: Any, label: str) -> None:
+    item = _require_exact_keys(
+        value,
+        {"present", "json_type", "value", "string_length", "canonical_sha256"},
+        label,
+    )
+    if type(item["present"]) is not bool:
+        raise CaptureError(f"{label} presence differs")
+    if item["json_type"] not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}:
+        raise CaptureError(f"{label} JSON type differs")
+    if item["present"] != (item["json_type"] != "absent"):
+        raise CaptureError(f"{label} presence/type differs")
+    if item["canonical_sha256"] is not None and not _sha256_string(item["canonical_sha256"]):
+        raise CaptureError(f"{label} SHA-256 differs")
+    if item["present"] != (item["canonical_sha256"] is not None):
+        raise CaptureError(f"{label} SHA-256 presence differs")
+    if item["string_length"] is not None and (type(item["string_length"]) is not int or item["string_length"] < 0):
+        raise CaptureError(f"{label} string length differs")
+    if item["value"] is not None and not isinstance(item["value"], (bool, int, float, str)):
+        raise CaptureError(f"{label} safe value differs")
+
+
+def validate_ready_candidate_audit(value: Any) -> dict[str, Any]:
+    audit = _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "audit_sha256",
+            "raw",
+            "top_level",
+            "safe_scalars",
+            "resident_session_id",
+            "nested",
+            "validation",
+        },
+        "ready candidate audit",
+    )
+    if audit["schema_version"] != READY_CANDIDATE_AUDIT_SCHEMA or not _sha256_string(audit["audit_sha256"]):
+        raise CaptureError("ready candidate audit identity differs")
+    if self_hash(audit, "audit_sha256") != audit["audit_sha256"]:
+        raise CaptureError("ready candidate audit self-hash differs")
+    if len(canonical(audit)) > MAX_READY_CANDIDATE_MARKER_BYTES:
+        raise CaptureError("ready candidate audit exceeds bound")
+    raw = _require_exact_keys(audit["raw"], {"byte_count", "raw_sha256"}, "ready candidate raw")
+    if type(raw["byte_count"]) is not int or raw["byte_count"] < 0 or not _sha256_string(raw["raw_sha256"]):
+        raise CaptureError("ready candidate raw binding differs")
+    top = _require_exact_keys(audit["top_level"], {"key_count", "keys", "key_types"}, "ready candidate top level")
+    if type(top["key_count"]) is not int or top["key_count"] < 0:
+        raise CaptureError("ready candidate key count differs")
+    _validate_key_type_summary(top["keys"], top["key_types"], "ready candidate top level")
+    scalars = _require_exact_keys(audit["safe_scalars"], {"event", "schema_version", "model_loads"}, "ready candidate safe scalars")
+    for name in ("event", "schema_version", "model_loads"):
+        _validate_safe_scalar(scalars[name], f"ready candidate {name}")
+    session = _require_exact_keys(
+        audit["resident_session_id"],
+        {"present", "json_type", "string_length", "canonical_sha256"},
+        "ready candidate session ID",
+    )
+    if (
+        type(session["present"]) is not bool
+        or session["json_type"] not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}
+        or session["present"] != (session["json_type"] != "absent")
+        or (session["string_length"] is not None and (type(session["string_length"]) is not int or session["string_length"] < 0))
+        or (session["canonical_sha256"] is not None and not _sha256_string(session["canonical_sha256"]))
+        or session["present"] != (session["canonical_sha256"] is not None)
+    ):
+        raise CaptureError("ready candidate session ID summary differs")
+    nested = _require_exact_keys(audit["nested"], {"driver_identity", "served_model_binding"}, "ready candidate nested summaries")
+    for name in ("driver_identity", "served_model_binding"):
+        item = _require_exact_keys(
+            nested[name],
+            {"present", "json_type", "canonical_sha256", "keys", "key_types"},
+            f"ready candidate {name}",
+        )
+        if (
+            type(item["present"]) is not bool
+            or item["json_type"] not in {"absent", "null", "boolean", "integer", "number", "string", "array", "object"}
+            or item["present"] != (item["json_type"] != "absent")
+            or (item["canonical_sha256"] is not None and not _sha256_string(item["canonical_sha256"]))
+            or item["present"] != (item["canonical_sha256"] is not None)
+        ):
+            raise CaptureError(f"ready candidate {name} summary differs")
+        _validate_key_type_summary(item["keys"], item["key_types"], f"ready candidate {name}")
+    validation = _require_exact_keys(audit["validation"], {"status", "reason_code", "predicates"}, "ready candidate validation")
+    predicate_keys = {
+        "field_set_exact",
+        "event_is_ready",
+        "schema_version_exact",
+        "model_loads_is_integer",
+        "model_loads_is_one",
+        "resident_session_id_is_string",
+        "resident_session_id_nonempty",
+    }
+    if (
+        validation["status"] not in {"passed", "failed"}
+        or not isinstance(validation["reason_code"], str)
+        or not validation["reason_code"]
+        or not isinstance(validation["predicates"], dict)
+        or set(validation["predicates"]) != predicate_keys
+        or any(type(child) is not bool for child in validation["predicates"].values())
+    ):
+        raise CaptureError("ready candidate validation summary differs")
+    return audit
+
+
+def _ready_capture_binding(
+    *,
+    status: str,
+    reason_code: str,
+    stream_sha256: str | None,
+    marker_count: int,
+    marker_sha256: str | None = None,
+    audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    value = {
+        "schema_version": READY_CANDIDATE_CAPTURE_SCHEMA,
+        "self_sha256": None,
+        "status": status,
+        "reason_code": reason_code,
+        "source_stream": "rocprof.stderr",
+        "source_stream_sha256": stream_sha256,
+        "marker_count": marker_count,
+        "marker_sha256": marker_sha256,
+        "audit_sha256": None if audit is None else audit["audit_sha256"],
+        "audit": audit,
+    }
+    value["self_sha256"] = self_hash(value, "self_sha256")
+    return value
+
+
+def parse_ready_candidate_marker(path: Path, stream_sha256: str | None) -> dict[str, Any]:
+    markers: list[bytes] = []
+    invalid_reason: str | None = None
+    with path.open("rb", buffering=0) as source:
+        while True:
+            line = source.readline(MAX_READY_CANDIDATE_MARKER_BYTES + 2)
+            if not line:
+                break
+            if len(line) > MAX_READY_CANDIDATE_MARKER_BYTES and not line.endswith(b"\n"):
+                starts_marker = line.startswith(READY_CANDIDATE_MARKER_PREFIX)
+                while line and not line.endswith(b"\n"):
+                    line = source.readline(MAX_READY_CANDIDATE_MARKER_BYTES + 2)
+                if starts_marker:
+                    invalid_reason = "ready_candidate_marker_oversize"
+                continue
+            if line.startswith(READY_CANDIDATE_MARKER_PREFIX):
+                if len(line.removesuffix(b"\n")) > MAX_READY_CANDIDATE_MARKER_BYTES:
+                    invalid_reason = "ready_candidate_marker_oversize"
+                    continue
+                markers.append(line)
+    if not markers:
+        return _ready_capture_binding(
+            status="invalid" if invalid_reason else "absent",
+            reason_code=invalid_reason or "ready_candidate_marker_absent",
+            stream_sha256=stream_sha256,
+            marker_count=0,
+        )
+    if invalid_reason is not None or len(markers) != 1:
+        return _ready_capture_binding(
+            status="invalid",
+            reason_code=invalid_reason or "ready_candidate_marker_count_differs",
+            stream_sha256=stream_sha256,
+            marker_count=len(markers),
+        )
+    marker = markers[0]
+    marker_sha256 = hashlib.sha256(marker).hexdigest()
+    if not marker.endswith(b"\n") or marker.endswith(b"\r\n"):
+        return _ready_capture_binding(
+            status="invalid",
+            reason_code="ready_candidate_marker_termination_differs",
+            stream_sha256=stream_sha256,
+            marker_count=1,
+            marker_sha256=marker_sha256,
+        )
+    payload = marker[len(READY_CANDIDATE_MARKER_PREFIX) : -1]
+    try:
+        def unique_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, child in items:
+                if key in value:
+                    raise CaptureError(f"duplicate ready candidate audit key: {key}")
+                value[key] = child
+            return value
+
+        parsed = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=unique_pairs,
+            parse_constant=lambda item: (_ for _ in ()).throw(CaptureError(f"non-finite ready candidate audit value: {item}")),
+        )
+        audit = validate_ready_candidate_audit(parsed)
+        if audit["validation"]["status"] != "failed":
+            raise CaptureError("ready candidate marker does not describe a failure")
+    except (CaptureError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _ready_capture_binding(
+            status="invalid",
+            reason_code="ready_candidate_marker_payload_invalid",
+            stream_sha256=stream_sha256,
+            marker_count=1,
+            marker_sha256=marker_sha256,
+        )
+    return _ready_capture_binding(
+        status="valid",
+        reason_code="ready_candidate_marker_bound",
+        stream_sha256=stream_sha256,
+        marker_count=1,
+        marker_sha256=marker_sha256,
+        audit=audit,
+    )
+
+
 def ref(snapshot: Any) -> dict[str, str]:
     return {"path": str(snapshot.path), "sha256": snapshot.sha256}
 
@@ -1207,6 +1447,27 @@ def write_failure_evidence(
                 "bytes": stream.stat().st_size,
                 "sha256": snapshot.sha256,
             }
+    stderr_path = output_directory / "rocprof.stderr"
+    if "rocprof.stderr" in streams:
+        try:
+            ready_candidate_audit = parse_ready_candidate_marker(
+                stderr_path,
+                streams["rocprof.stderr"]["sha256"],
+            )
+        except OSError:
+            ready_candidate_audit = _ready_capture_binding(
+                status="invalid",
+                reason_code="ready_candidate_source_stream_unavailable",
+                stream_sha256=streams["rocprof.stderr"]["sha256"],
+                marker_count=0,
+            )
+    else:
+        ready_candidate_audit = _ready_capture_binding(
+            status="absent",
+            reason_code="ready_candidate_source_stream_absent",
+            stream_sha256=None,
+            marker_count=0,
+        )
     cleanup_complete = "cleanup failed" not in reason
     value = {
         "schema_version": FAILURE_SCHEMA,
@@ -1224,6 +1485,7 @@ def write_failure_evidence(
         "effective_command_sha256": hashlib.sha256(canonical(effective_command if effective_command is not None else command)).hexdigest(),
         "context": context or {},
         "streams": streams,
+        "ready_candidate_audit": ready_candidate_audit,
     }
     value["failure_sha256"] = self_hash(value, "failure_sha256")
     write_json_atomic(path, value)

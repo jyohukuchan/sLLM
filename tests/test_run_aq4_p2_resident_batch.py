@@ -347,7 +347,8 @@ if fault == 'descendant_hang':
 if fault == 'invalid_json':
     os.write(1, b'not-json\\n'); raise SystemExit(26)
 session = 'fault-session'
-print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':1,'resident_session_id':session,'driver_identity':identity,'served_model_binding':served_model_binding}), flush=True)
+model_loads = 0 if fault == 'invalid_ready' else 1
+print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':model_loads,'resident_session_id':session,'driver_identity':identity,'served_model_binding':served_model_binding}), flush=True)
 for line in sys.stdin:
     message = json.loads(line)
     if message['command'] == 'case_begin':
@@ -498,6 +499,129 @@ def test_live_ready_requires_top_level_served_model_binding(tmp_path: Path) -> N
     assert served_binding == event["served_model_binding"]
 
 
+@pytest.mark.parametrize(
+    ("mutation", "reason_code"),
+    (
+        ({"event": "not-ready"}, "ready_candidate_event_differs"),
+        ({"schema_version": "unknown"}, "ready_candidate_schema_differs"),
+        ({"model_loads": True}, "ready_candidate_model_loads_type_differs"),
+        ({"model_loads": 0}, "ready_candidate_model_loads_value_differs"),
+        ({"resident_session_id": 1}, "ready_candidate_session_id_type_differs"),
+        ({"resident_session_id": ""}, "ready_candidate_session_id_empty"),
+    ),
+)
+def test_ready_candidate_predicates_have_stable_reason_codes(
+    tmp_path: Path, mutation: dict, reason_code: str
+) -> None:
+    resident_identity = _identity("a" * 64)
+    identity = {
+        "resident_driver_identity": resident_identity,
+        "hash_binding": {
+            field: resident_identity[field]
+            for field in (
+                "package_manifest_sha256",
+                "package_content_sha256",
+                "served_model_manifest_sha256",
+                "worker_binary_sha256",
+            )
+        },
+        "build_git_commit": resident_identity["build_git_commit"],
+    }
+    case, _ = _case(tmp_path, 128, 1, "all_m1", 0)
+    event = {
+        "event": "ready",
+        "schema_version": BATCH.DRIVER_SCHEMA,
+        "model_loads": 1,
+        "resident_session_id": "session-must-not-be-recorded",
+        "driver_identity": resident_identity,
+        "served_model_binding": _legacy_served_binding("/secret/model/path"),
+    }
+    event.update(mutation)
+    raw = BATCH.canonical(event) + b"\n"
+    audit = BATCH._build_ready_candidate_audit(raw, event)
+    with pytest.raises(BATCH.ReadyValidationError) as caught:
+        BATCH.validate_ready(
+            event,
+            identity,
+            [case],
+            "a" * 64,
+            candidate_audit=audit,
+        )
+    observed = caught.value.audit
+    assert observed["validation"]["reason_code"] == reason_code
+    assert observed["validation"]["status"] == "failed"
+    assert observed["raw"] == {
+        "byte_count": len(raw),
+        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    assert observed["resident_session_id"]["string_length"] == (
+        len(event["resident_session_id"])
+        if isinstance(event["resident_session_id"], str)
+        else None
+    )
+    serialized = BATCH.canonical(observed)
+    assert b"session-must-not-be-recorded" not in serialized
+    assert b"/secret/model/path" not in serialized
+    assert BATCH.sha_bytes(
+        BATCH.canonical({**observed, "audit_sha256": None})
+    ) == observed["audit_sha256"]
+
+
+def test_rust_ready_source_golden_feeds_python_candidate_validator(tmp_path: Path) -> None:
+    source = (
+        ROOT / "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs"
+    ).read_text()
+    ready_source = source.split("fn ready(&self) -> Value", 1)[1].split(
+        "fn begin", 1
+    )[0]
+    for field in (
+        "event",
+        "schema_version",
+        "model_loads",
+        "resident_session_id",
+        "driver_identity",
+        "served_model_binding",
+    ):
+        assert f'"{field}"' in ready_source
+    assert '"event": "ready"' in ready_source
+    assert '"model_loads": 1' in ready_source
+
+    resident_identity = _identity("a" * 64)
+    identity = {
+        "resident_driver_identity": resident_identity,
+        "hash_binding": {
+            field: resident_identity[field]
+            for field in (
+                "package_manifest_sha256",
+                "package_content_sha256",
+                "served_model_manifest_sha256",
+                "worker_binary_sha256",
+            )
+        },
+        "build_git_commit": resident_identity["build_git_commit"],
+    }
+    case, _ = _case(tmp_path, 128, 1, "all_m1", 0)
+    event = {
+        "event": "ready",
+        "schema_version": BATCH.DRIVER_SCHEMA,
+        "model_loads": 1,
+        "resident_session_id": "rust-golden-session",
+        "driver_identity": resident_identity,
+        "served_model_binding": _legacy_served_binding(),
+    }
+    audit = BATCH._build_ready_candidate_audit(BATCH.canonical(event) + b"\n", event)
+    BATCH.validate_ready(
+        event,
+        identity,
+        [case],
+        "a" * 64,
+        candidate_audit=audit,
+    )
+    assert audit["validation"]["status"] == "passed"
+    assert audit["validation"]["reason_code"] == "ready_candidate_valid"
+    assert audit["top_level"]["keys"] == sorted(event)
+
+
 def test_one_case_smoke_requires_explicit_bundle_root(tmp_path: Path) -> None:
     command = _one_case_command(tmp_path / "missing-root")
     root_index = command.index("--bundle-root")
@@ -594,6 +718,99 @@ def test_fake_resident_driver_writes_one_atomic_raw_per_case(tmp_path: Path) -> 
     assert sample["device_lock"]["driver"]["sha256"] == driver_sha256
     assert sample["schedule"] == {"warmup_runs": 2, "measured_runs": 10, "completed_runs": 12}
     assert json.loads((output / "resident-batch.summary.json").read_text())["completed_cases"] == 84
+    process = json.loads((output / "resident-batch.driver-process.json").read_text())
+    audit = process["protocol"]["ready_candidate_audit"]
+    assert audit["validation"]["status"] == "passed"
+    assert audit["validation"]["reason_code"] == "ready_candidate_valid"
+    assert BATCH.sha_bytes(BATCH.canonical({**audit, "audit_sha256": None})) == audit["audit_sha256"]
+
+
+def test_ready_failure_emits_bounded_secret_safe_marker_and_process_audit(
+    tmp_path: Path,
+) -> None:
+    python, _ = _detached_python(tmp_path)
+    driver, driver_sha256 = _fault_driver(tmp_path, python, "invalid_ready")
+    expanded, index, identity, preflight, policy = _bundle(tmp_path, driver_sha256)
+    output = tmp_path / "invalid-ready-output"
+    completed = subprocess.run(
+        _live_command(
+            tmp_path,
+            output,
+            expanded,
+            index,
+            identity,
+            preflight,
+            policy,
+            driver,
+            "invalid-ready",
+        ),
+        text=False,
+        capture_output=True,
+        timeout=10,
+    )
+    assert completed.returncode == 1
+    lines = completed.stderr.splitlines(keepends=True)
+    assert lines[0] == (
+        b"AQ4 P2 resident batch failed: resident driver did not prove one model load\n"
+    )
+    assert lines[1].startswith(BATCH.READY_CANDIDATE_MARKER_PREFIX.encode("ascii"))
+    assert len(lines[1]) <= BATCH.MAX_READY_CANDIDATE_MARKER_BYTES + 1
+    marker_audit = json.loads(
+        lines[1][len(BATCH.READY_CANDIDATE_MARKER_PREFIX) :]
+    )
+    process_audit = json.loads(
+        (output / "resident-batch.failure.json").read_text()
+    )["protocol"]["ready_candidate_audit"]
+    assert marker_audit == process_audit
+    assert marker_audit["validation"]["reason_code"] == (
+        "ready_candidate_model_loads_value_differs"
+    )
+    assert marker_audit["safe_scalars"]["model_loads"]["value"] == 0
+    serialized = BATCH.canonical(marker_audit)
+    assert b"fault-session" not in serialized
+    assert str(tmp_path).encode() not in serialized
+
+
+def test_ready_marker_uses_safe_fallback_if_process_evidence_write_later_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    event = {
+        "event": "ready",
+        "schema_version": BATCH.DRIVER_SCHEMA,
+        "model_loads": 0,
+        "resident_session_id": "fallback-session",
+        "driver_identity": {},
+        "served_model_binding": {},
+    }
+    audit = BATCH._build_ready_candidate_audit(BATCH.canonical(event) + b"\n", event)
+    BATCH._finish_ready_candidate_audit(
+        audit,
+        status="failed",
+        reason_code="ready_candidate_model_loads_value_differs",
+        predicates=BATCH._ready_predicates(
+            event,
+            {
+                "event",
+                "schema_version",
+                "model_loads",
+                "resident_session_id",
+                "driver_identity",
+                "served_model_binding",
+            },
+        ),
+    )
+    monkeypatch.setattr(BATCH, "parse_args", lambda _argv: object())
+    monkeypatch.setattr(
+        BATCH,
+        "run_batch",
+        lambda _args: (_ for _ in ()).throw(OSError("process evidence disappeared")),
+    )
+    assert BATCH.main([]) == 1
+    stderr = capsys.readouterr().err.splitlines()
+    assert stderr[0] == "AQ4 P2 resident batch failed: process evidence disappeared"
+    assert stderr[1].startswith(BATCH.READY_CANDIDATE_MARKER_PREFIX)
+    observed = json.loads(stderr[1][len(BATCH.READY_CANDIDATE_MARKER_PREFIX) :])
+    assert observed["audit_sha256"] == audit["audit_sha256"]
 
 
 def test_resident_oom_is_immutable_and_aborts_remaining_cases(tmp_path: Path) -> None:

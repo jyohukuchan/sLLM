@@ -34,6 +34,10 @@ MAX_DRIVER_STDERR_RETAIN_BYTES = 1024 * 1024
 MAX_DRIVER_TAIL_BYTES = 64 * 1024
 DRIVER_IO_CHUNK_BYTES = 64 * 1024
 DRIVER_CLEANUP_GRACE_SECONDS = 5.0
+READY_CANDIDATE_AUDIT_SCHEMA = "ullm.aq4_p2_ready_candidate_audit.v1"
+READY_CANDIDATE_MARKER_PREFIX = "ULLM_AQ4_READY_CANDIDATE_AUDIT_V1 "
+MAX_READY_CANDIDATE_MARKER_BYTES = 16 * 1024
+SAFE_AUDIT_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 CASE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -121,10 +125,17 @@ FD_CLOSURE_CONTRACT = {
     "device_lock_closure": "pinned_fd",
     "data_integrity": "trusted_pre_post_guarded",
 }
+LAST_READY_CANDIDATE_FAILURE_AUDIT: dict[str, Any] | None = None
 
 
 class BatchError(ValueError):
     pass
+
+
+class ReadyValidationError(BatchError):
+    def __init__(self, message: str, audit: dict[str, Any]) -> None:
+        self.audit = audit
+        super().__init__(message)
 
 
 class PreparedPreflightLink(TypedDict):
@@ -1371,6 +1382,7 @@ class DriverAudit:
         self.stdout_event_count = 0
         self.stdout_records: list[dict[str, Any]] = []
         self.stdout_records_dropped = 0
+        self.ready_candidate_audit: dict[str, Any] | None = None
         self.ready_received = False
         self.case_begin_count = 0
         self.warmup_completed = 0
@@ -1458,6 +1470,174 @@ def _send(process: subprocess.Popen[bytes], message: dict[str, Any]) -> None:
     process.stdin.flush()
 
 
+def _json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    raise BatchError("ready candidate contains an unsupported JSON value")
+
+
+def _safe_audit_key(key: str) -> str:
+    if SAFE_AUDIT_KEY_RE.fullmatch(key) is not None:
+        return key
+    return f"sha256:{sha_bytes(key.encode('utf-8'))}"
+
+
+def _key_type_summary(value: Any) -> tuple[list[str], dict[str, str]]:
+    if not isinstance(value, dict):
+        return [], {}
+    entries = [(_safe_audit_key(key), _json_type(child)) for key, child in value.items()]
+    entries.sort()
+    if len(entries) > 16:
+        omitted_sha256 = sha_bytes(canonical(entries[16:]))
+        entries = entries[:16] + [(f"omitted-sha256:{omitted_sha256}", "omitted")]
+        entries.sort()
+    return [key for key, _kind in entries], {key: kind for key, kind in entries}
+
+
+def _safe_scalar(value: dict[str, Any], key: str) -> dict[str, Any]:
+    present = key in value
+    child = value.get(key)
+    kind = _json_type(child) if present else "absent"
+    encoded = canonical(child) if present else b""
+    safe_value: Any = None
+    if present and kind in {"null", "boolean", "integer", "number"}:
+        safe_value = child
+    elif present and kind == "string" and len(child) <= 128 and SAFE_AUDIT_KEY_RE.fullmatch(child) is not None:
+        safe_value = child
+    return {
+        "present": present,
+        "json_type": kind,
+        "value": safe_value,
+        "string_length": len(child) if isinstance(child, str) else None,
+        "canonical_sha256": sha_bytes(encoded) if present else None,
+    }
+
+
+def _session_id_summary(value: dict[str, Any]) -> dict[str, Any]:
+    present = "resident_session_id" in value
+    child = value.get("resident_session_id")
+    return {
+        "present": present,
+        "json_type": _json_type(child) if present else "absent",
+        "string_length": len(child) if isinstance(child, str) else None,
+        "canonical_sha256": sha_bytes(canonical(child)) if present else None,
+    }
+
+
+def _nested_summary(value: dict[str, Any], key: str) -> dict[str, Any]:
+    present = key in value
+    child = value.get(key)
+    keys, types = _key_type_summary(child)
+    return {
+        "present": present,
+        "json_type": _json_type(child) if present else "absent",
+        "canonical_sha256": sha_bytes(canonical(child)) if present else None,
+        "keys": keys,
+        "key_types": types,
+    }
+
+
+def _ready_predicates(value: dict[str, Any], expected_fields: set[str]) -> dict[str, bool]:
+    return {
+        "field_set_exact": set(value) == expected_fields,
+        "event_is_ready": value.get("event") == "ready",
+        "schema_version_exact": value.get("schema_version") == DRIVER_SCHEMA,
+        "model_loads_is_integer": type(value.get("model_loads")) is int,
+        "model_loads_is_one": type(value.get("model_loads")) is int and value.get("model_loads") == 1,
+        "resident_session_id_is_string": isinstance(value.get("resident_session_id"), str),
+        "resident_session_id_nonempty": isinstance(value.get("resident_session_id"), str) and bool(value.get("resident_session_id")),
+    }
+
+
+def _ready_reason_code(predicates: dict[str, bool]) -> str:
+    for predicate, reason_code in (
+        ("field_set_exact", "ready_candidate_field_set_differs"),
+        ("event_is_ready", "ready_candidate_event_differs"),
+        ("schema_version_exact", "ready_candidate_schema_differs"),
+        ("model_loads_is_integer", "ready_candidate_model_loads_type_differs"),
+        ("model_loads_is_one", "ready_candidate_model_loads_value_differs"),
+        ("resident_session_id_is_string", "ready_candidate_session_id_type_differs"),
+        ("resident_session_id_nonempty", "ready_candidate_session_id_empty"),
+    ):
+        if not predicates[predicate]:
+            return reason_code
+    return "ready_candidate_envelope_valid"
+
+
+def _seal_ready_candidate_audit(audit: dict[str, Any]) -> dict[str, Any]:
+    audit["audit_sha256"] = None
+    audit["audit_sha256"] = sha_bytes(canonical(audit))
+    if len(canonical(audit)) > MAX_READY_CANDIDATE_MARKER_BYTES - len(READY_CANDIDATE_MARKER_PREFIX) - 1:
+        raise BatchError("ready candidate audit exceeds marker bound")
+    return audit
+
+
+def _build_ready_candidate_audit(raw: bytes, value: dict[str, Any]) -> dict[str, Any]:
+    keys, key_types = _key_type_summary(value)
+    return _seal_ready_candidate_audit(
+        {
+            "schema_version": READY_CANDIDATE_AUDIT_SCHEMA,
+            "audit_sha256": None,
+            "raw": {"byte_count": len(raw), "raw_sha256": sha_bytes(raw)},
+            "top_level": {"key_count": len(value), "keys": keys, "key_types": key_types},
+            "safe_scalars": {
+                "event": _safe_scalar(value, "event"),
+                "schema_version": _safe_scalar(value, "schema_version"),
+                "model_loads": _safe_scalar(value, "model_loads"),
+            },
+            "resident_session_id": _session_id_summary(value),
+            "nested": {
+                "driver_identity": _nested_summary(value, "driver_identity"),
+                "served_model_binding": _nested_summary(value, "served_model_binding"),
+            },
+            "validation": {
+                "status": "pending",
+                "reason_code": "ready_candidate_not_validated",
+                "predicates": None,
+            },
+        }
+    )
+
+
+def _finish_ready_candidate_audit(
+    audit: dict[str, Any],
+    *,
+    status: str,
+    reason_code: str,
+    predicates: dict[str, bool],
+) -> dict[str, Any]:
+    global LAST_READY_CANDIDATE_FAILURE_AUDIT
+    audit["validation"] = {
+        "status": status,
+        "reason_code": reason_code,
+        "predicates": predicates,
+    }
+    sealed = _seal_ready_candidate_audit(audit)
+    if status == "failed":
+        LAST_READY_CANDIDATE_FAILURE_AUDIT = sealed
+    return sealed
+
+
+def _ready_candidate_marker(audit: dict[str, Any]) -> str:
+    payload = canonical(audit).decode("ascii")
+    marker = READY_CANDIDATE_MARKER_PREFIX + payload
+    if len(marker.encode("ascii")) > MAX_READY_CANDIDATE_MARKER_BYTES:
+        raise BatchError("ready candidate marker exceeds bound")
+    return marker
+
+
 def _recv(process: subprocess.Popen[bytes], timeout: float, audit: DriverAudit, stage: str) -> dict[str, Any]:
     if process.stdout is None:
         raise BatchError("resident driver stdout is unavailable")
@@ -1542,6 +1722,8 @@ def _recv(process: subprocess.Popen[bytes], timeout: float, audit: DriverAudit, 
         raise DriverProtocolError("non_object", stage, "resident driver response is not an object")
     record["outcome"] = "json_object"
     audit.record_stdout(record)
+    if stage == "ready":
+        audit.ready_candidate_audit = _build_ready_candidate_audit(line, value)
     return value
 
 
@@ -1680,6 +1862,7 @@ def _driver_process_document(
             "stdout_event_count": audit.stdout_event_count,
             "stdout_records": audit.stdout_records,
             "stdout_records_dropped": audit.stdout_records_dropped,
+            "ready_candidate_audit": audit.ready_candidate_audit,
             "ready_received": audit.ready_received,
             "case_begin_count": audit.case_begin_count,
             "warmup_completed": audit.warmup_completed,
@@ -1849,6 +2032,7 @@ def validate_ready(
     expected_binary_sha256: str,
     *,
     allow_pre_binding_fixture: bool = False,
+    candidate_audit: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     expected_fields = {
         "event",
@@ -1860,23 +2044,68 @@ def validate_ready(
     }
     if allow_pre_binding_fixture and "served_model_binding" not in value:
         expected_fields.remove("served_model_binding")
-    if set(value) != expected_fields or value.get("event") != "ready" or value.get("schema_version") != DRIVER_SCHEMA or type(value.get("model_loads")) is not int or value.get("model_loads") != 1 or not isinstance(value.get("resident_session_id"), str) or not value["resident_session_id"]:
-        raise BatchError("resident driver did not prove one model load")
-    ready_identity = _validate_ready_identity(
-        value["driver_identity"],
-        identity,
-        cases,
-        allow_pre_binding_fixture=allow_pre_binding_fixture,
-    )
-    if ready_identity["binary_sha256"] != expected_binary_sha256:
-        raise BatchError("resident driver ready self SHA differs from pre-spawn executable")
-    served_binding = (
-        None
-        if "served_model_binding" not in value
-        else _validate_served_model_binding(
-            value["served_model_binding"],
-            ready_identity["served_model_manifest_sha256"],
+    if candidate_audit is None:
+        candidate_audit = _build_ready_candidate_audit(canonical(value) + b"\n", value)
+    predicates = _ready_predicates(value, expected_fields)
+    reason_code = _ready_reason_code(predicates)
+    if reason_code != "ready_candidate_envelope_valid":
+        _finish_ready_candidate_audit(
+            candidate_audit,
+            status="failed",
+            reason_code=reason_code,
+            predicates=predicates,
         )
+        raise ReadyValidationError(
+            "resident driver did not prove one model load", candidate_audit
+        )
+    try:
+        ready_identity = _validate_ready_identity(
+            value["driver_identity"],
+            identity,
+            cases,
+            allow_pre_binding_fixture=allow_pre_binding_fixture,
+        )
+    except BatchError as error:
+        _finish_ready_candidate_audit(
+            candidate_audit,
+            status="failed",
+            reason_code="ready_candidate_driver_identity_invalid",
+            predicates=predicates,
+        )
+        raise ReadyValidationError(str(error), candidate_audit) from error
+    if ready_identity["binary_sha256"] != expected_binary_sha256:
+        _finish_ready_candidate_audit(
+            candidate_audit,
+            status="failed",
+            reason_code="ready_candidate_binary_sha256_differs",
+            predicates=predicates,
+        )
+        raise ReadyValidationError(
+            "resident driver ready self SHA differs from pre-spawn executable",
+            candidate_audit,
+        )
+    try:
+        served_binding = (
+            None
+            if "served_model_binding" not in value
+            else _validate_served_model_binding(
+                value["served_model_binding"],
+                ready_identity["served_model_manifest_sha256"],
+            )
+        )
+    except BatchError as error:
+        _finish_ready_candidate_audit(
+            candidate_audit,
+            status="failed",
+            reason_code="ready_candidate_served_model_binding_invalid",
+            predicates=predicates,
+        )
+        raise ReadyValidationError(str(error), candidate_audit) from error
+    _finish_ready_candidate_audit(
+        candidate_audit,
+        status="passed",
+        reason_code="ready_candidate_valid",
+        predicates=predicates,
     )
     return value["resident_session_id"], ready_identity, served_binding
 
@@ -2295,6 +2524,7 @@ def _run_batch(args: argparse.Namespace) -> int:
                 identity,
                 cases,
                 driver_executable["sha256"],
+                candidate_audit=audit.ready_candidate_audit,
             )
             driver_invocation["ready_served_model_binding"] = served_model_binding
             audit.ready_received = True
@@ -2426,9 +2656,10 @@ def _run_batch(args: argparse.Namespace) -> int:
 
 
 def run_batch(args: argparse.Namespace) -> int:
-    global ACTIVE_FD_MAP
+    global ACTIVE_FD_MAP, LAST_READY_CANDIDATE_FAILURE_AUDIT
     if ACTIVE_FD_MAP is not None:
         raise BatchError("pinned FD map context is already active")
+    LAST_READY_CANDIDATE_FAILURE_AUDIT = None
     pinned_map = PinnedFdMap.from_environment(required=args.profile_roctx_ranges)
     ACTIVE_FD_MAP = pinned_map
     try:
@@ -2502,6 +2733,13 @@ def main(argv: list[str] | None = None) -> int:
         return run_batch(args)
     except (BatchError, OSError, subprocess.SubprocessError) as error:
         print(f"AQ4 P2 resident batch failed: {error}", file=sys.stderr)
+        ready_audit = (
+            error.audit
+            if isinstance(error, ReadyValidationError)
+            else LAST_READY_CANDIDATE_FAILURE_AUDIT
+        )
+        if ready_audit is not None:
+            print(_ready_candidate_marker(ready_audit), file=sys.stderr)
         return 1
 
 

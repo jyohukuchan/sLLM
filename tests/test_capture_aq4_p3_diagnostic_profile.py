@@ -1372,6 +1372,120 @@ def test_post_capture_assembly_failure_evidence_keeps_logical_command_binding(tm
     assert unknown_failure["children_remaining"] == []
 
 
+def _failed_ready_candidate_marker() -> tuple[bytes, dict]:
+    event = {
+        "event": "ready",
+        "schema_version": RUNNER_TESTS.BATCH.DRIVER_SCHEMA,
+        "model_loads": 0,
+        "resident_session_id": "session-must-not-cross-capture-boundary",
+        "driver_identity": {
+            "binary_sha256": "a" * 64,
+            "logical_path": "/secret/driver/path",
+        },
+        "served_model_binding": {
+            "logical_path": "/secret/served/model/path",
+            "descriptor": 91,
+        },
+    }
+    raw = RUNNER_TESTS.BATCH.canonical(event) + b"\n"
+    audit = RUNNER_TESTS.BATCH._build_ready_candidate_audit(raw, event)
+    with pytest.raises(RUNNER_TESTS.BATCH.ReadyValidationError) as caught:
+        RUNNER_TESTS.BATCH.validate_ready(
+            event,
+            {},
+            [],
+            "a" * 64,
+            candidate_audit=audit,
+        )
+    audit = caught.value.audit
+    marker = (
+        CAPTURE.READY_CANDIDATE_MARKER_PREFIX
+        + RUNNER_TESTS.BATCH.canonical(audit)
+        + b"\n"
+    )
+    return marker, audit
+
+
+def test_actual_v4_ready_failure_audit_survives_absent_runner_root(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "capture-v4-failure"
+    output.mkdir()
+    marker, expected_audit = _failed_ready_candidate_marker()
+    stderr = (
+        b"AQ4 P2 resident batch failed: resident driver did not prove one model load\n"
+        + marker
+    )
+    (output / "rocprof.stdout").write_bytes(b"")
+    (output / "rocprof.stderr").write_bytes(stderr)
+    runner_root = tmp_path / "resident-one-case-smoke-profile-execute-v4"
+    assert not runner_root.exists()
+
+    CAPTURE.write_failure_evidence(
+        output,
+        "rocprof diagnostic capture failed with exit 1",
+        ["/trusted/rocprofv3", "--", "/trusted/runner"],
+        {"runner_output": str(runner_root)},
+    )
+    failure = json.loads((output / "capture-failure.json").read_text())
+    assert failure["schema_version"] == CAPTURE.FAILURE_SCHEMA
+    assert failure["failure_sha256"] == CAPTURE.self_hash(
+        failure, "failure_sha256"
+    )
+    binding = failure["ready_candidate_audit"]
+    assert binding["status"] == "valid"
+    assert binding["reason_code"] == "ready_candidate_marker_bound"
+    assert binding["marker_count"] == 1
+    assert binding["source_stream_sha256"] == hashlib.sha256(stderr).hexdigest()
+    assert binding["audit"] == expected_audit
+    assert binding["audit_sha256"] == expected_audit["audit_sha256"]
+    assert binding["self_sha256"] == CAPTURE.self_hash(binding, "self_sha256")
+    serialized = CAPTURE.canonical(failure)
+    assert b"session-must-not-cross-capture-boundary" not in serialized
+    assert b"/secret/driver/path" not in serialized
+    assert b"/secret/served/model/path" not in serialized
+    assert not runner_root.exists()
+
+
+@pytest.mark.parametrize("variant", ("malformed", "oversize", "multiple"))
+def test_ready_candidate_marker_drift_is_bound_and_fail_closed(
+    tmp_path: Path, variant: str
+) -> None:
+    output = tmp_path / variant
+    output.mkdir()
+    marker, _audit = _failed_ready_candidate_marker()
+    if variant == "malformed":
+        stderr = CAPTURE.READY_CANDIDATE_MARKER_PREFIX + b"{not-json}\n"
+    elif variant == "oversize":
+        stderr = (
+            CAPTURE.READY_CANDIDATE_MARKER_PREFIX
+            + b"x" * CAPTURE.MAX_READY_CANDIDATE_MARKER_BYTES
+            + b"\n"
+        )
+    else:
+        stderr = marker + marker
+    (output / "rocprof.stdout").write_bytes(b"")
+    (output / "rocprof.stderr").write_bytes(stderr)
+    CAPTURE.write_failure_evidence(
+        output,
+        "synthetic ready candidate failure",
+        ["/trusted/rocprofv3", "--", "/trusted/runner"],
+        None,
+    )
+    failure = json.loads((output / "capture-failure.json").read_text())
+    binding = failure["ready_candidate_audit"]
+    assert binding["status"] == "invalid"
+    assert binding["audit"] is None
+    assert binding["audit_sha256"] is None
+    assert binding["self_sha256"] == CAPTURE.self_hash(binding, "self_sha256")
+    expected_reason = {
+        "malformed": "ready_candidate_marker_payload_invalid",
+        "oversize": "ready_candidate_marker_oversize",
+        "multiple": "ready_candidate_marker_count_differs",
+    }[variant]
+    assert binding["reason_code"] == expected_reason
+
+
 def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> None:
     sentinel_ready = tmp_path / "outer.ready"
     restore_request = tmp_path / "outer.restore-request"
