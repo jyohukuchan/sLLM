@@ -713,10 +713,17 @@ struct RawPreparedReceiptActual {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAuditTopology {
+    Legacy(RawAuditTopologyLegacy),
+    MigratedV2(RawAuditTopologyMigratedV2),
+    CurrentV2(RawAuditTopologyCurrentV2),
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAuditTopology {
+struct RawAuditTopologyLegacy {
     artifact_directory_count: usize,
-    artifact_payload_and_scale_bytes_hashed: Option<u64>,
     artifact_payload_and_scale_files_hashed: usize,
     artifact_regular_file_bytes: u64,
     artifact_regular_file_count: usize,
@@ -724,7 +731,6 @@ struct RawAuditTopology {
     executable_file_mode: String,
     historical_runtime_reference_count: usize,
     package_directory_count: usize,
-    package_regular_file_bytes: Option<u64>,
     package_regular_file_count: usize,
     regular_file_mode: String,
     regular_file_nlink: u64,
@@ -734,17 +740,80 @@ struct RawAuditTopology {
     special_file_count: usize,
     symlink_count: usize,
     worker_source_and_immutable_are_runtime_self: bool,
-    authorization_lineage_entries_sha256: Option<String>,
-    authorization_lineage_entry_count: Option<usize>,
-    authorization_lineage_migrated_prefix_count: Option<usize>,
-    authorization_lineage_migrated_prefix_sha256: Option<String>,
-    authorization_lineage_propagation_target_count: Option<usize>,
-    authorization_lineage_schema: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAuditTests {
+struct RawAuditTopologyMigratedV2 {
+    artifact_directory_count: usize,
+    artifact_payload_and_scale_bytes_hashed: u64,
+    artifact_payload_and_scale_files_hashed: usize,
+    artifact_regular_file_bytes: u64,
+    artifact_regular_file_count: usize,
+    current_runtime_reference_count: usize,
+    executable_file_mode: String,
+    historical_runtime_reference_count: usize,
+    package_directory_count: usize,
+    package_regular_file_bytes: u64,
+    package_regular_file_count: usize,
+    regular_file_mode: String,
+    regular_file_nlink: u64,
+    runtime_directory_mode: String,
+    runtime_directory_nlink: u64,
+    runtime_member_count: usize,
+    special_file_count: usize,
+    symlink_count: usize,
+    worker_source_and_immutable_are_runtime_self: bool,
+    authorization_lineage_entries_sha256: String,
+    authorization_lineage_entry_count: usize,
+    authorization_lineage_migrated_prefix_count: usize,
+    authorization_lineage_migrated_prefix_sha256: String,
+    authorization_lineage_propagation_target_count: usize,
+    authorization_lineage_schema: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditTopologyCurrentV2 {
+    artifact_directory_count: usize,
+    artifact_payload_and_scale_bytes_hashed: u64,
+    artifact_payload_and_scale_files_hashed: usize,
+    artifact_regular_file_bytes: u64,
+    artifact_regular_file_count: usize,
+    authorization_lineage_entries_sha256: String,
+    authorization_lineage_entry_count: usize,
+    authorization_lineage_predecessor_entries_sha256: String,
+    authorization_lineage_predecessor_entry_count: usize,
+    authorization_lineage_propagation_target_count: usize,
+    authorization_lineage_schema: String,
+    current_runtime_reference_count: usize,
+    executable_file_mode: String,
+    historical_direct_authorization_reference_count: usize,
+    historical_runtime_reference_count: usize,
+    package_directory_count: usize,
+    package_regular_file_bytes: u64,
+    package_regular_file_count: usize,
+    regular_file_mode: String,
+    regular_file_nlink: u64,
+    runtime_directory_mode: String,
+    runtime_directory_nlink: u64,
+    runtime_member_count: usize,
+    special_file_count: usize,
+    symlink_count: usize,
+    worker_source_and_immutable_are_runtime_self: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAuditTests {
+    Legacy(RawAuditTestsLegacy),
+    MigratedV2(RawAuditTestsMigratedV2),
+    CurrentV2(RawAuditTestsCurrentV2),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditTestsLegacy {
     actual_output: String,
     artifact_live_content: String,
     authorization_boundary: String,
@@ -755,8 +824,6 @@ struct RawAuditTests {
     gpu_or_service_execution: bool,
     historical_runtime_references: String,
     lineage_external_runtime_copy: String,
-    lineage_v1_authorization_rejection: Option<String>,
-    lineage_v1_migration: Option<String>,
     package_live_identity: String,
     runtime_modes_links_and_symlinks: String,
     runtime_sha256sums: String,
@@ -765,6 +832,67 @@ struct RawAuditTests {
     sudo_execution: bool,
     worker_live_identity: String,
     worker_runtime_self_identity: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditTestsMigratedV2 {
+    actual_output: String,
+    artifact_live_content: String,
+    authorization_boundary: String,
+    bridge_readiness_binding: String,
+    candidate_wrapper_dry_run: String,
+    fixed_request_id_recomputation: String,
+    formal_lineage_manifest: String,
+    gpu_or_service_execution: bool,
+    historical_runtime_references: String,
+    lineage_external_runtime_copy: String,
+    lineage_v1_authorization_rejection: String,
+    lineage_v1_migration: String,
+    package_live_identity: String,
+    runtime_modes_links_and_symlinks: String,
+    runtime_sha256sums: String,
+    source_commit_tree_archive: String,
+    source_worktree: String,
+    sudo_execution: bool,
+    worker_live_identity: String,
+    worker_runtime_self_identity: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditTestsCurrentV2 {
+    actual_output: String,
+    artifact_live_content: String,
+    authorization_boundary: String,
+    bridge_readiness_binding: String,
+    candidate_wrapper_dry_run: String,
+    fixed_request_id_recomputation: String,
+    formal_lineage_manifest: String,
+    gpu_or_service_execution: bool,
+    historical_runtime_references: String,
+    lineage_external_runtime_copy: String,
+    lineage_old_v2_authorization_rejection: String,
+    lineage_v1_authorization_rejection: String,
+    lineage_v2_successor: String,
+    package_live_identity: String,
+    runtime_modes_links_and_symlinks: String,
+    runtime_sha256sums: String,
+    served_model_cpu_validation: String,
+    source_commit_tree_archive: String,
+    source_worktree: String,
+    sudo_execution: bool,
+    worker_runtime_self_identity: String,
+}
+
+impl RawAuditTests {
+    fn recorded_forbidden_execution(&self) -> bool {
+        match self {
+            Self::Legacy(tests) => tests.gpu_or_service_execution || tests.sudo_execution,
+            Self::MigratedV2(tests) => tests.gpu_or_service_execution || tests.sudo_execution,
+            Self::CurrentV2(tests) => tests.gpu_or_service_execution || tests.sudo_execution,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -834,12 +962,21 @@ struct RawAuthorizationLineageEntryV2 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AuditLineageBinding {
-    manifest_sha256: String,
-    entries_sha256: String,
-    entry_count: usize,
-    migrated_prefix_count: usize,
-    migrated_prefix_sha256: String,
+enum AuditLineageBinding {
+    MigratedV2 {
+        manifest_sha256: String,
+        entries_sha256: String,
+        entry_count: usize,
+        migrated_prefix_count: usize,
+        migrated_prefix_sha256: String,
+    },
+    CurrentV2 {
+        manifest_sha256: String,
+        entries_sha256: String,
+        entry_count: usize,
+        predecessor_entry_count: usize,
+        predecessor_entries_sha256: String,
+    },
 }
 
 struct ParsedAuthorizationAudit {
@@ -1201,8 +1338,7 @@ fn parse_authorization_audit(
         || audit.gate_state.prepared_receipt_status != "prepared_not_executed"
         || audit.gate_state.prepared_receipt_actual.status != "pending"
         || !audit.gate_state.prepared_receipt_actual.required
-        || audit.tests.gpu_or_service_execution
-        || audit.tests.sudo_execution
+        || audit.tests.recorded_forbidden_execution()
     {
         return Err(ServedModelError(
             "promotion.authorization_audit verdict differs".into(),
@@ -1275,178 +1411,204 @@ fn parse_authorization_audit(
             "promotion.authorization_audit runtime binding differs".into(),
         ));
     }
-    let topology = audit.topology;
-    if topology.artifact_directory_count != 3
-        || topology.artifact_payload_and_scale_files_hashed != 96
-        || topology.artifact_regular_file_bytes == 0
-        || topology.artifact_regular_file_count != 98
-        || topology.current_runtime_reference_count == 0
-        || topology.executable_file_mode != "0555"
-        || topology.historical_runtime_reference_count != 0
-        || topology.package_directory_count == 0
-        || topology.package_regular_file_count == 0
-        || topology.regular_file_mode != "0444"
-        || topology.regular_file_nlink != 1
-        || topology.runtime_directory_mode != "0555"
-        || topology.runtime_directory_nlink != 2
-        || topology.runtime_member_count != 8
-        || topology.special_file_count != 0
-        || topology.symlink_count != 0
-        || !topology.worker_source_and_immutable_are_runtime_self
-    {
-        return Err(ServedModelError(
-            "promotion.authorization_audit topology differs".into(),
-        ));
+    macro_rules! validate_common_topology {
+        ($topology:expr) => {
+            if $topology.artifact_directory_count != 3
+                || $topology.artifact_payload_and_scale_files_hashed != 96
+                || $topology.artifact_regular_file_bytes == 0
+                || $topology.artifact_regular_file_count != 98
+                || $topology.current_runtime_reference_count == 0
+                || $topology.executable_file_mode != "0555"
+                || $topology.historical_runtime_reference_count != 0
+                || $topology.package_directory_count == 0
+                || $topology.package_regular_file_count == 0
+                || $topology.regular_file_mode != "0444"
+                || $topology.regular_file_nlink != 1
+                || $topology.runtime_directory_mode != "0555"
+                || $topology.runtime_directory_nlink != 2
+                || $topology.runtime_member_count != 8
+                || $topology.special_file_count != 0
+                || $topology.symlink_count != 0
+                || !$topology.worker_source_and_immutable_are_runtime_self
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_audit topology differs".into(),
+                ));
+            }
+        };
     }
-    let topology_lineage_values = [
-        topology.artifact_payload_and_scale_bytes_hashed.is_some(),
-        topology.package_regular_file_bytes.is_some(),
-        topology.authorization_lineage_entries_sha256.is_some(),
-        topology.authorization_lineage_entry_count.is_some(),
-        topology
-            .authorization_lineage_migrated_prefix_count
-            .is_some(),
-        topology
-            .authorization_lineage_migrated_prefix_sha256
-            .is_some(),
-        topology
-            .authorization_lineage_propagation_target_count
-            .is_some(),
-        topology.authorization_lineage_schema.is_some(),
-    ];
-    let tests_lineage_values = [
-        audit.tests.lineage_v1_authorization_rejection.is_some(),
-        audit.tests.lineage_v1_migration.is_some(),
-    ];
-    if topology_lineage_values.iter().any(|present| *present)
-        != topology_lineage_values.iter().all(|present| *present)
-        || tests_lineage_values.iter().any(|present| *present)
-            != tests_lineage_values.iter().all(|present| *present)
-        || topology_lineage_values[0] != tests_lineage_values[0]
-    {
-        return Err(ServedModelError(
-            "promotion.authorization_audit lineage topology differs".into(),
-        ));
+    macro_rules! validate_common_tests {
+        ($tests:expr) => {
+            for (text, label) in [
+                ($tests.actual_output, "actual_output"),
+                ($tests.artifact_live_content, "artifact_live_content"),
+                ($tests.authorization_boundary, "authorization_boundary"),
+                ($tests.bridge_readiness_binding, "bridge_readiness_binding"),
+                (
+                    $tests.candidate_wrapper_dry_run,
+                    "candidate_wrapper_dry_run",
+                ),
+                (
+                    $tests.fixed_request_id_recomputation,
+                    "fixed_request_id_recomputation",
+                ),
+                ($tests.formal_lineage_manifest, "formal_lineage_manifest"),
+                (
+                    $tests.historical_runtime_references,
+                    "historical_runtime_references",
+                ),
+                (
+                    $tests.lineage_external_runtime_copy,
+                    "lineage_external_runtime_copy",
+                ),
+                ($tests.package_live_identity, "package_live_identity"),
+                (
+                    $tests.runtime_modes_links_and_symlinks,
+                    "runtime_modes_links_and_symlinks",
+                ),
+                ($tests.runtime_sha256sums, "runtime_sha256sums"),
+                (
+                    $tests.source_commit_tree_archive,
+                    "source_commit_tree_archive",
+                ),
+                ($tests.source_worktree, "source_worktree"),
+                (
+                    $tests.worker_runtime_self_identity,
+                    "worker_runtime_self_identity",
+                ),
+            ] {
+                bounded_text(
+                    text,
+                    &format!("promotion.authorization_audit.tests.{label}"),
+                    4096,
+                )?;
+            }
+        };
     }
-    let lineage = if topology_lineage_values[0] {
-        let entries_sha256 = validate_sha256(
-            topology
-                .authorization_lineage_entries_sha256
-                .expect("presence checked"),
-            "promotion.authorization_audit.topology.authorization_lineage_entries_sha256",
-        )?;
-        let migrated_prefix_sha256 = validate_sha256(
-            topology
-                .authorization_lineage_migrated_prefix_sha256
-                .expect("presence checked"),
-            "promotion.authorization_audit.topology.authorization_lineage_migrated_prefix_sha256",
-        )?;
-        let entry_count = topology
-            .authorization_lineage_entry_count
-            .expect("presence checked");
-        let migrated_prefix_count = topology
-            .authorization_lineage_migrated_prefix_count
-            .expect("presence checked");
-        if topology
-            .artifact_payload_and_scale_bytes_hashed
-            .expect("presence checked")
-            == 0
-            || topology
-                .package_regular_file_bytes
-                .expect("presence checked")
-                == 0
-            || topology
-                .authorization_lineage_propagation_target_count
-                .expect("presence checked")
-                != 5
-            || topology.authorization_lineage_schema.as_deref()
-                != Some("ullm.sq8_authorization_lineage_input.v2")
-            || entry_count < 8
-            || migrated_prefix_count != 6
-        {
-            return Err(ServedModelError(
-                "promotion.authorization_audit lineage topology differs".into(),
-            ));
-        }
-        Some(AuditLineageBinding {
-            manifest_sha256: validate_sha256(
-                runtime_lineage_sha256,
-                "promotion.authorization_audit.runtime.authorization_lineage_manifest.sha256",
-            )?,
-            entries_sha256,
-            entry_count,
-            migrated_prefix_count,
-            migrated_prefix_sha256,
-        })
-    } else {
-        None
-    };
-    for (text, label) in [
-        (audit.tests.actual_output, "actual_output"),
-        (audit.tests.artifact_live_content, "artifact_live_content"),
-        (audit.tests.authorization_boundary, "authorization_boundary"),
-        (
-            audit.tests.bridge_readiness_binding,
-            "bridge_readiness_binding",
-        ),
-        (
-            audit.tests.candidate_wrapper_dry_run,
-            "candidate_wrapper_dry_run",
-        ),
-        (
-            audit.tests.fixed_request_id_recomputation,
-            "fixed_request_id_recomputation",
-        ),
-        (
-            audit.tests.formal_lineage_manifest,
-            "formal_lineage_manifest",
-        ),
-        (
-            audit.tests.historical_runtime_references,
-            "historical_runtime_references",
-        ),
-        (
-            audit.tests.lineage_external_runtime_copy,
-            "lineage_external_runtime_copy",
-        ),
-        (audit.tests.package_live_identity, "package_live_identity"),
-        (
-            audit.tests.runtime_modes_links_and_symlinks,
-            "runtime_modes_links_and_symlinks",
-        ),
-        (audit.tests.runtime_sha256sums, "runtime_sha256sums"),
-        (
-            audit.tests.source_commit_tree_archive,
-            "source_commit_tree_archive",
-        ),
-        (audit.tests.source_worktree, "source_worktree"),
-        (audit.tests.worker_live_identity, "worker_live_identity"),
-        (
-            audit.tests.worker_runtime_self_identity,
-            "worker_runtime_self_identity",
-        ),
-    ] {
-        bounded_text(
-            text,
-            &format!("promotion.authorization_audit.tests.{label}"),
-            4096,
-        )?;
-    }
-    for (text, label) in [
-        (
-            audit.tests.lineage_v1_authorization_rejection,
-            "lineage_v1_authorization_rejection",
-        ),
-        (audit.tests.lineage_v1_migration, "lineage_v1_migration"),
-    ] {
-        if let Some(text) = text {
+    let lineage = match (audit.topology, audit.tests) {
+        (RawAuditTopology::Legacy(topology), RawAuditTests::Legacy(tests)) => {
+            validate_common_topology!(topology);
+            validate_common_tests!(tests);
             bounded_text(
-                text,
-                &format!("promotion.authorization_audit.tests.{label}"),
+                tests.worker_live_identity,
+                "promotion.authorization_audit.tests.worker_live_identity",
                 4096,
             )?;
+            None
         }
-    }
+        (RawAuditTopology::MigratedV2(topology), RawAuditTests::MigratedV2(tests)) => {
+            validate_common_topology!(topology);
+            validate_common_tests!(tests);
+            for (text, label) in [
+                (tests.worker_live_identity, "worker_live_identity"),
+                (
+                    tests.lineage_v1_authorization_rejection,
+                    "lineage_v1_authorization_rejection",
+                ),
+                (tests.lineage_v1_migration, "lineage_v1_migration"),
+            ] {
+                bounded_text(
+                    text,
+                    &format!("promotion.authorization_audit.tests.{label}"),
+                    4096,
+                )?;
+            }
+            let entries_sha256 = validate_sha256(
+                topology.authorization_lineage_entries_sha256,
+                "promotion.authorization_audit.topology.authorization_lineage_entries_sha256",
+            )?;
+            let migrated_prefix_sha256 = validate_sha256(
+                topology.authorization_lineage_migrated_prefix_sha256,
+                "promotion.authorization_audit.topology.authorization_lineage_migrated_prefix_sha256",
+            )?;
+            if topology.artifact_payload_and_scale_bytes_hashed == 0
+                || topology.package_regular_file_bytes == 0
+                || topology.authorization_lineage_propagation_target_count != 5
+                || topology.authorization_lineage_schema
+                    != "ullm.sq8_authorization_lineage_input.v2"
+                || topology.authorization_lineage_entry_count < 8
+                || topology.authorization_lineage_migrated_prefix_count != 6
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_audit lineage topology differs".into(),
+                ));
+            }
+            Some(AuditLineageBinding::MigratedV2 {
+                manifest_sha256: validate_sha256(
+                    runtime_lineage_sha256,
+                    "promotion.authorization_audit.runtime.authorization_lineage_manifest.sha256",
+                )?,
+                entries_sha256,
+                entry_count: topology.authorization_lineage_entry_count,
+                migrated_prefix_count: topology.authorization_lineage_migrated_prefix_count,
+                migrated_prefix_sha256,
+            })
+        }
+        (RawAuditTopology::CurrentV2(topology), RawAuditTests::CurrentV2(tests)) => {
+            validate_common_topology!(topology);
+            validate_common_tests!(tests);
+            for (text, label) in [
+                (tests.lineage_v2_successor, "lineage_v2_successor"),
+                (
+                    tests.lineage_old_v2_authorization_rejection,
+                    "lineage_old_v2_authorization_rejection",
+                ),
+                (
+                    tests.lineage_v1_authorization_rejection,
+                    "lineage_v1_authorization_rejection",
+                ),
+                (
+                    tests.served_model_cpu_validation,
+                    "served_model_cpu_validation",
+                ),
+            ] {
+                bounded_text(
+                    text,
+                    &format!("promotion.authorization_audit.tests.{label}"),
+                    4096,
+                )?;
+            }
+            let entries_sha256 = validate_sha256(
+                topology.authorization_lineage_entries_sha256,
+                "promotion.authorization_audit.topology.authorization_lineage_entries_sha256",
+            )?;
+            let predecessor_entries_sha256 = validate_sha256(
+                topology.authorization_lineage_predecessor_entries_sha256,
+                "promotion.authorization_audit.topology.authorization_lineage_predecessor_entries_sha256",
+            )?;
+            if topology.artifact_payload_and_scale_bytes_hashed == 0
+                || topology.package_regular_file_bytes == 0
+                || topology.authorization_lineage_propagation_target_count != 5
+                || topology.authorization_lineage_schema
+                    != "ullm.sq8_authorization_lineage_input.v2"
+                || topology.historical_direct_authorization_reference_count != 0
+                || topology.authorization_lineage_predecessor_entry_count < 8
+                || topology
+                    .authorization_lineage_predecessor_entry_count
+                    .checked_add(2)
+                    != Some(topology.authorization_lineage_entry_count)
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_audit lineage topology differs".into(),
+                ));
+            }
+            Some(AuditLineageBinding::CurrentV2 {
+                manifest_sha256: validate_sha256(
+                    runtime_lineage_sha256,
+                    "promotion.authorization_audit.runtime.authorization_lineage_manifest.sha256",
+                )?,
+                entries_sha256,
+                entry_count: topology.authorization_lineage_entry_count,
+                predecessor_entry_count: topology.authorization_lineage_predecessor_entry_count,
+                predecessor_entries_sha256,
+            })
+        }
+        _ => {
+            return Err(ServedModelError(
+                "promotion.authorization_audit topology/tests variant differs".into(),
+            ));
+        }
+    };
     Ok(ParsedAuthorizationAudit {
         identity: AuthorizationAuditIdentity { path, sha256 },
         lineage,
@@ -1463,11 +1625,13 @@ struct ValidatedLineageDocument {
     entries_sha256: String,
     current_implementation_audit: Option<AuthorizationAuditIdentity>,
     migrated_prefix: Option<(usize, String)>,
+    v2_predecessor: Option<(usize, String)>,
 }
 
 struct ParsedAuthorizationLineage {
     identity: AuthorizationLineageIdentity,
     migrated_prefix: Option<(usize, String)>,
+    v2_predecessor: Option<(usize, String)>,
 }
 
 fn canonical_json_sha256(value: &Value, label: &str) -> Result<String> {
@@ -1923,6 +2087,7 @@ fn validate_lineage_file(
                     )?,
                     current_implementation_audit: None,
                     migrated_prefix: None,
+                    v2_predecessor: None,
                 })
             }
             RawAuthorizationLineageManifest::V2(document) => {
@@ -2001,7 +2166,7 @@ fn validate_lineage_file(
                         "promotion.authorization_lineage current GO source differs".into(),
                     ));
                 }
-                let migrated_prefix = match document.predecessor {
+                let (migrated_prefix, v2_predecessor) = match document.predecessor {
                     RawAuthorizationLineagePredecessor::V1(predecessor) => {
                         let predecessor_digest = validate_sha256(
                             predecessor.sha256,
@@ -2052,7 +2217,7 @@ fn validate_lineage_file(
                                 "promotion.authorization_lineage v1 migration differs".into(),
                             ));
                         }
-                        Some((migrated.len(), migrated_sha))
+                        (Some((migrated.len(), migrated_sha)), None)
                     }
                     RawAuthorizationLineagePredecessor::V2(predecessor) => {
                         let predecessor_digest = validate_sha256(
@@ -2096,7 +2261,10 @@ fn validate_lineage_file(
                                 "promotion.authorization_lineage is not append-only".into(),
                             ));
                         }
-                        previous.migrated_prefix
+                        (
+                            previous.migrated_prefix,
+                            Some((predecessor.entry_count, predecessor_entries_sha)),
+                        )
                     }
                 };
                 let entries_value = Value::Array(document.entries.clone());
@@ -2112,6 +2280,7 @@ fn validate_lineage_file(
                     )?,
                     current_implementation_audit: current.pop().map(|(_, _, identity)| identity),
                     migrated_prefix,
+                    v2_predecessor,
                 })
             }
         }
@@ -2228,6 +2397,7 @@ fn parse_authorization_lineage(
             current_implementation_audit,
         },
         migrated_prefix: validated[0].migrated_prefix.clone(),
+        v2_predecessor: validated[0].v2_predecessor.clone(),
     })
 }
 
@@ -2339,7 +2509,16 @@ fn parse_promotion(raw: RawPromotion, base: &Path) -> Result<PromotionContract> 
     if let (Some(audit), Some(lineage)) = (&parsed_audit, &parsed_lineage) {
         match (&audit.lineage, lineage.identity.entry_count) {
             (None, None) => {}
-            (Some(binding), Some(entry_count)) => {
+            (
+                Some(AuditLineageBinding::MigratedV2 {
+                    manifest_sha256,
+                    entries_sha256,
+                    entry_count: audit_entry_count,
+                    migrated_prefix_count: audit_prefix_count,
+                    migrated_prefix_sha256: audit_prefix_sha256,
+                }),
+                Some(entry_count),
+            ) => {
                 let Some((migrated_prefix_count, migrated_prefix_sha256)) =
                     lineage.migrated_prefix.as_ref()
                 else {
@@ -2347,11 +2526,40 @@ fn parse_promotion(raw: RawPromotion, base: &Path) -> Result<PromotionContract> 
                         "promotion authorization lineage audit binding differs".into(),
                     ));
                 };
-                if binding.manifest_sha256 != lineage.identity.sha256
-                    || binding.entries_sha256 != lineage.identity.entries_sha256
-                    || binding.entry_count != entry_count
-                    || binding.migrated_prefix_count != *migrated_prefix_count
-                    || binding.migrated_prefix_sha256 != *migrated_prefix_sha256
+                if lineage.v2_predecessor.is_some()
+                    || manifest_sha256 != &lineage.identity.sha256
+                    || entries_sha256 != &lineage.identity.entries_sha256
+                    || *audit_entry_count != entry_count
+                    || *audit_prefix_count != *migrated_prefix_count
+                    || audit_prefix_sha256 != migrated_prefix_sha256
+                {
+                    return Err(ServedModelError(
+                        "promotion authorization lineage audit binding differs".into(),
+                    ));
+                }
+            }
+            (
+                Some(AuditLineageBinding::CurrentV2 {
+                    manifest_sha256,
+                    entries_sha256,
+                    entry_count: audit_entry_count,
+                    predecessor_entry_count: audit_predecessor_count,
+                    predecessor_entries_sha256: audit_predecessor_sha256,
+                }),
+                Some(entry_count),
+            ) => {
+                let Some((predecessor_entry_count, predecessor_entries_sha256)) =
+                    lineage.v2_predecessor.as_ref()
+                else {
+                    return Err(ServedModelError(
+                        "promotion authorization lineage audit binding differs".into(),
+                    ));
+                };
+                if manifest_sha256 != &lineage.identity.sha256
+                    || entries_sha256 != &lineage.identity.entries_sha256
+                    || *audit_entry_count != entry_count
+                    || *audit_predecessor_count != *predecessor_entry_count
+                    || audit_predecessor_sha256 != predecessor_entries_sha256
                 {
                     return Err(ServedModelError(
                         "promotion authorization lineage audit binding differs".into(),
@@ -3293,6 +3501,181 @@ mod tests {
         fixture
     }
 
+    fn current_v2_authorized_fixture() -> AuthorizationFixture {
+        let mut fixture = first_v2_authorized_fixture();
+        let lineage_input = fixture.root.join("lineage-input.json");
+        let lineage_runtime = fixture.root.join("lineage-runtime.json");
+        let mut lineage: Value = serde_json::from_slice(
+            &bounded_read(&lineage_input, MAX_MANIFEST_BYTES, "fixture lineage").unwrap(),
+        )
+        .unwrap();
+        let predecessor_bytes = serde_json::to_vec(&lineage).unwrap();
+        let predecessor_sha = sha256_bytes(&predecessor_bytes);
+        let predecessor_entries_sha =
+            canonical_json_sha256(&lineage["entries"], "fixture predecessor entries").unwrap();
+        let predecessor_path = fixture.root.join("lineage-v2-predecessor.json");
+        write_immutable(&predecessor_path, &predecessor_bytes);
+
+        let previous_commit = "a".repeat(40);
+        let current_commit = "b".repeat(40);
+        let current_tree = "c".repeat(40);
+        let current_archive = "d".repeat(64);
+        let request = format!("sq8-promotion-{}", "8".repeat(64));
+        let (failure_path, failure_sha) = write_immutable_json(
+            &fixture.root,
+            "entry-8.json",
+            &json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+                "status": "actual_failed",
+                "request_id": request,
+                "source_commit": previous_commit,
+                "actual": {"status": "failed", "request_id": request},
+            }),
+        );
+        let (current_path, current_sha) = write_immutable_json(
+            &fixture.root,
+            "entry-9.json",
+            &json!({
+                "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+                "auditor_task_id": "fixture-9",
+                "audited_source": {
+                    "commit": current_commit,
+                    "tree_sha256": current_tree,
+                    "archive_sha256": current_archive,
+                },
+                "verdict": "implementation_ready",
+                "actual": "not_executed",
+                "authorization": {"eligible_for_fresh_authorization_builder": true},
+            }),
+        );
+        lineage["source"] = json!({
+            "commit": current_commit,
+            "tree_oid": current_tree,
+            "archive_sha256": current_archive,
+        });
+        lineage["predecessor"] = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_input.v2",
+            "path": predecessor_path,
+            "sha256": predecessor_sha,
+            "entries_sha256": predecessor_entries_sha,
+            "entry_count": 8,
+        });
+        lineage["entries"].as_array_mut().unwrap().push(json!({
+            "sequence": 8,
+            "relation": "actual_failure",
+            "path": failure_path,
+            "sha256": failure_sha,
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "status": "actual_failed",
+            "request_id": request,
+            "source_commit": previous_commit,
+        }));
+        lineage["entries"].as_array_mut().unwrap().push(json!({
+            "sequence": 9,
+            "relation": "implementation_ready_current",
+            "path": current_path,
+            "sha256": current_sha,
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+            "status": "implementation_ready",
+            "request_id": null,
+            "source_commit": current_commit,
+        }));
+        let lineage_bytes = serde_json::to_vec(&lineage).unwrap();
+        let lineage_sha = sha256_bytes(&lineage_bytes);
+        let entries_sha = canonical_json_sha256(&lineage["entries"], "fixture entries").unwrap();
+        for path in [&lineage_input, &lineage_runtime] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            write_immutable(path, &lineage_bytes);
+        }
+        fixture.value["promotion"]["source_commit"] = json!(current_commit);
+        fixture.value["promotion"]["authorization_lineage"] = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_ref.v2",
+            "input_path": lineage_input,
+            "runtime_path": lineage_runtime,
+            "sha256": lineage_sha,
+            "entries_sha256": entries_sha,
+            "entry_count": 10,
+            "current_implementation_audit": {
+                "path": current_path,
+                "sha256": current_sha,
+            },
+        });
+
+        let audit_path = fixture.root.join("audit.json");
+        let mut audit: Value = serde_json::from_slice(
+            &bounded_read(&audit_path, MAX_MANIFEST_BYTES, "fixture audit").unwrap(),
+        )
+        .unwrap();
+        audit["audited_source"] = json!({
+            "commit": current_commit,
+            "tree_sha256": current_tree,
+            "archive_sha256": current_archive,
+        });
+        audit["runtime"]["authorization_lineage_manifest"]["sha256"] = json!(lineage_sha);
+        let topology = audit["topology"].as_object_mut().unwrap();
+        topology.remove("authorization_lineage_migrated_prefix_count");
+        topology.remove("authorization_lineage_migrated_prefix_sha256");
+        topology.insert(
+            "historical_direct_authorization_reference_count".into(),
+            json!(0),
+        );
+        topology.insert("authorization_lineage_entry_count".into(), json!(10));
+        topology.insert(
+            "authorization_lineage_entries_sha256".into(),
+            json!(entries_sha),
+        );
+        topology.insert(
+            "authorization_lineage_predecessor_entry_count".into(),
+            json!(8),
+        );
+        topology.insert(
+            "authorization_lineage_predecessor_entries_sha256".into(),
+            json!(predecessor_entries_sha),
+        );
+        let tests = audit["tests"].as_object_mut().unwrap();
+        tests.remove("lineage_v1_migration");
+        tests.remove("worker_live_identity");
+        tests.insert("lineage_v2_successor".into(), json!("passed"));
+        tests.insert(
+            "lineage_old_v2_authorization_rejection".into(),
+            json!("passed"),
+        );
+        tests.insert("served_model_cpu_validation".into(), json!("passed"));
+        let audit_bytes = serde_json::to_vec(&audit).unwrap();
+        fs::set_permissions(&audit_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&audit_path, &audit_bytes);
+        fixture.value["promotion"]["authorization_audit"]["sha256"] =
+            json!(sha256_bytes(&audit_bytes));
+        fixture
+    }
+
+    fn mutate_current_v2_audit(
+        fixture: &mut AuthorizationFixture,
+        mutate: impl FnOnce(&mut Value),
+    ) {
+        let audit_path = PathBuf::from(
+            fixture.value["promotion"]["authorization_audit"]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        let mut audit: Value = serde_json::from_slice(
+            &bounded_read(&audit_path, MAX_MANIFEST_BYTES, "fixture audit").unwrap(),
+        )
+        .unwrap();
+        mutate(&mut audit);
+        let bytes = serde_json::to_vec(&audit).unwrap();
+        fs::set_permissions(&audit_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&audit_path, &bytes);
+        fixture.value["promotion"]["authorization_audit"]["sha256"] = json!(sha256_bytes(&bytes));
+    }
+
+    fn assert_current_v2_audit_rejected(mutate: impl FnOnce(&mut Value)) {
+        let mut fixture = current_v2_authorized_fixture();
+        mutate_current_v2_audit(&mut fixture, mutate);
+        let raw = serde_json::to_vec(&fixture.value).unwrap();
+        assert!(load_served_model_bytes(&fixture.manifest_path, &raw).is_err());
+    }
+
     fn validate_mutated_first_v2(
         mutate: impl FnOnce(&mut Value),
     ) -> Result<ValidatedLineageDocument> {
@@ -3485,6 +3868,87 @@ mod tests {
         );
         assert_eq!(lineage.entry_count, Some(8));
         assert!(lineage.current_implementation_audit.is_some());
+    }
+
+    #[test]
+    fn portable_current_v2_authorization_audit_is_typed_and_bound() {
+        let fixture = current_v2_authorized_fixture();
+        let raw = serde_json::to_vec(&fixture.value).unwrap();
+        let model = load_served_model_bytes(&fixture.manifest_path, &raw).unwrap();
+        assert!(model.promotion.authorization_audit.is_some());
+        let lineage = model.promotion.authorization_lineage.unwrap();
+        assert_eq!(lineage.entry_count, Some(10));
+        assert_eq!(
+            lineage
+                .current_implementation_audit
+                .expect("current implementation GO")
+                .sha256,
+            fixture.value["promotion"]["authorization_lineage"]
+                ["current_implementation_audit"]["sha256"]
+                .as_str()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn portable_current_v2_audit_variant_tamper_matrix_is_rejected() {
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown".into(), json!(true));
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]
+                .as_object_mut()
+                .unwrap()
+                .remove("historical_direct_authorization_reference_count");
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["historical_direct_authorization_reference_count"] = json!("0");
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["historical_direct_authorization_reference_count"] = json!(1);
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["authorization_lineage_entry_count"] = json!(9);
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["authorization_lineage_predecessor_entry_count"] = json!(7);
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["authorization_lineage_predecessor_entry_count"] = json!(usize::MAX);
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["authorization_lineage_entries_sha256"] = json!("0".repeat(64));
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["topology"]["authorization_lineage_predecessor_entries_sha256"] =
+                json!("0".repeat(64));
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["tests"]["gpu_or_service_execution"] = json!(true);
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["tests"]
+                .as_object_mut()
+                .unwrap()
+                .remove("served_model_cpu_validation");
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            audit["tests"]
+                .as_object_mut()
+                .unwrap()
+                .insert("worker_live_identity".into(), json!("passed"));
+        });
+        assert_current_v2_audit_rejected(|audit| {
+            let tests = audit["tests"].as_object_mut().unwrap();
+            tests.remove("lineage_v2_successor");
+            tests.remove("lineage_old_v2_authorization_rejection");
+            tests.remove("served_model_cpu_validation");
+            tests.insert("lineage_v1_migration".into(), json!("passed"));
+            tests.insert("worker_live_identity".into(), json!("passed"));
+        });
     }
 
     #[test]
@@ -3860,6 +4324,55 @@ mod tests {
                 .expect("v2 current implementation GO")
                 .sha256,
             "058bc7f90c1c6cd93e2c5dae4a9a207749dc15bfc52e2d26203345fe3ebe01b4"
+        );
+    }
+
+    #[test]
+    fn current_v2_authorized_sq8_manifest_is_cpu_loadable_when_available() {
+        let path = PathBuf::from(
+            "/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-08044245855b9bc2/served-model.json",
+        );
+        if !path.exists() {
+            return;
+        }
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "b1f2a3a88ea24d65298129c065e77fede46711975ded40ea3a0a802634d6db43"
+        );
+        let model = load_served_model(path).unwrap();
+        assert!(model.promotion.authorization_audit.is_some());
+        let lineage = model.promotion.authorization_lineage.unwrap();
+        assert_eq!(lineage.entry_count, Some(10));
+        assert_eq!(
+            lineage
+                .current_implementation_audit
+                .expect("current implementation GO")
+                .sha256,
+            "8b7a0ab9d3bd6ea672bed7b435a89176f178a30f9a02daf879e1ee42bb73465d"
+        );
+    }
+
+    #[test]
+    fn current_v2_unauthorized_sq8_manifest_is_cpu_loadable_when_available() {
+        let path = PathBuf::from(
+            "/tmp/ullm-sq8-overlay-gpu-promotion-6ad51ac5-5c7d71d2-unauthorized-v2/served-model.json",
+        );
+        if !path.exists() {
+            return;
+        }
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "484ac20f4a9828152c895cd6064371c1851b34dece64a996bf445c431a29d21e"
+        );
+        let model = load_served_model(path).unwrap();
+        assert!(model.promotion.authorization_audit.is_none());
+        assert_eq!(
+            model
+                .promotion
+                .authorization_lineage
+                .expect("current v2 lineage")
+                .entry_count,
+            Some(10)
         );
     }
 
