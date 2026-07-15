@@ -17,16 +17,18 @@ stage sample が記録されたが、`model.language_model.layers.0.linear_attn.
   RMSNorm weight は additive delta のため、runtime と同じ `raw_f32 + 1.0_f32` を
   適用し、raw payload SHA と effective f32 値の SHA を report に固定した。
 - package AQ4 CPU matvec と BF16 source QKV matvec を比較した。各ケースの
-  `max_abs` は 0.0839967--0.113756、relative L2 は 0.02786495--0.03253763、
-  cosine は 0.9994834--0.9996317 だった。これは量子化差分の観測であり、GPU 不具合の
+  `max_abs` は 0.7104448--0.8944544、relative L2 は 0.02345423--0.02735736、
+  cosine は 0.9996409--0.9997432 だった。これは量子化差分の観測であり、GPU 不具合の
   判定ではない。
 - Python 参照式と host runtime の `aq4_matvec_f32` 契約を模した明示的な f32
   積・加算モデル（runtime API 自体は呼び出していない）を比較した。3 ケースとも
   固定 numeric bound（max abs/relative L2 `1e-4`）を通過したが、bit-exact 一致を
-  意味しない。最大絶対差は epsilon f32 適用後で `5.3e-5` 以下だった。行スケールは
-  0、row-scale override は存在しない。
-- 係数テーブル、index、scale、codebook、source tensor の SHA-256、形状、BF16/f32 と
-  ニブル順、非有限値数（全 0）を report に固定した。GPU tensor output がないため、
+  意味しない。最大絶対差は epsilon f32 適用後で `5.60e-5` 以下、bit mismatch は
+  `7924/7934/7960` だった。行スケールは 0、row-scale override は存在しない。
+- 係数テーブル、index、scale、codebook、source tensor、source safetensor、cases、trace
+  manifest/payload の実ファイル SHA-256を、capture 前後の stat とともに report に固定した。
+  package/source/cases/trace のcanonical containmentとTOCTOUを検証し、形状、BF16/f32 と
+  ニブル順、非有限値数（全 0）も固定した。GPU tensor output がないため、
   status/classification は `blocked_missing_gpu_tensor_output` /
   `inconclusive_missing_gpu_tensor_output` のままとした。
 - GPU、常駐サービス、holdout、フルモデルの再実行は行っていない。CPU での読み取りと

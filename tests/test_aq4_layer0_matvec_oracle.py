@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
 import struct
 from pathlib import Path
 
@@ -69,8 +70,67 @@ def test_runtime_identity_f32_encodings_are_explicit() -> None:
     assert ORACLE._f32_bits_hex(0.022842333) == "0x3cbb1fd8"
 
 
+def test_rmsnorm_f32_uses_sequential_f32_operations() -> None:
+    values = ORACLE.rmsnorm_f32_input([1.0, 2.0, 3.0], [1.0, 0.5, -1.0], 1.0e-6)
+    assert all(struct.pack("<f", value) == struct.pack("<f", value) for value in values)
+    assert values == pytest.approx([0.4629099965, 0.4629099965, -1.3887300491], rel=1e-7)
+
+
+def test_canonical_package_payload_rejects_escape(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"x")
+    with pytest.raises(ORACLE.OracleError, match="relative package path"):
+        ORACLE._canonical_package_payload(package, str(outside), "payload")
+    with pytest.raises(ORACLE.OracleError, match="escapes canonical root"):
+        ORACLE._canonical_package_payload(package, "../outside.bin", "payload")
+
+
+def test_file_identity_detects_post_capture_change(tmp_path: Path) -> None:
+    path = tmp_path / "identity.bin"
+    path.write_bytes(b"before")
+    identity = ORACLE._capture_file_identity(path, "identity")
+    path.write_bytes(b"after")
+    with pytest.raises(ORACLE.OracleError, match="changed after identity capture"):
+        ORACLE._assert_file_identity(identity, "identity")
+
+
+def test_trace_jsonl_streaming_rejects_blank_rows(tmp_path: Path) -> None:
+    root = tmp_path / "trace"
+    root.mkdir()
+    (root / "manifest.json").write_text(json.dumps({"schema_version": ORACLE.TRACE_SCHEMA, "rows": 3}), encoding="utf-8")
+    (root / "payload.jsonl").write_text("\n", encoding="utf-8")
+    with pytest.raises(ORACLE.OracleError, match="blank"):
+        ORACLE._load_trace(root, None, None)
+
+
+def test_gpu_output_requires_full_identity_binding(tmp_path: Path) -> None:
+    path = tmp_path / "gpu.json"
+    path.write_text(json.dumps({"schema_version": ORACLE.TENSOR_OUTPUT_SCHEMA, "tensor_name": ORACLE.DEFAULT_TENSOR, "rows": []}), encoding="utf-8")
+    with pytest.raises(ORACLE.OracleError, match="identity is missing"):
+        ORACLE._load_tensor_outputs(path, {"name": ORACLE.DEFAULT_TENSOR}, {})
+
+
+def test_gpu_output_identity_mismatch_is_rejected(tmp_path: Path) -> None:
+    identity = {
+        "package_manifest_sha256": "a" * 64,
+        "active_manifest_sha256": "b" * 64,
+        "input_bindings_sha256": "c" * 64,
+        "device": {"backend": "hip", "index": 1},
+        "guard_set_sha256": "d" * 64,
+        "operation": "wrong-operation",
+        "effective_rpb": {"rows_per_block": 4, "threads_per_row": 64},
+    }
+    path = tmp_path / "gpu.json"
+    path.write_text(json.dumps({"schema_version": ORACLE.TENSOR_OUTPUT_SCHEMA, "tensor_name": ORACLE.DEFAULT_TENSOR, "identity": identity, "rows": []}), encoding="utf-8")
+    expected = dict(identity, operation=ORACLE.DEFAULT_GPU_OPERATION)
+    with pytest.raises(ORACLE.OracleError, match="identity mismatch: operation"):
+        ORACLE._load_tensor_outputs(path, {"name": ORACLE.DEFAULT_TENSOR}, expected)
+
+
 def test_candidate1_evidence_is_fail_closed_and_identity_bound() -> None:
-    report_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/report-v5.json"
+    report_path = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/report-v6.json"
     report = __import__("json").loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "blocked_missing_gpu_tensor_output"
     assert report["classification"] == "inconclusive_missing_gpu_tensor_output"
@@ -80,6 +140,8 @@ def test_candidate1_evidence_is_fail_closed_and_identity_bound() -> None:
     assert report["nonfinite_counts"] == {"cpu_outputs": 0, "input_vectors": 0, "runtime_cpu_outputs": 0, "source_outputs": 0}
     assert report["cpu_f32_reference_contract"]["execution"] == "offline_python_model; runtime API not invoked"
     assert report["cpu_f32_reference_contract"]["bit_exact_required"] is False
+    assert report["file_identities"]["package manifest"]["sha256"] == report["package_manifest_sha256"]
+    assert report["gpu_tensor_output_identity_contract"]["effective_rpb"] == {"rows_per_block": 4, "threads_per_row": 64}
     for row in report["rows"]:
         assert "cosine" in row["cpu_vs_source"]
         assert "bit_mismatch_count" in row["cpu_formula_vs_f32_reference"]
