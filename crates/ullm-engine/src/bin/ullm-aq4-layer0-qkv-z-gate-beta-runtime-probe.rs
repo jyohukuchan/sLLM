@@ -38,6 +38,9 @@ const A_LOG_TENSOR: &str = "model.language_model.layers.0.linear_attn.A_log";
 const DT_BIAS_TENSOR: &str = "model.language_model.layers.0.linear_attn.dt_bias";
 const EXPECTED_INPUT_COLS: usize = 4096;
 const EXPECTED_QKV_ROWS: usize = 8192;
+const EXPECTED_QKV_Q_ROWS: usize = 2048;
+const EXPECTED_QKV_K_ROWS: usize = 2048;
+const EXPECTED_QKV_V_ROWS: usize = 4096;
 const EXPECTED_Z_ROWS: usize = 4096;
 const EXPECTED_HEADS: usize = 32;
 const DEFAULT_CHUNK_BYTES: usize = 16 * 1024 * 1024;
@@ -100,6 +103,15 @@ struct GuardReport {
     fallback_allowed: bool,
     relevant_environment: std::collections::BTreeMap<String, Option<String>>,
     effective_rpb_raw: std::collections::BTreeMap<String, Option<String>>,
+    fused_rpb_raw: Option<String>,
+    fused_rpb_effective: Option<u32>,
+    fused_rpb_source: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VisibilityReport {
+    hip_visible_devices: Option<String>,
+    ullm_hip_visible_devices: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -177,7 +189,7 @@ struct InputSidecarIdentity {
     consumed_sha256: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct OutputCaseReport {
     case_id: String,
     step: usize,
@@ -203,6 +215,24 @@ struct OutputReport {
 }
 
 #[derive(Debug, Serialize)]
+struct QkvRowSegment {
+    name: String,
+    start_row: usize,
+    end_row_exclusive: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OutputLayoutReport {
+    format: String,
+    dtype: String,
+    row_order: String,
+    qkv_shape: Vec<usize>,
+    z_shape: Vec<usize>,
+    gate_shape: Vec<usize>,
+    beta_shape: Vec<usize>,
+}
+
+#[derive(Debug, Serialize)]
 struct QkvReferenceReport {
     operation: String,
     bit_exact: bool,
@@ -223,10 +253,13 @@ struct ProbeReport {
     operation: String,
     fused: bool,
     device: DeviceReport,
+    visibility: VisibilityReport,
     guard: GuardReport,
     package: PackageReport,
     input: InputReport,
     outputs: std::collections::BTreeMap<String, OutputReport>,
+    qkv_row_segments: Vec<QkvRowSegment>,
+    output_layout: OutputLayoutReport,
     qkv_component_reference: QkvReferenceReport,
 }
 
@@ -260,6 +293,41 @@ struct AtomicFile {
     temp: PathBuf,
     final_path: PathBuf,
     file: File,
+}
+
+struct RollbackGuard {
+    paths: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl RollbackGuard {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RollbackGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for path in &self.paths {
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 impl AtomicFile {
@@ -397,21 +465,23 @@ impl OutputSink {
         Ok(())
     }
 
-    fn publish(self) -> ProbeResult<OutputReport> {
-        let digest = hex_digest(self.digest.finalize());
-        let path = self.path.clone();
-        let report = OutputReport {
-            path: path.display().to_string(),
+    fn report(&self) -> OutputReport {
+        let digest = hex_digest(self.digest.clone().finalize());
+        OutputReport {
+            path: self.path.display().to_string(),
             format: "concatenated_little_endian_f32_rows".to_string(),
             dtype: "f32".to_string(),
             row_shape: vec![self.shape],
             row_order: "input_jsonl_order".to_string(),
             bytes: self.bytes,
             sha256: digest,
-            cases: self.cases,
-        };
+            cases: self.cases.clone(),
+        }
+    }
+
+    fn publish(self) -> ProbeResult<()> {
         self.file.publish()?;
-        Ok(report)
+        Ok(())
     }
 }
 
@@ -501,6 +571,9 @@ fn run() -> ProbeResult<()> {
                 .to_string(),
         );
     }
+    if args.device_index == 1 {
+        validate_hip_environment()?;
+    }
     let package = load_package_identity(&args.package)?;
     let mut input = InputReader::open(&args.input, QKV_TENSOR)?;
 
@@ -514,19 +587,35 @@ fn run() -> ProbeResult<()> {
     let device_info = context
         .device_info()
         .map_err(|err| format!("failed to query runtime context device: {err}"))?;
-    if args.device_index != 0 || !device_info.backend.eq_ignore_ascii_case("cpu") {
+    let is_cpu = args.device_index == 0;
+    let is_hip = args.device_index == 1;
+    if is_cpu && !device_info.backend.eq_ignore_ascii_case("cpu") {
         return Err(format!(
-            "fused diagnostic is fixed to CPU device 0; got index {} backend {}",
+            "fused diagnostic CPU device 0 requires CPU backend; got {}",
+            device_info.backend
+        ));
+    }
+    if is_hip
+        && (!device_info.backend.eq_ignore_ascii_case("hip")
+            || !device_info.gcn_arch_name.eq_ignore_ascii_case("gfx1201"))
+    {
+        return Err(format!(
+            "fused diagnostic HIP device 1 requires HIP gfx1201; got backend {} arch {}",
+            device_info.backend, device_info.gcn_arch_name
+        ));
+    }
+    if !is_cpu && !is_hip {
+        return Err(format!(
+            "fused diagnostic supports only device 0 CPU or device 1 HIP; got index {} backend {}",
             args.device_index, device_info.backend
         ));
     }
-    let hip_guard_required = !device_info.backend.eq_ignore_ascii_case("cpu");
-    if hip_guard_required && !env_flag_enabled("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL") {
-        return Err(
-            "non-CPU probe requires ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1 to fail closed"
-                .to_string(),
-        );
-    }
+    let hip_guard_required = is_hip;
+    let (fused_rpb_raw, fused_rpb_effective, fused_rpb_source) = if is_hip {
+        resolve_fused_rpb_environment()?
+    } else {
+        (None, None, "not_applicable_cpu".to_string())
+    };
     let device = DeviceReport {
         device_index: args.device_index,
         device_id: device_info.device_id,
@@ -544,6 +633,13 @@ fn run() -> ProbeResult<()> {
         fallback_allowed: false,
         relevant_environment: relevant_environment(),
         effective_rpb_raw: effective_rpb_raw_environment(),
+        fused_rpb_raw,
+        fused_rpb_effective,
+        fused_rpb_source,
+    };
+    let visibility = VisibilityReport {
+        hip_visible_devices: env::var("HIP_VISIBLE_DEVICES").ok(),
+        ullm_hip_visible_devices: env::var("ULLM_HIP_VISIBLE_DEVICES").ok(),
     };
 
     let mut stream = context
@@ -638,23 +734,7 @@ fn run() -> ProbeResult<()> {
         .copy_from_host(0, &encode_f32_to_bytes(&dt_bias.values), Some(&mut stream))
         .map_err(|err| format!("failed to upload dt_bias: {err}"))?;
 
-    fs::create_dir_all(&args.output_dir).map_err(|err| {
-        format!(
-            "failed to create output directory {}: {err}",
-            args.output_dir.display()
-        )
-    })?;
-    let output_dir = fs::canonicalize(&args.output_dir)
-        .map_err(|err| format!("failed to canonicalize output directory: {err}"))?;
-    if !fs::symlink_metadata(&output_dir)
-        .map_err(|err| format!("failed to inspect output directory: {err}"))?
-        .is_dir()
-    {
-        return Err(format!(
-            "output directory is not a directory: {}",
-            output_dir.display()
-        ));
-    }
+    let output_dir = prepare_output_directory(&args.output_dir)?;
     let report_path = output_dir.join("report.json");
     if fs::symlink_metadata(&report_path).is_ok()
         || ["qkv", "z", "gate", "beta"]
@@ -664,6 +744,13 @@ fn run() -> ProbeResult<()> {
         return Err("refusing to overwrite an existing output sidecar".to_string());
     }
     let report_file = AtomicFile::create(report_path)?;
+    let mut rollback = RollbackGuard::new(vec![
+        output_dir.join("qkv.f32le"),
+        output_dir.join("z.f32le"),
+        output_dir.join("gate.f32le"),
+        output_dir.join("beta.f32le"),
+        output_dir.join("report.json"),
+    ]);
     let mut qkv_sink = OutputSink::create(&output_dir, "qkv", EXPECTED_QKV_ROWS)?;
     let mut z_sink = OutputSink::create(&output_dir, "z", EXPECTED_Z_ROWS)?;
     let mut gate_sink = OutputSink::create(&output_dir, "gate", EXPECTED_HEADS)?;
@@ -789,10 +876,10 @@ fn run() -> ProbeResult<()> {
         return Err("fused QKV component differs from standalone CPU output".to_string());
     }
     let mut outputs = std::collections::BTreeMap::new();
-    outputs.insert("qkv".to_string(), qkv_sink.publish()?);
-    outputs.insert("z".to_string(), z_sink.publish()?);
-    outputs.insert("gate".to_string(), gate_sink.publish()?);
-    outputs.insert("beta".to_string(), beta_sink.publish()?);
+    outputs.insert("qkv".to_string(), qkv_sink.report());
+    outputs.insert("z".to_string(), z_sink.report());
+    outputs.insert("gate".to_string(), gate_sink.report());
+    outputs.insert("beta".to_string(), beta_sink.report());
     let report = ProbeReport {
         schema_version: SCHEMA.to_string(),
         status: "valid".to_string(),
@@ -801,6 +888,7 @@ fn run() -> ProbeResult<()> {
         operation: "aq4_matvec_qkv_z_gate_beta_f32".to_string(),
         fused: true,
         device,
+        visibility,
         guard,
         package: package_report,
         input: InputReport {
@@ -813,6 +901,32 @@ fn run() -> ProbeResult<()> {
             identity: input_sidecar_identity,
         },
         outputs,
+        qkv_row_segments: vec![
+            QkvRowSegment {
+                name: "Q".to_string(),
+                start_row: 0,
+                end_row_exclusive: EXPECTED_QKV_Q_ROWS,
+            },
+            QkvRowSegment {
+                name: "K".to_string(),
+                start_row: EXPECTED_QKV_Q_ROWS,
+                end_row_exclusive: EXPECTED_QKV_Q_ROWS + EXPECTED_QKV_K_ROWS,
+            },
+            QkvRowSegment {
+                name: "V".to_string(),
+                start_row: EXPECTED_QKV_Q_ROWS + EXPECTED_QKV_K_ROWS,
+                end_row_exclusive: EXPECTED_QKV_Q_ROWS + EXPECTED_QKV_K_ROWS + EXPECTED_QKV_V_ROWS,
+            },
+        ],
+        output_layout: OutputLayoutReport {
+            format: "concatenated_little_endian_f32_rows".to_string(),
+            dtype: "f32".to_string(),
+            row_order: "input_jsonl_order".to_string(),
+            qkv_shape: vec![EXPECTED_QKV_ROWS],
+            z_shape: vec![EXPECTED_Z_ROWS],
+            gate_shape: vec![EXPECTED_HEADS],
+            beta_shape: vec![EXPECTED_HEADS],
+        },
         qkv_component_reference,
     };
     let report_json = serde_json::to_vec_pretty(&report)
@@ -822,10 +936,14 @@ fn run() -> ProbeResult<()> {
         .file
         .write_all(&report_json)
         .map_err(|err| format!("failed to write report: {err}"))?;
-    // Publish the report and f32 sidecar independently; each target is a
-    // complete, no-overwrite hard-link publication.  A consumer accepts the
-    // pair only when both files are present and the report hash matches.
+    // Sidecars publish before the report commit marker. RollbackGuard removes
+    // every already-published sidecar if any later publication fails.
+    qkv_sink.publish()?;
+    z_sink.publish()?;
+    gate_sink.publish()?;
+    beta_sink.publish()?;
     report_file.publish()?;
+    rollback.commit();
     Ok(())
 }
 
@@ -973,13 +1091,126 @@ where
 }
 
 fn validate_args(args: &Args) -> ProbeResult<()> {
-    if args.device_index != 0 {
-        return Err("--device-index is fixed to CPU device 0".to_string());
+    if args.device_index > 1 {
+        return Err("--device-index must be 0 (CPU) or 1 (HIP gfx1201)".to_string());
     }
     if args.chunk_bytes < 4096 || args.chunk_bytes > 256 * 1024 * 1024 {
         return Err("--chunk-bytes must be between 4096 and 268435456".to_string());
     }
     Ok(())
+}
+
+fn prepare_output_directory(path: &Path) -> ProbeResult<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "output directory must not be a symlink: {}",
+                    path.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(format!(
+                    "output directory is not a directory: {}",
+                    path.display()
+                ));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|create_err| {
+                format!(
+                    "failed to create output directory {}: {create_err}",
+                    path.display()
+                )
+            })?;
+        }
+        Err(err) => {
+            return Err(format!(
+                "failed to inspect output directory {}: {err}",
+                path.display()
+            ));
+        }
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize output directory: {err}"))?;
+    let metadata = fs::symlink_metadata(&canonical)
+        .map_err(|err| format!("failed to inspect output directory: {err}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "output directory is not a non-symlink directory: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn validate_hip_environment_values(
+    hip_visible_devices: Option<&str>,
+    ullm_hip_visible_devices: Option<&str>,
+    single_guard: Option<&str>,
+    fused_guard: Option<&str>,
+    fused_rpb: Option<&str>,
+    generic_fused_rpb: Option<&str>,
+) -> ProbeResult<()> {
+    if hip_visible_devices != Some("1") {
+        return Err("HIP_VISIBLE_DEVICES must be exactly 1 for HIP device 1".to_string());
+    }
+    if ullm_hip_visible_devices != Some("1") {
+        return Err("ULLM_HIP_VISIBLE_DEVICES must be exactly 1 for HIP device 1".to_string());
+    }
+    if single_guard != Some("1") {
+        return Err("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL must be exactly 1 for HIP".to_string());
+    }
+    if fused_guard != Some("1") {
+        return Err(
+            "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL must be exactly 1 for HIP"
+                .to_string(),
+        );
+    }
+    if fused_rpb != Some("4") && generic_fused_rpb != Some("4") {
+        return Err(
+            "fused RPB must be exactly 4 in ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB or ULLM_AQ4_FUSED_RPB"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_hip_environment() -> ProbeResult<()> {
+    validate_hip_environment_values(
+        env::var("HIP_VISIBLE_DEVICES").ok().as_deref(),
+        env::var("ULLM_HIP_VISIBLE_DEVICES").ok().as_deref(),
+        env::var("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL")
+            .ok()
+            .as_deref(),
+        env::var("ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL")
+            .ok()
+            .as_deref(),
+        env::var("ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB")
+            .ok()
+            .as_deref(),
+        env::var("ULLM_AQ4_FUSED_RPB").ok().as_deref(),
+    )
+}
+
+fn resolve_fused_rpb_environment() -> ProbeResult<(Option<String>, Option<u32>, String)> {
+    let dedicated = env::var("ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB").ok();
+    let generic = env::var("ULLM_AQ4_FUSED_RPB").ok();
+    if dedicated.as_deref() == Some("4") {
+        return Ok((
+            dedicated,
+            Some(4),
+            "environment:ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB".to_string(),
+        ));
+    }
+    if generic.as_deref() == Some("4") {
+        return Ok((
+            generic,
+            Some(4),
+            "environment:ULLM_AQ4_FUSED_RPB".to_string(),
+        ));
+    }
+    Err("fused RPB must resolve to exactly 4 for HIP".to_string())
 }
 
 fn load_package_identity(package_path: &Path) -> ProbeResult<PackageIdentity> {
@@ -1005,6 +1236,7 @@ fn load_package_identity(package_path: &Path) -> ProbeResult<PackageIdentity> {
             "unsupported package manifest schema_version {manifest_schema_version}"
         ));
     }
+    validate_manifest_exact_name_counts(&manifest_value)?;
     let contracts = [
         (
             QKV_TENSOR,
@@ -1114,6 +1346,38 @@ fn load_package_identity(package_path: &Path) -> ProbeResult<PackageIdentity> {
         tensors,
         passthrough_inputs,
     })
+}
+
+fn validate_manifest_exact_name_counts(manifest: &serde_json::Value) -> ProbeResult<()> {
+    let names = [
+        QKV_TENSOR,
+        Z_TENSOR,
+        A_TENSOR,
+        B_TENSOR,
+        A_LOG_TENSOR,
+        DT_BIAS_TENSOR,
+    ];
+    let quantized = manifest
+        .get("tensors")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "package manifest tensors array is missing".to_string())?;
+    let passthrough = manifest
+        .get("passthrough_tensors")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "package manifest passthrough_tensors array is missing".to_string())?;
+    for name in names {
+        let count = quantized
+            .iter()
+            .chain(passthrough)
+            .filter(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+            .count();
+        if count != 1 {
+            return Err(format!(
+                "package manifest exact tensor name {name} must occur once, got {count}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn assert_package_unchanged(package_path: &Path, expected: &PackageIdentity) -> ProbeResult<()> {
@@ -1522,6 +1786,10 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn temp_path(label: &str) -> PathBuf {
+        env::temp_dir().join(format!("aq4-fused-{label}-{}", std::process::id()))
+    }
+
     #[test]
     fn f32_hash_is_little_endian_and_stable() {
         assert_eq!(
@@ -1583,5 +1851,127 @@ mod tests {
             .expect_err("replacement must be rejected")
             .contains("changed during probe"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn device_index_contract_accepts_cpu_and_hip_only() {
+        let base = vec![
+            "--package".to_string(),
+            "package".to_string(),
+            "--input".to_string(),
+            "input".to_string(),
+            "--output-dir".to_string(),
+            "output".to_string(),
+        ];
+        for index in ["0", "1"] {
+            let mut args = base.clone();
+            args.extend(["--device-index".to_string(), index.to_string()]);
+            assert!(validate_args(&parse_args(args.into_iter()).unwrap()).is_ok());
+        }
+        let mut args = base;
+        args.extend(["--device-index".to_string(), "2".to_string()]);
+        assert!(validate_args(&parse_args(args.into_iter()).unwrap()).is_err());
+    }
+
+    #[test]
+    fn hip_environment_contract_requires_exact_values() {
+        assert!(validate_hip_environment_values(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("4"),
+            None,
+        )
+        .is_ok());
+        assert!(validate_hip_environment_values(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            None,
+            Some("4"),
+        )
+        .is_ok());
+        assert!(validate_hip_environment_values(
+            Some("0"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("4"),
+            None,
+        )
+        .is_err());
+        assert!(validate_hip_environment_values(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("32"),
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn manifest_exact_name_count_rejects_duplicates() {
+        let mut tensors = vec![QKV_TENSOR, Z_TENSOR, A_TENSOR, B_TENSOR]
+            .into_iter()
+            .map(|name| serde_json::json!({"name": name}))
+            .collect::<Vec<_>>();
+        let passthrough = vec![A_LOG_TENSOR, DT_BIAS_TENSOR]
+            .into_iter()
+            .map(|name| serde_json::json!({"name": name}))
+            .collect::<Vec<_>>();
+        let manifest = serde_json::json!({
+            "tensors": tensors,
+            "passthrough_tensors": passthrough,
+        });
+        assert!(validate_manifest_exact_name_counts(&manifest).is_ok());
+        tensors.push(serde_json::json!({"name": QKV_TENSOR}));
+        let duplicate = serde_json::json!({
+            "tensors": tensors,
+            "passthrough_tensors": [
+                {"name": A_LOG_TENSOR},
+                {"name": DT_BIAS_TENSOR}
+            ],
+        });
+        assert!(validate_manifest_exact_name_counts(&duplicate).is_err());
+    }
+
+    #[test]
+    fn rollback_guard_removes_published_files_on_error() {
+        let root = temp_path("rollback");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let qkv = root.join("qkv.f32le");
+        let report = root.join("report.json");
+        fs::write(&qkv, b"qkv").unwrap();
+        fs::write(&report, b"report").unwrap();
+        {
+            let _guard = RollbackGuard::new(vec![qkv.clone(), report.clone()]);
+        }
+        assert!(!qkv.exists());
+        assert!(!report.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn output_directory_symlink_is_rejected() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let root = temp_path("output-symlink");
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            let target = root.join("target");
+            let link = root.join("link");
+            fs::create_dir_all(&target).unwrap();
+            symlink(&target, &link).unwrap();
+            assert!(prepare_output_directory(&link)
+                .expect_err("output symlink must be rejected")
+                .contains("symlink"));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }
