@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
@@ -139,10 +139,45 @@ pub struct ProductContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationAuditIdentity {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationLineageIdentity {
+    pub input_path: PathBuf,
+    pub runtime_path: PathBuf,
+    pub sha256: String,
+    pub entries_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessIdentity {
+    pub container_name: String,
+    pub container_id: String,
+    pub image_id: String,
+    pub config_image: String,
+    pub network_name: String,
+    pub network_id: String,
+    pub network_driver: String,
+    pub bridge_interface: String,
+    pub url: String,
+    pub path: String,
+    pub expected_status: usize,
+    pub expected_body: String,
+    pub expected_body_sha256: String,
+    pub timeout_seconds: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotionContract {
     pub source_commit: String,
     pub receipt: PathBuf,
     pub receipt_sha256: String,
+    pub authorization_audit: Option<AuthorizationAuditIdentity>,
+    pub authorization_lineage: Option<AuthorizationLineageIdentity>,
+    pub readiness: Option<ReadinessIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,6 +558,198 @@ struct RawPromotion {
     source_commit: String,
     receipt: String,
     receipt_sha256: String,
+    authorization_audit: Option<RawAuthorizationAuditIdentity>,
+    authorization_lineage: Option<RawAuthorizationLineageIdentity>,
+    readiness: Option<RawReadinessIdentity>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationAuditIdentity {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineageIdentity {
+    schema_version: String,
+    input_path: String,
+    runtime_path: String,
+    sha256: String,
+    entries_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadinessIdentity {
+    schema: String,
+    container: RawReadinessContainer,
+    network: RawReadinessNetwork,
+    endpoint: RawReadinessEndpoint,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadinessContainer {
+    name: String,
+    id: String,
+    image_id: String,
+    config_image: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadinessNetwork {
+    name: String,
+    id: String,
+    driver: String,
+    bridge_interface: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadinessEndpoint {
+    url: String,
+    path: String,
+    expected_status: usize,
+    expected_body: String,
+    expected_body_sha256: String,
+    timeout_seconds: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIndependentAuditReceipt {
+    schema_version: String,
+    auditor_task_id: String,
+    audited_at_utc: String,
+    audited_source: RawAuditSource,
+    runtime: RawAuditRuntime,
+    fixed_request_id: String,
+    gate_state: RawAuditGateState,
+    topology: RawAuditTopology,
+    verdict: String,
+    actual: String,
+    tests: RawAuditTests,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditSource {
+    commit: String,
+    tree_sha256: String,
+    archive_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditRuntime {
+    path: String,
+    gate: RawAuditReference,
+    worker: RawAuditReference,
+    profile: RawAuditReference,
+    served_model: RawAuditReference,
+    prepared_receipt: RawAuditReference,
+    binding: RawAuditBindingReference,
+    package: RawAuditReference,
+    authorization_lineage_manifest: RawAuditReference,
+    sha256sums: RawAuditReference,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditReference {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditBindingReference {
+    path: String,
+    sha256: String,
+    content_sha256: String,
+    tensor_set_sha256: String,
+    tensor_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditGateState {
+    status: String,
+    actual_run_allowed: bool,
+    prepared_receipt_status: String,
+    prepared_receipt_actual: RawPreparedReceiptActual,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPreparedReceiptActual {
+    status: String,
+    required: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditTopology {
+    artifact_directory_count: usize,
+    artifact_payload_and_scale_files_hashed: usize,
+    artifact_regular_file_bytes: u64,
+    artifact_regular_file_count: usize,
+    current_runtime_reference_count: usize,
+    executable_file_mode: String,
+    historical_runtime_reference_count: usize,
+    package_directory_count: usize,
+    package_regular_file_count: usize,
+    regular_file_mode: String,
+    regular_file_nlink: u64,
+    runtime_directory_mode: String,
+    runtime_directory_nlink: u64,
+    runtime_member_count: usize,
+    special_file_count: usize,
+    symlink_count: usize,
+    worker_source_and_immutable_are_runtime_self: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuditTests {
+    actual_output: String,
+    artifact_live_content: String,
+    authorization_boundary: String,
+    bridge_readiness_binding: String,
+    candidate_wrapper_dry_run: String,
+    fixed_request_id_recomputation: String,
+    formal_lineage_manifest: String,
+    gpu_or_service_execution: bool,
+    historical_runtime_references: String,
+    lineage_external_runtime_copy: String,
+    package_live_identity: String,
+    runtime_modes_links_and_symlinks: String,
+    runtime_sha256sums: String,
+    source_commit_tree_archive: String,
+    source_worktree: String,
+    sudo_execution: bool,
+    worker_live_identity: String,
+    worker_runtime_self_identity: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineageManifest {
+    schema_version: String,
+    disposition: String,
+    source: RawAuthorizationLineageSource,
+    entries: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationLineageSource {
+    archive_sha256: String,
+    commit: String,
+    tree_oid: String,
 }
 
 fn parse_public(raw: RawPublic) -> Result<PublicModel> {
@@ -761,17 +988,464 @@ fn parse_product(raw: RawProduct, base: &Path) -> Result<ProductContract> {
     })
 }
 
+fn canonical_absolute_regular_file(raw: String, label: &str, immutable: bool) -> Result<PathBuf> {
+    let raw = bounded_text(raw, label, 4096)?;
+    let path = PathBuf::from(&raw);
+    if !path.is_absolute() {
+        return Err(ServedModelError(format!(
+            "{label} must be a canonical absolute path"
+        )));
+    }
+    let resolved = safe_regular_file(&path, label)?;
+    if resolved != path {
+        return Err(ServedModelError(format!(
+            "{label} must be a canonical absolute path"
+        )));
+    }
+    if immutable {
+        let metadata = fs::symlink_metadata(&resolved).map_err(io_error)?;
+        if metadata.permissions().mode() & 0o777 != 0o444 || metadata.nlink() != 1 {
+            return Err(ServedModelError(format!(
+                "{label} must be immutable single-link"
+            )));
+        }
+    }
+    Ok(resolved)
+}
+
+fn validate_canonical_absolute_text(raw: String, label: &str) -> Result<String> {
+    let raw = bounded_text(raw, label, 4096)?;
+    let path = Path::new(&raw);
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir | Component::ParentDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ServedModelError(format!(
+            "{label} must be a canonical absolute path"
+        )));
+    }
+    Ok(raw)
+}
+
+fn validate_hex40(value: String, label: &str) -> Result<String> {
+    if value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value)
+    } else {
+        Err(ServedModelError(format!(
+            "{label} must be lowercase hexadecimal"
+        )))
+    }
+}
+
+fn validate_request_id(value: String, label: &str) -> Result<String> {
+    let Some(digest) = value.strip_prefix("sq8-promotion-") else {
+        return Err(ServedModelError(format!("{label} is invalid")));
+    };
+    validate_sha256(digest.to_string(), label)?;
+    Ok(value)
+}
+
+fn validate_audit_reference(raw: RawAuditReference, label: &str) -> Result<()> {
+    validate_canonical_absolute_text(raw.path, &format!("{label}.path"))?;
+    validate_sha256(raw.sha256, &format!("{label}.sha256"))?;
+    Ok(())
+}
+
+fn parse_authorization_audit(
+    raw: RawAuthorizationAuditIdentity,
+    source_commit: &str,
+) -> Result<AuthorizationAuditIdentity> {
+    let path =
+        canonical_absolute_regular_file(raw.path, "promotion.authorization_audit.path", true)?;
+    let sha256 = validate_sha256(raw.sha256, "promotion.authorization_audit.sha256")?;
+    verify_file_sha256(&path, &sha256, "promotion.authorization_audit")?;
+    let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, "promotion.authorization_audit")?;
+    let value = decode_strict_json(&bytes)?;
+    exact_keys(
+        &value,
+        &[
+            "schema_version",
+            "auditor_task_id",
+            "audited_at_utc",
+            "audited_source",
+            "runtime",
+            "fixed_request_id",
+            "gate_state",
+            "topology",
+            "verdict",
+            "actual",
+            "tests",
+        ],
+        "promotion.authorization_audit receipt",
+    )?;
+    let audit: RawIndependentAuditReceipt = serde_json::from_value(value).map_err(|_| {
+        ServedModelError("promotion.authorization_audit typed schema is invalid".into())
+    })?;
+    if audit.schema_version != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+        || audit.verdict != "implementation_ready"
+        || audit.actual != "not_executed"
+        || audit.audited_source.commit != source_commit
+        || audit.gate_state.status != "ready_for_independent_audit"
+        || audit.gate_state.actual_run_allowed
+        || audit.gate_state.prepared_receipt_status != "prepared_not_executed"
+        || audit.gate_state.prepared_receipt_actual.status != "pending"
+        || !audit.gate_state.prepared_receipt_actual.required
+        || audit.tests.gpu_or_service_execution
+        || audit.tests.sudo_execution
+    {
+        return Err(ServedModelError(
+            "promotion.authorization_audit verdict differs".into(),
+        ));
+    }
+    bounded_text(
+        audit.auditor_task_id,
+        "promotion.authorization_audit.auditor_task_id",
+        256,
+    )?;
+    bounded_text(
+        audit.audited_at_utc,
+        "promotion.authorization_audit.audited_at_utc",
+        64,
+    )?;
+    validate_hex40(
+        audit.audited_source.commit,
+        "promotion.authorization_audit.audited_source.commit",
+    )?;
+    validate_hex40(
+        audit.audited_source.tree_sha256,
+        "promotion.authorization_audit.audited_source.tree_sha256",
+    )?;
+    validate_sha256(
+        audit.audited_source.archive_sha256,
+        "promotion.authorization_audit.audited_source.archive_sha256",
+    )?;
+    validate_request_id(
+        audit.fixed_request_id,
+        "promotion.authorization_audit.fixed_request_id",
+    )?;
+    validate_canonical_absolute_text(
+        audit.runtime.path,
+        "promotion.authorization_audit.runtime.path",
+    )?;
+    for (reference, label) in [
+        (audit.runtime.gate, "runtime.gate"),
+        (audit.runtime.worker, "runtime.worker"),
+        (audit.runtime.profile, "runtime.profile"),
+        (audit.runtime.served_model, "runtime.served_model"),
+        (audit.runtime.prepared_receipt, "runtime.prepared_receipt"),
+        (audit.runtime.package, "runtime.package"),
+        (
+            audit.runtime.authorization_lineage_manifest,
+            "runtime.authorization_lineage_manifest",
+        ),
+        (audit.runtime.sha256sums, "runtime.sha256sums"),
+    ] {
+        validate_audit_reference(reference, &format!("promotion.authorization_audit.{label}"))?;
+    }
+    validate_canonical_absolute_text(
+        audit.runtime.binding.path,
+        "promotion.authorization_audit.runtime.binding.path",
+    )?;
+    validate_sha256(
+        audit.runtime.binding.sha256,
+        "promotion.authorization_audit.runtime.binding.sha256",
+    )?;
+    validate_sha256(
+        audit.runtime.binding.content_sha256,
+        "promotion.authorization_audit.runtime.binding.content_sha256",
+    )?;
+    validate_sha256(
+        audit.runtime.binding.tensor_set_sha256,
+        "promotion.authorization_audit.runtime.binding.tensor_set_sha256",
+    )?;
+    if audit.runtime.binding.tensor_count != 48 {
+        return Err(ServedModelError(
+            "promotion.authorization_audit runtime binding differs".into(),
+        ));
+    }
+    let topology = audit.topology;
+    if topology.artifact_directory_count != 3
+        || topology.artifact_payload_and_scale_files_hashed != 96
+        || topology.artifact_regular_file_bytes == 0
+        || topology.artifact_regular_file_count != 98
+        || topology.current_runtime_reference_count == 0
+        || topology.executable_file_mode != "0555"
+        || topology.historical_runtime_reference_count != 0
+        || topology.package_directory_count == 0
+        || topology.package_regular_file_count == 0
+        || topology.regular_file_mode != "0444"
+        || topology.regular_file_nlink != 1
+        || topology.runtime_directory_mode != "0555"
+        || topology.runtime_directory_nlink != 2
+        || topology.runtime_member_count != 8
+        || topology.special_file_count != 0
+        || topology.symlink_count != 0
+        || !topology.worker_source_and_immutable_are_runtime_self
+    {
+        return Err(ServedModelError(
+            "promotion.authorization_audit topology differs".into(),
+        ));
+    }
+    for (text, label) in [
+        (audit.tests.actual_output, "actual_output"),
+        (audit.tests.artifact_live_content, "artifact_live_content"),
+        (audit.tests.authorization_boundary, "authorization_boundary"),
+        (
+            audit.tests.bridge_readiness_binding,
+            "bridge_readiness_binding",
+        ),
+        (
+            audit.tests.candidate_wrapper_dry_run,
+            "candidate_wrapper_dry_run",
+        ),
+        (
+            audit.tests.fixed_request_id_recomputation,
+            "fixed_request_id_recomputation",
+        ),
+        (
+            audit.tests.formal_lineage_manifest,
+            "formal_lineage_manifest",
+        ),
+        (
+            audit.tests.historical_runtime_references,
+            "historical_runtime_references",
+        ),
+        (
+            audit.tests.lineage_external_runtime_copy,
+            "lineage_external_runtime_copy",
+        ),
+        (audit.tests.package_live_identity, "package_live_identity"),
+        (
+            audit.tests.runtime_modes_links_and_symlinks,
+            "runtime_modes_links_and_symlinks",
+        ),
+        (audit.tests.runtime_sha256sums, "runtime_sha256sums"),
+        (
+            audit.tests.source_commit_tree_archive,
+            "source_commit_tree_archive",
+        ),
+        (audit.tests.source_worktree, "source_worktree"),
+        (audit.tests.worker_live_identity, "worker_live_identity"),
+        (
+            audit.tests.worker_runtime_self_identity,
+            "worker_runtime_self_identity",
+        ),
+    ] {
+        bounded_text(
+            text,
+            &format!("promotion.authorization_audit.tests.{label}"),
+            4096,
+        )?;
+    }
+    Ok(AuthorizationAuditIdentity { path, sha256 })
+}
+
+fn validate_lineage_document(
+    bytes: &[u8],
+    source_commit: &str,
+    entries_sha256: &str,
+) -> Result<()> {
+    let value = decode_strict_json(bytes)?;
+    exact_keys(
+        &value,
+        &["schema_version", "disposition", "source", "entries"],
+        "promotion.authorization_lineage manifest",
+    )?;
+    let document: RawAuthorizationLineageManifest =
+        serde_json::from_value(value).map_err(|_| {
+            ServedModelError(
+                "promotion.authorization_lineage manifest typed schema is invalid".into(),
+            )
+        })?;
+    if document.schema_version != "ullm.sq8_authorization_lineage_input.v1"
+        || document.disposition != "authorization_input_not_yet_runtime_bound"
+        || document.source.commit != source_commit
+        || document.entries.len() != 6
+    {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage manifest differs".into(),
+        ));
+    }
+    validate_sha256(
+        document.source.archive_sha256,
+        "promotion.authorization_lineage.source.archive_sha256",
+    )?;
+    validate_hex40(
+        document.source.commit,
+        "promotion.authorization_lineage.source.commit",
+    )?;
+    validate_hex40(
+        document.source.tree_oid,
+        "promotion.authorization_lineage.source.tree_oid",
+    )?;
+    let encoded = serde_json::to_vec(&document.entries).map_err(|_| {
+        ServedModelError("promotion.authorization_lineage entries are not canonical JSON".into())
+    })?;
+    if sha256_bytes(&encoded) != entries_sha256 {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage entries SHA-256 differs".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_authorization_lineage(
+    raw: RawAuthorizationLineageIdentity,
+    source_commit: &str,
+) -> Result<AuthorizationLineageIdentity> {
+    if raw.schema_version != "ullm.sq8_authorization_lineage_ref.v1" {
+        return Err(ServedModelError(
+            "promotion.authorization_lineage schema differs".into(),
+        ));
+    }
+    let input_path = canonical_absolute_regular_file(
+        raw.input_path,
+        "promotion.authorization_lineage.input_path",
+        true,
+    )?;
+    let runtime_path = canonical_absolute_regular_file(
+        raw.runtime_path,
+        "promotion.authorization_lineage.runtime_path",
+        true,
+    )?;
+    let sha256 = validate_sha256(raw.sha256, "promotion.authorization_lineage.sha256")?;
+    let entries_sha256 = validate_sha256(
+        raw.entries_sha256,
+        "promotion.authorization_lineage.entries_sha256",
+    )?;
+    for path in [&input_path, &runtime_path] {
+        verify_file_sha256(path, &sha256, "promotion.authorization_lineage")?;
+        let bytes = bounded_read(path, MAX_MANIFEST_BYTES, "promotion.authorization_lineage")?;
+        validate_lineage_document(&bytes, source_commit, &entries_sha256)?;
+    }
+    Ok(AuthorizationLineageIdentity {
+        input_path,
+        runtime_path,
+        sha256,
+        entries_sha256,
+    })
+}
+
+fn parse_readiness(raw: RawReadinessIdentity) -> Result<ReadinessIdentity> {
+    if raw.schema != "ullm.bridge_container_readiness.v1" {
+        return Err(ServedModelError(
+            "promotion.readiness schema differs".into(),
+        ));
+    }
+    let container_name = bounded_text(
+        raw.container.name,
+        "promotion.readiness.container.name",
+        256,
+    )?;
+    let container_id = validate_sha256(raw.container.id, "promotion.readiness.container.id")?;
+    let image_id = bounded_text(
+        raw.container.image_id,
+        "promotion.readiness.container.image_id",
+        71,
+    )?;
+    let Some(image_digest) = image_id.strip_prefix("sha256:") else {
+        return Err(ServedModelError(
+            "promotion.readiness identity differs".into(),
+        ));
+    };
+    validate_sha256(
+        image_digest.to_string(),
+        "promotion.readiness.container.image_id",
+    )?;
+    let config_image = bounded_text(
+        raw.container.config_image,
+        "promotion.readiness.container.config_image",
+        512,
+    )?;
+    let network_name = bounded_text(raw.network.name, "promotion.readiness.network.name", 256)?;
+    let network_id = validate_sha256(raw.network.id, "promotion.readiness.network.id")?;
+    let network_driver =
+        bounded_text(raw.network.driver, "promotion.readiness.network.driver", 64)?;
+    let bridge_interface = bounded_text(
+        raw.network.bridge_interface,
+        "promotion.readiness.network.bridge_interface",
+        64,
+    )?;
+    let url = bounded_text(raw.endpoint.url, "promotion.readiness.endpoint.url", 512)?;
+    let path = bounded_text(raw.endpoint.path, "promotion.readiness.endpoint.path", 256)?;
+    let expected_body = bounded_text(
+        raw.endpoint.expected_body,
+        "promotion.readiness.endpoint.expected_body",
+        256,
+    )?;
+    let expected_body_sha256 = validate_sha256(
+        raw.endpoint.expected_body_sha256,
+        "promotion.readiness.endpoint.expected_body_sha256",
+    )?;
+    if container_name != "open-webui"
+        || network_driver != "bridge"
+        || bridge_interface != format!("br-{}", &network_id[..12])
+        || url != "http://172.20.0.1:8000/readyz"
+        || path != "/readyz"
+        || raw.endpoint.expected_status != 200
+        || expected_body != r#"{"status":"ready"}"#
+        || sha256_bytes(expected_body.as_bytes()) != expected_body_sha256
+        || raw.endpoint.timeout_seconds != 5
+    {
+        return Err(ServedModelError(
+            "promotion.readiness identity differs".into(),
+        ));
+    }
+    Ok(ReadinessIdentity {
+        container_name,
+        container_id,
+        image_id,
+        config_image,
+        network_name,
+        network_id,
+        network_driver,
+        bridge_interface,
+        url,
+        path,
+        expected_status: raw.endpoint.expected_status,
+        expected_body,
+        expected_body_sha256,
+        timeout_seconds: raw.endpoint.timeout_seconds,
+    })
+}
+
 fn parse_promotion(raw: RawPromotion, base: &Path) -> Result<PromotionContract> {
+    let source_commit = bounded_text(raw.source_commit, "promotion.source_commit", 256)?;
     let receipt = safe_regular_file(
         &resolve_root(base, &raw.receipt, "promotion.receipt")?,
         "promotion.receipt",
     )?;
     let digest = validate_sha256(raw.receipt_sha256, "promotion.receipt_sha256")?;
     verify_file_sha256(&receipt, &digest, "promotion.receipt")?;
+    let authorization_audit = raw
+        .authorization_audit
+        .map(|value| parse_authorization_audit(value, &source_commit))
+        .transpose()?;
+    let authorization_lineage = raw
+        .authorization_lineage
+        .map(|value| parse_authorization_lineage(value, &source_commit))
+        .transpose()?;
+    let readiness = raw.readiness.map(parse_readiness).transpose()?;
+    if authorization_audit.is_some() && (authorization_lineage.is_none() || readiness.is_none()) {
+        return Err(ServedModelError(
+            "authorized promotion requires audit, lineage, and readiness".into(),
+        ));
+    }
     Ok(PromotionContract {
-        source_commit: bounded_text(raw.source_commit, "promotion.source_commit", 256)?,
+        source_commit,
         receipt,
         receipt_sha256: digest,
+        authorization_audit,
+        authorization_lineage,
+        readiness,
     })
 }
 
@@ -882,9 +1556,10 @@ fn validate_exact_shape(value: &Value) -> Result<()> {
         &["manifest_path", "manifest_sha256"],
         "product.package",
     )?;
-    exact_keys(
+    required_optional_keys(
         &value["promotion"],
         &["source_commit", "receipt", "receipt_sha256"],
+        &["authorization_audit", "authorization_lineage", "readiness"],
         "promotion",
     )?;
     if schema == SERVED_MODEL_SCHEMA_VERSION_V2 {
@@ -919,6 +1594,25 @@ fn exact_keys(value: &Value, expected: &[&str], label: &str) -> Result<()> {
         .as_object()
         .ok_or_else(|| ServedModelError(format!("{label} must be an object")))?;
     if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err(ServedModelError(format!("{label} field set differs")));
+    }
+    Ok(())
+}
+
+fn required_optional_keys(
+    value: &Value,
+    required: &[&str],
+    optional: &[&str],
+    label: &str,
+) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| ServedModelError(format!("{label} must be an object")))?;
+    if required.iter().any(|key| !object.contains_key(*key))
+        || object
+            .keys()
+            .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+    {
         return Err(ServedModelError(format!("{label} field set differs")));
     }
     Ok(())
@@ -1180,12 +1874,205 @@ fn io_error(error: std::io::Error) -> ServedModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../services/openai-gateway/tests/fixtures/served-model")
             .join(name)
             .join("served-model.json")
+    }
+
+    struct AuthorizationFixture {
+        root: PathBuf,
+        manifest_path: PathBuf,
+        value: Value,
+    }
+
+    impl Drop for AuthorizationFixture {
+        fn drop(&mut self) {
+            for path in [
+                self.root.join("audit.json"),
+                self.root.join("lineage-input.json"),
+                self.root.join("lineage-runtime.json"),
+            ] {
+                if path.exists() {
+                    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+                }
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn write_immutable(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+
+    fn authorized_fixture(audit_schema: &str, audit_verdict: &str) -> AuthorizationFixture {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-served-model-authorization-{}-{}",
+            std::process::id(),
+            TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let source_commit = "a".repeat(40);
+        let sha_b = "b".repeat(64);
+        let sha_c = "c".repeat(40);
+        let sha_d = "d".repeat(64);
+        let entries = json!([{}, {}, {}, {}, {}, {}]);
+        let entries_sha256 = sha256_bytes(&serde_json::to_vec(&entries).unwrap());
+        let lineage = json!({
+            "schema_version": "ullm.sq8_authorization_lineage_input.v1",
+            "disposition": "authorization_input_not_yet_runtime_bound",
+            "source": {
+                "archive_sha256": sha_b,
+                "commit": source_commit,
+                "tree_oid": sha_c,
+            },
+            "entries": entries,
+        });
+        let lineage_bytes = serde_json::to_vec(&lineage).unwrap();
+        let lineage_sha256 = sha256_bytes(&lineage_bytes);
+        let lineage_input = root.join("lineage-input.json");
+        let lineage_runtime = root.join("lineage-runtime.json");
+        write_immutable(&lineage_input, &lineage_bytes);
+        write_immutable(&lineage_runtime, &lineage_bytes);
+        let reference = |name: &str| json!({"path": format!("/tmp/{name}"), "sha256": sha_d});
+        let audit = json!({
+            "schema_version": audit_schema,
+            "auditor_task_id": "fixture-auditor",
+            "audited_at_utc": "2026-07-16T00:00:00Z",
+            "audited_source": {
+                "commit": source_commit,
+                "tree_sha256": sha_c,
+                "archive_sha256": sha_b,
+            },
+            "runtime": {
+                "path": "/tmp/unauthorized-runtime",
+                "gate": reference("gate.json"),
+                "worker": reference("worker"),
+                "profile": reference("profile.json"),
+                "served_model": reference("served-model.json"),
+                "prepared_receipt": reference("promotion-receipt.json"),
+                "binding": {
+                    "path": "/tmp/binding.json",
+                    "sha256": sha_d,
+                    "content_sha256": sha_d,
+                    "tensor_set_sha256": sha_d,
+                    "tensor_count": 48,
+                },
+                "package": reference("package.json"),
+                "authorization_lineage_manifest": reference("lineage.json"),
+                "sha256sums": reference("SHA256SUMS"),
+            },
+            "fixed_request_id": format!("sq8-promotion-{}", sha_d),
+            "gate_state": {
+                "status": "ready_for_independent_audit",
+                "actual_run_allowed": false,
+                "prepared_receipt_status": "prepared_not_executed",
+                "prepared_receipt_actual": {"status": "pending", "required": true},
+            },
+            "topology": {
+                "artifact_directory_count": 3,
+                "artifact_payload_and_scale_files_hashed": 96,
+                "artifact_regular_file_bytes": 1,
+                "artifact_regular_file_count": 98,
+                "current_runtime_reference_count": 1,
+                "executable_file_mode": "0555",
+                "historical_runtime_reference_count": 0,
+                "package_directory_count": 1,
+                "package_regular_file_count": 1,
+                "regular_file_mode": "0444",
+                "regular_file_nlink": 1,
+                "runtime_directory_mode": "0555",
+                "runtime_directory_nlink": 2,
+                "runtime_member_count": 8,
+                "special_file_count": 0,
+                "symlink_count": 0,
+                "worker_source_and_immutable_are_runtime_self": true,
+            },
+            "verdict": audit_verdict,
+            "actual": "not_executed",
+            "tests": {
+                "actual_output": "absent",
+                "artifact_live_content": "passed",
+                "authorization_boundary": "passed",
+                "bridge_readiness_binding": "passed",
+                "candidate_wrapper_dry_run": "passed",
+                "fixed_request_id_recomputation": "passed",
+                "formal_lineage_manifest": "passed",
+                "gpu_or_service_execution": false,
+                "historical_runtime_references": "zero",
+                "lineage_external_runtime_copy": "passed",
+                "package_live_identity": "passed",
+                "runtime_modes_links_and_symlinks": "passed",
+                "runtime_sha256sums": "passed",
+                "source_commit_tree_archive": "passed",
+                "source_worktree": "clean",
+                "sudo_execution": false,
+                "worker_live_identity": "passed",
+                "worker_runtime_self_identity": "passed",
+            },
+        });
+        let audit_path = root.join("audit.json");
+        let audit_bytes = serde_json::to_vec(&audit).unwrap();
+        write_immutable(&audit_path, &audit_bytes);
+        let mut value = serde_json::from_slice::<Value>(
+            &bounded_read(&fixture("aq4"), MAX_MANIFEST_BYTES, "fixture").unwrap(),
+        )
+        .unwrap();
+        let promotion = value["promotion"].as_object_mut().unwrap();
+        promotion.insert("source_commit".into(), Value::String(source_commit));
+        promotion.insert(
+            "authorization_audit".into(),
+            json!({"path": audit_path, "sha256": sha256_bytes(&audit_bytes)}),
+        );
+        promotion.insert(
+            "authorization_lineage".into(),
+            json!({
+                "schema_version": "ullm.sq8_authorization_lineage_ref.v1",
+                "input_path": lineage_input,
+                "runtime_path": lineage_runtime,
+                "sha256": lineage_sha256,
+                "entries_sha256": entries_sha256,
+            }),
+        );
+        let body = r#"{"status":"ready"}"#;
+        promotion.insert(
+            "readiness".into(),
+            json!({
+                "schema": "ullm.bridge_container_readiness.v1",
+                "container": {
+                    "name": "open-webui",
+                    "id": "1".repeat(64),
+                    "image_id": format!("sha256:{}", "2".repeat(64)),
+                    "config_image": "ullm/open-webui:test",
+                },
+                "network": {
+                    "name": "open-webui-network",
+                    "id": "3".repeat(64),
+                    "driver": "bridge",
+                    "bridge_interface": format!("br-{}", "3".repeat(12)),
+                },
+                "endpoint": {
+                    "url": "http://172.20.0.1:8000/readyz",
+                    "path": "/readyz",
+                    "expected_status": 200,
+                    "expected_body": body,
+                    "expected_body_sha256": sha256_bytes(body.as_bytes()),
+                    "timeout_seconds": 5,
+                },
+            }),
+        );
+        AuthorizationFixture {
+            root,
+            manifest_path: fixture("aq4"),
+            value,
+        }
     }
 
     #[test]
@@ -1202,6 +2089,126 @@ mod tests {
             aq4.profile_snapshot().artifact_content_sha256,
             aq4.product.package.manifest_sha256
         );
+    }
+
+    #[test]
+    fn authorized_promotion_contract_is_typed_and_fail_closed() {
+        let authorized = authorized_fixture(
+            "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+            "implementation_ready",
+        );
+        let raw = serde_json::to_vec(&authorized.value).unwrap();
+        let model = load_served_model_bytes(&authorized.manifest_path, &raw).unwrap();
+        assert!(model.promotion.authorization_audit.is_some());
+        assert!(model.promotion.authorization_lineage.is_some());
+        assert!(model.promotion.readiness.is_some());
+
+        let mut cases = Vec::new();
+        let mut value = authorized.value.clone();
+        value["promotion"]["authorization_audit"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), Value::Bool(true));
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]
+            .as_object_mut()
+            .unwrap()
+            .remove("readiness");
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]["readiness"]["endpoint"]["expected_status"] =
+            Value::String("200".into());
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        let audit_path = value["promotion"]["authorization_audit"]["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let directory = authorized.root.file_name().unwrap().to_string_lossy();
+        value["promotion"]["authorization_audit"]["path"] = Value::String(format!(
+            "{}/../{directory}/audit.json",
+            authorized.root.display()
+        ));
+        assert_ne!(
+            value["promotion"]["authorization_audit"]["path"],
+            Value::String(audit_path)
+        );
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]["authorization_audit"]["sha256"] = Value::String("0".repeat(64));
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]["authorization_lineage"]["entries_sha256"] =
+            Value::String("0".repeat(64));
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]["readiness"]["endpoint"]["url"] =
+            Value::String("http://127.0.0.1:8000/readyz".into());
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]["readiness"]["endpoint"]["expected_body_sha256"] =
+            Value::String("0".repeat(64));
+        cases.push(value);
+
+        let mut value = authorized.value.clone();
+        value["promotion"]["authorization_lineage"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), Value::Bool(true));
+        cases.push(value);
+
+        for value in cases {
+            let raw = serde_json::to_vec(&value).unwrap();
+            assert!(load_served_model_bytes(&authorized.manifest_path, &raw).is_err());
+        }
+
+        let raw = String::from_utf8(serde_json::to_vec(&authorized.value).unwrap()).unwrap();
+        let duplicate = raw.replacen(
+            r#""authorization_audit":{"#,
+            r#""authorization_audit":{"path":"/tmp/duplicate","#,
+            1,
+        );
+        assert!(decode_strict_json(duplicate.as_bytes()).is_err());
+
+        let bad_status = authorized_fixture(
+            "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+            "implementation_no_go",
+        );
+        let raw = serde_json::to_vec(&bad_status.value).unwrap();
+        assert!(load_served_model_bytes(&bad_status.manifest_path, &raw).is_err());
+
+        let bad_schema = authorized_fixture(
+            "ullm.qwen35_aq4_sq8_overlay_independent_audit.v2",
+            "implementation_ready",
+        );
+        let raw = serde_json::to_vec(&bad_schema.value).unwrap();
+        assert!(load_served_model_bytes(&bad_schema.manifest_path, &raw).is_err());
+    }
+
+    #[test]
+    fn actual_failed_authorized_sq8_manifest_is_accepted_when_available() {
+        let path = PathBuf::from(
+            "/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-6fef8baafda003b5/served-model.json",
+        );
+        if !path.exists() {
+            return;
+        }
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "a4d541a8c44edd73e505f223b15cf92933b4e0bf2a257e8e9d08dbad94192542"
+        );
+        let model = load_served_model(path).unwrap();
+        assert!(model.promotion.authorization_audit.is_some());
+        assert!(model.promotion.authorization_lineage.is_some());
+        assert!(model.promotion.readiness.is_some());
     }
 
     #[test]
