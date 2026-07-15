@@ -298,6 +298,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "request_id_from_receipt",
         "authorization_audit_from_receipt",
         "readiness_from_receipt",
+        "readiness",
         "release_source_commit",
     }:
         raise PromotionError("candidate strict promotion profile differs")
@@ -310,6 +311,8 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     if gate.get("schema_version") != GATE_SCHEMA:
         raise PromotionError("candidate Gate schema differs")
     readiness = validate_readiness_contract(gate.get("readiness"))
+    if promotion.get("readiness") != readiness:
+        raise PromotionError("candidate readiness profile identity differs")
     if gate.get("release_source_commit") != build.get("release_source_commit"):
         raise PromotionError("candidate Gate and build source commits differ")
     identity = gate.get("profile_identity")
