@@ -19,6 +19,13 @@ assert SPEC and SPEC.loader
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 TRUSTED_LAUNCHER_SHA = LAUNCHER.sha_bytes(SCRIPT.read_bytes())
+ORIGINAL_LOCK_PATH = LAUNCHER.LOCK_PATH
+
+
+@pytest.fixture(autouse=True)
+def _restore_launcher_lock_path_after_test():
+    yield
+    LAUNCHER.LOCK_PATH = ORIGINAL_LOCK_PATH
 
 
 def _validator_success() -> bytes:
@@ -36,6 +43,11 @@ def _ready_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
 
 
 def _profile_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    test_lock = tmp_path / "r9700.lock"
+    test_lock.write_bytes(b"")
+    test_lock.chmod(0o600)
+    LAUNCHER.LOCK_PATH = test_lock
     evidence = tmp_path / "profile-execute-evidence"
     result = tmp_path / "profile-execute-result"
     run_id = "profile-execute-test-run"
@@ -195,19 +207,40 @@ def test_profile_roctx_sdk_authority_and_generic_runner_cli_are_exact() -> None:
     assert profile[index:index + 5] == ["--profile-roctx-ranges", "--roctx-library", str(library), "--roctx-library-sha256", LAUNCHER.ROCTX_LIBRARY_SHA]
 
 
-def test_v10_normal_and_profile_namespaces_are_disjoint_and_poststate_independent() -> None:
-    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v10"
-    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v10"
-    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v10"
-    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v10"
-    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
-    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v10"
-    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v10"
-    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v10"
+def test_v11_normal_and_profile_namespaces_are_disjoint_and_poststate_independent() -> None:
+    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v11"
+    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v11"
+    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v11"
+    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v11"
+    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11"
+    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v11"
+    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v11"
+    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v11"
     assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_PRODUCER_HELPER.read_bytes()) == LAUNCHER.PROFILE_PRODUCER_HELPER_SHA == "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
     assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_FAMILY_HELPER.read_bytes()) == LAUNCHER.PROFILE_FAMILY_HELPER_SHA == "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
-    paths = {LAUNCHER.EXECUTE_RUN_OUTPUT, LAUNCHER.EXECUTE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_RUN_OUTPUT, LAUNCHER.PROFILE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY}
-    assert len(paths) == 5
+    p2 = LAUNCHER.EXECUTE_BINDING_ROOT.parent
+    p3 = LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.parent
+    maintenance_v12 = p2 / "resident-one-case-smoke-profile-maintenance-evidence-v12"
+    fresh = {
+        LAUNCHER.EXECUTE_BINDING_ROOT,
+        LAUNCHER.EXECUTE_RUN_OUTPUT,
+        LAUNCHER.EXECUTE_EVIDENCE_OUTPUT,
+        LAUNCHER.PROFILE_RUN_OUTPUT,
+        LAUNCHER.PROFILE_EVIDENCE_OUTPUT,
+        LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY,
+        maintenance_v12,
+    }
+    occupied_actual_v14 = {
+        p2 / "resident-one-case-smoke-profile-maintenance-evidence-v11",
+        p2 / "resident-one-case-smoke-profile-execute-v10",
+        p2 / "resident-one-case-smoke-profile-execute-evidence-v10",
+        p2 / "resident-one-case-smoke-profile-operator-result-v14",
+        p2 / "resident-one-case-smoke-profile-actual-audit-v14",
+        p3 / "aq4-p3-diagnostic-rocprof-capture-v10",
+    }
+    assert len(fresh) == 7
+    assert fresh.isdisjoint(occupied_actual_v14)
+    assert all(path.is_absolute() and ".." not in path.parts for path in fresh)
 
 
 def test_profile_execute_cli_builds_only_the_exact_ready_profile_binding(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -737,9 +770,8 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
-def test_current_execute_binding_v10_is_sealed_and_bound_to_launcher_authority() -> None:
-    root = LAUNCHER.EXECUTE_BINDING_ROOT
-    assert root.name == "resident-one-case-smoke-execute-binding-v10"
+def test_historical_execute_binding_v10_is_sealed_and_immutable() -> None:
+    root = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v10"
     assert stat.S_IMODE(root.stat().st_mode) == 0o555
     assert {item.name for item in root.iterdir()} == {
         "execute-binding.json",
@@ -752,12 +784,62 @@ def test_current_execute_binding_v10_is_sealed_and_bound_to_launcher_authority()
     for line in (root / "SHA256SUMS").read_text().splitlines():
         digest, name = line.split("  ", 1)
         assert LAUNCHER.sha_bytes((root / name).read_bytes()) == digest
-    binding, trust = LAUNCHER.load_execute_binding(root / "execute-binding.json")
-    assert binding == LAUNCHER.execute_binding_document()
+    expected_hashes = {
+        "execute-binding.json": "6fb8e61d4460ab89fdd643e917c7c20d1ddd9a68b1292703f0a2bd4d86ecef06",
+        "launcher-trust.json": "33182ae19350cc7ed0a8fe3b439746a81996dc70a5d6d355fb0aac323e75dd6c",
+        "SHA256SUMS": "059ab6bab846f94b511a3d602a8cca350a328cf11b7dcf0f50a5ae8407b698de",
+    }
+    assert {item.name: LAUNCHER.sha_bytes(item.read_bytes()) for item in root.iterdir()} == expected_hashes
+    binding = json.loads((root / "execute-binding.json").read_text())
+    trust = json.loads((root / "launcher-trust.json").read_text())
+    assert binding["actual_eligible"] is False and binding["status"] == "blocked_pending_live_preflight_and_qa"
     assert trust["commit"] == "fc4559ee4fb8c7c1e62353fb3978a1a1e0a7d86d"
     assert trust["tree"] == "a5f938243463e36e401787aa62dfa6a5ef46e125"
     assert trust["git_blob"] == "debace42c2063c476a9db3dcfe7fdf480bdf5088"
     assert trust["sha256"] == "5197efa84ec98343dda9438e4c0bc31e144765ce686a4b41199f1ae0315de8a6"
+    artifact_commit = "2b477ed0dd1344d368e684e413cb756706af22f3"
+    relative_root = root.relative_to(ROOT)
+    assert subprocess.run(
+        ["git", "rev-parse", f"{artifact_commit}^{{tree}}"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+    ).stdout.decode().strip() == "bcc014d925e9d5c6b334496f6060959fe343decb"
+    assert subprocess.run(
+        ["git", "rev-parse", f"{artifact_commit}:{relative_root}"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+    ).stdout.decode().strip() == "0a1ea5664829bb7257bff097c551c3f625aeef6a"
+    for name in expected_hashes:
+        committed = subprocess.run(
+            ["git", "show", f"{artifact_commit}:{relative_root / name}"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+        )
+        assert committed.stdout == (root / name).read_bytes()
+
+
+def test_current_execute_binding_v11_is_sealed_and_bound_to_launcher_authority() -> None:
+    root = LAUNCHER.EXECUTE_BINDING_ROOT
+    assert root.name == "resident-one-case-smoke-execute-binding-v11"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o555
+    assert {item.name for item in root.iterdir()} == {"execute-binding.json", "launcher-trust.json", "SHA256SUMS"}
+    for item in root.iterdir():
+        assert stat.S_IMODE(item.stat().st_mode) == 0o444 and item.stat().st_nlink == 1
+    for line in (root / "SHA256SUMS").read_text().splitlines():
+        digest, name = line.split("  ", 1)
+        assert LAUNCHER.sha_bytes((root / name).read_bytes()) == digest
+    binding, trust = LAUNCHER.load_execute_binding(root / "execute-binding.json")
+    assert binding == LAUNCHER.execute_binding_document()
+    relative = SCRIPT.relative_to(ROOT)
+    source_commit = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", str(relative)], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+    ).stdout.decode().strip()
+    assert trust["commit"] == source_commit
+    assert trust["tree"] == subprocess.run(
+        ["git", "rev-parse", f"{source_commit}^{{tree}}"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+    ).stdout.decode().strip()
+    assert trust["git_blob"] == subprocess.run(
+        ["git", "rev-parse", f"{source_commit}:{relative}"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+    ).stdout.decode().strip()
+    committed = subprocess.run(
+        ["git", "show", f"{source_commit}:{relative}"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
+    ).stdout
+    assert committed == SCRIPT.read_bytes()
+    assert trust["sha256"] == LAUNCHER.sha_bytes(committed)
 
 
 def test_historical_execute_binding_v8_is_sealed_and_remains_blocked() -> None:

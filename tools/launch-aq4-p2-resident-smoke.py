@@ -31,11 +31,11 @@ RESIDENT_DRIVER = INPUT_ROOT / "resident-driver"
 SERVED_MANIFEST = Path("/etc/ullm/served-models/active.json")
 LOCK_PATH = Path("/run/ullm/r9700.lock")
 RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
-EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v10"
+EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v11"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
-EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v10"
-EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v10"
+EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v11"
+EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v11"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_REAL = Path("/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py")
@@ -149,13 +149,13 @@ ROCMINFO_SHA = "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed
 SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
-EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v10"
-PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
-PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10"
-PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10"
+EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v11"
+PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11"
+PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11"
+PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
-PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11"
 PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
 ROCTX_LIBRARY = Path("/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0")
@@ -842,15 +842,26 @@ def prepare_execute_binding(output: Path = EXECUTE_BINDING_ROOT) -> dict[str, An
     launcher_path = Path(__file__).resolve()
     launcher_raw, _ = read_regular(launcher_path, "execute launcher source")
     relative = launcher_path.relative_to(ROOT)
-    git_values = []
-    for revision in ("HEAD", "HEAD^{tree}", f"HEAD:{relative}"):
+    source_commit = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", str(relative)],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if source_commit.returncode != 0 or source_commit.stderr or not re.fullmatch(rb"[0-9a-f]{40}\n", source_commit.stdout):
+        raise LauncherError("execute launcher Git authority lookup failed")
+    source_revision = source_commit.stdout.decode("ascii").strip()
+    git_values = [source_revision]
+    for revision in (f"{source_revision}^{{tree}}", f"{source_revision}:{relative}"):
         completed = subprocess.run(["git", "rev-parse", revision], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if completed.returncode != 0 or completed.stderr:
             raise LauncherError("execute launcher Git identity lookup failed")
         git_values.append(completed.stdout.decode("ascii").strip())
-    committed = subprocess.run(["git", "show", f"HEAD:{relative}"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    committed = subprocess.run(["git", "show", f"{source_revision}:{relative}"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if committed.returncode != 0 or committed.stderr or committed.stdout != launcher_raw:
-        raise LauncherError("execute launcher source is not the exact committed HEAD blob")
+        raise LauncherError("execute launcher source is not the exact committed authority blob")
     launcher_trust = {
         "schema_version": "ullm.aq4_p2_resident_execute_launcher_trust.v1", "status": "qa_pending", "actual_eligible": False,
         "path": str(launcher_path), "commit": git_values[0], "tree": git_values[1], "git_blob": git_values[2], "sha256": sha_bytes(launcher_raw),
@@ -881,6 +892,19 @@ def load_execute_binding(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     launcher_raw, _ = read_regular(Path(__file__).resolve(), "execute launcher trusted self")
     if sha_bytes(launcher_raw) != trust["sha256"]:
         raise LauncherError("execute launcher self differs from artifact trust")
+    relative = Path(__file__).resolve().relative_to(ROOT)
+    authority_revisions = (f'{trust["commit"]}^{{tree}}', f'{trust["commit"]}:{relative}')
+    authority_values = []
+    for revision in authority_revisions:
+        completed = subprocess.run(["git", "rev-parse", revision], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if completed.returncode != 0 or completed.stderr or not re.fullmatch(rb"[0-9a-f]{40}\n", completed.stdout):
+            raise LauncherError("execute launcher artifact Git identity lookup failed")
+        authority_values.append(completed.stdout.decode("ascii").strip())
+    if authority_values != [trust["tree"], trust["git_blob"]]:
+        raise LauncherError("execute launcher artifact Git identity differs")
+    committed = subprocess.run(["git", "show", authority_revisions[1]], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if committed.returncode != 0 or committed.stderr or committed.stdout != launcher_raw:
+        raise LauncherError("execute launcher artifact authority blob differs")
     expected_sums = f"{sha_bytes(raw)}  execute-binding.json\n{sha_bytes(trust_raw)}  launcher-trust.json\n".encode("ascii")
     sums_raw, _ = read_regular(EXECUTE_BINDING_ROOT / "SHA256SUMS", "execute binding sums")
     if sums_raw != expected_sums:
