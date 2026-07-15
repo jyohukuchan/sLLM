@@ -29,6 +29,7 @@ class FakeRuntime:
         restore_health_failures: int = 0,
         hash_seconds: float = 0.0,
         metadata_mutation: str | None = None,
+        pre_metadata_mutation: str | None = None,
         pre_nrestarts: int = 0,
         post_nrestarts: int = 0,
     ) -> None:
@@ -47,6 +48,7 @@ class FakeRuntime:
         self.full_hash_count = 0
         self.metadata_scan_count = 0
         self.metadata_mutation = metadata_mutation
+        self.pre_metadata_mutation = pre_metadata_mutation
         self.pre_nrestarts = pre_nrestarts
         self.post_nrestarts = post_nrestarts
         self.events: list[str] = []
@@ -191,7 +193,7 @@ class FakeRuntime:
 
             def mark_runner_started() -> None:
                 self.runner_started_count += 1
-                self.events.append("runner")
+                self.events.append("rocprof")
 
             outcome = profile_runner_executor(
                 ["/fake/runner", "profile"],
@@ -207,6 +209,7 @@ class FakeRuntime:
                 "sequence": ["validator", "pre-exec-gates", "profile-runner-target", "runner", "runner-complete"],
                 "profile_runner_target": target,
                 "profile_capture": capture,
+                "profile_diagnostics": outcome["profile_diagnostics"],
                 "safety": {
                     "gpu_command_executed": outcome["gpu_command_executed"],
                     "model_load_executed": outcome["model_load_executed"],
@@ -228,22 +231,27 @@ class FakeRuntime:
             HARNESS.PackageTreeEntry("weights", 1, 12, 0o40755, 2, 4096, 100, 100),
             HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 13, 0o100644, 1, 7_200_000_000, 100, 100),
         ]
-        if self.epoch > 0 and self.metadata_mutation is not None:
+        mutation = self.metadata_mutation if self.epoch > 0 else self.pre_metadata_mutation
+        if mutation is not None:
             index = 3
-            if self.metadata_mutation == "added":
+            if mutation == "added":
                 entries.append(HARNESS.PackageTreeEntry("weights/new.gguf", 1, 14, 0o100644, 1, 1, 101, 101))
-            elif self.metadata_mutation == "removed":
+            elif mutation == "empty-directory":
+                entries.append(HARNESS.PackageTreeEntry("unexpected-empty", 1, 15, 0o40755, 2, 4096, 101, 101))
+            elif mutation == "special":
+                entries.append(HARNESS.PackageTreeEntry("unexpected-fifo", 1, 16, 0o010644, 1, 0, 101, 101))
+            elif mutation == "removed":
                 entries.pop(index)
-            elif self.metadata_mutation == "replaced":
+            elif mutation == "replaced":
                 entries[index] = HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 99, 0o100644, 1, 7_200_000_000, 100, 101)
-            elif self.metadata_mutation == "content":
+            elif mutation == "content":
                 entries[index] = HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 13, 0o100644, 1, 7_200_000_001, 101, 101)
-            elif self.metadata_mutation == "symlink":
+            elif mutation == "symlink":
                 entries[index] = HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 99, 0o120777, 1, 17, 101, 101)
-            elif self.metadata_mutation == "directory":
+            elif mutation == "directory":
                 entries[2] = HARNESS.PackageTreeEntry("weights", 1, 12, 0o40750, 2, 4096, 101, 101)
             else:
-                raise AssertionError(self.metadata_mutation)
+                raise AssertionError(mutation)
         ordered = tuple(sorted(entries, key=lambda item: item.relative_path))
         digest = HARNESS.hashlib.sha256()
         for item in ordered:
@@ -256,12 +264,13 @@ class FakeRuntime:
             file_count=sum(HARNESS.stat.S_ISREG(item.mode) for item in ordered),
             directory_count=sum(HARNESS.stat.S_ISDIR(item.mode) for item in ordered),
             symlink_count=sum(HARNESS.stat.S_ISLNK(item.mode) for item in ordered),
+            special_count=sum(not (HARNESS.stat.S_ISREG(item.mode) or HARNESS.stat.S_ISDIR(item.mode) or HARNESS.stat.S_ISLNK(item.mode)) for item in ordered),
             bytes=sum(item.size for item in ordered if HARNESS.stat.S_ISREG(item.mode)),
         )
 
     def profile_capture(self, request: dict) -> dict:
         self.profile_captured = True
-        self.events.extend(["capture", "rocprof"])
+        self.events.append("capture")
         if self.fail == "capture-start":
             raise OSError("synthetic capture startup failure")
         timed_out = self.fail == "capture-timeout"
@@ -270,6 +279,8 @@ class FakeRuntime:
         request["mark_runner_started"]()
         command = request["runner_argv"]
         complete = not timed_out and not remaining and not launcher_failed
+        if complete:
+            self.events.append("runner")
         return {
             "completed": subprocess.CompletedProcess(command, 0 if complete else 1, b"", b""),
             "keepalives": [],
@@ -284,9 +295,27 @@ class FakeRuntime:
                 "capture_tool_invocations": 1,
                 "rocprof_invocations": 1,
                 "target_manifest_sha256": request["target_binding"]["sha256"],
+                "target_manifest_semantic_sha256": request["target_binding"]["manifest_sha256"],
+                "target_argv_sha256": HARNESS.sha_bytes(HARNESS.canonical(command)),
+                "environment_sha256": HARNESS.sha_bytes(HARNESS.canonical(request["environment"])),
+                "capture_stdout_sha256": HARNESS.sha_bytes(b""),
+                "capture_stderr_sha256": HARNESS.sha_bytes(b""),
+                "rocprof_started": True,
+                "runner_start_known": complete,
+                "runner_started": complete,
+                "runner_completed": complete,
                 "timed_out": timed_out,
                 "cleanup_passed": not remaining,
+                "children_state_known": True,
                 "children_remaining": remaining,
+            },
+            "profile_diagnostics": {
+                "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+                "runner_finished": complete,
+                "capture_artifact": None,
+                "failure_evidence": None,
+                "validation_error": None,
+                "executor_exception": None,
             },
         }
 
@@ -406,6 +435,8 @@ def container_health_expected_argv() -> list[list[str]]:
 def ready(tmp_path: Path) -> dict:
     identity = {"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}
     value = HARNESS.ready_document(identity)
+    fake_tree = FakeRuntime().package_metadata(HARNESS.PACKAGE_ROOT)
+    value["trust"]["production"]["expected_package_integrity_identity_sha256"] = HARNESS.package_integrity_identity(HARNESS.PACKAGE_CONTENT_SHA, fake_tree)
     value["launcher_binding"]["runner_output"] = str(tmp_path / "runner")
     value["launcher_binding"]["evidence_output"] = str(tmp_path / "launcher-evidence")
     value["launcher_binding"]["live_preflight"]["path"] = str(tmp_path / "launcher-evidence/live-preflight.json")
@@ -415,11 +446,16 @@ def ready(tmp_path: Path) -> dict:
 def profile_ready(tmp_path: Path) -> dict:
     identity = {"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}
     value = HARNESS.ready_document(identity, profile_diagnostic=True)
+    fake_tree = FakeRuntime().package_metadata(HARNESS.PACKAGE_ROOT)
+    value["trust"]["production"]["expected_package_integrity_identity_sha256"] = HARNESS.package_integrity_identity(HARNESS.PACKAGE_CONTENT_SHA, fake_tree)
     value["launcher_binding"]["runner_output"] = str(tmp_path / "profile-runner")
     value["launcher_binding"]["evidence_output"] = str(tmp_path / "profile-launcher-evidence")
     value["launcher_binding"]["live_preflight"]["path"] = str(tmp_path / "profile-launcher-evidence/live-preflight.json")
     value["profile_diagnostic"]["output"]["directory"] = str(tmp_path / "profile-output")
     value["profile_diagnostic"]["output"]["artifact"] = str(tmp_path / "profile-output/capture-artifact.json")
+    value["profile_diagnostic"]["resident_evidence"]["identity"] = str(tmp_path / "resident-evidence/identity.json")
+    value["profile_diagnostic"]["resident_evidence"]["summary"] = str(tmp_path / "resident-evidence/resident-batch.summary.json")
+    value["profile_diagnostic"]["resident_evidence"]["raw"] = str(tmp_path / "resident-evidence/case.raw.json")
     return value
 
 
@@ -501,6 +537,8 @@ def test_profile_v3_outputs_are_fresh_from_failed_v2_attempt() -> None:
     assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v3"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v3"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+    value = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64})
+    assert value["trust"]["production"]["expected_package_integrity_identity_sha256"] == HARNESS.PACKAGE_INTEGRITY_IDENTITY_SHA
 
 
 def test_explicit_restore_resets_nonzero_nrestarts_to_zero(tmp_path: Path) -> None:
@@ -599,6 +637,18 @@ def test_restore_fails_closed_on_package_tree_metadata_mutation(tmp_path: Path, 
     assert recheck["passed"] is False
     assert recheck["identity_sha256"] != recheck["expected_identity_sha256"]
     assert recheck["difference"]["kind"] in {"added", "removed", "metadata_changed"}
+    assert runtime.full_hash_count == 1
+
+
+@pytest.mark.parametrize("mutation", ("added", "empty-directory", "special", "symlink", "directory"))
+def test_pre_stop_rejects_stable_package_tree_divergence_from_trusted_identity(tmp_path: Path, mutation: str) -> None:
+    runtime = FakeRuntime(pre_metadata_mutation=mutation)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / f"pre-metadata-{mutation}", runtime.dependencies())
+    assert code == 1 and evidence["failure"]["stage"] == "pre-stop-package-integrity"
+    assert evidence["package_integrity"]["integrity_identity"]["passed"] is False
+    assert evidence["package_integrity"]["error"] == "production package trusted integrity identity differs"
+    assert evidence["process_counts"]["systemctl_stop"] == 0
+    assert evidence["restore"]["attempted"] is False
     assert runtime.full_hash_count == 1
 
 
@@ -985,7 +1035,7 @@ def test_dry_run_writes_process_zero_evidence_without_dependencies(tmp_path: Pat
     value = ready(tmp_path)
     monkeypatch.setattr(HARNESS, "READY_PATH", tmp_path / "ready-binding.json")
     HARNESS.READY_PATH.write_text("{}\n")
-    code, evidence = HARNESS.dry_run_ready(value, tmp_path / "dry")
+    code, evidence = HARNESS.dry_run_ready(value, tmp_path / "dry", HARNESS.READY_PATH)
     assert code == 0 and evidence["status"] == "passed"
     assert evidence["process_counts"] == {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}
     assert evidence["service_touched"] is False and evidence["gpu_command_executed"] is False
@@ -1035,6 +1085,472 @@ def test_profile_capture_command_binds_fresh_launcher_runner_target(tmp_path: Pa
     assert command[command.index("--profile-output-directory") + 1] == profile["output"]["directory"]
     assert command[command.index("--artifact") + 1] == profile["output"]["artifact"]
     assert "--runner-command" not in command
+
+
+def valid_profile_capture_artifact(request: dict, output: Path) -> dict:
+    contract = request["contract"]
+    target = request["target_binding"]
+    command = HARNESS._expected_profile_command(request["runner_argv"], contract)
+    identity_sha = "d" * 64
+
+    def ref(path: Path, digit: str = "e") -> dict:
+        del digit
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(f"fixture:{path.name}\n".encode())
+        return {"path": str(path), "sha256": HARNESS.sha_bytes(path.read_bytes())}
+
+    capabilities = ref(output / "capture-capabilities.json", "f")
+    helpers = [
+        {"role": role, "path": str(path), "identity": list(HARNESS.LAUNCHER.file_identity(path.lstat())), "sha256": sha}
+        for role, path, sha in (
+            ("selection_raw_producer", HARNESS.LAUNCHER.PROFILE_PRODUCER_HELPER, HARNESS.LAUNCHER.PROFILE_PRODUCER_HELPER_SHA),
+            ("candidate_selector", HARNESS.LAUNCHER.PROFILE_SELECTOR_HELPER, HARNESS.LAUNCHER.PROFILE_SELECTOR_HELPER_SHA),
+            ("profile_family_classifier", HARNESS.LAUNCHER.PROFILE_FAMILY_HELPER, HARNESS.LAUNCHER.PROFILE_FAMILY_HELPER_SHA),
+        )
+    ]
+    runs = []
+    memory_traces = []
+    for index in range(2, 12):
+        runs.append({
+            "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1",
+            "case_id": contract["resident_evidence"]["case_id"],
+            "case_sha256": HARNESS.LAUNCHER.CASE_SHA,
+            "identity_sha256": identity_sha,
+            "resident_run_index": index,
+            "measurement_eligible": False,
+            "clock_domain": "rocprofv3_monotonic_ns",
+            "kernel_trace_complete": True,
+            "hip_api_trace_complete": True,
+            "capture_capabilities": capabilities,
+            "kernel_trace": ref(output / "measured-runs" / f"run-{index:02d}_kernel_trace.csv"),
+            "hip_api_trace": ref(output / "measured-runs" / f"run-{index:02d}_hip_api_trace.csv"),
+        })
+        memory_traces.append(ref(output / "measured-runs" / f"run-{index:02d}_memory_copy_trace.csv"))
+    artifact = {
+        "schema_version": HARNESS.PROFILE_CAPTURE_SCHEMA,
+        "status": "complete_diagnostic",
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "artifact_sha256": None,
+        "binding": {
+            "run_id": contract["resident_evidence"]["run_id"],
+            "resident_session_id": "fixture-session",
+            "case_id": contract["resident_evidence"]["case_id"],
+            "case_sha256": HARNESS.LAUNCHER.CASE_SHA,
+            "identity_sha256": identity_sha,
+            "device": {"runtime_device_index": 1, "device_id": "r9700-rdna4", "backend": "hip", "name": "AMD Radeon Graphics", "architecture": "gfx1201"},
+            "identity": ref(Path(contract["resident_evidence"]["identity"])),
+            "resident_summary": ref(Path(contract["resident_evidence"]["summary"])),
+            "resident_raw": ref(Path(contract["resident_evidence"]["raw"])),
+        },
+        "profiler": {
+            "tool": "rocprofv3",
+            "invocation_path": str(HARNESS.PROFILE_PROFILER),
+            "resolved_path": str(HARNESS.PROFILE_PROFILER),
+            "executable_sha256": HARNESS.PROFILE_PROFILER_SHA,
+            "resolved_identity": list(HARNESS.LAUNCHER.file_identity(HARNESS.PROFILE_PROFILER.lstat())),
+            "symlink_chain": [],
+            "version": "fixture",
+            "rocm_version": None,
+            "version_output_sha256": "a" * 64,
+            "target_command_manifest": {"path": target["path"], "sha256": target["sha256"]},
+            "target_environment": {"sha256": HARNESS.sha_bytes(HARNESS.canonical(request["environment"])), "keys": sorted(request["environment"]), "exact_base_environment": True, "secret_material_recorded": False},
+            "capture_helpers": helpers,
+            "command": command,
+            "command_sha256": HARNESS.sha_bytes(HARNESS.canonical(command)),
+            "subprocess_profile_runs": 1,
+        },
+        "source_traces": {kind: ref(output / f"fixture_{kind}_trace.csv") for kind in ("kernel", "hip_api", "memory_copy", "marker")},
+        "capture_capabilities": capabilities,
+        "marker_contract": {"schema_version": "ullm.aq4_p2.run.v1", "clock_domain": "rocprofv3_monotonic_ns", "range_count": 12, "warmup_indices": [0, 1], "measured_indices": list(range(2, 12)), "warmup_excluded": True},
+        "producer_profile_runs": runs,
+        "memory_copy_traces": memory_traces,
+        "eligibility_blockers": ["rocprof instrumentation overhead forbids performance promotion", "one-case diagnostic evidence does not satisfy seven-prompt promotion coverage"],
+    }
+    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+    return artifact
+
+
+def default_profile_adapter_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str):
+    bridge_name = f"profile_capture_test_bridge_{mode.replace('-', '_')}"
+    bridge = HARNESS.types.ModuleType(bridge_name)
+    trusted_raw = f"import sys\ndef main(argv, *, on_rocprof_started=None, on_runner_completed=None):\n    return sys.modules[{bridge_name!r}].invoke(argv, on_rocprof_started, on_runner_completed)\n".encode()
+    trusted_path = tmp_path / "trusted-capture.py"
+    trusted_path.write_bytes(trusted_raw)
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_TOOL", trusted_path)
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_SHA", HARNESS.sha_bytes(trusted_raw))
+    profile = profile_ready(tmp_path)["profile_diagnostic"]
+    output = Path(profile["output"]["directory"])
+    artifact_path = Path(profile["output"]["artifact"])
+    target = {
+        "path": str(tmp_path / "runner-target-command-manifest.json"),
+        "sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "identity": [1, 2, 3, 4, 1, 5, 6],
+    }
+    starts: list[str] = []
+
+    def invoke(argv, on_rocprof_started, on_runner_completed):
+        if mode == "exception-before":
+            raise RuntimeError("synthetic pre-spawn executor exception")
+        output.mkdir(mode=0o700)
+        target_reference = {
+            "path": argv[argv.index("--target-command-manifest") + 1],
+            "sha256": argv[argv.index("--target-command-manifest-sha256") + 1],
+        }
+        if mode != "before-start-failure":
+            on_rocprof_started()
+        if mode == "exception-after":
+            raise RuntimeError("synthetic post-spawn executor exception")
+        (output / "rocprof.stdout").write_bytes(b"")
+        (output / "rocprof.stderr").write_bytes(b"")
+        if mode in {
+            "success", "tampered-artifact", "missing-artifact", "artifact-mode",
+            "artifact-binding-field", "artifact-profiler-field", "artifact-command",
+            "artifact-ref-hash", "artifact-ref-outside", "artifact-ref-dotdot",
+            "artifact-ref-symlink", "artifact-ref-hardlink", "artifact-ref-mode",
+        }:
+            on_runner_completed()
+            if mode != "missing-artifact":
+                artifact = valid_profile_capture_artifact(request, output)
+                if mode == "tampered-artifact":
+                    artifact["status"] = "tampered"
+                elif mode == "artifact-binding-field":
+                    artifact["binding"]["unknown"] = True
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-profiler-field":
+                    artifact["profiler"]["unknown"] = True
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-command":
+                    artifact["profiler"]["command"][-1] = "different-runner"
+                    artifact["profiler"]["command_sha256"] = HARNESS.sha_bytes(HARNESS.canonical(artifact["profiler"]["command"]))
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-ref-hash":
+                    artifact["source_traces"]["kernel"]["sha256"] = "9" * 64
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-ref-outside":
+                    outside = output.parent / "outside-kernel.csv"
+                    outside.write_bytes(b"outside\n")
+                    artifact["source_traces"]["kernel"] = {"path": str(outside), "sha256": HARNESS.sha_bytes(outside.read_bytes())}
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-ref-dotdot":
+                    (output / "nested").mkdir()
+                    original = Path(artifact["source_traces"]["kernel"]["path"])
+                    artifact["source_traces"]["kernel"]["path"] = str(output / "nested" / ".." / original.name)
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-ref-symlink":
+                    original = Path(artifact["source_traces"]["kernel"]["path"])
+                    link = output / "linked-kernel.csv"
+                    link.symlink_to(original)
+                    artifact["source_traces"]["kernel"]["path"] = str(link)
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-ref-hardlink":
+                    original = Path(artifact["source_traces"]["kernel"]["path"])
+                    os.link(original, output / "hardlinked-kernel.csv")
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-ref-mode":
+                    Path(artifact["source_traces"]["kernel"]["path"]).chmod(0o755)
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                artifact_path.write_bytes(HARNESS.pretty(artifact))
+                artifact_path.chmod(0o644 if mode == "artifact-mode" else 0o444)
+            return 0
+        reason = "rocprof diagnostic capture timed out" if mode == "timeout" else "synthetic capture failure"
+        cleanup = mode not in {"cleanup-failed", "children-nonempty"}
+        children_known = mode != "cleanup-failed"
+        children_remaining = [4242] if mode == "children-nonempty" else []
+        streams = {}
+        for name in ("rocprof.stdout", "rocprof.stderr"):
+            raw = (output / name).read_bytes()
+            streams[name] = {"bytes": len(raw), "sha256": HARNESS.sha_bytes(raw)}
+        failure = {
+            "schema_version": HARNESS.PROFILE_CAPTURE_FAILURE_SCHEMA,
+            "status": "failed",
+            "measurement_eligible": False,
+            "promotion_eligible": False,
+            "failure_sha256": None,
+            "reason": reason,
+            "rocprof_child_new_session": True,
+            "outer_harness_signalled": False,
+            "process_group_cleanup_complete": cleanup,
+            "children_state_known": children_known,
+            "children_remaining": children_remaining,
+            "command_sha256": HARNESS.sha_bytes(HARNESS.canonical(HARNESS._expected_profile_command(request["runner_argv"], profile))),
+            "effective_command_sha256": HARNESS.sha_bytes(HARNESS.canonical(["/proc/self/fd/91", *HARNESS._expected_profile_command(request["runner_argv"], profile)[1:]])),
+            "context": {"profiler": {"tool": "rocprofv3", "invocation_path": str(HARNESS.PROFILE_PROFILER), "resolved_path": str(HARNESS.PROFILE_PROFILER), "executable_sha256": HARNESS.PROFILE_PROFILER_SHA, "resolved_identity": list(HARNESS.LAUNCHER.file_identity(HARNESS.PROFILE_PROFILER.lstat())), "symlink_chain": []}, "target_command_manifest": target_reference},
+            "streams": streams,
+        }
+        failure["failure_sha256"] = HARNESS._semantic_self_hash(failure, "failure_sha256")
+        if mode == "tampered-failure":
+            failure["reason"] = "tampered after self hash"
+        elif mode == "failure-profiler":
+            failure["context"]["profiler"]["executable_sha256"] = "9" * 64
+            failure["failure_sha256"] = HARNESS._semantic_self_hash(failure, "failure_sha256")
+        elif mode == "failure-command":
+            failure["command_sha256"] = "9" * 64
+            failure["failure_sha256"] = HARNESS._semantic_self_hash(failure, "failure_sha256")
+        elif mode == "failure-effective-command":
+            failure["effective_command_sha256"] = failure["command_sha256"]
+            failure["failure_sha256"] = HARNESS._semantic_self_hash(failure, "failure_sha256")
+        failure_path = output / HARNESS.PROFILE_CAPTURE_FAILURE_NAME
+        failure_path.write_bytes(HARNESS.pretty(failure))
+        failure_path.chmod(0o644 if mode == "failure-mode" else 0o444)
+        return 1
+
+    bridge.invoke = invoke
+    monkeypatch.setitem(sys.modules, bridge_name, bridge)
+    request = {
+        "contract": profile,
+        "runner_argv": ["/fake/runner", "profile"],
+        "environment": dict(HARNESS.LAUNCHER.EXECUTE_ENV),
+        "mark_runner_started": lambda: starts.append("started"),
+        "target_binding": target,
+    }
+    return request, trusted_raw, starts, trusted_path
+
+
+def test_default_profile_adapter_validates_success_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request, trusted_raw, starts, _ = default_profile_adapter_fixture(tmp_path, monkeypatch, "success")
+    outcome = HARNESS.run_profile_capture(request, trusted_capture_raw=trusted_raw)
+    capture = outcome["profile_capture"]
+    assert outcome["completed"].returncode == 0, outcome["profile_diagnostics"]["validation_error"]
+    assert starts == ["started"]
+    assert capture["status"] == "complete_diagnostic"
+    assert outcome["profile_diagnostics"]["capture_artifact"]["mode"] == 0o444
+    assert capture["cleanup_passed"] is True and capture["children_remaining"] == []
+    assert capture["rocprof_started"] is True and capture["runner_start_known"] is True
+    assert capture["runner_started"] is True and capture["runner_completed"] is True
+    assert outcome["profile_diagnostics"]["runner_finished"] is True
+
+
+def test_default_profile_adapter_rejects_reference_change_during_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, trusted_raw, _, _ = default_profile_adapter_fixture(tmp_path, monkeypatch, "success")
+    original = HARNESS._verified_profile_file
+    changed = False
+
+    def verify_then_change(path: Path, expected_sha256: str):
+        nonlocal changed
+        identity = original(path, expected_sha256)
+        if identity is not None and path.name == "fixture_kernel_trace.csv" and not changed:
+            changed = True
+            path.write_bytes(b"changed-after-reference-hash\n")
+        return identity
+
+    monkeypatch.setattr(HARNESS, "_verified_profile_file", verify_then_change)
+    outcome = HARNESS.run_profile_capture(request, trusted_capture_raw=trusted_raw)
+    assert changed is True
+    assert outcome["completed"].returncode == 1
+    assert "referenced file identity changed" in outcome["profile_diagnostics"]["validation_error"]
+
+
+@pytest.mark.parametrize("capture_mode", ("success", "failure-clean", "failure-unknown", "exception"))
+def test_default_adapter_invokes_actual_capture_main_lifecycle_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_mode: str
+) -> None:
+    request, _, starts, _ = default_profile_adapter_fixture(tmp_path, monkeypatch, "success")
+    actual_path = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
+    actual_raw = actual_path.read_bytes()
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_TOOL", actual_path)
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_SHA", HARNESS.sha_bytes(actual_raw))
+    module = HARNESS._load_profile_capture_module(actual_raw)
+    lifecycle: list[str] = []
+
+    class FakeProfiler:
+        descriptor = 91
+        invocation = HARNESS.PROFILE_PROFILER
+        def verify(self): return None
+        def evidence(self):
+            return {
+                "tool": "rocprofv3", "invocation_path": str(self.invocation),
+                "resolved_path": str(self.invocation), "executable_sha256": HARNESS.PROFILE_PROFILER_SHA,
+                "resolved_identity": list(HARNESS.LAUNCHER.file_identity(HARNESS.PROFILE_PROFILER.lstat())), "symlink_chain": [],
+            }
+        def close(self): return None
+
+    class FakeSnapshot:
+        path = Path(request["target_binding"]["path"])
+        sha256 = request["target_binding"]["sha256"]
+        def verify(self): return None
+
+    profiler = FakeProfiler()
+    snapshot = FakeSnapshot()
+    runner_output = tmp_path / "profile-runner-output.json"
+    target_value = {
+        "argv": request["runner_argv"],
+        "environment": request["environment"],
+        "output_paths": [{"argument_index": 0, "path": str(runner_output)}],
+    }
+    def open_profiler(path, sha):
+        if capture_mode == "exception":
+            raise RuntimeError("synthetic actual-main executor exception")
+        return profiler
+
+    monkeypatch.setattr(module.PinnedProfiler, "open", staticmethod(open_profiler))
+    monkeypatch.setattr(module, "pinned_profiler_version", lambda value: {**profiler.evidence(), "version": "fixture", "rocm_version": None, "version_output_sha256": "a" * 64})
+    monkeypatch.setattr(module, "load_target_command_manifest", lambda path, sha, allow_existing_outputs=False: (target_value, [snapshot]))
+    monkeypatch.setattr(module, "pinned_target_argv", lambda value, snapshots: (request["runner_argv"], ()))
+    monkeypatch.setattr(module, "capture_helper_contract", lambda: [])
+    monkeypatch.setattr(module, "verify_capture_helpers", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "profiler_command",
+        lambda value, directory, name, command: [
+            f"/proc/self/fd/{profiler.descriptor}",
+            *HARNESS._expected_profile_command(request["runner_argv"], request["contract"])[1:],
+        ],
+    )
+
+    def run_profile(command, output_directory, timeout, **kwargs):
+        lifecycle.append("rocprof")
+        kwargs["on_rocprof_started"]()
+        output_directory.mkdir(mode=0o700)
+        (output_directory / "rocprof.stdout").write_bytes(b"")
+        (output_directory / "rocprof.stderr").write_bytes(b"")
+        runner_output.write_text("{}\n")
+        if capture_mode != "success":
+            reason = "synthetic actual-main failure" if capture_mode == "failure-clean" else "synthetic actual-main cleanup failed"
+            module.write_failure_evidence(
+                output_directory,
+                reason,
+                HARNESS._expected_profile_command(request["runner_argv"], request["contract"]),
+                kwargs["failure_context"],
+                effective_command=command,
+            )
+            raise module.CaptureError(reason)
+
+    def assemble(**kwargs):
+        lifecycle.append("assemble")
+        artifact = valid_profile_capture_artifact(request, Path(request["contract"]["output"]["directory"]))
+        kwargs["artifact_path"].write_bytes(HARNESS.pretty(artifact))
+        kwargs["artifact_path"].chmod(0o444)
+        return artifact
+
+    monkeypatch.setattr(module, "run_profile", run_profile)
+    monkeypatch.setattr(module, "discover", lambda output: {})
+    monkeypatch.setattr(module, "assemble", assemble)
+    monkeypatch.setattr(module, "close_target_snapshots", lambda snapshots: None)
+    monkeypatch.setattr(HARNESS, "_load_profile_capture_module", lambda raw: module)
+    outcome = HARNESS.run_profile_capture(request, trusted_capture_raw=actual_raw)
+    expected_lifecycle = ["rocprof", "assemble"] if capture_mode == "success" else ([] if capture_mode == "exception" else ["rocprof"])
+    assert lifecycle == expected_lifecycle
+    assert starts == ([] if capture_mode == "exception" else ["started"])
+    assert outcome["completed"].returncode == (0 if capture_mode == "success" else 1)
+    assert outcome["profile_capture"]["rocprof_started"] is (capture_mode != "exception")
+    assert outcome["profile_capture"]["runner_completed"] is (capture_mode == "success")
+    assert outcome["profile_capture"]["children_state_known"] is (capture_mode != "failure-unknown")
+    assert outcome["profile_capture"]["cleanup_passed"] is (capture_mode != "failure-unknown")
+    assert outcome["profile_diagnostics"]["executor_exception"] == ("RuntimeError" if capture_mode == "exception" else None)
+
+
+@pytest.mark.parametrize("mode", (
+    "missing-artifact", "tampered-artifact", "artifact-mode", "artifact-binding-field",
+    "artifact-profiler-field", "artifact-command", "artifact-ref-hash", "artifact-ref-outside",
+    "artifact-ref-dotdot", "artifact-ref-symlink", "artifact-ref-hardlink", "artifact-ref-mode",
+    "tampered-failure", "failure-mode",
+    "failure-profiler", "failure-command", "failure-effective-command", "failure",
+    "cleanup-failed", "children-nonempty",
+    "timeout", "before-start-failure", "exception-before", "exception-after",
+))
+def test_default_profile_adapter_propagates_failure_safety(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    request, trusted_raw, starts, _ = default_profile_adapter_fixture(tmp_path, monkeypatch, mode)
+    outcome = HARNESS.run_profile_capture(request, trusted_capture_raw=trusted_raw)
+    capture = outcome["profile_capture"]
+    assert outcome["completed"].returncode == 1
+    assert capture["status"] == "failed"
+    runner_completed = mode in {
+        "missing-artifact", "tampered-artifact", "artifact-mode", "artifact-binding-field",
+        "artifact-profiler-field", "artifact-command", "artifact-ref-hash", "artifact-ref-outside",
+        "artifact-ref-dotdot", "artifact-ref-symlink", "artifact-ref-hardlink", "artifact-ref-mode",
+    }
+    children_state_known = runner_completed or mode in {"failure", "children-nonempty", "timeout", "before-start-failure", "exception-before"}
+    expected_children = [4242] if mode == "children-nonempty" else []
+    assert capture["runner_profiled"] is True
+    assert capture["runner_completed"] is runner_completed
+    assert outcome["profile_diagnostics"]["runner_finished"] is runner_completed
+    assert capture["children_state_known"] is children_state_known
+    assert capture["cleanup_passed"] is (children_state_known and expected_children == [])
+    assert capture["children_remaining"] == expected_children
+    if mode == "timeout":
+        assert capture["timed_out"] is True
+        assert capture["cleanup_passed"] is True and capture["children_remaining"] == []
+    if mode == "before-start-failure":
+        assert starts == []
+        assert capture["rocprof_started"] is False and capture["runner_started"] is False
+    if mode.startswith("exception-"):
+        assert outcome["profile_diagnostics"]["executor_exception"] == "RuntimeError"
+
+
+def test_profile_capture_uses_guarded_bytes_across_swap_restore(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request, trusted_raw, starts, trusted_path = default_profile_adapter_fixture(tmp_path, monkeypatch, "success")
+    profiler = tmp_path / "profiler"; profiler.write_bytes(b"profiler"); profiler.chmod(0o755)
+    python = tmp_path / "python"; python.write_bytes(b"python"); python.chmod(0o755)
+    launcher = tmp_path / "launcher"; launcher.write_bytes(b"launcher")
+    monkeypatch.setattr(HARNESS, "PROFILE_PROFILER", profiler)
+    monkeypatch.setattr(HARNESS, "PROFILE_PROFILER_SHA", HARNESS.sha_bytes(profiler.read_bytes()))
+    monkeypatch.setattr(HARNESS.LAUNCHER, "PYTHON", python)
+    monkeypatch.setattr(HARNESS.LAUNCHER, "PYTHON_SHA", HARNESS.sha_bytes(python.read_bytes()))
+    monkeypatch.setattr(HARNESS, "LAUNCHER_PATH", launcher)
+    monkeypatch.setattr(HARNESS, "LAUNCHER_SHA", HARNESS.sha_bytes(launcher.read_bytes()))
+    guard = HARNESS.ProfileTrustGuard()
+    assert guard(request["contract"], "before-start")["passed"] is True
+    marker = tmp_path / "malicious-executed"
+    malicious_path = tmp_path / "malicious-capture.py"
+    malicious_path.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n")
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_TOOL", malicious_path)
+    outcome = HARNESS.run_profile_capture(request, trusted_capture_raw=guard.capture_tool_raw)
+    monkeypatch.setattr(HARNESS, "PROFILE_CAPTURE_TOOL", trusted_path)
+    assert guard(request["contract"], "capture-after")["passed"] is True
+    assert outcome["completed"].returncode == 0 and starts == ["started"]
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_children", "cleanup_allowed"),
+    (("failure", [], True), ("cleanup-failed", [-1], False), ("children-nonempty", [4242], False)),
+)
+def test_default_profile_cleanup_state_controls_lock_substrate_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    expected_children: list[int],
+    cleanup_allowed: bool,
+) -> None:
+    request, trusted_raw, _, _ = default_profile_adapter_fixture(tmp_path, monkeypatch, mode)
+    runtime = FakeRuntime()
+    substrate = HARNESS.LockSubstrate(tmp_path / "lock-dir", tmp_path / "lock-dir/device.lock", (7, 8), (1, 2), {"passed": True})
+    cleanup_calls: list[dict] = []
+
+    def stopped(old_worker_pid, old_service_pid, run, control):
+        value = runtime.stopped(old_worker_pid, old_service_pid, run, control)
+        value["lock"].update({"source": "trusted_substrate", "substrate": {"directory": {"device": 7, "inode": 8}, "lock": {"device": 1, "inode": 2}}})
+        return value
+
+    def cleanup(value, run, *, runner_finished, runner_children):
+        cleanup_calls.append({"runner_finished": runner_finished, "runner_children": runner_children})
+        if not cleanup_allowed:
+            raise HARNESS.HarnessError("synthetic lock retained for unsafe capture child state")
+        return {"passed": True, "secret_material_recorded": False}
+
+    dependencies = replace(
+        runtime.dependencies(),
+        stopped_observation=stopped,
+        profile_capture=lambda actual_request: HARNESS.run_profile_capture(actual_request, trusted_capture_raw=trusted_raw),
+        lock_substrate_prepare=lambda run: substrate,
+        lock_substrate_cleanup=cleanup,
+    )
+    value = profile_ready(tmp_path)
+    assert value["profile_diagnostic"] == request["contract"]
+    code, evidence = HARNESS.execute_maintenance(value, tmp_path / "maintenance", dependencies)
+    assert code == 1 and evidence["restore"]["passed"] is True
+    assert cleanup_calls == [{"runner_finished": cleanup_allowed, "runner_children": expected_children}]
+    assert evidence["lock_substrate_cleanup"]["passed"] is cleanup_allowed
+    if not cleanup_allowed:
+        assert "lock retained" in evidence["lock_substrate_cleanup"]["error"]
+    assert evidence["capture"]["cleanup_passed"] is cleanup_allowed
+    assert evidence["capture"]["children_remaining"] == ([] if mode != "children-nonempty" else [4242])
+    assert evidence["capture"]["diagnostics"]["runner_finished"] is False
 
 
 def test_profile_fake_maintenance_captures_child_then_restores(tmp_path: Path) -> None:

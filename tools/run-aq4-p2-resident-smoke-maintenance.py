@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,10 +33,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "dfabd466d90c05d7fc6d1fb588f4cb3116d2229d"
-LAUNCHER_TREE = "d31e09f1e72caee51a171e9753fcc44b72a32e8d"
-LAUNCHER_GIT_BLOB = "856a8352c4a87b92759372ea454db9ff2452105a"
-LAUNCHER_SHA = "4ec1df2880f759095e118e2046bbdf24cc329fe7d10b01adb5ae8eeb53685f97"
+LAUNCHER_COMMIT = "48cce1349eae0b58beac2851a05e40b2d522559e"
+LAUNCHER_TREE = "49904d7cd5d310d39a1d4ff44f4c8ab881fe4326"
+LAUNCHER_GIT_BLOB = "9346e88563038ac9df1140037d4129101ab445eb"
+LAUNCHER_SHA = "f620495153c836b65160c1575781985174fd86cb6dc40de8bf5c565e02ad37e4"
 RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -55,16 +56,19 @@ PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v3"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v3"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553"
-PROFILE_CAPTURE_TREE = "7992fa953638d5c6fadb6106813f560d3fce1cbd"
-PROFILE_CAPTURE_GIT_BLOB = "671ec370eea971d1e4131b7fb1acef0a5e5697c5"
-PROFILE_CAPTURE_SHA = "9445ab1f1ba4a8d3d2c7b9961ddfc27f65b7b4eeaa4792c5cd7fc3e487c02b7d"
+PROFILE_CAPTURE_COMMIT = "48cce1349eae0b58beac2851a05e40b2d522559e"
+PROFILE_CAPTURE_TREE = "49904d7cd5d310d39a1d4ff44f4c8ab881fe4326"
+PROFILE_CAPTURE_GIT_BLOB = "5e87d7ec0b5c2c37a4ffc2591fa2d7bad8c9cbfd"
+PROFILE_CAPTURE_SHA = "53cbf20cce2219ed2f1033d7be60596c2f788b1496712c147547f383773a30f1"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v3"
 PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
 PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_TIMEOUT_SECONDS = 1800
+PROFILE_CAPTURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
+PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v1"
+PROFILE_CAPTURE_FAILURE_NAME = "capture-failure.json"
 SERVICE = "ullm-openai.service"
 WORKER = ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
 WORKER_SHA = "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
@@ -72,6 +76,7 @@ PACKAGE_ROOT = Path("/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1
 PACKAGE_MANIFEST = PACKAGE_ROOT / "manifest.json"
 PACKAGE_MANIFEST_SHA = "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
 PACKAGE_CONTENT_SHA = "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1"
+PACKAGE_INTEGRITY_IDENTITY_SHA = "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267"
 GATEWAY_READY_URL = "http://172.20.0.1:8000/readyz"
 GATEWAY_HEALTH_URL = "http://172.20.0.1:8000/healthz"
 GATEWAY_MODELS_URL = "http://172.20.0.1:8000/v1/models"
@@ -171,6 +176,7 @@ class PackageTreeSnapshot:
     file_count: int
     directory_count: int
     symlink_count: int
+    special_count: int
     bytes: int
 
     def evidence(self, stage: str) -> dict[str, Any]:
@@ -181,6 +187,7 @@ class PackageTreeSnapshot:
             "file_count": self.file_count,
             "directory_count": self.directory_count,
             "symlink_count": self.symlink_count,
+            "special_count": self.special_count,
             "bytes": self.bytes,
             "identity_fields": [
                 "relative_path",
@@ -246,7 +253,29 @@ def package_tree_snapshot(root: Path) -> PackageTreeSnapshot:
         file_count=sum(stat.S_ISREG(item.mode) for item in ordered),
         directory_count=sum(stat.S_ISDIR(item.mode) for item in ordered),
         symlink_count=sum(stat.S_ISLNK(item.mode) for item in ordered),
+        special_count=sum(
+            not (stat.S_ISREG(item.mode) or stat.S_ISDIR(item.mode) or stat.S_ISLNK(item.mode))
+            for item in ordered
+        ),
         bytes=sum(item.size for item in ordered if stat.S_ISREG(item.mode)),
+    )
+
+
+def package_integrity_identity(content_sha256: str, tree: PackageTreeSnapshot) -> str:
+    return sha_bytes(
+        canonical(
+            {
+                "schema_version": "ullm.aq4_package_integrity_identity.v1",
+                "full_content_sha256": content_sha256,
+                "tree_metadata_identity_sha256": tree.identity_sha256,
+                "entry_count": tree.entry_count,
+                "file_count": tree.file_count,
+                "directory_count": tree.directory_count,
+                "symlink_count": tree.symlink_count,
+                "special_count": tree.special_count,
+                "bytes": tree.bytes,
+            }
+        )
     )
 
 
@@ -1733,7 +1762,11 @@ def _package_tree_difference(expected: PackageTreeSnapshot, actual: PackageTreeS
     return result
 
 
-def capture_package_integrity(dependencies: Dependencies, evidence: dict[str, Any]) -> PackageTreeSnapshot:
+def capture_package_integrity(
+    dependencies: Dependencies,
+    evidence: dict[str, Any],
+    expected_integrity_identity_sha256: str,
+) -> PackageTreeSnapshot:
     """Run the one expensive content hash and bind it to stable tree metadata."""
 
     evidence.update(
@@ -1774,11 +1807,21 @@ def capture_package_integrity(dependencies: Dependencies, evidence: dict[str, An
         "stable_across_full_hash": difference is None,
         "difference": difference,
     }
+    observed_integrity_identity = package_integrity_identity(content_sha256, after)
+    evidence["integrity_identity"] = {
+        "schema_version": "ullm.aq4_package_integrity_identity.v1",
+        "expected_sha256": expected_integrity_identity_sha256,
+        "observed_sha256": observed_integrity_identity,
+        "passed": observed_integrity_identity == expected_integrity_identity_sha256,
+    }
     if content_sha256 != PACKAGE_CONTENT_SHA:
         evidence["error"] = "production package full content hash differs"
         raise HarnessError(evidence["error"])
     if difference is not None:
         evidence["error"] = "production package tree metadata changed during full content hash"
+        raise HarnessError(evidence["error"])
+    if SHA_RE.fullmatch(expected_integrity_identity_sha256) is None or observed_integrity_identity != expected_integrity_identity_sha256:
+        evidence["error"] = "production package trusted integrity identity differs"
         raise HarnessError(evidence["error"])
     return after
 
@@ -1866,6 +1909,7 @@ class ProfileTrustGuard:
     def __init__(self) -> None:
         self.snapshot = LAUNCHER.Snapshot()
         self.initialized = False
+        self.capture_tool_raw: bytes | None = None
 
     def __call__(self, contract: dict[str, Any], stage: str) -> dict[str, Any]:
         allowed = {"before-start", "capture-before", "capture-after", "finalize-before"}
@@ -1887,7 +1931,7 @@ class ProfileTrustGuard:
         if not self.initialized:
             if stage != "before-start":
                 raise HarnessError("profile trust was not initialized before capture")
-            self.snapshot.file(PROFILE_CAPTURE_TOOL, PROFILE_CAPTURE_SHA, "profile capture tool")
+            self.capture_tool_raw = self.snapshot.file(PROFILE_CAPTURE_TOOL, PROFILE_CAPTURE_SHA, "profile capture tool")
             self.snapshot.file(PROFILE_PROFILER, PROFILE_PROFILER_SHA, "profile profiler")
             self.snapshot.file(LAUNCHER.PYTHON, LAUNCHER.PYTHON_SHA, "profile target Python")
             self.snapshot.file(LAUNCHER_PATH, LAUNCHER_SHA, "profile target launcher")
@@ -1905,7 +1949,426 @@ class ProfileTrustGuard:
         }
 
 
-def run_profile_capture(request: dict[str, Any]) -> dict[str, Any]:
+def _semantic_self_hash(value: dict[str, Any], field: str) -> str:
+    clone = copy.deepcopy(value)
+    clone[field] = None
+    return sha_bytes(canonical(clone))
+
+
+def _read_profile_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    raw, _ = LAUNCHER.read_regular(path, label)
+    if len(raw) > LAUNCHER.MAX_BYTES:
+        raise HarnessError(f"{label} exceeds evidence bound")
+    return LAUNCHER.parse_json(raw, label), raw
+
+
+def _path_within(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return path != directory
+
+
+def _verified_profile_file(path: Path, expected_sha256: str) -> tuple[int, ...] | None:
+    maximum = 128 * 1024 * 1024
+    try:
+        if not path.is_absolute() or ".." in path.parts or path.resolve(strict=True) != path:
+            return None
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > maximum
+            or stat.S_IMODE(before.st_mode) not in {0o400, 0o440, 0o444, 0o600, 0o640, 0o644, 0o660, 0o664}
+        ):
+            return None
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if LAUNCHER.file_identity(opened) != LAUNCHER.file_identity(before):
+                return None
+            digest = hashlib.sha256()
+            size = 0
+            while chunk := os.read(descriptor, 1024 * 1024):
+                size += len(chunk)
+                if size > maximum:
+                    return None
+                digest.update(chunk)
+        finally:
+            os.close(descriptor)
+        after = path.lstat()
+        if (
+            size != before.st_size
+            or digest.hexdigest() != expected_sha256
+            or LAUNCHER.file_identity(after) != LAUNCHER.file_identity(before)
+        ):
+            return None
+        return LAUNCHER.file_identity(after)
+    except OSError:
+        return None
+
+
+def _profile_ref(
+    value: Any,
+    *,
+    expected_path: str | None = None,
+    expected_root: Path | None = None,
+    verified: dict[str, tuple[str, tuple[int, ...]]] | None = None,
+) -> bool:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"path", "sha256"}
+        or not isinstance(value.get("path"), str)
+        or not isinstance(value.get("sha256"), str)
+        or SHA_RE.fullmatch(value["sha256"]) is None
+    ):
+        return False
+    path = Path(value["path"])
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or (expected_path is not None and value["path"] != expected_path)
+        or (expected_root is not None and not _path_within(path, expected_root))
+    ):
+        return False
+    if verified is None:
+        return True
+    previous = verified.get(value["path"])
+    if previous is not None:
+        return previous[0] == value["sha256"]
+    identity = _verified_profile_file(path, value["sha256"])
+    if identity is None:
+        return False
+    verified[value["path"]] = (value["sha256"], identity)
+    return True
+
+
+def _profile_refs_unchanged(verified: dict[str, tuple[str, tuple[int, ...]]]) -> bool:
+    try:
+        return all(
+            Path(path).resolve(strict=True) == Path(path)
+            and LAUNCHER.file_identity(Path(path).lstat()) == identity
+            for path, (_sha256, identity) in verified.items()
+        )
+    except OSError:
+        return False
+
+
+def _profile_identity(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 7 and all(type(item) is int for item in value)
+
+
+def _expected_profile_command(runner_argv: list[str], contract: dict[str, Any]) -> list[str]:
+    return [
+        str(PROFILE_PROFILER),
+        "--log-level", "error", "--kernel-trace", "--hip-runtime-trace",
+        "--memory-copy-trace", "--marker-trace", "--output-format", "csv",
+        "--output-directory", contract["output"]["directory"],
+        "--output-file", contract["output"]["name"], "--", *runner_argv,
+    ]
+
+
+def _profile_helpers_valid(value: Any) -> bool:
+    expected = (
+        ("selection_raw_producer", LAUNCHER.PROFILE_PRODUCER_HELPER, LAUNCHER.PROFILE_PRODUCER_HELPER_SHA),
+        ("candidate_selector", LAUNCHER.PROFILE_SELECTOR_HELPER, LAUNCHER.PROFILE_SELECTOR_HELPER_SHA),
+        ("profile_family_classifier", LAUNCHER.PROFILE_FAMILY_HELPER, LAUNCHER.PROFILE_FAMILY_HELPER_SHA),
+    )
+    return isinstance(value, list) and len(value) == len(expected) and all(
+        isinstance(item, dict)
+        and set(item) == {"role", "path", "identity", "sha256"}
+        and item.get("role") == role
+        and item.get("path") == str(path)
+        and item.get("sha256") == expected_sha
+        and item.get("identity") == list(LAUNCHER.file_identity(path.lstat()))
+        and _verified_profile_file(path, expected_sha) is not None
+        for item, (role, path, expected_sha) in zip(value, expected)
+    )
+
+
+def _profile_profiler_binding_valid(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "tool", "invocation_path", "resolved_path", "executable_sha256",
+        "resolved_identity", "symlink_chain",
+    }:
+        return False
+    chain = value.get("symlink_chain")
+    return (
+        value.get("tool") == "rocprofv3"
+        and value.get("invocation_path") == str(PROFILE_PROFILER)
+        and value.get("resolved_path") == str(PROFILE_PROFILER)
+        and value.get("executable_sha256") == PROFILE_PROFILER_SHA
+        and value.get("resolved_identity") == list(LAUNCHER.file_identity(PROFILE_PROFILER.lstat()))
+        and chain == []
+    )
+
+
+def _validate_profile_success_artifact(
+    artifact_path: Path,
+    target_binding: dict[str, Any],
+    contract: dict[str, Any],
+    runner_argv: list[str],
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    value, raw = _read_profile_json(artifact_path, "profile capture success artifact")
+    metadata = artifact_path.lstat()
+    expected_keys = {
+        "schema_version", "status", "measurement_eligible", "promotion_eligible",
+        "artifact_sha256", "binding", "profiler", "source_traces",
+        "capture_capabilities", "marker_contract", "producer_profile_runs",
+        "memory_copy_traces", "eligibility_blockers",
+    }
+    profiler = value.get("profiler")
+    binding = value.get("binding")
+    output_directory = Path(contract["output"]["directory"])
+    expected_command = _expected_profile_command(runner_argv, contract)
+    profiler_binding = {
+        key: profiler.get(key) for key in (
+            "tool", "invocation_path", "resolved_path", "executable_sha256",
+            "resolved_identity", "symlink_chain",
+        )
+    } if isinstance(profiler, dict) else None
+    source_traces = value.get("source_traces")
+    marker_contract = value.get("marker_contract")
+    runs = value.get("producer_profile_runs")
+    memory_traces = value.get("memory_copy_traces")
+    eligibility_blockers = value.get("eligibility_blockers")
+    device = binding.get("device") if isinstance(binding, dict) else None
+    verified_refs: dict[str, tuple[str, tuple[int, ...]]] = {}
+    if (
+        stat.S_IMODE(metadata.st_mode) != 0o444
+        or set(value) != expected_keys
+        or value.get("schema_version") != PROFILE_CAPTURE_SCHEMA
+        or value.get("status") != "complete_diagnostic"
+        or value.get("measurement_eligible") is not False
+        or value.get("promotion_eligible") is not False
+        or not isinstance(value.get("artifact_sha256"), str)
+        or value["artifact_sha256"] != _semantic_self_hash(value, "artifact_sha256")
+        or not isinstance(profiler, dict)
+        or set(profiler) != {
+            "tool", "invocation_path", "resolved_path", "executable_sha256",
+            "resolved_identity", "symlink_chain", "version", "rocm_version",
+            "version_output_sha256", "target_command_manifest", "target_environment",
+            "capture_helpers", "command", "command_sha256", "subprocess_profile_runs",
+        }
+        or not _profile_profiler_binding_valid(profiler_binding)
+        or not isinstance(profiler.get("version"), str)
+        or not profiler["version"]
+        or (profiler.get("rocm_version") is not None and (not isinstance(profiler["rocm_version"], str) or not profiler["rocm_version"]))
+        or not isinstance(profiler.get("version_output_sha256"), str)
+        or SHA_RE.fullmatch(profiler["version_output_sha256"]) is None
+        or profiler.get("target_command_manifest") != {"path": target_binding["path"], "sha256": target_binding["sha256"]}
+        or profiler.get("target_environment") != {
+            "sha256": sha_bytes(canonical(environment)),
+            "keys": sorted(environment),
+            "exact_base_environment": True,
+            "secret_material_recorded": False,
+        }
+        or not _profile_helpers_valid(profiler.get("capture_helpers"))
+        or profiler.get("command") != expected_command
+        or profiler.get("command_sha256") != sha_bytes(canonical(expected_command))
+        or profiler.get("subprocess_profile_runs") != 1
+        or not isinstance(binding, dict)
+        or set(binding) != {
+            "run_id", "resident_session_id", "case_id", "case_sha256",
+            "identity_sha256", "device", "identity", "resident_summary", "resident_raw",
+        }
+        or binding.get("run_id") != contract["resident_evidence"]["run_id"]
+        or not isinstance(binding.get("resident_session_id"), str)
+        or not binding["resident_session_id"]
+        or binding.get("case_id") != contract["resident_evidence"]["case_id"]
+        or binding.get("case_sha256") != LAUNCHER.CASE_SHA
+        or not isinstance(binding.get("identity_sha256"), str)
+        or SHA_RE.fullmatch(binding["identity_sha256"]) is None
+        or device != {
+            "runtime_device_index": 1, "device_id": "r9700-rdna4", "backend": "hip",
+            "name": "AMD Radeon Graphics", "architecture": "gfx1201",
+        }
+        or not _profile_ref(binding.get("identity"), expected_path=contract["resident_evidence"]["identity"], verified=verified_refs)
+        or not _profile_ref(binding.get("resident_summary"), expected_path=contract["resident_evidence"]["summary"], verified=verified_refs)
+        or not _profile_ref(binding.get("resident_raw"), expected_path=contract["resident_evidence"]["raw"], verified=verified_refs)
+        or not isinstance(source_traces, dict)
+        or set(source_traces) != {"kernel", "hip_api", "memory_copy", "marker"}
+        or any(not _profile_ref(item, expected_root=output_directory, verified=verified_refs) for item in source_traces.values())
+        or len({item["path"] for item in source_traces.values()}) != 4
+        or len({item["sha256"] for item in source_traces.values()}) != 4
+        or not _profile_ref(value.get("capture_capabilities"), expected_path=str(output_directory / "capture-capabilities.json"), verified=verified_refs)
+        or marker_contract != {
+            "schema_version": "ullm.aq4_p2.run.v1",
+            "clock_domain": "rocprofv3_monotonic_ns",
+            "range_count": 12,
+            "warmup_indices": [0, 1],
+            "measured_indices": list(range(2, 12)),
+            "warmup_excluded": True,
+        }
+        or not isinstance(runs, list)
+        or len(runs) != 10
+        or not isinstance(memory_traces, list)
+        or len(memory_traces) != 10
+        or any(
+            not _profile_ref(
+                item,
+                expected_path=str(output_directory / "measured-runs" / f"run-{index:02d}_memory_copy_trace.csv"),
+                verified=verified_refs,
+            )
+            for index, item in enumerate(memory_traces, start=2)
+        )
+        or eligibility_blockers != [
+            "rocprof instrumentation overhead forbids performance promotion",
+            "one-case diagnostic evidence does not satisfy seven-prompt promotion coverage",
+        ]
+    ):
+        raise HarnessError("profile capture success artifact semantic binding differs")
+    assert isinstance(runs, list)
+    for index, run in enumerate(runs, start=2):
+        if (
+            not isinstance(run, dict)
+            or set(run) != {
+                "schema_version", "case_id", "case_sha256", "identity_sha256",
+                "resident_run_index", "measurement_eligible", "clock_domain",
+                "kernel_trace_complete", "hip_api_trace_complete", "capture_capabilities",
+                "kernel_trace", "hip_api_trace",
+            }
+            or run.get("schema_version") != "ullm.aq4_p3_rocprof_run_binding.v1"
+            or run.get("case_id") != contract["resident_evidence"]["case_id"]
+            or run.get("case_sha256") != LAUNCHER.CASE_SHA
+            or run.get("identity_sha256") != binding["identity_sha256"]
+            or run.get("resident_run_index") != index
+            or run.get("measurement_eligible") is not False
+            or run.get("clock_domain") != "rocprofv3_monotonic_ns"
+            or run.get("kernel_trace_complete") is not True
+            or run.get("hip_api_trace_complete") is not True
+            or run.get("capture_capabilities") != value["capture_capabilities"]
+            or not _profile_ref(
+                run.get("kernel_trace"),
+                expected_path=str(output_directory / "measured-runs" / f"run-{index:02d}_kernel_trace.csv"),
+                verified=verified_refs,
+            )
+            or not _profile_ref(
+                run.get("hip_api_trace"),
+                expected_path=str(output_directory / "measured-runs" / f"run-{index:02d}_hip_api_trace.csv"),
+                verified=verified_refs,
+            )
+        ):
+            raise HarnessError("profile capture producer run semantic binding differs")
+    if not _profile_refs_unchanged(verified_refs):
+        raise HarnessError("profile capture referenced file identity changed during validation")
+    return {
+        "path": str(artifact_path),
+        "sha256": sha_bytes(raw),
+        "artifact_sha256": value["artifact_sha256"],
+        "schema_version": value["schema_version"],
+        "status": value["status"],
+    }
+
+
+def _validate_profile_failure_evidence(
+    failure_path: Path,
+    output_directory: Path,
+    target_binding: dict[str, Any],
+    expected_command: list[str],
+) -> dict[str, Any]:
+    value, raw = _read_profile_json(failure_path, "profile capture failure evidence")
+    metadata = failure_path.lstat()
+    context = value.get("context")
+    streams = value.get("streams")
+    reason = value.get("reason")
+    expected_keys = {
+        "schema_version", "status", "measurement_eligible", "promotion_eligible",
+        "failure_sha256", "reason", "rocprof_child_new_session",
+        "outer_harness_signalled", "process_group_cleanup_complete",
+        "children_state_known", "children_remaining", "command_sha256",
+        "effective_command_sha256", "context", "streams",
+    }
+    children_state_known = value.get("children_state_known")
+    children_remaining = value.get("children_remaining")
+    cleanup_complete = value.get("process_group_cleanup_complete")
+    logical_command_sha = sha_bytes(canonical(expected_command))
+    if (
+        stat.S_IMODE(metadata.st_mode) != 0o444
+        or set(value) != expected_keys
+        or value.get("schema_version") != PROFILE_CAPTURE_FAILURE_SCHEMA
+        or value.get("status") != "failed"
+        or value.get("measurement_eligible") is not False
+        or value.get("promotion_eligible") is not False
+        or not isinstance(value.get("failure_sha256"), str)
+        or value["failure_sha256"] != _semantic_self_hash(value, "failure_sha256")
+        or not isinstance(reason, str)
+        or not reason
+        or len(reason.encode()) > 65536
+        or value.get("rocprof_child_new_session") is not True
+        or value.get("outer_harness_signalled") is not False
+        or type(cleanup_complete) is not bool
+        or type(children_state_known) is not bool
+        or not isinstance(children_remaining, list)
+        or any(type(pid) is not int or pid <= 0 for pid in children_remaining)
+        or children_remaining != sorted(set(children_remaining))
+        or cleanup_complete is not (children_state_known and children_remaining == [])
+        or (not children_state_known and children_remaining != [])
+        or not isinstance(value.get("command_sha256"), str)
+        or value["command_sha256"] != logical_command_sha
+        or not isinstance(value.get("effective_command_sha256"), str)
+        or SHA_RE.fullmatch(value["effective_command_sha256"]) is None
+        or value["effective_command_sha256"] == logical_command_sha
+        or not isinstance(context, dict)
+        or set(context) != {"profiler", "target_command_manifest"}
+        or not _profile_profiler_binding_valid(context.get("profiler"))
+        or context.get("target_command_manifest")
+        != {"path": target_binding["path"], "sha256": target_binding["sha256"]}
+        or not isinstance(streams, dict)
+        or set(streams) != {"rocprof.stdout", "rocprof.stderr"}
+    ):
+        raise HarnessError("profile capture failure evidence semantic binding differs")
+    for name, reference in streams.items():
+        stream_path = output_directory / name
+        stream_raw, _ = LAUNCHER.read_regular(stream_path, f"profile capture failure {name}")
+        if (
+            not isinstance(reference, dict)
+            or set(reference) != {"bytes", "sha256"}
+            or reference.get("bytes") != len(stream_raw)
+            or reference.get("sha256") != sha_bytes(stream_raw)
+        ):
+            raise HarnessError("profile capture failure stream binding differs")
+    return {
+        "path": str(failure_path),
+        "sha256": sha_bytes(raw),
+        "failure_sha256": value["failure_sha256"],
+        "schema_version": value["schema_version"],
+        "status": value["status"],
+        "reason": reason,
+        "timed_out": "timed out" in reason.lower(),
+        "process_group_cleanup_complete": cleanup_complete,
+        "children_state_known": children_state_known,
+        "children_remaining": children_remaining,
+        "streams": {
+            name: {"path": str(output_directory / name), **reference}
+            for name, reference in sorted(streams.items())
+        },
+    }
+
+
+def _load_profile_capture_module(trusted_capture_raw: bytes) -> types.ModuleType:
+    module_name = "aq4_p3_profile_capture_executor"
+    capture_module = types.ModuleType(module_name)
+    capture_module.__file__ = str(PROFILE_CAPTURE_TOOL)
+    capture_module.__package__ = ""
+    sys.modules[module_name] = capture_module
+    try:
+        code = compile(trusted_capture_raw, str(PROFILE_CAPTURE_TOOL), "exec", dont_inherit=True)
+        exec(code, capture_module.__dict__)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return capture_module
+
+
+def run_profile_capture(
+    request: dict[str, Any],
+    *,
+    trusted_capture_raw: bytes | None = None,
+) -> dict[str, Any]:
     required = {"contract", "runner_argv", "environment", "mark_runner_started", "target_binding"}
     if not isinstance(request, dict) or set(request) != required:
         raise HarnessError("profile runner executor request differs")
@@ -1914,25 +2377,74 @@ def run_profile_capture(request: dict[str, Any]) -> dict[str, Any]:
     environment = request["environment"]
     target_binding = request["target_binding"]
     mark_runner_started = request["mark_runner_started"]
+    output = contract.get("output") if isinstance(contract, dict) else None
     if (
         not isinstance(contract, dict)
         or not isinstance(runner_argv, list)
+        or not runner_argv
+        or any(not isinstance(item, str) or not item for item in runner_argv)
         or environment != LAUNCHER.EXECUTE_ENV
         or not callable(mark_runner_started)
         or not isinstance(target_binding, dict)
+        or set(target_binding) != {"path", "sha256", "manifest_sha256", "identity"}
+        or not isinstance(target_binding.get("path"), str)
+        or not Path(target_binding["path"]).is_absolute()
+        or ".." in Path(target_binding["path"]).parts
+        or not isinstance(target_binding.get("sha256"), str)
+        or SHA_RE.fullmatch(target_binding["sha256"]) is None
+        or not isinstance(target_binding.get("manifest_sha256"), str)
+        or SHA_RE.fullmatch(target_binding["manifest_sha256"]) is None
+        or not _profile_identity(target_binding.get("identity"))
+        or not isinstance(output, dict)
+        or set(output) != {"directory", "name", "artifact", "must_not_exist_before_capture"}
+        or not isinstance(output.get("directory"), str)
+        or not Path(output["directory"]).is_absolute()
+        or ".." in Path(output["directory"]).parts
+        or not isinstance(output.get("name"), str)
+        or not output["name"]
+        or output.get("artifact") != str(Path(output["directory"]) / "capture-artifact.json")
+        or output.get("must_not_exist_before_capture") is not True
     ):
         raise HarnessError("profile runner executor binding differs")
     command = profile_capture_command(target_binding, contract)
-    spec = importlib.util.spec_from_file_location("aq4_p3_profile_capture_executor", PROFILE_CAPTURE_TOOL)
-    if spec is None or spec.loader is None:
-        raise HarnessError("profile capture executor import failed")
-    capture_module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = capture_module
-    spec.loader.exec_module(capture_module)
+    if trusted_capture_raw is None:
+        trusted_capture_raw, _ = LAUNCHER.read_regular(PROFILE_CAPTURE_TOOL, "profile capture executor")
+    if sha_bytes(trusted_capture_raw) != PROFILE_CAPTURE_SHA:
+        raise HarnessError("profile capture executor trusted bytes differ")
+    capture_module = _load_profile_capture_module(trusted_capture_raw)
+    module_name = capture_module.__name__
     stdout_text = io.StringIO()
     stderr_text = io.StringIO()
-    with contextlib.redirect_stdout(stdout_text), contextlib.redirect_stderr(stderr_text):
-        return_code = capture_module.main(command[2:], on_started=mark_runner_started)
+    rocprof_started = False
+    runner_completed = False
+
+    def observed_rocprof_start() -> None:
+        nonlocal rocprof_started
+        if rocprof_started:
+            raise HarnessError("profile capture reported rocprof start more than once")
+        mark_runner_started()
+        rocprof_started = True
+
+    def observed_runner_completed() -> None:
+        nonlocal runner_completed
+        if not rocprof_started or runner_completed:
+            raise HarnessError("profile capture runner completion order differs")
+        runner_completed = True
+
+    capture_exception: Exception | None = None
+    try:
+        with contextlib.redirect_stdout(stdout_text), contextlib.redirect_stderr(stderr_text):
+            return_code = capture_module.main(
+                command[2:],
+                on_rocprof_started=observed_rocprof_start,
+                on_runner_completed=observed_runner_completed,
+            )
+    except Exception as error:
+        capture_exception = error
+        return_code = 1
+        stderr_text.write(f"profile capture executor raised {type(error).__name__}\n")
+    finally:
+        sys.modules.pop(module_name, None)
     capture_stdout = stdout_text.getvalue().encode()
     capture_stderr = stderr_text.getvalue().encode()
     if len(capture_stdout) > LAUNCHER.MAX_BYTES or len(capture_stderr) > LAUNCHER.MAX_BYTES:
@@ -1949,8 +2461,90 @@ def run_profile_capture(request: dict[str, Any]) -> dict[str, Any]:
 
     runner_stdout = runner_stream("rocprof.stdout", capture_stdout)
     runner_stderr = runner_stream("rocprof.stderr", capture_stderr)
-    completed = subprocess.CompletedProcess(runner_argv, return_code, runner_stdout, runner_stderr)
-    complete = return_code == 0 and not runner_stderr
+    output_directory = Path(contract["output"]["directory"])
+    artifact_path = Path(contract["output"]["artifact"])
+    failure_path = output_directory / PROFILE_CAPTURE_FAILURE_NAME
+    if artifact_path.parent != output_directory or artifact_path.name != "capture-artifact.json":
+        raise HarnessError("profile capture artifact output binding differs")
+
+    artifact_evidence: dict[str, Any] | None = None
+    failure_evidence: dict[str, Any] | None = None
+    validation_error: str | None = None
+    cleanup_passed = False
+    children_remaining: list[int] = []
+    timed_out = False
+    complete = False
+    try:
+        if type(return_code) is not int:
+            raise HarnessError("profile capture executor return code differs")
+        if return_code == 0:
+            if failure_path.exists() or failure_path.is_symlink():
+                raise HarnessError("profile capture success conflicts with failure evidence")
+            artifact_evidence = _validate_profile_success_artifact(
+                artifact_path, target_binding, contract, runner_argv, environment
+            )
+            if not rocprof_started or not runner_completed:
+                raise HarnessError("profile capture artifact exists without lifecycle callbacks")
+            if runner_stderr:
+                raise HarnessError("profiled runner stderr is not empty")
+            complete = True
+            cleanup_passed = True
+            children_remaining = []
+        else:
+            if artifact_path.exists() or artifact_path.is_symlink():
+                raise HarnessError("profile capture failure conflicts with success artifact")
+            failure_evidence = _validate_profile_failure_evidence(
+                failure_path,
+                output_directory,
+                target_binding,
+                _expected_profile_command(runner_argv, contract),
+            )
+            cleanup_passed = failure_evidence["process_group_cleanup_complete"]
+            children_remaining = failure_evidence["children_remaining"]
+            timed_out = failure_evidence["timed_out"]
+    except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError) as error:
+        validation_error = f"{type(error).__name__}: {error}"
+        return_code = 1
+        cleanup_passed = False
+        children_remaining = []
+        timed_out = False
+    if complete or runner_completed:
+        children_state_known = True
+        cleanup_passed = True
+        children_remaining = []
+    elif failure_evidence is not None:
+        children_state_known = failure_evidence["children_state_known"]
+        children_remaining = failure_evidence["children_remaining"]
+        cleanup_passed = failure_evidence["process_group_cleanup_complete"]
+    elif not rocprof_started:
+        children_state_known = True
+        cleanup_passed = True
+        children_remaining = []
+    else:
+        children_state_known = False
+        cleanup_passed = False
+        children_remaining = []
+    completed = subprocess.CompletedProcess(runner_argv, 0 if complete else 1, runner_stdout, runner_stderr)
+    runner_start_known = not rocprof_started or runner_completed
+    runner_started = runner_completed
+    runner_finished = runner_completed
+    profile_diagnostics = {
+        "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+        "runner_finished": runner_finished,
+        "capture_artifact": None if artifact_evidence is None else {
+            "path": artifact_evidence["path"],
+            "sha256": artifact_evidence["sha256"],
+            "mode": stat.S_IMODE(Path(artifact_evidence["path"]).lstat().st_mode),
+        },
+        "failure_evidence": None if failure_evidence is None else {
+            "path": failure_evidence["path"],
+            "sha256": failure_evidence["sha256"],
+            "mode": stat.S_IMODE(Path(failure_evidence["path"]).lstat().st_mode),
+            "reason": failure_evidence["reason"],
+        },
+        "validation_error": validation_error,
+        "executor_exception": type(capture_exception).__name__ if capture_exception is not None else None,
+    }
     return {
         "completed": completed,
         "keepalives": [],
@@ -1963,17 +2557,23 @@ def run_profile_capture(request: dict[str, Any]) -> dict[str, Any]:
             "validator_profiled": False,
             "gates_profiled": False,
             "capture_tool_invocations": 1,
-            "rocprof_invocations": 1,
+            "rocprof_invocations": int(rocprof_started),
             "target_manifest_sha256": target_binding.get("sha256"),
             "target_manifest_semantic_sha256": target_binding.get("manifest_sha256"),
             "target_argv_sha256": sha_bytes(canonical(runner_argv)),
             "environment_sha256": sha_bytes(canonical(environment)),
             "capture_stdout_sha256": sha_bytes(capture_stdout),
             "capture_stderr_sha256": sha_bytes(capture_stderr),
-            "timed_out": False,
-            "cleanup_passed": True,
-            "children_remaining": [],
+            "rocprof_started": rocprof_started,
+            "runner_start_known": runner_start_known,
+            "runner_started": runner_started,
+            "runner_completed": runner_completed,
+            "timed_out": timed_out,
+            "cleanup_passed": cleanup_passed,
+            "children_state_known": children_state_known,
+            "children_remaining": children_remaining,
         },
+        "profile_diagnostics": profile_diagnostics,
     }
 
 
@@ -1990,7 +2590,7 @@ def default_dependencies() -> Dependencies:
         owner_probe=default_owner_probe,
         package_hash=tree_hash,
         launcher_execute=_default_launcher_execute,
-        profile_capture=run_profile_capture,
+        profile_capture=lambda request: run_profile_capture(request, trusted_capture_raw=trust.capture_tool_raw),
         profile_trust=trust,
         sleep=time.sleep,
         monotonic_ns=time.monotonic_ns,
@@ -2053,18 +2653,18 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 386, "passed": 386, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 405, "passed": 405, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 275, "passed": 275, "failed": 0, "deselected": 0,
+                "collected": 285, "passed": 285, "failed": 0, "deselected": 0,
                 "files": [
                     {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407", "git_blob": "301b0df899590b28f9b9564866fbda80016580e2", "collected": 51, "passed": 51},
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "e57f7df362ced2fc6753519772b2e656b530ad7f", "collected": 37, "passed": 37},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553", "git_blob": "83737b05760ead8f0f0d0340567eb70b21c779bf", "collected": 59, "passed": 59},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "48cce1349eae0b58beac2851a05e40b2d522559e", "git_blob": "6ff9cf684c9f7ec803ebb50348b28e74ec7343bb", "collected": 69, "passed": 69},
                     {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "c25713ee08887057b3c49ca83111bb30f605873f", "git_blob": "59c5e8664b34bd429f1e24712166fed45b134ae6", "collected": 94, "passed": 94},
                 ],
             },
@@ -2083,8 +2683,8 @@ QA_ATTESTATION = {
             {
                 "name": "diagnostic_capture",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
-                "collected": 16, "passed": 16, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553", "git_blob": "b3255a585f8f7e4ef35bafcf77f44d45258b468b", "collected": 16, "passed": 16}],
+                "collected": 25, "passed": 25, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "48cce1349eae0b58beac2851a05e40b2d522559e", "git_blob": "a1c99f777b092dcf31632b4c1f336e5bc7ab4f97", "collected": 25, "passed": 25}],
             },
             {
                 "name": "selection_raw_producer",
@@ -2199,7 +2799,7 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
                 "full_content_hash_stage": "pre_stop_once",
                 "full_hash_count": 1,
                 "tree_metadata_identity_fields": ["relative_path", "device", "inode", "mode", "nlink", "size", "mtime_ns", "ctime_ns"],
-                "includes": ["regular_file", "directory", "symlink"],
+                "includes": ["regular_file", "directory", "symlink", "special_file"],
                 "post_readiness": "full_tree_metadata_reenumeration_exact_identity",
             },
             "restore_poll": {
@@ -2240,7 +2840,7 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "validator": {"commit": VALIDATOR_COMMIT, "sha256": LAUNCHER.VALIDATOR_SHA},
             "B": {"commit": B_COMMIT, "manifest_sha256": LAUNCHER.BINDING_MANIFEST_SHA},
             "resident": {"commit": RESIDENT_COMMIT, "sha256": LAUNCHER.RESIDENT_SHA},
-            "production": {"manifest_sha256": LAUNCHER.SERVED_SHA, "worker_sha256": WORKER_SHA, "package_manifest_sha256": PACKAGE_MANIFEST_SHA, "package_content_sha256": PACKAGE_CONTENT_SHA},
+            "production": {"manifest_sha256": LAUNCHER.SERVED_SHA, "worker_sha256": WORKER_SHA, "package_manifest_sha256": PACKAGE_MANIFEST_SHA, "package_content_sha256": PACKAGE_CONTENT_SHA, "expected_package_integrity_identity_sha256": PACKAGE_INTEGRITY_IDENTITY_SHA},
             "container_health": {
                 "docker": {"path": str(DOCKER), "sha256": DOCKER_SHA, "client_version": DOCKER_CLIENT_VERSION, "client_api_version": DOCKER_CLIENT_API_VERSION},
                 "container": {"name": OPENWEBUI_CONTAINER_NAME, "id": OPENWEBUI_CONTAINER_ID, "image_id": OPENWEBUI_IMAGE_ID, "status": "running", "health": "healthy"},
@@ -2478,6 +3078,9 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             raise HarnessError("profile diagnostic authorization differs")
     elif value.get("authorization", {}).get("rocprof_wrapper_required") is not False or "profile_diagnostic" in value:
         raise HarnessError("normal one-case profile contract differs")
+    expected_package_integrity = value.get("trust", {}).get("production", {}).get("expected_package_integrity_identity_sha256")
+    if not isinstance(expected_package_integrity, str) or SHA_RE.fullmatch(expected_package_integrity) is None:
+        raise HarnessError("ready package trusted integrity identity differs")
     for path, label in ((output, "maintenance evidence"), (Path(value["launcher_binding"]["runner_output"]), "runner output"), (Path(value["launcher_binding"]["evidence_output"]), "launcher evidence")):
         LAUNCHER.reject_symlink_components(path, label, allow_missing_leaf=True)
         if path.exists() or path.is_symlink():
@@ -2503,7 +3106,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
     stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; package_before: PackageTreeSnapshot | None = None; substrate: LockSubstrate | None = None; runner_finished = False; runner_not_started = False; runner_evidence: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
-        stage = "pre-stop-package-integrity"; package_before = capture_package_integrity(dependencies, evidence["package_integrity"])
+        stage = "pre-stop-package-integrity"; package_before = capture_package_integrity(dependencies, evidence["package_integrity"], expected_package_integrity)
         stage = "pre-stop-snapshot"; pre = capture_running(dependencies); pre["package_integrity"] = copy.deepcopy(evidence["package_integrity"]); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
         for name, count in pre["health"]["formal"]["process_counts"].items():
             evidence["process_counts"][name] += count
@@ -2576,14 +3179,23 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             )
             launcher_failure = launcher_evidence.get("failure")
             runner_not_started = isinstance(launcher_failure, dict) and launcher_failure.get("runner_started") is False
-            runner_finished = launcher_code == 0 or not (
-                runner_not_started
-            )
-            runner_evidence = launcher_evidence if isinstance(launcher_evidence, dict) else None
+            runner_finished = launcher_code == 0 or not runner_not_started
         except Exception:
             runner_finished = False
             raise
         capture_summary = launcher_evidence.get("profile_capture") if profile_diagnostic else None
+        profile_diagnostics = launcher_evidence.get("profile_diagnostics") if profile_diagnostic else None
+        if profile_diagnostic and isinstance(profile_outcome, dict):
+            if not isinstance(capture_summary, dict):
+                capture_summary = profile_outcome.get("profile_capture")
+            if not isinstance(profile_diagnostics, dict):
+                profile_diagnostics = profile_outcome.get("profile_diagnostics")
+        if isinstance(capture_summary, dict) and isinstance(profile_diagnostics, dict):
+            runner_finished = profile_diagnostics.get("runner_finished") is True
+            runner_not_started = (
+                capture_summary.get("rocprof_started") is False
+                and capture_summary.get("runner_started") is False
+            )
         capture_children = capture_summary.get("children_remaining", []) if isinstance(capture_summary, dict) else []
         evidence["launcher"] = {
             "code": launcher_code,
@@ -2591,11 +3203,16 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             "safety": launcher_evidence.get("safety"),
             "failure": launcher_evidence.get("failure"),
             "children_remaining": capture_children or launcher_evidence.get("children_remaining", []),
+            "children_state_known": capture_summary.get("children_state_known") if isinstance(capture_summary, dict) else None,
+            "cleanup_passed": capture_summary.get("cleanup_passed") if isinstance(capture_summary, dict) else None,
             "runner_finished": runner_finished,
             "runner_not_started": runner_not_started,
             "sequence": launcher_evidence.get("sequence"),
             "profile_runner_target": launcher_evidence.get("profile_runner_target"),
+            "profile_capture": capture_summary,
+            "profile_diagnostics": profile_diagnostics,
         }
+        runner_evidence = evidence["launcher"]
         evidence["safety"]["gpu_command_executed"] = launcher_evidence.get("safety", {}).get("gpu_command_executed", "unknown")
         evidence["safety"]["model_load_executed"] = launcher_evidence.get("safety", {}).get("model_load_executed", "unknown")
         if profile_diagnostic and isinstance(profile_outcome, dict):
@@ -2607,6 +3224,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                     "stdout_sha256": sha_bytes(completed.stdout),
                     "stderr_sha256": sha_bytes(completed.stderr),
                     **(capture_summary if isinstance(capture_summary, dict) else {}),
+                    "diagnostics": profile_diagnostics,
                 }
         if launcher_code != 0 or launcher_evidence.get("status") != "passed":
             raise HarnessError("immutable launcher failed")
@@ -2626,24 +3244,34 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                             value_children = runner_evidence.get(key)
                             if isinstance(value_children, list):
                                 children.extend(value_children)
-                    if not runner_finished and not runner_not_started and (capture_attempted or evidence["process_counts"]["launcher"]):
+                    profile_cleanup_safe = (
+                        not capture_attempted
+                        or (
+                            isinstance(runner_evidence, dict)
+                            and runner_evidence.get("cleanup_passed") is True
+                            and runner_evidence.get("children_state_known") is True
+                            and children == []
+                        )
+                    ) if profile_diagnostic else runner_finished or runner_not_started
+                    if not profile_cleanup_safe and not children:
                         # A failed/aborted runner has no trustworthy child
                         # inventory.  Keep the service stopped only long
                         # enough to record cleanup failure; never unlink a
                         # substrate while an unknown child may still hold it.
                         children = [-1]
+                    cleanup_runner_finished = runner_finished or (profile_diagnostic and profile_cleanup_safe)
                     cleanup = (
                         dependencies.lock_substrate_cleanup(
                             substrate,
                             dependencies.run,
-                            runner_finished=runner_finished,
+                            runner_finished=cleanup_runner_finished,
                             runner_children=children,
                         )
                         if dependencies.lock_substrate_cleanup is not None
                         else cleanup_lock_substrate(
                             substrate,
                             dependencies.run,
-                            runner_finished=runner_finished,
+                            runner_finished=cleanup_runner_finished,
                             runner_children=children,
                         )
                     )
