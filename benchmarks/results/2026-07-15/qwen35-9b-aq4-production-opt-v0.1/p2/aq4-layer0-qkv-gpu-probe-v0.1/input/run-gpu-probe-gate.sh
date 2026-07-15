@@ -187,15 +187,15 @@ execute_probe() {
     cleanup_status=$?
     trap - EXIT INT TERM
     set +e
-    if [[ -n "$observer_pid" ]]; then kill "$observer_pid" 2>/dev/null || true; wait "$observer_pid" 2>/dev/null || true; fi
-    if [[ "$service_started" = 1 ]]; then
+    if [[ -n "${observer_pid:-}" ]]; then kill "$observer_pid" 2>/dev/null || true; wait "$observer_pid" 2>/dev/null || true; fi
+    if [[ "${service_started:-0}" = 1 ]]; then
       timeout --signal=TERM --kill-after=5s 60s "${SYSTEMCTL[@]}" start "$SERVICE" >/dev/null 2>&1 || true
       for _ in $(seq 1 60); do [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active ]] && break; sleep 1; done
       [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active ]] || cleanup_status=1
       [[ "$(service_active_hashes)" = "$active_hashes_before" ]] || cleanup_status=1
       [[ "$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value 2>/dev/null)" = "$restart_before" ]] || cleanup_status=1
     fi
-    if [[ "$lock_ready" = 1 && -e "$LOCK" ]]; then rm -f -- "$LOCK" 2>/dev/null || true; fi
+    if [[ "${lock_ready:-0}" = 1 && -e "$LOCK" ]]; then rm -f -- "$LOCK" 2>/dev/null || true; fi
     if [[ -d "$RUNTIME_DIR" && -z "$(find "$RUNTIME_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then "${RUNTIME_DIR_REMOVE[@]}" "$RUNTIME_DIR" 2>/dev/null || true; fi
     exit "$cleanup_status"
   }
@@ -204,7 +204,7 @@ execute_probe() {
   mainpid_before=$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)
   restart_before=$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value)
   active_hashes_before=$(service_active_hashes)
-  run_observer & observer_pid=$!
+  (trap - EXIT INT TERM; run_observer) & observer_pid=$!
   sleep 2
   [[ -e "$OBSERVER_SAMPLE_MARKER" ]] || fail "observer did not produce a sample"
   service_started=1

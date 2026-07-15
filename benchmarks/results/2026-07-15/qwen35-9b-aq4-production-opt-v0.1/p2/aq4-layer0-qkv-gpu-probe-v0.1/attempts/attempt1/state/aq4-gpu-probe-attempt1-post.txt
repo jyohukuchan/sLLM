@@ -1,0 +1,190 @@
+status_porcelain_v1_untracked_all
+ M crates/ullm-engine/src/bin/ullm-aq4-fidelity-capture.rs
+ M crates/ullm-engine/src/bin/ullm-aq4-p2-full-model.rs
+ M crates/ullm-engine/src/bin/ullm-aq4-p2-path-oracle.rs
+ M tools/prepare-aq4-p2-resident-smoke-bundle.py
+ M tools/run-aq4-p2-resident-smoke-maintenance.py
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/SHA256SUMS
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/p0-snapshot.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/rollback-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/validation.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/SHA256SUMS
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit-live-v2.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit-live-v3.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit-live-v4.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/executor-record-fixture.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/SHA256SUMS
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/matrix.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-000.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-001.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-002.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-003.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-004.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-005.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-006.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-007.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-008.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-009.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/warmup-000.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/warmup-001.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-000.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-001.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-002.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-003.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-004.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-005.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-006.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-007.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-008.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-009.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/warmup-000.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/warmup-001.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/results.jsonl
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/summary.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-validation.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v2.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v3.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v4.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2-verified-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2-verified.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3-verified-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3-verified.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4-verified-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4-verified.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-verified-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-verified.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-verified-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-verified.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live-v2.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live-v3.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live-v4.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-prepublish.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/trace-binding.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/trace.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/validation.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/SHA256SUMS
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/failure.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/preflight.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/source.stderr.log
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/source.stdout.log
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/time-v.txt
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/vmstat.log
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/SHA256SUMS
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/cases.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/plan.json
+?? benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/run-source-capture.sh
+?? benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/monitor.log
+?? benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/observer-sample.marker
+?? benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/run.log
+?? benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/service-stopped.marker
+diff_stat
+ .../src/bin/ullm-aq4-fidelity-capture.rs           | 1258 +++++++++++++++++---
+ .../ullm-engine/src/bin/ullm-aq4-p2-full-model.rs  |   12 +-
+ .../ullm-engine/src/bin/ullm-aq4-p2-path-oracle.rs |   10 +-
+ tools/prepare-aq4-p2-resident-smoke-bundle.py      |  128 +-
+ tools/run-aq4-p2-resident-smoke-maintenance.py     |   48 +-
+ 5 files changed, 1178 insertions(+), 278 deletions(-)
+untracked_paths
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/SHA256SUMS
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/p0-snapshot.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/rollback-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p0/validation.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/SHA256SUMS
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit-live-v2.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit-live-v3.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit-live-v4.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/bottleneck-audit.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/executor-record-fixture.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/SHA256SUMS
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/matrix.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-000.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-001.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-002.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-003.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-004.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-005.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-006.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-007.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-008.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/measured-009.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/warmup-000.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/full_model-cold_prefill-p128-m128-hip-r9700/warmup-001.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-000.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-001.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-002.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-003.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-004.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-005.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-006.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-007.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-008.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/measured-009.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/warmup-000.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/raw/production_server-decode-c128-m1-hip-r9700/warmup-001.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/results.jsonl
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-smoke/summary.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/matrix-validation.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v2.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v3.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live-v4.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record-live.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-executor-record.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2-verified-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2-verified.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v2.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3-verified-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3-verified.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v3.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4-verified-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4-verified.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-v4.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-verified-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live-verified.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-live.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-verified-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace-verified.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-trace.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live-v2.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live-v3.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live-v4.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-live.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation-prepublish.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/production-validation.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/trace-binding.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/trace.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p1/validation.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/SHA256SUMS
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/failure.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/preflight.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/source.stderr.log
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/source.stdout.log
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/time-v.txt
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/attempts/source-attempt-20260714T164526Z/vmstat.log
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/SHA256SUMS
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/cases.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/plan.json
+benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-calibration-capture-v0.1/input/run-source-capture.sh
+benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/monitor.log
+benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/observer-sample.marker
+benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/run.log
+benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/service-stopped.marker

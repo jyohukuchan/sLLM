@@ -35,6 +35,7 @@ class Aq4Layer0QkvGpuProbeGateTest(unittest.TestCase):
             '"classification"] == "unclassified"',
             "RUNTIME_DIR_INSTALL=(sudo -n -- install",
             "RUNTIME_DIR_REMOVE=(sudo -n -- rmdir)",
+            "(trap - EXIT INT TERM; run_observer) & observer_pid=$!",
         ):
             self.assertIn(token, text)
 

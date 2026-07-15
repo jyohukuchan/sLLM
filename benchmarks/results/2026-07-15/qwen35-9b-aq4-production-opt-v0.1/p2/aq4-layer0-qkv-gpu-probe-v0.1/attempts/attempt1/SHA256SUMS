@@ -1,0 +1,7 @@
+d2afcae078eb8a184d67221befb1fcbcf11e67f1e15863ce99e3ec265ded3a63  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/raw/monitor.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/raw/observer-sample.marker
+5a2ee284cfd0949a1a4143f1f63740286e28efde65c260fee25e8026c4e60d82  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/raw/run.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/raw/service-stopped.marker
+0dc0768250259fa39237eb516e76e7071bdef36b570aa61306888cbccabdd73d  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/state/aq4-gpu-probe-attempt1-post.txt
+635b38880c28dfc76e0b14a194f95b28712f44cd7bc446a7e273ce43dde2c0b5  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/state/aq4-gpu-probe-attempt1-preexisting.txt
+57c643021203ba9ad83fc5d5062cb5907ef2b1d14aac5ff084875b3760a97958  benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt1/attempt.json

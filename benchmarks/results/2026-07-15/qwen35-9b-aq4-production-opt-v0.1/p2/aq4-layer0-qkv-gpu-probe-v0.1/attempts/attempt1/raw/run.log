@@ -1,0 +1,2 @@
+ullm-aq4-layer0-qkv-runtime-probe: failed to load AQ4 package tensor: unsupported backend operation Aq4MatvecBatch for phase ColdPrefill
+benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/input/run-gpu-probe-gate.sh: line 190: observer_pid: unbound variable

@@ -1,0 +1,60 @@
+{
+  "schema_version": "ullm.aq4_layer0_qkv_gpu_probe_attempt.v1",
+  "attempt": "attempt1",
+  "gate_commit": "1cb69e23ba08bd35a953488bae19e4f6e244a464",
+  "gate_sha256": "4d64b6b95aebcee5e5976d6ff2018a8dc9a9cb86f9f483712bf5f77578bb1306",
+  "started_from_main_head": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+  "execution": {
+    "sudo_v_same_pty": true,
+    "service_stop_attempted": true,
+    "gpu_probe_attempted": true,
+    "rerun": false,
+    "holdout_observed": false,
+    "numeric_go_no_go": false,
+    "promotion": false
+  },
+  "result": {
+    "status": "blocked_runtime_operation_admission",
+    "report_generated": false,
+    "output_generated": false,
+    "expected_output_bytes": 98304,
+    "observed_output_bytes": 0,
+    "error": "unsupported backend operation Aq4MatvecBatch for phase ColdPrefill",
+    "cleanup_error": "observer_pid: unbound variable (background observer inherited EXIT trap)"
+  },
+  "observer": {
+    "physical_card": "2",
+    "samples": 2,
+    "card0_gpu_use_percent": [0, 0],
+    "card1_gpu_use_percent": [0, 0],
+    "card2_gpu_use_percent": [3, 6],
+    "raw_monitor_sha256": "d2afcae078eb8a184d67221befb1fcbcf11e67f1e15863ce99e3ec265ded3a63"
+  },
+  "restore": {
+    "service_active": "active",
+    "service_substate": "running",
+    "main_pid": 1553870,
+    "n_restarts": 0,
+    "runtime_directory": "mode750 uid1000 gid1000 nlink2",
+    "runtime_lock": "mode600 uid1000 gid1000 nlink1",
+    "lock_owner_pid": 1553870,
+    "lock_owner_command": "ullm-openai-gat"
+  },
+  "identity_sha256": {
+    "input_sidecar": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "package_manifest": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "active_manifest": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "worker": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "probe_binary": "b889dbd08d467395c339e5e9524b4d0b94353ca6e3aec29d354aae5070e357f0"
+  },
+  "dirty_state": {
+    "preexisting_status_file_sha256": "635b38880c28dfc76e0b14a194f95b28712f44cd7bc446a7e273ce43dde2c0b5",
+    "post_status_file_sha256": "0dc0768250259fa39237eb516e76e7071bdef36b570aa61306888cbccabdd73d",
+    "new_gate_paths": [
+      "run.log",
+      "monitor.log",
+      "service-stopped.marker",
+      "observer-sample.marker"
+    ]
+  }
+}
