@@ -1655,6 +1655,98 @@ fn parse_v2_entry(value: &Value, index: usize) -> Result<(RawAuthorizationLineag
     Ok((entry, source))
 }
 
+fn validate_v1_entry_semantics(
+    object: &serde_json::Map<String, Value>,
+    source: &Value,
+    sequence: usize,
+    schema: &str,
+) -> Result<()> {
+    match sequence {
+        0 => {
+            if schema != "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+                || object.get("verdict").and_then(Value::as_str) != Some("implementation_ready")
+                || object.get("actual").and_then(Value::as_str) != Some("not_executed")
+                || source.get("verdict") != object.get("verdict")
+                || source.get("actual") != object.get("actual")
+                || source
+                    .get("authorization")
+                    .and_then(Value::as_object)
+                    .and_then(|authorization| {
+                        authorization
+                            .get("eligible_for_fresh_authorization_builder")
+                            .and_then(Value::as_bool)
+                    })
+                    != Some(true)
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 implementation GO differs".into(),
+                ));
+            }
+        }
+        1 | 2 => {
+            let reason_codes = object
+                .get("reason_codes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    ServedModelError(
+                        "promotion.authorization_lineage v1 capture No-Go differs".into(),
+                    )
+                })?;
+            let mut seen = HashSet::new();
+            let reason_codes_are_valid = !reason_codes.is_empty()
+                && reason_codes.iter().all(|reason_code| {
+                    reason_code.as_str().is_some_and(|reason_code| {
+                        !reason_code.is_empty() && seen.insert(reason_code)
+                    })
+                });
+            if schema != "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+                || object.get("verdict").and_then(Value::as_str) != Some("implementation_no_go")
+                || object.get("actual").and_then(Value::as_str) != Some("not_executed")
+                || !reason_codes_are_valid
+                || source.get("verdict") != object.get("verdict")
+                || source.get("actual") != object.get("actual")
+                || source.get("reason_codes") != object.get("reason_codes")
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 capture No-Go differs".into(),
+                ));
+            }
+        }
+        3 | 4 => {
+            let actual = source.get("actual").and_then(Value::as_object);
+            if schema != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+                || object.get("status").and_then(Value::as_str) != Some("actual_failed")
+                || object.get("actual_status").and_then(Value::as_str) != Some("failed")
+                || source.get("status") != object.get("status")
+                || source.get("request_id") != object.get("request_id")
+                || actual.and_then(|actual| actual.get("status")) != object.get("actual_status")
+                || actual.and_then(|actual| actual.get("request_id")) != object.get("request_id")
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 actual failure differs".into(),
+                ));
+            }
+        }
+        5 => {
+            if schema != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+                || object.get("verdict").and_then(Value::as_str) != Some("implementation_no_go")
+                || object.get("actual").and_then(Value::as_str) != Some("not_executed")
+                || object.get("reason_code").and_then(Value::as_str)
+                    != Some("restore_retry_terminal_identity_not_fail_closed")
+                || source.get("verdict") != object.get("verdict")
+                || source.get("actual") != object.get("actual")
+                || source.get("reason_code") != object.get("reason_code")
+            {
+                return Err(ServedModelError(
+                    "promotion.authorization_lineage v1 restore No-Go differs".into(),
+                ));
+            }
+        }
+        _ => unreachable!("v1 lineage entry count is validated before migration"),
+    }
+    Ok(())
+}
+
 fn migrate_v1_entries(entries: &[Value]) -> Result<Vec<Value>> {
     const OLD_RELATIONS: [&str; 6] = [
         "implementation_go_eligible_for_fresh_runtime_audit",
@@ -1739,6 +1831,7 @@ fn migrate_v1_entries(entries: &[Value]) -> Result<Vec<Value>> {
                     "promotion.authorization_lineage v1 entry schema differs".into(),
                 ));
             }
+            validate_v1_entry_semantics(object, &source, sequence, schema)?;
             let status = object
                 .get("status")
                 .or_else(|| object.get("verdict"))
@@ -3185,6 +3278,51 @@ mod tests {
         validate_lineage_file(&path, &digest, Some(&"a".repeat(40)), &mut HashSet::new())
     }
 
+    fn validate_mutated_first_v2_predecessor(
+        sequence: usize,
+        mutate: impl FnOnce(&mut Value, &mut Value),
+    ) -> Result<ValidatedLineageDocument> {
+        let fixture = first_v2_authorized_fixture();
+        let lineage_path = fixture.root.join("lineage-input.json");
+        let mut lineage: Value = serde_json::from_slice(
+            &bounded_read(&lineage_path, MAX_MANIFEST_BYTES, "fixture lineage").unwrap(),
+        )
+        .unwrap();
+        let predecessor_path = PathBuf::from(lineage["predecessor"]["path"].as_str().unwrap());
+        let mut predecessor: Value = serde_json::from_slice(
+            &bounded_read(&predecessor_path, MAX_MANIFEST_BYTES, "fixture predecessor").unwrap(),
+        )
+        .unwrap();
+        let receipt_path =
+            PathBuf::from(predecessor["entries"][sequence]["path"].as_str().unwrap());
+        let mut receipt: Value = serde_json::from_slice(
+            &bounded_read(&receipt_path, MAX_MANIFEST_BYTES, "fixture receipt").unwrap(),
+        )
+        .unwrap();
+        mutate(&mut predecessor["entries"][sequence], &mut receipt);
+
+        let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
+        fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&receipt_path, &receipt_bytes);
+        predecessor["entries"][sequence]["sha256"] = json!(sha256_bytes(&receipt_bytes));
+
+        let predecessor_bytes = serde_json::to_vec(&predecessor).unwrap();
+        fs::set_permissions(&predecessor_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&predecessor_path, &predecessor_bytes);
+        lineage["predecessor"]["sha256"] = json!(sha256_bytes(&predecessor_bytes));
+
+        let lineage_bytes = serde_json::to_vec(&lineage).unwrap();
+        let lineage_digest = sha256_bytes(&lineage_bytes);
+        fs::set_permissions(&lineage_path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_immutable(&lineage_path, &lineage_bytes);
+        validate_lineage_file(
+            &lineage_path,
+            &lineage_digest,
+            Some(&"a".repeat(40)),
+            &mut HashSet::new(),
+        )
+    }
+
     #[test]
     fn sq8_and_aq4_gateway_fixtures_use_the_same_loader() {
         let sq8 = load_served_model(fixture("sq8")).unwrap();
@@ -3361,52 +3499,72 @@ mod tests {
 
     #[test]
     fn portable_v2_manifest_tamper_matrix_is_rejected() {
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("unknown".into(), Value::Bool(true));
-            })
-            .is_err()
-        );
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value["entries"][7]["sequence"] = json!(8);
-            })
-            .is_err()
-        );
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value["entries"][7]["path"] = value["entries"][0]["path"].clone();
-                value["entries"][7]["sha256"] = value["entries"][0]["sha256"].clone();
-            })
-            .is_err()
-        );
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value["entries"][7]["source_commit"] = json!("b".repeat(40));
-            })
-            .is_err()
-        );
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value["predecessor"]["migrated_prefix_sha256"] = json!("0".repeat(64));
-            })
-            .is_err()
-        );
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value["predecessor"]["sha256"] = json!("0".repeat(64));
-            })
-            .is_err()
-        );
-        assert!(
-            validate_mutated_first_v2(|value| {
-                value["entries"].as_array_mut().unwrap().push(json!({}));
-            })
-            .is_err()
-        );
+        assert!(validate_mutated_first_v2(|value| {
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("unknown".into(), Value::Bool(true));
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2(|value| {
+            value["entries"][7]["sequence"] = json!(8);
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2(|value| {
+            value["entries"][7]["path"] = value["entries"][0]["path"].clone();
+            value["entries"][7]["sha256"] = value["entries"][0]["sha256"].clone();
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2(|value| {
+            value["entries"][7]["source_commit"] = json!("b".repeat(40));
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2(|value| {
+            value["predecessor"]["migrated_prefix_sha256"] = json!("0".repeat(64));
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2(|value| {
+            value["predecessor"]["sha256"] = json!("0".repeat(64));
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2(|value| {
+            value["entries"].as_array_mut().unwrap().push(json!({}));
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn portable_v1_migration_discarded_field_tamper_matrix_is_rejected() {
+        assert!(validate_mutated_first_v2_predecessor(0, |entry, receipt| {
+            entry["actual"] = json!("executed");
+            receipt["actual"] = json!("executed");
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2_predecessor(1, |entry, receipt| {
+            entry["reason_codes"] = json!([]);
+            receipt["reason_codes"] = json!([]);
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2_predecessor(2, |entry, receipt| {
+            entry["reason_codes"] = json!(["fixture_no_go", "fixture_no_go"]);
+            receipt["reason_codes"] = json!(["fixture_no_go", "fixture_no_go"]);
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2_predecessor(3, |entry, receipt| {
+            entry["actual_status"] = json!("succeeded");
+            receipt["actual"]["status"] = json!("succeeded");
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2_predecessor(4, |entry, receipt| {
+            entry["status"] = json!("pending");
+            receipt["status"] = json!("pending");
+        })
+        .is_err());
+        assert!(validate_mutated_first_v2_predecessor(5, |entry, receipt| {
+            entry["reason_code"] = json!("wrong_reason");
+            receipt["reason_code"] = json!("wrong_reason");
+        })
+        .is_err());
     }
 
     #[test]
@@ -3495,15 +3653,13 @@ mod tests {
         let tampered_sha = sha256_bytes(&tampered);
         fs::set_permissions(&lineage_input, fs::Permissions::from_mode(0o600)).unwrap();
         write_immutable(&lineage_input, &tampered);
-        assert!(
-            validate_lineage_file(
-                &lineage_input,
-                &tampered_sha,
-                Some(&"a".repeat(40)),
-                &mut HashSet::new(),
-            )
-            .is_err()
-        );
+        assert!(validate_lineage_file(
+            &lineage_input,
+            &tampered_sha,
+            Some(&"a".repeat(40)),
+            &mut HashSet::new(),
+        )
+        .is_err());
     }
 
     #[test]
