@@ -45,8 +45,21 @@ class ReceiptWriter:
 
     @staticmethod
     def write_failure_receipt(**kwargs: Any) -> None:
+        maintenance = Path(kwargs["maintenance_evidence_path"])
         Path(kwargs["output_path"]).write_text(
-            '{"status":"failed"}\n', encoding="ascii"
+            json.dumps(
+                {
+                    "status": "failed",
+                    "actual": {
+                        "maintenance_evidence": {
+                            "path": maintenance.name,
+                            "sha256": hashlib.sha256(maintenance.read_bytes()).hexdigest(),
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="ascii",
         )
 
 
@@ -140,6 +153,8 @@ def dependencies(
     start_error: bool = False,
     acquire_error: bool = False,
     cleanup_error: bool = False,
+    capture_stdout: str | bytes | None = None,
+    capture_stderr: str | bytes = "",
 ) -> tuple[Any, dict[str, Any]]:
     service_values = iter(
         [
@@ -178,8 +193,14 @@ def dependencies(
         output = Path(argv[argv.index("--output") + 1])
         if capture_code == 0:
             output.write_text("{}\n", encoding="utf-8")
-        stdout = json.dumps({"status": "ok", "output": str(output)}) if capture_code == 0 else ""
-        return subprocess.CompletedProcess(argv, capture_code, stdout=stdout, stderr="")
+        stdout = (
+            json.dumps({"status": "ok", "output": str(output)})
+            if capture_code == 0
+            else ""
+        ) if capture_stdout is None else capture_stdout
+        return subprocess.CompletedProcess(
+            argv, capture_code, stdout=stdout, stderr=capture_stderr
+        )
 
     def acquire() -> Lease:
         calls["acquire"] += 1
@@ -349,6 +370,7 @@ def test_success_runs_candidate_once_and_restores_new_epoch(
     assert code == 0
     assert evidence["status"] == "passed"
     assert evidence["actual_run_count"] == 1
+    assert "capture_failure" not in evidence
     assert evidence["restore"]["passed"] is True
     assert calls["stop"] == calls["start"] == 1
     assert calls["lease"].released is True
@@ -378,7 +400,18 @@ def test_capture_failure_still_releases_and_restores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prepare(monkeypatch, [snapshot()])
-    deps, calls = dependencies(tmp_path, capture_code=9)
+    stderr = (
+        b"worker initialization failed: invalid device \xff\n"
+        b"API_KEY=do-not-persist\n"
+        b"token=also-do-not-persist\n"
+        + b"x" * (MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES + 100)
+    )
+    deps, calls = dependencies(
+        tmp_path,
+        capture_code=9,
+        capture_stdout=b"not-json\xff",
+        capture_stderr=stderr,
+    )
 
     code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "failure", deps)
 
@@ -388,8 +421,83 @@ def test_capture_failure_still_releases_and_restores(
     assert evidence["restore"]["passed"] is True
     assert calls["lease"].released is True
     assert calls["start"] == 1
-    assert (tmp_path / "failure" / "promotion-failure-receipt.json").is_file()
+    output = tmp_path / "failure"
+    assert (output / "promotion-failure-receipt.json").is_file()
     assert not (tmp_path / "failure" / "promotion-actual-receipt.json").exists()
+    diagnostic = evidence["capture_failure"]
+    assert diagnostic["stage"] == "capture_subprocess_completed"
+    assert diagnostic["returncode"] == 9
+    assert diagnostic["signal"] is None
+    assert diagnostic["stderr"]["byte_count"] == len(stderr)
+    assert diagnostic["stderr"]["truncated"] is True
+    assert diagnostic["stderr"]["captured_bytes"] == MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    assert diagnostic["stderr"]["sha256"] == hashlib.sha256(stderr).hexdigest()
+    assert "API_KEY" not in diagnostic["stderr"]["text"]
+    assert "do-not-persist" not in diagnostic["stderr"]["text"]
+    assert "also-do-not-persist" not in diagnostic["stderr"]["text"]
+    assert "<redacted sensitive diagnostic line>" in diagnostic["stderr"]["text"]
+    assert "\ufffd" in diagnostic["stderr"]["text"]
+    persisted = json.loads((output / "maintenance-evidence.json").read_text())
+    assert persisted["capture_failure"] == diagnostic
+    failure_receipt = json.loads(
+        (output / "promotion-failure-receipt.json").read_text()
+    )
+    maintenance_ref = failure_receipt["actual"]["maintenance_evidence"]
+    assert maintenance_ref["sha256"] == MODULE.sha_file(
+        output / "maintenance-evidence.json"
+    )
+    sums = (output / "SHA256SUMS").read_text(encoding="ascii")
+    assert f'{maintenance_ref["sha256"]}  maintenance-evidence.json\n' in sums
+    for path in output.iterdir():
+        metadata = path.stat(follow_symlinks=False)
+        assert not path.is_symlink()
+        assert metadata.st_nlink == 1
+        assert stat.S_IMODE(metadata.st_mode) in {0o444, 0o555}
+
+
+def test_capture_signal_and_timeout_are_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(monkeypatch, [snapshot()])
+    deps, _calls = dependencies(
+        tmp_path,
+        capture_code=-9,
+        capture_stderr="worker killed",
+    )
+    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "signal", deps)
+    assert code == 1
+    assert evidence["capture_failure"]["stage"] == "capture_subprocess_completed"
+    assert evidence["capture_failure"]["returncode"] == -9
+    assert evidence["capture_failure"]["signal"] == {
+        "number": 9,
+        "name": "SIGKILL",
+    }
+
+    prepare(monkeypatch, [snapshot()])
+    timeout_root = tmp_path / "timeout-case"
+    timeout_root.mkdir()
+    deps, _calls = dependencies(timeout_root)
+
+    def timeout(argv: list[str], environment: dict[str, str]) -> Any:
+        raise subprocess.TimeoutExpired(
+            argv,
+            300,
+            output=b"partial\xff",
+            stderr=b"password=hunter2\nstartup timed out",
+        )
+
+    deps.capture = timeout
+    code, evidence = MODULE.execute(
+        candidate(timeout_root), tmp_path / "timeout", deps
+    )
+    assert code == 1
+    diagnostic = evidence["capture_failure"]
+    assert diagnostic["stage"] == "capture_subprocess_timeout"
+    assert diagnostic["returncode"] is None
+    assert diagnostic["signal"] is None
+    assert diagnostic["timeout_seconds"] == 300.0
+    assert "hunter2" not in diagnostic["stderr"]["text"]
+    assert evidence["actual_run_count"] == 1
 
 
 def test_stop_failure_attempts_restore(
@@ -467,6 +575,48 @@ def test_create_new_output_rejects_existing_directory(tmp_path: Path) -> None:
     output.mkdir()
     with pytest.raises(MODULE.PromotionError, match="create-new"):
         MODULE.finalize_directory(output, {"record.json": {"status": "ok"}})
+
+
+@pytest.mark.parametrize("kind", ["output-symlink", "staging-directory", "staging-symlink"])
+def test_finalize_rejects_preexisting_and_symlink_paths(
+    tmp_path: Path, kind: str
+) -> None:
+    output = tmp_path / "evidence"
+    staging = tmp_path / ".evidence.incomplete"
+    target = tmp_path / "target"
+    target.mkdir()
+    if kind == "output-symlink":
+        output.symlink_to(target, target_is_directory=True)
+    elif kind == "staging-directory":
+        staging.mkdir()
+    else:
+        staging.symlink_to(target, target_is_directory=True)
+    with pytest.raises(MODULE.PromotionError):
+        MODULE.finalize_directory(output, {"record.json": {"status": "ok"}})
+
+
+def test_finalize_rejects_hardlinked_receipt_and_unsafe_document_name(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "hardlink"
+    external = tmp_path / "external.json"
+    external.write_text("{}\n", encoding="ascii")
+
+    def linked_receipt(staging: Path) -> str:
+        os.link(external, staging / "receipt.json")
+        return "receipt.json"
+
+    with pytest.raises(MODULE.PromotionError, match="topology"):
+        MODULE.finalize_directory(
+            output, {"record.json": {"status": "ok"}}, linked_receipt
+        )
+    assert external.stat().st_nlink == 1
+    assert not output.exists()
+
+    with pytest.raises(MODULE.PromotionError, match="name is unsafe"):
+        MODULE.finalize_directory(
+            tmp_path / "unsafe", {"../escape.json": {"status": "bad"}}
+        )
 
 
 def test_execute_rejects_unauthorized_candidate_before_service_access(

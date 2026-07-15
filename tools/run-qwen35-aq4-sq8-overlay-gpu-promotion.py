@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -43,6 +44,7 @@ STOP_TIMEOUT_SECONDS = 30.0
 RESTORE_TIMEOUT_SECONDS = 120.0
 POLL_SECONDS = 0.25
 MAX_JSON_BYTES = 16 * 1024 * 1024
+CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
 PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DOCKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -1184,8 +1186,83 @@ def default_owner_snapshot() -> dict[str, Any]:
     }
 
 
-def default_capture(argv: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return _run(argv, env=environment, timeout=300)
+def default_capture(argv: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        argv,
+        check=False,
+        capture_output=True,
+        text=False,
+        env=environment,
+        timeout=300,
+    )
+
+
+def _diagnostic_bytes(value: Any) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="surrogatepass")
+    return repr(value).encode("utf-8", errors="backslashreplace")
+
+
+def _redact_diagnostic(raw: bytes) -> str:
+    """Return bounded, display-only diagnostics without credential-bearing lines."""
+
+    text = raw.decode("utf-8", errors="replace")
+    sensitive = re.compile(
+        r"(?i)(?:password|passwd|secret|api[_-]?key|authorization|"
+        r"access[_-]?token|refresh[_-]?token|bearer\s+|"
+        r"(?<![A-Za-z0-9])token\s*[:=]|https?://[^/\s:@]+:[^@\s/]+@)"
+    )
+    redacted: list[str] = []
+    for line in text.splitlines(keepends=True):
+        ending = "\n" if line.endswith("\n") else ""
+        if sensitive.search(line):
+            redacted.append("<redacted sensitive diagnostic line>" + ending)
+        else:
+            redacted.append(line)
+    return "".join(redacted)
+
+
+def _bounded_diagnostic(value: Any) -> dict[str, Any]:
+    raw = _diagnostic_bytes(value)
+    captured = raw[:CAPTURE_DIAGNOSTIC_MAX_BYTES]
+    return {
+        "byte_count": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "captured_bytes": len(captured),
+        "truncated": len(raw) > len(captured),
+        "text": _redact_diagnostic(captured),
+    }
+
+
+def capture_failure_diagnostic(
+    *,
+    stage: str,
+    returncode: int | None,
+    stdout: Any,
+    stderr: Any,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    signal_value: dict[str, Any] | None = None
+    if isinstance(returncode, int) and returncode < 0:
+        number = -returncode
+        try:
+            name = signal.Signals(number).name
+        except ValueError:
+            name = None
+        signal_value = {"number": number, "name": name}
+    return {
+        "schema_version": "ullm.qwen35_aq4.sq8_overlay_capture_failure.v1",
+        "stage": stage,
+        "returncode": returncode,
+        "signal": signal_value,
+        "timeout_seconds": timeout_seconds,
+        "stdout": _bounded_diagnostic(stdout),
+        "stderr": _bounded_diagnostic(stderr),
+    }
 
 
 @dataclass
@@ -1195,7 +1272,9 @@ class Dependencies:
     stop_service: Callable[[], None]
     start_service: Callable[[], None]
     acquire_lock: Callable[[], Any]
-    capture: Callable[[list[str], dict[str, str]], subprocess.CompletedProcess[str]]
+    capture: Callable[
+        [list[str], dict[str, str]], subprocess.CompletedProcess[Any]
+    ]
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
 
@@ -1404,6 +1483,8 @@ def finalize_directory(
     staging.mkdir(mode=0o700)
     try:
         for name, value in documents.items():
+            if Path(name).name != name or name in {"", ".", "..", "SHA256SUMS"}:
+                raise PromotionError("promotion evidence document name is unsafe")
             path = staging / name
             raw = (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("ascii")
             with path.open("xb") as destination:
@@ -1422,6 +1503,24 @@ def finalize_directory(
             expected_names.add(receipt_name)
         if set(names) != expected_names:
             raise PromotionError("promotion evidence receipt output set differs")
+        for name in names:
+            path = staging / name
+            metadata = path.stat(follow_symlinks=False)
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+            ):
+                raise PromotionError("promotion evidence member topology differs")
+            path.chmod(0o444)
+            immutable = path.stat(follow_symlinks=False)
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(immutable.st_mode)
+                or immutable.st_nlink != 1
+                or stat.S_IMODE(immutable.st_mode) != 0o444
+            ):
+                raise PromotionError("promotion evidence member immutability differs")
         sums = [f"{sha_file(staging / name)}  {name}\n" for name in names]
         sums_path = staging / "SHA256SUMS"
         with sums_path.open("xb") as destination:
@@ -1514,13 +1613,43 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             "argv": command,
             "environment": {name: environment[name] for name in ("HIP_VISIBLE_DEVICES", "ULLM_HIP_VISIBLE_DEVICES", *REQUIRED_OVERLAY_ENV)},
         }
-        completed = deps.capture(command, environment)
         evidence["actual_run_count"] = 1
         try:
+            completed = deps.capture(command, environment)
+        except subprocess.TimeoutExpired as error:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_subprocess_timeout",
+                returncode=None,
+                stdout=error.stdout,
+                stderr=error.stderr,
+                timeout_seconds=float(error.timeout),
+            )
+            raise PromotionError("candidate SQ8 capture timed out") from error
+        if completed.returncode != 0:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_subprocess_completed",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+            raise PromotionError("candidate SQ8 capture failed")
+        try:
             capture_status = json.loads(completed.stdout) if completed.stdout.strip() else None
-        except json.JSONDecodeError as error:
+        except (UnicodeError, json.JSONDecodeError) as error:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_status_parse",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
             raise PromotionError("candidate SQ8 capture status JSON differs") from error
-        if completed.returncode != 0 or capture_status != {"status": "ok", "output": str(capture_temp)}:
+        if capture_status != {"status": "ok", "output": str(capture_temp)}:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_status_validation",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
             raise PromotionError("candidate SQ8 capture failed")
         capture_record = validate_executor_record(capture_temp, before_candidate, request_id)
         after_candidate = candidate_snapshot(candidate)
