@@ -3169,12 +3169,12 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 13, "collected": 684, "passed": 684, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 13, "collected": 685, "passed": 685, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_prepared_bootstrap.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 407, "passed": 407, "failed": 0, "deselected": 0,
+                "collected": 408, "passed": 408, "failed": 0, "deselected": 0,
                 "files": [
                     {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "a016564b4cc1dd913227df915a4929bac984f392", "git_blob": "577ccca504997aaca3dc7d24f9626a4a6e90c901", "collected": 67, "passed": 67},
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "d367b6da07393f55c720ded7250bda8cdc402a79", "git_blob": "b62503b59973828cc87836299fa07ff355c28d85", "collected": 59, "passed": 59},
@@ -3182,7 +3182,7 @@ QA_ATTESTATION = {
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "fc4559ee4fb8c7c1e62353fb3978a1a1e0a7d86d", "git_blob": "7104e3181ee3584829d673909cd09238119dd0ce", "collected": 8, "passed": 8},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "2b477ed0dd1344d368e684e413cb756706af22f3", "git_blob": "f6df5f9b1f2a5396ce73db2ba88a031dc653c846", "collected": 72, "passed": 72},
-                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "7bc74c2924c5dfda85b1fc458663392bebc65efe", "git_blob": "6fb58ab9b13754528cee3bee0dac01ec0339c665", "collected": 164, "passed": 164},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "7bdaee8b658ae35b7c794d649de4ab30f21fb7fd", "git_blob": "5020c9316536820df9839f957cd9d614997f1291", "collected": 165, "passed": 165},
                 ],
             },
             {
