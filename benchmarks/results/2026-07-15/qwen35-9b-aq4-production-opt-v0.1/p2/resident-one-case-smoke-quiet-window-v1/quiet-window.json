@@ -1,0 +1,118 @@
+{
+  "binding": {
+    "head_at_finalize": "61818b0b0b877795c2880ba4901f396e24a931e3",
+    "maintenance_harness_sha256": "287e985b6c29ec647deefab00ae67b05a28f74c787a2539c67dac87c9864e6f3",
+    "ready_binding_sha256": "2024ae57338852369c04d974d08a78d37ef22490965bc5cc174ebe39dcb2cc17",
+    "ready_sums_sha256": "be90c4a425d5a1cea8df17de83cbbbf5bb4a8488f92fbe645c121d56bfeb5ae7",
+    "service": "ullm-openai.service"
+  },
+  "captured_unix_ns": 1784087409471054267,
+  "formal_health": {
+    "container": {
+      "health": "healthy",
+      "id": "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+      "image_id": "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409",
+      "network_id": "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8",
+      "network_name": "open-webui-network"
+    },
+    "end": {
+      "gateway_healthz": {
+        "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+        "status": 200
+      },
+      "gateway_models": {
+        "body_sha256": "ccfc5786e5d0928931111c7a2d272ab62e202abd9978b1490a531aa0b6133c20",
+        "model_id": "ullm-qwen3.5-9b-aq4",
+        "status": 200
+      },
+      "gateway_readyz": {
+        "body_sha256": "31bf75f4c0a97cc1f7b60df824fa390b3be9ba014f29b63c87c698ba63d9a9fd",
+        "status": 200
+      },
+      "openwebui_health": {
+        "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+        "status": 200
+      }
+    },
+    "identity_unchanged": true,
+    "process_counts_each_boundary": {
+      "container_curl_endpoint": 5,
+      "container_curl_total": 6,
+      "container_curl_version": 1,
+      "docker": 9,
+      "docker_exec": 6
+    },
+    "start_equals_end": true
+  },
+  "primary_window": {
+    "baseline": {
+      "active_state": "active",
+      "exec_main_start_timestamp": "Wed 2026-07-15 12:39:19 JST",
+      "gpu_owner_pids": [
+        1722613
+      ],
+      "kfd_owner_pids": [
+        1722613
+      ],
+      "lock_device": 26,
+      "lock_holder_pid": 1722227,
+      "lock_inode": 762398,
+      "main_pid": 1722227,
+      "nrestarts": 1,
+      "sub_state": "running",
+      "worker_pid": 1722613
+    },
+    "baseline_equals_final": true,
+    "interval_seconds": 5,
+    "observed_seconds": 121.397,
+    "sample_count": 25,
+    "violations": []
+  },
+  "read_only": true,
+  "schema_version": "ullm.aq4_p2_external_mutation_quiet_window.v1",
+  "status": "go",
+  "terminal_window": {
+    "baseline_equals_final": true,
+    "external_service_process_observations": 0,
+    "interval_seconds": 5,
+    "lock_inode": 762398,
+    "observed_seconds": 120.108,
+    "pts5_process_observations": 0,
+    "pts5_sample_counts": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "sample_count": 25,
+    "service_epoch": {
+      "active_state": "active",
+      "exec_main_start_timestamp": "Wed 2026-07-15 12:39:19 JST",
+      "main_pid": 1722227,
+      "nrestarts": 1,
+      "sub_state": "running"
+    },
+    "violations": []
+  }
+}
