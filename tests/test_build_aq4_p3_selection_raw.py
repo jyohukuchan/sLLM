@@ -69,7 +69,10 @@ def identity_fixture(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "resident_driver_identity": resident,
         "hash_binding": {
             "bound_case_manifest_sha256": "a" * 64,
+            "worker_binary_sha256": "d" * 64,
+            "package_manifest_sha256": "e" * 64,
             "package_content_sha256": "f" * 64,
+            "served_model_manifest_sha256": "1" * 64,
         },
     }
     value["identity_sha256"] = PRODUCER.self_hash(value, "identity_sha256")
@@ -608,6 +611,16 @@ def test_hash_swap_missing_prompt_m_and_pairing_fail_closed(tmp_path: Path) -> N
     with pytest.raises(PRODUCER.ProducerError, match="run pairing differs"):
         build_manifest(broken_path)
 
+    duplicate_root = tmp_path / "duplicate-pair"
+    duplicate_root.mkdir()
+    _path, duplicate = promotion_manifest(duplicate_root)
+    duplicate["full_model_pairs"][1]["run_index"] = duplicate["full_model_pairs"][0]["run_index"]
+    duplicate["manifest_sha256"] = PRODUCER.manifest_sha256(duplicate)
+    duplicate_path = duplicate_root / "duplicate-pair.json"
+    write_json(duplicate_path, duplicate)
+    with pytest.raises(PRODUCER.ProducerError, match="reuses a measured run sample"):
+        build_manifest(duplicate_path)
+
 
 @pytest.mark.parametrize(
     ("field", "replacement", "message"),
@@ -785,3 +798,24 @@ def test_resident_raw_float_field_matrix_rejects_integer_substitution(
     write_json(bad_path, manifest)
     with pytest.raises(PRODUCER.ProducerError, match="must be a finite float"):
         build_manifest(bad_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["resident_driver_identity"].pop("runtime_device"), "runtime_device"),
+        (lambda value: value["hash_binding"].pop("package_manifest_sha256"), "hash_binding"),
+        (lambda value: value["resident_driver_identity"].pop("worker_binary_sha256"), "fields differ"),
+    ],
+)
+def test_identity_requires_source_build_runtime_and_package_bindings(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    identity_path, identity = identity_fixture(tmp_path)
+    mutation(identity)
+    identity["identity_sha256"] = PRODUCER.self_hash(identity, "identity_sha256")
+    write_json(identity_path, identity)
+    snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
+    value = PRODUCER.parse_json(snapshot, "identity")
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        PRODUCER.validate_identity(value, snapshot)
