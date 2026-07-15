@@ -1,0 +1,171 @@
+{
+  "B": {
+    "manifest_sha256": "82a75a62a1b5ce254df5522f808ec1ffce00045265960342149eb9ddb29837d4",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
+  },
+  "R": {
+    "commit": "076c3662aad6a3c8c74b3875882df4b41c026de7",
+    "git_blob": "c6f5f30a0a3bc64dca01787648f19bb74edc95f5",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5/trusted-runner.py",
+    "sha256": "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb",
+    "tree": "8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca"
+  },
+  "actual_eligible": false,
+  "blocked_reasons": [
+    "live preflight sidecar is absent",
+    "independent execute-launcher QA is pending"
+  ],
+  "case": {
+    "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+    "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7"
+  },
+  "dry_launcher": {
+    "commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958",
+    "git_blob": "9e9cee31e23559e440cbd1a074784eaae97fae57",
+    "sha256": "8cd38aabc60eba5dfdcc3adc46421cbe7508bfd95bcb1d8b56b410f1a0f1fa81",
+    "tree": "f7d553a0901af033c86faa09eb966dce8255e065"
+  },
+  "environment": {
+    "HIP_VISIBLE_DEVICES": "1",
+    "ULLM_BUILD_GIT_COMMIT": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+    "ULLM_HIP_VISIBLE_DEVICES": "1",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
+    "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json"
+  },
+  "evidence_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v6",
+  "execution_contract": {
+    "case_count": 1,
+    "measured_runs": 10,
+    "oom_reuse_forbidden": true,
+    "resident_model_loads": 1,
+    "sequential": true,
+    "warmup_runs": 2
+  },
+  "input_root": {
+    "fingerprint_sha256": "55b30d5d521abf98b0122144f59122b1030a885dbfd67d25bb9d4c6f2955bb14",
+    "member_count": 19,
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
+  },
+  "live_preflight": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v6/live-preflight.json",
+    "replaces_synthetic_preflight": false,
+    "required": true,
+    "sha256": null
+  },
+  "lock_path": "/run/ullm/r9700.lock",
+  "promotion": false,
+  "resident": {
+    "commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver",
+    "served_manifest": "/etc/ullm/served-models/active.json",
+    "served_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34"
+  },
+  "run_id": "p2-r9700-resident-one-case-smoke-execute-v6",
+  "runner_output": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v6",
+  "runtime_mapping": {
+    "amd_smi_index": 2,
+    "bdf": "0000:47:00.0",
+    "kfd_id": 51545,
+    "runtime_device_index": 1,
+    "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+    "visible_token": "1"
+  },
+  "schema_version": "ullm.aq4_p2_resident_smoke_execute_binding.v1",
+  "services": [
+    "ullm-openai.service",
+    "llama-qwen35-udq4.service"
+  ],
+  "status": "blocked_pending_live_preflight_and_qa",
+  "tools": {
+    "amd_smi": {
+      "path": "/opt/rocm/bin/amd-smi",
+      "resolved_path": "/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py",
+      "sha256": "c6185991e96dc45b3ae930eace23869f070fce2afab5e061a336c0a7e2e9fa4a",
+      "symlink_chain": [
+        [
+          "/opt/rocm",
+          "/etc/alternatives/rocm"
+        ],
+        [
+          "/etc/alternatives/rocm",
+          "/opt/rocm-7.2.1"
+        ],
+        [
+          "/opt/rocm/bin/amd-smi",
+          "../libexec/amdsmi_cli/amdsmi_cli.py"
+        ]
+      ]
+    },
+    "pgrep": {
+      "path": "/usr/bin/pgrep",
+      "sha256": "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
+    },
+    "rocminfo": {
+      "path": "/usr/bin/rocminfo",
+      "resolved_path": "/opt/rocm-7.2.1/bin/rocminfo",
+      "sha256": "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed",
+      "symlink_chain": [
+        [
+          "/usr/bin/rocminfo",
+          "/etc/alternatives/rocminfo"
+        ],
+        [
+          "/etc/alternatives/rocminfo",
+          "/opt/rocm-7.2.1/bin/rocminfo"
+        ]
+      ]
+    },
+    "sudo": {
+      "keepalive_seconds": 30.0,
+      "path": "/usr/bin/sudo",
+      "prevalidate_argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "sha256": "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
+    },
+    "systemctl": {
+      "path": "/usr/bin/systemctl",
+      "sha256": "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
+    }
+  },
+  "validator": {
+    "commit": "a3f0527a200bfe14f81301789089c61b59047116",
+    "git_blob": "bec05f97ad9156ae49aab27ccda5c73fab346d8e",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+    "sha256": "8a151a4d3b44c266a667c1e902d284b019ed282639fa5f0f6e5339de0488e5bc",
+    "tree": "becc037dbb3a4e91c10499ea3bc2cf9b7c011748"
+  },
+  "worker_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker"
+}
