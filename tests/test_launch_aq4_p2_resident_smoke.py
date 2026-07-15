@@ -21,7 +21,7 @@ SPEC.loader.exec_module(LAUNCHER)
 
 
 def validator_success() -> bytes:
-    return (json.dumps({"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5"}, sort_keys=True) + "\n").encode()
+    return (json.dumps({"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v6"}, sort_keys=True) + "\n").encode()
 
 
 def test_real_dry_run_orders_validator_before_runner_and_writes_immutable_evidence(tmp_path: Path) -> None:

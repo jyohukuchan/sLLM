@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v6"
 BINDING_MANIFEST = BINDING_ROOT / "binding-manifest.json"
 RUNNER = BINDING_ROOT / "trusted-runner.py"
 VALIDATOR = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
@@ -31,11 +31,11 @@ RESIDENT_DRIVER = INPUT_ROOT / "resident-driver"
 SERVED_MANIFEST = Path("/etc/ullm/served-models/active.json")
 LOCK_PATH = Path("/run/ullm/r9700.lock")
 RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
-EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v5"
+EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v6"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
-EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v6"
-EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v6"
+EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v7"
+EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v7"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_REAL = Path("/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py")
@@ -54,18 +54,18 @@ INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10491730
 INPUT_FINGERPRINT_SHA = "55b30d5d521abf98b0122144f59122b1030a885dbfd67d25bb9d4c6f2955bb14"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10617146
+BINDING_ROOT_INODE = 10617226
 BINDING_ROOT_MODE = 0o555
-BINDING_MANIFEST_SHA = "82a75a62a1b5ce254df5522f808ec1ffce00045265960342149eb9ddb29837d4"
-BINDING_PLAN_SHA = "8063dcc804cf48b2ceb890cc444c3f80279756c740968b9cab044ec5992e5009"
-RUNNER_COMMIT = "076c3662aad6a3c8c74b3875882df4b41c026de7"
-RUNNER_TREE = "8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca"
-RUNNER_GIT_BLOB = "c6f5f30a0a3bc64dca01787648f19bb74edc95f5"
-RUNNER_SHA = "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
-VALIDATOR_COMMIT = "a3f0527a200bfe14f81301789089c61b59047116"
-VALIDATOR_TREE = "becc037dbb3a4e91c10499ea3bc2cf9b7c011748"
-VALIDATOR_GIT_BLOB = "bec05f97ad9156ae49aab27ccda5c73fab346d8e"
-VALIDATOR_SHA = "8a151a4d3b44c266a667c1e902d284b019ed282639fa5f0f6e5339de0488e5bc"
+BINDING_MANIFEST_SHA = "b206df5a49b9e97146f9f0488b262814e7f6ec3071a9dbb3c017cfe8dbb2f7b7"
+BINDING_PLAN_SHA = "41ef9ae650fdf705908f007af483d3c491211b9893af5b321df32e66a05e564d"
+RUNNER_COMMIT = "76c48aa27c08f8cd5115a15e6be25b83d679d8fa"
+RUNNER_TREE = "e79865753bcbba1a9134670fa2ea57327ab84ea4"
+RUNNER_GIT_BLOB = "1929ca23d50c85d3464f9a2c87f1e062d0dc665a"
+RUNNER_SHA = "bbe978ede0e4662c33d0d12eee4194531f340b9c06001f37d619019197fd5138"
+VALIDATOR_COMMIT = "fb0a5afe86763c95c7bef99ae19ac864c2f56bd5"
+VALIDATOR_TREE = "798db857d239b75165f85c2e540e07afa13d3574"
+VALIDATOR_GIT_BLOB = "38e0979ff9dc33fc31f76e4dc91f3421a851d660"
+VALIDATOR_SHA = "72cb128fa4290e468d2e482749138a17d8a8ef2e05d1ad456fa1bcc9cc5ad789"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
 RESIDENT_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
 RESIDENT_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
@@ -110,13 +110,13 @@ ROCMINFO_SHA = "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed
 SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
-EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v6"
-PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v5"
-PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v5"
-PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v5"
+EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v7"
+PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v6"
+PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v6"
+PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v6"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
-PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v5"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v6"
 PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
 ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
@@ -171,11 +171,11 @@ INPUT_MEMBER_SHA = {
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "a3646ec43d6c74e087fc16155c7e5ef0434331e4f2e3c903d0ed4f5f76ac19ba",
+    "runner-subprocess-evidence.json": "0954e645b5a0a20efb3c52050426637d1ba77eab30f04303f2b80cca3908ab7b",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "0971483a95925d352ef4f80af94631b1b9e323243d1fee236129a010d47a155d",
+    "SHA256SUMS": "684e3be7a50393b3b8c7b045c3719727b4ea6f1ceaabfd3476c3158215076e50",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -456,7 +456,7 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     exact = {"schema_version", "status", "promotion", "launch_eligible", "requires_immutable_launcher", "predecessor", "trust_roots", "input_root", "outputs", "execution", "cycle_control", "next_stage", "runner_roles", "binding_root_contract"}
     if set(manifest) != exact:
         raise LauncherError("B binding manifest exact schema differs")
-    if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v5" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
+    if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v6" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
         raise LauncherError("B binding status/promotion differs")
     if manifest.get("binding_root_contract") != {"type": "directory", "mode": "0555", "members_read_only": True, "members_single_link": True}:
         raise LauncherError("B binding root contract differs")
@@ -532,7 +532,7 @@ def runner_argv() -> list[str]:
         "--identity", str(INPUT_ROOT / "identity.json"), "--preflight", str(INPUT_ROOT / "preflight.json"),
         "--policy", str(INPUT_ROOT / "policy.json"), "--bundle-root", str(INPUT_ROOT),
         "--trusted-validator", str(VALIDATOR), "--trusted-validator-sha256", VALIDATOR_SHA,
-        "--output-dir", str(RUNNER_OUTPUT), "--run-id", "p2-r9700-resident-one-case-smoke-binding-v5-validate",
+        "--output-dir", str(RUNNER_OUTPUT), "--run-id", "p2-r9700-resident-one-case-smoke-binding-v6-validate",
         "--baseline-kind", "active-production", "--lock-path", str(LOCK_PATH), "--one-case-smoke", "--dry-run",
     ]
 
@@ -617,7 +617,7 @@ def process_record(argv: list[str], completed: subprocess.CompletedProcess[bytes
 
 def validate_validator_report(raw: bytes) -> dict[str, Any]:
     report = parse_json(raw, "validator report")
-    expected = {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5"}
+    expected = {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v6"}
     if report != expected:
         raise LauncherError("validator report/root/B binding differs")
     return report

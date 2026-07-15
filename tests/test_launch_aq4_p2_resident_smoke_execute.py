@@ -21,7 +21,7 @@ TRUSTED_LAUNCHER_SHA = LAUNCHER.sha_bytes(SCRIPT.read_bytes())
 
 
 def _validator_success() -> bytes:
-    return b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v5", "status": "prepared_not_executed"}\n'
+    return b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v6", "status": "prepared_not_executed"}\n'
 
 
 def _ready_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
