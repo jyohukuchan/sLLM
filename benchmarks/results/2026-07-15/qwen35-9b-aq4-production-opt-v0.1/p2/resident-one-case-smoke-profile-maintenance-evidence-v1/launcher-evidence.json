@@ -1,0 +1,91 @@
+{
+  "capture": null,
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "captured_unix_ns": 1784086743571931322,
+      "exit_code": 0,
+      "label": "sudo-prevalidate",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "execution_mode": "profile_diagnostic",
+  "failure": {
+    "launcher_started": false,
+    "reason": "[Errno 2] No such file or directory: '/run/ullm/r9700.lock'",
+    "stage": "pre-stop-snapshot"
+  },
+  "launcher": null,
+  "lock_substrate": null,
+  "lock_substrate_cleanup": null,
+  "mode": "execute",
+  "pre_stop": null,
+  "process_counts": {
+    "capture_tool": 0,
+    "container_curl": 0,
+    "container_curl_endpoint": 0,
+    "container_curl_total": 0,
+    "container_curl_version": 0,
+    "docker": 0,
+    "docker_exec": 0,
+    "launcher": 0,
+    "rocprof": 0,
+    "stopped_gate_polls": 0,
+    "stopped_gate_probe_commands": 0,
+    "sudo": 1,
+    "sudo_keepalive": 0,
+    "systemctl_start": 0,
+    "systemctl_stop": 0
+  },
+  "profile_trust": [
+    {
+      "capture_command_sha256": "453af6305732725a2cff7e416ae38b19951aec42abdd7f8706172a19c1308b9e",
+      "capture_tool_sha256": "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8",
+      "launcher_command_sha256": "bc03a50462fbfeaca786c2b4cd22bdcf5dbc5cbddc26ef8f37f46202a5e00547",
+      "launcher_sha256": "382dca37f2fb5fb398a0c71128a96d58ad7f0d56543c0c418ae09532092ba3b4",
+      "passed": true,
+      "profiler_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "python_sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118",
+      "stage": "before-start",
+      "target_manifest_sha256": "99014dac5f0d0b91d64f9821e76252bf77552121b8102f00e724662c49cd9072"
+    },
+    {
+      "capture_command_sha256": "453af6305732725a2cff7e416ae38b19951aec42abdd7f8706172a19c1308b9e",
+      "capture_tool_sha256": "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8",
+      "launcher_command_sha256": "bc03a50462fbfeaca786c2b4cd22bdcf5dbc5cbddc26ef8f37f46202a5e00547",
+      "launcher_sha256": "382dca37f2fb5fb398a0c71128a96d58ad7f0d56543c0c418ae09532092ba3b4",
+      "passed": true,
+      "profiler_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "python_sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118",
+      "stage": "finalize-before",
+      "target_manifest_sha256": "99014dac5f0d0b91d64f9821e76252bf77552121b8102f00e724662c49cd9072"
+    }
+  ],
+  "promotion_eligible": false,
+  "restore": {
+    "attempted": false,
+    "error": null,
+    "passed": true,
+    "post_start": null
+  },
+  "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1",
+  "safety": {
+    "gpu_command_executed": false,
+    "model_load_executed": false,
+    "service_stopped": false,
+    "service_touched": false
+  },
+  "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
+  "secret_material_recorded": false,
+  "sequence": [
+    "sudo-prevalidate"
+  ],
+  "status": "failed",
+  "stopped_gate_poll": null,
+  "stopped_gates": null
+}
