@@ -1,0 +1,981 @@
+{
+  "artifact_sha256": "d7d55ce12bfa3f91b0945922ed73aff900dff436d76a5646f9f78bd481ec8fcc",
+  "binding": {
+    "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+    "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+    "device": {
+      "architecture": "gfx1201",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "AMD Radeon Graphics",
+      "runtime_device_index": 1
+    },
+    "identity": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+      "sha256": "6c3e3562eaafbc357497153f46a12c726383130b8b7f4e630ba50c769d03fc37"
+    },
+    "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+    "resident_raw": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+      "sha256": "f2593ab596a583c7761d7596e03b87dc8f53fb0b0af9aa1a7fddd9b36d6e6fc0"
+    },
+    "resident_session_id": "2e3effe49222744bda6e37bff1ff5b8bec2422aed1a581a9c6e85de352002ea1",
+    "resident_summary": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.summary.json",
+      "sha256": "36d8cd6a2c12dbc0ecb4db4f30d0f4475e82dbfe8abc1f9f0146368f54295e77"
+    },
+    "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
+  },
+  "capture_capabilities": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+    "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+  },
+  "eligibility_blockers": [
+    "rocprof instrumentation overhead forbids performance promotion",
+    "one-case diagnostic evidence does not satisfy seven-prompt promotion coverage"
+  ],
+  "kernel_normalization": {
+    "groups": [
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "7712f8755520eea1d088a1d6369e3efb060dc09583114057a090a848757446c2",
+            "before": "7712f8755520eea1d088a1d6369e3efb060dc09583114057a090a848757446c2"
+          },
+          "correlation_id_set_sha256": {
+            "after": "da1bda1395a408dd73ffb546672623596d2e8623295a915ff50758fe3ca93995",
+            "before": "da1bda1395a408dd73ffb546672623596d2e8623295a915ff50758fe3ca93995"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "c40cdca3f0446a4b15d686e5a19bd3211da1be6e5db78c79e82b6e893766a6f6",
+            "before": "c40cdca3f0446a4b15d686e5a19bd3211da1be6e5db78c79e82b6e893766a6f6"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "75f622e91d5b71da23c12e509b820ee4ce3fb3ae2f357adf2a6931fe83b475e9",
+            "before": "75f622e91d5b71da23c12e509b820ee4ce3fb3ae2f357adf2a6931fe83b475e9"
+          },
+          "duration_sum_ns": {
+            "after": 942465592,
+            "before": 942465592
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "1aa904f89b8bf158bb4d99ecf0e8fecdd3fc82494eee3e1353d349affcf1b9a5",
+        "pre_order_sha256": "b7bda25846659521fa9b64d4d7421ab344bfae3339cb5b8ac4dbb9f34773319e",
+        "raw_order_inversion_count": 35,
+        "row_count": 928,
+        "run_index": 0,
+        "run_kind": "warmup"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "df504f93ed6e7e2a7addac7808f46a236c849ea1126f74ec199919dd68031b4d",
+            "before": "df504f93ed6e7e2a7addac7808f46a236c849ea1126f74ec199919dd68031b4d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "e4354b8ed895124224ea982e3ba56e01ccb86a699b36098281732e6edfe7a9d7",
+            "before": "e4354b8ed895124224ea982e3ba56e01ccb86a699b36098281732e6edfe7a9d7"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "c0962d3f5f35bfcfedcd2813e83930b30ec614bf4ec50b1e8f250f98d0801ec0",
+            "before": "c0962d3f5f35bfcfedcd2813e83930b30ec614bf4ec50b1e8f250f98d0801ec0"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "a629eb38a1c5b238fc77f3c27786bbaeea86ec4720eecd0b8c2fcb137b3404e9",
+            "before": "a629eb38a1c5b238fc77f3c27786bbaeea86ec4720eecd0b8c2fcb137b3404e9"
+          },
+          "duration_sum_ns": {
+            "after": 940755700,
+            "before": 940755700
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "b08ac2ad367dd83326e20002cf34bd72cc7dabf2cf437f1855614287bd735588",
+        "pre_order_sha256": "548d487f0a68e0025286f8bcb498f3017670528227fdffaab17382b98a5f1e5f",
+        "raw_order_inversion_count": 10,
+        "row_count": 928,
+        "run_index": 1,
+        "run_kind": "warmup"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "d7e3ba6d50600185beda649929d1306385e2e673f28463fdc865276a57e60ad8",
+            "before": "d7e3ba6d50600185beda649929d1306385e2e673f28463fdc865276a57e60ad8"
+          },
+          "correlation_id_set_sha256": {
+            "after": "c7da28834eb81bd6483b723c71ab284c00e33b8503580a8b3e4ecb8446096b14",
+            "before": "c7da28834eb81bd6483b723c71ab284c00e33b8503580a8b3e4ecb8446096b14"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "aa22377947facfc874734ceba7e8888a09c664a464e6c32ee1a9d21f1170b565",
+            "before": "aa22377947facfc874734ceba7e8888a09c664a464e6c32ee1a9d21f1170b565"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "a06d2deb76520ed69b2a21f7128cda4726a0fafe3634082b67bd96e7314d49a3",
+            "before": "a06d2deb76520ed69b2a21f7128cda4726a0fafe3634082b67bd96e7314d49a3"
+          },
+          "duration_sum_ns": {
+            "after": 941604350,
+            "before": 941604350
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "e377f301f16273907152363ad529562a7ecf9bfe66d14d3f01fb4edae3d9c337",
+        "pre_order_sha256": "56669ffe9cbdde1ece3db44101ad4a3d7dda59d9f41eafc67f62af2423c23e52",
+        "raw_order_inversion_count": 8,
+        "row_count": 928,
+        "run_index": 2,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "3dae3e0e428f0c2bd79ca559e2a3b608195b2e50488d57bd8dbfa1890c05abef",
+            "before": "3dae3e0e428f0c2bd79ca559e2a3b608195b2e50488d57bd8dbfa1890c05abef"
+          },
+          "correlation_id_set_sha256": {
+            "after": "3879b223c1aa78470792fb7530b0d640c1d834321e37348529de71d482da1319",
+            "before": "3879b223c1aa78470792fb7530b0d640c1d834321e37348529de71d482da1319"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "d3157919fcaefde9a26a840fb77b3cfe9c045f6222a46484d94a1b6a092e8699",
+            "before": "d3157919fcaefde9a26a840fb77b3cfe9c045f6222a46484d94a1b6a092e8699"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "2d9d4fa209defb740b79737bcb48f770e1f6d28ad9a3f66dad85009a5f99b747",
+            "before": "2d9d4fa209defb740b79737bcb48f770e1f6d28ad9a3f66dad85009a5f99b747"
+          },
+          "duration_sum_ns": {
+            "after": 943260951,
+            "before": 943260951
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "f916dd75928a86d97f134cc6a9ad02c28d3715bd30d8b503a78813030b80d250",
+        "pre_order_sha256": "2861e09b396f735bb1d9627e8b5559e50b5ae8f2084d655e193e565445fb1188",
+        "raw_order_inversion_count": 19,
+        "row_count": 928,
+        "run_index": 3,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "791543872e30243baccee9260ed8bf042a9271ff282142c61854932030ffbcb3",
+            "before": "791543872e30243baccee9260ed8bf042a9271ff282142c61854932030ffbcb3"
+          },
+          "correlation_id_set_sha256": {
+            "after": "208c3ec2675d3f98d52254e1b0faa2b721031c9182255b1dd2df8e6e03755cc5",
+            "before": "208c3ec2675d3f98d52254e1b0faa2b721031c9182255b1dd2df8e6e03755cc5"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "4c151930e2a7fdf5a9fdc9a4cdbf5817cea75fe3c040f44a7eb8f9ae6e4718f1",
+            "before": "4c151930e2a7fdf5a9fdc9a4cdbf5817cea75fe3c040f44a7eb8f9ae6e4718f1"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "a0a55e2238b79036a7989e4e535aa0f9080c44a26ad87819b2d55e8b85883c2f",
+            "before": "a0a55e2238b79036a7989e4e535aa0f9080c44a26ad87819b2d55e8b85883c2f"
+          },
+          "duration_sum_ns": {
+            "after": 943546066,
+            "before": 943546066
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "cf3a590f94e581436f2ed5b75f2a3923e3dc494147ae6da0a3dee7cc001e574c",
+        "pre_order_sha256": "20d7f9d264530679613143ba829b2efdc52e77b24f6e7666aa4c7e462d5c710b",
+        "raw_order_inversion_count": 23,
+        "row_count": 928,
+        "run_index": 4,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "c04407dd2d3d4534e2101b4f83ddbd82ccdc09bf9da2932387d8bfeab7a8e89d",
+            "before": "c04407dd2d3d4534e2101b4f83ddbd82ccdc09bf9da2932387d8bfeab7a8e89d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "457da9c29dbcf4e0b469852c7d0a89e9b2b0045702bbc0904e6811591c1bfe4a",
+            "before": "457da9c29dbcf4e0b469852c7d0a89e9b2b0045702bbc0904e6811591c1bfe4a"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "9e49d8e9a862a4f003201573eace94eeb9c41fbd4ba75617ced84720d791883c",
+            "before": "9e49d8e9a862a4f003201573eace94eeb9c41fbd4ba75617ced84720d791883c"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "6a2f8fdb2339579dbb5f54b17aaad587e7db8f2c22371c369e012620f5bf7a77",
+            "before": "6a2f8fdb2339579dbb5f54b17aaad587e7db8f2c22371c369e012620f5bf7a77"
+          },
+          "duration_sum_ns": {
+            "after": 942447572,
+            "before": 942447572
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "6d710c1a44ecc5e3de610b937fd4c85f1430abf39768c4e4e4e102989a8319d6",
+        "pre_order_sha256": "df0701ce3da02318fb4b0506e643c04211fbb837f62cce5944574098488bd1de",
+        "raw_order_inversion_count": 16,
+        "row_count": 928,
+        "run_index": 5,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "532fe4e579001dcb117672ea4be9dec5710fd7485bd48937fcc79df01ac38e1d",
+            "before": "532fe4e579001dcb117672ea4be9dec5710fd7485bd48937fcc79df01ac38e1d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "415ff39bbb6c659a9aa887fec7e09878c8383e2e2356f5eac1b1fed9d18dc7b5",
+            "before": "415ff39bbb6c659a9aa887fec7e09878c8383e2e2356f5eac1b1fed9d18dc7b5"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "bf4b8eb31ca8182097e31e400c69214cdd6cd099dc97955fdb1718a059cf3fed",
+            "before": "bf4b8eb31ca8182097e31e400c69214cdd6cd099dc97955fdb1718a059cf3fed"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "8c3c6aabee0f23bffe36753c5bf84ad1787695de2fc54553b2dc7560f64dd563",
+            "before": "8c3c6aabee0f23bffe36753c5bf84ad1787695de2fc54553b2dc7560f64dd563"
+          },
+          "duration_sum_ns": {
+            "after": 944598386,
+            "before": 944598386
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "f2f18661b9b30845b53004cec99a295c4562e61045feb2dce80fc4a0d5ba617e",
+        "pre_order_sha256": "08e29686aaf4807683d1dd577c604b3151e847a6af3526152bcae53e01f03c7a",
+        "raw_order_inversion_count": 7,
+        "row_count": 928,
+        "run_index": 6,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "1949e3d129df7b664e8fb490718e783298d6460a3656db514f78ee9601dd909d",
+            "before": "1949e3d129df7b664e8fb490718e783298d6460a3656db514f78ee9601dd909d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "b4b48fe32ba9e697336a6bded22eb169793064d9027a596f9a476b3c08c9749a",
+            "before": "b4b48fe32ba9e697336a6bded22eb169793064d9027a596f9a476b3c08c9749a"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "9df0b8c4999d38cc2daa664161a18e0ff1eaf953b997c2dead5ce9a0dcd49d9c",
+            "before": "9df0b8c4999d38cc2daa664161a18e0ff1eaf953b997c2dead5ce9a0dcd49d9c"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "ce7c2cb554abd4a61a9163d40ed4ee0a18d89c0f9b0b1cc4e9d29c5d81be8d9e",
+            "before": "ce7c2cb554abd4a61a9163d40ed4ee0a18d89c0f9b0b1cc4e9d29c5d81be8d9e"
+          },
+          "duration_sum_ns": {
+            "after": 946705293,
+            "before": 946705293
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "59a9058ad4d892a20387b622df8728287705207324dabfb55dd640d5fa7c4b9d",
+        "pre_order_sha256": "4bce5791b1928f68f43d631031ad2f169bbcf321e40541396bddf3a3f2bee945",
+        "raw_order_inversion_count": 20,
+        "row_count": 928,
+        "run_index": 7,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "fc26039e58087bff0ccd136debea66a0f044d93b69cedc797d5911c86e5d1d86",
+            "before": "fc26039e58087bff0ccd136debea66a0f044d93b69cedc797d5911c86e5d1d86"
+          },
+          "correlation_id_set_sha256": {
+            "after": "5f2819501a408a3df211dba064ccc123e244f8354c5f2f42d591598612561b02",
+            "before": "5f2819501a408a3df211dba064ccc123e244f8354c5f2f42d591598612561b02"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "2dd38b861762428a9db47b7bd6289c3b62b65f1489ea2a4ab795b607a3d3d72d",
+            "before": "2dd38b861762428a9db47b7bd6289c3b62b65f1489ea2a4ab795b607a3d3d72d"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "d552d82e08e3fda0e7652f0577939a31541f2b517b94c3fff646d0f9843efa36",
+            "before": "d552d82e08e3fda0e7652f0577939a31541f2b517b94c3fff646d0f9843efa36"
+          },
+          "duration_sum_ns": {
+            "after": 947541065,
+            "before": 947541065
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "7ffbddd11d47506d8269e7b307443d73624943bba195854336acf9bb436000c9",
+        "pre_order_sha256": "12233925bc1081b761e0634ec2dc559cdcf1f549e23684c04e3ccf53a66267f5",
+        "raw_order_inversion_count": 17,
+        "row_count": 928,
+        "run_index": 8,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "8b772f70df4ba426a85b59ef9936ba7870169c540b16d628f89eab5a2cd07df7",
+            "before": "8b772f70df4ba426a85b59ef9936ba7870169c540b16d628f89eab5a2cd07df7"
+          },
+          "correlation_id_set_sha256": {
+            "after": "73e4e98112e6a3b9da9e3c7f0aaf99e0d189d255c7fc32479c01c7144ea5f41f",
+            "before": "73e4e98112e6a3b9da9e3c7f0aaf99e0d189d255c7fc32479c01c7144ea5f41f"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "2de9e05863563b489083992d09dea9f2029df76afb8ce53e6c74067048935ee6",
+            "before": "2de9e05863563b489083992d09dea9f2029df76afb8ce53e6c74067048935ee6"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "d4b2fac8ed1f44e32acb5ac1ca72546e822d06b31cc40f6751584cc2ae1c03c7",
+            "before": "d4b2fac8ed1f44e32acb5ac1ca72546e822d06b31cc40f6751584cc2ae1c03c7"
+          },
+          "duration_sum_ns": {
+            "after": 947357638,
+            "before": 947357638
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "71f5b1452d2e92a567bc9113021ba554004904c59c159b016921a8c58c2ace95",
+        "pre_order_sha256": "d7b9f2d7d67c8da9fe26266be0a054ce10808f7c48cd656c892f2859ea9ab889",
+        "raw_order_inversion_count": 26,
+        "row_count": 928,
+        "run_index": 9,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "631c8f8ac35774295e4e7c55fc38f4e6d9b184bc6d1553be35e1d6058016095b",
+            "before": "631c8f8ac35774295e4e7c55fc38f4e6d9b184bc6d1553be35e1d6058016095b"
+          },
+          "correlation_id_set_sha256": {
+            "after": "144fe7b21d8a7c88372aa2f320d59beb496d3562c141693c032eb4a1d31737d5",
+            "before": "144fe7b21d8a7c88372aa2f320d59beb496d3562c141693c032eb4a1d31737d5"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "8918a1ad9640fe14186dd251089f413f2e811f805557201c249d5889c7afe49d",
+            "before": "8918a1ad9640fe14186dd251089f413f2e811f805557201c249d5889c7afe49d"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "380ef194706dbe2ceabf65a5a73d86be61ec42db7f7a48fa24cf9b9b6280d460",
+            "before": "380ef194706dbe2ceabf65a5a73d86be61ec42db7f7a48fa24cf9b9b6280d460"
+          },
+          "duration_sum_ns": {
+            "after": 950399078,
+            "before": 950399078
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "997f151619c7d0570879c257241ea7911e1294d847790da50ceda8583e6378b9",
+        "pre_order_sha256": "4e9fb407eaaa1ffed08fc7f5014fe5b89f7403108055ec1f8bf701122c515aa0",
+        "raw_order_inversion_count": 3,
+        "row_count": 928,
+        "run_index": 10,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "f2c2e33b5a42f28c53fd5f5a2db7ac4eb5cb87d98e6a36296fbe99751927521e",
+            "before": "f2c2e33b5a42f28c53fd5f5a2db7ac4eb5cb87d98e6a36296fbe99751927521e"
+          },
+          "correlation_id_set_sha256": {
+            "after": "b604d5f0e1adf08f33c76b71b9cdce211e6a49f2254cc26572ec74422f8ffa6a",
+            "before": "b604d5f0e1adf08f33c76b71b9cdce211e6a49f2254cc26572ec74422f8ffa6a"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "5a70a91c352b3d0b4d8baefab8618116a672f3e053d98f7d8e9605e63d2d9c0d",
+            "before": "5a70a91c352b3d0b4d8baefab8618116a672f3e053d98f7d8e9605e63d2d9c0d"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "b6a03c749461b6267b40eb3beed63d0fc836ad14ce01e407e3a4c0e9729753d4",
+            "before": "b6a03c749461b6267b40eb3beed63d0fc836ad14ce01e407e3a4c0e9729753d4"
+          },
+          "duration_sum_ns": {
+            "after": 948756364,
+            "before": 948756364
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "a3a4e73716a2ce73c7624c71bc4117a49614156f053f635b8eeb5fb1e95d2182",
+        "pre_order_sha256": "544cfe1da293dec57269c40c84f813ee9dd16003abc2ab7dc19deb93782240a1",
+        "raw_order_inversion_count": 15,
+        "row_count": 928,
+        "run_index": 11,
+        "run_kind": "measured"
+      }
+    ],
+    "numeric_order": [
+      "Start_Timestamp",
+      "End_Timestamp",
+      "Dispatch_Id",
+      "Correlation_Id",
+      "original_ordinal"
+    ],
+    "raw_trace": {
+      "conservation": {
+        "correlation_id_multiset_sha256": {
+          "after": "db3b3f0a384b9f9324d1a3517a3161b65fc7bd9df1f30b0c76d45e186a756129",
+          "before": "db3b3f0a384b9f9324d1a3517a3161b65fc7bd9df1f30b0c76d45e186a756129"
+        },
+        "correlation_id_set_sha256": {
+          "after": "81e0d86ec94d2f5e5ddfe625f96a0cef87c960a446adf5aa4f86fa2c7fb595fc",
+          "before": "81e0d86ec94d2f5e5ddfe625f96a0cef87c960a446adf5aa4f86fa2c7fb595fc"
+        },
+        "dispatch_id_multiset_sha256": {
+          "after": "0d1089a8d6e3636ef5d5c38b5266db6eba017b9960fd16fc1070a0f6bbcce30d",
+          "before": "0d1089a8d6e3636ef5d5c38b5266db6eba017b9960fd16fc1070a0f6bbcce30d"
+        },
+        "dispatch_id_set_sha256": {
+          "after": "88b0fe1195060e3024f6e25b15fcd066e36b125c55ac704d744b84e89083645f",
+          "before": "88b0fe1195060e3024f6e25b15fcd066e36b125c55ac704d744b84e89083645f"
+        },
+        "duration_sum_ns": {
+          "after": 11352683443,
+          "before": 11352683443
+        },
+        "row_count": {
+          "after": 12263,
+          "before": 12263
+        }
+      },
+      "post_order_sha256": "39d50869003f6ba721c06b8193a8110675ccc9e9eb0303aa10b8b0f785982cb6",
+      "pre_order_sha256": "c5a1a25debd9845d045a464c94adfdf8933c715b58dba927d665747dedd8ede8",
+      "raw_order_inversion_count": 207,
+      "row_count": 12263
+    },
+    "schema_version": "ullm.aq4_p3_kernel_split_normalization.v1",
+    "scope": "derived_marker_bounded_kernel_splits_only",
+    "source_kernel_trace_sha256_after": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc",
+    "source_kernel_trace_sha256_before": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc"
+  },
+  "marker_contract": {
+    "clock_domain": "rocprofv3_monotonic_ns",
+    "measured_indices": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "range_count": 12,
+    "schema_version": "ullm.aq4_p2.run.v1",
+    "warmup_excluded": true,
+    "warmup_indices": [
+      0,
+      1
+    ]
+  },
+  "measurement_eligible": false,
+  "memory_copy_traces": [
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-02_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-03_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-04_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-05_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-06_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-07_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-08_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-09_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-10_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-11_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    }
+  ],
+  "producer_profile_runs": [
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-02_hip_api_trace.csv",
+        "sha256": "dd90a4556f8f57b85e2d35756096b19663d623105b27633efa9e1181a1aafb73"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-02_kernel_trace.csv",
+        "sha256": "5701a56aa57e72d88c37107c67299a9b395fea71ff99af36df0056f8ece7ab94"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 2,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-03_hip_api_trace.csv",
+        "sha256": "e5da697a6603d6b029068b31912976b1066a06ab03e60d90ab08a7d325bd2fa1"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-03_kernel_trace.csv",
+        "sha256": "53f34dd35aa021af506776d0a553c0fea450047df4d95e41ee578ea2b42ec18b"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 3,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-04_hip_api_trace.csv",
+        "sha256": "39f9837cefdab8994995a7cbd5e07901b9a8892f4341cb76d78ba70f9761ef15"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-04_kernel_trace.csv",
+        "sha256": "f0d9960704bf103db444fdef97c7bc73ed7a6760a686420e16e7511ecf951f3c"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 4,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-05_hip_api_trace.csv",
+        "sha256": "b072264ddfa7d50b1a60b73249fa0d1958c07d4326ca47be6a21d69aaec39d39"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-05_kernel_trace.csv",
+        "sha256": "7d0dc5bfa7c04faaa381e61d3a3e92c0ce63d276a82e7ea51c8f745df289773f"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 5,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-06_hip_api_trace.csv",
+        "sha256": "1e0f7d706b3df09029887fd3515ceb0137f3fbfab0857e7bf33469158ebd48f4"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-06_kernel_trace.csv",
+        "sha256": "5a921dfc36a1fe728e6037397b97386728b94e7b8e48b3f75b2f6e5ee9483bd6"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 6,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-07_hip_api_trace.csv",
+        "sha256": "de7a320a5c09d68a2d50bf4b0e16417f7265e9c6e6e6de61a1b6cfd0481407ee"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-07_kernel_trace.csv",
+        "sha256": "a3385e31c0f441c560b9c0c6b58c8c4c7e24fabae4c5a43d089750f72869f314"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 7,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-08_hip_api_trace.csv",
+        "sha256": "9c9fc335492f687fcf6a04044ce86863133aade75e7f53ec97c754e0bc2309c8"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-08_kernel_trace.csv",
+        "sha256": "a5ec60981341159d734fac94bcda289b3658d0758f2560e4fd7efb79e57be863"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 8,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-09_hip_api_trace.csv",
+        "sha256": "25d5a37472fd28b105f0ff6c4fbf509d0c9d718b88bf78380d162408904c78a1"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-09_kernel_trace.csv",
+        "sha256": "d394c42035eb3b1bf360d0c86b0aa69e2ce321929553ac755126e75d11266f63"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 9,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-10_hip_api_trace.csv",
+        "sha256": "ade7f8de67ef158dd8761972db690c1786a1a34d2532c60d09b26d2f6338ede4"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-10_kernel_trace.csv",
+        "sha256": "762f188998b5ca8392dde7ff8608ce07570139b954e5d556c922f38085c53014"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 10,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-11_hip_api_trace.csv",
+        "sha256": "de336b54dd08e482b0561f387196fb2e8edd4f2e85fef1b587d3996d2567ba84"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-11_kernel_trace.csv",
+        "sha256": "8743c3eb370d34f22cb1209116613bda9c65ee031a61b124897080e439d96c69"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 11,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    }
+  ],
+  "profiler": {
+    "capture_helpers": [
+      {
+        "identity": [
+          66306,
+          206315368,
+          33204,
+          1,
+          83367,
+          1784136670266540663,
+          1784136670266540663
+        ],
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/build-aq4-p3-selection-raw.py",
+        "role": "selection_raw_producer",
+        "sha256": "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
+      },
+      {
+        "identity": [
+          66306,
+          206314691,
+          33204,
+          1,
+          45255,
+          1784044522174045164,
+          1784044522174045164
+        ],
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/select-aq4-p3-candidate.py",
+        "role": "candidate_selector",
+        "sha256": "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+      },
+      {
+        "identity": [
+          66306,
+          206315363,
+          33204,
+          1,
+          36343,
+          1784136426031334297,
+          1784136426031334297
+        ],
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/profile-aq4-p2-family-exclusive.py",
+        "role": "profile_family_classifier",
+        "sha256": "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
+      }
+    ],
+    "command": [
+      "/opt/rocm-7.2.1/bin/rocprofv3",
+      "--log-level",
+      "error",
+      "--kernel-trace",
+      "--hip-runtime-trace",
+      "--memory-copy-trace",
+      "--marker-trace",
+      "--output-format",
+      "csv",
+      "--output-directory",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12",
+      "--output-file",
+      "aq4-p3-diagnostic",
+      "--",
+      "/usr/bin/python3.12",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+      "--expanded",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+      "--fixture-index",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+      "--identity",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+      "--preflight",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+      "--policy",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+      "--bundle-root",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
+      "--trusted-validator",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+      "--trusted-validator-sha256",
+      "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904",
+      "--output-dir",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10",
+      "--run-id",
+      "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10",
+      "--baseline-kind",
+      "active-production",
+      "--lock-path",
+      "/run/ullm/r9700.lock",
+      "--one-case-smoke",
+      "--live-preflight",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/live-preflight.json",
+      "--profile-roctx-ranges",
+      "--roctx-library",
+      "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+      "--roctx-library-sha256",
+      "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9",
+      "--driver-command",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver",
+      "--served-model-manifest",
+      "/etc/ullm/served-models/active.json",
+      "--device-index",
+      "1",
+      "--build-git-commit",
+      "43ba16f2347a45caba8a60cac2189714118db280"
+    ],
+    "command_sha256": "ac3a9dfa3e000eb920fd5d8de5518b260f275f21d99483ba3d052d304defa52a",
+    "executable_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+    "invocation_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+    "offline_reassembly": true,
+    "resolved_identity": [
+      66306,
+      41551451,
+      33261,
+      1,
+      62506,
+      1773373040000000000,
+      1783630549665735286
+    ],
+    "resolved_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+    "rocm_version": "7.2.1",
+    "source_actual_commit": "a2fe1ebac5d631919ca9082e17fda2126759a385",
+    "subprocess_profile_runs": 1,
+    "symlink_chain": [],
+    "target_command_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner-target-command-manifest.json",
+      "sha256": "ada12e2b7f3e8ed4332563309cc39ec475ce33a24b435f015b4ef0e7464329a6"
+    },
+    "target_environment": {
+      "exact_base_environment": true,
+      "injected_fd_map_key": null,
+      "keys": [
+        "HIP_VISIBLE_DEVICES",
+        "ULLM_BUILD_GIT_COMMIT",
+        "ULLM_HIP_VISIBLE_DEVICES",
+        "ULLM_REQUIRE_HIP_ADD_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+        "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+        "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+        "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+        "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+        "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+        "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+        "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+        "ULLM_SERVED_MODEL_MANIFEST"
+      ],
+      "secret_material_recorded": false,
+      "sha256": "0fd998b06579b17c7d6b89ee1806f430c74d198162ed84fc50bbb6014f41e1ca"
+    },
+    "tool": "rocprofv3",
+    "version": "1.1.0",
+    "version_output_sha256": "a6f71d5d6c85075c68b561fced061dbfcc8c7c713fa42c4bb77582e0221b06f7"
+  },
+  "promotion_eligible": false,
+  "schema_version": "ullm.aq4_p3_diagnostic_rocprof_capture.v2",
+  "source_traces": {
+    "hip_api": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_hip_api_trace.csv",
+      "sha256": "0f6db01548159fe82c831ed67b617820e610b2df3a5bdfdd98eea865d6980470"
+    },
+    "kernel": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_kernel_trace.csv",
+      "sha256": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc"
+    },
+    "marker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_marker_api_trace.csv",
+      "sha256": "4f848455354da857fb0bb89976639a03655784c086ec0311120b8139922e5280"
+    },
+    "memory_copy": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_memory_copy_trace.csv",
+      "sha256": "e91bc82d7819509b5bbc841c6a037dccd74cc40abfa90d6e340b09a10e80eda2"
+    }
+  },
+  "status": "complete_diagnostic"
+}
