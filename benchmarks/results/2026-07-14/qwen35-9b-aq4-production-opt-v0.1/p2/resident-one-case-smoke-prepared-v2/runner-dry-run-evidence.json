@@ -1,0 +1,55 @@
+{
+  "command": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/trusted-runner.py",
+    "--expanded",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+    "--fixture-index",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+    "--identity",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+    "--preflight",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+    "--policy",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+    "--output-dir",
+    "/tmp/ullm-aq4-p2-resident-smoke-validate-only",
+    "--run-id",
+    "p2-r9700-resident-one-case-smoke-runner-validate-v4",
+    "--baseline-kind",
+    "active-production",
+    "--one-case-smoke",
+    "--dry-run"
+  ],
+  "exit_code": 0,
+  "facts": {
+    "case_count": 1,
+    "fake_handshake": "passed",
+    "measured_runs": 10,
+    "promotion_eligible": false,
+    "smoke_only": true,
+    "transaction_count": 12,
+    "validation_mode": "validate_only",
+    "warmup_runs": 2
+  },
+  "normal_profile": {
+    "case_count": 84,
+    "separate": true
+  },
+  "plan": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/dry-run.json",
+    "sha256": "7a6738f6ebdc3b07b388753c8152d052d3e329e50a44e30e40b6fa97e2269037"
+  },
+  "runner_source_commit": "410d6fa1876a6772215604ba765ae1d6a91d67b9",
+  "runner_source_sha256": "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0",
+  "runner_subprocess_count": 1,
+  "schema_version": "ullm.aq4_p2_resident_runner_subprocess_evidence.v1",
+  "stderr": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "utf8": ""
+  },
+  "stdout": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "utf8": ""
+  }
+}

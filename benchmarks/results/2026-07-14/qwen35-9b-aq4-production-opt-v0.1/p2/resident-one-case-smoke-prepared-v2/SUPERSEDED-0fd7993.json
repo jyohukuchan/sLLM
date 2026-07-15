@@ -1,0 +1,10 @@
+{
+  "execution_eligible": false,
+  "promotion": false,
+  "reason": "source predates the normative resident launch-boundary hardening",
+  "resident_binary_sha256": "cb81b05e6e3b80426843be0c63aa6f2beeb3686016f64a03b6af5fe019caa2b4",
+  "schema_version": "ullm.aq4_p2_resident_smoke_supersession.v1",
+  "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
+  "status": "superseded_historical_prepared",
+  "superseded_by_source_commit": "43ba16f2347a45caba8a60cac2189714118db280"
+}

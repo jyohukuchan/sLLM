@@ -1,0 +1,77 @@
+{
+  "canonical_case_sha256": "8111b0dfed8f144451edb0e469d8dff034c9861766e815e517b1ff8329984bef",
+  "case_count": 1,
+  "cases": [
+    {
+      "baseline_mode": "cold_batched",
+      "cached_prefix_tokens": 0,
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "context_tokens": 128,
+      "control": {
+        "control_id": "aq4_0_target",
+        "format_id": "AQ4_0",
+        "implementation_id": "qwen35_aq4_rdna4_v1",
+        "promotion_eligible": true,
+        "role": "target"
+      },
+      "control_id": "aq4_0_target",
+      "decode_request_count": 0,
+      "decode_start_tokens": 0,
+      "device": {
+        "architecture": "gfx1201",
+        "backend": "hip",
+        "device_id": "r9700-rdna4",
+        "name": "AMD Radeon Graphics",
+        "runtime_device_index": 1
+      },
+      "fixture_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "format_id": "AQ4_0",
+      "generated_tokens": 0,
+      "implementation_id": "qwen35_aq4_rdna4_v1",
+      "mode": "cold_batched",
+      "path_oracle_case_id": "p2-representative-full_model-cold_prefill-all_m1-n128-m128-r9700-rdna4-aq4_0_target",
+      "path_oracle_result_sha256": null,
+      "phase": "cold_prefill",
+      "prefill_requested_m": 128,
+      "prompt_tokens": 128,
+      "request_count": 1,
+      "resolved_m": 128,
+      "sampling": {
+        "mode": "greedy",
+        "seed": 0,
+        "temperature": 0.0,
+        "top_k": 1,
+        "top_p": 1.0
+      },
+      "scope": "full_model",
+      "stage_id": "representative",
+      "stage_order": 2
+    }
+  ],
+  "official_case_sha256": "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a",
+  "runtime_binding": {
+    "bound_device": {
+      "architecture": "gfx1201",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "AMD Radeon Graphics",
+      "runtime_device_index": 1
+    },
+    "environment": {
+      "HIP_VISIBLE_DEVICES": "1",
+      "ULLM_HIP_VISIBLE_DEVICES": "1"
+    },
+    "schema_version": "ullm.aq4_p2_r9700_host_binding.v1",
+    "source_device": {
+      "architecture": "RDNA4",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "Radeon AI PRO R9700",
+      "runtime_device_index": 0
+    }
+  },
+  "schema_version": "ullm.aq4_production_p2_expanded.v2",
+  "source_manifest_sha256": "1fa264c6a7a485e36b1119ca13732ad88e052a8bd502c2addacdff14ff41cbea",
+  "status": "bound_one_case_smoke"
+}

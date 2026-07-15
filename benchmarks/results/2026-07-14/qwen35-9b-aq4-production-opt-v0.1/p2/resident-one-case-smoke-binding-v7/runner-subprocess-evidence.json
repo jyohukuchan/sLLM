@@ -1,0 +1,58 @@
+{
+  "command": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+    "--expanded",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+    "--fixture-index",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+    "--identity",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+    "--preflight",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+    "--policy",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+    "--bundle-root",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
+    "--trusted-validator",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+    "--trusted-validator-sha256",
+    "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904",
+    "--output-dir",
+    "/tmp/ullm-aq4-p2-resident-smoke-binding-v7-runner",
+    "--run-id",
+    "p2-r9700-resident-one-case-smoke-binding-v7-validate",
+    "--baseline-kind",
+    "active-production",
+    "--one-case-smoke",
+    "--dry-run"
+  ],
+  "exit_code": 0,
+  "plan": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/runner-plan.json",
+    "sha256": "b0acd2da4ab5b4c6bfd338358ac95b55280cc5fb05f885675ff5a1b27429a280"
+  },
+  "runner_source": {
+    "archive_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+    "git_blob": "fed94b749790cdbf6a61e33f3f9e95ebd73502e0",
+    "source_commit": "d367b6da07393f55c720ded7250bda8cdc402a79",
+    "source_sha256": "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f",
+    "source_tree": "8fea6bf90e8ad99c7ed36c719b8b4ad204ce73df"
+  },
+  "runner_subprocess_count": 1,
+  "schema_version": "ullm.aq4_p2_resident_binding_runner_evidence.v2",
+  "stderr": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "utf8": ""
+  },
+  "stdout": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "utf8": ""
+  },
+  "trusted_validator": {
+    "canonical_report_sha256": "c7da6bc14cee298b76730dad8350e9c09f792da9e84c9862593d26de8c0ac20c",
+    "report_file_sha256": "8df8debd89f1dbc9f866a8ec67a862d4daf538e264778a07607ea5189e830b62",
+    "source_sha256": "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904",
+    "subprocess_count": 1
+  }
+}

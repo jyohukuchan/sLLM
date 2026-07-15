@@ -1,0 +1,193 @@
+{
+  "external": {
+    "case_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json",
+      "sha256": "1fa264c6a7a485e36b1119ca13732ad88e052a8bd502c2addacdff14ff41cbea"
+    },
+    "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
+    "package_manifest": {
+      "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package/manifest.json",
+      "sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+    },
+    "package_tree": {
+      "file_count": 1045,
+      "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+      "sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1"
+    },
+    "served_model": {
+      "path": "/etc/ullm/served-models/active.json",
+      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    },
+    "worker": {
+      "hardlink_set": {
+        "exact_path_count": 1,
+        "expected": {
+          "ctime_ns": 1784072866140873703,
+          "device": 66306,
+          "gid": 1000,
+          "inode": 10490132,
+          "mode": 33277,
+          "mtime_ns": 1784072866130697763,
+          "nlink": 1,
+          "size": 3729520,
+          "uid": 1000
+        },
+        "fixture": {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json",
+          "sha256": "4a6bfe06d2ebd7bbabc1ad4e4c6df24b14a1c4837466c2a675953cb1d226d340"
+        },
+        "paths": [
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker"
+        ],
+        "primary_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+        "roots": [
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/deps"
+        ],
+        "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+        "unknown_hardlinks_possible": false
+      },
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
+  "source": {
+    "active_case_device_fixture_sha256": "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73",
+    "commit": "43ba16f2347a45caba8a60cac2189714118db280",
+    "driver_build_inputs": {
+      ".cargo/config.toml": {
+        "git_blob": "6dee7973a174f5e45c5762d91522f5d6849a5b84",
+        "role": "cargo_linker_configuration",
+        "sha256": "41627bf0cfcb00817cd6bee0285a01d25c89614bb271798139c26539c525f67d"
+      },
+      "Cargo.lock": {
+        "git_blob": "fb12cb0388ea1c6fc6368e7ea5d5100c11a20666",
+        "role": "locked_dependency_graph",
+        "sha256": "10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"
+      },
+      "crates/ullm-runtime-sys/build.rs": {
+        "git_blob": "bfd7a966b465e6f61189ae7cae8432065f102b6f",
+        "role": "runtime_static_library_build",
+        "sha256": "e2d29a16e4e6be98e8cc5f41f7350e8210d707229a204fb7c0b35a9ef0d096ea"
+      },
+      "runtime/src/ullm_runtime_parts/part_00.inc": {
+        "git_blob": "316d3ae5c13f79678fb8256aa8c66ea7e154660f",
+        "role": "directional_hip_copy_runtime",
+        "sha256": "db138bfaf33f59708f24edbec8352a39fe809ff39422d5b742399752c8fa9f5f"
+      }
+    },
+    "driver_source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+    "driver_source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+    "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
+    "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
+    "normative_driver": {
+      "blob_unchanged_at_current_source": true,
+      "build_inputs": {
+        ".cargo/config.toml": {
+          "git_blob": "6dee7973a174f5e45c5762d91522f5d6849a5b84",
+          "role": "cargo_linker_configuration",
+          "sha256": "41627bf0cfcb00817cd6bee0285a01d25c89614bb271798139c26539c525f67d"
+        },
+        "Cargo.lock": {
+          "git_blob": "fb12cb0388ea1c6fc6368e7ea5d5100c11a20666",
+          "role": "locked_dependency_graph",
+          "sha256": "10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"
+        },
+        "crates/ullm-runtime-sys/build.rs": {
+          "git_blob": "bfd7a966b465e6f61189ae7cae8432065f102b6f",
+          "role": "runtime_static_library_build",
+          "sha256": "e2d29a16e4e6be98e8cc5f41f7350e8210d707229a204fb7c0b35a9ef0d096ea"
+        },
+        "runtime/src/ullm_runtime_parts/part_00.inc": {
+          "git_blob": "316d3ae5c13f79678fb8256aa8c66ea7e154660f",
+          "role": "directional_hip_copy_runtime",
+          "sha256": "db138bfaf33f59708f24edbec8352a39fe809ff39422d5b742399752c8fa9f5f"
+        }
+      },
+      "clean_build": {
+        "binary_build_id_sha1": "033ce9b214e2149861a8fcf0381c27bbac5bf1d1",
+        "binary_bytes": 3505000,
+        "build_inputs": {
+          ".cargo/config.toml": {
+            "git_blob": "6dee7973a174f5e45c5762d91522f5d6849a5b84",
+            "role": "cargo_linker_configuration",
+            "sha256": "41627bf0cfcb00817cd6bee0285a01d25c89614bb271798139c26539c525f67d"
+          },
+          "Cargo.lock": {
+            "git_blob": "fb12cb0388ea1c6fc6368e7ea5d5100c11a20666",
+            "role": "locked_dependency_graph",
+            "sha256": "10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"
+          },
+          "crates/ullm-runtime-sys/build.rs": {
+            "git_blob": "bfd7a966b465e6f61189ae7cae8432065f102b6f",
+            "role": "runtime_static_library_build",
+            "sha256": "e2d29a16e4e6be98e8cc5f41f7350e8210d707229a204fb7c0b35a9ef0d096ea"
+          },
+          "runtime/src/ullm_runtime_parts/part_00.inc": {
+            "git_blob": "316d3ae5c13f79678fb8256aa8c66ea7e154660f",
+            "role": "directional_hip_copy_runtime",
+            "sha256": "db138bfaf33f59708f24edbec8352a39fe809ff39422d5b742399752c8fa9f5f"
+          }
+        },
+        "cargo_build_jobs": 1,
+        "cargo_incremental": false,
+        "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
+        "clang_version": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+        "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-a cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+        "cxx_version": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+        "expected_binary_sha256": "d7458fcdf8553871cac00123413676625c61eff2fdee3be9a440e656f05bcc1e",
+        "llvm_version": "22.1.2",
+        "locked": true,
+        "mold_version": "mold 2.30.0 (compatible with GNU ld)",
+        "profile": "release",
+        "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
+        "reproducibility": {
+          "build_count": 2,
+          "build_id_equal": true,
+          "byte_identical": true,
+          "bytes_equal": true,
+          "commands": [
+            "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-a cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+            "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-b cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver"
+          ],
+          "independent_initially_absent_target_directories": true,
+          "sha256_equal": true
+        },
+        "rocm_resolved_path": "/opt/rocm-7.2.1",
+        "rustc_host": "x86_64-unknown-linux-gnu",
+        "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
+        "source_commit": "43ba16f2347a45caba8a60cac2189714118db280",
+        "source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+        "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+        "source_tree": "72392a7114f5968d6c2ad05e24762a6790000013"
+      },
+      "commit": "43ba16f2347a45caba8a60cac2189714118db280",
+      "git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+      "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+      "tree": "72392a7114f5968d6c2ad05e24762a6790000013"
+    },
+    "one_case_smoke_runner": {
+      "flag": "--one-case-smoke",
+      "measured_runs": 10,
+      "normal_case_count": 84,
+      "promotion_eligible": false,
+      "smoke_case_count": 1,
+      "smoke_transactions": 12,
+      "warmup_runs": 2
+    },
+    "protocol": "ullm.aq4_p2_resident_driver.v2",
+    "protocol_path_contract": {
+      "case_binding": "absolute_without_parent_traversal",
+      "fixture": "absolute_without_parent_traversal",
+      "identity": "absolute_without_parent_traversal",
+      "policy": "absolute_without_parent_traversal",
+      "preflight": "absolute_without_parent_traversal",
+      "served_model_manifest": "absolute_without_parent_traversal"
+    },
+    "runner_source_commit": "410d6fa1876a6772215604ba765ae1d6a91d67b9",
+    "runner_source_sha256": "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0",
+    "runner_source_tree": "73fa76d74e042c23c353d6e25172f62cbb364995",
+    "tree": "72392a7114f5968d6c2ad05e24762a6790000013"
+  }
+}
