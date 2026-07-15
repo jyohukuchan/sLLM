@@ -42,9 +42,12 @@ cargo run -p ullm-engine --bin ullm-aq4-layer0-qkv-runtime-probe -- \
 
 `output.f32le` contains concatenated little-endian f32 rows in input order.
 `report.json` binds the package manifest SHA, all three QKV payload SHAs,
-tensor geometry, input sidecar SHA, per-case context/input hashes, runtime
-device information, operation identity, and relevant guard environment
-variables. Every output value must be finite. Each sidecar is written to a
+tensor geometry, per-case context/input hashes, runtime device information,
+operation identity, and relevant guard environment variables. The input
+sidecar report records its canonical regular-file path, `nlink=1`, device,
+inode, byte size, nanosecond mtime before and after consumption, and the SHA
+of the bytes consumed by the probe. Any metadata or digest change fails
+closed. Every output value must be finite. Each sidecar is written to a
 temporary file, synced, and published with a no-overwrite hard link.
 
 The same binary can target a future HIP device with `--device-index N`, but it

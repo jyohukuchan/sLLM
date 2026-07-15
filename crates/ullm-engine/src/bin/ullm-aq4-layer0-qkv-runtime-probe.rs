@@ -125,6 +125,24 @@ struct InputReport {
     dtype: String,
     shape: Vec<usize>,
     rows: usize,
+    identity: InputSidecarIdentity,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct FileStat {
+    device: u64,
+    inode: u64,
+    size_bytes: u64,
+    mtime_ns: i64,
+    nlink: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct InputSidecarIdentity {
+    canonical_path: String,
+    pre_stat: FileStat,
+    post_stat: FileStat,
+    consumed_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,7 +466,8 @@ fn run() -> ProbeResult<()> {
 
     let input_dtype = input.header.dtype.clone();
     let input_shape = input.header.shape.clone();
-    let input_sidecar_sha256 = input.finish_sha256();
+    let input_sidecar_identity = input.finish_identity()?;
+    let input_sidecar_sha256 = input_sidecar_identity.consumed_sha256.clone();
     let package_report = PackageReport {
         root: package.root.display().to_string(),
         manifest_sha256: package.manifest_sha256,
@@ -496,6 +515,7 @@ fn run() -> ProbeResult<()> {
             dtype: input_dtype,
             shape: input_shape,
             rows: output_report.cases.len(),
+            identity: input_sidecar_identity,
         },
         output: output_report,
     };
@@ -518,13 +538,21 @@ struct InputReader {
     reader: BufReader<File>,
     header: InputHeader,
     digest: Sha256,
+    canonical_path: PathBuf,
+    pre_stat: FileStat,
 }
 
 impl InputReader {
     fn open(path: &Path, expected_tensor: &str) -> ProbeResult<Self> {
         ensure_regular_nlink_one(path, "input sidecar")?;
-        let file =
-            File::open(path).map_err(|err| format!("failed to open input sidecar: {err}"))?;
+        let canonical_path = fs::canonicalize(path)
+            .map_err(|err| format!("failed to canonicalize input sidecar: {err}"))?;
+        let pre_stat = file_stat(&canonical_path, "input sidecar")?;
+        if pre_stat.nlink != 1 {
+            return Err("input sidecar must have nlink=1".to_string());
+        }
+        let file = File::open(&canonical_path)
+            .map_err(|err| format!("failed to open input sidecar: {err}"))?;
         let mut reader = BufReader::new(file);
         let mut digest = Sha256::new();
         let line = read_capped_line(&mut reader, MAX_INPUT_LINE_BYTES)
@@ -545,6 +573,8 @@ impl InputReader {
             reader,
             header,
             digest,
+            canonical_path,
+            pre_stat,
         })
     }
 
@@ -574,8 +604,30 @@ impl InputReader {
         Ok(Some(case))
     }
 
-    fn finish_sha256(self) -> String {
-        hex_digest(self.digest.finalize())
+    fn finish_identity(self) -> ProbeResult<InputSidecarIdentity> {
+        let InputReader {
+            reader,
+            header: _,
+            digest,
+            canonical_path,
+            pre_stat,
+        } = self;
+        drop(reader);
+        let post_stat = file_stat(&canonical_path, "input sidecar")?;
+        if pre_stat != post_stat {
+            return Err("input sidecar changed during probe".to_string());
+        }
+        let consumed_sha256 = hex_digest(digest.finalize());
+        let (whole_sha256, whole_bytes) = hash_file(&canonical_path)?;
+        if whole_sha256 != consumed_sha256 || whole_bytes != pre_stat.size_bytes {
+            return Err("input sidecar consumed SHA differs from final file".to_string());
+        }
+        Ok(InputSidecarIdentity {
+            canonical_path: canonical_path.display().to_string(),
+            pre_stat,
+            post_stat,
+            consumed_sha256,
+        })
     }
 }
 
@@ -812,7 +864,7 @@ fn ensure_directory_not_symlink(path: &Path, label: &str) -> ProbeResult<()> {
     Ok(())
 }
 
-fn ensure_regular_nlink_one(path: &Path, label: &str) -> ProbeResult<()> {
+fn file_stat(path: &Path, label: &str) -> ProbeResult<FileStat> {
     let metadata =
         fs::symlink_metadata(path).map_err(|err| format!("{label} is unavailable: {err}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -821,9 +873,42 @@ fn ensure_regular_nlink_one(path: &Path, label: &str) -> ProbeResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
-            return Err(format!("{label} must have nlink=1"));
-        }
+        let mtime_ns = i128::from(metadata.mtime())
+            .checked_mul(1_000_000_000)
+            .and_then(|seconds| seconds.checked_add(i128::from(metadata.mtime_nsec())))
+            .ok_or_else(|| format!("{label} mtime overflows nanoseconds"))?;
+        let mtime_ns = i64::try_from(mtime_ns)
+            .map_err(|_| format!("{label} mtime does not fit i64 nanoseconds"))?;
+        return Ok(FileStat {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size_bytes: metadata.size(),
+            mtime_ns,
+            nlink: metadata.nlink(),
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let mtime_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .and_then(|value| i64::try_from(value.as_nanos()).ok())
+            .unwrap_or(0);
+        Ok(FileStat {
+            device: 0,
+            inode: 0,
+            size_bytes: metadata.len(),
+            mtime_ns,
+            nlink: 1,
+        })
+    }
+}
+
+fn ensure_regular_nlink_one(path: &Path, label: &str) -> ProbeResult<()> {
+    let stat = file_stat(path, label)?;
+    if stat.nlink != 1 {
+        return Err(format!("{label} must have nlink=1"));
     }
     Ok(())
 }
@@ -995,8 +1080,32 @@ mod tests {
         );
         let path = env::temp_dir().join(format!("aq4-probe-input-header-{}", std::process::id()));
         fs::write(&path, header).unwrap();
-        let reader = InputReader::open(&path, DEFAULT_TENSOR);
-        assert!(reader.is_ok());
+        let mut reader = InputReader::open(&path, DEFAULT_TENSOR).unwrap();
+        assert!(reader.next_case().unwrap().is_none());
+        let identity = reader.finish_identity().unwrap();
+        assert_eq!(identity.pre_stat, identity.post_stat);
+        assert_eq!(identity.pre_stat.nlink, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn input_sidecar_replacement_is_fail_closed() {
+        let path = env::temp_dir().join(format!(
+            "aq4-probe-input-replacement-{}",
+            std::process::id()
+        ));
+        let header = format!(
+            "{{\"kind\":\"header\",\"schema_version\":\"{INPUT_SCHEMA}\",\"tensor_name\":\"{DEFAULT_TENSOR}\",\"dtype\":\"f32\",\"shape\":[4096]}}\n"
+        );
+        fs::write(&path, header).unwrap();
+        let reader = InputReader::open(&path, DEFAULT_TENSOR).unwrap();
+        fs::write(&path, b"replaced\n").unwrap();
+        assert!(
+            reader
+                .finish_identity()
+                .expect_err("replacement must be rejected")
+                .contains("changed during probe")
+        );
         let _ = fs::remove_file(path);
     }
 }
