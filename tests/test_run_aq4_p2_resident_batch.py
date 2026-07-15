@@ -447,6 +447,12 @@ def test_one_case_smoke_dry_run_validates_exact_root_and_subprocesses(tmp_path: 
     assert all(item["type"] == "regular_file" and item["nlink"] == 1 for item in plan["validation"]["members"].values())
     assert plan["validation"]["fake_driver_subprocess_count"] == 1
     assert plan["validation"]["driver_fake_handshake"] == "passed"
+    assert plan["validation"]["fake_ready_scope"] == {
+        "stage": "pre_spawn_fixture_only",
+        "runtime_proof": False,
+        "ready_proof": False,
+        "model_load_proof": False,
+    }
     assert plan["validation"]["resident_session_id"] == "offline-fake-ready-not-executed"
     validator = plan["validation"]["trusted_bundle_validator"]
     assert validator["subprocess_count"] == 1
@@ -454,15 +460,36 @@ def test_one_case_smoke_dry_run_validates_exact_root_and_subprocesses(tmp_path: 
     assert len(validator["report_sha256"]) == 64
 
 
-def test_historical_fake_ready_compatibility_is_dry_run_only(tmp_path: Path) -> None:
+def test_non_dry_historical_fixture_reaches_live_preflight_gate(tmp_path: Path) -> None:
     output = tmp_path / "historical-fake-ready-non-dry"
     command = _one_case_command(output)
     command.remove("--dry-run")
     command.extend(["--live-preflight", str(tmp_path / "not-reached.json")])
     completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
-    assert "resident driver did not prove one model load" in completed.stderr
+    assert "live preflight metadata failed" in completed.stderr
+    assert "resident driver did not prove one model load" not in completed.stderr
     assert not output.exists()
+
+
+def test_historical_synthetic_ready_is_fixture_only_not_runtime_proof() -> None:
+    fake_ready = json.loads((TRUSTED_ONE_CASE_ROOT / "fake-ready.json").read_text())
+    identity = json.loads((TRUSTED_ONE_CASE_ROOT / "identity.json").read_text())
+    cases = json.loads((TRUSTED_ONE_CASE_ROOT / "case-binding.json").read_text())["cases"]
+    session_id, ready_identity = BATCH.validate_historical_synthetic_ready_fixture(
+        fake_ready,
+        identity,
+        cases,
+        identity["resident_driver_identity"]["binary_sha256"],
+    )
+    assert session_id == "offline-fake-ready-not-executed"
+    assert ready_identity == identity["resident_driver_identity"]
+    assert BATCH.HISTORICAL_SYNTHETIC_READY_SCOPE == {
+        "stage": "pre_spawn_fixture_only",
+        "runtime_proof": False,
+        "ready_proof": False,
+        "model_load_proof": False,
+    }
 
 
 def test_live_ready_requires_top_level_served_model_binding(tmp_path: Path) -> None:

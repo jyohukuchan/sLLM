@@ -113,6 +113,20 @@ SERVED_MODEL_BINDING_KEYS = {
     "single_read",
     "logical_path_opened",
 }
+HISTORICAL_SYNTHETIC_READY_FIELDS = {
+    "event",
+    "schema_version",
+    "model_loads",
+    "resident_session_id",
+    "driver_identity",
+}
+LIVE_READY_FIELDS = HISTORICAL_SYNTHETIC_READY_FIELDS | {"served_model_binding"}
+HISTORICAL_SYNTHETIC_READY_SCOPE = {
+    "stage": "pre_spawn_fixture_only",
+    "runtime_proof": False,
+    "ready_proof": False,
+    "model_load_proof": False,
+}
 DEFAULT_LOCK_PATH = Path("/run/ullm/r9700.lock")
 ROCTX_SCHEMA = "ullm.aq4_p2_resident_roctx_ranges.v1"
 ROCTX_MARKER_PREFIX = "ullm.aq4_p2.run.v1"
@@ -1286,12 +1300,11 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         raise BatchError("one-case smoke resident driver argv binding is invalid")
     validate_driver_argv_schema(expected_driver_argv, identity)
     fake_ready = _run_fake_ready_handshake(fake_ready_path, args.timeout)
-    session_id, driver_identity, _ = validate_ready(
+    session_id, driver_identity = validate_historical_synthetic_ready_fixture(
         fake_ready,
         identity,
         cases,
         expected_binary_sha256,
-        allow_pre_binding_fixture=args.dry_run,
     )
     prepared_plan = load(root / "dry-run.json", "one-case smoke prepared dry-run")
     prepared_validation = prepared_plan.get("validation")
@@ -1344,6 +1357,7 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         "fake_ready": {"path": str(fake_ready_path), "sha256": sha_file(fake_ready_path, "one-case smoke fake-ready")},
         "fake_driver_subprocess_count": 1,
         "driver_fake_handshake": "passed",
+        "fake_ready_scope": dict(HISTORICAL_SYNTHETIC_READY_SCOPE),
         "resident_session_id": session_id,
         "driver_identity": driver_identity,
         "resident_driver_argv": expected_driver_argv,
@@ -1976,8 +1990,6 @@ def _validate_ready_identity(
     value: Any,
     identity: dict[str, Any],
     cases: list[dict[str, Any]],
-    *,
-    allow_pre_binding_fixture: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != READY_IDENTITY_KEYS:
         raise BatchError("resident driver identity fields differ")
@@ -2025,28 +2037,33 @@ def _validate_ready_identity(
     return value
 
 
+def validate_historical_synthetic_ready_fixture(
+    value: dict[str, Any],
+    identity: dict[str, Any],
+    cases: list[dict[str, Any]],
+    expected_binary_sha256: str,
+) -> tuple[str, dict[str, Any]]:
+    """Validate the immutable pre-spawn fixture without granting runtime proof."""
+    predicates = _ready_predicates(value, HISTORICAL_SYNTHETIC_READY_FIELDS)
+    if _ready_reason_code(predicates) != "ready_candidate_envelope_valid":
+        raise BatchError("historical synthetic fake-ready fixture fields differ")
+    ready_identity = _validate_ready_identity(value["driver_identity"], identity, cases)
+    if ready_identity["binary_sha256"] != expected_binary_sha256:
+        raise BatchError("historical synthetic fake-ready fixture binary SHA differs")
+    return value["resident_session_id"], ready_identity
+
+
 def validate_ready(
     value: dict[str, Any],
     identity: dict[str, Any],
     cases: list[dict[str, Any]],
     expected_binary_sha256: str,
     *,
-    allow_pre_binding_fixture: bool = False,
     candidate_audit: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
-    expected_fields = {
-        "event",
-        "schema_version",
-        "model_loads",
-        "resident_session_id",
-        "driver_identity",
-        "served_model_binding",
-    }
-    if allow_pre_binding_fixture and "served_model_binding" not in value:
-        expected_fields.remove("served_model_binding")
     if candidate_audit is None:
         candidate_audit = _build_ready_candidate_audit(canonical(value) + b"\n", value)
-    predicates = _ready_predicates(value, expected_fields)
+    predicates = _ready_predicates(value, LIVE_READY_FIELDS)
     reason_code = _ready_reason_code(predicates)
     if reason_code != "ready_candidate_envelope_valid":
         _finish_ready_candidate_audit(
@@ -2063,7 +2080,6 @@ def validate_ready(
             value["driver_identity"],
             identity,
             cases,
-            allow_pre_binding_fixture=allow_pre_binding_fixture,
         )
     except BatchError as error:
         _finish_ready_candidate_audit(
@@ -2085,13 +2101,9 @@ def validate_ready(
             candidate_audit,
         )
     try:
-        served_binding = (
-            None
-            if "served_model_binding" not in value
-            else _validate_served_model_binding(
-                value["served_model_binding"],
-                ready_identity["served_model_manifest_sha256"],
-            )
+        served_binding = _validate_served_model_binding(
+            value["served_model_binding"],
+            ready_identity["served_model_manifest_sha256"],
         )
     except BatchError as error:
         _finish_ready_candidate_audit(
