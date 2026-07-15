@@ -2,11 +2,11 @@
   "actual_executed": false,
   "automated_tests": {
     "aggregate": {
-      "collected": 462,
+      "collected": 467,
       "deselected": 0,
       "distinct_test_file_count": 12,
       "failed": 0,
-      "passed": 462
+      "passed": 467
     },
     "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
     "suites": [
@@ -145,7 +145,7 @@
         "passed": 27
       },
       {
-        "collected": 21,
+        "collected": 26,
         "command": [
           "python3",
           "-m",
@@ -157,15 +157,15 @@
         "failed": 0,
         "files": [
           {
-            "collected": 21,
-            "git_blob": "1227c0a4fd60b9730e2e9e8b9f663fbc5867914f",
-            "passed": 21,
+            "collected": 26,
+            "git_blob": "8167859108c68fa27c67fe21c3d772e4899e384a",
+            "passed": 26,
             "path": "tests/test_build_aq4_p3_selection_raw.py",
-            "source_commit": "78ba33c982c994df47c8ff4541df85b8d7da4a63"
+            "source_commit": "c743007f9748d2baf6d699744f7dad4fd3b1cd21"
           }
         ],
         "name": "selection_raw_producer",
-        "passed": 21
+        "passed": 26
       },
       {
         "collected": 27,
@@ -216,8 +216,8 @@
     ]
   },
   "capture_tool": {
-    "commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd",
-    "sha256": "e749e6e53f0daee596fa68bc374ad88241764a2ba4f149e166093ef525cd6da8"
+    "commit": "86fb3df33a18ee1b03934a58c7102ddcd6158128",
+    "sha256": "928511985128385b10f2a5c1fe1d9020d92528cc8de5afd11486989ea3ea1846"
   },
   "coverage": [
     "safety-success-start-failure-partial",
@@ -242,8 +242,8 @@
     "roctx-run-session-case-and-library-binding"
   ],
   "launcher": {
-    "commit": "868b9f72739bfb7aabc492ba5b4880b7f44e8b3d",
-    "sha256": "a62c054d7a0712a7aa1aedda71b38fae5378948dd6c9ad39ded70720e1ecea01"
+    "commit": "86fb3df33a18ee1b03934a58c7102ddcd6158128",
+    "sha256": "1e7f662f7a729374cff6af82002f116688f1d47653b925291a3c315258e5f176"
   },
   "manual_checks": {
     "boundary_count": 15,
