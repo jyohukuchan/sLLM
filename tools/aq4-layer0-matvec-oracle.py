@@ -17,19 +17,22 @@ import importlib.util
 import json
 import math
 import os
+import stat
 import struct
 from pathlib import Path
 from typing import Any
 
 
 SCHEMA = "ullm.aq4_layer0_matvec_oracle.v1"
-INPUT_SCHEMA = "ullm.aq4_layer0_matvec_inputs.v1"
 TENSOR_OUTPUT_SCHEMA = "ullm.aq4_layer0_matvec_tensor_output.v1"
 TRACE_SCHEMA = "ullm.qwen35_aq4_differential_trace.v1"
 DEFAULT_TENSOR = "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
 DEFAULT_ACTIVE_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 DEFAULT_PACKAGE_SHA = "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
 DEFAULT_SOURCE_TRACE_SHA = "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692"
+DEFAULT_GPU_OPERATION = "fused_qkv_aq4_matvec"
+DEFAULT_GPU_RPB_ROWS = 4
+DEFAULT_GPU_THREADS_PER_ROW = 64
 EXPECTED_ROWS = (("fixture-prompt-0", 0), ("fixture-prompt-0", 1), ("fixture-prompt-1", 0))
 F32 = struct.Struct("<f")
 _AUDIT_SPEC = importlib.util.spec_from_file_location("aq4_input_controls", Path(__file__).with_name("audit_aq4_p2_input_controls.py"))
@@ -51,6 +54,71 @@ def sha256_file(path: Path, chunk_bytes: int = 1 << 20) -> str:
         while chunk := handle.read(chunk_bytes):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_directory(path: Path, label: str) -> Path:
+    if path.is_symlink() or not path.is_dir():
+        raise OracleError(f"{label} must be a regular directory")
+    return path.resolve()
+
+
+def _canonical_file(path: Path, label: str, *, root: Path | None = None) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise OracleError(f"{label} must be a regular file")
+    canonical = path.resolve()
+    if canonical.is_symlink() or not canonical.is_file():
+        raise OracleError(f"{label} must resolve to a regular file")
+    if root is not None:
+        root = root.resolve()
+        try:
+            canonical.relative_to(root)
+        except ValueError as error:
+            raise OracleError(f"{label} escapes canonical root {root}") from error
+    return canonical
+
+
+def _stat_signature(path: Path, label: str) -> dict[str, int]:
+    try:
+        info = path.stat()
+    except OSError as error:
+        raise OracleError(f"{label} stat failed: {error}") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise OracleError(f"{label} is not a regular file")
+    return {
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+        "size_bytes": int(info.st_size),
+        "mtime_ns": int(info.st_mtime_ns),
+        "ctime_ns": int(info.st_ctime_ns),
+    }
+
+
+def _capture_file_identity(path: Path, label: str, *, root: Path | None = None) -> dict[str, Any]:
+    canonical = _canonical_file(path, label, root=root)
+    pre = _stat_signature(canonical, label)
+    digest = sha256_file(canonical)
+    post = _stat_signature(canonical, label)
+    if pre != post:
+        raise OracleError(f"{label} changed during identity capture")
+    return {
+        "canonical_path": str(canonical),
+        "sha256": digest,
+        "pre_stat": pre,
+        "post_stat": post,
+    }
+
+
+def _assert_file_identity(identity: dict[str, Any], label: str) -> None:
+    path = Path(str(identity.get("canonical_path", "")))
+    current = _capture_file_identity(path, label)
+    if current["canonical_path"] != identity["canonical_path"] or current["sha256"] != identity["sha256"] or current["pre_stat"] != identity["post_stat"]:
+        raise OracleError(f"{label} changed after identity capture")
+
+
+def _canonical_package_payload(package_dir: Path, relative: Any, label: str) -> Path:
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+        raise OracleError(f"{label} must be a relative package path")
+    return _canonical_file(package_dir / relative, label, root=package_dir)
 
 
 def read_json(path: Path) -> Any:
@@ -186,7 +254,10 @@ class SafeTensorReader:
 
 
 def _load_trace(root: Path, expected_package_sha: str | None, expected_active_sha: str | None) -> tuple[dict[str, Any], dict[tuple[str, int], dict[str, Any]]]:
-    manifest = read_json(root / "manifest.json")
+    root = _canonical_directory(root, "trace root")
+    manifest_path = _canonical_file(root / "manifest.json", "trace manifest", root=root)
+    payload = _canonical_file(root / "payload.jsonl", "trace payload", root=root)
+    manifest = read_json(manifest_path)
     if not isinstance(manifest, dict) or manifest.get("schema_version") != TRACE_SCHEMA or manifest.get("rows") != 3:
         raise OracleError("differential trace manifest schema/row count differs")
     identity = manifest.get("identity")
@@ -198,28 +269,35 @@ def _load_trace(root: Path, expected_package_sha: str | None, expected_active_sh
         if expected_active_sha is not None and identity.get("active_manifest_sha256") != expected_active_sha:
             raise OracleError("differential trace active identity differs")
     rows: dict[tuple[str, int], dict[str, Any]] = {}
-    payload = root / "payload.jsonl"
-    if payload.is_symlink() or not payload.is_file():
-        raise OracleError("differential trace payload must be a regular file")
-    for line in payload.read_text(encoding="utf-8").splitlines():
-        value = json.loads(line, object_pairs_hook=_reject_duplicate)
-        if not isinstance(value, dict) or not isinstance(value.get("case_id"), str) or type(value.get("step")) is not int:
-            raise OracleError("differential trace row identity differs")
-        key = (value["case_id"], value["step"])
-        if key in rows:
-            raise OracleError(f"duplicate differential trace row: {key}")
-        rows[key] = value
+    with payload.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if len(line) > 64 * 1024 * 1024:
+                raise OracleError(f"differential trace row {line_number} exceeds bound")
+            if not line.strip():
+                raise OracleError(f"differential trace row {line_number} is blank")
+            try:
+                value = json.loads(line, object_pairs_hook=_reject_duplicate)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise OracleError(f"invalid differential trace JSONL row {line_number}: {error}") from error
+            if not isinstance(value, dict) or not isinstance(value.get("case_id"), str) or type(value.get("step")) is not int:
+                raise OracleError("differential trace row identity differs")
+            key = (value["case_id"], value["step"])
+            if key in rows:
+                raise OracleError(f"duplicate differential trace row: {key}")
+            rows[key] = value
     if set(rows) != set(EXPECTED_ROWS):
         raise OracleError("differential trace case set differs")
     return manifest, rows
 
 
-def _load_package(package_dir: Path, tensor_name: str) -> tuple[dict[str, Any], dict[str, Any], Path, str]:
-    manifest_path = package_dir / "manifest.json"
+def _load_package(package_dir: Path, tensor_name: str) -> tuple[dict[str, Any], dict[str, Any], Path, str, dict[str, Any]]:
+    package_dir = _canonical_directory(package_dir, "package root")
+    manifest_path = _canonical_file(package_dir / "manifest.json", "package manifest", root=package_dir)
     manifest = read_json(manifest_path)
     if manifest.get("schema_version") != "ullm-prototype-manifest-v0.1":
         raise OracleError("package manifest schema differs")
-    package_sha = sha256_file(manifest_path)
+    package_identity = _capture_file_identity(manifest_path, "package manifest", root=package_dir)
+    package_sha = package_identity["sha256"]
     entries = {str(item.get("name")): item for item in manifest.get("tensors", []) if isinstance(item, dict)}
     item = entries.get(tensor_name)
     if item is None:
@@ -238,10 +316,9 @@ def _load_package(package_dir: Path, tensor_name: str) -> tuple[dict[str, Any], 
     for field in ("index_file", "scale_file", "codebook_file", "source_file"):
         if field not in item:
             raise OracleError(f"sentinel manifest field is missing: {field}")
-    source_path = Path(str(item["source_file"]))
-    if source_path.is_symlink() or not source_path.is_file():
-        raise OracleError("sentinel source safetensor is unavailable")
-    return manifest, item, package_dir, package_sha
+    source_path = _canonical_file(Path(str(item["source_file"])), "sentinel source safetensor")
+    item["source_file"] = str(source_path)
+    return manifest, item, package_dir, package_sha, package_identity
 
 
 def _read_f32_file(path: Path, count: int) -> list[float]:
@@ -272,14 +349,12 @@ def dequant_matvec(package_dir: Path, item: dict[str, Any], vector: list[float],
     vector = [finite(value, "matvec input") for value in vector]
     group_size = item["group_size"]
     groups_per_row = cols // group_size
-    index_path = package_dir / item["index_file"]
-    scale_path = package_dir / item["scale_file"]
-    codebook_path = package_dir / item["codebook_file"]
-    for path in (index_path, scale_path, codebook_path):
-        if path.is_symlink() or not path.is_file():
-            raise OracleError(f"AQ4 payload must be a regular file: {path}")
+    package_dir = _canonical_directory(package_dir, "package root")
+    index_path = _canonical_package_payload(package_dir, item["index_file"], "AQ4 index payload")
+    scale_path = _canonical_package_payload(package_dir, item["scale_file"], "AQ4 scale payload")
+    codebook_path = _canonical_package_payload(package_dir, item["codebook_file"], "AQ4 codebook payload")
     codebook = _read_f32_file(codebook_path, 16)
-    tensor_scale = finite(item.get("tensor_scale"), "tensor_scale")
+    tensor_scale = _f32(finite(item.get("tensor_scale"), "tensor_scale"))
     if tensor_scale <= 0:
         raise OracleError("tensor_scale must be positive")
     scales = scale_values_e4m3()
@@ -298,7 +373,9 @@ def dequant_matvec(package_dir: Path, item: dict[str, Any], vector: list[float],
                 packed = indices[element // 2]
                 code = (packed & 0x0F) if element % 2 == 0 else packed >> 4
                 group = element // group_size
-                product = _f32(_f32(codebook[code] * scale_table[scale_indices[group]] * tensor_scale) * vector[element])
+                weight = _f32(_f32(codebook[code]) * _f32(scale_table[scale_indices[group]]))
+                weight = _f32(weight * tensor_scale)
+                product = _f32(weight * _f32(vector[element]))
                 total = _f32(total + product)
         else:
             try:
@@ -341,13 +418,50 @@ def _f32_bits_hex(value: float) -> str:
     return f"0x{struct.unpack('<I', F32.pack(_f32(value)))[0]:08x}"
 
 
-def _build_input_normed(package_manifest: dict[str, Any], source_manifest: dict[str, Any], source_rows: dict[tuple[str, int], dict[str, Any]]) -> tuple[dict[tuple[str, int], list[float]], dict[tuple[str, int], dict[str, Any]], dict[str, Any]]:
+def _source_tensor_paths(package_manifest: dict[str, Any], qkv_item: dict[str, Any]) -> tuple[dict[str, Path], Path]:
+    passthrough = {str(item.get("name")): item for item in package_manifest.get("passthrough_tensors", []) if isinstance(item, dict)}
+    names = {
+        "qkv": qkv_item.get("source_file"),
+        "embedding": (passthrough.get("model.language_model.embed_tokens.weight") or {}).get("source_file"),
+        "input_norm": (passthrough.get("model.language_model.layers.0.input_layernorm.weight") or {}).get("source_file"),
+    }
+    paths: dict[str, Path] = {}
+    for label, value in names.items():
+        if not isinstance(value, str) or not value:
+            raise OracleError(f"source {label} path is missing")
+        paths[label] = _canonical_file(Path(value), f"source {label} safetensor")
+    source_root = Path(os.path.commonpath([str(path.parent) for path in paths.values()])).resolve()
+    if not source_root.is_dir():
+        raise OracleError("source canonical root is unavailable")
+    for label, path in paths.items():
+        try:
+            path.relative_to(source_root)
+        except ValueError as error:
+            raise OracleError(f"source {label} escapes canonical source root") from error
+    return paths, source_root
+
+
+def rmsnorm_f32_input(embedding: list[float], norm: list[float], epsilon: float) -> list[float]:
+    if len(embedding) != len(norm) or not embedding:
+        raise OracleError("RMSNorm input/weight dimensions differ")
+    sum_squares = _f32(0.0)
+    for value in embedding:
+        product = _f32(_f32(value) * _f32(value))
+        sum_squares = _f32(sum_squares + product)
+    mean_square = _f32(sum_squares / _f32(len(embedding)))
+    epsilon = _f32(epsilon)
+    variance = _f32(mean_square + epsilon)
+    rms = _f32(math.sqrt(variance))
+    scale = _f32(_f32(1.0) / rms)
+    return [finite(_f32(_f32(_f32(value) * _f32(norm[index])) * scale), "layer-0 input_normed") for index, value in enumerate(embedding)]
+
+
+def _build_input_normed(package_manifest: dict[str, Any], cases_path: Path, source_rows: dict[tuple[str, int], dict[str, Any]], source_paths: dict[str, Path]) -> tuple[dict[tuple[str, int], list[float]], dict[tuple[str, int], dict[str, Any]], dict[str, Any]]:
     """Reconstruct the exact layer-0 input from embedding rows and RMSNorm weights.
 
     Only three token rows and one 4096-element norm vector are retained.  The full
     embedding and QKV tensors are never materialized.
     """
-    cases_path = Path(str(source_manifest.get("cases_path", "")))
     cases_doc = read_json(cases_path)
     cases = {str(row["case_id"]): row for row in cases_doc.get("cases", []) if isinstance(row, dict)}
     passthrough = {str(item.get("name")): item for item in package_manifest.get("passthrough_tensors", []) if isinstance(item, dict)}
@@ -355,8 +469,8 @@ def _build_input_normed(package_manifest: dict[str, Any], source_manifest: dict[
     norm_item = passthrough.get("model.language_model.layers.0.input_layernorm.weight")
     if embed_item is None or norm_item is None:
         raise OracleError("layer-0 embedding/input norm passthrough identity is missing")
-    embed_reader = SafeTensorReader(Path(str(embed_item["source_file"])))
-    norm_reader = SafeTensorReader(Path(str(norm_item["source_file"])))
+    embed_reader = SafeTensorReader(source_paths["embedding"])
+    norm_reader = SafeTensorReader(source_paths["input_norm"])
     raw_norm = norm_reader.read_tensor_vector(norm_item["name"])
     if len(raw_norm) != 4096:
         raise OracleError("layer-0 input norm length differs")
@@ -397,10 +511,8 @@ def _build_input_normed(package_manifest: dict[str, Any], source_manifest: dict[
         embedding = embed_reader.read_tensor_row(embed_item["name"], token_id)
         if len(embedding) != len(norm):
             raise OracleError("embedding/input norm dimensions differ")
-        mean_square = sum(float(value) * float(value) for value in embedding) / len(embedding)
         epsilon = _f32(1.0e-6)
-        scale = 1.0 / math.sqrt(mean_square + epsilon)
-        vector = [finite(float(value) * float(norm[index]) * scale, "layer-0 input_normed") for index, value in enumerate(embedding)]
+        vector = rmsnorm_f32_input(embedding, norm, epsilon)
         vectors[(case_id, step)] = vector
         bindings[(case_id, step)] = {
             "token_id": token_id,
@@ -414,6 +526,17 @@ def _build_input_normed(package_manifest: dict[str, Any], source_manifest: dict[
 def vector_sha(values: list[float]) -> str:
     payload = b"".join(F32.pack(finite(value, "input vector")) for value in values)
     return hashlib.sha256(payload).hexdigest()
+
+
+def input_bindings_sha(bindings: dict[tuple[str, int], dict[str, Any]]) -> str:
+    rows = []
+    for case_id, step in EXPECTED_ROWS:
+        binding = bindings.get((case_id, step))
+        if not isinstance(binding, dict):
+            raise OracleError(f"input binding is missing: {(case_id, step)}")
+        rows.append({"case_id": case_id, "step": step, **binding})
+    encoded = json.dumps(rows, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def compare_vectors(left: list[float], right: list[float]) -> dict[str, float | bool]:
@@ -437,35 +560,31 @@ def compare_vectors(left: list[float], right: list[float]) -> dict[str, float | 
     }
 
 
-def _load_inputs(path: Path, item: dict[str, Any]) -> dict[tuple[str, int], list[float]]:
-    value = read_json(path)
-    if value.get("schema_version") != INPUT_SCHEMA or value.get("tensor_name") != item["name"]:
-        raise OracleError("matvec input schema/tensor differs")
-    rows = value.get("rows")
-    if not isinstance(rows, list):
-        raise OracleError("matvec inputs must contain rows")
-    loaded: dict[tuple[str, int], list[float]] = {}
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("case_id"), str) or type(row.get("step")) is not int or not isinstance(row.get("values"), list):
-            raise OracleError("matvec input row fields differ")
-        key = (row["case_id"], row["step"])
-        if key in loaded or key not in EXPECTED_ROWS:
-            raise OracleError("matvec input case set differs")
-        values = [finite(number, "matvec input") for number in row["values"]]
-        if row.get("input_sha256") != vector_sha(values):
-            raise OracleError(f"matvec input hash differs: {key}")
-        loaded[key] = values
-    if set(loaded) != set(EXPECTED_ROWS):
-        raise OracleError("matvec input must contain all fixed attempt-3 cases")
-    return loaded
-
-
-def _load_tensor_outputs(path: Path, item: dict[str, Any]) -> dict[tuple[str, int], list[float]]:
+def _load_tensor_outputs(path: Path, item: dict[str, Any], expected_identity: dict[str, Any]) -> tuple[dict[tuple[str, int], list[float]], dict[str, Any]]:
+    path = _canonical_file(path, "GPU tensor output")
     value = read_json(path)
     if value.get("schema_version") != TENSOR_OUTPUT_SCHEMA or value.get("tensor_name") != item["name"]:
-        raise OracleError("tensor output schema/tensor differs")
+        raise OracleError("GPU tensor output schema/tensor differs")
+    identity = value.get("identity")
+    if not isinstance(identity, dict):
+        raise OracleError("GPU tensor output identity is missing")
+    required = ("package_manifest_sha256", "active_manifest_sha256", "input_bindings_sha256", "device", "guard_set_sha256", "operation", "effective_rpb")
+    missing = [field for field in required if field not in identity]
+    if missing:
+        raise OracleError(f"GPU tensor output identity fields are missing: {','.join(missing)}")
+    for field in ("package_manifest_sha256", "active_manifest_sha256", "input_bindings_sha256", "guard_set_sha256", "operation"):
+        if identity.get(field) != expected_identity.get(field):
+            raise OracleError(f"GPU tensor output identity mismatch: {field}")
+    if identity.get("device") != expected_identity.get("device"):
+        raise OracleError("GPU tensor output device/backend identity mismatch")
+    effective_rpb = identity.get("effective_rpb")
+    if effective_rpb != expected_identity.get("effective_rpb"):
+        raise OracleError("GPU tensor output effective RPB identity mismatch")
     loaded: dict[tuple[str, int], list[float]] = {}
-    for row in value.get("rows", []):
+    rows = value.get("rows")
+    if not isinstance(rows, list):
+        raise OracleError("GPU tensor output rows are missing")
+    for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("case_id"), str) or type(row.get("step")) is not int or not isinstance(row.get("values"), list):
             raise OracleError("tensor output row fields differ")
         key = (row["case_id"], row["step"])
@@ -474,26 +593,65 @@ def _load_tensor_outputs(path: Path, item: dict[str, Any]) -> dict[tuple[str, in
         loaded[key] = [finite(number, "tensor output") for number in row["values"]]
     if set(loaded) != set(EXPECTED_ROWS):
         raise OracleError("tensor output must contain all fixed attempt-3 cases")
-    return loaded
+    return loaded, identity
+
+
+def _trace_file_identities(root: Path, label: str) -> dict[str, Any]:
+    root = _canonical_directory(root, f"{label} root")
+    return {
+        "manifest": _capture_file_identity(root / "manifest.json", f"{label} manifest", root=root),
+        "payload": _capture_file_identity(root / "payload.jsonl", f"{label} payload", root=root),
+    }
+
+
+def _assert_identities(identities: dict[str, Any]) -> None:
+    for label, identity in identities.items():
+        _assert_file_identity(identity, label)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    package_manifest, item, package_dir, package_sha = _load_package(args.package_dir, args.tensor_name)
+    if not isinstance(args.expected_gpu_operation, str) or not args.expected_gpu_operation or args.expected_gpu_rpb_rows <= 0 or args.expected_gpu_threads_per_row <= 0:
+        raise OracleError("GPU operation/RPB binding is invalid")
+    package_manifest, item, package_dir, package_sha, package_manifest_identity = _load_package(args.package_dir, args.tensor_name)
     if package_sha != args.expected_package_sha256:
         raise OracleError("package manifest SHA differs from pinned identity")
+    package_payload_paths = {
+        "package index payload": _canonical_package_payload(package_dir, item["index_file"], "package index payload"),
+        "package scale payload": _canonical_package_payload(package_dir, item["scale_file"], "package scale payload"),
+        "package codebook payload": _canonical_package_payload(package_dir, item["codebook_file"], "package codebook payload"),
+    }
+    file_identities: dict[str, Any] = {"package manifest": package_manifest_identity}
+    file_identities.update({label: _capture_file_identity(path, label, root=package_dir) for label, path in package_payload_paths.items()})
+    gpu_trace_file_identities = _trace_file_identities(args.gpu_trace, "GPU trace")
+    source_trace_file_identities = _trace_file_identities(args.source_trace, "source trace")
+    file_identities.update({f"GPU trace {key}": value for key, value in gpu_trace_file_identities.items()})
+    file_identities.update({f"source trace {key}": value for key, value in source_trace_file_identities.items()})
     gpu_manifest, gpu_rows = _load_trace(args.gpu_trace, package_sha, args.expected_active_sha256)
     source_manifest, source_rows = _load_trace(args.source_trace, None, None)
+    _assert_identities({**file_identities})
     if source_manifest.get("source_manifest_sha256") != args.expected_source_trace_sha256:
         raise OracleError("source trace identity differs from pinned identity")
     for key in EXPECTED_ROWS:
         if source_rows[key].get("context_token_ids_sha256") != gpu_rows[key].get("context_token_ids_sha256"):
             raise OracleError(f"source/GPU context binding differs: {key}")
-    index_path = package_dir / item["index_file"]
-    scale_path = package_dir / item["scale_file"]
-    codebook_path = package_dir / item["codebook_file"]
-    source_tensor_path = Path(str(item["source_file"]))
-    source_tensor_reader = SafeTensorReader(source_tensor_path)
+    source_paths, source_root = _source_tensor_paths(package_manifest, item)
+    file_identities.update({f"source {key} safetensor": _capture_file_identity(path, f"source {key} safetensor", root=source_root) for key, path in source_paths.items()})
+    cases_value = source_manifest.get("cases_path")
+    if not isinstance(cases_value, str) or not cases_value or not Path(cases_value).is_absolute():
+        raise OracleError("source trace cases_path must be an absolute path")
+    cases_path = _canonical_file(Path(cases_value), "cases file")
+    file_identities["cases file"] = _capture_file_identity(cases_path, "cases file")
+    source_tensor_reader = SafeTensorReader(source_paths["qkv"])
     scale_table = scale_values_e4m3()
+    active_identity = gpu_manifest.get("identity")
+    if not isinstance(active_identity, dict):
+        raise OracleError("GPU trace identity is missing")
+    gpu_device = active_identity.get("device")
+    if not isinstance(gpu_device, dict) or not isinstance(gpu_device.get("backend"), str) or type(gpu_device.get("index")) is not int:
+        raise OracleError("GPU trace device/backend identity is missing")
+    guard_set_sha = active_identity.get("guard_set_sha256")
+    if not isinstance(guard_set_sha, str) or len(guard_set_sha) != 64:
+        raise OracleError("GPU trace guard identity is missing")
     base = {
         "schema_version": SCHEMA,
         "status": "blocked_missing_tensor_output",
@@ -502,10 +660,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "tensor_shape": item["shape"],
         "group_size": item["group_size"],
         "package_manifest_sha256": package_sha,
-        "active_manifest_sha256": gpu_manifest["identity"]["active_manifest_sha256"],
+        "active_manifest_sha256": active_identity["active_manifest_sha256"],
         "source_trace_manifest_sha256": source_manifest.get("source_manifest_sha256"),
         "fixed_case_rows": [{"case_id": case_id, "step": step} for case_id, step in EXPECTED_ROWS],
         "required_gpu_tensor_output_schema": TENSOR_OUTPUT_SCHEMA,
+        "source_canonical_root": str(source_root),
         "cpu_f32_reference_contract": {
             "implementation": "explicit_f32_scalar_accumulation",
             "api_target": "ullm_runtime_aq4_matvec_f32",
@@ -525,17 +684,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "index_packing": "idx4_low_nibble_first",
             "source_reference_accumulator_dtype": "f64_python_reference",
         },
-        "nonfinite_counts": {
-            "input_vectors": 0,
-            "cpu_outputs": 0,
-            "runtime_cpu_outputs": 0,
-            "source_outputs": 0,
+        "gpu_tensor_output_identity_contract": {
+            "package_manifest_sha256": package_sha,
+            "active_manifest_sha256": active_identity["active_manifest_sha256"],
+            "device": {"backend": gpu_device["backend"], "index": gpu_device["index"]},
+            "guard_set_sha256": guard_set_sha,
+            "operation": args.expected_gpu_operation,
+            "effective_rpb": {"rows_per_block": args.expected_gpu_rpb_rows, "threads_per_row": args.expected_gpu_threads_per_row},
         },
+        "nonfinite_counts": {"input_vectors": 0, "cpu_outputs": 0, "runtime_cpu_outputs": 0, "source_outputs": 0},
         "payload_identity": {
             "source_tensor_sha256": source_tensor_reader.digest_tensor(item["name"]),
-            "index_sha256": sha256_file(index_path),
-            "scale_sha256": sha256_file(scale_path),
-            "codebook_sha256": sha256_file(codebook_path),
+            "index_sha256": file_identities["package index payload"]["sha256"],
+            "scale_sha256": file_identities["package scale payload"]["sha256"],
+            "codebook_sha256": file_identities["package codebook payload"]["sha256"],
             "scale_table_count": len(scale_table),
             "scale_table_f32le_sha256": hashlib.sha256(b"".join(F32.pack(value) for value in scale_table)).hexdigest(),
             "tensor_scale": item["tensor_scale"],
@@ -544,29 +706,42 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "row_scale_count": 0,
             "row_scale_override_present": False,
         },
+        "file_identities": file_identities,
     }
-    inputs, input_bindings, norm_identity = _build_input_normed(package_manifest, source_manifest, source_rows)
+    inputs, input_bindings, norm_identity = _build_input_normed(package_manifest, cases_path, source_rows, source_paths)
     base["input_norm_identity"] = norm_identity
-    source_reader = source_tensor_reader
+    base["input_bindings_sha256"] = input_bindings_sha(input_bindings)
+    expected_gpu_identity = {
+        "package_manifest_sha256": package_sha,
+        "active_manifest_sha256": active_identity["active_manifest_sha256"],
+        "input_bindings_sha256": base["input_bindings_sha256"],
+        "device": {"backend": gpu_device["backend"], "index": gpu_device["index"]},
+        "guard_set_sha256": guard_set_sha,
+        "operation": args.expected_gpu_operation,
+        "effective_rpb": {"rows_per_block": args.expected_gpu_rpb_rows, "threads_per_row": args.expected_gpu_threads_per_row},
+    }
+    gpu_outputs = None
+    if args.gpu_tensor_output:
+        gpu_output_path = _canonical_file(args.gpu_tensor_output, "GPU tensor output")
+        try:
+            file_identities["GPU tensor output"] = _capture_file_identity(gpu_output_path, "GPU tensor output")
+            gpu_outputs, gpu_output_identity = _load_tensor_outputs(gpu_output_path, item, expected_gpu_identity)
+            base["gpu_tensor_output_identity"] = gpu_output_identity
+        except OracleError as error:
+            base["status"] = "no_go_gpu_tensor_output_identity_mismatch"
+            base["classification"] = "no_go_gpu_tensor_output_identity_mismatch"
+            base["reason"] = f"GPU tensor output identity rejected: {error}"
+            base["rows"] = []
+            return base
     rows: list[dict[str, Any]] = []
-    gpu_outputs = _load_tensor_outputs(args.gpu_tensor_output, item) if args.gpu_tensor_output else None
     for key in EXPECTED_ROWS:
         vector = inputs[key]
         cpu = dequant_matvec(package_dir, item, vector)
         cpu_runtime_f32 = dequant_matvec(package_dir, item, vector, scalar_f32=True)
-        source = source_matvec(source_reader, item, vector)
+        source = source_matvec(source_tensor_reader, item, vector)
         formula_vs_runtime = compare_vectors(cpu, cpu_runtime_f32)
         f32_bound_pass = formula_vs_runtime["max_abs"] <= 1e-4 and formula_vs_runtime["relative_l2"] <= 1e-4
-        record: dict[str, Any] = {
-            "case_id": key[0],
-            "step": key[1],
-            "input_binding": input_bindings[key],
-            "cpu_vs_source": compare_vectors(cpu, source),
-            "cpu_formula_vs_f32_reference": formula_vs_runtime,
-            "runtime_cpu_f32_api_invoked": False,
-            "runtime_cpu_f32_bit_exact": False,
-            "runtime_cpu_f32_bound_pass": f32_bound_pass,
-        }
+        record: dict[str, Any] = {"case_id": key[0], "step": key[1], "input_binding": input_bindings[key], "cpu_vs_source": compare_vectors(cpu, source), "cpu_formula_vs_f32_reference": formula_vs_runtime, "runtime_cpu_f32_api_invoked": False, "runtime_cpu_f32_bit_exact": False, "runtime_cpu_f32_bound_pass": f32_bound_pass}
         if gpu_outputs is not None:
             gpu = gpu_outputs[key]
             if len(gpu) != len(cpu):
@@ -578,6 +753,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else:
             record["classification"] = "inconclusive_missing_gpu_tensor_output"
         rows.append(record)
+    _assert_identities(file_identities)
     base["input_contract"] = "source embedding row + effective layer-0 additive RMSNorm (raw BF16 weight + 1.0_f32; epsilon=1e-6_f32)"
     base["cpu_reference"] = "tools/audit_aq4_p2_input_controls.py::aq4_matvec_reference"
     if gpu_outputs is None:
@@ -593,13 +769,15 @@ def main() -> int:
     parser.add_argument("--package-dir", type=Path, required=True)
     parser.add_argument("--source-trace", type=Path, required=True)
     parser.add_argument("--gpu-trace", type=Path, required=True)
-    parser.add_argument("--input-vectors", type=Path)
     parser.add_argument("--gpu-tensor-output", type=Path)
     parser.add_argument("--tensor-name", default=DEFAULT_TENSOR)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-active-sha256", dest="expected_active_sha256", default=DEFAULT_ACTIVE_SHA)
     parser.add_argument("--expected-package-sha256", dest="expected_package_sha256", default=DEFAULT_PACKAGE_SHA)
     parser.add_argument("--expected-source-trace-sha256", dest="expected_source_trace_sha256", default=DEFAULT_SOURCE_TRACE_SHA)
+    parser.add_argument("--expected-gpu-operation", default=DEFAULT_GPU_OPERATION)
+    parser.add_argument("--expected-gpu-rpb-rows", type=int, default=DEFAULT_GPU_RPB_ROWS)
+    parser.add_argument("--expected-gpu-threads-per-row", type=int, default=DEFAULT_GPU_THREADS_PER_ROW)
     parser.add_argument("--abs-tol", type=float, default=1e-3)
     parser.add_argument("--relative-tol", type=float, default=1e-4)
     args = parser.parse_args()
