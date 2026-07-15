@@ -531,16 +531,29 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     assert evidence["secret_material_recorded"] is False
 
 
-def test_profile_actual_v4_and_v5_failures_are_immutable_historical_readback() -> None:
+def test_profile_actual_v4_v5_and_v6_failures_are_immutable_historical_readback() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v6"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v6"
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v6"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v7"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v7"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v7"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v7"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+    assert not HARNESS.PROFILE_READY_ROOT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
+    assert not HARNESS.PROFILE_DRY_RUN_EVIDENCE.exists()
     assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
+    historical_v6_roots = (
+        base / "p2/resident-one-case-smoke-profile-ready-v6",
+        base / "p2/resident-one-case-smoke-profile-ready-dry-run-v6",
+        base / "p2/resident-one-case-smoke-profile-execute-v6",
+        base / "p2/resident-one-case-smoke-profile-execute-evidence-v6",
+        base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v6",
+        base / "p3/aq4-p3-diagnostic-rocprof-capture-v6",
+        base / "p2/resident-one-case-smoke-profile-operator-result-v7",
+        base / "p2/resident-one-case-smoke-profile-actual-audit-v7",
+    )
     historical_v5_roots = (
         base / "p2/resident-one-case-smoke-profile-execute-evidence-v5",
         base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v5",
@@ -549,7 +562,7 @@ def test_profile_actual_v4_and_v5_failures_are_immutable_historical_readback() -
         base / "p2/resident-one-case-smoke-profile-actual-audit-v6",
     )
     assert not (base / "p2/resident-one-case-smoke-profile-execute-v5").exists()
-    for root in historical_v5_roots:
+    for root in historical_v6_roots + historical_v5_roots:
         completed = subprocess.run(
             ["sha256sum", "-c", "SHA256SUMS"],
             cwd=root,
@@ -558,6 +571,11 @@ def test_profile_actual_v4_and_v5_failures_are_immutable_historical_readback() -
             check=False,
         )
         assert completed.returncode == 0, (root, completed.stdout, completed.stderr)
+    assert json.loads((historical_v6_roots[3] / "launcher-evidence.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v6_roots[4] / "launcher-evidence.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v6_roots[5] / "capture-failure.json").read_text())["schema_version"] == HARNESS.PROFILE_CAPTURE_FAILURE_SCHEMA
+    assert json.loads((historical_v6_roots[6] / "operator-result.json").read_text())["status"] == "failed"
+    assert json.loads((historical_v6_roots[7] / "actual-audit.json").read_text())["status"] == "failed_immutable_evidence_preserved_restore_passed"
     assert json.loads((historical_v5_roots[0] / "launcher-evidence.json").read_text())["status"] == "failed"
     assert json.loads((historical_v5_roots[1] / "launcher-evidence.json").read_text())["status"] == "failed"
     assert json.loads((historical_v5_roots[2] / "capture-failure.json").read_text())["schema_version"] == HARNESS.PROFILE_CAPTURE_FAILURE_SCHEMA
