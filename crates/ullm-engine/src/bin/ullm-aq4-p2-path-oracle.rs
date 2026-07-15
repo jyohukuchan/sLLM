@@ -318,6 +318,7 @@ fn run(
         layer_indices: None,
         lm_head_mode: PackageLmHeadMode::GpuResidentF32,
         lm_head_chunk_rows: 8192,
+        sq8_overlay: None,
     };
     let mut session_config = Qwen35Aq4SessionConfig::greedy(max_steps, EOS_TOKEN_IDS.to_vec())
         .with_prefill_chunk_tokens(prefill_m)?;

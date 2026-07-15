@@ -408,6 +408,7 @@ impl RealExecutor {
             layer_indices: None,
             lm_head_mode: PackageLmHeadMode::GpuResidentF32,
             lm_head_chunk_rows: DEFAULT_LM_HEAD_CHUNK_ROWS,
+            sq8_overlay: None,
         };
         Ok(Self {
             model: Qwen35Aq4ModelRuntime::load(config)?,

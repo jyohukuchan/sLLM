@@ -553,7 +553,7 @@ fn run(args: Args) -> Result<(), String> {
     let mut logits = OpenOptions::new().write(true).create_new(true).open(temporary.join("vectors/logits.f32le")).map_err(|e| format!("logits output: {e}"))?;
     let mut rows_file = OpenOptions::new().write(true).create_new(true).open(temporary.join("rows.jsonl")).map_err(|e| format!("rows output: {e}"))?;
     let profile = model.profile_snapshot();
-    let model_config = Qwen35Aq4ModelLoadConfig { package_dir: package_root.to_path_buf(), device_index: args.device_index, expected_architecture: Some(profile.device.clone()), chunk_bytes: 1024 * 1024, context_length: profile.context_length, kv_block_size: QWEN35_AQ4_KV_BLOCK_SIZE, layer_indices: None, lm_head_mode: PackageLmHeadMode::GpuResidentF32, lm_head_chunk_rows: 8192 };
+    let model_config = Qwen35Aq4ModelLoadConfig { package_dir: package_root.to_path_buf(), device_index: args.device_index, expected_architecture: Some(profile.device.clone()), chunk_bytes: 1024 * 1024, context_length: profile.context_length, kv_block_size: QWEN35_AQ4_KV_BLOCK_SIZE, layer_indices: None, lm_head_mode: PackageLmHeadMode::GpuResidentF32, lm_head_chunk_rows: 8192, sq8_overlay: None };
     let mut runtime = Qwen35Aq4ModelRuntime::load(model_config)?;
     if !runtime.calibration_full_logits_top1_available() { return Err("active LM head has no full-logit calibration path".into()); }
     let mut output_rows = 0usize;

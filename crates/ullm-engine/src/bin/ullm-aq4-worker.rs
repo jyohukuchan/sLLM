@@ -20,6 +20,10 @@ use ullm_engine::aq4_worker_backend::{
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig};
 use ullm_engine::qwen35_aq4_session::{Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig};
+use ullm_engine::qwen35_aq4_sq8_overlay::{
+    QWEN35_AQ4_SQ8_OVERLAY_EXECUTION_PROFILE, QWEN35_AQ4_SQ8_OVERLAY_IMPLEMENTATION_ID,
+    Qwen35Aq4Sq8OverlayLoadConfig,
+};
 use ullm_engine::served_model::{
     ServedModel, ServedModelError, WorkerBackendKind, WorkerStartupConfig, load_served_model,
 };
@@ -31,6 +35,12 @@ const PROCESS_IO_BUFFER_BYTES: usize = 64 * 1024;
 const RESIDENT_DEVICE_INDEX: u32 = 1;
 const RESIDENT_CHUNK_BYTES: usize = 1024 * 1024;
 const RESIDENT_LM_HEAD_CHUNK_ROWS: usize = 8192;
+const QWEN35_AQ4_SQ8_OVERLAY_REQUIRED_ENV: &[&str] = &[
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL",
+    "ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA",
+];
 
 #[derive(Debug, PartialEq, Eq)]
 struct WorkerArgs {
@@ -362,20 +372,61 @@ fn load_resident_worker(
     model: &ServedModel,
     current_exe: &std::path::Path,
 ) -> Result<LoadedWorker, ServedModelError> {
-    validate_resident_model_contract(model)?;
-    let startup = model.worker_startup(WorkerBackendKind::Aq4, current_exe)?;
-    let (config, profile) = resident_config_from_startup(startup)?;
+    let backend_kind = validate_resident_model_contract(model)?;
+    let startup = model.worker_startup(backend_kind, current_exe)?;
+    let sq8_overlay = match backend_kind {
+        WorkerBackendKind::Aq4Sq8Overlay => {
+            let artifact = model.product.artifact.as_ref().ok_or_else(|| {
+                ServedModelError("AQ4 SQ8 overlay artifact identity is missing".into())
+            })?;
+            let artifact_dir = startup.artifact_dir.clone().ok_or_else(|| {
+                ServedModelError("AQ4 SQ8 overlay artifact directory is missing".into())
+            })?;
+            Some(Qwen35Aq4Sq8OverlayLoadConfig {
+                binding_manifest: model.product.root.join(&artifact.manifest_path),
+                artifact_dir,
+                expected_binding_manifest_sha256: artifact.manifest_sha256.clone(),
+                expected_content_sha256: artifact.content_sha256.clone(),
+                expected_package_manifest_sha256: model.product.package.manifest_sha256.clone(),
+                expected_source_model_dir: model.tokenizer.root.clone(),
+                row_chunk: 256,
+            })
+        }
+        WorkerBackendKind::Aq4 => None,
+        WorkerBackendKind::Sq8 => {
+            return Err(ServedModelError(
+                "AQ4 resident worker resolved an SQ8 backend".into(),
+            ));
+        }
+    };
+    let (config, profile) = resident_config_from_startup(startup, sq8_overlay)?;
     Ok(LoadedWorker::Resident { config, profile })
 }
 
-fn validate_resident_model_contract(model: &ServedModel) -> Result<(), ServedModelError> {
+fn validate_resident_model_contract(
+    model: &ServedModel,
+) -> Result<WorkerBackendKind, ServedModelError> {
+    let backend_kind = if model.format.implementation_id == QWEN35_AQ4_SQ8_OVERLAY_IMPLEMENTATION_ID
+        && model.worker.identity.execution_profile == QWEN35_AQ4_SQ8_OVERLAY_EXECUTION_PROFILE
+        && model.product.artifact.is_some()
+    {
+        WorkerBackendKind::Aq4Sq8Overlay
+    } else if model.format.implementation_id == "qwen35_aq4_rdna4_v1"
+        && model.worker.identity.execution_profile == "rdna4_aq4_resident"
+        && model.product.artifact.is_none()
+    {
+        WorkerBackendKind::Aq4
+    } else {
+        return Err(ServedModelError(
+            "AQ4 resident implementation, execution profile, and artifact shape are inconsistent"
+                .into(),
+        ));
+    };
     if model.format.format_id != "AQ4_0"
-        || model.format.implementation_id != "qwen35_aq4_rdna4_v1"
         || model.generation.sampling.temperature
         || model.generation.sampling.top_p
         || model.generation.sampling.top_k != 1
         || model.worker.identity.device != "gfx1201"
-        || model.worker.identity.execution_profile != "rdna4_aq4_resident"
     {
         return Err(ServedModelError(
             "AQ4 resident worker format, implementation, identity, or greedy sampling contract is unsupported"
@@ -385,6 +436,9 @@ fn validate_resident_model_contract(model: &ServedModel) -> Result<(), ServedMod
     let mut actual_environment = model.worker.required_environment.iter().collect::<Vec<_>>();
     actual_environment.sort_unstable();
     let mut required_environment = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
+    if backend_kind == WorkerBackendKind::Aq4Sq8Overlay {
+        required_environment.extend_from_slice(QWEN35_AQ4_SQ8_OVERLAY_REQUIRED_ENV);
+    }
     required_environment.sort_unstable();
     if actual_environment.len() != required_environment.len()
         || actual_environment
@@ -397,13 +451,14 @@ fn validate_resident_model_contract(model: &ServedModel) -> Result<(), ServedMod
                 .into(),
         ));
     }
-    Ok(())
+    Ok(backend_kind)
 }
 
 fn resident_config_from_startup(
     startup: WorkerStartupConfig,
+    sq8_overlay: Option<Qwen35Aq4Sq8OverlayLoadConfig>,
 ) -> Result<(ResidentWorkerConfig, Sq8WorkerProfile), ServedModelError> {
-    if startup.artifact_dir.is_some() || startup.profile.top_k != 1 {
+    if startup.artifact_dir.is_some() != sq8_overlay.is_some() || startup.profile.top_k != 1 {
         return Err(ServedModelError(
             "AQ4 resident startup contract is inconsistent".into(),
         ));
@@ -419,6 +474,7 @@ fn resident_config_from_startup(
         layer_indices: None,
         lm_head_mode: PackageLmHeadMode::GpuResidentF32,
         lm_head_chunk_rows: RESIDENT_LM_HEAD_CHUNK_ROWS,
+        sq8_overlay,
     };
     let mut session = Qwen35Aq4SessionConfig::greedy(
         startup.profile.max_new_tokens,
@@ -657,7 +713,7 @@ mod tests {
         aq4_benchmark_case_registry_sha256, aq4_benchmark_case_sha256,
     };
     use ullm_engine::qwen35_aq4_session::Qwen35Aq4SessionModel;
-    use ullm_engine::served_model::WorkerProfileSnapshot;
+    use ullm_engine::served_model::{ArtifactIdentity, WorkerProfileSnapshot};
 
     static REGISTRY_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -980,7 +1036,7 @@ mod tests {
             required_environment: vec!["ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL".into()],
             reasoning: None,
         };
-        let (config, profile) = resident_config_from_startup(startup).unwrap();
+        let (config, profile) = resident_config_from_startup(startup, None).unwrap();
 
         assert_eq!(config.model.package_dir, PathBuf::from("/product/package"));
         assert_eq!(config.model.device_index, 1);
@@ -1006,13 +1062,16 @@ mod tests {
     fn resident_config_rejects_artifact_and_non_greedy_profile() {
         let mut profile = profile_snapshot();
         profile.top_k = 2;
-        let error = resident_config_from_startup(WorkerStartupConfig {
-            artifact_dir: Some(PathBuf::from("/artifact")),
-            package_dir: PathBuf::from("/package"),
-            profile,
-            required_environment: vec![],
-            reasoning: None,
-        })
+        let error = resident_config_from_startup(
+            WorkerStartupConfig {
+                artifact_dir: Some(PathBuf::from("/artifact")),
+                package_dir: PathBuf::from("/package"),
+                profile,
+                required_environment: vec![],
+                reasoning: None,
+            },
+            None,
+        )
         .unwrap_err();
         assert!(error.0.contains("inconsistent"));
     }
@@ -1127,6 +1186,7 @@ mod tests {
                 layer_indices: None,
                 lm_head_mode: PackageLmHeadMode::GpuResidentF32,
                 lm_head_chunk_rows: 8192,
+                sq8_overlay: None,
             },
             session: Qwen35Aq4SessionConfig::greedy(4, vec![2]),
             expected_vocab_size: 32,
@@ -1394,6 +1454,40 @@ mod tests {
     }
 
     #[test]
+    fn resident_contract_admits_only_the_exact_sq8_overlay_identity() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../services/openai-gateway/tests/fixtures/served-model/aq4/served-model.json",
+        );
+        let mut model = load_served_model(fixture).unwrap();
+        model.format.implementation_id = QWEN35_AQ4_SQ8_OVERLAY_IMPLEMENTATION_ID.into();
+        model.worker.identity.execution_profile = QWEN35_AQ4_SQ8_OVERLAY_EXECUTION_PROFILE.into();
+        model.product.artifact = Some(ArtifactIdentity {
+            manifest_path: "artifact/binding.json".into(),
+            manifest_sha256: "c".repeat(64),
+            content_sha256: "d".repeat(64),
+        });
+        model.worker.required_environment = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
+            .iter()
+            .chain(QWEN35_AQ4_SQ8_OVERLAY_REQUIRED_ENV)
+            .map(|value| (*value).to_string())
+            .collect();
+        assert_eq!(
+            validate_resident_model_contract(&model).unwrap(),
+            WorkerBackendKind::Aq4Sq8Overlay
+        );
+
+        model.product.artifact = None;
+        assert!(validate_resident_model_contract(&model).is_err());
+        model.product.artifact = Some(ArtifactIdentity {
+            manifest_path: "artifact/binding.json".into(),
+            manifest_sha256: "c".repeat(64),
+            content_sha256: "d".repeat(64),
+        });
+        model.worker.required_environment.pop();
+        assert!(validate_resident_model_contract(&model).is_err());
+    }
+
+    #[test]
     fn deployment_profile_matches_resident_worker_contract() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/served-models/qwen35-9b-aq4.profile.json");
@@ -1420,6 +1514,35 @@ mod tests {
         assert!(actual.contains(&"ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL"));
         actual.sort_unstable();
         let mut expected = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sq8_overlay_deployment_profile_is_dedicated_and_exact() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/served-models/qwen35-9b-aq4-sq8-linear-qkv-z-overlay.profile.json");
+        let profile: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(profile["format"]["format_id"], "AQ4_0");
+        assert_eq!(
+            profile["format"]["implementation_id"],
+            QWEN35_AQ4_SQ8_OVERLAY_IMPLEMENTATION_ID
+        );
+        assert_eq!(
+            profile["worker"]["identity"]["execution_profile"],
+            QWEN35_AQ4_SQ8_OVERLAY_EXECUTION_PROFILE
+        );
+        assert!(profile["product"]["artifact"].is_object());
+        let mut actual = profile["worker"]["required_environment"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut expected = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.to_vec();
+        expected.extend_from_slice(QWEN35_AQ4_SQ8_OVERLAY_REQUIRED_ENV);
+        actual.sort_unstable();
         expected.sort_unstable();
         assert_eq!(actual, expected);
     }

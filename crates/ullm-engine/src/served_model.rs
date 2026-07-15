@@ -200,6 +200,7 @@ pub struct ServedModel {
 pub enum WorkerBackendKind {
     Sq8,
     Aq4,
+    Aq4Sq8Overlay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +264,7 @@ impl ServedModel {
         let (format_id, requires_artifact) = match kind {
             WorkerBackendKind::Sq8 => ("SQ8_0", true),
             WorkerBackendKind::Aq4 => ("AQ4_0", false),
+            WorkerBackendKind::Aq4Sq8Overlay => ("AQ4_0", true),
         };
         if self.format.format_id != format_id
             || self.product.artifact.is_some() != requires_artifact

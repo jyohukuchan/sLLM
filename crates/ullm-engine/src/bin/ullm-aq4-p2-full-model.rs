@@ -780,6 +780,7 @@ fn run(args: Args) -> Result<bool, String> {
         layer_indices: None,
         lm_head_mode: PackageLmHeadMode::GpuResidentF32,
         lm_head_chunk_rows: DEFAULT_LM_HEAD_CHUNK_ROWS,
+        sq8_overlay: None,
     };
     // A prefill benchmark must not append a generated token merely to satisfy the ordinary
     // serving session's `max_new_tokens >= 1` contract.  Keep pure prefill in this driver-local
