@@ -324,7 +324,7 @@ fn run() -> ProbeResult<()> {
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
     let mut registry = WeightRegistry::new();
-    let matvec = PackageAq4ResidentMatvec::load(
+    let matvec = PackageAq4ResidentMatvec::load_single_diagnostic(
         &mut context,
         &mut stream,
         &mut registry,

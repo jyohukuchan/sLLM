@@ -399,6 +399,46 @@ impl PackageAq4ResidentMatvec {
             tensor_name,
             chunk_bytes,
             projection_dispatches,
+            true,
+        )
+    }
+
+    /// Loads one resident AQ4 matrix for the standalone diagnostic single-matvec path.
+    ///
+    /// This deliberately skips production AQ4 batch-plan admission. The diagnostic binary only
+    /// invokes [`Self::matvec`], so admitting `Aq4MatvecBatch` would require an unrelated HIP batch
+    /// guard and M1 probe before the single operation can start. The normal [`Self::load`] path
+    /// remains unchanged and always resolves production plans for all execution phases.
+    pub fn load_single_diagnostic(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        path: &str,
+        tensor_name: &str,
+        chunk_bytes: usize,
+    ) -> Result<Self, String> {
+        let device_info = context
+            .device_info()
+            .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+        if !device_info.backend.eq_ignore_ascii_case("cpu")
+            && !env_flag_enabled("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL")
+        {
+            return Err(
+                "non-CPU diagnostic AQ4 matvec load requires ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1"
+                    .to_string(),
+            );
+        }
+        let projection_dispatches = SqFp8ProjectionDispatches::from_info(&device_info, None);
+        Self::load_with_shared_buffers(
+            context,
+            stream,
+            registry,
+            None,
+            path,
+            tensor_name,
+            chunk_bytes,
+            projection_dispatches,
+            false,
         )
     }
 
@@ -411,6 +451,7 @@ impl PackageAq4ResidentMatvec {
         tensor_name: &str,
         chunk_bytes: usize,
         projection_dispatches: SqFp8ProjectionDispatches,
+        resolve_batch_plans: bool,
     ) -> Result<Self, String> {
         let selector = TensorSelector::Name(tensor_name.to_string());
         let bundle = select_tensor_payload_bundle(path, &selector)
@@ -518,15 +559,19 @@ impl PackageAq4ResidentMatvec {
             tensor_scale: materialize.tensor_scale,
             scale_count: materialize.scale_values.len(),
             row_scale_count: if row_scale_buffer.is_some() { rows } else { 0 },
-            aq4_batch_plans: Some(resolve_aq4_batch_plans(
-                context,
-                rows,
-                cols,
-                materialize.group_size,
-                materialize.scale_values.len(),
-                if row_scale_buffer.is_some() { rows } else { 0 },
-                materialize.tensor_scale,
-            )?),
+            aq4_batch_plans: resolve_batch_plans
+                .then(|| {
+                    resolve_aq4_batch_plans(
+                        context,
+                        rows,
+                        cols,
+                        materialize.group_size,
+                        materialize.scale_values.len(),
+                        if row_scale_buffer.is_some() { rows } else { 0 },
+                        materialize.tensor_scale,
+                    )
+                })
+                .transpose()?,
             projection_dispatches,
             storage: PackageResidentMatvecStorage::Aq4 {
                 index_buffer: loaded.index.buffer.clone(),
@@ -596,6 +641,7 @@ impl PackageAq4ResidentMatvec {
             tensor_name,
             chunk_bytes,
             projection_dispatches,
+            true,
         )
     }
 
@@ -1569,6 +1615,46 @@ mod tests {
         }
         assert!(cached_aq4_batch_plan(&plans, 1).is_err());
         assert!(cached_aq4_batch_plan(&plans, 129).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_single_matvec_instance_rejects_batch_execution_without_plans()
+    -> Result<(), String> {
+        let mut context = ullm_runtime_sys::RuntimeContext::create(0)?;
+        let mut stream = context.create_stream()?;
+        let device_info = context.device_info()?;
+        let projection_dispatches = SqFp8ProjectionDispatches::from_info(&device_info, None);
+        let mut matrix_buffer = |bytes| context.alloc_buffer(bytes).map(Arc::new);
+        let matrix = PackageAq4ResidentMatvec {
+            rows: 1,
+            cols: 1,
+            group_size: 1,
+            tensor_scale: 1.0,
+            scale_count: 1,
+            row_scale_count: 0,
+            aq4_batch_plans: None,
+            projection_dispatches,
+            storage: PackageResidentMatvecStorage::Aq4 {
+                index_buffer: matrix_buffer(1)?,
+                scale_buffer: matrix_buffer(1)?,
+                codebook_buffer: matrix_buffer(16 * std::mem::size_of::<f32>())?,
+                scale_values_buffer: matrix_buffer(std::mem::size_of::<f32>())?,
+                row_scale_buffer: None,
+            },
+        };
+        let input_buffer = context.alloc_buffer(2 * std::mem::size_of::<f32>())?;
+        let mut output_buffer = context.alloc_buffer(2 * std::mem::size_of::<f32>())?;
+        let error = matrix
+            .matvec_batch(
+                &input_buffer,
+                2,
+                &mut output_buffer,
+                &mut stream,
+                "diagnostic single matvec",
+            )
+            .expect_err("diagnostic single-matvec instance must reject batch execution");
+        assert!(error.contains("AQ4 matvec batch has no resolved production plan"));
         Ok(())
     }
 }

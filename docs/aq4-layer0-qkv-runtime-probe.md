@@ -6,6 +6,13 @@ defined operation: a direct `PackageAq4ResidentMatvec::matvec` call for
 not call the fused QKV/Z/Gate/Beta wrapper. The report is therefore emitted
 with `classification: "unclassified"` and `promotion_eligible: false`.
 
+The probe uses the diagnostic-only `PackageAq4ResidentMatvec::load_single_diagnostic`
+loader. It shares the normal package payload, shape, and identity validation, but
+does not admit production `Aq4MatvecBatch` plans because no batch operation is
+executed. The serving/production `PackageAq4ResidentMatvec::load` path and its
+phase-specific batch admission are unchanged. On HIP, the standalone probe still
+requires `ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1` and never falls back.
+
 ## Input sidecar
 
 The input is UTF-8 JSON Lines. The first line is a strict header:
