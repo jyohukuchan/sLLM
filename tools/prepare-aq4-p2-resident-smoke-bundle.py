@@ -24,18 +24,18 @@ SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 DRIVER_BUILD_PATH = ROOT / "target/release/ullm-aq4-p2-resident-driver"
 WORKER_HARDLINK_FIXTURE_PATH = ROOT / "tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json"
-SOURCE_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
-SOURCE_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
-DRIVER_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
-DRIVER_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
-DRIVER_SOURCE_SHA = "6d7ae136c7abc3b9f7f675d27ff8ed05cd82b9b40a492e56f38e7f2282491345"
+SOURCE_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+SOURCE_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
+DRIVER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+DRIVER_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
+DRIVER_SOURCE_SHA = "63821344747158f94e4934bb47da93e265a2a44fe8215979ef826fac0734bd4c"
 RUNNER_COMMIT = "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9"
 RUNNER_TREE = "bd46e713c658878e66fcab6d49ef863e43a06bd8"
 RUNNER_SOURCE_SHA = "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
 ACTIVE_CASE_DEVICE_FIXTURE_SHA = "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73"
-EXPECTED_DRIVER_SHA = "7cf027bc9c84632f93d725fe59bbaa0bb416840f8a5037199fe8836a75326025"
+EXPECTED_DRIVER_SHA = "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
 EXPECTED_SERVED_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 EXPECTED_WORKER_SHA = "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
 EXPECTED_PACKAGE_MANIFEST_SHA = "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
@@ -49,7 +49,7 @@ MAX_JSON = 64 * 1024 * 1024
 CHUNK = 1024 * 1024
 MAX_WORKER_RELEASE_ENTRIES = 4096
 MAX_WORKER_RELEASE_DEPTH = 8
-EXPECTED_WORKER_HARDLINK_FIXTURE_SHA = "600df04efa3f21aed9e089f6bcaace3fafddb033a093c4adb67af989f3663b87"
+EXPECTED_WORKER_HARDLINK_FIXTURE_SHA = "4a6bfe06d2ebd7bbabc1ad4e4c6df24b14a1c4837466c2a675953cb1d226d340"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 REQUIRED_FILES = {
@@ -74,11 +74,11 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "7c61c0c32bef709b4f2884325385c6d189e04b4c"
-BINDING_SOURCE_TREE = "a5245eda66112db2b479bf740a1ddc61c65ef4e2"
+BINDING_SOURCE_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+BINDING_SOURCE_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
 BINDING_RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
 BINDING_RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
-BINDING_DRIVER_GIT_BLOB = "0223325ea36a5ec6b6a8791d28b4ba5298a22655"
+BINDING_DRIVER_GIT_BLOB = "ea26726e95aeb73b4285fd36ea3f8b0be74578f4"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
     "trusted-validator.py": (0o444, "ed67910_bundle_validator_source"),
@@ -255,83 +255,81 @@ def scan_worker_inode_paths(root: Path, expected: dict[str, int], label: str, sn
 
 
 def validate_worker_hardlink_fixture(snapshot: Snapshot | None = None, hook: Callable[[], None] | None = None, *, fixture_path: Path = WORKER_HARDLINK_FIXTURE_PATH, expected_fixture_sha: str = EXPECTED_WORKER_HARDLINK_FIXTURE_SHA) -> dict[str, Any]:
-    fixture_raw = read_stable(fixture_path, "worker hardlink fixture", snapshot=snapshot)
+    fixture_raw = read_stable(fixture_path, "worker link fixture", snapshot=snapshot)
     if sha_bytes(fixture_raw) != expected_fixture_sha:
-        raise BundleError("worker hardlink fixture SHA differs")
-    fixture = parse_json(fixture_raw, "worker hardlink fixture")
-    exact = {"schema_version", "release_root", "deps_root", "primary_path", "alias_path", "sha256", "expected"}
-    if set(fixture) != exact or fixture.get("schema_version") != "ullm.aq4_p2_resident_worker_hardlink_identity.v1" or not isinstance(fixture.get("sha256"), str) or SHA_RE.fullmatch(fixture["sha256"]) is None:
-        raise BundleError("worker hardlink fixture schema differs")
+        raise BundleError("worker link fixture SHA differs")
+    fixture = parse_json(fixture_raw, "worker link fixture")
+    exact = {"schema_version", "roots", "paths", "primary_path", "sha256", "expected"}
+    if set(fixture) != exact or fixture.get("schema_version") != "ullm.aq4_p2_resident_worker_link_identity.v2" or not isinstance(fixture.get("sha256"), str) or SHA_RE.fullmatch(fixture["sha256"]) is None:
+        raise BundleError("worker link fixture schema differs")
     expected = fixture.get("expected")
     expected_keys = {"device", "inode", "uid", "gid", "mode", "size", "nlink", "mtime_ns", "ctime_ns"}
-    if not isinstance(expected, dict) or set(expected) != expected_keys or any(type(expected[key]) is not int or expected[key] < 0 for key in expected_keys) or expected["nlink"] != 2:
-        raise BundleError("worker hardlink fixture metadata differs")
-    release_root = Path(fixture["release_root"])
-    deps_root = Path(fixture["deps_root"])
+    roots_raw = fixture.get("roots")
+    paths_raw = fixture.get("paths")
+    if not isinstance(expected, dict) or set(expected) != expected_keys or any(type(expected[key]) is not int or expected[key] < 0 for key in expected_keys) or not isinstance(roots_raw, list) or not roots_raw or not isinstance(paths_raw, list) or not paths_raw or any(not isinstance(item, str) for item in [*roots_raw, *paths_raw]) or expected["nlink"] != len(paths_raw) or expected["nlink"] == 0:
+        raise BundleError("worker link fixture metadata differs")
+    roots = [Path(item) for item in roots_raw]
+    paths = [Path(item) for item in paths_raw]
     primary = Path(fixture["primary_path"])
-    alias = Path(fixture["alias_path"])
-    for path, label in ((release_root, "worker release root"), (deps_root, "worker deps root"), (primary, "worker primary"), (alias, "worker alias")):
-        reject_symlink_components(path, label)
-    if primary == alias or primary.parent != release_root or alias.parent != deps_root or deps_root.parent != release_root:
-        raise BundleError("worker hardlink paths/roots differ")
+    if len(set(roots)) != len(roots) or len(set(paths)) != len(paths) or primary != paths[0]:
+        raise BundleError("worker link paths/roots differ")
+    for path in roots:
+        reject_symlink_components(path, "worker scan root")
+    for path in paths:
+        reject_symlink_components(path, "worker declared path")
+        if not any(path != root and path.is_relative_to(root) for root in roots):
+            raise BundleError("worker link declared path is outside scan roots")
     try:
-        primary_before = primary.lstat()
-        alias_before = alias.lstat()
+        before = [path.lstat() for path in paths]
     except OSError as error:
-        raise BundleError(f"worker hardlink pre-open metadata failed: {error}") from error
-    if not stat.S_ISREG(primary_before.st_mode) or not stat.S_ISREG(alias_before.st_mode) or worker_stat_identity(primary_before) != expected or worker_stat_identity(alias_before) != expected or primary_before.st_mode & 0o111 == 0 or primary_before.st_mode & 0o002:
-        raise BundleError("worker hardlink pre-open metadata differs")
+        raise BundleError(f"worker link pre-open metadata failed: {error}") from error
+    if any(not stat.S_ISREG(item.st_mode) or worker_stat_identity(item) != expected or item.st_mode & 0o111 == 0 or item.st_mode & 0o002 for item in before):
+        raise BundleError("worker link pre-open metadata differs")
     if snapshot is not None:
-        snapshot.capture(primary, primary_before)
-        snapshot.capture(alias, alias_before)
+        for path, metadata in zip(paths, before, strict=True):
+            snapshot.capture(path, metadata)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    primary_fd = os.open(primary, flags)
+    descriptors: list[int] = []
     try:
-        alias_fd = os.open(alias, flags)
-    except OSError:
-        os.close(primary_fd)
-        raise
-    try:
-        if worker_stat_identity(os.fstat(primary_fd)) != expected or worker_stat_identity(os.fstat(alias_fd)) != expected:
-            raise BundleError("worker hardlink open metadata differs")
-        expected_release_paths = {primary, alias}
-        expected_deps_paths = {alias}
-        if scan_worker_inode_paths(release_root, expected, "worker release root", snapshot) != expected_release_paths or scan_worker_inode_paths(deps_root, expected, "worker deps root", snapshot) != expected_deps_paths:
-            raise BundleError("worker hardlink exact path coverage differs")
-        digests = []
-        sizes = []
-        for descriptor in (primary_fd, alias_fd):
+        for path in paths:
+            descriptors.append(os.open(path, flags))
+        if any(worker_stat_identity(os.fstat(descriptor)) != expected for descriptor in descriptors):
+            raise BundleError("worker link open metadata differs")
+        for root in roots:
+            expected_paths = {path for path in paths if path.is_relative_to(root)}
+            if scan_worker_inode_paths(root, expected, "worker scan root", snapshot) != expected_paths:
+                raise BundleError("worker link exact path coverage differs")
+        for descriptor in descriptors:
             digest = hashlib.sha256()
             size = 0
             while chunk := os.read(descriptor, CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
-            digests.append(digest.hexdigest())
-            sizes.append(size)
-        if digests != [fixture["sha256"], fixture["sha256"]] or sizes != [expected["size"], expected["size"]]:
-            raise BundleError("worker hardlink FD hash differs")
+            if digest.hexdigest() != fixture["sha256"] or size != expected["size"]:
+                raise BundleError("worker link FD hash differs")
         if hook is not None:
             hook()
         try:
-            primary_post = primary.lstat()
-            alias_post = alias.lstat()
+            post = [path.lstat() for path in paths]
         except OSError as error:
-            raise BundleError(f"worker hardlink post metadata failed: {error}") from error
-        if worker_stat_identity(primary_post) != expected or worker_stat_identity(alias_post) != expected or worker_stat_identity(os.fstat(primary_fd)) != expected or worker_stat_identity(os.fstat(alias_fd)) != expected:
-            raise BundleError("worker hardlink identity changed during validation")
-        if scan_worker_inode_paths(release_root, expected, "worker release root post", snapshot) != expected_release_paths or scan_worker_inode_paths(deps_root, expected, "worker deps root post", snapshot) != expected_deps_paths:
-            raise BundleError("worker hardlink post path coverage differs")
+            raise BundleError(f"worker link post metadata failed: {error}") from error
+        if any(worker_stat_identity(item) != expected for item in post) or any(worker_stat_identity(os.fstat(descriptor)) != expected for descriptor in descriptors):
+            raise BundleError("worker link identity changed during validation")
+        for root in roots:
+            expected_paths = {path for path in paths if path.is_relative_to(root)}
+            if scan_worker_inode_paths(root, expected, "worker scan root post", snapshot) != expected_paths:
+                raise BundleError("worker link post path coverage differs")
     finally:
-        os.close(alias_fd)
-        os.close(primary_fd)
+        for descriptor in descriptors:
+            os.close(descriptor)
     return {
         "fixture": {"path": str(fixture_path), "sha256": expected_fixture_sha},
-        "release_root": str(release_root),
-        "deps_root": str(deps_root),
-        "paths": [str(primary), str(alias)],
+        "roots": [str(path) for path in roots],
+        "paths": [str(path) for path in paths],
+        "primary_path": str(primary),
         "sha256": fixture["sha256"],
         "expected": expected,
-        "exact_path_count": 2,
+        "exact_path_count": len(paths),
         "unknown_hardlinks_possible": False,
     }
 
@@ -477,6 +475,8 @@ def reconstruct() -> Reconstruction:
         b'WorkerHardlinkGuard::capture(&model.worker.binary, &model.worker.binary_sha256)?',
         b'worker_guard.verify(&model.worker.binary, &model.worker.binary_sha256)?',
         b'case.device.architecture != identity.runtime_device.architecture',
+        b'fixture.paths.len() as u64 != fixture.expected.nlink',
+        b'worker link path coverage differs',
         b'MAX_WORKER_RELEASE_ENTRIES',
         b'O_NOFOLLOW',
     ):
