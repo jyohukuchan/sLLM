@@ -221,16 +221,36 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
             "keepalives": [],
             "keepalive_failed": False,
             "gpu_command_executed": True,
-            "model_load_executed": True,
-            "profile_capture": {
+                "model_load_executed": True,
+                "profile_diagnostics": {
+                    "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+                    "runner_finished": True,
+                    "capture_artifact": {"path": str(tmp_path / "capture-artifact.json"), "sha256": "0" * 64, "mode": 0o444},
+                    "failure_evidence": None,
+                    "validation_error": None,
+                    "executor_exception": None,
+                },
+                "profile_capture": {
                 "status": "complete_diagnostic",
                 "runner_profiled": True,
                 "validator_profiled": False,
                 "gates_profiled": False,
-                "capture_tool_invocations": 1,
-                "rocprof_invocations": 1,
-                "target_manifest_sha256": target["sha256"],
-            },
+                    "capture_tool_invocations": 1,
+                    "rocprof_invocations": 1,
+                    "rocprof_started": True,
+                    "runner_started": True,
+                    "runner_start_known": True,
+                    "runner_completed": True,
+                    "target_manifest_sha256": target["sha256"],
+                    "target_manifest_semantic_sha256": target["manifest_sha256"],
+                    "target_argv_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(command)),
+                    "environment_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(environment)),
+                    "capture_stdout_sha256": "0" * 64,
+                    "capture_stderr_sha256": "0" * 64,
+                    "timed_out": False,
+                    "cleanup_passed": True,
+                    "children_remaining": [],
+                },
         }
 
     code, evidence = LAUNCHER.execute_bound(binding, evidence_path, result_path, run_id, trusted_launcher_sha=TRUSTED_LAUNCHER_SHA, run=validator, gate_provider=_gates, profile_runner_executor=runner)
@@ -240,6 +260,81 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
     assert evidence["profile_diagnostic"]["resident_session_id"] == "profile-session-test"
     assert evidence["profile_diagnostic"]["ranges"]["count"] == 12
     assert evidence["profile_diagnostic"]["promotion_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("unknown-field", "runner-without-known-start", "cleanup-contradiction", "complete-timeout"),
+)
+def test_profile_capture_summary_rejects_unknown_fields_and_lifecycle_contradictions(
+    tmp_path: Path, mutation: str
+) -> None:
+    binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
+
+    def validator(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, _validator_success(), b"")
+
+    def runner(command: list[str], environment: dict[str, str], on_rocprof_started, target):
+        capture = {
+            "status": "complete_diagnostic",
+            "runner_profiled": True,
+            "validator_profiled": False,
+            "gates_profiled": False,
+            "capture_tool_invocations": 1,
+            "rocprof_invocations": 1,
+            "rocprof_started": True,
+            "runner_started": True,
+            "runner_start_known": True,
+            "runner_completed": True,
+            "target_manifest_sha256": target["sha256"],
+            "target_manifest_semantic_sha256": target["manifest_sha256"],
+            "target_argv_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(command)),
+            "environment_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(environment)),
+            "capture_stdout_sha256": "0" * 64,
+            "capture_stderr_sha256": "0" * 64,
+            "timed_out": False,
+            "cleanup_passed": True,
+            "children_remaining": [],
+        }
+        if mutation == "unknown-field":
+            capture["unknown"] = False
+        elif mutation == "runner-without-known-start":
+            capture["runner_start_known"] = False
+        elif mutation == "cleanup-contradiction":
+            capture["cleanup_passed"] = False
+        elif mutation == "complete-timeout":
+            capture["timed_out"] = True
+        on_rocprof_started()
+        return {
+            "completed": subprocess.CompletedProcess(command, 1, b"", b""),
+            "keepalives": [],
+            "keepalive_failed": False,
+            "gpu_command_executed": "unknown",
+            "model_load_executed": "unknown",
+            "profile_capture": capture,
+            "profile_diagnostics": {
+                "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+                "runner_finished": True,
+                "capture_artifact": {"path": str(tmp_path / "capture-artifact.json"), "sha256": "0" * 64, "mode": 0o444},
+                "failure_evidence": None,
+                "validation_error": None,
+                "executor_exception": None,
+            },
+        }
+
+    code, evidence = LAUNCHER.execute_bound(
+        binding,
+        evidence_path,
+        result_path,
+        run_id,
+        trusted_launcher_sha=TRUSTED_LAUNCHER_SHA,
+        run=validator,
+        gate_provider=_gates,
+        profile_runner_executor=runner,
+    )
+    assert code == 1
+    assert evidence["failure"]["reason"] == "profile capture outcome contract differs"
+    assert evidence["failure"]["runner_started"] is False
 
 
 def test_profile_execute_rejects_generic_runner_executor_before_evidence(tmp_path: Path) -> None:

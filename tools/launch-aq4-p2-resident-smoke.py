@@ -94,6 +94,12 @@ PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
 ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
 ROCTX_LIBRARY_RESOLVED = Path("/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201")
 ROCTX_LIBRARY_SHA = "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
+PROFILE_PRODUCER_HELPER = ROOT / "tools/build-aq4-p3-selection-raw.py"
+PROFILE_PRODUCER_HELPER_SHA = "59a2f16ae3310928c3ead5e0df4435a74fea0125d01fcc4fb771657e86e61e55"
+PROFILE_SELECTOR_HELPER = ROOT / "tools/select-aq4-p3-candidate.py"
+PROFILE_SELECTOR_HELPER_SHA = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+PROFILE_FAMILY_HELPER = ROOT / "tools/profile-aq4-p2-family-exclusive.py"
+PROFILE_FAMILY_HELPER_SHA = "ef26005a364511ab8d0f7ca2fa46ad2108cac083d0a2a24721f6cef577e16c92"
 SUDO_KEEPALIVE_SECONDS = 30.0
 SERVICE_UNITS = ("ullm-openai.service", "llama-qwen35-udq4.service")
 GUARD_NAMES = (
@@ -592,6 +598,21 @@ def execute_binding_document() -> dict[str, Any]:
     }
 
 
+def profile_capture_helper_bindings() -> list[dict[str, Any]]:
+    bindings = []
+    for role, path, expected_sha in (
+        ("selection_raw_producer", PROFILE_PRODUCER_HELPER, PROFILE_PRODUCER_HELPER_SHA),
+        ("candidate_selector", PROFILE_SELECTOR_HELPER, PROFILE_SELECTOR_HELPER_SHA),
+        ("profile_family_classifier", PROFILE_FAMILY_HELPER, PROFILE_FAMILY_HELPER_SHA),
+    ):
+        observed_sha, identity = sha_file(path, f"profile capture helper {role}")
+        metadata = path.lstat()
+        if observed_sha != expected_sha or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise LauncherError("profile capture helper trust differs")
+        bindings.append({"role": role, "path": str(path), "identity": list(identity), "sha256": expected_sha})
+    return bindings
+
+
 def profile_execute_binding_document() -> dict[str, Any]:
     value = execute_binding_document()
     value["run_id"] = PROFILE_RUN_ID
@@ -618,6 +639,7 @@ def profile_execute_binding_document() -> dict[str, Any]:
             "generated_after_live_preflight": True,
             "file_name": PROFILE_RUNNER_TARGET_MANIFEST_NAME,
             "maximum_invocations": 1,
+            "capture_helpers": profile_capture_helper_bindings(),
         },
         "measurement_eligible": False,
         "promotion_eligible": False,
@@ -835,6 +857,7 @@ def profile_runner_target_manifest(
             },
         ],
         "output_paths": [{"argument_index": 19, "path": command[19]}],
+        "capture_helpers": profile_capture_helper_bindings(),
         "authorization": {
             "maximum_invocations": 1,
             "target_role": "profile_runner_only",
@@ -1389,6 +1412,7 @@ def execute_bound(
     runner_after_verified = False
     live_preflight: dict[str, Any] | None = None
     profile_target: dict[str, Any] | None = None
+    profile_rocprof_started = False
     stage = "constants"
 
     def verify_trust(point: str) -> None:
@@ -1405,6 +1429,12 @@ def execute_bound(
         evidence["safety"]["gpu_command_executed"] = "unknown"
         evidence["safety"]["model_load_executed"] = "unknown"
         evidence["safety"]["execution_state_source"] = "runner_started_completion_unknown"
+
+    def mark_rocprof_started() -> None:
+        nonlocal profile_rocprof_started
+        if profile_rocprof_started:
+            raise LauncherError("profile rocprof start was reported more than once")
+        profile_rocprof_started = True
 
     try:
         validate_execute_constants(snapshot, self_sha)
@@ -1449,7 +1479,7 @@ def execute_bound(
         try:
             if profile_enabled and profile_runner_executor is not None:
                 assert profile_target is not None
-                outcome = profile_runner_executor(command, EXECUTE_ENV, mark_runner_started, profile_target)
+                outcome = profile_runner_executor(command, EXECUTE_ENV, mark_rocprof_started, profile_target)
             elif profile_enabled:
                 raise LauncherError("profile runner executor is required")
             elif runner_executor is not None:
@@ -1461,7 +1491,7 @@ def execute_bound(
                 verify_trust("runner-after")
                 runner_after_verified = True
             raise
-        if evidence["process_counts"]["runner"] != 1:
+        if not profile_enabled and evidence["process_counts"]["runner"] != 1:
             evidence["safety"]["gpu_command_executed"] = "unknown"
             evidence["safety"]["model_load_executed"] = "unknown"
             evidence["safety"]["execution_state_source"] = "runner_outcome_without_start_signal"
@@ -1472,23 +1502,100 @@ def execute_bound(
         valid_load_state = type(load_state) is bool or load_state == "unknown"
         expected_outcome_fields = {"completed", "keepalives", "keepalive_failed", "gpu_command_executed", "model_load_executed"}
         if profile_enabled and profile_runner_executor is not None:
-            expected_outcome_fields.add("profile_capture")
+            expected_outcome_fields.update({"profile_capture", "profile_diagnostics"})
         if not isinstance(outcome, dict) or set(outcome) != expected_outcome_fields or not isinstance(outcome.get("completed"), subprocess.CompletedProcess) or not isinstance(outcome.get("keepalives"), list) or type(outcome.get("keepalive_failed")) is not bool or not valid_gpu_state or not valid_load_state:
             raise LauncherError("execute runner outcome contract differs")
         if "profile_capture" in expected_outcome_fields:
             capture = outcome.get("profile_capture")
+            capture_fields = {
+                "status", "runner_profiled", "validator_profiled", "gates_profiled",
+                "capture_tool_invocations", "rocprof_invocations", "rocprof_started",
+                "runner_started", "target_manifest_sha256", "target_manifest_semantic_sha256",
+                "target_argv_sha256", "environment_sha256", "capture_stdout_sha256",
+                "capture_stderr_sha256", "timed_out", "cleanup_passed", "children_remaining",
+                "runner_start_known", "runner_completed",
+            }
             if (
                 not isinstance(capture, dict)
-                or capture.get("runner_profiled") is not True
+                or set(capture) != capture_fields
+                or type(capture.get("rocprof_started")) is not bool
+                or type(capture.get("runner_started")) is not bool
+                or type(capture.get("runner_start_known")) is not bool
+                or type(capture.get("runner_completed")) is not bool
+                or capture.get("runner_profiled") is not capture.get("runner_completed")
                 or capture.get("validator_profiled") is not False
                 or capture.get("gates_profiled") is not False
                 or capture.get("capture_tool_invocations") != 1
-                or capture.get("rocprof_invocations") != 1
+                or capture.get("rocprof_invocations") != int(capture.get("rocprof_started"))
+                or capture.get("rocprof_started") is not profile_rocprof_started
                 or capture.get("target_manifest_sha256") != profile_target["sha256"]
+                or capture.get("target_manifest_semantic_sha256") != profile_target["manifest_sha256"]
+                or capture.get("target_argv_sha256") != sha_bytes(canonical(command))
+                or capture.get("environment_sha256") != sha_bytes(canonical(EXECUTE_ENV))
+                or any(not isinstance(capture.get(key), str) or SHA_RE.fullmatch(capture[key]) is None for key in ("capture_stdout_sha256", "capture_stderr_sha256"))
+                or type(capture.get("timed_out")) is not bool
+                or type(capture.get("cleanup_passed")) is not bool
+                or not isinstance(capture.get("children_remaining"), list)
+                or any(type(pid) is not int or pid <= 0 for pid in capture["children_remaining"])
+                or capture["cleanup_passed"] is not (capture["children_remaining"] == [])
+                or (capture["runner_started"] and (not capture["runner_start_known"] or not capture["rocprof_started"]))
+                or (capture["runner_completed"] and (not capture["runner_start_known"] or not capture["runner_started"]))
+                or (not capture["runner_start_known"] and (
+                    not capture["rocprof_started"]
+                    or capture["runner_started"]
+                    or capture["runner_completed"]
+                    or capture["status"] != "failed"
+                ))
+                or (not capture["rocprof_started"] and (
+                    not capture["runner_start_known"]
+                    or capture["runner_started"]
+                    or capture["runner_completed"]
+                ))
+                or (capture["timed_out"] and not capture["rocprof_started"])
                 or capture.get("status") not in {"complete_diagnostic", "failed"}
+                or (capture["status"] == "complete_diagnostic" and (
+                    not capture["rocprof_started"]
+                    or not capture["runner_started"]
+                    or not capture["runner_start_known"]
+                    or not capture["runner_completed"]
+                    or capture["timed_out"]
+                    or not capture["cleanup_passed"]
+                ))
             ):
                 raise LauncherError("profile capture outcome contract differs")
+            diagnostics = outcome.get("profile_diagnostics")
+            diagnostic_fields = {
+                "schema_version", "runner_finished", "capture_artifact", "failure_evidence",
+                "validation_error", "executor_exception",
+            }
+            if not isinstance(diagnostics, dict) or set(diagnostics) != diagnostic_fields or diagnostics.get("schema_version") != "ullm.aq4_p3_profile_executor_diagnostics.v1" or type(diagnostics.get("runner_finished")) is not bool:
+                raise LauncherError("profile capture diagnostics contract differs")
+            for key in ("validation_error", "executor_exception"):
+                if diagnostics[key] is not None and (not isinstance(diagnostics[key], str) or not diagnostics[key]):
+                    raise LauncherError("profile capture diagnostics error differs")
+            for key, fields in (
+                ("capture_artifact", {"path", "sha256", "mode"}),
+                ("failure_evidence", {"path", "sha256", "mode", "reason"}),
+            ):
+                item = diagnostics[key]
+                if item is not None and (
+                    not isinstance(item, dict)
+                    or set(item) != fields
+                    or not isinstance(item.get("path"), str)
+                    or not Path(item["path"]).is_absolute()
+                    or not isinstance(item.get("sha256"), str)
+                    or SHA_RE.fullmatch(item["sha256"]) is None
+                    or item.get("mode") != 0o444
+                    or (key == "failure_evidence" and (not isinstance(item.get("reason"), str) or not item["reason"]))
+                ):
+                    raise LauncherError("profile capture diagnostics evidence differs")
+            if diagnostics["runner_finished"] is not capture["runner_completed"] or (capture["status"] == "complete_diagnostic") is not (diagnostics["capture_artifact"] is not None) or (capture["status"] == "complete_diagnostic" and (diagnostics["failure_evidence"] is not None or diagnostics["validation_error"] is not None or diagnostics["executor_exception"] is not None)):
+                raise LauncherError("profile capture diagnostics state differs")
+            if capture["runner_completed"]:
+                mark_runner_started()
             evidence["profile_capture"] = capture
+        if profile_enabled and evidence["process_counts"]["runner"] != int(evidence["profile_capture"]["runner_completed"]):
+            raise LauncherError("profile runner lifecycle accounting differs")
         completed = outcome["completed"]
         keepalives = outcome["keepalives"]
         keepalive_failed = outcome["keepalive_failed"]

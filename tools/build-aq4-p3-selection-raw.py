@@ -6,36 +6,81 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import importlib.util
 import json
 import math
 import os
 import re
 import stat
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SELECTOR_PATH = ROOT / "tools/select-aq4-p3-candidate.py"
+SELECTOR_SHA256 = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+PROFILER_PATH = ROOT / "tools/profile-aq4-p2-family-exclusive.py"
+PROFILER_SHA256 = "ef26005a364511ab8d0f7ca2fa46ad2108cac083d0a2a24721f6cef577e16c92"
+DEPENDENCY_MAX_BYTES = 2 * 1024 * 1024
 
 
-def load_tool(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
+def load_verified_tool(name: str, path: Path, expected_sha256: str) -> Any:
+    if not path.is_absolute() or ".." in path.parts or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise RuntimeError("producer dependency binding is invalid")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if stat.S_ISLNK(current.lstat().st_mode):
+            raise RuntimeError(f"producer dependency path contains a symlink: {current}")
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > DEPENDENCY_MAX_BYTES:
+        raise RuntimeError("producer dependency must be a bounded single-link regular file")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+        opened_identity = (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        if opened_identity != identity:
+            raise RuntimeError("producer dependency changed while opening")
+        data = b""
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            size += len(chunk)
+            if size > DEPENDENCY_MAX_BYTES:
+                raise RuntimeError("producer dependency exceeds the input limit")
+            chunks.append(chunk)
+            digest.update(chunk)
+        data = b"".join(chunks)
+        final = os.fstat(descriptor)
+        final_identity = (final.st_dev, final.st_ino, final.st_mode, final.st_nlink, final.st_size, final.st_mtime_ns, final.st_ctime_ns)
+        if digest.hexdigest() != expected_sha256 or final_identity != identity:
+            raise RuntimeError("producer dependency SHA-256 or identity differs")
+    finally:
+        os.close(descriptor)
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = ""
     sys.modules[name] = module
     try:
-        spec.loader.exec_module(module)
+        exec(compile(data, str(path), "exec", dont_inherit=True), module.__dict__)
     finally:
         sys.modules.pop(name, None)
     return module
 
 
-SELECTOR = load_tool("aq4_p3_selector_for_producer", ROOT / "tools/select-aq4-p3-candidate.py")
-PROFILER = load_tool("aq4_p2_profiler_for_producer", ROOT / "tools/profile-aq4-p2-family-exclusive.py")
+_injected = globals().pop("_ULLM_VERIFIED_MODULES", None)
+if _injected is None:
+    SELECTOR = load_verified_tool("aq4_p3_selector_for_producer", SELECTOR_PATH, SELECTOR_SHA256)
+    PROFILER = load_verified_tool("aq4_p2_profiler_for_producer", PROFILER_PATH, PROFILER_SHA256)
+elif isinstance(_injected, dict) and set(_injected) == {"selector", "profiler"} and all(isinstance(item, types.ModuleType) for item in _injected.values()):
+    SELECTOR = _injected["selector"]
+    PROFILER = _injected["profiler"]
+else:
+    raise RuntimeError("verified producer dependency injection differs")
 
 INPUT_SCHEMA = "ullm.aq4_p3_selection_raw_producer_input.v1"
 PROFILE_BINDING_SCHEMA = "ullm.aq4_p3_rocprof_run_binding.v1"

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -17,28 +16,133 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 from typing import Any, NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HELPER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+HELPER_MAX_BYTES = 2 * 1024 * 1024
+PRODUCER_PATH = ROOT / "tools/build-aq4-p3-selection-raw.py"
+PRODUCER_SHA256 = "59a2f16ae3310928c3ead5e0df4435a74fea0125d01fcc4fb771657e86e61e55"
+SELECTOR_PATH = ROOT / "tools/select-aq4-p3-candidate.py"
+SELECTOR_SHA256 = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+PROFILE_HELPER_PATH = ROOT / "tools/profile-aq4-p2-family-exclusive.py"
+PROFILE_HELPER_SHA256 = "ef26005a364511ab8d0f7ca2fa46ad2108cac083d0a2a24721f6cef577e16c92"
 
 
-def load_tool(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(name, None)
-    return module
+class CaptureError(ValueError):
+    pass
 
 
-PRODUCER = load_tool("aq4_p3_producer_for_diagnostic_capture", ROOT / "tools/build-aq4-p3-selection-raw.py")
-PROFILER = load_tool("aq4_p2_profiler_for_diagnostic_capture", ROOT / "tools/profile-aq4-p2-family-exclusive.py")
+def local_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+class PinnedPythonHelper:
+    def __init__(self, path: Path, sha256: str, descriptor: int, identity: tuple[int, ...], data: bytes) -> None:
+        self.path = path
+        self.sha256 = sha256
+        self.descriptor = descriptor
+        self.identity = identity
+        self.data = data
+
+    @classmethod
+    def open(cls, path: Path, expected_sha256: str) -> "PinnedPythonHelper":
+        if not path.is_absolute() or ".." in path.parts or HELPER_SHA256_RE.fullmatch(expected_sha256) is None:
+            raise CaptureError("capture helper binding is invalid")
+        current = Path(path.anchor)
+        for part in path.parts[1:]:
+            current /= part
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise CaptureError(f"capture helper path contains a symlink: {current}")
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > HELPER_MAX_BYTES:
+            raise CaptureError("capture helper must be a bounded single-link regular file")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if local_identity(opened) != local_identity(metadata):
+                raise CaptureError("capture helper changed while opening")
+            chunks: list[bytes] = []
+            digest = hashlib.sha256()
+            size = 0
+            while chunk := os.read(descriptor, 1024 * 1024):
+                size += len(chunk)
+                if size > HELPER_MAX_BYTES:
+                    raise CaptureError("capture helper exceeds the input limit")
+                chunks.append(chunk)
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256 or local_identity(os.fstat(descriptor)) != local_identity(metadata):
+                raise CaptureError("capture helper SHA-256 or identity differs")
+            return cls(path, expected_sha256, descriptor, local_identity(metadata), b"".join(chunks))
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def load(self, name: str, *, injected_modules: dict[str, Any] | None = None) -> Any:
+        module = types.ModuleType(name)
+        module.__file__ = str(self.path)
+        module.__package__ = ""
+        if injected_modules is not None:
+            if set(injected_modules) != {"selector", "profiler"} or any(not isinstance(item, types.ModuleType) for item in injected_modules.values()):
+                raise CaptureError("capture helper module injection differs")
+            module.__dict__["_ULLM_VERIFIED_MODULES"] = dict(injected_modules)
+        sys.modules[name] = module
+        try:
+            code = compile(self.data, str(self.path), "exec", dont_inherit=True)
+            exec(code, module.__dict__)
+        finally:
+            sys.modules.pop(name, None)
+        return module
+
+    def verify(self) -> None:
+        if local_identity(self.path.lstat()) != self.identity or local_identity(os.fstat(self.descriptor)) != self.identity:
+            raise CaptureError("capture helper identity changed")
+        os.lseek(self.descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(self.descriptor, 1024 * 1024):
+            digest.update(chunk)
+        if digest.hexdigest() != self.sha256:
+            raise CaptureError("capture helper bytes changed")
+
+    def evidence(self, role: str) -> dict[str, Any]:
+        return {"role": role, "path": str(self.path), "identity": list(self.identity), "sha256": self.sha256}
+
+
+PRODUCER_HELPER = PinnedPythonHelper.open(PRODUCER_PATH, PRODUCER_SHA256)
+SELECTOR_HELPER = PinnedPythonHelper.open(SELECTOR_PATH, SELECTOR_SHA256)
+PROFILE_HELPER = PinnedPythonHelper.open(PROFILE_HELPER_PATH, PROFILE_HELPER_SHA256)
+SELECTOR = SELECTOR_HELPER.load("aq4_p3_selector_for_diagnostic_capture")
+PROFILER = PROFILE_HELPER.load("aq4_p2_profiler_for_diagnostic_capture")
+PRODUCER = PRODUCER_HELPER.load(
+    "aq4_p3_producer_for_diagnostic_capture",
+    injected_modules={"selector": SELECTOR, "profiler": PROFILER},
+)
+
+
+def capture_helper_contract() -> list[dict[str, Any]]:
+    return [
+        PRODUCER_HELPER.evidence("selection_raw_producer"),
+        SELECTOR_HELPER.evidence("candidate_selector"),
+        PROFILE_HELPER.evidence("profile_family_classifier"),
+    ]
+
+
+def verify_capture_helpers() -> None:
+    for helper in (PRODUCER_HELPER, SELECTOR_HELPER, PROFILE_HELPER):
+        helper.verify()
+
 
 SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
 TARGET_SCHEMA = "ullm.aq4_p3_profile_target_command.v1"
@@ -53,10 +157,6 @@ MEMORY_COPY_KINDS = {
     "d2h", "h2d", "d2d", "h2h", "peer", "peertopeer", "hosttodevice",
     "devicetohost", "devicetodevice", "hosttohost",
 }
-
-
-class CaptureError(ValueError):
-    pass
 
 
 class SymlinkIdentity(NamedTuple):
@@ -297,21 +397,105 @@ class PinnedTargetManifest:
         os.close(self.descriptor)
 
 
+class PinnedTargetFile:
+    def __init__(
+        self,
+        path: Path,
+        expected_sha256: str,
+        descriptor: int,
+        identity: tuple[int, ...],
+        argument_index: int,
+    ) -> None:
+        self.path = path
+        self.sha256 = expected_sha256
+        self.descriptor = descriptor
+        self.identity = identity
+        self.argument_index = argument_index
+
+    @property
+    def fd_path(self) -> str:
+        return f"/proc/self/fd/{self.descriptor}"
+
+    @classmethod
+    def open(
+        cls,
+        path: Path,
+        expected_sha256: str,
+        argument_index: int,
+        *,
+        require_executable: bool,
+    ) -> "PinnedTargetFile":
+        if not path.is_absolute() or ".." in path.parts or PRODUCER.SHA256_RE.fullmatch(expected_sha256) is None:
+            raise CaptureError("target input file binding is invalid")
+        try:
+            resolved = PROFILER.canonical_path(path, "target input file")
+            metadata = resolved.lstat()
+        except (OSError, PROFILER.ProfileError) as error:
+            raise CaptureError(f"target input file path is invalid: {error}") from error
+        if resolved != path or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise CaptureError("target input file must be a canonical single-link regular file")
+        if require_executable and stat.S_IMODE(metadata.st_mode) & 0o111 == 0:
+            raise CaptureError("target input executable permission differs")
+        descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            identity = PROFILER._identity(metadata)
+            if PROFILER._identity(opened) != identity:
+                raise CaptureError("target input file changed while opening")
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256 or PROFILER._identity(os.fstat(descriptor)) != identity:
+                raise CaptureError("target input file SHA-256 or identity differs")
+            return cls(resolved, expected_sha256, descriptor, identity, argument_index)
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def verify(self) -> None:
+        try:
+            current = self.path.lstat()
+            opened = os.fstat(self.descriptor)
+        except OSError as error:
+            raise CaptureError(f"target input file binding is unavailable: {error}") from error
+        if PROFILER._identity(current) != self.identity or PROFILER._identity(opened) != self.identity:
+            raise CaptureError("target input file identity changed")
+        os.lseek(self.descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(self.descriptor, 1024 * 1024):
+            digest.update(chunk)
+        if digest.hexdigest() != self.sha256:
+            raise CaptureError("target input file bytes changed")
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+
+
 class PinnedRuntimePath:
-    def __init__(self, value: dict[str, Any]) -> None:
+    def __init__(self, value: dict[str, Any], argument_index: int) -> None:
         self.value = value
         self.path = Path(value["path"])
         self.kind = value["kind"]
+        self.argument_index = argument_index
         self.identity = tuple(value.get("identity", ()))
-        self.resolved_snapshot: Any | None = None
+        self.resolved_snapshot: PinnedTargetFile | None = None
         if self.kind == "symlinked_file":
             resolved = Path(value["resolved_path"])
-            self.resolved_snapshot = PROFILER.capture(
-                resolved, "target symlinked runtime path", require_single_link=True
+            self.resolved_snapshot = PinnedTargetFile.open(
+                resolved,
+                value["sha256"],
+                argument_index,
+                require_executable=False,
             )
-            if self.resolved_snapshot.sha256 != value["sha256"]:
-                raise CaptureError("target symlinked runtime path SHA-256 differs")
         self.verify()
+
+    @property
+    def descriptor(self) -> int | None:
+        return None if self.resolved_snapshot is None else self.resolved_snapshot.descriptor
+
+    @property
+    def fd_path(self) -> str | None:
+        return None if self.resolved_snapshot is None else self.resolved_snapshot.fd_path
 
     def verify(self) -> None:
         try:
@@ -338,6 +522,10 @@ class PinnedRuntimePath:
                 raise CaptureError("target runtime path kind differs")
         except OSError as error:
             raise CaptureError(f"target runtime path is unavailable: {error}") from error
+
+    def close(self) -> None:
+        if self.resolved_snapshot is not None:
+            self.resolved_snapshot.close()
 
 
 def process_group_alive(process_group: int, process: subprocess.Popen[Any]) -> bool:
@@ -440,7 +628,7 @@ def pinned_profiler_version(profiler: PinnedProfiler) -> dict[str, Any]:
 def validate_target_manifest_root(value: dict[str, Any]) -> None:
     fields = {
         "schema_version", "status", "manifest_sha256", "argv", "environment",
-        "input_files", "runtime_paths", "output_paths", "authorization",
+        "input_files", "runtime_paths", "output_paths", "capture_helpers", "authorization",
     }
     PRODUCER.exact(value, fields, "target command manifest")
     if value.get("schema_version") != TARGET_SCHEMA or value.get("status") != "bound":
@@ -472,6 +660,8 @@ def validate_target_manifest_root(value: dict[str, Any]) -> None:
         "promotion_eligible": False,
     }:
         raise CaptureError("target command authorization differs")
+    if value.get("capture_helpers") != capture_helper_contract():
+        raise CaptureError("target command capture helper binding differs")
 
 
 def load_target_command_manifest(
@@ -525,16 +715,12 @@ def load_target_command_manifest(
                 raise CaptureError("target input index/path binding differs")
             if type(item.get("executable")) is not bool:
                 raise CaptureError("target input executable flag must be boolean")
-            snapshot = PROFILER.capture(
+            snapshot = PinnedTargetFile.open(
                 Path(item["path"]),
-                f"target input {number}",
+                PRODUCER.digest(item.get("sha256"), f"target input {number} hash"),
+                index,
                 require_executable=item["executable"],
-                require_single_link=True,
             )
-            if snapshot.sha256 != PRODUCER.digest(
-                item.get("sha256"), f"target input {number} hash"
-            ):
-                raise CaptureError("target input SHA-256 differs")
             snapshots.append(snapshot)
             classified.add(index)
         if 0 not in classified or not any(
@@ -580,7 +766,7 @@ def load_target_command_manifest(
                 resolved = item.get("resolved_path")
                 if not isinstance(resolved, str) or not Path(resolved).is_absolute():
                     raise CaptureError("target symlinked runtime path resolution differs")
-            snapshots.append(PinnedRuntimePath(item))
+            snapshots.append(PinnedRuntimePath(item, index))
             classified.add(index)
         for number, item in enumerate(outputs):
             if not isinstance(item, dict):
@@ -615,8 +801,48 @@ def load_target_command_manifest(
             raise CaptureError("target absolute argv path coverage differs")
         return value, snapshots
     except Exception:
-        manifest_snapshot.close()
+        for snapshot in reversed(locals().get("snapshots", [manifest_snapshot])):
+            close = getattr(snapshot, "close", None)
+            if callable(close):
+                close()
         raise
+
+
+def pinned_target_argv(value: dict[str, Any], snapshots: list[Any]) -> tuple[list[str], tuple[int, ...]]:
+    argv = list(value["argv"])
+    replacements: dict[int, str] = {}
+    descriptors: list[int] = []
+    for snapshot in snapshots[1:]:
+        descriptor = getattr(snapshot, "descriptor", None)
+        fd_path = getattr(snapshot, "fd_path", None)
+        index = getattr(snapshot, "argument_index", None)
+        if descriptor is None and fd_path is None:
+            continue
+        if type(descriptor) is not int or not isinstance(fd_path, str) or type(index) is not int:
+            raise CaptureError("target FD binding contract differs")
+        if index in replacements or index >= len(argv):
+            raise CaptureError("target FD binding coverage differs")
+        replacements[index] = fd_path
+        descriptors.append(descriptor)
+    expected = {
+        item["argument_index"] for item in value["input_files"]
+    } | {
+        item["argument_index"] for item in value["runtime_paths"] if item["kind"] == "symlinked_file"
+    }
+    if set(replacements) != expected or 0 not in replacements:
+        raise CaptureError("target FD replacement coverage differs")
+    for index, fd_path in replacements.items():
+        argv[index] = fd_path
+    if len(descriptors) != len(set(descriptors)):
+        raise CaptureError("target FD descriptors are not unique")
+    return argv, tuple(sorted(descriptors))
+
+
+def close_target_snapshots(snapshots: list[Any]) -> None:
+    for snapshot in reversed(snapshots):
+        close = getattr(snapshot, "close", None)
+        if callable(close):
+            close()
 
 
 def profiler_command(
@@ -658,7 +884,7 @@ def _run_profile(
     pass_fds: tuple[int, ...] = (),
     spawn_verifier: Any = None,
     environment: dict[str, str] | None = None,
-    on_started: Any = None,
+    on_rocprof_started: Any = None,
 ) -> None:
     if timeout <= 0.0:
         raise CaptureError("profile timeout must be positive")
@@ -683,9 +909,9 @@ def _run_profile(
             pass_fds=pass_fds,
             env=None if environment is None else dict(environment),
         )
-        if on_started is not None:
+        if on_rocprof_started is not None:
             try:
-                on_started()
+                on_rocprof_started()
             except Exception:
                 terminate_process_group(process)
                 raise
@@ -748,7 +974,7 @@ def run_profile(
     verifier: Any = None,
     failure_context: dict[str, Any] | None = None,
     environment: dict[str, str] | None = None,
-    on_started: Any = None,
+    on_rocprof_started: Any = None,
 ) -> None:
     if verifier is not None:
         verifier()
@@ -763,7 +989,7 @@ def run_profile(
             pass_fds=pass_fds,
             spawn_verifier=verifier,
             environment=environment,
-            on_started=on_started,
+            on_rocprof_started=on_rocprof_started,
         )
     except (
         CaptureError,
@@ -1201,6 +1427,7 @@ def _assemble(
     for snapshot in [*evidence_snapshots, *trace_snapshots.values(), *split_snapshots, capability_snapshot]:
         snapshot.verify()
     write_json_atomic(artifact_path, artifact)
+    artifact_path.chmod(0o444)
     return artifact
 
 
@@ -1227,7 +1454,12 @@ def assemble(**kwargs: Any) -> dict[str, Any]:
         raise
 
 
-def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    on_rocprof_started: Any = None,
+    on_runner_completed: Any = None,
+) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("capture", "assemble"))
     parser.add_argument("--profiler-path", type=Path, required=True)
@@ -1242,13 +1474,14 @@ def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=1800.0)
     args = parser.parse_args(argv)
-    if on_started is not None and args.command != "capture":
-        raise CaptureError("target start callback is reserved for capture")
+    if (on_rocprof_started is not None or on_runner_completed is not None) and args.command != "capture":
+        raise CaptureError("capture lifecycle callbacks are reserved for capture")
     pinned_profiler: PinnedProfiler | None = None
     pinned_target_manifest: PinnedTargetManifest | None = None
     capture_completed = False
     failure_context: dict[str, Any] | None = None
     logical_command: list[str] | None = None
+    target_snapshots: list[Any] = []
     try:
         if args.command == "capture" and (
             args.artifact.exists() or args.artifact.is_symlink()
@@ -1264,7 +1497,7 @@ def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
             allow_existing_outputs=args.command == "assemble",
         )
         pinned_target_manifest = target_snapshots[0]
-        target_command = target_value["argv"]
+        target_command, target_descriptors = pinned_target_argv(target_value, target_snapshots)
         profiler_value["target_command_manifest"] = ref(target_snapshots[0])
         profiler_value["target_environment"] = {
             "sha256": hashlib.sha256(canonical(target_value["environment"])).hexdigest(),
@@ -1272,13 +1505,22 @@ def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
             "exact_base_environment": True,
             "secret_material_recorded": False,
         }
+        profiler_value["capture_helpers"] = capture_helper_contract()
         command = profiler_command(
             pinned_profiler,
             args.profile_output_directory,
             args.profile_output_name,
             target_command,
         )
-        logical_command = [str(pinned_profiler.invocation), *command[1:]]
+        logical_command = [
+            str(pinned_profiler.invocation),
+            *profiler_command(
+                pinned_profiler,
+                args.profile_output_directory,
+                args.profile_output_name,
+                target_value["argv"],
+            )[1:],
+        ]
         failure_context = {
             "profiler": pinned_profiler.evidence(),
             "target_command_manifest": ref(target_snapshots[0]),
@@ -1286,6 +1528,7 @@ def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
 
         def verify_launch_inputs() -> None:
             pinned_profiler.verify()
+            verify_capture_helpers()
             try:
                 for snapshot in target_snapshots:
                     snapshot.verify()
@@ -1297,12 +1540,14 @@ def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
                 command,
                 args.profile_output_directory,
                 args.timeout,
-                pass_fds=(pinned_profiler.descriptor,),
+                pass_fds=(pinned_profiler.descriptor, *target_descriptors),
                 verifier=verify_launch_inputs,
                 failure_context=failure_context,
                 environment=target_value["environment"],
-                on_started=on_started,
+                on_rocprof_started=on_rocprof_started,
             )
+            if on_runner_completed is not None:
+                on_runner_completed()
             capture_completed = True
         elif not args.profile_output_directory.is_dir():
             raise CaptureError("assemble profile output directory is missing")
@@ -1352,8 +1597,8 @@ def main(argv: list[str] | None = None, *, on_started: Any = None) -> int:
         print(f"AQ4 P3 diagnostic rocprof capture failed: {error}", file=sys.stderr)
         return 1
     finally:
-        if pinned_target_manifest is not None:
-            pinned_target_manifest.close()
+        if target_snapshots:
+            close_target_snapshots(target_snapshots)
         if pinned_profiler is not None:
             pinned_profiler.close()
 

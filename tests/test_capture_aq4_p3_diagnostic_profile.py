@@ -119,6 +119,7 @@ def write_target_manifest(
         "output_paths": [
             {"argument_index": index, "path": argv[index]} for index in output_indices
         ],
+        "capture_helpers": CAPTURE.capture_helper_contract(),
         "authorization": {
             "maximum_invocations": 1,
             "target_role": "profile_runner_only",
@@ -190,12 +191,12 @@ def test_run_profile_passes_only_bound_base_environment_and_signals_start_once(
         output,
         10.0,
         environment={"ULLM_EXACT_BASE": "bound"},
-        on_started=lambda: starts.append("runner-wrapper"),
+        on_rocprof_started=lambda: starts.append("rocprof"),
     )
     environment = json.loads(observed.read_text(encoding="utf-8"))
     assert environment["ULLM_EXACT_BASE"] == "bound"
     assert "HOME" not in environment and "LD_PRELOAD" not in environment
-    assert starts == ["runner-wrapper"]
+    assert starts == ["rocprof"]
 
 
 def test_pinned_profiler_uses_verified_fd_and_rejects_sha_or_symlink_swap(
@@ -274,10 +275,10 @@ def test_target_command_manifest_binds_exact_argv_and_input_hashes(tmp_path: Pat
         assert len(snapshots) == 2
 
         executable.chmod(0o755)
-        with pytest.raises(CAPTURE.PROFILER.ProfileError, match="identity changed"):
+        with pytest.raises(CAPTURE.CaptureError, match="identity changed"):
             snapshots[1].verify()
     finally:
-        snapshots[0].close()
+        CAPTURE.close_target_snapshots(snapshots)
 
     executable.chmod(0o555)
     reordered = write_target_manifest(
@@ -342,7 +343,154 @@ def test_runtime_path_identity_is_pinned_by_target_manifest(tmp_path: Path) -> N
         with pytest.raises(CAPTURE.CaptureError, match="identity changed"):
             snapshots[-1].verify()
     finally:
-        snapshots[0].close()
+        CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_target_swap_between_verify_and_spawn_executes_only_pinned_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = (tmp_path / "trusted-runner.py").resolve()
+    replacement = (tmp_path / "replacement-runner.py").resolve()
+    observed = (tmp_path / "observed.txt").resolve()
+    trusted.write_text(
+        "import pathlib,sys\npathlib.Path(sys.argv[1]).write_text('trusted')\n",
+        encoding="utf-8",
+    )
+    replacement.write_text(
+        "import pathlib,sys\npathlib.Path(sys.argv[1]).write_text('replacement')\n",
+        encoding="utf-8",
+    )
+    interpreter = Path(sys.executable).resolve()
+    manifest = (tmp_path / "fd-target.json").resolve()
+    value = write_target_manifest(
+        manifest,
+        [str(interpreter), str(trusted), str(observed)],
+        input_indices=(0, 1),
+        output_indices=(2,),
+    )
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
+    effective, target_fds = CAPTURE.pinned_target_argv(loaded, snapshots)
+    assert loaded["argv"] == value["argv"]
+    assert effective[:2] != loaded["argv"][:2]
+    fake_profiler = (tmp_path / "rocprofv3").resolve()
+    fake_profiler.write_text(
+        "#!/usr/bin/python3\n"
+        "import subprocess,sys\n"
+        "target=sys.argv[sys.argv.index('--')+1:]\n"
+        "fds=tuple(int(item.rsplit('/',1)[1]) for item in target if item.startswith('/proc/self/fd/'))\n"
+        "raise SystemExit(subprocess.run(target,pass_fds=fds).returncode)\n",
+        encoding="utf-8",
+    )
+    fake_profiler.chmod(0o555)
+    backup = tmp_path / "trusted-backup.py"
+    real_popen = CAPTURE.subprocess.Popen
+
+    def swapping_popen(*args, **kwargs):
+        trusted.rename(backup)
+        replacement.rename(trusted)
+        try:
+            process = real_popen(*args, **kwargs)
+            deadline = time.monotonic() + 5.0
+            while not observed.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert observed.read_text(encoding="utf-8") == "trusted"
+            return process
+        finally:
+            trusted.rename(replacement)
+            backup.rename(trusted)
+
+    monkeypatch.setattr(CAPTURE.subprocess, "Popen", swapping_popen)
+    output = (tmp_path / "fd-profile-output").resolve()
+    try:
+        with pytest.raises(CAPTURE.CaptureError, match="post-spawn.*identity changed"):
+            CAPTURE.run_profile(
+                [str(fake_profiler), "--", *effective],
+                output,
+                10.0,
+                pass_fds=target_fds,
+                verifier=lambda: [snapshot.verify() for snapshot in snapshots],
+            )
+        assert observed.read_text(encoding="utf-8") == "trusted"
+    finally:
+        CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_helper_swap_executes_verified_bytes_and_preserves_execution_hash(tmp_path: Path) -> None:
+    helper = (tmp_path / "helper.py").resolve()
+    replacement = (tmp_path / "replacement-helper.py").resolve()
+    helper.write_text("VALUE = 'trusted'\n", encoding="utf-8")
+    replacement.write_text("VALUE = 'replacement'\n", encoding="utf-8")
+    expected_sha = hashlib.sha256(helper.read_bytes()).hexdigest()
+    pinned = CAPTURE.PinnedPythonHelper.open(helper, expected_sha)
+    backup = tmp_path / "helper-backup.py"
+    try:
+        helper.rename(backup)
+        replacement.rename(helper)
+        module = pinned.load("verified_helper_swap_test")
+        assert module.VALUE == "trusted"
+        helper.rename(replacement)
+        backup.rename(helper)
+        with pytest.raises(CAPTURE.CaptureError, match="helper identity changed"):
+            pinned.verify()
+        assert pinned.evidence("test")["sha256"] == expected_sha
+    finally:
+        os.close(pinned.descriptor)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_sha", "module_attribute", "expected_value", "inject"),
+    [
+        (CAPTURE.SELECTOR_PATH, CAPTURE.SELECTOR_SHA256, "RAW_SCHEMA", CAPTURE.SELECTOR.RAW_SCHEMA, False),
+        (CAPTURE.PROFILE_HELPER_PATH, CAPTURE.PROFILE_HELPER_SHA256, "ARTIFACT_SCHEMA", CAPTURE.PROFILER.ARTIFACT_SCHEMA, False),
+        (CAPTURE.PRODUCER_PATH, CAPTURE.PRODUCER_SHA256, "RAW_SCHEMA", CAPTURE.PRODUCER.RAW_SCHEMA, True),
+    ],
+)
+def test_transitive_helper_swap_never_executes_replacement_bytes(
+    tmp_path: Path,
+    source: Path,
+    expected_sha: str,
+    module_attribute: str,
+    expected_value: str,
+    inject: bool,
+) -> None:
+    helper = (tmp_path / source.name).resolve()
+    replacement = (tmp_path / f"replacement-{source.name}").resolve()
+    helper.write_bytes(source.read_bytes())
+    replacement.write_text("raise RuntimeError('replacement helper executed')\n", encoding="utf-8")
+    pinned = CAPTURE.PinnedPythonHelper.open(helper, expected_sha)
+    backup = tmp_path / f"backup-{source.name}"
+    try:
+        helper.rename(backup)
+        replacement.rename(helper)
+        injected = {"selector": CAPTURE.SELECTOR, "profiler": CAPTURE.PROFILER} if inject else None
+        module = pinned.load(f"verified_{source.stem}_swap_test", injected_modules=injected)
+        assert getattr(module, module_attribute) == expected_value
+        if inject:
+            assert module.SELECTOR is CAPTURE.SELECTOR
+            assert module.PROFILER is CAPTURE.PROFILER
+        helper.rename(replacement)
+        backup.rename(helper)
+        with pytest.raises(CAPTURE.CaptureError, match="helper identity changed"):
+            pinned.verify()
+    finally:
+        os.close(pinned.descriptor)
+
+
+def test_capture_helper_closure_is_exact_and_reuses_verified_modules() -> None:
+    assert [item["role"] for item in CAPTURE.capture_helper_contract()] == [
+        "selection_raw_producer",
+        "candidate_selector",
+        "profile_family_classifier",
+    ]
+    assert CAPTURE.PRODUCER.SELECTOR is CAPTURE.SELECTOR
+    assert CAPTURE.PRODUCER.PROFILER is CAPTURE.PROFILER
+    with pytest.raises(CAPTURE.CaptureError, match="module injection differs"):
+        CAPTURE.PRODUCER_HELPER.load(
+            "invalid_dependency_closure",
+            injected_modules={"selector": CAPTURE.SELECTOR},
+        )
 
 
 def test_post_spawn_manifest_path_swap_emits_failure_and_blocks_success(
@@ -394,7 +542,7 @@ def test_post_spawn_manifest_path_swap_emits_failure_and_blocks_success(
             )
         assert not artifact.exists()
     finally:
-        pinned_manifest.close()
+        CAPTURE.close_target_snapshots(snapshots)
 
 
 def test_profile_timeout_and_oom_exit_fail_closed(tmp_path: Path) -> None:
@@ -522,6 +670,7 @@ def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
     assert len(artifact["memory_copy_traces"]) == 10
     assert artifact["artifact_sha256"] == CAPTURE.self_hash(artifact, "artifact_sha256")
     assert artifact_path.exists()
+    assert artifact_path.stat().st_mode & 0o777 == 0o444
     producer_manifest = {
         "schema_version": CAPTURE.PRODUCER.INPUT_SCHEMA,
         "status": "one_case_diagnostic",
@@ -744,7 +893,7 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
             assert loaded["authorization"]["target_role"] == "profile_runner_only"
             assert loaded["output_paths"] == [{"argument_index": 19, "path": str(result_path)}]
         finally:
-            snapshots[0].close()
+            CAPTURE.close_target_snapshots(snapshots)
         on_started()
         write_launcher_profile_result(result_path, binding)
         return {
@@ -753,6 +902,14 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
             "keepalive_failed": False,
             "gpu_command_executed": True,
             "model_load_executed": True,
+            "profile_diagnostics": {
+                "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+                "runner_finished": True,
+                "capture_artifact": {"path": str(tmp_path / "capture-artifact.json"), "sha256": "0" * 64, "mode": 0o444},
+                "failure_evidence": None,
+                "validation_error": None,
+                "executor_exception": None,
+            },
             "profile_capture": {
                 "status": "complete_diagnostic",
                 "runner_profiled": True,
@@ -760,7 +917,19 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
                 "gates_profiled": False,
                 "capture_tool_invocations": 1,
                 "rocprof_invocations": 1,
+                "rocprof_started": True,
+                "runner_started": True,
+                "runner_start_known": True,
+                "runner_completed": True,
                 "target_manifest_sha256": target["sha256"],
+                "target_manifest_semantic_sha256": target["manifest_sha256"],
+                "target_argv_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(command)),
+                "environment_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(environment)),
+                "capture_stdout_sha256": "0" * 64,
+                "capture_stderr_sha256": "0" * 64,
+                "timed_out": False,
+                "cleanup_passed": True,
+                "children_remaining": [],
             },
         }
 
