@@ -53,9 +53,11 @@ DRIVER_BUILD_INPUTS = {
         "role": "directional_hip_copy_runtime",
     },
 }
-RUNNER_COMMIT = "d367b6da07393f55c720ded7250bda8cdc402a79"
-RUNNER_TREE = "8fea6bf90e8ad99c7ed36c719b8b4ad204ce73df"
-RUNNER_SOURCE_SHA = "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
+RUNNER_SOURCE_PATH = "tools/run-aq4-p2-resident-prepared-bootstrap.py"
+RUNNER_COMMIT = "410d6fa1876a6772215604ba765ae1d6a91d67b9"
+RUNNER_TREE = "73fa76d74e042c23c353d6e25172f62cbb364995"
+RUNNER_SOURCE_GIT_BLOB = "a12032be24ffdabd703d304df3e4ee825bc71634"
+RUNNER_SOURCE_SHA = "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
 ACTIVE_CASE_DEVICE_FIXTURE_SHA = "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73"
@@ -789,6 +791,9 @@ def reconstruct() -> Reconstruction:
     runner_tree = subprocess.run(["git", "rev-parse", f"{RUNNER_COMMIT}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
     if runner_tree.returncode != 0 or runner_tree.stdout.strip() != RUNNER_TREE:
         raise BundleError("prepared runner commit/tree differs")
+    runner_object = subprocess.run(["git", "rev-parse", f"{RUNNER_COMMIT}:{RUNNER_SOURCE_PATH}"], cwd=ROOT, text=True, capture_output=True, check=False)
+    if runner_object.returncode != 0 or runner_object.stdout.strip() != RUNNER_SOURCE_GIT_BLOB:
+        raise BundleError("prepared runner Git blob differs")
     driver_source = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA)
     normative_driver_source = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if driver_source != normative_driver_source:
@@ -810,10 +815,15 @@ def reconstruct() -> Reconstruction:
     ):
         if contract not in driver_source:
             raise BundleError("trusted general-single-link/worker-exact-two protocol contract differs")
-    runner_source = git_blob("tools/run-aq4-p2-resident-batch.py", RUNNER_SOURCE_SHA, RUNNER_COMMIT)
-    for contract in (b"def validate_driver_command", b"expected_binary_sha256", b"LOCK_EX | fcntl.LOCK_NB"):
+    runner_source = git_blob(RUNNER_SOURCE_PATH, RUNNER_SOURCE_SHA, RUNNER_COMMIT)
+    for contract in (
+        b"def validate_bundle_header",
+        b"def validate_member_inventory",
+        b"prepared bootstrap bundle schema differs",
+        b"if not args.one_case_smoke or not args.dry_run",
+    ):
         if contract not in runner_source:
-            raise BundleError("trusted runner launch contract differs")
+            raise BundleError("trusted prepared bootstrap contract differs")
     expander_source = git_blob("tools/expand-aq4-production-p2.py", EXPANDER_SOURCE_SHA)
     git_blob("tools/generate-aq4-p2-fixtures.py", FIXTURE_SOURCE_SHA)
     active_case_device_fixture_raw = git_blob(
