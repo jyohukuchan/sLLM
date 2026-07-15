@@ -2665,7 +2665,7 @@ QA_ATTESTATION = {
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd", "git_blob": "1dcc036971a238b5b48eb8147bfc8cbf8f629f39", "collected": 39, "passed": 39},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "48cce1349eae0b58beac2851a05e40b2d522559e", "git_blob": "6ff9cf684c9f7ec803ebb50348b28e74ec7343bb", "collected": 69, "passed": 69},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "a0a61219be28be1e3765c076d4a23513f6bd6221", "git_blob": "7e79ac50b1f69e49128c90652cf3623db2ecfd78", "collected": 69, "passed": 69},
                     {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "ea32ffb3f2f7f65b210c4c6115af7eef13045f5a", "git_blob": "904ade176f74f3a20a91dd7e1619d03698cd8ec9", "collected": 135, "passed": 135},
                 ],
             },
