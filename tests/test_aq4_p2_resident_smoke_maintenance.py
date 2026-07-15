@@ -1374,6 +1374,16 @@ def test_default_adapter_invokes_actual_capture_main_lifecycle_api(
         sha256 = request["target_binding"]["sha256"]
         def verify(self): return None
 
+    class FakeFdMap:
+        descriptor = 92
+        sha256 = "b" * 64
+        value = {
+            "map_sha256": "c" * 64,
+            "bindings": [],
+        }
+        def verify(self): return None
+        def close(self): return None
+
     profiler = FakeProfiler()
     snapshot = FakeSnapshot()
     runner_output = tmp_path / "profile-runner-output.json"
@@ -1381,6 +1391,12 @@ def test_default_adapter_invokes_actual_capture_main_lifecycle_api(
         "argv": request["runner_argv"],
         "environment": request["environment"],
         "output_paths": [{"argument_index": 0, "path": str(runner_output)}],
+        "closure_contract": {
+            "code_execution_closure": "pinned_fd",
+            "control_input_closure": "pinned_fd",
+            "device_lock_closure": "pinned_fd",
+            "data_integrity": "trusted_pre_post_guarded",
+        },
     }
     def open_profiler(path, sha):
         if capture_mode == "exception":
@@ -1388,6 +1404,7 @@ def test_default_adapter_invokes_actual_capture_main_lifecycle_api(
         return profiler
 
     monkeypatch.setattr(module.PinnedProfiler, "open", staticmethod(open_profiler))
+    monkeypatch.setattr(module.PinnedFdMap, "create", staticmethod(lambda value, snapshots: FakeFdMap()))
     monkeypatch.setattr(module, "pinned_profiler_version", lambda value: {**profiler.evidence(), "version": "fixture", "rocm_version": None, "version_output_sha256": "a" * 64})
     monkeypatch.setattr(module, "load_target_command_manifest", lambda path, sha, allow_existing_outputs=False: (target_value, [snapshot]))
     monkeypatch.setattr(module, "pinned_target_argv", lambda value, snapshots: (request["runner_argv"], ()))
