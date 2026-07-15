@@ -1,0 +1,321 @@
+{
+  "baseline": {
+    "attention_block_sha256": "adee6df2dbd0c6215f0b11fcb4fd8e85a1bc06d7aa4ac156dc5993a7161dba0c",
+    "layer_output_sha256": "1de0f1aee1be8d376bffe44081195ff5dd09bbeb3e2b872e1c55db73385dccd8",
+    "mode": "all_aq4",
+    "qkv_sha256": "9683b8c5decd545c35e416da0b0f9568e6f51463ae5395fcd872dc9cbd82b473",
+    "recurrent_sha256": "e4a953aa4fe8af2dc57e6b8072ebfad42ba14d82f604e579e9e8a00247b5f581"
+  },
+  "classification": "unclassified",
+  "device": {
+    "backend": "cpu",
+    "requested_index": 0
+  },
+  "holdout": "not_run",
+  "hybrid": {
+    "attention_block_sha256": "3e99de5118ee5fad56436b47ab635c80cce0c34b14f96d4d201a6786d75d9b80",
+    "layer_output_sha256": "23a9c2662579736a965a7a8b0270240b29222ad94e603f1502a0ad8451feff01",
+    "mode": "aq4_except_qkv_source_bf16",
+    "qkv_sha256": "d00333055f5a88d3d102fde62d351a1caa736579c9dc01871a942e6496a46018",
+    "recurrent_sha256": "9f78dd6e195efeb14553d6fa65d3b13b1d57bf2ec86c9f5f5acd5f3bf69a1794"
+  },
+  "input": {
+    "cases": [
+      {
+        "case_id": "fixture-prompt-0",
+        "context_length": 3,
+        "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
+        "step": 0
+      },
+      {
+        "case_id": "fixture-prompt-0",
+        "context_length": 4,
+        "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+        "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
+        "step": 1
+      },
+      {
+        "case_id": "fixture-prompt-1",
+        "context_length": 2,
+        "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
+        "step": 0
+      }
+    ],
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-family-isolation-v0.1/runtime-input.jsonl",
+    "rows": 3,
+    "schema": "ullm.aq4_layer0_input_normed_jsonl.v1",
+    "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "shape": [
+      4096
+    ]
+  },
+  "metrics": {
+    "baseline_vs_source_qkv": {
+      "aggregate": {
+        "cosine": 0.9996858734591356,
+        "elements_per_row": 8192,
+        "max_abs": 0.8943977355957031,
+        "nonfinite": false,
+        "relative_l2": 0.025665445097128963,
+        "rows": 3
+      },
+      "per_step": [
+        {
+          "cosine": 0.9997431668208009,
+          "elements_per_row": 8192,
+          "max_abs": 0.8782234191894531,
+          "nonfinite": false,
+          "relative_l2": 0.023454284114153626,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9996408884455511,
+          "elements_per_row": 8192,
+          "max_abs": 0.7104549407958984,
+          "nonfinite": false,
+          "relative_l2": 0.027357323627093564,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9996522830061152,
+          "elements_per_row": 8192,
+          "max_abs": 0.8943977355957031,
+          "nonfinite": false,
+          "relative_l2": 0.02681327168497436,
+          "rows": 1
+        }
+      ]
+    },
+    "hybrid_vs_baseline_attention_block": {
+      "aggregate": {
+        "cosine": 0.9999997117077108,
+        "elements_per_row": 4096,
+        "max_abs": 0.02549004554748535,
+        "nonfinite": false,
+        "relative_l2": 0.0007618561557508186,
+        "rows": 3
+      },
+      "per_step": [
+        {
+          "cosine": 0.9999996854040605,
+          "elements_per_row": 4096,
+          "max_abs": 0.02549004554748535,
+          "nonfinite": false,
+          "relative_l2": 0.0007948393794491906,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9999996994926851,
+          "elements_per_row": 4096,
+          "max_abs": 0.019708633422851562,
+          "nonfinite": false,
+          "relative_l2": 0.000777725665464821,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9999997499375959,
+          "elements_per_row": 4096,
+          "max_abs": 0.018925189971923828,
+          "nonfinite": false,
+          "relative_l2": 0.0007109531826829468,
+          "rows": 1
+        }
+      ]
+    },
+    "hybrid_vs_baseline_layer_output": {
+      "aggregate": {
+        "cosine": 0.9999996912571605,
+        "elements_per_row": 4096,
+        "max_abs": 0.026048660278320312,
+        "nonfinite": false,
+        "relative_l2": 0.0007890094626902091,
+        "rows": 3
+      },
+      "per_step": [
+        {
+          "cosine": 0.9999997245776001,
+          "elements_per_row": 4096,
+          "max_abs": 0.026048660278320312,
+          "nonfinite": false,
+          "relative_l2": 0.0007480144351461979,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9999996411714562,
+          "elements_per_row": 4096,
+          "max_abs": 0.024054527282714844,
+          "nonfinite": false,
+          "relative_l2": 0.0008490432524464153,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9999997084873015,
+          "elements_per_row": 4096,
+          "max_abs": 0.02215099334716797,
+          "nonfinite": false,
+          "relative_l2": 0.0007661965368410044,
+          "rows": 1
+        }
+      ]
+    },
+    "hybrid_vs_baseline_qkv": {
+      "aggregate": {
+        "cosine": 0.9996858734591356,
+        "elements_per_row": 8192,
+        "max_abs": 0.8943977355957031,
+        "nonfinite": false,
+        "relative_l2": 0.025816271415611255,
+        "rows": 3
+      },
+      "per_step": [
+        {
+          "cosine": 0.9997431668208009,
+          "elements_per_row": 8192,
+          "max_abs": 0.8782234191894531,
+          "nonfinite": false,
+          "relative_l2": 0.02360294985309689,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9996408884455511,
+          "elements_per_row": 8192,
+          "max_abs": 0.7104549407958984,
+          "nonfinite": false,
+          "relative_l2": 0.02751875661843866,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9996522830061152,
+          "elements_per_row": 8192,
+          "max_abs": 0.8943977355957031,
+          "nonfinite": false,
+          "relative_l2": 0.026953691162991598,
+          "rows": 1
+        }
+      ]
+    },
+    "hybrid_vs_baseline_recurrent": {
+      "aggregate": {
+        "cosine": 0.9999266820060279,
+        "elements_per_row": 4096,
+        "max_abs": 0.00659237802028656,
+        "nonfinite": false,
+        "relative_l2": 0.01324807118725593,
+        "rows": 3
+      },
+      "per_step": [
+        {
+          "cosine": 0.9998813643543641,
+          "elements_per_row": 4096,
+          "max_abs": 0.0049211978912353516,
+          "nonfinite": false,
+          "relative_l2": 0.016465496059841482,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9999022675798854,
+          "elements_per_row": 4096,
+          "max_abs": 0.00659237802028656,
+          "nonfinite": false,
+          "relative_l2": 0.017812701624131816,
+          "rows": 1
+        },
+        {
+          "cosine": 0.9999547532458797,
+          "elements_per_row": 4096,
+          "max_abs": 0.004964619874954224,
+          "nonfinite": false,
+          "relative_l2": 0.009929103767051,
+          "rows": 1
+        }
+      ]
+    },
+    "hybrid_vs_source_qkv": {
+      "aggregate": {
+        "cosine": 1.0,
+        "elements_per_row": 8192,
+        "max_abs": 0.0,
+        "nonfinite": false,
+        "relative_l2": 0.0,
+        "rows": 3
+      },
+      "per_step": [
+        {
+          "cosine": 1.0,
+          "elements_per_row": 8192,
+          "max_abs": 0.0,
+          "nonfinite": false,
+          "relative_l2": 0.0,
+          "rows": 1
+        },
+        {
+          "cosine": 1.0,
+          "elements_per_row": 8192,
+          "max_abs": 0.0,
+          "nonfinite": false,
+          "relative_l2": 0.0,
+          "rows": 1
+        },
+        {
+          "cosine": 1.0,
+          "elements_per_row": 8192,
+          "max_abs": 0.0,
+          "nonfinite": false,
+          "relative_l2": 0.0,
+          "rows": 1
+        }
+      ]
+    }
+  },
+  "override": {
+    "boundary": "after_production_qkv_matvec_before_production_depthwise_conv_split_norm_recurrent",
+    "default_off": true,
+    "family": "qkv",
+    "promotion": false,
+    "worker_reachable": false
+  },
+  "package": {
+    "layer_index": 0,
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package"
+  },
+  "policy_evaluation": "policy_not_evaluated",
+  "production_path": {
+    "input_norm": "same_fixed_input_sidecar",
+    "post_norm_mlp_residual": "same_production_runtime",
+    "qkv_after_override": "same_production_depthwise_conv_split_qk_norm_recurrent",
+    "z_a_b": "same_production_aq4_matvec"
+  },
+  "promotion": false,
+  "recurrent_state_digests": {
+    "calculation": "host_reference_f32_replay",
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-hybrid-fidelity-v0.1/diagnostic/recurrent-state-digests.json",
+    "sha256": "92e4ed211e9fe0cf66ae65916c878937ddcf00db709e0b95fa9dd10fe1428c37",
+    "shape": [
+      3,
+      32,
+      128,
+      128
+    ]
+  },
+  "schema_version": "ullm.aq4_layer0_qkv_hybrid_fidelity.cpu.v1",
+  "source_qkv": {
+    "dtype": "f32",
+    "operation": "input_f32_matmul_source_bf16_weight_cast_f32_accumulate_f32",
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-hybrid-fidelity-v0.1/source-qkv.f32le",
+    "sha256": "d00333055f5a88d3d102fde62d351a1caa736579c9dc01871a942e6496a46018",
+    "shape": [
+      3,
+      8192
+    ]
+  },
+  "state_reset": {
+    "boundary": "before_each_run",
+    "recurrent_state": "zero_initialized_once_for_sequence",
+    "same_between_baseline_and_hybrid": true
+  },
+  "status": "valid",
+  "thresholds": null
+}

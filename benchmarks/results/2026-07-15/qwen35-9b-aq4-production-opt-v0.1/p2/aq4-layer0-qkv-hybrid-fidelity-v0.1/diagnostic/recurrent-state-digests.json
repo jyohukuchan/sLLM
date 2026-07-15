@@ -1,0 +1,46 @@
+{
+  "baseline": [
+    {
+      "sha256": "6df53d5cf51f8297af22b39fc2aacb9e49029e7519cd5eaa7b22ec7ac0b2dd53",
+      "step": 0
+    },
+    {
+      "sha256": "9f42f5d3fab11d13bbe3110f7c8d9c218cddac4c9104c8a1d556347846d805a4",
+      "step": 1
+    },
+    {
+      "sha256": "75286d441eb0e4cca705754ecd1fcbfc2284a60ca82336ced19c5e30ec477c7b",
+      "step": 2
+    }
+  ],
+  "calculation": "host_reference_f32_replay_of_production_q_k_v_gate_beta",
+  "changed_by_step": [
+    true,
+    true,
+    true
+  ],
+  "holdout": "not_run",
+  "hybrid": [
+    {
+      "sha256": "0adaf16dc12e9ddcbc5c31c6bad3fe4743139ca3503f860458c4a0956a6f9fd0",
+      "step": 0
+    },
+    {
+      "sha256": "aa7dd167ee2c8a350e05db7b73626948720d9295b14f425a1cb390ef70256424",
+      "step": 1
+    },
+    {
+      "sha256": "f4869ded09b9ed3e0a6d5002a28f3e82399128bb02e56127fcad10503c8737e6",
+      "step": 2
+    }
+  ],
+  "promotion": false,
+  "reset": "zero_before_each_baseline_or_hybrid_sequence",
+  "schema_version": "ullm.aq4_layer0_qkv_hybrid_recurrent_state_digests.cpu.v1",
+  "state_shape": [
+    32,
+    128,
+    128
+  ],
+  "status": "valid"
+}
