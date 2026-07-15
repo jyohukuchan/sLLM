@@ -2501,6 +2501,7 @@ fn capture_into_temporary(
         layer_indices: None,
         lm_head_mode: PackageLmHeadMode::GpuResidentF32,
         lm_head_chunk_rows: DEFAULT_LM_HEAD_CHUNK_ROWS,
+        sq8_overlay: None,
     };
     let session_config =
         Qwen35Aq4SessionConfig::greedy(common.fixture.step_count, profile.eos_token_ids.clone())

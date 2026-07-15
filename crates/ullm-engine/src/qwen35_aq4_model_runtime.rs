@@ -14,9 +14,10 @@ use crate::backend_operation_registry::{OperationExecutionRecord, OperationResol
 use crate::execution_batch::ExecutionPhase;
 use crate::execution_batch::WorkspacePlan;
 use crate::loader::{
-    PassthroughF32Data, effective_rmsnorm_weight_values, read_named_passthrough_f32,
+    PassthroughF32Data, WeightRegistry, effective_rmsnorm_weight_values, read_named_passthrough_f32,
 };
 use crate::package::TensorSelector;
+use crate::qwen3_loader::Qwen3PackageSqOverlay;
 use crate::qwen35_aq4_head_runtime::{
     PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
     PackageTokenLogit, QWEN3_FINAL_NORM_TENSOR, package_embedding_shape,
@@ -26,6 +27,9 @@ use crate::qwen35_aq4_layer_runtime::{
     PackageLinearAttnSequenceGeometry, PackageLinearAttnSequenceWorkspace,
     PackageSelfAttnComponentStepMs, PackageSelfAttnResidentStepLayer,
     PackageSelfAttnSequenceGeometry, PackageSelfAttnSequenceWorkspace,
+};
+use crate::qwen35_aq4_sq8_overlay::{
+    Qwen35Aq4Sq8OverlayIdentity, Qwen35Aq4Sq8OverlayLoadConfig, validate_qwen35_aq4_sq8_overlay,
 };
 use crate::qwen35_package_contract::{
     PackageDecoderLayerKind, PackageManifestLayerEntry, package_manifest_layer_entries,
@@ -489,6 +493,8 @@ pub struct Qwen35Aq4ModelLoadConfig {
     pub layer_indices: Option<Vec<usize>>,
     pub lm_head_mode: PackageLmHeadMode,
     pub lm_head_chunk_rows: usize,
+    /// Default-off, fail-closed SQ8 overlay for the exact 24 linear-layer QKV/Z tensor set.
+    pub sq8_overlay: Option<Qwen35Aq4Sq8OverlayLoadConfig>,
 }
 
 #[derive(Clone)]
@@ -616,6 +622,7 @@ pub struct Qwen35Aq4ModelRuntime {
     device_name: String,
     backend: String,
     device_total_global_mem: u64,
+    sq8_overlay_identity: Option<Qwen35Aq4Sq8OverlayIdentity>,
     last_partial_operation_executions: Vec<[Option<OperationExecutionRecord>; 2]>,
     last_partial_prefill_invocations: Vec<Qwen35Aq4FailedPrefillInvocation>,
 }
@@ -659,6 +666,11 @@ impl Qwen35Aq4ModelRuntime {
         }
         let path = package_path_text(&config.package_dir)?;
         let manifest_layers = package_manifest_layer_entries(&config.package_dir)?;
+        let linear_manifest_layers = manifest_layers
+            .iter()
+            .filter(|layer| layer.kind == PackageDecoderLayerKind::LinearAttention)
+            .map(|layer| layer.layer_index)
+            .collect::<Vec<_>>();
         let layers = select_manifest_layers(&manifest_layers, config.layer_indices.as_deref())?;
         let (vocab, hidden) = package_embedding_shape(path)?;
         let mut geometry = Qwen35Aq4ModelGeometry::new(
@@ -668,6 +680,18 @@ impl Qwen35Aq4ModelRuntime {
             config.kv_block_size,
             layers,
         )?;
+        let validated_overlay = config
+            .sq8_overlay
+            .as_ref()
+            .map(|overlay| {
+                validate_qwen35_aq4_sq8_overlay(
+                    overlay,
+                    &config.package_dir,
+                    &linear_manifest_layers,
+                )
+            })
+            .transpose()?;
+        let sq8_overlay_identity = validated_overlay.as_ref().map(|overlay| overlay.identity());
 
         let mut context = ullm_runtime_sys::RuntimeContext::create(config.device_index)
             .map_err(|err| format!("failed to create Qwen3.5 AQ4 runtime context: {err}"))?;
@@ -684,9 +708,19 @@ impl Qwen35Aq4ModelRuntime {
             .filter(|layer| layer.kind == Qwen35Aq4LayerKind::LinearAttention)
             .count();
         let self_layers = geometry.layers.len() - linear_layers;
+        let resident_plan_bytes =
+            qwen35_package_resident_plan_bytes(&config.package_dir, &geometry.layers)?
+                .checked_add(
+                    validated_overlay
+                        .as_ref()
+                        .map_or(0, |overlay| overlay.resident_bytes),
+                )
+                .ok_or_else(|| {
+                    "Qwen3.5 AQ4 SQ8 overlay resident plan bytes overflow".to_string()
+                })?;
         let _workspace = qwen35_model_workspace_plan(
             info.total_global_mem,
-            qwen35_package_resident_plan_bytes(&config.package_dir, &geometry.layers)?,
+            resident_plan_bytes,
             qwen35_retained_activation_bytes(&config.package_dir, &geometry.layers, hidden, vocab)?,
             linear_layers,
             self_layers,
@@ -700,12 +734,23 @@ impl Qwen35Aq4ModelRuntime {
         for spec in &geometry.layers {
             let layer = match spec.kind {
                 Qwen35Aq4LayerKind::LinearAttention => Qwen35Aq4ResidentLayer::LinearAttention({
-                    let layer = PackageLinearAttnResidentStepLayer::load(
+                    let mut registry = WeightRegistry::new();
+                    let sq_overlay =
+                        validated_overlay
+                            .as_ref()
+                            .map(|overlay| Qwen3PackageSqOverlay {
+                                artifact: &overlay.artifact,
+                                row_chunk: overlay.row_chunk,
+                            });
+                    let layer = PackageLinearAttnResidentStepLayer::load_with_registry(
                         &mut context,
                         &mut stream,
+                        &mut registry,
+                        None,
                         path,
                         config.chunk_bytes,
                         spec.layer_index,
+                        sq_overlay.as_ref(),
                     )
                     .map_err(|err| {
                         format!(
@@ -903,6 +948,7 @@ impl Qwen35Aq4ModelRuntime {
             device_name: info.name,
             backend: info.backend.to_string(),
             device_total_global_mem: info.total_global_mem,
+            sq8_overlay_identity,
             last_partial_operation_executions: Vec::with_capacity(32),
             last_partial_prefill_invocations: Vec::new(),
         })
@@ -926,6 +972,10 @@ impl Qwen35Aq4ModelRuntime {
 
     pub fn device_total_global_mem(&self) -> u64 {
         self.device_total_global_mem
+    }
+
+    pub fn sq8_overlay_identity(&self) -> Option<&Qwen35Aq4Sq8OverlayIdentity> {
+        self.sq8_overlay_identity.as_ref()
     }
 
     pub fn has_resident_embedding(&self) -> bool {
