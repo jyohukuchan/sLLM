@@ -287,6 +287,36 @@ def test_refuses_symlink_output(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "unchanged"
 
 
+def test_generator_create_new_refuses_existing_output_without_replacement(tmp_path: Path) -> None:
+    profile = write_profile(tmp_path)
+    output = tmp_path / "served-model.json"
+    output.write_text("immutable\n", encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="already exists"):
+        GENERATOR.generate(profile, output)
+
+    assert output.read_text(encoding="utf-8") == "immutable\n"
+    assert not list(tmp_path.glob(".served-model.json.incomplete-*"))
+
+
+def test_cli_forwards_actual_receipt_path_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, Path | None] = {}
+
+    def fake_generate(profile: Path, output: Path, *, receipt_path_override: Path | None = None) -> str:
+        observed["profile"] = profile
+        observed["output"] = output
+        observed["receipt"] = receipt_path_override
+        return "a" * 64
+
+    monkeypatch.setattr(GENERATOR, "generate", fake_generate)
+    assert GENERATOR.main([
+        "--profile", str(tmp_path / "profile.json"),
+        "--output", str(tmp_path / "served.json"),
+        "--receipt-path-override", str(tmp_path / "actual-receipt.json"),
+    ]) == 0
+    assert observed["receipt"] == tmp_path / "actual-receipt.json"
+
+
 def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
     profile_path = write_profile(root)
     profile = json.loads(profile_path.read_text(encoding="utf-8"))

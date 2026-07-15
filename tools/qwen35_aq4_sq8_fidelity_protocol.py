@@ -1,0 +1,575 @@
+#!/usr/bin/env python3
+"""Offline SQ8 calibration/freeze and one-shot holdout protocol.
+
+The protocol is deliberately filesystem-only.  It validates a served SQ8
+promotion receipt before calibration is allowed, recomputes all 24 calibration
+metrics itself, and consumes the holdout attempt at an irreversible boundary.
+It never starts a model, GPU, service, or subprocess.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+
+MAX_ROWS = 24
+MAX_JSON_BYTES = 64 * 1024 * 1024
+MAX_CHUNK_ELEMENTS = 65_536
+SQ8_RECEIPT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+PLAN_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_plan.v1"
+METRICS_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_metrics.v1"
+FREEZE_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_freeze_receipt.v1"
+PREFLIGHT_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_holdout_preflight.v1"
+ATTEMPT_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_holdout_attempt.v1"
+HOLDOUT_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_holdout_receipt.v1"
+LEDGER_SCHEMA = "ullm.qwen35_aq4_sq8_fidelity_attempt_ledger.v1"
+REQUEST_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
+HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+METRIC_POLICY: dict[str, dict[str, Any]] = {
+    "token_agreement_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0},
+    "topk_overlap_rate_k10": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.1, "absolute_ceiling": 1.0},
+    "logits_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
+    "logits_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
+    "hidden_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
+    "hidden_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
+    "hidden_max_abs": {"role": "diagnostic_only", "direction": "diagnostic", "aggregation": "max", "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": None},
+    "bf16_top1_retained_in_aq4_top10_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0},
+}
+BINARY_METRICS = {"token_agreement_rate", "bf16_top1_retained_in_aq4_top10_rate"}
+RELATIVE_L2_METRICS = {"logits_relative_l2", "hidden_relative_l2"}
+WILSON_Z = 1.6448536269514722
+
+
+class ProtocolError(ValueError):
+    """A malformed, stale, or unsafe protocol artifact."""
+
+
+def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in items:
+        if key in value:
+            raise ProtocolError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _constant(value: str) -> Any:
+    raise ProtocolError(f"non-finite JSON constant: {value}")
+
+
+def canonical(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def sha_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha_file(path: Path, label: str) -> str:
+    _regular(path, label)
+    if path.stat().st_size > MAX_JSON_BYTES:
+        raise ProtocolError(f"{label} exceeds bounded size")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _regular(path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ProtocolError(f"{label} must be a regular non-symlink file")
+    current = path.absolute().anchor and Path(path.absolute().anchor) or Path("/")
+    for component in path.absolute().parts[1:]:
+        current /= component
+        if current.is_symlink():
+            raise ProtocolError(f"{label} has a symlink component")
+
+
+def load_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    _regular(path, label)
+    if path.stat().st_size > MAX_JSON_BYTES:
+        raise ProtocolError(f"{label} exceeds bounded size")
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ProtocolError(f"invalid {label}") from error
+    if not isinstance(value, dict):
+        raise ProtocolError(f"{label} must be a JSON object")
+    return value, raw
+
+
+def read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
+    _regular(path, label)
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as stream:
+        for number, line in enumerate(stream, 1):
+            try:
+                value = json.loads(line, object_pairs_hook=_pairs, parse_constant=_constant)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ProtocolError(f"invalid {label} line {number}") from error
+            if not isinstance(value, dict):
+                raise ProtocolError(f"{label} line {number} is not an object")
+            rows.append(value)
+    return rows
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    if os.path.lexists(path):
+        raise ProtocolError(f"refusing to overwrite {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.incomplete")
+    try:
+        with temporary.open("xb", buffering=0) as stream:
+            raw = json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False).encode() + b"\n"
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _hex(value: Any, label: str, *, forty: bool = False) -> str:
+    pattern = HEX40_RE if forty else HEX_RE
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise ProtocolError(f"{label} is not a lowercase hexadecimal digest")
+    return value
+
+
+def _request(value: Any) -> str:
+    if not isinstance(value, str) or REQUEST_RE.fullmatch(value) is None:
+        raise ProtocolError("SQ8 request_id is invalid")
+    return value
+
+
+def _ref(path: Path, label: str, *, base: Path | None = None) -> dict[str, str]:
+    _regular(path, label)
+    resolved = path.resolve()
+    if base is not None:
+        try:
+            relative = resolved.relative_to(base.resolve())
+        except ValueError as error:
+            raise ProtocolError(f"{label} must be below its receipt directory") from error
+        if not relative.parts or any(part in (".", "..", "") for part in relative.parts):
+            raise ProtocolError(f"{label} path is unsafe")
+        raw_path = str(relative)
+    else:
+        raw_path = str(resolved)
+    return {"path": raw_path, "sha256": sha_file(resolved, label)}
+
+
+def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    receipt, raw = load_json(path, "SQ8 promotion receipt")
+    receipt_keys = {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "authorization_audit", "readiness", "actual"}
+    if set(receipt) not in (receipt_keys, receipt_keys | {"authorization_lineage"}):
+        raise ProtocolError("SQ8 promotion receipt has unknown or missing fields")
+    if receipt.get("schema_version") != SQ8_RECEIPT_SCHEMA or receipt.get("status") != "actual_verified":
+        raise ProtocolError("actual_verified SQ8 receipt is required")
+    _request(receipt.get("request_id"))
+    _hex(receipt.get("source_commit"), "source commit", forty=True)
+    source = receipt.get("source_provenance")
+    if not isinstance(source, dict) or set(source) != {"tree_sha256", "archive_sha256"}:
+        raise ProtocolError("SQ8 source provenance is incomplete")
+    _hex(source.get("tree_sha256"), "source tree", forty=True)
+    _hex(source.get("archive_sha256"), "source archive")
+    overlay = receipt.get("overlay")
+    overlay_keys = {"binding_manifest_path", "binding_manifest_sha256", "content_sha256", "tensor_set_sha256", "tensor_count", "artifact_inventory"}
+    if not isinstance(overlay, dict) or set(overlay) != overlay_keys or overlay.get("tensor_count") != 48:
+        raise ProtocolError("SQ8 overlay tensor count must be 48")
+    content = _hex(overlay.get("content_sha256"), "overlay content")
+    tensor_set = _hex(overlay.get("tensor_set_sha256"), "overlay tensor set")
+    actual = receipt.get("actual")
+    required = {"status", "required", "prepared_receipt", "maintenance_evidence", "executor_record", "gpu_exclusive_preflight", "telemetry", "telemetry_binding", "manifest_identity", "output_identity"}
+    if not isinstance(actual, dict) or set(actual) != required or actual.get("status") != "actual_verified" or actual.get("required") is not True:
+        raise ProtocolError("SQ8 actual evidence is incomplete")
+    request_id = receipt["request_id"]
+    if actual["prepared_receipt"].get("path") == str(path.resolve()):
+        raise ProtocolError("prepared and actual receipt cannot be the same file")
+    prepared_ref = actual["prepared_receipt"]
+    if not isinstance(prepared_ref, dict) or set(prepared_ref) != {"path", "sha256"}:
+        raise ProtocolError("prepared receipt reference is incomplete")
+    _hex(prepared_ref.get("sha256"), "prepared receipt SHA")
+    prepared_path = Path(str(prepared_ref.get("path")))
+    _regular(prepared_path, "prepared receipt")
+    if sha_file(prepared_path, "prepared receipt") != prepared_ref["sha256"]:
+        raise ProtocolError("prepared receipt SHA differs")
+    prepared, _ = load_json(prepared_path, "prepared receipt")
+    prepared_keys = {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "authorization_audit", "readiness", "actual"}
+    if set(prepared) not in (prepared_keys, prepared_keys | {"authorization_lineage"}):
+        raise ProtocolError("prepared receipt has unknown or missing fields")
+    if prepared.get("schema_version") != SQ8_RECEIPT_SCHEMA or prepared.get("status") != "prepared_not_executed" or prepared.get("request_id") != request_id:
+        raise ProtocolError("prepared receipt state differs")
+    for key in ("source_commit", "source_provenance", "overlay", "package"):
+        if prepared.get(key) != receipt.get(key):
+            raise ProtocolError(f"prepared receipt {key} differs")
+    prepared_release = prepared.get("release")
+    release = receipt.get("release")
+    if not isinstance(prepared_release, dict) or not isinstance(release, dict):
+        raise ProtocolError("prepared/release identity is incomplete")
+    for component in ("worker", "profile"):
+        if prepared_release.get(component) != release.get(component):
+            raise ProtocolError(f"prepared receipt release {component} differs")
+    if prepared_release.get("served_model", {}).get("path") != release.get("served_model", {}).get("path"):
+        raise ProtocolError("prepared receipt served-model path differs")
+    telemetry = actual["telemetry"]
+    telemetry_keys = {"schema_version", "projection", "diagnostic_host_staging"}
+    if not isinstance(telemetry, dict) or set(telemetry) != telemetry_keys or telemetry.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_telemetry.v1":
+        raise ProtocolError("SQ8 telemetry schema differs")
+    projection = telemetry.get("projection")
+    projection_keys = {"single_matvec_count", "batch_matvec_count", "pair_matvec_count", "triple_matvec_count", "fallback_count"}
+    if not isinstance(projection, dict) or set(projection) != projection_keys or any(type(projection[key]) is not int or projection[key] < 0 for key in projection_keys) or projection["batch_matvec_count"] <= 0 or projection["pair_matvec_count"] <= 0 or any(projection[key] != 0 for key in ("single_matvec_count", "triple_matvec_count", "fallback_count")):
+        raise ProtocolError("SQ8 telemetry projection differs")
+    staging = telemetry.get("diagnostic_host_staging")
+    if not isinstance(staging, dict) or set(staging) != {"read_count", "write_count", "read_bytes", "write_bytes"} or any(type(staging[key]) is not int or staging[key] != 0 for key in staging):
+        raise ProtocolError("SQ8 telemetry host staging differs")
+    binding = actual["telemetry_binding"]
+    if not isinstance(binding, dict) or set(binding) != {"schema_version", "request_id", "hash_encoding", "telemetry_sha256"}:
+        raise ProtocolError("SQ8 telemetry binding shape differs")
+    if binding.get("request_id") != request_id or binding.get("hash_encoding") != "canonical_json_ascii_sort_keys_compact_v1" or binding.get("telemetry_sha256") != sha_bytes(canonical(telemetry)):
+        raise ProtocolError("SQ8 telemetry binding differs")
+    identity = actual["manifest_identity"]
+    expected_identity_keys = {"implementation_id", "execution_profile", "artifact_content_sha256", "artifact_manifest_sha256", "package_manifest_sha256"}
+    if not isinstance(identity, dict) or set(identity) != expected_identity_keys or identity.get("implementation_id") != "qwen35_aq4_sq8_linear_qkv_z_overlay_v1" or identity.get("artifact_content_sha256") != content or identity.get("artifact_manifest_sha256") != overlay.get("binding_manifest_sha256") or not HEX_RE.fullmatch(str(identity.get("package_manifest_sha256"))):
+        raise ProtocolError("SQ8 manifest identity differs")
+    output = actual["output_identity"]
+    if not isinstance(output, dict) or set(output) != {"token_count", "token_ids_sha256", "token_ids_recorded"} or output.get("token_count") != 2 or output.get("token_ids_recorded") is not False:
+        raise ProtocolError("SQ8 token output identity differs")
+    _hex(output.get("token_ids_sha256"), "SQ8 token IDs SHA")
+    release = receipt.get("release")
+    if not isinstance(release, dict) or set(release) != {"worker", "profile", "served_model"} or not isinstance(release.get("worker"), dict) or not isinstance(release.get("profile"), dict) or not isinstance(release.get("served_model"), dict):
+        raise ProtocolError("SQ8 release identity is incomplete")
+    worker = release["worker"]
+    if set(worker) != {"path", "sha256", "bytes", "mode", "nlink"}:
+        raise ProtocolError("SQ8 worker identity shape differs")
+    if set(release["profile"]) != {"path", "sha256"} or set(release["served_model"]) != {"path", "semantic_sha256"}:
+        raise ProtocolError("SQ8 profile/served identity shape differs")
+    _hex(worker.get("sha256"), "worker SHA")
+    served = release["served_model"]
+    _hex(served.get("semantic_sha256"), "served-model semantic SHA")
+    package = receipt.get("package")
+    if not isinstance(package, dict) or set(package) != {"manifest_path", "manifest_sha256"} or not isinstance(package.get("manifest_sha256"), str):
+        raise ProtocolError("SQ8 package identity is incomplete")
+    _hex(package["manifest_sha256"], "package manifest SHA")
+    for key in ("maintenance_evidence", "executor_record"):
+        ref = actual[key]
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
+            raise ProtocolError(f"{key} reference is incomplete")
+        _hex(ref.get("sha256"), f"{key} SHA")
+        target = (path.parent / str(ref["path"]))
+        _regular(target, key)
+        if sha_file(target, key) != ref["sha256"]:
+            raise ProtocolError(f"{key} SHA differs")
+    maintenance_value, _ = load_json(path.parent / str(actual["maintenance_evidence"]["path"]), "SQ8 maintenance evidence")
+    if maintenance_value.get("promotion_request_id") != request_id:
+        raise ProtocolError("SQ8 maintenance request ID differs")
+    executor_value, _ = load_json(path.parent / str(actual["executor_record"]["path"]), "SQ8 executor record")
+    if executor_value.get("schema_version") != "ullm.production_executor_record.v1" or executor_value.get("status") != "ok":
+        raise ProtocolError("SQ8 executor record schema/status differs")
+    executor_evidence = executor_value.get("sq8_promotion_evidence")
+    if not isinstance(executor_evidence, dict) or set(executor_evidence) != {"schema_version", "request_id", "manifest_identity", "telemetry", "telemetry_binding", "output_identity"} or executor_evidence.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_executor.v1" or executor_evidence.get("request_id") != request_id or executor_evidence.get("manifest_identity") != identity or executor_evidence.get("telemetry") != telemetry or executor_evidence.get("telemetry_binding") != binding or executor_evidence.get("output_identity") != output:
+        raise ProtocolError("SQ8 executor evidence does not bind actual receipt")
+    return receipt, raw, {"request_id": request_id, "content_sha256": content, "tensor_set_sha256": tensor_set, "source_commit": receipt["source_commit"], "source_tree_sha256": source["tree_sha256"], "source_archive_sha256": source["archive_sha256"], "token_ids_sha256": output["token_ids_sha256"], "telemetry_binding": binding, "maintenance_evidence": actual["maintenance_evidence"], "executor_record": actual["executor_record"], "prepared_receipt": prepared_ref, "served_model": served, "worker": worker, "package": package}
+
+
+def policy() -> dict[str, Any]:
+    metrics = {}
+    for name, spec in METRIC_POLICY.items():
+        item = dict(spec)
+        item["sample_minimum"] = MAX_ROWS
+        item["observed_domain"] = "[0,1]" if name not in {"hidden_max_abs"} else "[0,+inf)"
+        if name in RELATIVE_L2_METRICS:
+            item["pathological_rejection_ceiling"] = 1.0
+        metrics[name] = item
+    return {"schema_version": "ullm.qwen35_aq4_sq8_fidelity_policy.v1", "status": "formula_frozen_unbound", "promotion_eligible": False, "n": MAX_ROWS, "metrics": metrics, "relative_l2_rejection": {"ceiling": 1.0, "action": "reject any observed relative-L2 > 1 before aggregation"}, "holdout_evaluation_allowed_once": True, "retry_permitted": False, "attempt_boundary": {"remaining_before": 1, "remaining_after": 0, "failure_consumes_attempt": True}}
+
+
+def _split(split_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    manifest, manifest_raw = load_json(split_root / "split-manifest.json", "SQ8 split manifest")
+    policy_value, policy_raw = load_json(split_root / "policy.json", "SQ8 policy")
+    if manifest.get("selected_case_count") != 48 or manifest.get("calibration_case_count") != 24 or manifest.get("holdout_case_count") != 24:
+        raise ProtocolError("SQ8 split must contain 48/24/24 cases")
+    if policy_value != policy() and policy_value.get("schema_version") != "ullm.aq4_p2_fidelity_policy.v1":
+        raise ProtocolError("SQ8 policy formula is not frozen")
+    calibration = read_jsonl(split_root / "calibration-cases.jsonl", "SQ8 calibration cases")
+    holdout = read_jsonl(split_root / "holdout-cases.jsonl", "SQ8 holdout cases")
+    if len(calibration) != MAX_ROWS or len(holdout) != MAX_ROWS:
+        raise ProtocolError("SQ8 split must contain exactly 24 rows per subset")
+    seen: set[str] = set()
+    for subset, rows in (("calibration", calibration), ("holdout", holdout)):
+        for row in rows:
+            if row.get("subset") != subset or row.get("step") != 0 or row.get("row_count") != 1 or row.get("cached_prefix_tokens") != 0 or row.get("generated_tokens") != 0 or row.get("prompt_tokens") != row.get("context_tokens"):
+                raise ProtocolError(f"SQ8 {subset} row state differs")
+            case_id = row.get("case_id")
+            if not isinstance(case_id, str) or not case_id or case_id in seen:
+                raise ProtocolError("SQ8 case identity is not disjoint")
+            seen.add(case_id)
+            for key in ("case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256"):
+                _hex(row.get(key), f"SQ8 {subset} {key}")
+    if manifest.get("calibration_sha256") != sha_file(split_root / "calibration-cases.jsonl", "SQ8 calibration cases") or manifest.get("holdout_sha256") != sha_file(split_root / "holdout-cases.jsonl", "SQ8 holdout cases") or manifest.get("policy_sha256") != sha_file(split_root / "policy.json", "SQ8 policy"):
+        raise ProtocolError("SQ8 split manifest file bindings differ")
+    return ({"sha256": sha_bytes(manifest_raw), "path": str((split_root / "split-manifest.json").resolve()), "rows": calibration}, {"sha256": sha_file(split_root / "calibration-cases.jsonl", "SQ8 calibration cases"), "path": str((split_root / "calibration-cases.jsonl").resolve()), "rows": calibration}, {"sha256": sha_file(split_root / "holdout-cases.jsonl", "SQ8 holdout cases"), "path": str((split_root / "holdout-cases.jsonl").resolve()), "rows": holdout}, {"sha256": sha_bytes(policy_raw), "path": str((split_root / "policy.json").resolve()), "value": policy_value})
+
+
+def _identity(actual: dict[str, Any], *, receipt_path: Path, receipt_sha: str, split: dict[str, Any], calibration: dict[str, Any], holdout: dict[str, Any], policy_ref: dict[str, Any], source_v32: Path) -> dict[str, Any]:
+    return {"sq8_receipt_path": str(receipt_path.resolve()), "sq8_receipt_sha256": receipt_sha, "request_id": actual["request_id"], "source_commit": actual["source_commit"], "source_tree_sha256": actual["source_tree_sha256"], "source_archive_sha256": actual["source_archive_sha256"], "source_v32_path": str(source_v32.resolve()), "source_v32_sha256": sha_file(source_v32, "source-v32"), "served_model": actual["served_model"], "worker": actual["worker"], "package": actual["package"], "overlay_content_sha256": actual["content_sha256"], "overlay_tensor_set_sha256": actual["tensor_set_sha256"], "token_ids_sha256": actual["token_ids_sha256"], "telemetry_binding": actual["telemetry_binding"], "maintenance_evidence": actual["maintenance_evidence"], "executor_record": actual["executor_record"], "prepared_receipt": actual["prepared_receipt"], "split_manifest_sha256": split["sha256"], "calibration_cases_sha256": calibration["sha256"], "holdout_cases_sha256": holdout["sha256"], "policy_sha256": policy_ref["sha256"]}
+
+
+def create_plan(split_root: Path, actual_receipt: Path, source_v32: Path, output: Path) -> None:
+    try:
+        receipt, receipt_raw, actual = _actual_receipt(actual_receipt)
+        actual_verified = True
+    except ProtocolError:
+        # A prepared receipt can produce a read-only preflight plan.  It must
+        # never be accepted by ``freeze`` or either holdout command.
+        receipt, receipt_raw = load_json(actual_receipt, "SQ8 prepared receipt")
+        if receipt.get("schema_version") != SQ8_RECEIPT_SCHEMA or receipt.get("status") != "prepared_not_executed" or receipt.get("actual") != {"status": "pending", "required": True}:
+            raise
+        _request(receipt.get("request_id"))
+        source = receipt.get("source_provenance")
+        overlay = receipt.get("overlay")
+        release = receipt.get("release")
+        package = receipt.get("package")
+        if not isinstance(source, dict) or not isinstance(overlay, dict) or not isinstance(release, dict) or not isinstance(package, dict):
+            raise ProtocolError("prepared SQ8 receipt identity is incomplete")
+        _hex(receipt.get("source_commit"), "source commit", forty=True)
+        _hex(source.get("tree_sha256"), "source tree", forty=True)
+        _hex(source.get("archive_sha256"), "source archive")
+        _hex(overlay.get("content_sha256"), "overlay content")
+        _hex(overlay.get("tensor_set_sha256"), "overlay tensor set")
+        actual = {"request_id": receipt["request_id"], "source_commit": receipt["source_commit"], "source_tree_sha256": source["tree_sha256"], "source_archive_sha256": source["archive_sha256"], "content_sha256": overlay["content_sha256"], "tensor_set_sha256": overlay["tensor_set_sha256"], "served_model": release.get("served_model"), "worker": release.get("worker"), "package": package, "token_ids_sha256": None, "telemetry_binding": None, "maintenance_evidence": None, "executor_record": None, "prepared_receipt": {"path": str(actual_receipt.resolve()), "sha256": sha_bytes(receipt_raw)}}
+        actual_verified = False
+    split, calibration, holdout, policy_ref = _split(split_root)
+    split["rows"] = calibration["rows"] + holdout["rows"]
+    identity = _identity(actual, receipt_path=actual_receipt, receipt_sha=sha_bytes(receipt_raw), split=split, calibration=calibration, holdout=holdout, policy_ref=policy_ref, source_v32=source_v32)
+    identity["holdout_cases_path"] = holdout["path"]
+    status = "ready_for_calibration" if actual_verified else "preflight_only"
+    plan = {"schema_version": PLAN_SCHEMA, "status": status, "preflight_only": not actual_verified, "actual_verified_required": True, "identity": identity, "policy": policy(), "calibration": {"path": calibration["path"], "sha256": calibration["sha256"], "row_count": MAX_ROWS}, "holdout": {"path": holdout["path"], "sha256": holdout["sha256"], "row_count": MAX_ROWS}, "resource_contract": {"jobs": 1, "case_concurrency": 1, "one_model_load": True, "chunk_elements": MAX_CHUNK_ELEMENTS, "bounded_vectors": True, "bounded_disk": True, "max_rows": MAX_ROWS, "max_case_file_bytes": MAX_JSON_BYTES, "vram_headroom_required": True, "vram_headroom_bytes_min": 1}, "holdout_state": {"status": "not_started", "evaluations_remaining": 1, "retry_permitted": False}}
+    atomic_json(output, plan)
+
+
+def _check_plan(path: Path) -> tuple[dict[str, Any], bytes]:
+    plan, raw = load_json(path, "SQ8 fidelity plan")
+    if set(plan) != {"schema_version", "status", "preflight_only", "actual_verified_required", "identity", "policy", "calibration", "holdout", "resource_contract", "holdout_state"}:
+        raise ProtocolError("SQ8 plan has unknown or missing fields")
+    if plan.get("schema_version") != PLAN_SCHEMA or plan.get("actual_verified_required") is not True or plan.get("holdout_state") != {"status": "not_started", "evaluations_remaining": 1, "retry_permitted": False}:
+        raise ProtocolError("SQ8 plan schema/state differs")
+    resource = plan.get("resource_contract", {})
+    if resource.get("jobs") != 1 or resource.get("case_concurrency") != 1 or resource.get("one_model_load") is not True or resource.get("chunk_elements") != MAX_CHUNK_ELEMENTS or resource.get("max_rows") != MAX_ROWS or resource.get("max_case_file_bytes") != MAX_JSON_BYTES or resource.get("vram_headroom_required") is not True or resource.get("vram_headroom_bytes_min") != 1:
+        raise ProtocolError("SQ8 resource contract is unsafe")
+    source_v32 = Path(str(plan.get("identity", {}).get("source_v32_path", "")))
+    if not source_v32.is_absolute() or sha_file(source_v32, "source-v32") != plan["identity"].get("source_v32_sha256"):
+        raise ProtocolError("SQ8 source-v32 identity differs")
+    receipt_path = Path(str(plan.get("identity", {}).get("sq8_receipt_path", "")))
+    if not receipt_path.is_absolute() or sha_file(receipt_path, "SQ8 promotion receipt") != plan["identity"].get("sq8_receipt_sha256"):
+        raise ProtocolError("SQ8 promotion receipt identity differs")
+    try:
+        _actual_receipt(receipt_path)
+    except ProtocolError:
+        prepared_value, _ = load_json(receipt_path, "SQ8 prepared receipt")
+        if prepared_value.get("schema_version") != SQ8_RECEIPT_SCHEMA or prepared_value.get("status") != "prepared_not_executed":
+            raise
+    if plan.get("policy") != policy():
+        raise ProtocolError("SQ8 plan policy differs")
+    return plan, raw
+
+
+def _metric_value(value: Any, label: str, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ProtocolError(f"{label} is not finite")
+    number = float(value)
+    if number < 0 or (name != "hidden_max_abs" and number > 1):
+        raise ProtocolError(f"{label} is outside the frozen domain")
+    if name in BINARY_METRICS and number not in (0.0, 1.0):
+        raise ProtocolError(f"{label} must be binary")
+    if name in RELATIVE_L2_METRICS and number > 1:
+        raise ProtocolError(f"{label} exceeds pathological relative-L2 ceiling")
+    return number
+
+
+def _rows(metrics: dict[str, Any], expected_rows: list[dict[str, Any]], identity: dict[str, Any]) -> list[dict[str, Any]]:
+    if set(metrics) != {"schema_version", "identity", "subset", "rows"}:
+        raise ProtocolError("SQ8 metrics has unknown or missing fields")
+    if metrics.get("schema_version") != METRICS_SCHEMA or metrics.get("identity") != identity or metrics.get("subset") != "calibration":
+        raise ProtocolError("SQ8 metrics identity/subset differs")
+    rows = metrics.get("rows")
+    if not isinstance(rows, list) or len(rows) != MAX_ROWS:
+        raise ProtocolError("SQ8 calibration metrics must contain exactly 24 rows")
+    expected = {row.get("case_id"): row for row in expected_rows}
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("case_id") not in expected or row["case_id"] in seen:
+            raise ProtocolError("SQ8 metric case identity differs")
+        allowed_row_keys = {"case_id", "case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "generated_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count", "subset", "metrics"}
+        if set(row) != allowed_row_keys:
+            raise ProtocolError("SQ8 metric row has unknown or missing fields")
+        seen.add(row["case_id"])
+        expected_row = expected[row["case_id"]]
+        for key in ("case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "generated_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count", "subset"):
+            if row.get(key) != expected_row.get(key):
+                raise ProtocolError(f"SQ8 metric row identity differs: {row['case_id']} {key}")
+        values = row.get("metrics")
+        if not isinstance(values, dict) or set(values) != set(METRIC_POLICY):
+            raise ProtocolError(f"SQ8 metric set differs: {row['case_id']}")
+        for name in METRIC_POLICY:
+            _metric_value(values.get(name), f"{row['case_id']}.{name}", name)
+    if seen != set(expected):
+        raise ProtocolError("SQ8 calibration metric row set differs")
+    return rows
+
+
+def wilson_lower(successes: int, samples: int = MAX_ROWS) -> float:
+    if samples != MAX_ROWS or not 0 <= successes <= samples:
+        raise ProtocolError("Wilson inputs differ")
+    p = successes / samples
+    z2 = WILSON_Z * WILSON_Z
+    denominator = 1 + z2 / samples
+    center = p + z2 / (2 * samples)
+    radius = WILSON_Z * math.sqrt((p * (1 - p) + z2 / (4 * samples)) / samples)
+    return max(0.0, (center - radius) / denominator)
+
+
+def recompute(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    aggregate = {name: [float(row["metrics"][name]) for row in rows] for name in METRIC_POLICY}
+    derived: dict[str, Any] = {}
+    for name, spec in METRIC_POLICY.items():
+        values = aggregate[name]
+        if name in BINARY_METRICS:
+            successes = sum(value == 1.0 for value in values)
+            derived[name] = {"calibration_mean": sum(values) / MAX_ROWS, "successes": successes, "confidence_level": 0.95, "wilson_z": WILSON_Z, "bound": wilson_lower(successes), "direction": spec["direction"], "sample_count": MAX_ROWS}
+        elif name == "hidden_max_abs":
+            derived[name] = {"diagnostic_max": max(values), "bound": None, "direction": "diagnostic", "sample_count": MAX_ROWS}
+        else:
+            mean = sum(values) / MAX_ROWS
+            margin = max(float(spec["margin"]), float(spec["relative_margin"]) * abs(mean))
+            bound = mean - margin if spec["direction"] == "higher" else mean + margin
+            if spec["absolute_floor"] is not None:
+                bound = max(float(spec["absolute_floor"]), bound)
+            if spec["absolute_ceiling"] is not None:
+                bound = min(float(spec["absolute_ceiling"]), bound)
+            derived[name] = {"calibration_mean": mean, "absolute_margin": spec["margin"], "relative_margin": spec["relative_margin"], "effective_margin": margin, "bound": bound, "direction": spec["direction"], "sample_count": MAX_ROWS}
+    return derived
+
+
+def freeze(plan_path: Path, metrics_path: Path, output: Path) -> None:
+    plan, _ = _check_plan(plan_path)
+    if plan.get("status") != "ready_for_calibration" or plan.get("preflight_only") is True:
+        raise ProtocolError("SQ8 actual_verified receipt is required before calibration freeze")
+    metrics, metrics_raw = load_json(metrics_path, "SQ8 calibration metrics")
+    rows = _rows(metrics, read_jsonl(Path(plan["calibration"]["path"]), "SQ8 calibration cases"), plan["identity"])
+    receipt = {"schema_version": FREEZE_SCHEMA, "status": "frozen_calibration_envelope", "identity": plan["identity"], "plan_sha256": sha_file(plan_path, "SQ8 plan"), "metrics_sha256": sha_bytes(metrics_raw), "calibration_case_count": MAX_ROWS, "derived_bounds": recompute(rows), "holdout_status": "not_started", "holdout_evaluations_remaining": 1, "retry_permitted": False, "relative_l2_rejection_ceiling": 1.0, "attempt_boundary": {"remaining_before": 1, "remaining_after": 0, "failure_consumes_attempt": True}}
+    atomic_json(output, receipt)
+
+
+def validate_freeze(plan_path: Path, metrics_path: Path, freeze_path: Path) -> dict[str, Any]:
+    """Independently recompute all 24 rows and compare a freeze receipt."""
+
+    plan, _ = _check_plan(plan_path)
+    if plan.get("status") != "ready_for_calibration" or plan.get("preflight_only") is True:
+        raise ProtocolError("SQ8 actual_verified receipt is required before freeze validation")
+    metrics, metrics_raw = load_json(metrics_path, "SQ8 calibration metrics")
+    rows = _rows(metrics, read_jsonl(Path(plan["calibration"]["path"]), "SQ8 calibration cases"), plan["identity"])
+    receipt, receipt_raw = load_json(freeze_path, "SQ8 freeze receipt")
+    if set(receipt) != {"schema_version", "status", "identity", "plan_sha256", "metrics_sha256", "calibration_case_count", "derived_bounds", "holdout_status", "holdout_evaluations_remaining", "retry_permitted", "relative_l2_rejection_ceiling", "attempt_boundary"}:
+        raise ProtocolError("SQ8 freeze receipt has unknown or missing fields")
+    if receipt.get("schema_version") != FREEZE_SCHEMA or receipt.get("status") != "frozen_calibration_envelope" or receipt.get("identity") != plan["identity"] or receipt.get("plan_sha256") != sha_file(plan_path, "SQ8 plan") or receipt.get("metrics_sha256") != sha_bytes(metrics_raw):
+        raise ProtocolError("SQ8 freeze receipt binding differs")
+    expected = recompute(rows)
+    if receipt.get("derived_bounds") != expected:
+        raise ProtocolError("SQ8 freeze receipt derived bounds differ from independent recomputation")
+    if receipt.get("holdout_status") != "not_started" or receipt.get("holdout_evaluations_remaining") != 1 or receipt.get("retry_permitted") is not False:
+        raise ProtocolError("SQ8 freeze receipt state differs")
+    return {"status": "ok", "receipt_sha256": sha_bytes(receipt_raw), "metrics_sha256": sha_bytes(metrics_raw), "row_count": MAX_ROWS}
+
+
+def preflight(freeze_path: Path, plan_path: Path, output: Path) -> None:
+    plan, _ = _check_plan(plan_path)
+    if plan.get("status") != "ready_for_calibration" or plan.get("preflight_only") is True:
+        raise ProtocolError("SQ8 actual_verified receipt is required before holdout preflight")
+    freeze_value, freeze_raw = load_json(freeze_path, "SQ8 freeze receipt")
+    if set(freeze_value) != {"schema_version", "status", "identity", "plan_sha256", "metrics_sha256", "calibration_case_count", "derived_bounds", "holdout_status", "holdout_evaluations_remaining", "retry_permitted", "relative_l2_rejection_ceiling", "attempt_boundary"}:
+        raise ProtocolError("SQ8 freeze receipt has unknown or missing fields")
+    if freeze_value.get("schema_version") != FREEZE_SCHEMA or freeze_value.get("status") != "frozen_calibration_envelope" or freeze_value.get("identity") != plan["identity"] or freeze_value.get("holdout_status") != "not_started" or freeze_value.get("holdout_evaluations_remaining") != 1 or freeze_value.get("retry_permitted") is not False:
+        raise ProtocolError("SQ8 freeze receipt state/identity differs")
+    holdout = read_jsonl(Path(plan["holdout"]["path"]), "SQ8 holdout cases")
+    if len(holdout) != MAX_ROWS:
+        raise ProtocolError("SQ8 holdout case count differs")
+    value = {"schema_version": PREFLIGHT_SCHEMA, "status": "ready_for_one_shot_holdout", "freeze_receipt_sha256": sha_bytes(freeze_raw), "freeze_receipt_path": str(freeze_path.resolve()), "identity": plan["identity"], "holdout_cases_sha256": plan["identity"]["holdout_cases_sha256"], "holdout_case_count": MAX_ROWS, "evaluations_remaining": 1, "retry_permitted": False, "attempt_boundary": {"remaining_before": 1, "remaining_after": 0, "failure_consumes_attempt": True}}
+    atomic_json(output, value)
+
+
+def execute(preflight_path: Path, metrics_path: Path, ledger_path: Path, output: Path, *, crash_after_sentinel: bool = False) -> None:
+    preflight_value, preflight_raw = load_json(preflight_path, "SQ8 holdout preflight")
+    if set(preflight_value) != {"schema_version", "status", "freeze_receipt_sha256", "freeze_receipt_path", "identity", "holdout_cases_sha256", "holdout_case_count", "evaluations_remaining", "retry_permitted", "attempt_boundary"}:
+        raise ProtocolError("SQ8 holdout preflight has unknown or missing fields")
+    if preflight_value.get("schema_version") != PREFLIGHT_SCHEMA or preflight_value.get("status") != "ready_for_one_shot_holdout" or preflight_value.get("evaluations_remaining") != 1 or preflight_value.get("retry_permitted") is not False:
+        raise ProtocolError("SQ8 holdout preflight is not executable")
+    if os.path.lexists(ledger_path):
+        raise ProtocolError("SQ8 holdout attempt was already consumed; retry is forbidden")
+    attempt_id = sha_bytes(b"ullm.qwen35-aq4-sq8-holdout-attempt-v1\0" + sha_bytes(preflight_raw).encode())
+    ledger = {"schema_version": LEDGER_SCHEMA, "status": "consumed", "attempt_id": attempt_id, "preflight_sha256": sha_bytes(preflight_raw), "identity": preflight_value["identity"], "remaining_before": 1, "remaining_after": 0, "retry_permitted": False}
+    atomic_json(ledger_path, ledger)
+    if crash_after_sentinel:
+        raise ProtocolError("simulated crash after irreversible attempt boundary")
+    try:
+        metrics, metrics_raw = load_json(metrics_path, "SQ8 holdout metrics")
+        if metrics.get("schema_version") != METRICS_SCHEMA or metrics.get("identity") != preflight_value["identity"] or metrics.get("subset") != "holdout":
+            raise ProtocolError("SQ8 holdout metrics identity/subset differs")
+        # Holdout rows are checked against the frozen 24-row case set; identity is
+        # retained in the preflight and the same strict row validator is reused.
+        expected_rows = read_jsonl(Path(preflight_value["identity"].get("holdout_cases_path", "")), "SQ8 holdout cases") if preflight_value["identity"].get("holdout_cases_path") else []
+        if not expected_rows:
+            raise ProtocolError("SQ8 holdout case path is absent from identity")
+        rows = _rows({**metrics, "subset": "calibration"}, expected_rows, preflight_value["identity"])
+        bounds_path = Path(str(preflight_value["freeze_receipt_path"]))
+        freeze_value, _ = load_json(bounds_path, "SQ8 freeze receipt")
+        observed = recompute(rows)
+        checks: dict[str, bool] = {}
+        for name, spec in METRIC_POLICY.items():
+            if spec["role"] == "diagnostic_only":
+                checks[name] = True
+            elif spec["direction"] == "higher":
+                checks[name] = observed[name]["bound"] >= freeze_value["derived_bounds"][name]["bound"]
+            else:
+                checks[name] = observed[name]["bound"] <= freeze_value["derived_bounds"][name]["bound"]
+        passed = all(checks.values())
+        result = {"schema_version": ATTEMPT_SCHEMA, "status": "passed" if passed else "failed", "attempt_id": attempt_id, "preflight_sha256": sha_bytes(preflight_raw), "ledger_sha256": sha_file(ledger_path, "SQ8 attempt ledger"), "metrics_sha256": sha_bytes(metrics_raw), "identity": preflight_value["identity"], "derived_metrics": observed, "gate_checks": checks, "retry_permitted": False, "evaluations_remaining": 0}
+    except (ProtocolError, OSError, ValueError) as error:
+        result = {"schema_version": ATTEMPT_SCHEMA, "status": "failed", "attempt_id": attempt_id, "preflight_sha256": sha_bytes(preflight_raw), "ledger_sha256": sha_file(ledger_path, "SQ8 attempt ledger"), "identity": preflight_value["identity"], "failure": str(error), "retry_permitted": False, "evaluations_remaining": 0}
+        atomic_json(output, result)
+        raise
+    atomic_json(output, result)
+    if result["status"] != "passed":
+        raise ProtocolError("SQ8 holdout gate failed; the consumed attempt cannot be retried")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("plan"); p.add_argument("--split-root", type=Path, required=True); p.add_argument("--actual-receipt", type=Path, required=True); p.add_argument("--source-v32", type=Path, required=True); p.add_argument("--output", type=Path, required=True); p.set_defaults(func=lambda a: create_plan(a.split_root, a.actual_receipt, a.source_v32, a.output))
+    p = sub.add_parser("freeze"); p.add_argument("--plan", type=Path, required=True); p.add_argument("--metrics", type=Path, required=True); p.add_argument("--output", type=Path, required=True); p.set_defaults(func=lambda a: freeze(a.plan, a.metrics, a.output))
+    p = sub.add_parser("validate-freeze"); p.add_argument("--plan", type=Path, required=True); p.add_argument("--metrics", type=Path, required=True); p.add_argument("--freeze", type=Path, required=True); p.set_defaults(func=lambda a: print(json.dumps(validate_freeze(a.plan, a.metrics, a.freeze), sort_keys=True)))
+    p = sub.add_parser("preflight-holdout"); p.add_argument("--plan", type=Path, required=True); p.add_argument("--freeze", type=Path, required=True); p.add_argument("--output", type=Path, required=True); p.set_defaults(func=lambda a: preflight(a.freeze, a.plan, a.output))
+    p = sub.add_parser("execute-holdout"); p.add_argument("--preflight", type=Path, required=True); p.add_argument("--metrics", type=Path, required=True); p.add_argument("--ledger", type=Path, required=True); p.add_argument("--output", type=Path, required=True); p.add_argument("--crash-after-sentinel", action="store_true"); p.set_defaults(func=lambda a: execute(a.preflight, a.metrics, a.ledger, a.output, crash_after_sentinel=a.crash_after_sentinel))
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+        return 0
+    except (ProtocolError, OSError, ValueError) as error:
+        print(f"SQ8 fidelity protocol failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

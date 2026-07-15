@@ -828,6 +828,25 @@ def _served_model_semantic_sha256(document: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _publish_create_new(temporary: Path, output_path: Path) -> None:
+    """Publish a validated manifest once without replacing an existing path."""
+
+    try:
+        os.link(temporary, output_path, follow_symlinks=False)
+    except FileExistsError as error:
+        raise GenerationError("served-model output already exists or is a symlink") from error
+    try:
+        temporary.unlink()
+    except OSError:
+        output_path.unlink(missing_ok=True)
+        raise
+    directory = os.open(output_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _materialize_profile_document(
     profile_path: Path,
     *,
@@ -1086,7 +1105,7 @@ def generate(
     temporary: Path | None = None
     try:
         descriptor, raw_path = tempfile.mkstemp(
-            prefix=f".{output_path.name}.", dir=output_path.parent
+            prefix=f".{output_path.name}.incomplete-", dir=output_path.parent
         )
         temporary = Path(raw_path)
         with os.fdopen(descriptor, "wb") as destination:
@@ -1095,13 +1114,8 @@ def generate(
             os.fsync(destination.fileno())
         temporary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
         model = _load_validator().load_served_model(temporary)
-        os.replace(temporary, output_path)
+        _publish_create_new(temporary, output_path)
         temporary = None
-        directory = os.open(output_path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
         return model.manifest_sha256
     finally:
         if temporary is not None:
@@ -1124,7 +1138,7 @@ def generate_prepared_candidate(profile_path: Path, output_path: Path) -> str:
     encoded = (json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("utf-8")
     temporary: Path | None = None
     try:
-        descriptor, raw_path = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
+        descriptor, raw_path = tempfile.mkstemp(prefix=f".{output_path.name}.incomplete-", dir=output_path.parent)
         temporary = Path(raw_path)
         with os.fdopen(descriptor, "wb") as destination:
             destination.write(encoded)
@@ -1132,13 +1146,8 @@ def generate_prepared_candidate(profile_path: Path, output_path: Path) -> str:
             os.fsync(destination.fileno())
         temporary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
         model = _load_validator().load_served_model(temporary)
-        os.replace(temporary, output_path)
+        _publish_create_new(temporary, output_path)
         temporary = None
-        directory = os.open(output_path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
         return model.manifest_sha256
     finally:
         if temporary is not None:
@@ -1149,13 +1158,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--receipt-path-override", type=Path)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        digest = generate(args.profile, args.output)
+        digest = generate(
+            args.profile,
+            args.output,
+            receipt_path_override=args.receipt_path_override,
+        )
     except Exception as error:
         print(f"served-model generation failed: {error}", file=sys.stderr)
         return 1
