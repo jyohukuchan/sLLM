@@ -97,6 +97,15 @@ RUNTIME_DEVICE_KEYS = {
 DEFAULT_LOCK_PATH = Path("/run/ullm/r9700.lock")
 ROCTX_SCHEMA = "ullm.aq4_p2_resident_roctx_ranges.v1"
 ROCTX_MARKER_PREFIX = "ullm.aq4_p2.run.v1"
+FD_MAP_SCHEMA = "ullm.aq4_p3_inherited_fd_map.v1"
+FD_MAP_ENV = "ULLM_AQ4_PINNED_FD_MAP"
+FD_MAP_MAX_BYTES = 1024 * 1024
+FD_CLOSURE_CONTRACT = {
+    "code_execution_closure": "pinned_fd",
+    "control_input_closure": "pinned_fd",
+    "device_lock_closure": "pinned_fd",
+    "data_integrity": "trusted_pre_post_guarded",
+}
 
 
 class BatchError(ValueError):
@@ -138,8 +147,22 @@ class RoctxLibraryIdentity(NamedTuple):
     sha256: str
     resolved_identity: tuple[int, ...]
     components: tuple[PathComponentIdentity, ...]
+    descriptor: int | None = None
 
     def verify(self) -> None:
+        if self.descriptor is not None:
+            if ACTIVE_FD_MAP is None:
+                raise BatchError("ROCTx pinned FD map disappeared")
+            item = ACTIVE_FD_MAP.binding(self.invocation_path, method="dlopen")
+            if item is None or item["descriptor"] != self.descriptor:
+                raise BatchError("ROCTx pinned FD binding disappeared")
+            metadata = ACTIVE_FD_MAP.verify_binding(item)
+            _raw, digest, _metadata = read_regular(
+                self.invocation_path, "ROCTx pinned library", collect=False
+            )
+            if digest != self.sha256 or _file_identity(metadata) != self.resolved_identity:
+                raise BatchError("ROCTx pinned library identity changed")
+            return
         for component in self.components:
             try:
                 current = os.lstat(component.path)
@@ -190,6 +213,30 @@ class RoctxRangeRecorder:
             raise BatchError("ROCTx invocation path must be absolute without parent traversal")
         if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
             raise BatchError("ROCTx expected SHA-256 is invalid")
+        mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(invocation_path, method="dlopen")
+        if mapped is not None:
+            _raw, digest, metadata = read_regular(
+                invocation_path, "ROCTx pinned library", collect=False
+            )
+            if digest != expected_sha256:
+                raise BatchError("ROCTx pinned library SHA-256 differs")
+            identity = RoctxLibraryIdentity(
+                invocation_path,
+                Path(mapped["resolved_path"]),
+                digest,
+                _file_identity(metadata),
+                (),
+                mapped["descriptor"],
+            )
+            try:
+                handle = cdll_factory(
+                    f"/proc/self/fd/{mapped['descriptor']}",
+                    mode=getattr(os, "RTLD_NOW", 0) | getattr(ctypes, "RTLD_LOCAL", 0),
+                )
+            except OSError as error:
+                raise BatchError(f"ROCTx pinned library load failed: {error}") from error
+            identity.verify()
+            return cls(identity, handle)
         components: list[PathComponentIdentity] = []
         current = Path(invocation_path.anchor)
         for part in invocation_path.parts[1:]:
@@ -358,6 +405,242 @@ def _file_identity(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _named_file_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "mode": value.st_mode,
+        "nlink": value.st_nlink,
+        "size": value.st_size,
+        "mtime_ns": value.st_mtime_ns,
+        "ctime_ns": value.st_ctime_ns,
+    }
+
+
+class PinnedFdMap:
+    def __init__(self, descriptor: int, value: dict[str, Any]) -> None:
+        self.descriptor = descriptor
+        self.value = value
+        self.bindings = {item["logical_path"]: item for item in value["bindings"]}
+        self.roles = {item["role"]: item for item in value["bindings"]}
+
+    @classmethod
+    def from_environment(cls, *, required: bool) -> "PinnedFdMap | None":
+        raw_descriptor = os.environ.get(FD_MAP_ENV)
+        if raw_descriptor is None:
+            if required:
+                raise BatchError("profile execution requires the pinned FD map")
+            return None
+        if not raw_descriptor.isascii() or not raw_descriptor.isdecimal():
+            raise BatchError("pinned FD map descriptor is invalid")
+        descriptor = int(raw_descriptor)
+        if descriptor < 3:
+            raise BatchError("pinned FD map descriptor is reserved")
+        required_seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        try:
+            if not required_seals or fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & required_seals != required_seals:
+                raise BatchError("pinned FD map seals differ")
+            data = os.pread(descriptor, FD_MAP_MAX_BYTES + 1, 0)
+        except OSError as error:
+            raise BatchError(f"pinned FD map read failed: {error}") from error
+        if len(data) > FD_MAP_MAX_BYTES or not data.endswith(b"\n"):
+            raise BatchError("pinned FD map byte contract differs")
+        try:
+            value = json.loads(
+                data[:-1].decode("ascii"),
+                object_pairs_hook=pairs,
+                parse_constant=lambda item: (_ for _ in ()).throw(BatchError(f"non-finite FD map number: {item}")),
+            )
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise BatchError(f"pinned FD map JSON is invalid: {error}") from error
+        if not isinstance(value, dict) or set(value) != {
+            "schema_version", "status", "map_sha256", "logical_argv_sha256",
+            "closure_contract", "bindings",
+        }:
+            raise BatchError("pinned FD map root fields differ")
+        if value.get("schema_version") != FD_MAP_SCHEMA or value.get("status") != "bound":
+            raise BatchError("pinned FD map schema/status differs")
+        declared = value.get("map_sha256")
+        clone = json.loads(json.dumps(value))
+        clone["map_sha256"] = None
+        if not isinstance(declared, str) or SHA256_RE.fullmatch(declared) is None or sha_bytes(canonical(clone)) != declared:
+            raise BatchError("pinned FD map self-hash differs")
+        if value.get("closure_contract") != FD_CLOSURE_CONTRACT:
+            raise BatchError("pinned FD map closure contract differs")
+        bindings = value.get("bindings")
+        if not isinstance(bindings, list) or not bindings:
+            raise BatchError("pinned FD map bindings are missing")
+        paths: set[str] = set()
+        roles: set[str] = set()
+        descriptors: set[int] = set()
+        allowed = {
+            "code_execution": {"exec", "dlopen"},
+            "control_input": {"read"},
+            "device_lock": {"flock"},
+            "data_integrity": {"pre_post_guard"},
+        }
+        for item in bindings:
+            if not isinstance(item, dict) or set(item) != {
+                "role", "logical_path", "resolved_path", "descriptor", "kind", "closure", "method",
+                "identity", "sha256",
+            }:
+                raise BatchError("pinned FD map binding fields differ")
+            role = item.get("role")
+            path = item.get("logical_path")
+            child_descriptor = item.get("descriptor")
+            identity = item.get("identity")
+            closure = item.get("closure")
+            method = item.get("method")
+            if (
+                not isinstance(role, str)
+                or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", role)
+                or role in roles
+                or not isinstance(path, str)
+                or not Path(path).is_absolute()
+                or ".." in Path(path).parts
+                or path in paths
+                or type(child_descriptor) is not int
+                or child_descriptor < 3
+                or child_descriptor in descriptors
+                or closure not in allowed
+                or method not in allowed[closure]
+                or item.get("kind") not in {"regular_file", "directory", "symlinked_file"}
+                or (
+                    item.get("kind") == "symlinked_file"
+                    and (
+                        not isinstance(item.get("resolved_path"), str)
+                        or not Path(item["resolved_path"]).is_absolute()
+                        or ".." in Path(item["resolved_path"]).parts
+                    )
+                )
+                or (item.get("kind") != "symlinked_file" and item.get("resolved_path") is not None)
+                or not isinstance(identity, dict)
+                or set(identity) != {"device", "inode", "mode", "nlink", "size", "mtime_ns", "ctime_ns"}
+                or any(type(part) is not int for part in identity.values())
+                or (item.get("sha256") is not None and (not isinstance(item["sha256"], str) or SHA256_RE.fullmatch(item["sha256"]) is None))
+                or (method in {"exec", "dlopen", "read"} and item.get("sha256") is None)
+                or (method in {"flock", "pre_post_guard"} and item.get("sha256") is not None)
+            ):
+                raise BatchError("pinned FD map binding value differs")
+            try:
+                observed = _named_file_identity(os.fstat(child_descriptor))
+            except OSError as error:
+                raise BatchError(f"pinned FD binding is unavailable: {role}: {error}") from error
+            stable_keys = {"device", "inode", "mode", "nlink"}
+            matches = (
+                all(observed[key] == identity[key] for key in stable_keys)
+                if method == "flock"
+                else all(
+                    observed[key] == identity[key]
+                    for key in {"device", "inode", "mode", "nlink", "size", "mtime_ns"}
+                )
+                if method != "pre_post_guard"
+                else observed == identity
+            )
+            if not matches:
+                raise BatchError(f"pinned FD binding identity differs: {role}")
+            paths.add(path)
+            roles.add(role)
+            descriptors.add(child_descriptor)
+        result = cls(descriptor, value)
+        result.verify_data_guards()
+        return result
+
+    def binding(self, path: Path, *, method: str | None = None) -> dict[str, Any] | None:
+        item = self.bindings.get(str(path))
+        if item is not None and method is not None and item["method"] != method:
+            raise BatchError(f"pinned FD method differs: {item['role']}")
+        return item
+
+    def role(self, role: str, *, method: str | None = None) -> dict[str, Any]:
+        item = self.roles.get(role)
+        if item is None or (method is not None and item["method"] != method):
+            raise BatchError(f"required pinned FD role is missing: {role}")
+        return item
+
+    def descriptors(self) -> tuple[int, ...]:
+        return tuple(sorted({self.descriptor, *(item["descriptor"] for item in self.value["bindings"])}))
+
+    def verify_binding(self, item: dict[str, Any]) -> os.stat_result:
+        try:
+            metadata = os.fstat(item["descriptor"])
+        except OSError as error:
+            raise BatchError(f"pinned FD binding disappeared: {item['role']}: {error}") from error
+        observed = _named_file_identity(metadata)
+        stable_keys = {"device", "inode", "mode", "nlink"}
+        matches = (
+            all(observed[key] == item["identity"][key] for key in stable_keys)
+            if item["method"] == "flock"
+            else all(
+                observed[key] == item["identity"][key]
+                for key in {"device", "inode", "mode", "nlink", "size", "mtime_ns"}
+            )
+            if item["method"] != "pre_post_guard"
+            else observed == item["identity"]
+        )
+        if not matches:
+            raise BatchError(f"pinned FD binding identity changed: {item['role']}")
+        return metadata
+
+    def verify_data_guards(self) -> None:
+        for item in self.value["bindings"]:
+            self.verify_binding(item)
+            if item["method"] != "pre_post_guard":
+                continue
+            path = Path(item["logical_path"])
+            try:
+                current = os.lstat(path)
+            except OSError as error:
+                raise BatchError(f"guarded data path is unavailable: {path}: {error}") from error
+            if _named_file_identity(current) != item["identity"]:
+                raise BatchError(f"guarded data path identity changed: {path}")
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            **self.value["closure_contract"],
+            "fd_map_schema": FD_MAP_SCHEMA,
+            "fd_map_sha256": self.value["map_sha256"],
+            "bindings": [
+                {
+                    key: item[key]
+                    for key in ("role", "logical_path", "resolved_path", "kind", "closure", "method", "identity", "sha256")
+                }
+                for item in self.value["bindings"]
+            ],
+        }
+
+
+ACTIVE_FD_MAP: PinnedFdMap | None = None
+
+
+def effective_fd_path(path: Path, *, method: str, role: str | None = None) -> str:
+    if ACTIVE_FD_MAP is None:
+        return str(path)
+    item = (
+        ACTIVE_FD_MAP.role(role, method=method)
+        if role is not None
+        else ACTIVE_FD_MAP.binding(path, method=method)
+    )
+    if item is None:
+        raise BatchError(f"unmapped {method} path is forbidden: {path}")
+    ACTIVE_FD_MAP.verify_binding(item)
+    return f"/proc/self/fd/{item['descriptor']}"
+
+
+def fd_child_options() -> dict[str, Any]:
+    if ACTIVE_FD_MAP is None:
+        return {}
+    return {
+        "pass_fds": ACTIVE_FD_MAP.descriptors(),
+        "env": dict(os.environ),
+    }
+
+
 def _require_absolute_nonsymlink_path(path: Path, label: str) -> None:
     if not path.is_absolute() or ".." in path.parts:
         raise BatchError(f"{label} path must be absolute without parent traversal")
@@ -370,6 +653,34 @@ def _require_absolute_nonsymlink_path(path: Path, label: str) -> None:
 
 
 def read_regular(path: Path, label: str, maximum: int | None = None, *, absolute: bool = False, collect: bool = True) -> tuple[bytes, str, os.stat_result]:
+    mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(path)
+    if mapped is not None:
+        if mapped["kind"] not in {"regular_file", "symlinked_file"} or mapped["method"] not in {"read", "exec", "dlopen"}:
+            raise BatchError(f"{label} pinned FD is not readable")
+        metadata = ACTIVE_FD_MAP.verify_binding(mapped)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise BatchError(f"{label} pinned FD must be a single-link regular file")
+        if maximum is not None and metadata.st_size > maximum:
+            raise BatchError(f"{label} exceeds the byte bound")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < metadata.st_size:
+            chunk = os.pread(mapped["descriptor"], min(1024 * 1024, metadata.st_size - offset), offset)
+            if not chunk:
+                raise BatchError(f"{label} pinned FD ended early")
+            offset += len(chunk)
+            if maximum is not None and offset > maximum:
+                raise BatchError(f"{label} exceeds the byte bound")
+            digest.update(chunk)
+            if collect:
+                chunks.append(chunk)
+        if _file_identity(ACTIVE_FD_MAP.verify_binding(mapped)) != _file_identity(metadata):
+            raise BatchError(f"{label} pinned FD changed while reading")
+        observed_sha = digest.hexdigest()
+        if mapped["sha256"] is not None and observed_sha != mapped["sha256"]:
+            raise BatchError(f"{label} pinned FD SHA-256 differs")
+        return b"".join(chunks), observed_sha, metadata
     if absolute:
         _require_absolute_nonsymlink_path(path, label)
     try:
@@ -441,8 +752,15 @@ def normalize_fixture_paths(fixture_index: dict[str, Any]) -> None:
         if not isinstance(entry, dict) or not isinstance(entry.get("fixture_path"), str):
             raise BatchError("fixture index contains an invalid fixture path")
         raw = Path(entry["fixture_path"])
-        _require_absolute_nonsymlink_path(raw, "fixture")
+        mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(raw, method="read")
+        if mapped is None:
+            _require_absolute_nonsymlink_path(raw, "fixture")
+        elif not raw.is_absolute() or ".." in raw.parts:
+            raise BatchError("fixture logical path must be absolute without parent traversal")
         sha_file(raw, "fixture", absolute=True)
+        if mapped is not None:
+            entry["fixture_path"] = str(raw)
+            continue
         try:
             resolved = raw.resolve(strict=True)
         except OSError as error:
@@ -500,7 +818,11 @@ def acquire_device_lock(
     *,
     expected_identity: dict[str, int] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    _require_absolute_nonsymlink_path(path, "device lock")
+    pinned = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(path, method="flock")
+    if pinned is None:
+        _require_absolute_nonsymlink_path(path, "device lock")
+    elif not path.is_absolute() or ".." in path.parts:
+        raise BatchError("device lock logical path must be absolute without parent traversal")
     before: os.stat_result | None = None
     if expected_identity is not None:
         if (
@@ -512,7 +834,7 @@ def acquire_device_lock(
         ):
             raise BatchError("expected device lock identity differs")
         try:
-            before = os.lstat(path)
+            before = os.lstat(path) if pinned is None else ACTIVE_FD_MAP.verify_binding(pinned)
         except OSError as error:
             raise BatchError(f"bound device lock metadata failed: {error}") from error
         if (
@@ -525,13 +847,17 @@ def acquire_device_lock(
             raise BatchError("bound device lock file contract differs")
         if before.st_dev != expected_identity["device"] or before.st_ino != expected_identity["inode"]:
             raise BatchError("bound device lock identity differs")
-    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    if expected_identity is None:
-        flags |= os.O_CREAT
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as error:
-        raise BatchError(f"device lock open failed: {error}") from error
+    descriptor_owned = pinned is None
+    if pinned is not None:
+        descriptor = pinned["descriptor"]
+    else:
+        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if expected_identity is None:
+            flags |= os.O_CREAT
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as error:
+            raise BatchError(f"device lock open failed: {error}") from error
     owner = {
         "schema_version": "ullm.aq4_p2_device_lock_owner.v1",
         "path": str(path),
@@ -556,7 +882,7 @@ def acquire_device_lock(
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise BatchError(f"device lock is already owned: {path}") from error
-        if before is not None:
+        if before is not None and pinned is None:
             try:
                 current = os.lstat(path)
             except OSError as error:
@@ -580,7 +906,8 @@ def acquire_device_lock(
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
+            if descriptor_owned:
+                os.close(descriptor)
 
 
 def case_hash(case: dict[str, Any]) -> str:
@@ -705,24 +1032,28 @@ def _identity_self_sha256(identity: dict[str, Any]) -> str:
 
 
 def _run_fake_ready_handshake(path: Path, timeout: float) -> dict[str, Any]:
+    mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(path, method="read")
     child = (
         "import os,sys\n"
-        "p=sys.argv[1]\n"
-        "f=os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_CLOEXEC',0))\n"
-        "try:\n"
-        " d=os.read(f,67108865)\n"
-        " if len(d)>67108864 or os.read(f,1): raise SystemExit(91)\n"
-        "finally: os.close(f)\n"
+        "d=sys.stdin.buffer.read(67108865) if sys.argv[1]=='-' else open(sys.argv[1],'rb').read(67108865)\n"
+        "if len(d)>67108864: raise SystemExit(91)\n"
         "sys.stdout.buffer.write(d)\n"
         "sys.stdout.buffer.flush()\n"
     )
+    pinned_raw = None
+    child_path = str(path)
+    if mapped is not None:
+        pinned_raw, _digest, _metadata = read_regular(path, "one-case smoke fake-ready", MAX_JSON_BYTES)
+        child_path = "-"
     completed = subprocess.run(
-        [sys.executable, "-I", "-c", child, str(path)],
-        stdin=subprocess.DEVNULL,
+        [effective_fd_path(Path(sys.executable), method="exec", role="python_interpreter"), "-I", "-c", child, child_path],
+        input=pinned_raw,
+        stdin=subprocess.DEVNULL if pinned_raw is None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
+        **fd_child_options(),
     )
     if completed.returncode != 0 or completed.stderr:
         raise BatchError("one-case smoke fake-ready subprocess handshake failed")
@@ -742,23 +1073,29 @@ def _run_fake_ready_handshake(path: Path, timeout: float) -> dict[str, Any]:
 def _run_bundle_validator(path: Path, expected_sha256: str, root: Path, timeout: float) -> dict[str, Any]:
     if SHA256_RE.fullmatch(expected_sha256) is None:
         raise BatchError("trusted bundle validator expected SHA is invalid")
-    _require_absolute_nonsymlink_path(path, "trusted bundle validator")
+    mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(path, method="exec")
+    if mapped is None:
+        _require_absolute_nonsymlink_path(path, "trusted bundle validator")
     source_raw, source_sha, source_before = read_regular(path, "trusted bundle validator", MAX_JSON_BYTES, absolute=True)
     if source_sha != expected_sha256:
         raise BatchError("trusted bundle validator source differs from expected SHA")
     if not source_raw.startswith(b"#!") and path.suffix != ".py":
         raise BatchError("trusted bundle validator is not a Python source file")
+    python_path = effective_fd_path(Path(sys.executable), method="exec", role="python_interpreter")
+    validator_path = effective_fd_path(path, method="exec")
     completed = subprocess.run(
-        [sys.executable, str(path), "validate", "--bundle", str(root)],
+        [python_path, validator_path, "validate", "--bundle", str(root)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
+        **fd_child_options(),
     )
     if completed.returncode != 0 or completed.stderr:
         raise BatchError("trusted bundle validator subprocess rejected the bundle")
-    if _file_identity(source_before) != _file_identity(os.lstat(path)) or sha_file(path, "trusted bundle validator", absolute=True) != source_sha:
+    source_after = ACTIVE_FD_MAP.verify_binding(mapped) if mapped is not None else os.lstat(path)
+    if _file_identity(source_before) != _file_identity(source_after) or sha_file(path, "trusted bundle validator", absolute=True) != source_sha:
         raise BatchError("trusted bundle validator source changed during subprocess validation")
     try:
         report = json.loads(completed.stdout.decode("utf-8"), object_pairs_hook=pairs)
@@ -785,15 +1122,24 @@ def _run_bundle_validator(path: Path, expected_sha256: str, root: Path, timeout:
 def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str, Any], fixture_index: dict[str, Any], identity: dict[str, Any], preflight: dict[str, Any], policy: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     if args.bundle_root is None:
         raise BatchError("--bundle-root is required with --one-case-smoke")
-    _require_absolute_nonsymlink_path(args.bundle_root, "one-case smoke bundle root")
-    try:
-        root = args.bundle_root.resolve(strict=True)
-    except OSError as error:
-        raise BatchError(f"one-case smoke bundle root resolution failed: {error}") from error
-    root_metadata = os.lstat(root)
+    root_binding = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(
+        args.bundle_root, method="pre_post_guard"
+    )
+    if root_binding is None:
+        _require_absolute_nonsymlink_path(args.bundle_root, "one-case smoke bundle root")
+        try:
+            root = args.bundle_root.resolve(strict=True)
+        except OSError as error:
+            raise BatchError(f"one-case smoke bundle root resolution failed: {error}") from error
+        root_metadata = os.lstat(root)
+        root_descriptor = None
+    else:
+        root = args.bundle_root
+        root_metadata = ACTIVE_FD_MAP.verify_binding(root_binding)
+        root_descriptor = root_binding["descriptor"]
     if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
         raise BatchError("one-case smoke bundle root must be a non-symlink directory")
-    names = {entry.name for entry in root.iterdir()}
+    names = set(os.listdir(root_descriptor)) if root_descriptor is not None else {entry.name for entry in root.iterdir()}
     if names != ONE_CASE_ROOT_MEMBERS:
         raise BatchError("one-case smoke bundle root exact member coverage differs")
     expected_paths = {
@@ -804,7 +1150,8 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         "policy": root / "policy.json",
     }
     for name, expected in expected_paths.items():
-        supplied = getattr(args, name).resolve(strict=True)
+        supplied_path = getattr(args, name)
+        supplied = supplied_path if ACTIVE_FD_MAP is not None and ACTIVE_FD_MAP.binding(supplied_path) is not None else supplied_path.resolve(strict=True)
         if supplied != expected:
             raise BatchError(f"one-case smoke {name} is not the bundle root v4 member")
     bundle_path = root / "bundle.json"
@@ -812,13 +1159,21 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
     initial: dict[str, tuple[int, ...]] = {}
     member_inventory: dict[str, dict[str, Any]] = {}
     for name in sorted(ONE_CASE_ROOT_MEMBERS):
-        metadata = os.lstat(root / name)
+        member_path = root / name
+        member_binding = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(member_path)
+        metadata = (
+            ACTIVE_FD_MAP.verify_binding(member_binding)
+            if member_binding is not None
+            else os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+            if root_descriptor is not None
+            else os.lstat(member_path)
+        )
         expected_mode = 0o444 if name in {"bundle.json", "SHA256SUMS"} else ONE_CASE_MEMBER_CONTRACT[name][0]
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != expected_mode:
             raise BatchError(f"one-case smoke bundle member type/link/mode differs: {name}")
         initial[name] = _file_identity(metadata)
         role = {"bundle.json": "bundle_manifest", "SHA256SUMS": "sha256_manifest"}[name] if name in {"bundle.json", "SHA256SUMS"} else ONE_CASE_MEMBER_CONTRACT[name][1]
-        member_inventory[name] = {"path": str(root / name), "sha256": sha_file(root / name, f"one-case smoke {name}"), "role": role, "type": "regular_file", "nlink": metadata.st_nlink, "mode": f"{expected_mode:04o}"}
+        member_inventory[name] = {"path": str(member_path), "sha256": sha_file(member_path, f"one-case smoke {name}"), "role": role, "type": "regular_file", "nlink": metadata.st_nlink, "mode": f"{expected_mode:04o}"}
     bundle = load(bundle_path, "one-case smoke bundle")
     if bundle.get("schema_version") != ONE_CASE_BUNDLE_SCHEMA or bundle.get("status") != "prepared_not_executed" or bundle.get("promotion") is not False:
         raise BatchError("one-case smoke bundle v3 status/promotion differs")
@@ -932,10 +1287,21 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         raise BatchError("one-case smoke prepared runner evidence binding differs")
     validator_path = args.trusted_validator
     validator = _run_bundle_validator(validator_path, args.trusted_validator_sha256, root, args.timeout)
-    if {entry.name for entry in root.iterdir()} != ONE_CASE_ROOT_MEMBERS or _file_identity(os.lstat(root)) != _file_identity(root_metadata):
+    final_names = set(os.listdir(root_descriptor)) if root_descriptor is not None else {entry.name for entry in root.iterdir()}
+    final_root_metadata = ACTIVE_FD_MAP.verify_binding(root_binding) if root_binding is not None else os.lstat(root)
+    if final_names != ONE_CASE_ROOT_MEMBERS or _file_identity(final_root_metadata) != _file_identity(root_metadata):
         raise BatchError("one-case smoke bundle root changed during validation")
     for name, before in initial.items():
-        if _file_identity(os.lstat(root / name)) != before:
+        member_path = root / name
+        member_binding = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(member_path)
+        current = (
+            ACTIVE_FD_MAP.verify_binding(member_binding)
+            if member_binding is not None
+            else os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+            if root_descriptor is not None
+            else os.lstat(member_path)
+        )
+        if _file_identity(current) != before:
             raise BatchError(f"one-case smoke bundle member changed during validation: {name}")
     return bundle, {
         "mode": "validate_only",
@@ -1458,7 +1824,7 @@ def validate_prepared_preflight_link(path: Path, value: dict[str, Any]) -> Prepa
     for process in processes:
         if not isinstance(process, dict) or set(process) != {"pid", "process_name", "vram_bytes"} or type(process.get("pid")) is not int or process["pid"] < 0 or not isinstance(process.get("process_name"), str) or type(process.get("vram_bytes")) is not int or process["vram_bytes"] < 0:
             raise BatchError("prepared preflight process entry is invalid")
-    resolved = path.resolve(strict=True)
+    resolved = path if ACTIVE_FD_MAP is not None and ACTIVE_FD_MAP.binding(path) is not None else path.resolve(strict=True)
     link: PreparedPreflightLink = {"path": str(resolved), "sha256": sha_file(path, "prepared preflight")}
     return require_prepared_preflight_link(link)
 
@@ -1483,7 +1849,9 @@ def require_live_preflight_link(value: dict[str, Any]) -> LivePreflightLink:
 
 
 def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[str, Any]) -> LivePreflightLink:
-    _require_absolute_nonsymlink_path(path, "live preflight")
+    mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(path, method="read")
+    if mapped is None:
+        _require_absolute_nonsymlink_path(path, "live preflight")
     raw, digest, before = read_regular(path, "live preflight", MAX_JSON_BYTES, absolute=True)
     if stat.S_IMODE(before.st_mode) != 0o444:
         raise BatchError("live preflight mode must be 0444")
@@ -1543,14 +1911,16 @@ def validate_live_preflight(path: Path, args: argparse.Namespace, bundle: dict[s
         observed_labels.add(label)
     if observed_labels != set(expected_commands):
         raise BatchError("live preflight command evidence differs")
-    if _file_identity(before) != _file_identity(os.lstat(path)) or sha_file(path, "live preflight", absolute=True) != digest:
+    after = ACTIVE_FD_MAP.verify_binding(mapped) if mapped is not None else os.lstat(path)
+    if _file_identity(before) != _file_identity(after) or sha_file(path, "live preflight", absolute=True) != digest:
         raise BatchError("live preflight changed during validation")
     return require_live_preflight_link({"path": str(path), "sha256": digest, "device": before.st_dev, "inode": before.st_ino, "captured_unix_ns": value["captured_unix_ns"], "runtime_mapping": mapping, "lock": lock, "vram": vram})
 
 
 def verify_live_preflight(path: Path, link: LivePreflightLink) -> None:
+    mapped = None if ACTIVE_FD_MAP is None else ACTIVE_FD_MAP.binding(path, method="read")
     try:
-        metadata = os.lstat(path)
+        metadata = ACTIVE_FD_MAP.verify_binding(mapped) if mapped is not None else os.lstat(path)
     except OSError as error:
         raise BatchError(f"live preflight final metadata failed: {error}") from error
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o444:
@@ -1669,7 +2039,7 @@ def execute_resident_run(
         return value
 
 
-def run_batch(args: argparse.Namespace) -> int:
+def _run_batch(args: argparse.Namespace) -> int:
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise BatchError("--timeout must be a finite positive number")
     if args.profile_roctx_ranges:
@@ -1715,6 +2085,8 @@ def run_batch(args: argparse.Namespace) -> int:
         live_preflight_link = validate_live_preflight(args.live_preflight, args, smoke_bundle)
         smoke_validation["live_preflight"] = live_preflight_link
     plan = build_plan(cases, args.expanded, args.fixture_index, args.run_id, args.baseline_kind, identity, policy)
+    if ACTIVE_FD_MAP is not None:
+        plan["execution_closure"] = ACTIVE_FD_MAP.evidence()
     if args.one_case_smoke:
         plan.update({"execution_mode": "one_case_smoke", "smoke_only": True, "promotion_eligible": False, "validation": smoke_validation})
     if args.dry_run:
@@ -1724,6 +2096,14 @@ def run_batch(args: argparse.Namespace) -> int:
         raise BatchError("--driver-command is required unless --dry-run is set")
     expected_driver_argv = smoke_validation["resident_driver_argv"] if smoke_validation is not None else None
     driver_executable = validate_driver_command(args.driver_command, identity, expected_argv=expected_driver_argv)
+    effective_driver_command = list(args.driver_command)
+    if ACTIVE_FD_MAP is not None:
+        effective_driver_command[0] = effective_fd_path(
+            Path(args.driver_command[0]), method="exec", role="resident_driver"
+        )
+        effective_driver_command[2] = effective_fd_path(
+            Path(args.driver_command[2]), method="read", role="served_manifest"
+        )
     roctx = (
         RoctxRangeRecorder.load(args.roctx_library, args.roctx_library_sha256)
         if args.profile_roctx_ranges
@@ -1749,7 +2129,7 @@ def run_batch(args: argparse.Namespace) -> int:
         driver_error: BaseException | None = None
         try:
             process = subprocess.Popen(
-                args.driver_command,
+                effective_driver_command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=audit.stderr_handle,
@@ -1757,6 +2137,7 @@ def run_batch(args: argparse.Namespace) -> int:
                 shell=False,
                 bufsize=0,
                 start_new_session=True,
+                **fd_child_options(),
             )
             audit.mark_spawned(process)
             session_id, driver_identity = validate_ready(
@@ -1886,6 +2267,45 @@ def run_batch(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_batch(args: argparse.Namespace) -> int:
+    global ACTIVE_FD_MAP
+    if ACTIVE_FD_MAP is not None:
+        raise BatchError("pinned FD map context is already active")
+    pinned_map = PinnedFdMap.from_environment(required=args.profile_roctx_ranges)
+    ACTIVE_FD_MAP = pinned_map
+    try:
+        if pinned_map is not None:
+            raw_cli = getattr(args, "_logical_cli_argv", None)
+            if not isinstance(raw_cli, list) or any(not isinstance(item, str) for item in raw_cli):
+                raise BatchError("logical runner argv is unavailable for FD-map verification")
+            logical_argv = [
+                pinned_map.role("python_interpreter", method="exec")["logical_path"],
+                pinned_map.role("resident_runner", method="exec")["logical_path"],
+                *raw_cli,
+            ]
+            if sha_bytes(canonical(logical_argv)) != pinned_map.value["logical_argv_sha256"]:
+                raise BatchError("logical runner argv differs from the pinned FD map")
+            required_roles = {
+                "python_interpreter", "resident_runner", "case_binding",
+                "fixture_index", "identity", "prepared_preflight", "policy",
+            }
+            if args.one_case_smoke:
+                required_roles |= {"trusted_validator", "bundle_root"}
+            if not args.dry_run:
+                required_roles |= {"resident_driver", "device_lock"}
+            if args.profile_roctx_ranges:
+                required_roles |= {"roctx_library", "live_preflight", "served_manifest"}
+            if not required_roles <= set(pinned_map.roles):
+                raise BatchError("pinned FD map required role coverage differs")
+        return _run_batch(args)
+    finally:
+        try:
+            if pinned_map is not None:
+                pinned_map.verify_data_guards()
+        finally:
+            ACTIVE_FD_MAP = None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expanded", type=Path, required=True)
@@ -1912,7 +2332,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--roctx-library", type=Path)
     parser.add_argument("--roctx-library-sha256")
     parser.add_argument("--driver-command", nargs=argparse.REMAINDER, help="exact resident driver argv; this option and its value must be last")
-    return parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    args._logical_cli_argv = raw_argv
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

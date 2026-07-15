@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Callable, Iterator
 
 import pytest
 
@@ -13,8 +17,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
 BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "614fea0808a4bbe044df734fbf530b2bd9a6e6ec"
-VALIDATOR_SHA = "0b3341d3e9d6e3dde8cff05eb8dd43fe2ec8b176a8a913183dbee638dd25c175"
+VALIDATOR_COMMIT = "ec25754440e4655750e3bc4ef11c0f1580dbf2f9"
+VALIDATOR_SHA = "c14bff3cd1ca0d18ace1d0e511e28ed01ad96f5b66024b5228343d329b56a154"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -34,6 +38,116 @@ def rewrite_json(path: Path, value: dict) -> None:
     path.chmod(0o644)
     path.write_text(json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o444)
+
+
+def fd_identity(descriptor: int) -> dict[str, int]:
+    return BUNDLE.named_identity(os.fstat(descriptor))
+
+
+@contextmanager
+def inherited_bundle_map(
+    root: Path,
+    *,
+    mutate: Callable[[dict], None] | None = None,
+    sealed: bool = True,
+    extra_control: Path | None = None,
+    corrupt_hash: bool = False,
+) -> Iterator[tuple[int, dict]]:
+    descriptors: list[int] = []
+    map_descriptor: int | None = None
+    try:
+        root_descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
+        )
+        descriptors.append(root_descriptor)
+        bindings = [
+            {
+                "role": "bundle_root",
+                "logical_path": str(root),
+                "resolved_path": None,
+                "descriptor": root_descriptor,
+                "kind": "directory",
+                "closure": "data_integrity",
+                "method": "pre_post_guard",
+                "identity": fd_identity(root_descriptor),
+                "sha256": None,
+            }
+        ]
+        for name in sorted(set(BUNDLE.REQUIRED_FILES) | {"bundle.json", "SHA256SUMS"}):
+            path = root / name
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            descriptors.append(descriptor)
+            role_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+            bindings.append(
+                {
+                    "role": f"bundle_{role_name}",
+                    "logical_path": str(path),
+                    "resolved_path": None,
+                    "descriptor": descriptor,
+                    "kind": "regular_file",
+                    "closure": "control_input",
+                    "method": "read",
+                    "identity": fd_identity(descriptor),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        if extra_control is not None:
+            descriptor = os.open(
+                extra_control,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            descriptors.append(descriptor)
+            bindings.append(
+                {
+                    "role": "external_control",
+                    "logical_path": str(extra_control),
+                    "resolved_path": None,
+                    "descriptor": descriptor,
+                    "kind": "regular_file",
+                    "closure": "control_input",
+                    "method": "read",
+                    "identity": fd_identity(descriptor),
+                    "sha256": hashlib.sha256(extra_control.read_bytes()).hexdigest(),
+                }
+            )
+        value = {
+            "schema_version": BUNDLE.FD_MAP_SCHEMA,
+            "status": "bound",
+            "map_sha256": None,
+            "logical_argv_sha256": hashlib.sha256(BUNDLE.canonical(["logical-validator-argv"])).hexdigest(),
+            "closure_contract": BUNDLE.FD_CLOSURE_CONTRACT,
+            "bindings": bindings,
+        }
+        if mutate is not None:
+            mutate(value)
+        if "map_sha256" in value:
+            value["map_sha256"] = hashlib.sha256(
+                BUNDLE.canonical({**value, "map_sha256": None})
+            ).hexdigest()
+            if corrupt_hash:
+                value["map_sha256"] = "0" * 64
+        data = BUNDLE.canonical(value) + b"\n"
+        flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+        map_descriptor = os.memfd_create("validator-test-fd-map", flags)
+        os.write(map_descriptor, data)
+        if sealed:
+            required = (
+                fcntl.F_SEAL_SEAL
+                | fcntl.F_SEAL_SHRINK
+                | fcntl.F_SEAL_GROW
+                | fcntl.F_SEAL_WRITE
+            )
+            fcntl.fcntl(map_descriptor, fcntl.F_ADD_SEALS, required)
+        yield map_descriptor, value
+    finally:
+        if map_descriptor is not None:
+            os.close(map_descriptor)
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def worker_hardlink_fixture(tmp_path: Path, *, exact_two: bool = True) -> tuple[Path, dict]:
@@ -205,6 +319,139 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     superseded = json.loads((ARTIFACT / "SUPERSEDED-0fd7993.json").read_text())
     assert superseded["execution_eligible"] is False
     assert superseded["promotion"] is False
+
+
+def test_fd_map_validate_uses_logical_paths_and_pread_without_moving_offsets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trusted_reconstruction,
+) -> None:
+    root = copy_bundle(tmp_path)
+    with inherited_bundle_map(root) as (descriptor, value):
+        control_descriptor = value["bindings"][1]["descriptor"]
+        os.lseek(descriptor, 7, os.SEEK_SET)
+        os.lseek(control_descriptor, 3, os.SEEK_SET)
+        before = (os.lseek(descriptor, 0, os.SEEK_CUR), os.lseek(control_descriptor, 0, os.SEEK_CUR))
+        monkeypatch.setenv(BUNDLE.FD_MAP_ENV, str(descriptor))
+        pinned = BUNDLE.PinnedFdMap.from_environment()
+        assert pinned is not None
+        result = BUNDLE.validate(root, trusted_reconstruction, pinned)
+        after = (os.lseek(descriptor, 0, os.SEEK_CUR), os.lseek(control_descriptor, 0, os.SEEK_CUR))
+    assert result["status"] == "prepared_not_executed"
+    assert before == after
+    assert result["canonical_root"] == str(BUNDLE.CANONICAL_ROOT)
+
+
+def test_fd_map_control_path_swap_reads_only_the_pinned_old_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = copy_bundle(tmp_path)
+    control = (tmp_path / "external-control.json").resolve()
+    control.write_bytes(b'{"trusted":true}\n')
+    with inherited_bundle_map(root, extra_control=control) as (descriptor, _value):
+        monkeypatch.setenv(BUNDLE.FD_MAP_ENV, str(descriptor))
+        pinned = BUNDLE.PinnedFdMap.from_environment()
+        assert pinned is not None
+        item = pinned.binding(control)
+        assert item is not None
+        old = tmp_path / "old-external-control.json"
+        control.rename(old)
+        control.write_bytes(b'{"trusted":false}\n')
+        assert fd_identity(item["descriptor"])["ctime_ns"] != item["identity"]["ctime_ns"]
+        raw, digest, _metadata = pinned.read(item)
+    assert raw == b'{"trusted":true}\n'
+    assert digest == hashlib.sha256(raw).hexdigest()
+
+
+def test_fd_map_bundle_root_logical_swap_fails_the_seven_field_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = copy_bundle(tmp_path)
+    with inherited_bundle_map(root) as (descriptor, _value):
+        monkeypatch.setenv(BUNDLE.FD_MAP_ENV, str(descriptor))
+        pinned = BUNDLE.PinnedFdMap.from_environment()
+        assert pinned is not None
+        old_root = tmp_path / "old-bundle"
+        root.rename(old_root)
+        shutil.copytree(ARTIFACT, root)
+        with pytest.raises(BUNDLE.BundleError, match="bundle[_ ]root|guarded data path"):
+            BUNDLE.validate(root, pinned_map=pinned)
+
+
+def test_fd_map_missing_bundle_control_binding_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trusted_reconstruction,
+) -> None:
+    root = copy_bundle(tmp_path)
+
+    def remove_policy(value: dict) -> None:
+        value["bindings"] = [
+            item for item in value["bindings"] if item["logical_path"] != str(root / "policy.json")
+        ]
+
+    with inherited_bundle_map(root, mutate=remove_policy) as (descriptor, _value):
+        monkeypatch.setenv(BUNDLE.FD_MAP_ENV, str(descriptor))
+        pinned = BUNDLE.PinnedFdMap.from_environment()
+        assert pinned is not None
+        with pytest.raises(BUNDLE.BundleError, match="absent from pinned FD map"):
+            BUNDLE.validate(root, trusted_reconstruction, pinned)
+
+
+@pytest.mark.parametrize(
+    ("variant", "message"),
+    (
+        ("root_extra", "root fields"),
+        ("binding_extra", "binding fields"),
+        ("duplicate_role", "binding value"),
+        ("identity", "identity/type"),
+        ("resolved_path", "binding value"),
+        ("null_control_sha", "binding value"),
+    ),
+)
+def test_fd_map_exact_schema_and_identity_reject_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+    message: str,
+) -> None:
+    root = copy_bundle(tmp_path)
+
+    def mutate(value: dict) -> None:
+        if variant == "root_extra":
+            value["unexpected"] = False
+        elif variant == "binding_extra":
+            value["bindings"][1]["unexpected"] = False
+        elif variant == "duplicate_role":
+            value["bindings"][1]["role"] = value["bindings"][0]["role"]
+        elif variant == "identity":
+            value["bindings"][1]["identity"]["inode"] += 1
+        elif variant == "resolved_path":
+            value["bindings"][1]["resolved_path"] = str(root / "policy.json")
+        else:
+            value["bindings"][1]["sha256"] = None
+
+    with inherited_bundle_map(root, mutate=mutate) as (descriptor, _value):
+        monkeypatch.setenv(BUNDLE.FD_MAP_ENV, str(descriptor))
+        with pytest.raises(BUNDLE.BundleError, match=message):
+            BUNDLE.PinnedFdMap.from_environment()
+
+
+@pytest.mark.parametrize(("sealed", "corrupt_hash", "message"), ((False, False, "seals"), (True, True, "self-hash")))
+def test_fd_map_rejects_unsealed_or_self_hash_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sealed: bool,
+    corrupt_hash: bool,
+    message: str,
+) -> None:
+    root = copy_bundle(tmp_path)
+    with inherited_bundle_map(root, sealed=sealed, corrupt_hash=corrupt_hash) as (descriptor, _value):
+        monkeypatch.setenv(BUNDLE.FD_MAP_ENV, str(descriptor))
+        with pytest.raises(BUNDLE.BundleError, match=message):
+            BUNDLE.PinnedFdMap.from_environment()
 
 
 def test_rejects_unknown_bundle_schema(tmp_path: Path, trusted_reconstruction) -> None:
@@ -433,9 +680,9 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert value["requires_immutable_launcher"] is True
     assert value["predecessor"] == {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}
     roots = value["trust_roots"]
-    assert roots["source_commit"] == "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-    assert roots["source_tree"] == "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
-    assert roots["runner"] == {"git_blob": "dbace784cb291837e346dd6ca063fa3a5132cfe7", "sha256": "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"}
+    assert roots["source_commit"] == BUNDLE.BINDING_SOURCE_COMMIT
+    assert roots["source_tree"] == BUNDLE.BINDING_SOURCE_TREE
+    assert roots["runner"] == {"git_blob": BUNDLE.BINDING_RUNNER_GIT_BLOB, "sha256": BUNDLE.BINDING_RUNNER_SHA}
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
     assert roots["resident_driver"]["blob_unchanged"] is True
@@ -467,6 +714,21 @@ def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses()
 
 def test_v4_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
+    assert manifest["runner_roles"] == {
+        "prepared_bootstrap": {
+            "commit": BUNDLE.RUNNER_COMMIT,
+            "sha256": BUNDLE.RUNNER_SOURCE_SHA,
+            "role": "historical_control_member",
+            "execution_closure": "control_input/read",
+        },
+        "binding_actual": {
+            "commit": BUNDLE.BINDING_SOURCE_COMMIT,
+            "sha256": BUNDLE.BINDING_RUNNER_SHA,
+            "role": "actual_generic_runner",
+            "execution_closure": "code_execution/exec",
+        },
+        "same_runner": False,
+    }
     assert manifest["cycle_control"] == {
         "input_root_unchanged_after_runner": True,
         "generated_outputs_outside_input_root": True,
