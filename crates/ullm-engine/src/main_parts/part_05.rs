@@ -2665,6 +2665,215 @@ fn package_linear_attn_ab_hybrid_diagnostic(
     }
 }
 
+fn qkv_z_combined_write_run(
+    output_dir: &std::path::Path,
+    prefix: &str,
+    run: &PackageLinearAttnMlpBlockSequenceRun,
+    sequence_len: usize,
+) -> Result<serde_json::Value, String> {
+    let write = |suffix: &str, values: &[f32]| {
+        z_hybrid_write_f32(&output_dir.join(format!("{prefix}-{suffix}.f32le")), values)
+    };
+    Ok(serde_json::json!({
+        "qkv_sha256": write("qkv", &run.attention_qkv_projection)?,
+        "z_sha256": write("z", &run.attention_z_projection)?,
+        "recurrent_sha256": write("recurrent", &run.attention_recurrent)?,
+        "attention_block_sha256": write("attention-block", &run.attention_block_output)?,
+        "layer_output_sha256": write("layer-output", &run.layer_output)?,
+        "finite": run.attention_qkv_projection.iter().chain(&run.attention_z_projection)
+            .chain(&run.attention_recurrent).chain(&run.attention_block_output)
+            .chain(&run.layer_output).all(|value| value.is_finite()),
+        "recurrent_state_digests": qkv_hybrid_recurrent_state_digests(run, sequence_len)?
+            .iter().enumerate().map(|(step, sha256)| serde_json::json!({"step": step, "sha256": sha256}))
+            .collect::<Vec<_>>()
+    }))
+}
+
+fn qkv_z_interaction_vectors(
+    baseline: &[f32], qkv_only: &[f32], z_only: &[f32], combined: &[f32],
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+    if baseline.len() != qkv_only.len() || baseline.len() != z_only.len() || baseline.len() != combined.len() {
+        return Err("QKV+Z interaction geometry differs".to_string());
+    }
+    let mut additive_prediction_delta = Vec::with_capacity(baseline.len());
+    let mut combined_delta = Vec::with_capacity(baseline.len());
+    let mut interaction_residual = Vec::with_capacity(baseline.len());
+    for (((&base, &qkv), &z), &both) in baseline.iter().zip(qkv_only).zip(z_only).zip(combined) {
+        let predicted = (qkv - base) + (z - base);
+        let observed = both - base;
+        additive_prediction_delta.push(predicted);
+        combined_delta.push(observed);
+        interaction_residual.push(observed - predicted);
+    }
+    Ok((additive_prediction_delta, combined_delta, interaction_residual))
+}
+
+fn qkv_z_interaction_json(
+    output_dir: &std::path::Path,
+    boundary: &str,
+    baseline: &[f32], qkv_only: &[f32], z_only: &[f32], combined: &[f32],
+    sequence_len: usize,
+) -> Result<serde_json::Value, String> {
+    let (prediction, observed, residual) =
+        qkv_z_interaction_vectors(baseline, qkv_only, z_only, combined)?;
+    let norm = |values: &[f32]| values.iter().map(|value| (*value as f64) * (*value as f64)).sum::<f64>().sqrt();
+    let prediction_norm = norm(&prediction);
+    let observed_norm = norm(&observed);
+    let interaction = if observed_norm > prediction_norm {
+        "amplification"
+    } else if observed_norm < prediction_norm {
+        "cancellation"
+    } else {
+        "additive"
+    };
+    Ok(serde_json::json!({
+        "definition": "combined_delta_minus_qkv_delta_plus_z_delta",
+        "observation": interaction,
+        "additive_prediction_delta_l2": prediction_norm,
+        "combined_delta_l2": observed_norm,
+        "interaction_residual_l2": norm(&residual),
+        "combined_delta_vs_additive_prediction": ab_hybrid_metric_json(&observed, &prediction, sequence_len)?,
+        "additive_prediction_delta_sha256": z_hybrid_write_f32(&output_dir.join(format!("interaction-{boundary}-additive-prediction-delta.f32le")), &prediction)?,
+        "combined_delta_sha256": z_hybrid_write_f32(&output_dir.join(format!("interaction-{boundary}-combined-delta.f32le")), &observed)?,
+        "interaction_residual_sha256": z_hybrid_write_f32(&output_dir.join(format!("interaction-{boundary}-residual.f32le")), &residual)?,
+        "finite": prediction.iter().chain(&observed).chain(&residual).all(|value| value.is_finite())
+    }))
+}
+
+fn package_linear_attn_qkv_z_combined_hybrid_diagnostic(
+    path: Option<String>, input: Option<String>, source_qkv: Option<String>, source_z: Option<String>,
+    output: Option<String>, device_index: Option<String>, chunk_bytes: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic requires a .ullm.d path"); return ExitCode::from(2); };
+    let Some(input) = input else { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic requires a fixed input JSONL"); return ExitCode::from(2); };
+    let Some(source_qkv) = source_qkv else { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic requires a source QKV f32le sidecar"); return ExitCode::from(2); };
+    let Some(source_z) = source_z else { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic requires a source Z f32le sidecar"); return ExitCode::from(2); };
+    let Some(output) = output else { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic requires a new output directory"); return ExitCode::from(2); };
+    let device_index = match parse_optional_device_index(device_index) { Ok(value) => value, Err(code) => return code };
+    if device_index != 0 { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic is CPU-only and requires device index 0"); return ExitCode::from(2); }
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value, Ok(_) => { eprintln!("chunk bytes must be greater than zero"); return ExitCode::from(2); }, Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+        Ok(value) if value > 0 => value, Ok(_) => { eprintln!("sequence length must be greater than zero"); return ExitCode::from(2); }, Err(code) => return code,
+    };
+    if std::path::Path::new(&output).exists() { eprintln!("refusing to overwrite diagnostic output directory: {output}"); return ExitCode::from(2); }
+    let result = (|| -> Result<serde_json::Value, String> {
+        let (cases, input_values, input_sha256) = z_hybrid_read_input(&input, sequence_len)?;
+        let hidden = 32_usize * 128;
+        let qkv_rows = 2_usize * 16 * 128 + hidden;
+        let source_qkv_bytes = fs::read(&source_qkv).map_err(|err| format!("failed to read source QKV sidecar {source_qkv}: {err}"))?;
+        let source_z_bytes = fs::read(&source_z).map_err(|err| format!("failed to read source Z sidecar {source_z}: {err}"))?;
+        let expected_qkv_bytes = sequence_len * qkv_rows * std::mem::size_of::<f32>();
+        let expected_z_bytes = sequence_len * hidden * std::mem::size_of::<f32>();
+        if source_qkv_bytes.len() != expected_qkv_bytes || source_z_bytes.len() != expected_z_bytes {
+            return Err(format!("source QKV/Z sidecar size differs: QKV={} expected={} Z={} expected={}", source_qkv_bytes.len(), expected_qkv_bytes, source_z_bytes.len(), expected_z_bytes));
+        }
+        let source_qkv_values = decode_f32_le_values(&source_qkv_bytes);
+        let source_z_values = decode_f32_le_values(&source_z_bytes);
+        if source_qkv_values.iter().chain(&source_z_values).any(|value| !value.is_finite()) {
+            return Err("source QKV/Z sidecar contains non-finite values".to_string());
+        }
+        fs::create_dir_all(&output).map_err(|err| format!("failed to create diagnostic output: {err}"))?;
+        let residual_base = deterministic_f32_vector(hidden);
+        let mut residual_sequence = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len { residual_sequence.extend(linear_attn_step_input(&residual_base, timestep)); }
+        let run = |qkv_override: Option<&[f32]>, z_override: Option<&[f32]>| {
+            package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+                &path, device_index, chunk_bytes, 0, sequence_len, residual_sequence.clone(),
+                None, None, Some(&input_values), qkv_override, None, None, z_override,
+            )
+        };
+        let baseline = run(None, None)?;
+        let qkv_only = run(Some(&source_qkv_values), None)?;
+        let z_only = run(None, Some(&source_z_values))?;
+        let combined = run(Some(&source_qkv_values), Some(&source_z_values))?;
+        let output_dir = std::path::Path::new(&output);
+        let mut baseline_identity = qkv_z_combined_write_run(output_dir, "baseline", &baseline, sequence_len)?;
+        let mut qkv_only_identity = qkv_z_combined_write_run(output_dir, "qkv-only", &qkv_only, sequence_len)?;
+        let mut z_only_identity = qkv_z_combined_write_run(output_dir, "z-only", &z_only, sequence_len)?;
+        let mut combined_identity = qkv_z_combined_write_run(output_dir, "combined", &combined, sequence_len)?;
+        baseline_identity["mode"] = serde_json::json!("all_aq4");
+        qkv_only_identity["mode"] = serde_json::json!("aq4_except_qkv_source_bf16");
+        z_only_identity["mode"] = serde_json::json!("aq4_except_z_source_bf16");
+        combined_identity["mode"] = serde_json::json!("aq4_except_qkv_z_source_bf16");
+        let mut metrics = serde_json::Map::new();
+        metrics.insert("qkv_only_vs_source_qkv".to_string(), ab_hybrid_metric_json(&qkv_only.attention_qkv_projection, &source_qkv_values, sequence_len)?);
+        metrics.insert("z_only_vs_source_z".to_string(), ab_hybrid_metric_json(&z_only.attention_z_projection, &source_z_values, sequence_len)?);
+        metrics.insert("combined_vs_source_qkv".to_string(), ab_hybrid_metric_json(&combined.attention_qkv_projection, &source_qkv_values, sequence_len)?);
+        metrics.insert("combined_vs_source_z".to_string(), ab_hybrid_metric_json(&combined.attention_z_projection, &source_z_values, sequence_len)?);
+        for (name, candidate) in [("qkv_only", &qkv_only), ("z_only", &z_only), ("combined", &combined)] {
+            for (suffix, lhs, rhs) in [
+                ("qkv", candidate.attention_qkv_projection.as_slice(), baseline.attention_qkv_projection.as_slice()),
+                ("z", candidate.attention_z_projection.as_slice(), baseline.attention_z_projection.as_slice()),
+                ("recurrent", candidate.attention_recurrent.as_slice(), baseline.attention_recurrent.as_slice()),
+                ("attention_block", candidate.attention_block_output.as_slice(), baseline.attention_block_output.as_slice()),
+                ("layer_output", candidate.layer_output.as_slice(), baseline.layer_output.as_slice()),
+            ] { metrics.insert(format!("{name}_vs_baseline_{suffix}"), ab_hybrid_metric_json(lhs, rhs, sequence_len)?); }
+        }
+        let interactions = serde_json::json!({
+            "recurrent": qkv_z_interaction_json(output_dir, "recurrent", &baseline.attention_recurrent, &qkv_only.attention_recurrent, &z_only.attention_recurrent, &combined.attention_recurrent, sequence_len)?,
+            "attention_block": qkv_z_interaction_json(output_dir, "attention-block", &baseline.attention_block_output, &qkv_only.attention_block_output, &z_only.attention_block_output, &combined.attention_block_output, sequence_len)?,
+            "layer_output": qkv_z_interaction_json(output_dir, "layer-output", &baseline.layer_output, &qkv_only.layer_output, &z_only.layer_output, &combined.layer_output, sequence_len)?
+        });
+        for boundary in ["recurrent", "attention_block", "layer_output"] {
+            metrics.insert(
+                format!("interaction_residual_{boundary}"),
+                interactions[boundary]["combined_delta_vs_additive_prediction"].clone(),
+            );
+        }
+        let p2_root = std::path::Path::new(&source_qkv).parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| "source QKV path does not identify the P2 artifact root".to_string())?;
+        let ab_report_path = p2_root.join("aq4-layer0-ab-hybrid-fidelity-v0.1/report.json");
+        let ab_report: serde_json::Value = serde_json::from_slice(
+            &fs::read(&ab_report_path).map_err(|err| format!("failed to read existing A/B hybrid report: {err}"))?,
+        ).map_err(|err| format!("failed to decode existing A/B hybrid report: {err}"))?;
+        let ab_combined_layer_relative_l2 = ab_report["metrics"]["combined_vs_baseline_layer_output"]["aggregate"]["relative_l2"]
+            .as_f64().ok_or_else(|| "existing A/B hybrid report lacks combined layer relative L2".to_string())?;
+        let qkv_layer_relative_l2 = metrics["qkv_only_vs_baseline_layer_output"]["aggregate"]["relative_l2"].as_f64().unwrap_or(f64::NAN);
+        let z_layer_relative_l2 = metrics["z_only_vs_baseline_layer_output"]["aggregate"]["relative_l2"].as_f64().unwrap_or(f64::NAN);
+        let combined_layer_relative_l2 = metrics["combined_vs_baseline_layer_output"]["aggregate"]["relative_l2"].as_f64().unwrap_or(f64::NAN);
+        let manifest_bytes = fs::read(std::path::Path::new(&path).join("manifest.json")).map_err(|err| format!("failed to read package manifest: {err}"))?;
+        let report = serde_json::json!({
+            "schema_version": "ullm.aq4_layer0_qkv_z_combined_hybrid_fidelity.cpu.v1", "status": "valid",
+            "classification": "unclassified", "promotion": false, "holdout": "not_run",
+            "policy_evaluation": "policy_not_evaluated", "thresholds": serde_json::Value::Null,
+            "device": {"backend": "cpu", "requested_index": device_index},
+            "package": {"root": path, "manifest_sha256": z_hybrid_sha256(&manifest_bytes), "layer_index": 0},
+            "input": {"path": input, "sha256": input_sha256, "schema": "ullm.aq4_layer0_input_normed_jsonl.v1", "rows": sequence_len, "shape": [hidden], "cases": cases.iter().map(|case| serde_json::json!({"case_id": case.case_id, "step": case.step, "context_length": case.context_length, "context_token_ids_sha256": case.context_token_ids_sha256, "input_sha256": case.input_sha256})).collect::<Vec<_>>()},
+            "source_qkv": {"path": source_qkv, "sha256": z_hybrid_sha256(&source_qkv_bytes), "shape": [sequence_len, qkv_rows], "dtype": "f32"},
+            "source_z": {"path": source_z, "sha256": z_hybrid_sha256(&source_z_bytes), "shape": [sequence_len, hidden], "dtype": "f32"},
+            "state_reset": {"boundary": "before_each_run", "recurrent_state": "zero_initialized_once_for_sequence", "same_between_all_variants": true},
+            "override": {"families": ["qkv", "z"], "qkv_boundary": "after_production_qkv_matvec_before_production_depthwise_conv", "z_boundary": "after_production_z_matvec_before_production_silu_mul", "default_off": true, "worker_reachable": false, "promotion": false},
+            "baseline": baseline_identity, "qkv_only": qkv_only_identity, "z_only": z_only_identity, "combined": combined_identity,
+            "metrics": metrics, "interactions": interactions,
+            "interaction_residual_definition": "(combined-baseline)-((qkv_only-baseline)+(z_only-baseline))",
+            "comparison_to_existing_hybrids": {
+                "qkv": {"layer_output_relative_l2": qkv_layer_relative_l2},
+                "z": {"layer_output_relative_l2": z_layer_relative_l2},
+                "a_b_combined": {"report_path": ab_report_path, "layer_output_relative_l2": ab_combined_layer_relative_l2},
+                "qkv_z_combined": {"layer_output_relative_l2": combined_layer_relative_l2, "ratio_to_a_b_combined": combined_layer_relative_l2 / ab_combined_layer_relative_l2},
+                "next_candidate": "layer_depth_accumulation_before_adding_b"
+            },
+            "production_path": {"input_norm": "same_fixed_input_sidecar", "a_b": "same_production_aq4_matvec", "qkv_z_after_override": "same_production_conv_gate_beta_recurrent_silu", "post_norm_mlp_residual": "same_production_runtime"}
+        });
+        fs::write(output_dir.join("report.json"), serde_json::to_vec_pretty(&report).map_err(|err| format!("failed to encode report: {err}"))?)
+            .map_err(|err| format!("failed to write report: {err}"))?;
+        Ok(report)
+    })();
+    match result {
+        Ok(report) => {
+            let metric = |name: &str| report.get("metrics").and_then(|value| value.get(name)).and_then(|value| value.get("aggregate"))
+                .and_then(|value| value.get("relative_l2")).and_then(serde_json::Value::as_f64).unwrap_or(f64::NAN);
+            println!("package-linear-attn-qkv-z-combined-hybrid-diagnostic report={output}/report.json rows={sequence_len} qkv_only_layer_relative_l2={:.9} z_only_layer_relative_l2={:.9} combined_layer_relative_l2={:.9} promotion=false holdout=not_run", metric("qkv_only_vs_baseline_layer_output"), metric("z_only_vs_baseline_layer_output"), metric("combined_vs_baseline_layer_output"));
+            ExitCode::SUCCESS
+        }
+        Err(err) => { eprintln!("package-linear-attn-qkv-z-combined-hybrid-diagnostic: {err}"); ExitCode::from(1) }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
