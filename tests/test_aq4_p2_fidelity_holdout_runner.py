@@ -147,7 +147,7 @@ def test_runtime_identity_requires_frozen_single_gpu_contract() -> None:
         "device_index": 1,
         "device_backend": "hip",
         "device_name": "R9700",
-        "device_id": "0000:01:00.0",
+        "device_id": 0,
         "build_sha256": "1" * 64,
         "source_identity": {
             "model_revision": "src",
@@ -181,7 +181,7 @@ def test_runtime_identity_requires_frozen_single_gpu_contract() -> None:
             "source_checkpoint_aggregate_sha256": "3" * 64,
             "device": {
                 "requested_index": 1,
-                "device_id": "0000:01:00.0",
+                "device_id": 0,
                 "backend": "hip",
                 "name": "R9700",
                 "architecture": "gfx1201",
@@ -203,6 +203,115 @@ def test_revalidate_identity_rejects_content_and_mode_changes(tmp_path: Path) ->
     artifact.write_bytes(b"two")
     with pytest.raises(RUNNER.HoldoutError, match="changed|SHA"):
         RUNNER._revalidate_identity(identity, "artifact")
+
+
+def test_stable_read_rejects_restored_mtime_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "artifact"
+    artifact.write_bytes(b"a" * (2 * 1024 * 1024))
+    original = artifact.stat()
+    original_read = RUNNER.os.read
+    raced = False
+
+    def race_read(descriptor: int, size: int) -> bytes:
+        nonlocal raced
+        chunk = original_read(descriptor, size)
+        if chunk and not raced:
+            raced = True
+            with artifact.open("r+b") as stream:
+                stream.seek(1024 * 1024 + 7)
+                stream.write(b"b")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.utime(artifact, ns=(original.st_atime_ns, original.st_mtime_ns))
+        return chunk
+
+    monkeypatch.setattr(RUNNER.os, "read", race_read)
+    with pytest.raises(RUNNER.HoldoutError, match="changed"):
+        RUNNER._stable_file(artifact, "artifact")
+
+
+def test_child_environment_is_allowlist_only_and_hash_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "/frozen/path")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/forbidden.so")
+    monkeypatch.setenv("ULLM_UNLISTED", "forbidden")
+    device = {name: "1" for name in RUNNER.DEVICE_ENV}
+    ambient, child = RUNNER._frozen_child_environment({"ULLM_GUARD": "1"}, device)
+    assert ambient["PATH"] == "/frozen/path"
+    assert "LD_PRELOAD" not in child
+    assert "ULLM_UNLISTED" not in child
+    digest = RUNNER._environment_sha(child)
+    monkeypatch.setenv("ULLM_UNLISTED", "changed")
+    assert (
+        RUNNER._environment_sha(
+            RUNNER._frozen_child_environment({"ULLM_GUARD": "1"}, device)[1]
+        )
+        == digest
+    )
+
+
+def test_runtime_identity_accepts_real_rust_shaped_integer_device_fixture() -> None:
+    shas = {
+        "served_model_manifest_sha256": "1" * 64,
+        "package_manifest_sha256": "2" * 64,
+        "package_content_sha256": "3" * 64,
+        "worker_binary_sha256": "4" * 64,
+        "capture_binary_sha256": "5" * 64,
+        "guard_sha256": "6" * 64,
+        "selected_cases_sha256": "7" * 64,
+        "split_manifest_sha256": "8" * 64,
+        "policy_sha256": "9" * 64,
+        "holdout_cases_sha256": "7" * 64,
+        "quantized_artifact_revision": "quantized-revision",
+        "build_sha256": "a" * 64,
+    }
+    expected = {
+        **shas,
+        "device_index": 1,
+        "device_id": 0,
+        "device_backend": "hip",
+        "device_name": "AMD Radeon AI PRO R9700",
+        "device_architecture": "gfx1201",
+        "source_identity": {
+            "model_revision": "source-revision",
+            "tokenizer": {"aggregate_sha256": "b" * 64},
+            "source_checkpoint": {"aggregate_sha256": "c" * 64},
+        },
+    }
+    runtime = {
+        **shas,
+        "upstream_model_revision": "source-revision",
+        "tokenizer_aggregate_sha256": "b" * 64,
+        "source_checkpoint_aggregate_sha256": "c" * 64,
+        "selected_subset": "holdout",
+        "one_process": True,
+        "one_model_load": True,
+        "gpu_parallelism": 1,
+        "device": {
+            "requested_index": 1,
+            "device_id": 0,
+            "backend": "hip",
+            "name": "AMD Radeon AI PRO R9700",
+            "architecture": "gfx1201",
+        },
+        "state_evidence": {
+            "contract": "full_context_step_zero_reset_v1",
+            "rows_started": 24,
+            "rows_completed": 24,
+            "clean_before_each_row": True,
+            "generation_states_observed": 24,
+            "reset_calls": 24,
+            "clean_after_each_reset": True,
+            "scheduler_mode": "not_used_direct_capture",
+            "scheduler_pending_before_each_row": 0,
+            "scheduler_pending_after_each_row": 0,
+        },
+    }
+    active = {"manifest": {"runtime": {"runtime": runtime, "model_loads": 1}}}
+    assert RUNNER._runtime_identity(active, expected) == runtime
 
 
 def test_validate_plan_rejects_command_sha_and_device_env_mismatch() -> None:
@@ -430,6 +539,12 @@ def test_execute_seals_pre_spawn_oserror_after_consuming_attempt(
             "capture_binary": {"path": binary},
             "device_environment": {name: "1" for name in RUNNER.DEVICE_ENV},
             "guard_environment": {},
+            "ambient_environment_allowlist": list(RUNNER.AMBIENT_ENV_ALLOWLIST),
+            "ambient_environment": {},
+            "child_environment": {name: "1" for name in RUNNER.DEVICE_ENV},
+            "child_environment_sha256": RUNNER._environment_sha(
+                {name: "1" for name in RUNNER.DEVICE_ENV}
+            ),
             "command": command,
             "command_sha256": RUNNER._command_sha(command),
         },
@@ -454,3 +569,83 @@ def test_execute_seals_pre_spawn_oserror_after_consuming_attempt(
     assert result["errno"] == errno.EIO
     assert (tmp_path / "attempt.json").exists()
     assert (tmp_path / "result.json").stat().st_mode & 0o777 == 0o444
+
+
+def _minimal_execute_plan(tmp_path: Path) -> dict[str, object]:
+    return {
+        "schema_version": RUNNER.PREFLIGHT_SCHEMA,
+        "status": "ready_for_execute",
+        "subset": "holdout",
+        "row_count": 24,
+        "split_manifest_sha256": "a" * 64,
+        "policy_sha256": "b" * 64,
+        "calibration_cases_sha256": "c" * 64,
+        "holdout_cases_sha256": "d" * 64,
+        "freeze_receipt_sha256": "e" * 64,
+        "actual_verified_receipt": {},
+        "identity": {},
+        "execution_contract": {"command_sha256": "f" * 64},
+        "paths": {
+            "attempt_marker": str(tmp_path / "attempt.json"),
+            "result_receipt": str(tmp_path / "result.json"),
+        },
+    }
+
+
+@pytest.mark.parametrize("fault_stage", ["link", "fsync", "close"])
+def test_outer_fail_safe_seals_attempt_publication_exceptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault_stage: str
+) -> None:
+    plan = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    preflight.write_text(json.dumps(plan) + "\n", encoding="ascii")
+    monkeypatch.setattr(RUNNER, "_validate_plan", lambda _plan: None)
+    original_atomic = RUNNER._atomic_json
+
+    def faulting_atomic(path: Path, value: object, label: str) -> str:
+        digest = original_atomic(path, value, label)
+        if label == "attempt marker":
+            raise OSError(errno.EIO, f"injected {fault_stage} failure")
+        return digest
+
+    monkeypatch.setattr(RUNNER, "_atomic_json", faulting_atomic)
+    result = RUNNER._execute(
+        type(
+            "Args",
+            (),
+            {"preflight": preflight, "receipt_output": tmp_path / "result.json"},
+        )()
+    )
+    rescue = Path(result["receipt"])
+    assert result["failure_kind"] == "fail_safe_rescue"
+    assert result["attempt_consumed"] is True
+    assert result["retry_permitted"] is False
+    assert rescue.is_file()
+    assert rescue.stat().st_mode & 0o777 == 0o444
+    assert hashlib.sha256(rescue.read_bytes()).hexdigest() == result["receipt_sha256"]
+
+
+def test_outer_fail_safe_survives_failure_receipt_publication_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    preflight.write_text(json.dumps(plan) + "\n", encoding="ascii")
+    monkeypatch.setattr(RUNNER, "_validate_plan", lambda _plan: None)
+
+    def failed_inner(args: object) -> dict[str, object]:
+        RUNNER._atomic_json(
+            tmp_path / "attempt.json", {"status": "started"}, "attempt marker"
+        )
+        raise OSError(errno.EIO, "injected failure publication exception")
+
+    monkeypatch.setattr(RUNNER, "_execute_inner", failed_inner)
+    result = RUNNER._execute(
+        type(
+            "Args",
+            (),
+            {"preflight": preflight, "receipt_output": tmp_path / "result.json"},
+        )()
+    )
+    assert result["failure_kind"] == "fail_safe_rescue"
+    assert Path(result["receipt"]).is_file()

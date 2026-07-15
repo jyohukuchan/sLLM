@@ -60,20 +60,56 @@ GUARD_RECEIPT_SCHEMA = "ullm.aq4_p2_resident_guard_receipt.v1"
 SOURCE_HOLDOUT_RECEIPT_SCHEMA = "ullm.aq4_p2_fidelity_holdout_source_cases.v1"
 ACTUAL_RECEIPT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
 DEVICE_ENV = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+AMBIENT_ENV_ALLOWLIST = (
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "LD_LIBRARY_PATH",
+    "ROCM_PATH",
+    "HIP_PATH",
+    "HSA_PATH",
+    "HSA_OVERRIDE_GFX_VERSION",
+    "HSA_ENABLE_SDMA",
+    "HSA_XNACK",
+)
 
 
 class HoldoutError(ValueError):
     pass
 
 
-def _stable_sha_info(
-    path: Path, label: str, limit: int | None = None
-) -> tuple[str, os.stat_result]:
-    _regular(path, label, limit=limit)
-    digest = hashlib.sha256()
+IDENTITY_CORE_KEYS = {"path", "sha256", "bytes", "mode", "nlink"}
+IDENTITY_FINGERPRINT_KEYS = {"dev", "ino", "uid", "gid", "mtime_ns", "ctime_ns"}
+
+
+def _stat_fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _stable_file(
+    path: Path,
+    label: str,
+    *,
+    limit: int | None = None,
+    collect: bool = False,
+) -> tuple[str, os.stat_result, bytes | None]:
+    _no_symlink_components(path, label)
     descriptor = os.open(
         path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     )
+    digest = hashlib.sha256()
+    raw = bytearray() if collect else None
     try:
         before = os.fstat(descriptor)
         if (
@@ -84,40 +120,27 @@ def _stable_sha_info(
             raise HoldoutError(f"{label} stable descriptor topology differs")
         while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
+            if raw is not None:
+                raw.extend(chunk)
+                if limit is not None and len(raw) > limit:
+                    raise HoldoutError(f"{label} exceeds bounded size")
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
     final = os.lstat(path)
-    before_fingerprint = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mode,
-        before.st_nlink,
-        before.st_mtime_ns,
-    )
-    after_fingerprint = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mode,
-        after.st_nlink,
-        after.st_mtime_ns,
-    )
-    final_fingerprint = (
-        final.st_dev,
-        final.st_ino,
-        final.st_size,
-        final.st_mode,
-        final.st_nlink,
-        final.st_mtime_ns,
-    )
-    if (
-        before_fingerprint != after_fingerprint
-        or after_fingerprint != final_fingerprint
-    ):
-        raise HoldoutError(f"{label} changed while hashing")
-    return digest.hexdigest(), after
+    _no_symlink_components(path, label)
+    if _stat_fingerprint(before) != _stat_fingerprint(after) or _stat_fingerprint(
+        after
+    ) != _stat_fingerprint(final):
+        raise HoldoutError(f"{label} changed while reading")
+    return digest.hexdigest(), after, bytes(raw) if raw is not None else None
+
+
+def _stable_sha_info(
+    path: Path, label: str, limit: int | None = None
+) -> tuple[str, os.stat_result]:
+    digest, info, _ = _stable_file(path, label, limit=limit)
+    return digest, info
 
 
 def _sha(path: Path, label: str, limit: int | None = None) -> str:
@@ -159,53 +182,8 @@ def _regular(
 
 def _read_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
     limit = 64 * 1024 * 1024
-    _regular(path, label, limit=limit)
-    descriptor = os.open(
-        path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    )
-    try:
-        before = os.fstat(descriptor)
-        raw_buffer = bytearray()
-        while chunk := os.read(
-            descriptor, min(1024 * 1024, limit + 1 - len(raw_buffer))
-        ):
-            raw_buffer.extend(chunk)
-            if len(raw_buffer) > limit:
-                raise HoldoutError(f"{label} exceeds bounded size")
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    final = os.lstat(path)
-    before_fingerprint = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mode,
-        before.st_nlink,
-        before.st_mtime_ns,
-    )
-    after_fingerprint = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mode,
-        after.st_nlink,
-        after.st_mtime_ns,
-    )
-    final_fingerprint = (
-        final.st_dev,
-        final.st_ino,
-        final.st_size,
-        final.st_mode,
-        final.st_nlink,
-        final.st_mtime_ns,
-    )
-    if (
-        before_fingerprint != after_fingerprint
-        or after_fingerprint != final_fingerprint
-    ):
-        raise HoldoutError(f"{label} changed while reading")
-    raw = bytes(raw_buffer)
+    _digest, _info, raw = _stable_file(path, label, limit=limit, collect=True)
+    assert raw is not None
     try:
         value = json.loads(
             raw, object_pairs_hook=PROTOCOL.pairs, parse_constant=PROTOCOL.no_constants
@@ -280,6 +258,12 @@ def _identity_file(
         "bytes": info.st_size,
         "mode": f"{stat.S_IMODE(info.st_mode):04o}",
         "nlink": info.st_nlink,
+        "dev": info.st_dev,
+        "ino": info.st_ino,
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
     }
 
 
@@ -290,9 +274,12 @@ def _exact_object(value: Any, keys: set[str], label: str) -> dict[str, Any]:
 
 
 def _revalidate_identity(identity: Any, label: str) -> dict[str, Any]:
-    item = _exact_object(
-        identity, {"path", "sha256", "bytes", "mode", "nlink"}, f"{label} identity"
-    )
+    if not isinstance(identity, dict) or frozenset(identity) not in {
+        frozenset(IDENTITY_CORE_KEYS),
+        frozenset(IDENTITY_CORE_KEYS | IDENTITY_FINGERPRINT_KEYS),
+    }:
+        raise HoldoutError(f"{label} identity shape differs")
+    item = identity
     if (
         item.get("nlink") != 1
         or not isinstance(item.get("bytes"), int)
@@ -300,9 +287,67 @@ def _revalidate_identity(identity: Any, label: str) -> dict[str, Any]:
     ):
         raise HoldoutError(f"{label} identity topology differs")
     current = _identity_file(Path(item["path"]), label, item["sha256"])
-    if current != item:
+    projection = {key: current[key] for key in item}
+    if projection != item:
         raise HoldoutError(f"{label} path/content/size/mode/topology changed")
     return current
+
+
+def _open_verified_identity(identity: Any, label: str) -> int:
+    """Return a verified descriptor that pins the validated inode until spawn."""
+    if not isinstance(identity, dict):
+        raise HoldoutError(f"{label} identity shape differs")
+    path = Path(identity.get("path", ""))
+    _no_symlink_components(path, label)
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise HoldoutError(f"{label} descriptor topology differs")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        final = os.lstat(path)
+        _no_symlink_components(path, label)
+        if _stat_fingerprint(before) != _stat_fingerprint(after) or _stat_fingerprint(
+            after
+        ) != _stat_fingerprint(final):
+            raise HoldoutError(f"{label} changed while opening verified descriptor")
+        observed = {
+            "path": str(path.resolve()),
+            "sha256": digest.hexdigest(),
+            "bytes": after.st_size,
+            "mode": f"{stat.S_IMODE(after.st_mode):04o}",
+            "nlink": after.st_nlink,
+            "dev": after.st_dev,
+            "ino": after.st_ino,
+            "uid": after.st_uid,
+            "gid": after.st_gid,
+            "mtime_ns": after.st_mtime_ns,
+            "ctime_ns": after.st_ctime_ns,
+        }
+        if {key: observed.get(key) for key in identity} != identity:
+            raise HoldoutError(f"{label} verified descriptor differs from preflight")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_frozen_descriptors(plan: dict[str, Any]) -> dict[str, int]:
+    descriptors: dict[str, int] = {}
+    try:
+        for name, identity in plan["frozen_inputs"].items():
+            descriptors[name] = _open_verified_identity(identity, f"frozen {name}")
+        return descriptors
+    except BaseException:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        raise
 
 
 def _command_sha(command: Any) -> str:
@@ -317,6 +362,41 @@ def _command_sha(command: Any) -> str:
             command, ensure_ascii=True, separators=(",", ":"), allow_nan=False
         ).encode()
     ).hexdigest()
+
+
+def _environment_sha(environment: Any) -> str:
+    if not isinstance(environment, dict) or not all(
+        isinstance(name, str)
+        and name
+        and isinstance(value, str)
+        and "\x00" not in name
+        and "=" not in name
+        and "\x00" not in value
+        for name, value in environment.items()
+    ):
+        raise HoldoutError("execution environment is invalid")
+    return hashlib.sha256(
+        json.dumps(
+            environment,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+
+
+def _frozen_child_environment(
+    guard_environment: dict[str, str], device_environment: dict[str, str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    ambient_environment = {
+        name: os.environ[name] for name in AMBIENT_ENV_ALLOWLIST if name in os.environ
+    }
+    return ambient_environment, {
+        **ambient_environment,
+        **guard_environment,
+        **device_environment,
+    }
 
 
 def _git(worktree: Path, *arguments: str) -> str:
@@ -373,11 +453,24 @@ def _package_tree(root: Path) -> dict[str, Any]:
     }
 
 
-def _load_rows(path: Path, subset: str) -> list[dict[str, Any]]:
-    _regular(path, f"{subset} cases", limit=16 * 1024 * 1024)
+def _load_rows(
+    path: Path, subset: str, expected_sha: str | None = None
+) -> tuple[list[dict[str, Any]], str]:
+    digest, _info, raw = _stable_file(
+        path, f"{subset} cases", limit=16 * 1024 * 1024, collect=True
+    )
+    assert raw is not None
+    if expected_sha is not None and digest != _sha_value(
+        expected_sha, f"expected {subset} cases SHA"
+    ):
+        raise HoldoutError(f"{subset} cases SHA differs")
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError as error:
+        raise HoldoutError(f"invalid {subset} cases UTF-8: {error}") from error
+    for number, line in enumerate(lines, 1):
         if not line or len(line) > 64 * 1024:
             raise HoldoutError(f"{subset} row {number} is empty or oversized")
         try:
@@ -400,7 +493,7 @@ def _load_rows(path: Path, subset: str) -> list[dict[str, Any]]:
         rows.append(value)
     if len(rows) != MAX_ROWS:
         raise HoldoutError(f"{subset} rows must contain exactly {MAX_ROWS} entries")
-    return rows
+    return rows, digest
 
 
 def _freeze(
@@ -438,13 +531,13 @@ def _freeze(
         raise HoldoutError("holdout has already been evaluated or is not frozen")
     holdout_path = split_root / "holdout-cases.jsonl"
     calibration_path = split_root / "calibration-cases.jsonl"
-    _load_rows(calibration_path, "calibration")
-    _load_rows(holdout_path, "holdout")
+    _calibration_rows, calibration_digest = _load_rows(calibration_path, "calibration")
+    _holdout_rows, holdout_digest = _load_rows(holdout_path, "holdout")
     shas = {
         "split_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
         "policy_sha256": hashlib.sha256(policy_raw).hexdigest(),
-        "calibration_cases_sha256": _sha(calibration_path, "calibration cases"),
-        "holdout_cases_sha256": _sha(holdout_path, "holdout cases"),
+        "calibration_cases_sha256": calibration_digest,
+        "holdout_cases_sha256": holdout_digest,
         "freeze_receipt_sha256": hashlib.sha256(receipt_raw).hexdigest(),
     }
     if (
@@ -691,7 +784,7 @@ def _build_receipt(path: Path, capture_binary: Path) -> dict[str, Any]:
         binary_path, "capture build binary", binary["sha256"]
     )
     if (
-        observed_binary
+        {key: observed_binary[key] for key in IDENTITY_CORE_KEYS}
         != {
             "path": str(binary_path),
             "sha256": binary["sha256"],
@@ -1090,7 +1183,9 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
     actual = _actual_verified(args.actual_verified_receipt, args.served_model_manifest)
     source_manifest = args.source_artifact / "manifest.json"
     source_identity = _identity_file(source_manifest, "source artifact manifest")
-    split_rows = _load_rows(args.split_root / "holdout-cases.jsonl", "holdout")
+    split_rows, _ = _load_rows(
+        args.split_root / "holdout-cases.jsonl", "holdout", shas["holdout_cases_sha256"]
+    )
     source = _artifact_identity(
         args.source_artifact, "independent_source_full", split_rows, "holdout"
     )
@@ -1169,13 +1264,14 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
         ("device backend", args.expected_device_backend),
         ("device name", args.expected_device_name),
         ("device architecture", args.expected_device_architecture),
-        ("device ID", args.expected_device_id),
         ("quantized artifact revision", args.expected_quantized_artifact_revision),
     ):
         if not isinstance(value, str) or not value:
             raise HoldoutError(f"{label} must be nonempty")
     if (
-        args.device_index < 0
+        type(args.expected_device_id) is not int
+        or not 0 <= args.expected_device_id <= 2_147_483_647
+        or args.device_index < 0
         or args.chunk_elements < 1
         or args.timeout_seconds <= 0
         or not math.isfinite(args.timeout_seconds)
@@ -1279,6 +1375,11 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
         },
         **{f"actual_{name}": item for name, item in actual["lineage"].items()},
     }
+    device_environment = {name: str(args.device_index) for name in DEVICE_ENV}
+    guard_environment = guard["required_environment"]
+    ambient_environment, child_environment = _frozen_child_environment(
+        guard_environment, device_environment
+    )
     plan = {
         "schema_version": PREFLIGHT_SCHEMA,
         "status": "ready_for_execute",
@@ -1316,8 +1417,12 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
             "timeout_seconds": args.timeout_seconds,
             "chunk_elements": args.chunk_elements,
             "capture_binary": capture_identity,
-            "device_environment": {name: str(args.device_index) for name in DEVICE_ENV},
-            "guard_environment": guard["required_environment"],
+            "ambient_environment_allowlist": list(AMBIENT_ENV_ALLOWLIST),
+            "ambient_environment": ambient_environment,
+            "device_environment": device_environment,
+            "guard_environment": guard_environment,
+            "child_environment": child_environment,
+            "child_environment_sha256": _environment_sha(child_environment),
             "command": command,
             "command_sha256": _command_sha(command),
         },
@@ -1338,8 +1443,7 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _failure(
-    path: Path,
+def _failure_value(
     plan: dict[str, Any],
     preflight_sha: str,
     kind: str,
@@ -1377,8 +1481,127 @@ def _failure(
         value["errno"] = errno
     if evidence:
         value["execution_evidence"] = evidence
+    return value
+
+
+def _failure(
+    path: Path,
+    plan: dict[str, Any],
+    preflight_sha: str,
+    kind: str,
+    detail: str,
+    exit_code: int | None = None,
+    *,
+    stage: str = "validation",
+    errno: int | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    value = _failure_value(
+        plan,
+        preflight_sha,
+        kind,
+        detail,
+        exit_code,
+        stage=stage,
+        errno=errno,
+        evidence=evidence,
+    )
     _atomic_json(path, value, "failure receipt")
     return value
+
+
+def _reserve_failure_receipt(
+    receipt_output: Path, plan: dict[str, Any], preflight_sha: str
+) -> dict[str, Any]:
+    """Durably prepublish an inactive rescue receipt before consuming the attempt."""
+    path = receipt_output.with_name(
+        f".{receipt_output.name}.{preflight_sha[:16]}.rescue-failure.json"
+    )
+    value = _failure_value(
+        plan,
+        preflight_sha,
+        "fail_safe_rescue",
+        "reserved before attempt; active only after the one-shot attempt marker exists",
+        stage="outer_fail_safe",
+        evidence={
+            "activation": {
+                "attempt_marker": plan["paths"]["attempt_marker"],
+                "primary_receipt": str(receipt_output.resolve()),
+                "condition": "post-attempt exception escaped primary publication",
+            }
+        },
+    )
+    encoded = (
+        json.dumps(
+            value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False
+        ).encode()
+        + b"\n"
+    )
+    if os.path.lexists(path):
+        raise HoldoutError("fail-safe rescue receipt already exists")
+    receipt_output.parent.mkdir(parents=True, exist_ok=True)
+    _no_symlink_components(receipt_output.parent, "fail-safe rescue parent")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o444,
+    )
+    try:
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("fail-safe rescue write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o444
+            or info.st_size != len(encoded)
+        ):
+            raise HoldoutError("fail-safe rescue receipt topology differs")
+        parent_fd = os.open(
+            receipt_output.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        raise
+    return {
+        "path": path,
+        "descriptor": descriptor,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "value": value,
+    }
+
+
+def _retire_failure_rescue(rescue: dict[str, Any]) -> None:
+    descriptor = rescue.pop("descriptor", None)
+    if descriptor is not None:
+        os.close(descriptor)
+    os.unlink(rescue["path"])
+    parent_fd = os.open(
+        Path(rescue["path"]).parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def _process_census(capture_binary: Path) -> list[dict[str, Any]]:
@@ -1555,6 +1778,18 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     expected_env = {name: str(identity.get("device_index")) for name in DEVICE_ENV}
     if contract.get("device_environment") != expected_env:
         raise HoldoutError("preflight device environment differs")
+    ambient = contract.get("ambient_environment")
+    guard = contract.get("guard_environment")
+    child = contract.get("child_environment")
+    if (
+        contract.get("ambient_environment_allowlist") != list(AMBIENT_ENV_ALLOWLIST)
+        or not isinstance(ambient, dict)
+        or not set(ambient).issubset(AMBIENT_ENV_ALLOWLIST)
+        or not isinstance(guard, dict)
+        or child != {**ambient, **guard, **expected_env}
+        or contract.get("child_environment_sha256") != _environment_sha(child)
+    ):
+        raise HoldoutError("preflight allowlist-only child environment differs")
     expected_command = [
         contract.get("capture_binary", {}).get("path"),
         "--served-model-manifest",
@@ -1693,7 +1928,7 @@ def _revalidate_frozen_plan(plan: dict[str, Any]) -> None:
         raise HoldoutError("active output appeared before capture")
 
 
-def _execute(args: argparse.Namespace) -> dict[str, Any]:
+def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
     plan, plan_raw = _read_json(args.preflight, "preflight")
     preflight_sha = hashlib.sha256(plan_raw).hexdigest()
     try:
@@ -1724,6 +1959,7 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
     process: subprocess.Popen[bytes] | None = None
     out_fd: int | None = None
     err_fd: int | None = None
+    frozen_descriptors: dict[str, int] = {}
     try:
         _revalidate_frozen_plan(plan)
         evidence["pre_spawn_process_census"] = _process_census(
@@ -1741,16 +1977,18 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
         err_fd = os.open(
             stderr_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444
         )
-        env = os.environ.copy()
-        env.update(plan["execution_contract"]["guard_environment"])
-        env.update(plan["execution_contract"]["device_environment"])
+        env = dict(plan["execution_contract"]["child_environment"])
+        frozen_descriptors = _open_frozen_descriptors(plan)
+        binary_fd = frozen_descriptors["capture_binary"]
         try:
             process = subprocess.Popen(
                 plan["execution_contract"]["command"],
+                executable=f"/proc/self/fd/{binary_fd}",
                 stdin=subprocess.DEVNULL,
                 stdout=out_fd,
                 stderr=err_fd,
                 env=env,
+                pass_fds=(binary_fd,),
                 start_new_session=True,
             )
         except OSError as error:
@@ -1765,6 +2003,10 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
                 errno=error.errno,
                 evidence=evidence,
             )
+        finally:
+            for descriptor in frozen_descriptors.values():
+                os.close(descriptor)
+            frozen_descriptors = {}
         evidence["child_pid"] = process.pid
         evidence["child_process_group"] = os.getpgid(process.pid)
         if evidence["child_process_group"] != process.pid:
@@ -1854,6 +2096,11 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
             evidence=evidence,
         )
     finally:
+        for descriptor in frozen_descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         for descriptor in (out_fd, err_fd):
             if descriptor is not None:
                 try:
@@ -1958,15 +2205,13 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
             "capture output directory is missing",
         )
     try:
-        holdout_rows = _load_rows(
-            Path(plan["paths"]["split_root"]) / "holdout-cases.jsonl", "holdout"
+        holdout_rows, live_holdout_sha = _load_rows(
+            Path(plan["paths"]["split_root"]) / "holdout-cases.jsonl",
+            "holdout",
+            plan["holdout_cases_sha256"],
         )
         if (
-            _sha(
-                Path(plan["paths"]["split_root"]) / "holdout-cases.jsonl",
-                "holdout cases",
-            )
-            != plan["holdout_cases_sha256"]
+            live_holdout_sha != plan["holdout_cases_sha256"]
             or _sha(
                 Path(plan["paths"]["split_root"]) / "calibration-cases.jsonl",
                 "calibration cases",
@@ -2077,6 +2322,53 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _execute(args: argparse.Namespace) -> dict[str, Any]:
+    plan, plan_raw = _read_json(args.preflight, "preflight")
+    preflight_sha = hashlib.sha256(plan_raw).hexdigest()
+    try:
+        attempt_path = Path(plan["paths"]["attempt_marker"])
+    except (KeyError, TypeError) as error:
+        raise HoldoutError("preflight attempt marker path is missing") from error
+    if os.path.lexists(attempt_path):
+        raise HoldoutError("attempt marker already exists; retry is forbidden")
+    if (
+        args.receipt_output.resolve()
+        != Path(plan.get("paths", {}).get("result_receipt", "")).resolve()
+    ):
+        raise HoldoutError(
+            "execute receipt output differs from the frozen preflight path"
+        )
+    _validate_plan(plan)
+    rescue = _reserve_failure_receipt(args.receipt_output, plan, preflight_sha)
+    try:
+        result = _execute_inner(args)
+    except BaseException as error:
+        if os.path.lexists(attempt_path):
+            descriptor = rescue.pop("descriptor", None)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            return {
+                **rescue["value"],
+                "receipt": str(rescue["path"]),
+                "receipt_sha256": rescue["sha256"],
+                "escaped_exception_type": type(error).__name__,
+            }
+        try:
+            _retire_failure_rescue(rescue)
+        except OSError:
+            pass
+        raise
+    try:
+        _retire_failure_rescue(rescue)
+    except OSError:
+        # A primary sealed result/failure already exists.  Cleanup cannot alter it.
+        pass
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2103,7 +2395,7 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument("--expected-device-backend", required=True)
     pre.add_argument("--expected-device-name", required=True)
     pre.add_argument("--expected-device-architecture", required=True)
-    pre.add_argument("--expected-device-id", required=True)
+    pre.add_argument("--expected-device-id", type=int, required=True)
     pre.add_argument("--expected-quantized-artifact-revision", required=True)
     pre.add_argument("--device-index", type=int, default=0)
     pre.add_argument("--chunk-elements", type=int, default=65536)

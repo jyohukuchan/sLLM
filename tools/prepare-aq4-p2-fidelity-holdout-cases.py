@@ -57,12 +57,94 @@ def _regular(path: Path, label: str) -> None:
 
 
 def _sha(path: Path, label: str) -> str:
+    digest, _raw = _stable_file(path, label)
+    return digest
+
+
+def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _stable_file(
+    path: Path, label: str, *, collect: bool = False, limit: int = 64 * 1024 * 1024
+) -> tuple[str, bytes | None]:
     _regular(path, label)
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
+    raw = bytearray() if collect else None
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > limit
+        ):
+            raise CasesError(f"{label} stable descriptor topology differs")
+        while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
-    return digest.hexdigest()
+            if raw is not None:
+                raw.extend(chunk)
+                if len(raw) > limit:
+                    raise CasesError(f"{label} exceeds bounded size")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = os.lstat(path)
+    _regular(path, label)
+    if _fingerprint(before) != _fingerprint(after) or _fingerprint(
+        after
+    ) != _fingerprint(final):
+        raise CasesError(f"{label} changed while reading")
+    return digest.hexdigest(), bytes(raw) if raw is not None else None
+
+
+def _stable_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
+    digest, raw = _stable_file(path, label, collect=True)
+    assert raw is not None
+    try:
+        value = json.loads(
+            raw, object_pairs_hook=PROTOCOL.pairs, parse_constant=PROTOCOL.no_constants
+        )
+    except (UnicodeError, json.JSONDecodeError, PROTOCOL.ProtocolError) as error:
+        raise CasesError(f"invalid {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise CasesError(f"{label} root must be an object")
+    return value, digest
+
+
+def _stable_jsonl(path: Path, label: str) -> tuple[list[dict[str, Any]], str]:
+    digest, raw = _stable_file(path, label, collect=True, limit=16 * 1024 * 1024)
+    assert raw is not None
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError as error:
+        raise CasesError(f"invalid {label} UTF-8: {error}") from error
+    rows: list[dict[str, Any]] = []
+    for number, line in enumerate(lines, 1):
+        try:
+            value = json.loads(
+                line,
+                object_pairs_hook=PROTOCOL.pairs,
+                parse_constant=PROTOCOL.no_constants,
+            )
+        except (json.JSONDecodeError, PROTOCOL.ProtocolError) as error:
+            raise CasesError(f"invalid {label} row {number}: {error}") from error
+        if not isinstance(value, dict):
+            raise CasesError(f"{label} row {number} must be an object")
+        rows.append(value)
+    return rows, digest
 
 
 def _atomic(path: Path, value: Any) -> str:
@@ -112,16 +194,18 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         SPLIT.validate(args.split_root)
     except Exception as error:
         raise CasesError(f"split validation failed: {error}") from error
-    manifest_raw = (args.split_root / "split-manifest.json").read_bytes()
-    policy_raw = (args.split_root / "policy.json").read_bytes()
+    _manifest, manifest_sha = _stable_json(
+        args.split_root / "split-manifest.json", "split manifest"
+    )
+    _policy, policy_sha = _stable_json(args.split_root / "policy.json", "policy")
     calibration_sha = _sha(
         args.split_root / "calibration-cases.jsonl", "calibration cases"
     )
     holdout_path = args.split_root / "holdout-cases.jsonl"
-    holdout_sha = _sha(holdout_path, "holdout cases")
+    rows, holdout_sha = _stable_jsonl(holdout_path, "holdout cases")
     expected = {
-        "split_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
-        "policy_sha256": hashlib.sha256(policy_raw).hexdigest(),
+        "split_manifest_sha256": manifest_sha,
+        "policy_sha256": policy_sha,
         "calibration_cases_sha256": calibration_sha,
         "holdout_cases_sha256": holdout_sha,
     }
@@ -135,7 +219,6 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise CasesError(
             "split/policy/calibration/holdout SHA does not match the pinned contract"
         )
-    rows = PROTOCOL.read_jsonl(holdout_path, "holdout cases")
     if len(rows) != MAX_ROWS or any(row.get("subset") != "holdout" for row in rows):
         raise CasesError("holdout cases must contain exactly 24 holdout rows")
     cases = []
@@ -148,9 +231,9 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         fixture = Path(row["fixture_path"])
         if not fixture.is_absolute():
             fixture = (args.split_root / fixture).resolve()
-        if _sha(fixture, f"fixture {case_id}") != row.get("fixture_sha256"):
+        value, fixture_sha = _stable_json(fixture, f"fixture {case_id}")
+        if fixture_sha != row.get("fixture_sha256"):
             raise CasesError(f"fixture SHA differs: {case_id}")
-        value, _ = PROTOCOL.load(fixture, f"fixture {case_id}")
         item = value.get("cases", [{}])[0]
         tokens = item.get("prompt_token_ids")
         if (

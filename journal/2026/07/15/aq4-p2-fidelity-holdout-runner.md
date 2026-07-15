@@ -35,4 +35,14 @@
 
 監査修正後も同じread-only比較を行った。`cargo fmt --all --check`の既存差分は2011行、変更前/変更後を別copyでrustfmtしたsemantic差分は196行で、今回追加したseal helper、holdout device env、state/reset evidence、manifest binding、封印publication、単体テストだけである。
 
+追補監査receipt `350ac7855e2f295b9c75551aefbc23e482466f1bc404710649c558df15c815f6` の残件B2/B3/B5/B8に対し、次を修正した。
+
+- Python runnerとholdout cases adapterは、`O_NOFOLLOW`で開いた同一fdからhash対象bytesとJSON/JSONL parse対象bytesを取得し、前後fdと最終pathの`dev/ino/mode/uid/gid/nlink/size/mtime_ns/ctime_ns`を照合する。mtimeを復元した競合もctime差で拒否する。
+- Rust captureも同じfingerprintで安定読み取りし、served-modelは同一fdから得たbytesを`load_served_model_bytes`へ渡す。runnerは全frozen inputの検証済みfdをspawn完了まで保持し、capture binary自体は`/proc/self/fd/N`からexecする。
+- runtime device IDはRust evidenceと同じinteger型に固定した。子環境は明示allowlist、guard、device可視性だけから構成し、完全な環境objectとSHA-256をplanへ凍結する。`os.environ.copy()`は実行経路から除去した。
+- rows/vectorはchmod 0444後にfile fsyncを行ってからdirectory chmod/fsync、rename、parent fsyncへ進む。chmod/post-chmod-fsync/closeの注入失敗を単体テストで確認する。
+- attempt消費前に独立したhidden rescue failure receiptをcreate-new、write、file fsync、chmod、再fsync、parent fsyncし、fdを保持する。attempt markerのlink/fsync/close後例外、通常failure/result publication例外、finally例外は最外層でこの封印済みfailureへ収束し、retryを許可しない。
+
+追補検証はholdout focused pytest 34件、Rust capture test 9件、Cargo check/test、py_compile、`uvx ruff check`、`uvx ruff format --check`が成功した。全pytestはgateway依存（fastapi/package）不足など11件のcollection errorで開始不能だった。`PYTHONPATH=.`の広域testsは233 passed/1 skippedまで進み、isolated worktreeにない既存benchmark fixtureと別系統のmaintenance bindingなど69件が失敗した時点で中断した。GPU、service、sudoは使用していない。全workspaceの`cargo fmt --all --check`は今回の対象外Rust fileを含む基点由来の既存未整形が残るため失敗し、対象capture fileも基点時点からrustfmt未適用である。
+
 GPU実行は行っていない。実機での残課題は、凍結済みsource artifactをholdout casesで生成し、指定Rust binaryを一回だけ起動してresult receiptを作ることだ。
