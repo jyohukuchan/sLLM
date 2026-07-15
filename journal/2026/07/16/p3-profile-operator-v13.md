@@ -58,3 +58,19 @@
   `c6562fd6` before the final trusted-source readback.
 - Current ready, historical ready, offline reassembly, and 20 trusted sources
   all passed exact readback; all nine future actual outputs remained absent.
+
+## Formal audit follow-up
+
+- Replaced the operator source's moving `HEAD` authority with its source-path
+  last-change commit. The readback now requires the derived commit tree, Git
+  blob, archived bytes, worktree hash-object, and raw SHA-256 to agree, with
+  `source_commit` equal to `artifact_commit`.
+- Added fail-closed tests for source-byte tampering and Git blob authority
+  mismatch, plus a poststate test proving the source remains bound to its
+  last-change commit after this journal commit advances `HEAD`.
+- Completed the historical v15 pair by pinning dry-run root tree
+  `b375ac9a0e55b738715dd637d38b864ccf6a2204`, its evidence and
+  `SHA256SUMS`, and archive-to-commit file coverage at the same b39 artifact
+  commit as ready-v15.
+- Source and tests for the follow-up were committed as `ceca3594` before the
+  journal poststate was recorded.
