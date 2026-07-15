@@ -182,6 +182,7 @@ RESTORE_POLL_INTERVAL_SECONDS = 1.0
 RESTORE_PROBE_TIMEOUT_SECONDS = 10.0
 RUN_ID = LAUNCHER.EXECUTE_RUN_ID
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_OID_RE = re.compile(r"^[0-9a-f]{40}$")
 LOCK_SUBSTRATE_OWNER = "homelab1"
 LOCK_SUBSTRATE_DIRECTORY = Path("/run/ullm")
 LOCK_SUBSTRATE_MODE = 0o750
@@ -3769,7 +3770,7 @@ def validate_profile_offline_reassembly(
         }
         or evidence.get("capture_parser") != expected_parser
         or evidence.get("generic_memcpy_derivation") != derivation
-        or evidence.get("generator") != _git_identity()
+        or evidence.get("generator") != _git_source_identity()
         or evidence.get("output") != output
         or evidence.get("execution") != expected_execution
         or evidence.get("safety") != expected_safety
@@ -3913,7 +3914,7 @@ def prepare_profile_offline_reassembly(
         seal_after = actual_v12_seal()
         if seal_after != seal_before:
             raise HarnessError("actual-v12 source changed during offline reassembly")
-        generator = _git_identity()
+        generator = _git_source_identity()
         evidence = {
             "schema_version": PROFILE_REASSEMBLY_SCHEMA,
             "status": "offline_reassembled_sealed",
@@ -3985,6 +3986,53 @@ def _git_identity() -> dict[str, str]:
     if committed.returncode != 0 or committed.stderr or committed.stdout != raw:
         raise HarnessError("harness is not the exact committed HEAD blob")
     return {"path": str(path), "commit": values[0], "tree": values[1], "git_blob": values[2], "sha256": sha_bytes(raw)}
+
+
+def _git_bytes(argv: list[str], label: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *argv],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise HarnessError(f"{label} Git lookup failed")
+    return completed.stdout
+
+
+def _git_source_identity() -> dict[str, str]:
+    path = Path(__file__).resolve()
+    relative = path.relative_to(ROOT)
+    commit = _git_stdout(
+        ["log", "-1", "--format=%H", "--", str(relative)],
+        "maintenance source last-change commit",
+    )
+    if GIT_OID_RE.fullmatch(commit) is None:
+        raise HarnessError("maintenance source last-change commit differs")
+    tree = _git_stdout(
+        ["rev-parse", f"{commit}^{{tree}}"],
+        "maintenance source last-change tree",
+    )
+    git_blob = _git_stdout(
+        ["rev-parse", f"{commit}:{relative}"],
+        "maintenance source last-change blob",
+    )
+    raw = path.read_bytes()
+    committed = _git_bytes(
+        ["show", f"{commit}:{relative}"],
+        "maintenance source last-change bytes",
+    )
+    if committed != raw or _git_stdout(["hash-object", str(path)], "maintenance source archive blob") != git_blob:
+        raise HarnessError("maintenance source differs from last-change Git authority")
+    return {
+        "path": str(path),
+        "commit": commit,
+        "tree": tree,
+        "git_blob": git_blob,
+        "sha256": sha_bytes(raw),
+    }
 
 
 def prepare_ready_artifact(*, profile_diagnostic: bool = False) -> dict[str, Any]:

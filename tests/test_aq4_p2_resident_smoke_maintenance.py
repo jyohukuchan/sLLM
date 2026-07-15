@@ -635,7 +635,7 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
     evidence = tmp_path / "maintenance-evidence-v11"
     monkeypatch.setattr(
         HARNESS,
-        "_git_identity",
+        "_git_source_identity",
         lambda: {
             "path": str(SCRIPT),
             "commit": "1" * 40,
@@ -966,6 +966,43 @@ def test_offline_reassembly_poststate_does_not_change_canonical_ready(
         "must_not_exist_before_capture": True,
     }
     assert str(offline) not in json.dumps(after, sort_keys=True)
+
+
+def test_offline_source_authority_uses_path_last_change_not_current_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_commit = "1" * 40
+    source_tree = "2" * 40
+    source_blob = "3" * 40
+    calls: list[list[str]] = []
+
+    def git_stdout(argv: list[str], _label: str) -> str:
+        calls.append(argv)
+        if argv[:4] == ["log", "-1", "--format=%H", "--"]:
+            return source_commit
+        if argv == ["rev-parse", f"{source_commit}^{{tree}}"]:
+            return source_tree
+        if argv[0:2] == ["rev-parse", f"{source_commit}:tools/run-aq4-p2-resident-smoke-maintenance.py"]:
+            return source_blob
+        if argv[0] == "hash-object":
+            return source_blob
+        raise AssertionError(f"unexpected Git lookup: {argv}")
+
+    monkeypatch.setattr(HARNESS, "_git_stdout", git_stdout)
+    monkeypatch.setattr(HARNESS, "_git_bytes", lambda _argv, _label: SCRIPT.read_bytes())
+    identity = HARNESS._git_source_identity()
+    assert identity == {
+        "path": str(SCRIPT),
+        "commit": source_commit,
+        "tree": source_tree,
+        "git_blob": source_blob,
+        "sha256": HARNESS.sha_bytes(SCRIPT.read_bytes()),
+    }
+    assert all("HEAD" not in argument for argv in calls for argument in argv)
+
+    monkeypatch.setattr(HARNESS, "_git_bytes", lambda _argv, _label: b"tampered-source")
+    with pytest.raises(HARNESS.HarnessError, match="differs from last-change Git authority"):
+        HARNESS._git_source_identity()
 
 
 def test_qa_manifest_strictly_resolves_all_source_commit_path_blobs(
