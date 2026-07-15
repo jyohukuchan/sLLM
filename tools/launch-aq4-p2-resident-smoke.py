@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
-INPUT_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v6"
+INPUT_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7"
 BINDING_MANIFEST = BINDING_ROOT / "binding-manifest.json"
 RUNNER = BINDING_ROOT / "trusted-runner.py"
 VALIDATOR = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
@@ -31,11 +31,11 @@ RESIDENT_DRIVER = INPUT_ROOT / "resident-driver"
 SERVED_MANIFEST = Path("/etc/ullm/served-models/active.json")
 LOCK_PATH = Path("/run/ullm/r9700.lock")
 RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
-EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v9"
+EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v10"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
-EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v9"
-EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v9"
+EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v10"
+EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v10"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_REAL = Path("/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py")
@@ -51,40 +51,67 @@ WORKER = ROOT / "target/reasoning-v2/release/ullm-aq4-worker"
 KFD_PROC_ROOT = Path("/sys/class/kfd/kfd/proc")
 
 INPUT_ROOT_DEVICE = 66306
-INPUT_ROOT_INODE = 10491730
-INPUT_FINGERPRINT_SHA = "55b30d5d521abf98b0122144f59122b1030a885dbfd67d25bb9d4c6f2955bb14"
+INPUT_ROOT_INODE = 10617640
+INPUT_FINGERPRINT_SHA = "584ab574b6283b21f13216c265cd16c88abb836b1c94b2630127247215f633d1"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10617226
+BINDING_ROOT_INODE = 10617667
 BINDING_ROOT_MODE = 0o555
-BINDING_MANIFEST_SHA = "b206df5a49b9e97146f9f0488b262814e7f6ec3071a9dbb3c017cfe8dbb2f7b7"
-BINDING_PLAN_SHA = "41ef9ae650fdf705908f007af483d3c491211b9893af5b321df32e66a05e564d"
-RUNNER_COMMIT = "76c48aa27c08f8cd5115a15e6be25b83d679d8fa"
-RUNNER_TREE = "e79865753bcbba1a9134670fa2ea57327ab84ea4"
-RUNNER_GIT_BLOB = "1929ca23d50c85d3464f9a2c87f1e062d0dc665a"
-RUNNER_SHA = "bbe978ede0e4662c33d0d12eee4194531f340b9c06001f37d619019197fd5138"
-VALIDATOR_COMMIT = "fb0a5afe86763c95c7bef99ae19ac864c2f56bd5"
-VALIDATOR_TREE = "798db857d239b75165f85c2e540e07afa13d3574"
-VALIDATOR_GIT_BLOB = "38e0979ff9dc33fc31f76e4dc91f3421a851d660"
-VALIDATOR_SHA = "72cb128fa4290e468d2e482749138a17d8a8ef2e05d1ad456fa1bcc9cc5ad789"
+BINDING_MANIFEST_SHA = "3b99dcfd11f9c4726a8531f9f828ec62dd84fabe577b6b529636ee0b66918579"
+BINDING_PLAN_SHA = "b0acd2da4ab5b4c6bfd338358ac95b55280cc5fb05f885675ff5a1b27429a280"
+RUNNER_COMMIT = "d367b6da07393f55c720ded7250bda8cdc402a79"
+RUNNER_TREE = "8fea6bf90e8ad99c7ed36c719b8b4ad204ce73df"
+RUNNER_GIT_BLOB = "fed94b749790cdbf6a61e33f3f9e95ebd73502e0"
+RUNNER_SHA = "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
+VALIDATOR_COMMIT = "e36a03ad423a0bb45cc1e4de67d3ca4fddfacdbc"
+VALIDATOR_TREE = "9189252d996e2eda05761f650960224676867811"
+VALIDATOR_GIT_BLOB = "5ee4278a58b18454cf714da6bfe540f5d2ff832c"
+VALIDATOR_SHA = "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
-RESIDENT_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
-RESIDENT_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+RESIDENT_COMMIT = "43ba16f2347a45caba8a60cac2189714118db280"
+RESIDENT_TREE = "72392a7114f5968d6c2ad05e24762a6790000013"
 RESIDENT_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
 RESIDENT_SOURCE_SHA = "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf"
-RESIDENT_SHA = "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34"
-RESIDENT_BYTES = 3506904
-RESIDENT_BUILD_ID = "e7313ba6f51feac74f14b5ffd100333265362e1e"
+RESIDENT_SHA = "d7458fcdf8553871cac00123413676625c61eff2fdee3be9a440e656f05bcc1e"
+RESIDENT_BYTES = 3505000
+RESIDENT_BUILD_ID = "033ce9b214e2149861a8fcf0381c27bbac5bf1d1"
+RESIDENT_BUILD_INPUTS = {
+    ".cargo/config.toml": {
+        "git_blob": "6dee7973a174f5e45c5762d91522f5d6849a5b84",
+        "role": "cargo_linker_configuration",
+        "sha256": "41627bf0cfcb00817cd6bee0285a01d25c89614bb271798139c26539c525f67d",
+    },
+    "Cargo.lock": {
+        "git_blob": "fb12cb0388ea1c6fc6368e7ea5d5100c11a20666",
+        "role": "locked_dependency_graph",
+        "sha256": "10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b",
+    },
+    "crates/ullm-runtime-sys/build.rs": {
+        "git_blob": "bfd7a966b465e6f61189ae7cae8432065f102b6f",
+        "role": "runtime_static_library_build",
+        "sha256": "e2d29a16e4e6be98e8cc5f41f7350e8210d707229a204fb7c0b35a9ef0d096ea",
+    },
+    "runtime/src/ullm_runtime_parts/part_00.inc": {
+        "git_blob": "316d3ae5c13f79678fb8256aa8c66ea7e154660f",
+        "role": "directional_hip_copy_runtime",
+        "sha256": "db138bfaf33f59708f24edbec8352a39fe809ff39422d5b742399752c8fa9f5f",
+    },
+}
 RESIDENT_BUILD_METADATA = {
-    "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-served-manifest-lane-d-target cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+    "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-a cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
     "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
     "source_commit": RESIDENT_COMMIT,
     "source_tree": RESIDENT_TREE,
     "source_git_blob": RESIDENT_GIT_BLOB,
     "source_sha256": RESIDENT_SOURCE_SHA,
+    "build_inputs": RESIDENT_BUILD_INPUTS,
     "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
     "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
     "rustc_host": "x86_64-unknown-linux-gnu",
     "llvm_version": "22.1.2",
+    "clang_version": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+    "cxx_version": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "mold_version": "mold 2.30.0 (compatible with GNU ld)",
+    "rocm_resolved_path": "/opt/rocm-7.2.1",
     "cargo_build_jobs": 1,
     "cargo_incremental": False,
     "locked": True,
@@ -92,6 +119,18 @@ RESIDENT_BUILD_METADATA = {
     "binary_bytes": RESIDENT_BYTES,
     "binary_build_id_sha1": RESIDENT_BUILD_ID,
     "expected_binary_sha256": RESIDENT_SHA,
+    "reproducibility": {
+        "build_count": 2,
+        "build_id_equal": True,
+        "byte_identical": True,
+        "bytes_equal": True,
+        "commands": [
+            "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-a cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+            "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-profile-v10-resident-target-b cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+        ],
+        "independent_initially_absent_target_directories": True,
+        "sha256_equal": True,
+    },
 }
 SERVED_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 DEVICE_INDEX = 1
@@ -110,13 +149,13 @@ ROCMINFO_SHA = "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed
 SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
-EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v9"
-PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v9"
-PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v9"
-PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v9"
+EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v10"
+PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
+PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10"
+PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
-PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v9"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10"
 PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
 ROCTX_LIBRARY = Path("/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0")
@@ -151,34 +190,34 @@ GUARD_NAMES = (
 EXECUTE_ENV = {"HIP_VISIBLE_DEVICES": "1", "ULLM_HIP_VISIBLE_DEVICES": "1", "ULLM_SERVED_MODEL_MANIFEST": str(SERVED_MANIFEST), "ULLM_BUILD_GIT_COMMIT": RESIDENT_COMMIT} | {name: "1" for name in GUARD_NAMES}
 
 INPUT_MEMBER_SHA = {
-    "SHA256SUMS": "12e72ded1804ca075fde19f7ceca4d02cde9df2558489288e8ff850caf1a2b2b",
-    "SUPERSEDED-0fd7993.json": "6d8a780482ac800b66e6789aaf6c110342266e610c4968376aa8e91f5803dfc2",
-    "bundle.json": "fe9ad93acb21dc98f2cb8c9a442fe4373ca44022b675da2cb61008bf9ff3811c",
+    "SHA256SUMS": "27579326b1ba703585d4683ddcabf47676debeca58878e54a2ae2cccee6e99b9",
+    "SUPERSEDED-0fd7993.json": "ef18c2289b56647ece390683af1e562aea6df071d5fc22cfbf5e63b0ed058a7b",
+    "bundle.json": "b947e43d6aff609967ea9b0909aa14a689b4f35791a7903134453c42ede8fb38",
     "case-binding.json": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5",
-    "dry-run.json": "062b4e4fb210245552b1e21d9b8fe472ef79b08be01fbd6400458c31e3e4eea8",
-    "fake-ready.json": "4409002bc6b43db772e6ad921b6158d6014deb74a1fb0d54c37252dc0e1b3972",
-    "fixture-index.json": "4bcc02ac22bfd19a55913943e5f28dc690c5917b0743b0b5f679c4a5610d353a",
+    "dry-run.json": "7a6738f6ebdc3b07b388753c8152d052d3e329e50a44e30e40b6fa97e2269037",
+    "fake-ready.json": "b353d412fc11a7656ed1eb522cdc77bd29412ef9b0f702eb4615263a9273427c",
+    "fixture-index.json": "9bde3a24bd8bb3ff017f5a370cee505e16cb632182fdbf3ad8c2cfb33c23bc4d",
     "fixture.json": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
-    "identity.json": "0e47a0090ca74e945414adbc596693ac244a2893d8b31b019f951ee5476df515",
-    "launch-command.json": "714010fc43ec335caf22e8383f771d0aaead09d95a43cc2f8b7a723732439553",
-    "official-case.json": "38eb53e03e9f6f16aec683b546aae6abb3fe7dec6615c511f5afe71d00b51022",
+    "identity.json": "6c3e3562eaafbc357497153f46a12c726383130b8b7f4e630ba50c769d03fc37",
+    "launch-command.json": "6a963811ccab739958bfbf6846eaed9cdb16e45c9e533e47c7a97bd307731383",
+    "official-case.json": "916abe28bd0b82bde85f918d6a6b1a1f54a49d14149f4832f042b17d2eb15bc2",
     "package-manifest.json": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
     "policy.json": "21dff8ecdbc17a1cd86a458fe7f8771eed0cdd18577a5f0fb6c7b96310a2de16",
     "preflight.json": "294ddf1771251c4b1954ea663d73e85821749119da2a4f6c7528fdae510bbc6e",
     "resident-driver": RESIDENT_SHA,
-    "runner-dry-run-evidence.json": "0050e78174487722a1a21a1b0fc59fac8217f9a4dcfa5c227849144c6c3480cf",
+    "runner-dry-run-evidence.json": "4f37d7bba1320ff2dd57c0249b0d18ba3e0f1ee45c68cbb5dfb373c54de9ddcf",
     "served-model.json": SERVED_SHA,
-    "trust-roots.json": "3185ad06940143a91aa6bb46456c82084421ce21d4f762150db3894651278b81",
-    "trusted-runner.py": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
+    "trust-roots.json": "b6b5d0975e45a40b2a42d1a8f07345caf510fc15b2c3ce39e23b1ba05badaacd",
+    "trusted-runner.py": "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0",
 }
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "0954e645b5a0a20efb3c52050426637d1ba77eab30f04303f2b80cca3908ab7b",
+    "runner-subprocess-evidence.json": "16c8a4ba60bdeb5debab7e4c70926414be9410fe915ed622353b90fb6f3effd3",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
-    "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "684e3be7a50393b3b8c7b045c3719727b4ea6f1ceaabfd3476c3158215076e50",
+    "validator-report.json": "8df8debd89f1dbc9f866a8ec67a862d4daf538e264778a07607ea5189e830b62",
+    "SHA256SUMS": "e922a38142380bbee3e7e4db18d195f93aad86f4b1123e0034f9149edf1f9918",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -459,7 +498,7 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     exact = {"schema_version", "status", "promotion", "launch_eligible", "requires_immutable_launcher", "predecessor", "trust_roots", "input_root", "outputs", "execution", "cycle_control", "next_stage", "runner_roles", "binding_root_contract"}
     if set(manifest) != exact:
         raise LauncherError("B binding manifest exact schema differs")
-    if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v6" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
+    if manifest.get("schema_version") != "ullm.aq4_p2_resident_smoke_binding.v7" or manifest.get("status") != "prepared_not_executed" or manifest.get("promotion") is not False:
         raise LauncherError("B binding status/promotion differs")
     if manifest.get("binding_root_contract") != {"type": "directory", "mode": "0555", "members_read_only": True, "members_single_link": True}:
         raise LauncherError("B binding root contract differs")
@@ -473,10 +512,10 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
             "sha256": RUNNER_SHA,
         },
         "prepared_bootstrap": {
-            "commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
+            "commit": "410d6fa1876a6772215604ba765ae1d6a91d67b9",
             "execution_closure": "control_input/read",
             "role": "historical_control_member",
-            "sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
+            "sha256": "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0",
         },
         "same_runner": False,
     }:
@@ -503,6 +542,7 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
         "binary_sha256": RESIDENT_SHA,
         "binary_bytes": RESIDENT_BYTES,
         "binary_build_id_sha1": RESIDENT_BUILD_ID,
+        "build_inputs": RESIDENT_BUILD_INPUTS,
         "build": RESIDENT_BUILD_METADATA,
     }:
         raise LauncherError("B resident trust root differs")
@@ -519,7 +559,7 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     outputs = manifest.get("outputs")
     if not isinstance(outputs, dict) or outputs.get("runner_plan_sha256") != BINDING_PLAN_SHA:
         raise LauncherError("B runner plan binding differs")
-    if manifest.get("predecessor") != {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False}:
+    if manifest.get("predecessor") != {"commit": "31eb65a644eae20a3be6cbeb36b04aaaabf69429", "status": "SUPERSEDED", "execution_eligible": False}:
         raise LauncherError("B predecessor differs")
     return manifest
 
@@ -535,7 +575,7 @@ def runner_argv() -> list[str]:
         "--identity", str(INPUT_ROOT / "identity.json"), "--preflight", str(INPUT_ROOT / "preflight.json"),
         "--policy", str(INPUT_ROOT / "policy.json"), "--bundle-root", str(INPUT_ROOT),
         "--trusted-validator", str(VALIDATOR), "--trusted-validator-sha256", VALIDATOR_SHA,
-        "--output-dir", str(RUNNER_OUTPUT), "--run-id", "p2-r9700-resident-one-case-smoke-binding-v6-validate",
+        "--output-dir", str(RUNNER_OUTPUT), "--run-id", "p2-r9700-resident-one-case-smoke-binding-v7-validate",
         "--baseline-kind", "active-production", "--lock-path", str(LOCK_PATH), "--one-case-smoke", "--dry-run",
     ]
 
@@ -620,7 +660,7 @@ def process_record(argv: list[str], completed: subprocess.CompletedProcess[bytes
 
 def validate_validator_report(raw: bytes) -> dict[str, Any]:
     report = parse_json(raw, "validator report")
-    expected = {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v6"}
+    expected = {"status": "prepared_not_executed", "promotion": False, "run_id": "p2-r9700-resident-one-case-smoke-binding-v7"}
     if report != expected:
         raise LauncherError("validator report/root/B binding differs")
     return report

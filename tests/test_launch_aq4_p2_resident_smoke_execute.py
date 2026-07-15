@@ -22,7 +22,7 @@ TRUSTED_LAUNCHER_SHA = LAUNCHER.sha_bytes(SCRIPT.read_bytes())
 
 
 def _validator_success() -> bytes:
-    return b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v6", "status": "prepared_not_executed"}\n'
+    return b'{"promotion": false, "run_id": "p2-r9700-resident-one-case-smoke-binding-v7", "status": "prepared_not_executed"}\n'
 
 
 def _ready_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
@@ -195,19 +195,19 @@ def test_profile_roctx_sdk_authority_and_generic_runner_cli_are_exact() -> None:
     assert profile[index:index + 5] == ["--profile-roctx-ranges", "--roctx-library", str(library), "--roctx-library-sha256", LAUNCHER.ROCTX_LIBRARY_SHA]
 
 
-def test_v9_normal_and_profile_namespaces_are_fresh_and_disjoint() -> None:
-    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v9"
-    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v9"
-    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v9"
-    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v9"
-    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v9"
-    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v9"
-    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v9"
-    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v9"
+def test_v10_normal_and_profile_namespaces_are_disjoint_and_poststate_independent() -> None:
+    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v10"
+    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v10"
+    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v10"
+    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v10"
+    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
+    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v10"
+    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v10"
+    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v10"
     assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_PRODUCER_HELPER.read_bytes()) == LAUNCHER.PROFILE_PRODUCER_HELPER_SHA == "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
     assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_FAMILY_HELPER.read_bytes()) == LAUNCHER.PROFILE_FAMILY_HELPER_SHA == "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
     paths = {LAUNCHER.EXECUTE_RUN_OUTPUT, LAUNCHER.EXECUTE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_RUN_OUTPUT, LAUNCHER.PROFILE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY}
-    assert len(paths) == 5 and all(not path.exists() and not path.is_symlink() for path in paths)
+    assert len(paths) == 5
 
 
 def test_profile_execute_cli_builds_only_the_exact_ready_profile_binding(monkeypatch: pytest.MonkeyPatch) -> None:
