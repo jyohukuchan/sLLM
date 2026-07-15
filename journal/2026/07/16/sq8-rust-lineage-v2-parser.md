@@ -12,6 +12,7 @@ Rustのv2 lineage parserは新旧served-modelとportable migrationを処理で�
 - v1のseq0、seq1-2、seq3-4、seq5について、schema、固定verdict/status、actual、reason code(s)、authorization eligibility、live receiptとの一致を移行前に検証する。entryとlive receiptを同じ不正値へ変更する6系列の負試験を追加し、移行後に捨てる項目もfail-closedにした。
 - 新served-model SHA `31ba7f6483a5baf7d84f8b45a5d86d02c2c22d72d229ca74cfe593192e98ccdd`と旧v1 SHA `a4d541a8c44edd73e505f223b15cf92933b4e0bf2a257e8e9d08dbad94192542`をCPU loaderで受理する回帰試験を追加した。
 - 対象ファイルへrustfmtを適用した。`CARGO_BUILD_JOBS=1`でserved-model試験11件、worker試験18件、package checkを通した。full lib suiteはテストスレッドも1に固定し、744件pass、0件fail、isolated HIP試験1件ignoreで完走した。
+- `crates/ullm-engine/Cargo.toml`のedition 2024に合わせて、対象ファイルを`rustfmt --edition 2024`で再整形した。先のedition 2021指定を訂正し、差分がassertionの括弧と改行だけであることを監査して、専用試験11件、worker試験18件、package checkを再度通した。
 
 ## 次の行動
 

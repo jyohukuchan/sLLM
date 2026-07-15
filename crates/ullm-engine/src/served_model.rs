@@ -3499,72 +3499,98 @@ mod tests {
 
     #[test]
     fn portable_v2_manifest_tamper_matrix_is_rejected() {
-        assert!(validate_mutated_first_v2(|value| {
-            value
-                .as_object_mut()
-                .unwrap()
-                .insert("unknown".into(), Value::Bool(true));
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2(|value| {
-            value["entries"][7]["sequence"] = json!(8);
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2(|value| {
-            value["entries"][7]["path"] = value["entries"][0]["path"].clone();
-            value["entries"][7]["sha256"] = value["entries"][0]["sha256"].clone();
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2(|value| {
-            value["entries"][7]["source_commit"] = json!("b".repeat(40));
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2(|value| {
-            value["predecessor"]["migrated_prefix_sha256"] = json!("0".repeat(64));
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2(|value| {
-            value["predecessor"]["sha256"] = json!("0".repeat(64));
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2(|value| {
-            value["entries"].as_array_mut().unwrap().push(json!({}));
-        })
-        .is_err());
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unknown".into(), Value::Bool(true));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"][7]["sequence"] = json!(8);
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"][7]["path"] = value["entries"][0]["path"].clone();
+                value["entries"][7]["sha256"] = value["entries"][0]["sha256"].clone();
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"][7]["source_commit"] = json!("b".repeat(40));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["predecessor"]["migrated_prefix_sha256"] = json!("0".repeat(64));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["predecessor"]["sha256"] = json!("0".repeat(64));
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2(|value| {
+                value["entries"].as_array_mut().unwrap().push(json!({}));
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn portable_v1_migration_discarded_field_tamper_matrix_is_rejected() {
-        assert!(validate_mutated_first_v2_predecessor(0, |entry, receipt| {
-            entry["actual"] = json!("executed");
-            receipt["actual"] = json!("executed");
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2_predecessor(1, |entry, receipt| {
-            entry["reason_codes"] = json!([]);
-            receipt["reason_codes"] = json!([]);
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2_predecessor(2, |entry, receipt| {
-            entry["reason_codes"] = json!(["fixture_no_go", "fixture_no_go"]);
-            receipt["reason_codes"] = json!(["fixture_no_go", "fixture_no_go"]);
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2_predecessor(3, |entry, receipt| {
-            entry["actual_status"] = json!("succeeded");
-            receipt["actual"]["status"] = json!("succeeded");
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2_predecessor(4, |entry, receipt| {
-            entry["status"] = json!("pending");
-            receipt["status"] = json!("pending");
-        })
-        .is_err());
-        assert!(validate_mutated_first_v2_predecessor(5, |entry, receipt| {
-            entry["reason_code"] = json!("wrong_reason");
-            receipt["reason_code"] = json!("wrong_reason");
-        })
-        .is_err());
+        assert!(
+            validate_mutated_first_v2_predecessor(0, |entry, receipt| {
+                entry["actual"] = json!("executed");
+                receipt["actual"] = json!("executed");
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2_predecessor(1, |entry, receipt| {
+                entry["reason_codes"] = json!([]);
+                receipt["reason_codes"] = json!([]);
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2_predecessor(2, |entry, receipt| {
+                entry["reason_codes"] = json!(["fixture_no_go", "fixture_no_go"]);
+                receipt["reason_codes"] = json!(["fixture_no_go", "fixture_no_go"]);
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2_predecessor(3, |entry, receipt| {
+                entry["actual_status"] = json!("succeeded");
+                receipt["actual"]["status"] = json!("succeeded");
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2_predecessor(4, |entry, receipt| {
+                entry["status"] = json!("pending");
+                receipt["status"] = json!("pending");
+            })
+            .is_err()
+        );
+        assert!(
+            validate_mutated_first_v2_predecessor(5, |entry, receipt| {
+                entry["reason_code"] = json!("wrong_reason");
+                receipt["reason_code"] = json!("wrong_reason");
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -3653,13 +3679,15 @@ mod tests {
         let tampered_sha = sha256_bytes(&tampered);
         fs::set_permissions(&lineage_input, fs::Permissions::from_mode(0o600)).unwrap();
         write_immutable(&lineage_input, &tampered);
-        assert!(validate_lineage_file(
-            &lineage_input,
-            &tampered_sha,
-            Some(&"a".repeat(40)),
-            &mut HashSet::new(),
-        )
-        .is_err());
+        assert!(
+            validate_lineage_file(
+                &lineage_input,
+                &tampered_sha,
+                Some(&"a".repeat(40)),
+                &mut HashSet::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
