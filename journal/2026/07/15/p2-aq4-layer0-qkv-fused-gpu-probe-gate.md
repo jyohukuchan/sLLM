@@ -38,6 +38,12 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 - 比較成果物は`benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-fused-gpu-probe-v0.1/attempt3/comparisons/attempt3-vs-cpu-formal-v1/comparison.json`（SHA-256 `6e171794f95e3327a6a546a5d50e91dd34718c84a9894ebcfceacbb93b2088f5`）であり、比較ツールは`tools/compare-aq4-layer0-fused-attempt3.py`（SHA-256 `982db13090732fc26093026db18953a854d963a888035f4d2c035308b854a236`）である。比較は固定閾値を持たない記述的な測定で、`thresholds=null`、`policy_decision=not_evaluated`、holdout/promotionは未実施である。
 - 集約値（全ペアでnonfinite=0）は次のとおりである。GPU fused QKV対GPU standalone QKVはbyte mismatch `16285/98304`、max abs `3.814697265625e-06`、relative L2 `7.107261355045151e-08`、cosine `0.9999999999999886`。GPU fused QKV対CPU formal QKVは`25934/98304`、`5.7220458984375e-05`、`8.815654484874577e-07`、`0.9999999999995889`。GPU standalone QKV対CPU formal QKVは`25939/98304`、`5.91278076171875e-05`、`8.828352279004388e-07`、`0.9999999999995917`。GPU z対CPU formal zは`12421/49152`、`2.86102294921875e-05`、`9.195597723437779e-07`、`0.9999999999995598`。GPU gate対CPU formal gateは`98/384`、`1.5795230865478516e-06`、`8.724489477997521e-07`、`0.9999999999996194`。GPU beta対CPU formal betaは`67/384`、`4.76837158203125e-07`、`1.9279977243837735e-07`、`0.9999999999999825`である。これらは数値傾向の記録であり、合否・promotionの閾値判断には使用していない。
 
+## post-start readiness の期限付き再試行（2026-07-15）
+
+- `run-fused-gpu-probe-gate.sh`のpost-start判定を、固定120回ループから絶対monotonic deadline（既定120秒）内の全predicate再評価へ変更した。各attemptはservice active、SubState running、新MainPID（旧PIDとの差分を含む）、NRestarts不変、active/package/worker SHA tuple不変、lockのregular/nlink=1/mode=0600/uid=1000/gid=1000、flock保持、MainPIDのlock fd owner、health HTTP 200を順番どおり評価し、途中の一条件の失敗で残りを省略しない。
+- `$ATTEMPT_ROOT/post-start-readiness.jsonl`へattemptごとの条件結果とfailure reasonを追記し、成功またはdeadline timeout時に`post-start-readiness.json`（schema `ullm.aq4_layer0_qkv_fused_gpu_post_start_readiness.v1`）をcreate-new保存する。成功artifactはattempt数・elapsed、timeout artifactは期限・attempt数・最終failed subcondition理由を保持し、追加GPU/probeを実行しないことを`safety`へ記録する。health predicateはcurlのHTTP statusを厳密に`200`へ固定した。
+- GPU/serviceに触れない`MOCK_POST_START_READINESS=1`経路を追加し、ownerとhealthの初回失敗後の成功（2 attempts）、期限切れrc1、timeout後の追加GPU/probeなし、epoch/hash/lock predicate保持をテストで確認した。`bash -n`、fused/standalone gate tests（12 tests）、post-start test、`git diff --check`を実行した。GPU kernel実行、service stop/start、systemctl実測、promotionは行っていない。
+
 ## 次の行動
 
-attempt3のGPU/output/observer/復旧証跡と閾値なし比較成果物を限定commitとして保存する。post-start checkのrc1原因を別途確認するまで再実行・promotionは行わない。
+attempt3のGPU/output/observer/復旧証跡、閾値なし比較成果物、期限付きpost-start readiness診断を限定commitとして保存する。GPU/serviceの再実行・promotionは行わない。

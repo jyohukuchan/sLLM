@@ -60,6 +60,9 @@ MOCK_PREFLIGHT="${MOCK_PREFLIGHT:-0}"
 EXECUTE_GPU_PROBE="${EXECUTE_GPU_PROBE:-0}"
 MOCK_OBSERVER="${MOCK_OBSERVER:-0}"
 MOCK_OBSERVER_LOOP="${MOCK_OBSERVER_LOOP:-0}"
+MOCK_POST_START_READINESS="${MOCK_POST_START_READINESS:-0}"
+POST_START_TIMEOUT_SECONDS="${POST_START_TIMEOUT_SECONDS:-120}"
+POST_START_POLL_SECONDS="${POST_START_POLL_SECONDS:-1}"
 if [[ "$PREFLIGHT_ONLY" = 1 && "$PREFLIGHT_LOCKED_ONLY" = 1 ]]; then
   echo "preflight modes are mutually exclusive" >&2
   exit 64
@@ -90,6 +93,8 @@ fi
 ATTEMPT_ROOT="${ATTEMPT_ROOT:-$BASE/attempts/attempt1}"
 RUNTIME_PROBE="${RUNTIME_PROBE:-$ATTEMPT_ROOT/ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe}"
 RUNTIME_PROBE_META="${RUNTIME_PROBE_META:-$ATTEMPT_ROOT/runtime-probe-stat.json}"
+POST_START_READINESS_ARTIFACT="${POST_START_READINESS_ARTIFACT:-$ATTEMPT_ROOT/post-start-readiness.json}"
+POST_START_READINESS_LOG="${POST_START_READINESS_LOG:-$ATTEMPT_ROOT/post-start-readiness.jsonl}"
 
 fail() { echo "AQ4 GPU probe gate: $*" >&2; exit 1; }
 sha256_file() { sha256sum -- "$1" | awk '{print $1}'; }
@@ -289,6 +294,8 @@ validate_preflight() {
   require_absent "$STOP_MARKER"
   require_absent "$OBSERVER_FAIL_MARKER"
   require_absent "$OBSERVER_SAMPLE_MARKER"
+  require_absent "$POST_START_READINESS_ARTIFACT"
+  require_absent "$POST_START_READINESS_LOG"
 }
 
 observer_sample_once() {
@@ -442,27 +449,209 @@ cleanup_lock_substrate() {
   [[ ! -e "$LOCK" && ! -e "$RUNTIME_DIR" ]] || return 1
   LOCK_CLEAN=1
 }
-post_start_check() {
-  local new_pid new_restarts
-  for _ in $(seq 1 120); do
-    [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null)" = active ]] &&
-      [[ "$("${SYSTEMCTL[@]}" show "$SERVICE" -p SubState --value 2>/dev/null)" = running ]] && break
-    sleep 1
+post_start_monotonic_ns() {
+  "$PYTHON" -c 'import time; print(time.monotonic_ns())'
+}
+post_start_json_map() {
+  "$PYTHON" - "$@" <<'PY'
+import json
+import sys
+
+value = {}
+for raw in sys.argv[1:]:
+    key, separator, item = raw.partition("=")
+    if separator:
+        value[key] = item
+print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+PY
+}
+post_start_record_attempt() {
+  local attempt="$1" elapsed_ns="$2" status="$3" conditions_json="$4" failures_json="$5"
+  "$PYTHON" - "$POST_START_READINESS_LOG" "$attempt" "$elapsed_ns" "$status" "$conditions_json" "$failures_json" <<'PY'
+import json
+import pathlib
+import sys
+
+path, attempt, elapsed_ns, status, conditions, failures = sys.argv[1:]
+record = {
+    "attempt": int(attempt),
+    "elapsed_ns": int(elapsed_ns),
+    "status": status,
+    "conditions": json.loads(conditions),
+    "failure_reasons": json.loads(failures),
+}
+with pathlib.Path(path).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+post_start_write_artifact() {
+  local result="$1" attempt_count="$2" elapsed_ns="$3" deadline_ns="$4" last_failure_json="$5" safety_json="$6"
+  "$PYTHON" - "$POST_START_READINESS_ARTIFACT" "$POST_START_READINESS_LOG" "$result" "$attempt_count" "$elapsed_ns" "$deadline_ns" "$last_failure_json" "$safety_json" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+artifact, log_path, result, attempt_count, elapsed_ns, deadline_ns, last_failure, safety = sys.argv[1:]
+log = pathlib.Path(log_path)
+attempts = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+last = json.loads(last_failure)
+payload = {
+    "schema_version": "ullm.aq4_layer0_qkv_fused_gpu_post_start_readiness.v1",
+    "status": result,
+    "attempt_count": int(attempt_count),
+    "elapsed_ns": int(elapsed_ns),
+    "deadline_ns": int(deadline_ns),
+    "predicate_order": [
+        "service_active",
+        "service_running",
+        "new_main_pid",
+        "nrestarts",
+        "active_hashes",
+        "lock_identity",
+        "flock_held",
+        "owner",
+        "health_200",
+    ],
+    "attempts": attempts,
+    "last_failure": last if last else None,
+    "safety": json.loads(safety),
+}
+raw = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+fd = os.open(artifact, flags, 0o644)
+with os.fdopen(fd, "wb") as stream:
+    stream.write(raw)
+PY
+}
+post_start_sleep() {
+  local remaining_ns="$1" sleep_for
+  (( remaining_ns > 0 )) || return 0
+  sleep_for="$("$PYTHON" - "$remaining_ns" "$POST_START_POLL_SECONDS" <<'PY'
+import sys
+
+remaining_ns = int(sys.argv[1])
+poll_seconds = float(sys.argv[2])
+print(min(poll_seconds, remaining_ns / 1_000_000_000))
+PY
+)"
+  [[ "$sleep_for" = 0 ]] || sleep "$sleep_for"
+}
+post_start_check_mock() {
+  local start_ns deadline_ns now_ns end_ns attempt=0
+  local owner_failures="${MOCK_POST_START_OWNER_FAILURES:-0}"
+  local health_failures="${MOCK_POST_START_HEALTH_FAILURES:-0}"
+  local force_timeout="${MOCK_POST_START_FORCE_TIMEOUT:-0}"
+  local last_failure_json='{}' conditions_json failures_json
+  [[ "$owner_failures" =~ ^[0-9]+$ && "$health_failures" =~ ^[0-9]+$ ]] || return 1
+  [[ "$POST_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$POST_START_POLL_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  : > "$POST_START_READINESS_LOG" || return 1
+  start_ns="$(post_start_monotonic_ns)" || return 1
+  deadline_ns=$((start_ns + POST_START_TIMEOUT_SECONDS * 1000000000))
+  while :; do
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    if (( attempt > 0 && now_ns >= deadline_ns )); then break; fi
+    attempt=$((attempt + 1))
+    local failures=() conditions=(
+      "service_active=true" "service_running=true" "new_main_pid=true"
+      "nrestarts=true" "active_hashes=true" "lock_identity=true" "flock_held=true"
+    )
+    local owner_ok=true health_ok=true
+    if [[ "$force_timeout" = 1 || "$attempt" -le "$owner_failures" ]]; then
+      owner_ok=false; failures+=("owner=synthetic owner predicate failure")
+    fi
+    if [[ "$force_timeout" = 1 || "$attempt" -le "$health_failures" ]]; then
+      health_ok=false; failures+=("health_200=synthetic HTTP status was not 200")
+    fi
+    conditions+=("owner=$owner_ok" "health_200=$health_ok")
+    conditions_json="$(post_start_json_map "${conditions[@]}")" || return 1
+    failures_json="$(post_start_json_map "${failures[@]}")" || return 1
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    local elapsed_ns=$((now_ns - start_ns)) status=passed
+    (( ${#failures[@]} == 0 )) || status=retry
+    post_start_record_attempt "$attempt" "$elapsed_ns" "$status" "$conditions_json" "$failures_json" || return 1
+    if [[ "$status" = passed ]]; then
+      end_ns="$(post_start_monotonic_ns)" || return 1
+      post_start_write_artifact passed "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
+        '{"additional_gpu_probe_executed":false,"additional_probe_executed":false,"systemctl_operations":0}' || return 1
+      echo "mock_post_start_readiness=1 status=passed attempts=$attempt elapsed_ns=$((end_ns - start_ns)) gpu_probe=0 systemctl_operations=0"
+      return 0
+    fi
+    last_failure_json="$failures_json"
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    (( now_ns >= deadline_ns )) && break
+    post_start_sleep "$((deadline_ns - now_ns))" || return 1
   done
-  [[ "$("${SYSTEMCTL[@]}" is-active "$SERVICE")" = active ]] || return 1
-  [[ "$("${SYSTEMCTL[@]}" show "$SERVICE" -p SubState --value)" = running ]] || return 1
-  new_pid="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value)"
-  new_restarts="$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value)"
-  [[ "$new_pid" =~ ^[0-9]+$ && "$new_pid" -gt 0 && "$new_pid" != "$OLD_PID" ]] || return 1
-  [[ "$new_restarts" = "$OLD_RESTARTS" ]] || return 1
-  [[ "$(service_active_hashes)" = "$OLD_HASHES" ]] || return 1
-  require_regular "$LOCK" restored_runtime_lock
-  [[ "$(stat -Lc '%d:%i:%h:%a:%u:%g' "$LOCK")" = *":1:600:1000:1000" ]] || return 1
-  /usr/bin/flock -n "$LOCK" -c true && return 1
-  local owner
-  owner="$(sudo -n -- /usr/bin/sh -c 'for f in /proc/'"$new_pid"'/fd/*; do [ "$(readlink "$f" 2>/dev/null)" = "'"$LOCK"'" ] && echo found && exit 0; done; exit 1' 2>/dev/null || true)"
-  [[ "$owner" = found ]] || return 1
-  /usr/bin/curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3000/health >/dev/null || return 1
+  end_ns="$(post_start_monotonic_ns)" || return 1
+  post_start_write_artifact deadline_timeout "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
+    '{"additional_gpu_probe_executed":false,"additional_probe_executed":false,"systemctl_operations":0}' || return 1
+  echo "mock_post_start_readiness=1 status=deadline_timeout attempts=$attempt elapsed_ns=$((end_ns - start_ns)) gpu_probe=0 systemctl_operations=0" >&2
+  return 1
+}
+post_start_check() {
+  [[ "$MOCK_POST_START_READINESS" = 1 ]] && { post_start_check_mock; return $?; }
+  local start_ns deadline_ns now_ns end_ns attempt=0
+  local new_pid new_restarts active_state sub_state current_hashes lock_stat lock_rc owner health_code
+  local last_failure_json='{}' conditions_json failures_json
+  [[ "$POST_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$POST_START_POLL_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  : > "$POST_START_READINESS_LOG" || return 1
+  start_ns="$(post_start_monotonic_ns)" || return 1
+  deadline_ns=$((start_ns + POST_START_TIMEOUT_SECONDS * 1000000000))
+  while :; do
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    if (( attempt > 0 && now_ns >= deadline_ns )); then break; fi
+    attempt=$((attempt + 1))
+    local failures=() conditions=()
+    active_state="$("${SYSTEMCTL[@]}" is-active "$SERVICE" 2>/dev/null || true)"
+    sub_state="$("${SYSTEMCTL[@]}" show "$SERVICE" -p SubState --value 2>/dev/null || true)"
+    if [[ "$active_state" = active ]]; then conditions+=("service_active=true"); else conditions+=("service_active=false"); failures+=("service_active=expected active got ${active_state:-missing}"); fi
+    if [[ "$sub_state" = running ]]; then conditions+=("service_running=true"); else conditions+=("service_running=false"); failures+=("service_running=expected running got ${sub_state:-missing}"); fi
+    new_pid="$("${SYSTEMCTL[@]}" show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+    if [[ "$new_pid" =~ ^[0-9]+$ ]] && (( new_pid > 0 )) && [[ "$new_pid" != "$OLD_PID" ]]; then conditions+=("new_main_pid=true"); else conditions+=("new_main_pid=false"); failures+=("new_main_pid=expected positive PID different from old PID"); fi
+    new_restarts="$("${SYSTEMCTL[@]}" show "$SERVICE" -p NRestarts --value 2>/dev/null || true)"
+    if [[ "$new_restarts" = "$OLD_RESTARTS" ]]; then conditions+=("nrestarts=true"); else conditions+=("nrestarts=false"); failures+=("nrestarts=expected $OLD_RESTARTS got ${new_restarts:-missing}"); fi
+    current_hashes="$(service_active_hashes 2>/dev/null || true)"
+    if [[ -n "$current_hashes" && "$current_hashes" = "$OLD_HASHES" ]]; then conditions+=("active_hashes=true"); else conditions+=("active_hashes=false"); failures+=("active_hashes=active/package/worker SHA tuple changed or unavailable"); fi
+    lock_stat="$(stat -Lc '%d:%i:%h:%a:%u:%g' "$LOCK" 2>/dev/null || true)"
+    if [[ -f "$LOCK" && ! -L "$LOCK" && "$lock_stat" = *":1:600:1000:1000" ]]; then conditions+=("lock_identity=true"); else conditions+=("lock_identity=false"); failures+=("lock_identity=expected regular nlink1 mode0600 uid1000 gid1000"); fi
+    if [[ "$lock_stat" = *":1:600:1000:1000" ]]; then
+      lock_rc=0; /usr/bin/flock -n "$LOCK" -c true || lock_rc=$?
+      if [[ "$lock_rc" = 1 ]]; then conditions+=("flock_held=true"); else conditions+=("flock_held=false"); failures+=("flock_held=expected lock contention rc1 got rc$lock_rc"); fi
+    else
+      conditions+=("flock_held=false"); failures+=("flock_held=lock identity unavailable");
+    fi
+    owner=""
+    if [[ "$new_pid" =~ ^[0-9]+$ ]] && (( new_pid > 0 )); then
+      owner="$(sudo -n -- /usr/bin/sh -c 'for f in /proc/'"$new_pid"'/fd/*; do [ "$(readlink "$f" 2>/dev/null)" = "'"$LOCK"'" ] && echo found && exit 0; done; exit 1' 2>/dev/null || true)"
+    fi
+    if [[ "$owner" = found ]]; then conditions+=("owner=true"); else conditions+=("owner=false"); failures+=("owner=expected new MainPID to hold lock fd"); fi
+    health_code="$(/usr/bin/curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 http://127.0.0.1:3000/health 2>/dev/null || true)"
+    if [[ "$health_code" = 200 ]]; then conditions+=("health_200=true"); else conditions+=("health_200=false"); failures+=("health_200=expected HTTP 200 got ${health_code:-no response}"); fi
+    conditions_json="$(post_start_json_map "${conditions[@]}")" || return 1
+    failures_json="$(post_start_json_map "${failures[@]}")" || return 1
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    local elapsed_ns=$((now_ns - start_ns)) status=passed
+    (( ${#failures[@]} == 0 )) || status=retry
+    post_start_record_attempt "$attempt" "$elapsed_ns" "$status" "$conditions_json" "$failures_json" || return 1
+    if [[ "$status" = passed ]]; then
+      end_ns="$(post_start_monotonic_ns)" || return 1
+      post_start_write_artifact passed "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
+        '{"additional_gpu_probe_executed":false,"additional_probe_executed":false}' || return 1
+      echo "post_start_readiness=passed attempts=$attempt elapsed_ns=$((end_ns - start_ns))"
+      return 0
+    fi
+    last_failure_json="$failures_json"
+    now_ns="$(post_start_monotonic_ns)" || return 1
+    (( now_ns >= deadline_ns )) && break
+    post_start_sleep "$((deadline_ns - now_ns))" || return 1
+  done
+  end_ns="$(post_start_monotonic_ns)" || return 1
+  post_start_write_artifact deadline_timeout "$attempt" "$((end_ns - start_ns))" "$deadline_ns" "$last_failure_json" \
+    '{"additional_gpu_probe_executed":false,"additional_probe_executed":false}' || return 1
+  echo "post_start_readiness=deadline_timeout attempts=$attempt elapsed_ns=$((end_ns - start_ns))" >&2
+  return 1
 }
 restore_after_failure() {
   local code=$? observer_rc=0 cleanup_rc=0 start_rc=0
@@ -529,6 +718,13 @@ execute_probe() {
 }
 
 validate_preflight
+if [[ "$MOCK_POST_START_READINESS" = 1 ]]; then
+  [[ ! -L "$BASE" ]] || fail "BASE must not be a symlink"
+  mkdir -p -- "$BASE/attempts" || fail "mock post-start attempt parent creation failed"
+  mkdir -m 0750 -- "$ATTEMPT_ROOT" || fail "mock post-start attempt directory creation failed"
+  post_start_check
+  exit $?
+fi
 if [[ "${MOCK_ARCHIVE_SETUP:-0}" = 1 ]]; then
   [[ ! -L "$BASE" ]] || fail "BASE must not be a symlink"
   mkdir -p -- "$BASE/attempts" || fail "attempt parent creation failed"

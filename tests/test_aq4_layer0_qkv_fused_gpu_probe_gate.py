@@ -44,6 +44,10 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             'ROCM_SMI_METRIC_ARGS=(metric -g "$EXPECTED_PHYSICAL_CARD" -m -u -p -t --json)',
             'ROCM_SMI_STATIC_ARGS=(static -g "$EXPECTED_PHYSICAL_CARD" -a --json)',
             'target_graphics_version', 'mem_usage',
+            'POST_START_TIMEOUT_SECONDS="${POST_START_TIMEOUT_SECONDS:-120}"',
+            'post_start_readiness.v1', 'post_start_record_attempt',
+            'post_start_check_mock', 'deadline_timeout', 'health_200',
+            'additional_gpu_probe_executed', 'systemctl_operations',
         ):
             self.assertIn(token, text)
         self.assertNotIn("--showmeminfo", text)
@@ -166,6 +170,89 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertNotEqual(failure_result.returncode, 0)
             self.assertTrue((failure_base / "observer-failed.marker").is_file())
             self.assertFalse((failure_base / "observer-sample.marker").exists())
+
+    def _mock_post_start_env(self, base: Path, **overrides: str) -> dict[str, str]:
+        probe = PROBE_ROOT / "ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe"
+        env = os.environ.copy()
+        env.update(
+            {
+                "MOCK_PREFLIGHT": "1",
+                "MOCK_POST_START_READINESS": "1",
+                "MOCK_BASE": str(base),
+                "MOCK_PROBE_ROOT": str(PROBE_ROOT),
+                "MOCK_PROBE": str(probe),
+                "MOCK_RECEIPT": str(PROBE_ROOT / "build-receipt.json"),
+                "MOCK_SUMS": str(PROBE_ROOT / "SHA256SUMS"),
+                "PYTHON": "/usr/bin/python3",
+                "POST_START_TIMEOUT_SECONDS": "1",
+                "POST_START_POLL_SECONDS": "0.1",
+            }
+        )
+        env.update(overrides)
+        return env
+
+    def test_mock_post_start_retries_owner_and_health_then_records_success(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ullm-aq4-post-start-success-") as directory:
+            base = Path(directory)
+            env = self._mock_post_start_env(
+                base,
+                MOCK_POST_START_OWNER_FAILURES="1",
+                MOCK_POST_START_HEALTH_FAILURES="1",
+            )
+            result = subprocess.run(
+                ["bash", str(GATE)], env=env, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("mock_post_start_readiness=1 status=passed attempts=2", result.stdout)
+            artifact = json.loads(
+                (base / "attempts/attempt1/post-start-readiness.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(artifact["status"], "passed")
+            self.assertEqual(artifact["attempt_count"], 2)
+            self.assertGreaterEqual(artifact["elapsed_ns"], 0)
+            self.assertEqual(
+                artifact["predicate_order"],
+                [
+                    "service_active", "service_running", "new_main_pid", "nrestarts",
+                    "active_hashes", "lock_identity", "flock_held", "owner", "health_200",
+                ],
+            )
+            self.assertIn("owner", artifact["attempts"][0]["failure_reasons"])
+            self.assertIn("health_200", artifact["attempts"][0]["failure_reasons"])
+            self.assertEqual(artifact["attempts"][-1]["failure_reasons"], {})
+            final_conditions = artifact["attempts"][-1]["conditions"]
+            for key in ("new_main_pid", "nrestarts", "active_hashes", "lock_identity", "flock_held"):
+                self.assertEqual(final_conditions[key], "true")
+            self.assertEqual(
+                artifact["safety"],
+                {
+                    "additional_gpu_probe_executed": False,
+                    "additional_probe_executed": False,
+                    "systemctl_operations": 0,
+                },
+            )
+
+    def test_mock_post_start_timeout_is_rc1_with_final_reasons_and_no_probe(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ullm-aq4-post-start-timeout-") as directory:
+            base = Path(directory)
+            env = self._mock_post_start_env(base, MOCK_POST_START_FORCE_TIMEOUT="1")
+            result = subprocess.run(
+                ["bash", str(GATE)], env=env, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("status=deadline_timeout", result.stderr)
+            self.assertIn("gpu_probe=0", result.stderr)
+            self.assertIn("systemctl_operations=0", result.stderr)
+            artifact_path = base / "attempts/attempt1/post-start-readiness.json"
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(artifact["status"], "deadline_timeout")
+            self.assertGreaterEqual(artifact["attempt_count"], 1)
+            self.assertIn("owner", artifact["last_failure"])
+            self.assertIn("health_200", artifact["last_failure"])
+            self.assertFalse(artifact["safety"]["additional_gpu_probe_executed"])
+            self.assertFalse(artifact["safety"]["additional_probe_executed"])
+            self.assertEqual(artifact["safety"]["systemctl_operations"], 0)
+            self.assertFalse((base / "attempts/attempt1/output").exists())
 
     def test_restore_attempts_service_start_after_cleanup_failure(self) -> None:
         text = GATE.read_text(encoding="utf-8")
