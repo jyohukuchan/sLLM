@@ -2654,7 +2654,7 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 479, "passed": 479, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 481, "passed": 481, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
@@ -2683,9 +2683,9 @@ QA_ATTESTATION = {
             },
             {
                 "name": "diagnostic_capture",
-                "command": ["python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
-                "collected": 27, "passed": 27, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd", "git_blob": "1eae6dbd21620ca7e6f465b061dc67244d1b7261", "collected": 27, "passed": 27}],
+                "command": ["env", "ULLM_TEST_AQ4_P2_RESIDENT_DRIVER=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver", "python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
+                "collected": 29, "passed": 29, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "1f5b12803759e6596021dfd8c5e1455f2635f586", "git_blob": "4dfa4e419098e3bf2dfc658eb2f93e1be6fa8008", "collected": 29, "passed": 29}],
             },
             {
                 "name": "selection_raw_producer",
@@ -2764,12 +2764,12 @@ def validate_qa_test_manifest() -> None:
             suite_paths.append(path)
             suite_collected += item["collected"]
             suite_passed += item["passed"]
-        expected_command = (
-            ["cargo", "test", "-p", "ullm-engine", "--bin", "ullm-aq4-p2-resident-driver", "--no-default-features"]
-            if suite.get("name") == "resident_driver_unit"
-            and suite_paths == ["crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs"]
-            else ["python3", "-m", "pytest", "-q", *suite_paths]
-        )
+        if suite.get("name") == "resident_driver_unit" and suite_paths == ["crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs"]:
+            expected_command = ["cargo", "test", "-p", "ullm-engine", "--bin", "ullm-aq4-p2-resident-driver", "--no-default-features"]
+        elif suite.get("name") == "diagnostic_capture" and suite_paths == ["tests/test_capture_aq4_p3_diagnostic_profile.py"]:
+            expected_command = ["env", f"ULLM_TEST_AQ4_P2_RESIDENT_DRIVER={LAUNCHER.RESIDENT_DRIVER}", "python3", "-m", "pytest", "-q", *suite_paths]
+        else:
+            expected_command = ["python3", "-m", "pytest", "-q", *suite_paths]
         if suite.get("command") != expected_command or suite.get("collected") != suite_collected or suite.get("passed") != suite_passed or suite.get("failed") != 0 or suite.get("deselected") != 0:
             raise HarnessError("QA exact test suite command/counts differ")
         collected += suite_collected
