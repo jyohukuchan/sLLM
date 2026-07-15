@@ -459,6 +459,28 @@ fn validate_direct_sequence_output_contract(
     Ok(())
 }
 
+/// Typed failure boundary for the direct sequence-output API.
+///
+/// Admission failures occur before a device operation starts and may safely be retried through
+/// the existing workspace-output copy path.  A non-ready request or any post-start failure must
+/// not be retried in place: request-owned recurrent/KV state is poisoned until synchronized reset.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResidentSequenceFailure {
+    Admission(String),
+    NotReusable(String),
+    Execution(String),
+}
+
+impl ResidentSequenceFailure {
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::Admission(message) | Self::NotReusable(message) | Self::Execution(message) => {
+                message
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResidentRequestState {
     Ready,
@@ -3073,6 +3095,7 @@ impl PackageSelfAttnResidentStepLayer {
             None,
             label,
         )
+        .map_err(ResidentSequenceFailure::message)
     }
 
     /// Runs the sequence path with its final `[M, H]` output written directly to a caller-owned
@@ -3092,6 +3115,35 @@ impl PackageSelfAttnResidentStepLayer {
         output: &mut ullm_runtime_sys::RuntimeBuffer,
         label: &str,
     ) -> Result<[OperationExecutionRecord; 2], String> {
+        self.run_device_sequence_for_phase_to_buffer_typed(
+            stream,
+            residual,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            cache_start,
+            phase,
+            workspace,
+            output,
+            label,
+        )
+        .map_err(ResidentSequenceFailure::message)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_device_sequence_for_phase_to_buffer_typed(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        rotary_dim: usize,
+        rope_base: f32,
+        cache_start: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageSelfAttnSequenceWorkspace,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], ResidentSequenceFailure> {
         self.run_device_sequence_for_phase_with_output(
             stream,
             residual,
@@ -3119,86 +3171,104 @@ impl PackageSelfAttnResidentStepLayer {
         workspace: &mut PackageSelfAttnSequenceWorkspace,
         mut direct_output: Option<&mut ullm_runtime_sys::RuntimeBuffer>,
         label: &str,
-    ) -> Result<[OperationExecutionRecord; 2], String> {
-        self.request_state.ensure_ready(label)?;
+    ) -> Result<[OperationExecutionRecord; 2], ResidentSequenceFailure> {
+        self.request_state
+            .ensure_ready(label)
+            .map_err(ResidentSequenceFailure::NotReusable)?;
         if !(2..=128).contains(&sequence_len) || sequence_len > workspace.max_width {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} self-attn sequence width must be in 2..={} and workspace capacity, got {sequence_len}",
                 workspace.max_width
-            ));
+            )));
         }
         let cache_limit = self
             .weights
             .block_size
             .checked_mul(self.weights.cache_blocks)
-            .ok_or_else(|| format!("{label} self-attn sequence cache capacity overflows"))?;
+            .ok_or_else(|| {
+                ResidentSequenceFailure::Admission(format!(
+                    "{label} self-attn sequence cache capacity overflows"
+                ))
+            })?;
         if cache_start != self.written_len
             || cache_start
                 .checked_add(sequence_len)
                 .is_none_or(|end| end > cache_limit)
         {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} self-attn sequence cache range {cache_start}..{} is invalid for written_len {} capacity {cache_limit}",
                 cache_start.saturating_add(sequence_len),
                 self.written_len
-            ));
+            )));
         }
         if rotary_dim == 0 || rotary_dim > self.weights.head_dim || !rotary_dim.is_multiple_of(2) {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} self-attn sequence rotary_dim {rotary_dim} is invalid for head_dim {}",
                 self.weights.head_dim
-            ));
+            )));
         }
         if !rope_base.is_finite() || rope_base <= 1.0 {
-            return Err(format!("{label} self-attn sequence RoPE base is invalid"));
+            return Err(ResidentSequenceFailure::Admission(format!(
+                "{label} self-attn sequence RoPE base is invalid"
+            )));
         }
         let geometry = self.sequence_geometry();
         if workspace.geometry != geometry {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} self-attn sequence workspace geometry mismatch: layer={geometry:?} workspace={:?}",
                 workspace.geometry
-            ));
+            )));
         }
         if geometry.q_projection_layout != PackageSelfAttnQProjectionLayout::Qwen35Gated {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} native self-attn sequence requires the Qwen3.5 gated Q projection layout"
-            ));
+            )));
         }
         if !self.weights.use_paged_decode_sigmoid_gate {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} native self-attn sequence requires the paged sigmoid-gate reader"
-            ));
+            )));
         }
         let hidden_elements = sequence_len
             .checked_mul(self.weights.hidden)
-            .ok_or_else(|| format!("{label} self-attn sequence hidden elements overflow"))?;
-        let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn sequence hidden")?;
+            .ok_or_else(|| {
+                ResidentSequenceFailure::Admission(format!(
+                    "{label} self-attn sequence hidden elements overflow"
+                ))
+            })?;
+        let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn sequence hidden")
+            .map_err(ResidentSequenceFailure::Admission)?;
         if let Some(output) = direct_output.as_deref() {
-            let output_bytes = output
-                .size()
-                .map_err(|error| format!("failed to query {label} direct output bytes: {error}"))?;
+            let output_bytes = output.size().map_err(|error| {
+                ResidentSequenceFailure::Admission(format!(
+                    "failed to query {label} direct output bytes: {error}"
+                ))
+            })?;
             validate_direct_sequence_output_contract(
                 output_bytes,
                 hidden_bytes,
                 std::ptr::eq(output, residual),
                 std::ptr::eq(output, workspace.output_buffer()),
                 label,
-            )?;
+            )
+            .map_err(ResidentSequenceFailure::Admission)?;
         }
-        let residual_bytes = residual
-            .size()
-            .map_err(|error| format!("failed to query {label} residual size: {error}"))?;
+        let residual_bytes = residual.size().map_err(|error| {
+            ResidentSequenceFailure::Admission(format!(
+                "failed to query {label} residual size: {error}"
+            ))
+        })?;
         if residual_bytes < hidden_bytes {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} self-attn sequence residual buffer is too small: got {residual_bytes} bytes expected at least {hidden_bytes}"
-            ));
+            )));
         }
         self.operation_phase = phase;
         self.last_operation_executions = [None, None];
         self.last_component_step_ms = None;
         let fail = |layer: &mut Self, message: String| {
             layer.request_state.mark_execution_failed();
-            Err(message)
+            Err(ResidentSequenceFailure::Execution(message))
         };
 
         if let Err(error) = ullm_runtime_sys::segmented_rmsnorm_f32(
@@ -4680,10 +4750,21 @@ impl PackageLinearAttnResidentStepLayer {
         }
         result?;
         let [first, second] = self.take_last_operation_executions();
-        Ok([
-            first.ok_or_else(|| format!("{label} did not record QKV prepare"))?,
-            second.ok_or_else(|| format!("{label} did not record recurrent scan"))?,
-        ])
+        let first = match first {
+            Some(record) => record,
+            None => {
+                self.request_state.mark_execution_failed();
+                return Err(format!("{label} did not record QKV prepare"));
+            }
+        };
+        let second = match second {
+            Some(record) => record,
+            None => {
+                self.request_state.mark_execution_failed();
+                return Err(format!("{label} did not record recurrent scan"));
+            }
+        };
+        Ok([first, second])
     }
 
     /// Runs the sequence path with its final `[M, H]` output written directly to a caller-owned
@@ -4699,42 +4780,72 @@ impl PackageLinearAttnResidentStepLayer {
         output: &mut ullm_runtime_sys::RuntimeBuffer,
         label: &str,
     ) -> Result<[OperationExecutionRecord; 2], String> {
-        self.request_state.ensure_ready(label)?;
+        self.run_device_sequence_for_phase_to_buffer_typed(
+            stream,
+            residual,
+            sequence_len,
+            phase,
+            workspace,
+            output,
+            label,
+        )
+        .map_err(ResidentSequenceFailure::message)
+    }
+
+    pub(crate) fn run_device_sequence_for_phase_to_buffer_typed(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &ullm_runtime_sys::RuntimeBuffer,
+        sequence_len: usize,
+        phase: ExecutionPhase,
+        workspace: &mut PackageLinearAttnSequenceWorkspace,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<[OperationExecutionRecord; 2], ResidentSequenceFailure> {
+        self.request_state
+            .ensure_ready(label)
+            .map_err(ResidentSequenceFailure::NotReusable)?;
         if !(2..=workspace.max_width).contains(&sequence_len) || sequence_len > 128 {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} sequence width must be in 2..={}, got {sequence_len}",
                 workspace.max_width.min(128)
-            ));
+            )));
         }
         let geometry = self.sequence_geometry();
         if geometry != workspace.geometry {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} shared sequence workspace geometry mismatch: layer={geometry:?} workspace={:?}",
                 workspace.geometry
-            ));
+            )));
         }
-        let sequence_elements = sequence_len
-            .checked_mul(geometry.hidden)
-            .ok_or_else(|| format!("{label} sequence element count overflows"))?;
-        let required_bytes = checked_f32_byte_len(sequence_elements, label)?;
-        let residual_bytes = residual
-            .size()
-            .map_err(|error| format!("failed to query {label} residual bytes: {error}"))?;
+        let sequence_elements = sequence_len.checked_mul(geometry.hidden).ok_or_else(|| {
+            ResidentSequenceFailure::Admission(format!("{label} sequence element count overflows"))
+        })?;
+        let required_bytes = checked_f32_byte_len(sequence_elements, label)
+            .map_err(ResidentSequenceFailure::Admission)?;
+        let residual_bytes = residual.size().map_err(|error| {
+            ResidentSequenceFailure::Admission(format!(
+                "failed to query {label} residual bytes: {error}"
+            ))
+        })?;
         if residual_bytes < required_bytes {
-            return Err(format!(
+            return Err(ResidentSequenceFailure::Admission(format!(
                 "{label} residual buffer is too small: got {residual_bytes} expected at least {required_bytes}"
-            ));
+            )));
         }
-        let output_bytes = output
-            .size()
-            .map_err(|error| format!("failed to query {label} direct output bytes: {error}"))?;
+        let output_bytes = output.size().map_err(|error| {
+            ResidentSequenceFailure::Admission(format!(
+                "failed to query {label} direct output bytes: {error}"
+            ))
+        })?;
         validate_direct_sequence_output_contract(
             output_bytes,
             required_bytes,
             std::ptr::eq(output, residual),
             std::ptr::eq(output, workspace.output_buffer()),
             label,
-        )?;
+        )
+        .map_err(ResidentSequenceFailure::Admission)?;
         self.operation_phase = phase;
         self.last_component_step_ms = None;
         self.last_operation_executions = [None, None];
@@ -4749,12 +4860,27 @@ impl PackageLinearAttnResidentStepLayer {
         if result.is_err() {
             self.request_state.mark_execution_failed();
         }
-        result?;
+        result.map_err(ResidentSequenceFailure::Execution)?;
         let [first, second] = self.take_last_operation_executions();
-        Ok([
-            first.ok_or_else(|| format!("{label} did not record QKV prepare"))?,
-            second.ok_or_else(|| format!("{label} did not record recurrent scan"))?,
-        ])
+        let first = match first {
+            Some(record) => record,
+            None => {
+                self.request_state.mark_execution_failed();
+                return Err(ResidentSequenceFailure::Execution(format!(
+                    "{label} did not record QKV prepare"
+                )));
+            }
+        };
+        let second = match second {
+            Some(record) => record,
+            None => {
+                self.request_state.mark_execution_failed();
+                return Err(ResidentSequenceFailure::Execution(format!(
+                    "{label} did not record recurrent scan"
+                )));
+            }
+        };
+        Ok([first, second])
     }
 
     fn run_device_sequence_inner(

@@ -25,7 +25,7 @@ use crate::qwen35_aq4_layer_runtime::{
     PackageLinearAttnComponentStepMs, PackageLinearAttnResidentStepLayer,
     PackageLinearAttnSequenceGeometry, PackageLinearAttnSequenceWorkspace,
     PackageSelfAttnComponentStepMs, PackageSelfAttnResidentStepLayer,
-    PackageSelfAttnSequenceGeometry, PackageSelfAttnSequenceWorkspace,
+    PackageSelfAttnSequenceGeometry, PackageSelfAttnSequenceWorkspace, ResidentSequenceFailure,
 };
 use crate::qwen35_package_contract::{
     PackageDecoderLayerKind, PackageManifestLayerEntry, package_manifest_layer_entries,
@@ -35,6 +35,17 @@ const QWEN35_LINEAR_PERSISTENT_STATE_BYTES: u64 = 2_228_224;
 const QWEN35_SELF_PERSISTENT_STATE_BYTES: u64 = 33_554_432;
 const QWEN35_REQUIRED_DEVICE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 pub const QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH: usize = 128;
+
+fn native_prefill_sequence_width_admitted(sequence_len: usize) -> bool {
+    (2..=QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH).contains(&sequence_len)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Qwen35Aq4SequenceOutputRoute {
+    Copy,
+    Direct,
+    CopyFallback,
+}
 
 fn direct_prefill_sequence_output_enabled_value(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -55,11 +66,7 @@ fn direct_prefill_sequence_output_enabled() -> bool {
 /// finite/equal output, and admission-failure fallback; they are indirect evidence and do not
 /// replace a real R9700 execution/profile.
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CpuSequenceOutputPath {
-    Copy,
-    Direct,
-}
+type CpuSequenceOutputPath = Qwen35Aq4SequenceOutputRoute;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +77,7 @@ enum CpuDirectSequenceFailure {
 
 #[cfg(test)]
 fn cpu_sequence_output_route(
+    sequence_len: usize,
     workspace_output: &[f32],
     destination: &mut [f32],
     direct_requested: bool,
@@ -87,6 +95,12 @@ fn cpu_sequence_output_route(
     if aliases_workspace {
         return Err(format!("{label} direct sequence output aliases workspace"));
     }
+    // M=1 remains the indirect/row-splice contract. The production native prefill API rejects
+    // it before dispatch, so the CPU seam must not present direct M=1 as a supported route.
+    if sequence_len == 1 {
+        destination.copy_from_slice(workspace_output);
+        return Ok(Qwen35Aq4SequenceOutputRoute::Copy);
+    }
     if direct_requested {
         match direct_failure {
             Some(CpuDirectSequenceFailure::Execution) => {
@@ -94,7 +108,7 @@ fn cpu_sequence_output_route(
             }
             Some(CpuDirectSequenceFailure::Admission) => {
                 destination.copy_from_slice(workspace_output);
-                return Ok(CpuSequenceOutputPath::Copy);
+                return Ok(Qwen35Aq4SequenceOutputRoute::CopyFallback);
             }
             None => {
                 for (destination_value, source_value) in
@@ -107,7 +121,7 @@ fn cpu_sequence_output_route(
         }
     }
     destination.copy_from_slice(workspace_output);
-    Ok(CpuSequenceOutputPath::Copy)
+    Ok(Qwen35Aq4SequenceOutputRoute::Copy)
 }
 
 /// Borrowed, ordered view of one prepared generation step's post-final-RMSNorm hidden row and
@@ -144,6 +158,8 @@ pub struct Qwen35Aq4PrefillInvocation {
     pub execution_width: usize,
     pub phase: ExecutionPhase,
     pub records: [OperationExecutionRecord; 2],
+    pub direct_sequence_output_requested: bool,
+    pub output_route: Qwen35Aq4SequenceOutputRoute,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1106,7 +1122,7 @@ impl Qwen35Aq4ModelRuntime {
         label: &str,
     ) -> Result<Qwen35Aq4PrefillChunkStep, String> {
         let sequence_len = token_ids.len();
-        if !(2..=QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH).contains(&sequence_len) {
+        if !native_prefill_sequence_width_admitted(sequence_len) {
             return Err(format!(
                 "{label} native prefill width must be in 2..={QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH}, got {sequence_len}"
             ));
@@ -1178,8 +1194,9 @@ impl Qwen35Aq4ModelRuntime {
                     let workspace = self.prefill_sequence_workspace.as_mut().ok_or_else(|| {
                         format!("{layer_label} has no shared linear sequence workspace")
                     })?;
+                    let mut output_route = Qwen35Aq4SequenceOutputRoute::Copy;
                     let records_result = if direct_sequence_output {
-                        match layer.run_device_sequence_for_phase_to_buffer(
+                        match layer.run_device_sequence_for_phase_to_buffer_typed(
                             &mut self.stream,
                             source,
                             sequence_len,
@@ -1188,32 +1205,44 @@ impl Qwen35Aq4ModelRuntime {
                             destination,
                             &layer_label,
                         ) {
-                            Ok(records) => Ok(records),
-                            Err(direct_error) if layer.request_state_is_reusable() => layer
-                                .run_device_sequence_for_phase(
+                            Ok(records) => {
+                                output_route = Qwen35Aq4SequenceOutputRoute::Direct;
+                                Ok(records)
+                            }
+                            Err(ResidentSequenceFailure::Admission(direct_error)) => {
+                                let records_result = layer.run_device_sequence_for_phase(
                                     &mut self.stream,
                                     source,
                                     sequence_len,
                                     phase,
                                     workspace,
                                     &layer_label,
-                                )
-                                .map_err(|fallback_error| {
-                                    format!(
+                                );
+                                match records_result {
+                                    Ok(records) => {
+                                        output_route = Qwen35Aq4SequenceOutputRoute::CopyFallback;
+                                        Ok(records)
+                                    }
+                                    Err(fallback_error) => Err(format!(
                                         "{layer_label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
-                                    )
-                                }),
-                            Err(error) => Err(error),
+                                    )),
+                                }
+                            }
+                            Err(error) => Err(error.message()),
                         }
                     } else {
-                        layer.run_device_sequence_for_phase(
+                        let records_result = layer.run_device_sequence_for_phase(
                             &mut self.stream,
                             source,
                             sequence_len,
                             phase,
                             workspace,
                             &layer_label,
-                        )
+                        );
+                        if records_result.is_ok() {
+                            output_route = Qwen35Aq4SequenceOutputRoute::Copy;
+                        }
+                        records_result
                     };
                     let records = match records_result {
                         Ok(records) => records,
@@ -1231,7 +1260,7 @@ impl Qwen35Aq4ModelRuntime {
                             return Err(error);
                         }
                     };
-                    if !direct_sequence_output {
+                    if !matches!(output_route, Qwen35Aq4SequenceOutputRoute::Direct) {
                         if let Err(error) = destination.copy_from_buffer(
                             0,
                             workspace.output_buffer(),
@@ -1254,21 +1283,22 @@ impl Qwen35Aq4ModelRuntime {
                         }
                     }
                     if layer_position + 1 == layer_count {
-                        let retain_result = if direct_sequence_output {
-                            layer.retain_last_sequence_row_from_buffer(
-                                &mut self.stream,
-                                destination,
-                                sequence_len,
-                                &layer_label,
-                            )
-                        } else {
-                            layer.retain_last_sequence_row(
-                                &mut self.stream,
-                                workspace,
-                                sequence_len,
-                                &layer_label,
-                            )
-                        };
+                        let retain_result =
+                            if matches!(output_route, Qwen35Aq4SequenceOutputRoute::Direct) {
+                                layer.retain_last_sequence_row_from_buffer(
+                                    &mut self.stream,
+                                    destination,
+                                    sequence_len,
+                                    &layer_label,
+                                )
+                            } else {
+                                layer.retain_last_sequence_row(
+                                    &mut self.stream,
+                                    workspace,
+                                    sequence_len,
+                                    &layer_label,
+                                )
+                            };
                         if let Err(error) = retain_result {
                             layer.mark_request_execution_failed();
                             self.last_partial_prefill_invocations.push(
@@ -1296,13 +1326,16 @@ impl Qwen35Aq4ModelRuntime {
                         execution_width: sequence_len,
                         phase,
                         records,
+                        direct_sequence_output_requested: direct_sequence_output,
+                        output_route,
                     });
                 }
                 Qwen35Aq4ResidentLayer::SelfAttention(layer) => {
                     if let Some(workspace) = self.prefill_self_attention_sequence_workspace.as_mut()
                     {
+                        let mut output_route = Qwen35Aq4SequenceOutputRoute::Copy;
                         let records_result = if direct_sequence_output {
-                            match layer.run_device_sequence_for_phase_to_buffer(
+                            match layer.run_device_sequence_for_phase_to_buffer_typed(
                                 &mut self.stream,
                                 source,
                                 sequence_len,
@@ -1314,9 +1347,12 @@ impl Qwen35Aq4ModelRuntime {
                                 destination,
                                 &layer_label,
                             ) {
-                                Ok(records) => Ok(records),
-                                Err(direct_error) if layer.request_state_is_reusable() => layer
-                                    .run_device_sequence_for_phase(
+                                Ok(records) => {
+                                    output_route = Qwen35Aq4SequenceOutputRoute::Direct;
+                                    Ok(records)
+                                }
+                                Err(ResidentSequenceFailure::Admission(direct_error)) => {
+                                    let records_result = layer.run_device_sequence_for_phase(
                                         &mut self.stream,
                                         source,
                                         sequence_len,
@@ -1326,16 +1362,22 @@ impl Qwen35Aq4ModelRuntime {
                                         phase,
                                         workspace,
                                         &layer_label,
-                                    )
-                                    .map_err(|fallback_error| {
-                                        format!(
+                                    );
+                                    match records_result {
+                                        Ok(records) => {
+                                            output_route =
+                                                Qwen35Aq4SequenceOutputRoute::CopyFallback;
+                                            Ok(records)
+                                        }
+                                        Err(fallback_error) => Err(format!(
                                             "{layer_label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
-                                        )
-                                    }),
-                                Err(error) => Err(error),
+                                        )),
+                                    }
+                                }
+                                Err(error) => Err(error.message()),
                             }
                         } else {
-                            layer.run_device_sequence_for_phase(
+                            let records_result = layer.run_device_sequence_for_phase(
                                 &mut self.stream,
                                 source,
                                 sequence_len,
@@ -1345,7 +1387,11 @@ impl Qwen35Aq4ModelRuntime {
                                 phase,
                                 workspace,
                                 &layer_label,
-                            )
+                            );
+                            if records_result.is_ok() {
+                                output_route = Qwen35Aq4SequenceOutputRoute::Copy;
+                            }
+                            records_result
                         };
                         let records = match records_result {
                             Ok(records) => records,
@@ -1363,7 +1409,7 @@ impl Qwen35Aq4ModelRuntime {
                                 return Err(error);
                             }
                         };
-                        if !direct_sequence_output {
+                        if !matches!(output_route, Qwen35Aq4SequenceOutputRoute::Direct) {
                             if let Err(error) = destination.copy_from_buffer(
                                 0,
                                 workspace.output_buffer(),
@@ -1400,6 +1446,8 @@ impl Qwen35Aq4ModelRuntime {
                             execution_width: sequence_len,
                             phase,
                             records,
+                            direct_sequence_output_requested: direct_sequence_output,
+                            output_route,
                         });
                     } else {
                         return Err(format!(
@@ -1758,14 +1806,28 @@ mod tests {
 
             let mut copy_output = vec![f32::NAN; source.len()];
             assert_eq!(
-                cpu_sequence_output_route(&source, &mut copy_output, false, None, false, "copy",)
-                    .unwrap(),
+                cpu_sequence_output_route(
+                    sequence_len,
+                    &source,
+                    &mut copy_output,
+                    false,
+                    None,
+                    false,
+                    "copy",
+                )
+                .unwrap(),
                 CpuSequenceOutputPath::Copy
             );
 
             let mut direct_output = vec![f32::NAN; source.len()];
+            let expected_direct_route = if sequence_len == 1 {
+                CpuSequenceOutputPath::Copy
+            } else {
+                CpuSequenceOutputPath::Direct
+            };
             assert_eq!(
                 cpu_sequence_output_route(
+                    sequence_len,
                     &source,
                     &mut direct_output,
                     true,
@@ -1774,7 +1836,7 @@ mod tests {
                     "direct",
                 )
                 .unwrap(),
-                CpuSequenceOutputPath::Direct
+                expected_direct_route
             );
             assert_eq!(direct_output, copy_output);
             assert!(direct_output.iter().all(|value| value.is_finite()));
@@ -1787,6 +1849,7 @@ mod tests {
         let mut output = [f32::NAN; 4];
         assert_eq!(
             cpu_sequence_output_route(
+                4,
                 &source,
                 &mut output,
                 true,
@@ -1795,7 +1858,7 @@ mod tests {
                 "direct-admission",
             )
             .unwrap(),
-            CpuSequenceOutputPath::Copy
+            CpuSequenceOutputPath::CopyFallback
         );
         assert_eq!(output, source);
         assert!(output.iter().all(|value| value.is_finite()));
@@ -1807,6 +1870,7 @@ mod tests {
         let sentinel = [42.0_f32; 4];
         let mut output = sentinel;
         let error = cpu_sequence_output_route(
+            4,
             &source,
             &mut output,
             true,
@@ -1827,17 +1891,30 @@ mod tests {
     }
 
     #[test]
+    fn cpu_seam_keeps_m1_indirect_and_production_prefill_rejects_m1() {
+        assert!(!native_prefill_sequence_width_admitted(1));
+        assert!(native_prefill_sequence_width_admitted(2));
+        let source = [1.0_f32, 2.0, 3.0, 4.0];
+        let mut output = [f32::NAN; 4];
+        assert_eq!(
+            cpu_sequence_output_route(1, &source, &mut output, true, None, false, "m1").unwrap(),
+            CpuSequenceOutputPath::Copy
+        );
+        assert_eq!(output, source);
+    }
+
+    #[test]
     fn cpu_direct_sequence_contract_rejects_alias_and_length_mismatch() {
         let source = [1.0_f32, 2.0];
         let mut output = [0.0_f32; 2];
         assert!(
-            cpu_sequence_output_route(&source, &mut output, true, None, true, "alias")
+            cpu_sequence_output_route(2, &source, &mut output, true, None, true, "alias")
                 .unwrap_err()
                 .contains("aliases workspace")
         );
         let mut short = [0.0_f32; 1];
         assert!(
-            cpu_sequence_output_route(&source, &mut short, true, None, false, "length")
+            cpu_sequence_output_route(2, &source, &mut short, true, None, false, "length")
                 .unwrap_err()
                 .contains("length mismatch")
         );
