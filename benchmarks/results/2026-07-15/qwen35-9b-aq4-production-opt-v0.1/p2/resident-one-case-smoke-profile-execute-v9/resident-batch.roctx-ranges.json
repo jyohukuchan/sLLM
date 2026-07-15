@@ -1,0 +1,105 @@
+{
+  "audit_sha256": "326247ec3a8c5eed1f8a6ae911a738ef395de22933f81ea53c9a49b796e38c0b",
+  "library": {
+    "components": [],
+    "invocation_path": "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+    "resolved_path": "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+    "sha256": "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9",
+    "symbols": [
+      "roctxRangePushA",
+      "roctxRangePop"
+    ]
+  },
+  "measurement_eligible": false,
+  "pid": 1954771,
+  "promotion_eligible": false,
+  "ranges": [
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=0/run_kind=warmup",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 0,
+      "run_kind": "warmup"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=1/run_kind=warmup",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 1,
+      "run_kind": "warmup"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=2/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 2,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=3/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 3,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=4/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 4,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=5/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 5,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=6/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 6,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=7/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 7,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=8/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 8,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=9/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 9,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=10/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 10,
+      "run_kind": "measured"
+    },
+    {
+      "name": "ullm.aq4_p2.run.v1/run_id=p2-r9700-resident-one-case-smoke-profile-diagnostic-v9/session_id=b120fa8549693959fd3974c577095bba3c17a7da7048f0eac6d3f577e0fd14f4/case_id=p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target/case_sha256=d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7/run_index=11/run_kind=measured",
+      "pop_result": 0,
+      "push_result": 0,
+      "run_index": 11,
+      "run_kind": "measured"
+    }
+  ],
+  "schema_version": "ullm.aq4_p2_resident_roctx_ranges.v1",
+  "status": "complete_diagnostic",
+  "thread_id": 124683288569216
+}
