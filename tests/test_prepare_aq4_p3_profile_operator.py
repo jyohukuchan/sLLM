@@ -31,6 +31,122 @@ def sealed(root: Path, name: str, value: dict) -> None:
     OPERATOR.write_sealed(root, name, value)
 
 
+def unsealed_json(root: Path, name: str, value: dict) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / name).write_bytes(OPERATOR.pretty(value))
+
+
+def finalizer_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int,
+) -> dict:
+    paths = {
+        "ROOT": tmp_path,
+        "PROFILE_READY_ROOT": tmp_path / "profile-ready-v9",
+        "PROFILE_READY": tmp_path / "profile-ready-v9/ready-binding.json",
+        "QUIET_ROOT": tmp_path / "quiet-v13",
+        "OPERATOR_ROOT": tmp_path / "operator-command-v8",
+        "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v7",
+        "OPERATOR_RESULT": tmp_path / "operator-result-v8",
+        "ACTUAL_AUDIT": tmp_path / "actual-audit-v8",
+        "PROFILE_RUNTIME": tmp_path / "runtime-v7",
+        "PROFILE_EXECUTE_EVIDENCE": tmp_path / "execute-evidence-v7",
+        "PROFILE_CAPTURE": tmp_path / "capture-v7",
+    }
+    for name, path in paths.items():
+        monkeypatch.setattr(OPERATOR, name, path)
+    succeeded = returncode == 0
+    status = "passed" if succeeded else "failed"
+    manifest = {
+        "inputs": {"profile_ready": {"artifact_commit": "a" * 40}},
+        "manifest_sha256": "b" * 64,
+        "command_sha256": "c" * 64,
+        "argv": ["/usr/bin/python3.12", "maintenance.py"],
+        "fresh_outputs": [{"path": f"fresh-{index}", "absent": True} for index in range(9)],
+    }
+    unsealed_json(paths["OPERATOR_ROOT"], "command-manifest.json", manifest)
+    unsealed_json(paths["PROFILE_READY_ROOT"], "ready-binding.json", {})
+    maintenance = {
+        "status": status,
+        "mode": "execute",
+        "failure": None if succeeded else {"stage": "profile-capture", "reason": "capture failed", "launcher_started": True},
+        "package_integrity": {"full_hash_count": 1, "full_content": {"passed": True}, "integrity_identity": {"passed": True}},
+        "restore": {"passed": True, "duration_ns": 1, "final_metadata_recheck": {"within_absolute_deadline": True}},
+        "lock_substrate_cleanup": {"passed": True, "runner_children": [], "holder_pids": []},
+        "capture": {"exit_code": returncode},
+    }
+    sealed(paths["MAINTENANCE_EVIDENCE"], "launcher-evidence.json", maintenance)
+    launcher = {
+        "status": status,
+        "runner": {"exit_code": returncode, "stdout": {"file": "runner.stdout.bin"}, "stderr": {"file": "runner.stderr.bin"}},
+        "validator": {"exit_code": 0, "stdout": {"file": "validator.stdout.bin"}, "stderr": {"file": "validator.stderr.bin"}},
+        "failure": None if succeeded else {"stage": "runner", "reason": "capture failed", "children_remaining": [], "cleanup_passed": True},
+    }
+    unsealed_json(paths["PROFILE_EXECUTE_EVIDENCE"], "launcher-evidence.json", launcher)
+    for name in ("runner.stdout.bin", "runner.stderr.bin", "validator.stdout.bin", "validator.stderr.bin"):
+        (paths["PROFILE_EXECUTE_EVIDENCE"] / name).write_bytes(b"")
+    OPERATOR.seal_existing(paths["PROFILE_EXECUTE_EVIDENCE"])
+    unsealed_json(paths["PROFILE_RUNTIME"], "resident-batch.summary.json", {"status": "complete", "resident_model_loads": 1})
+    unsealed_json(paths["PROFILE_RUNTIME"], "resident-batch.driver-process.json", {"cleanup": {"passed": True}})
+    if succeeded:
+        unsealed_json(paths["PROFILE_CAPTURE"], "capture-artifact.json", {"status": "complete_diagnostic", "measurement_eligible": False, "promotion_eligible": False})
+        nested = paths["PROFILE_CAPTURE"] / "measured-runs"
+        nested.mkdir()
+        (nested / "run-00_kernel_trace.csv").write_bytes(b"Kind,Name\nKERNEL,fixture\n")
+    else:
+        unsealed_json(paths["PROFILE_CAPTURE"], "capture-failure.json", {"schema_version": "failure.v2", "status": "failed", "reason": "capture failed", "children_remaining": [], "process_group_cleanup_complete": True, "ready_candidate_audit": {"reason_code": "marker_missing"}})
+    (paths["PROFILE_CAPTURE"] / "rocprof.stdout").write_bytes(b"")
+    (paths["PROFILE_CAPTURE"] / "rocprof.stderr").write_bytes(b"" if succeeded else b"capture failed\n")
+    paths["OPERATOR_RESULT"].mkdir()
+    (paths["OPERATOR_RESULT"] / "operator.stdout.bin").write_bytes(OPERATOR.pretty({"status": status, "mode": "execute", "evidence": str(paths["MAINTENANCE_EVIDENCE"] / "launcher-evidence.json")}))
+    (paths["OPERATOR_RESULT"] / "operator.stderr.bin").write_bytes(b"" if succeeded else b"maintenance failed\n")
+    pre = {"service": {"main_pid": 10}, "worker": {"pid": 20}, "owners": {"amd_smi": [20], "kfd": [20]}, "hashes": {"fixture": "same"}, "formal_health_sha256": "d" * 64}
+    post = {"service": {"active_state": "active", "sub_state": "running", "nrestarts": 0, "main_pid": 11}, "worker": {"pid": 21}, "gpu": {"device": "fixture"}, "owners": {"amd_smi": [21], "kfd": [21]}, "lock": {"busy": True}, "hashes": pre["hashes"], "formal_health_sha256": pre["formal_health_sha256"], "targeted_processes": []}
+    monkeypatch.setattr(OPERATOR, "validate_operator", lambda _root=paths["OPERATOR_ROOT"]: {"value": manifest})
+    monkeypatch.setattr(OPERATOR, "validate_quiet", lambda _root=paths["QUIET_ROOT"]: {"value": {"confirmation": pre}})
+    monkeypatch.setattr(OPERATOR, "capture_snapshot", lambda _ready: post)
+    monkeypatch.setattr(OPERATOR, "git", lambda *_args: "e" * 40)
+    return paths
+
+
+def test_v8_namespaces_bind_fresh_v9_ready_and_v7_profile_outputs() -> None:
+    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v9"
+    assert OPERATOR.QUIET_ROOT.name == "resident-one-case-smoke-profile-quiet-window-v13"
+    assert OPERATOR.OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v8"
+    assert OPERATOR.MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v7"
+    assert OPERATOR.PROFILE_RUNTIME.name == "resident-one-case-smoke-profile-execute-v7"
+    assert OPERATOR.PROFILE_EXECUTE_EVIDENCE.name == "resident-one-case-smoke-profile-execute-evidence-v7"
+    assert OPERATOR.PROFILE_CAPTURE.name == "aq4-p3-diagnostic-rocprof-capture-v7"
+    assert OPERATOR.OPERATOR_RESULT.name == "resident-one-case-smoke-profile-operator-result-v8"
+    assert OPERATOR.ACTUAL_AUDIT.name == "resident-one-case-smoke-profile-actual-audit-v8"
+    assert OPERATOR.PREVIOUS_OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v7"
+
+
+@pytest.mark.parametrize("returncode", (0, 17))
+def test_finalizer_immutably_seals_success_and_nonzero_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+) -> None:
+    paths = finalizer_fixture(tmp_path, monkeypatch, returncode=returncode)
+    audit = OPERATOR.finalize_actual(returncode=returncode, start_unix_ns=100, end_unix_ns=200)
+    succeeded = returncode == 0
+    assert audit["status"] == ("passed_immutable_evidence_preserved_restore_passed" if succeeded else "failed_immutable_evidence_preserved_restore_passed")
+    assert audit["failure"] is None if succeeded else audit["failure"]["returncode"] == returncode
+    assert audit["execution"]["maximum_invocations"] == 1
+    assert audit["execution"]["shell"] is False
+    assert audit["execution"]["retry_performed"] is False
+    assert audit["profile_artifacts"]["status"] == ("complete_diagnostic" if succeeded else "failure_evidence_only")
+    validated = OPERATOR.validate_actual()
+    assert validated["result"]["status"] == ("passed" if succeeded else "failed")
+    for root in (paths["OPERATOR_RESULT"], paths["ACTUAL_AUDIT"], paths["PROFILE_RUNTIME"], paths["PROFILE_CAPTURE"]):
+        assert OPERATOR.verify_sums(root)["mode"] == "0555"
+    if succeeded:
+        assert (paths["PROFILE_CAPTURE"] / "measured-runs").stat().st_mode & 0o777 == 0o555
+
+
 def test_monitor_requires_one_unchanged_clean_streak_and_confirmation() -> None:
     values = iter([sample(1_000_000_000), sample(2_000_000_000), sample(3_000_000_000)])
     result = OPERATOR.monitor({}, lambda _ready: next(values), lambda _seconds: None, interval=0.0, maximum=1.0, minimum_span=1.0, required=2)
@@ -107,10 +223,10 @@ def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: 
         "secret_material_recorded": False,
     }
     sealed(quiet_root, "quiet-window.json", quiet)
-    sealed(previous_root, "command-manifest.json", {"schema_version": "historical.v6"})
+    sealed(previous_root, "command-manifest.json", {"schema_version": "historical.v7"})
     monkeypatch.setattr(OPERATOR, "QUIET_ROOT", quiet_root)
     monkeypatch.setattr(OPERATOR, "PREVIOUS_OPERATOR_ROOT", previous_root)
-    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: (ready, {"root": "ready-v6"}))
+    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: (ready, {"root": "ready-v9"}))
     monkeypatch.setattr(OPERATOR, "fresh_paths", lambda _ready: fresh)
 
     value = OPERATOR.prepare_operator(output_root)

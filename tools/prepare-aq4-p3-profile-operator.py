@@ -22,33 +22,33 @@ P2 = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
 P3 = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
 MAINTENANCE = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
 SOURCE = Path(__file__).resolve()
-PROFILE_READY_ROOT = P2 / "resident-one-case-smoke-profile-ready-v6"
+PROFILE_READY_ROOT = P2 / "resident-one-case-smoke-profile-ready-v9"
 PROFILE_READY = PROFILE_READY_ROOT / "ready-binding.json"
-QUIET_ROOT = P2 / "resident-one-case-smoke-profile-quiet-window-v12"
-OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v7"
-MAINTENANCE_EVIDENCE = P2 / "resident-one-case-smoke-profile-maintenance-evidence-v6"
-OPERATOR_RESULT = P2 / "resident-one-case-smoke-profile-operator-result-v7"
-ACTUAL_AUDIT = P2 / "resident-one-case-smoke-profile-actual-audit-v7"
-PROFILE_RUNTIME = P2 / "resident-one-case-smoke-profile-execute-v6"
-PROFILE_EXECUTE_EVIDENCE = P2 / "resident-one-case-smoke-profile-execute-evidence-v6"
-PROFILE_CAPTURE = P3 / "aq4-p3-diagnostic-rocprof-capture-v6"
-PREVIOUS_OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v6"
+QUIET_ROOT = P2 / "resident-one-case-smoke-profile-quiet-window-v13"
+OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v8"
+MAINTENANCE_EVIDENCE = P2 / "resident-one-case-smoke-profile-maintenance-evidence-v7"
+OPERATOR_RESULT = P2 / "resident-one-case-smoke-profile-operator-result-v8"
+ACTUAL_AUDIT = P2 / "resident-one-case-smoke-profile-actual-audit-v8"
+PROFILE_RUNTIME = P2 / "resident-one-case-smoke-profile-execute-v7"
+PROFILE_EXECUTE_EVIDENCE = P2 / "resident-one-case-smoke-profile-execute-evidence-v7"
+PROFILE_CAPTURE = P3 / "aq4-p3-diagnostic-rocprof-capture-v7"
+PREVIOUS_OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v7"
 PYTHON = Path("/usr/bin/python3.12")
-QUIET_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v12"
-OPERATOR_SCHEMA = "ullm.aq4_p3_profile_operator_command.v7"
-OPERATOR_RESULT_SCHEMA = "ullm.aq4_p3_profile_operator_result.v7"
-ACTUAL_AUDIT_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v7"
+QUIET_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v13"
+OPERATOR_SCHEMA = "ullm.aq4_p3_profile_operator_command.v8"
+OPERATOR_RESULT_SCHEMA = "ullm.aq4_p3_profile_operator_result.v8"
+ACTUAL_AUDIT_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v8"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 DEFAULT_INTERVAL = 5.0
 DEFAULT_MAXIMUM = 900.0
 DEFAULT_MINIMUM_SPAN = 130.0
 DEFAULT_REQUIRED_SAMPLES = 27
 
-# Filled only after the fresh profile-ready-v6 commit is final.  The collector
+# Filled only after the fresh profile-ready-v9 commit is final.  The collector
 # rejects any other ready artifact rather than silently following a moving path.
-READY_ARTIFACT_COMMIT = "ff15b75ceed5e7b7eabe376e27859106694c285f"
-READY_BINDING_SHA256 = "0fca1b6d5b561b582bd0e59c33d88e558be785faa026a058a1a8d3e9d3b4e54e"
-READY_SHA256SUMS_SHA256 = "49c5535e617db3598029e0968e253a8771ad3489bc683cf541d11c54d13a1ccc"
+READY_ARTIFACT_COMMIT = "ed10d543bcc0d196b157fad306a6995782692fe9"
+READY_BINDING_SHA256 = "fc05c02cb0d3eabc91ef08d31ea643d582cd615ecc4558031cca2b3af8fc5c5d"
+READY_SHA256SUMS_SHA256 = "c4ce3a86ad02c6252170b8f1b753d60a9dd011322141d92b20f2d7538c0c0570"
 
 
 class OperatorError(ValueError):
@@ -101,11 +101,25 @@ def verify_sums(root: Path) -> dict[str, Any]:
         raise OperatorError(f"SHA256SUMS contract differs: {root}")
     declared: dict[str, str] = {}
     for line in sums.read_text(encoding="ascii").splitlines():
-        digest, name = line.split("  ", 1)
-        if SHA_RE.fullmatch(digest) is None or name in declared or "/" in name:
+        try:
+            digest, name = line.split("  ", 1)
+        except ValueError as error:
+            raise OperatorError(f"SHA256SUMS syntax differs: {root}") from error
+        relative = Path(name)
+        if SHA_RE.fullmatch(digest) is None or not name or name in declared or relative.is_absolute() or ".." in relative.parts or name == "SHA256SUMS":
             raise OperatorError(f"SHA256SUMS syntax differs: {root}")
         declared[name] = digest
-    expected = {item.name for item in root.iterdir()} - {"SHA256SUMS"}
+    expected: set[str] = set()
+    for item in root.rglob("*"):
+        relative = str(item.relative_to(root))
+        metadata = item.lstat()
+        if item.is_symlink() or (not stat.S_ISREG(metadata.st_mode) and not stat.S_ISDIR(metadata.st_mode)):
+            raise OperatorError(f"sealed member differs: {item}")
+        if stat.S_ISDIR(metadata.st_mode):
+            if stat.S_IMODE(metadata.st_mode) != 0o555:
+                raise OperatorError(f"sealed directory differs: {item}")
+        elif relative != "SHA256SUMS":
+            expected.add(relative)
     if set(declared) != expected:
         raise OperatorError(f"SHA256SUMS coverage differs: {root}")
     members: dict[str, Any] = {}
@@ -120,13 +134,13 @@ def verify_sums(root: Path) -> dict[str, Any]:
 
 def ready_authority() -> tuple[dict[str, Any], dict[str, Any]]:
     if not READY_ARTIFACT_COMMIT or not READY_BINDING_SHA256 or not READY_SHA256SUMS_SHA256:
-        raise OperatorError("profile-ready-v6 authority pins are not finalized")
+        raise OperatorError("profile-ready-v9 authority pins are not finalized")
     inventory = verify_sums(PROFILE_READY_ROOT)
     if sha_file(PROFILE_READY) != READY_BINDING_SHA256 or inventory["sha256sums_sha256"] != READY_SHA256SUMS_SHA256:
-        raise OperatorError("profile-ready-v6 hashes differ")
+        raise OperatorError("profile-ready-v9 hashes differ")
     path = str(PROFILE_READY.relative_to(ROOT))
     if git("rev-parse", f"{READY_ARTIFACT_COMMIT}:{path}") != git("hash-object", str(PROFILE_READY)):
-        raise OperatorError("profile-ready-v6 Git blob differs")
+        raise OperatorError("profile-ready-v9 Git blob differs")
     return load(PROFILE_READY, "profile ready binding"), inventory
 
 
@@ -158,7 +172,7 @@ def root_set() -> list[Path]:
         P2 / "resident-one-case-smoke-ready-v6",
         P2 / "resident-one-case-smoke-ready-dry-run-v6",
         PROFILE_READY_ROOT,
-        P2 / "resident-one-case-smoke-profile-ready-dry-run-v6",
+        P2 / "resident-one-case-smoke-profile-ready-dry-run-v9",
     ]
 
 
@@ -301,23 +315,35 @@ def write_sealed(root: Path, name: str, value: dict[str, Any]) -> None:
 
 
 def seal_existing(root: Path) -> dict[str, Any]:
-    if (root / "SHA256SUMS").exists():
+    if (root / "SHA256SUMS").exists() or (root / "SHA256SUMS").is_symlink():
         return verify_sums(root)
     if root.is_symlink() or not root.is_dir():
         raise OperatorError(f"evidence root differs: {root}")
-    members = sorted(item for item in root.iterdir() if item.name != "SHA256SUMS")
+    members: list[Path] = []
+    directories: list[Path] = []
+    for item in root.rglob("*"):
+        metadata = item.lstat()
+        if item.is_symlink() or (not stat.S_ISREG(metadata.st_mode) and not stat.S_ISDIR(metadata.st_mode)):
+            raise OperatorError(f"evidence member differs: {item}")
+        if stat.S_ISDIR(metadata.st_mode):
+            directories.append(item)
+        else:
+            members.append(item)
+    members.sort(key=lambda item: str(item.relative_to(root)))
     if not members:
         raise OperatorError(f"evidence root is empty: {root}")
     lines: list[str] = []
     for path in members:
         metadata = path.lstat()
-        if path.is_symlink() or not path.is_file() or metadata.st_nlink != 1:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise OperatorError(f"evidence member differs: {path}")
-        lines.append(f"{sha_file(path)}  {path.name}\n")
+        lines.append(f"{sha_file(path)}  {path.relative_to(root)}\n")
     sums = root / "SHA256SUMS"
     sums.write_text("".join(lines), encoding="ascii")
     for path in [*members, sums]:
         os.chmod(path, 0o444)
+    for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        os.chmod(path, 0o555)
     os.chmod(root, 0o555)
     return verify_sums(root)
 
@@ -352,7 +378,7 @@ def prepare_operator(output: Path = OPERATOR_ROOT) -> dict[str, Any]:
     if any(path.exists() or path.is_symlink() for path in fresh):
         raise OperatorError("operator fresh outputs are not absent")
     argv = actual_argv()
-    manifest: dict[str, Any] = {"schema_version": OPERATOR_SCHEMA, "status": "audited_ready_for_single_explicit_profile_diagnostic", "argv": argv, "command_sha256": sha_bytes(canonical(argv)), "authorization": {"maximum_invocations": 1, "explicit_confirmation_flag_count": argv.count("--confirm-one-case"), "profile_diagnostic_flag_count": argv.count("--profile-diagnostic"), "ready_artifact_flag_count": argv.count("--ready-artifact"), "evidence_output_flag_count": argv.count("--evidence-output"), "quiet_window_status_required": "go", "quiet_window_decision_required": "GO"}, "execution": {"argument_count": len(argv), "shell": False, "working_directory": str(ROOT), "same_pty_sudo_cache_required": True, "external_service_stop_required": True, "maximum_invocations": 1, "output_no_reuse": True, "operator_must_use_manifest_argv_exactly": True, "requires_fresh_output_recheck_immediately_before_execution": True, "promotion_eligible": False, "measurement_eligible": False}, "inputs": {"profile_ready": {"artifact_commit": READY_ARTIFACT_COMMIT, "ready_binding_sha256": READY_BINDING_SHA256, "inventory": ready_inventory}, "quiet_window": {"path": str(QUIET_ROOT / "quiet-window.json"), "sha256": sha_file(QUIET_ROOT / "quiet-window.json"), "decision": quiet["value"]["decision"], "status": quiet["value"]["status"]}, "historical_operator_v6": previous}, "fresh_outputs": [{"path": str(path), "absent": True} for path in fresh], "quiet_final_streak": quiet["value"]["summary"], "failure_contract": {"retry_forbidden": True, "preserve_operator_stdout_stderr": True, "preserve_maintenance_launcher_capture_and_ready_audits": True, "immutable_failure_capture_before_reporting": True, "outer_restore_in_finally": True, "restore_timeout_seconds": ready.get("maintenance", {}).get("restore_poll", {}).get("timeout_seconds"), "restore_requires_active_running_new_epoch_nrestarts_zero_worker_lock_gpu_kfd_formal_health_and_hashes": True, "children_remaining_must_be_empty": True}, "target_runner_manifest": {"schema_version": "ullm.aq4_p3_profile_target_command.v1", "fresh_per_execution": True, "generated_by": "launcher_after_live_preflight", "maximum_invocations": 1, "static_manifest_present": False}, "pre_execution_audit": {"quiet_window": "passed", "fresh_outputs": "9/9 absent", "historical_operator_v6": "immutable_readback", "actual_executed": False}, "actual_executed": False, "gpu_command_executed": False, "service_touched": False, "secret_material_embedded": False, "manifest_sha256": None}
+    manifest: dict[str, Any] = {"schema_version": OPERATOR_SCHEMA, "status": "audited_ready_for_single_explicit_profile_diagnostic", "argv": argv, "command_sha256": sha_bytes(canonical(argv)), "authorization": {"maximum_invocations": 1, "explicit_confirmation_flag_count": argv.count("--confirm-one-case"), "profile_diagnostic_flag_count": argv.count("--profile-diagnostic"), "ready_artifact_flag_count": argv.count("--ready-artifact"), "evidence_output_flag_count": argv.count("--evidence-output"), "quiet_window_status_required": "go", "quiet_window_decision_required": "GO"}, "execution": {"argument_count": len(argv), "shell": False, "working_directory": str(ROOT), "same_pty_sudo_cache_required": True, "external_service_stop_required": True, "maximum_invocations": 1, "output_no_reuse": True, "operator_must_use_manifest_argv_exactly": True, "requires_fresh_output_recheck_immediately_before_execution": True, "promotion_eligible": False, "measurement_eligible": False}, "inputs": {"profile_ready": {"artifact_commit": READY_ARTIFACT_COMMIT, "ready_binding_sha256": READY_BINDING_SHA256, "inventory": ready_inventory}, "quiet_window": {"path": str(QUIET_ROOT / "quiet-window.json"), "sha256": sha_file(QUIET_ROOT / "quiet-window.json"), "decision": quiet["value"]["decision"], "status": quiet["value"]["status"]}, "historical_operator_v7": previous}, "fresh_outputs": [{"path": str(path), "absent": True} for path in fresh], "quiet_final_streak": quiet["value"]["summary"], "failure_contract": {"retry_forbidden": True, "preserve_operator_stdout_stderr": True, "preserve_maintenance_launcher_capture_and_ready_audits": True, "immutable_failure_capture_before_reporting": True, "outer_restore_in_finally": True, "restore_timeout_seconds": ready.get("maintenance", {}).get("restore_poll", {}).get("timeout_seconds"), "restore_requires_active_running_new_epoch_nrestarts_zero_worker_lock_gpu_kfd_formal_health_and_hashes": True, "children_remaining_must_be_empty": True}, "target_runner_manifest": {"schema_version": "ullm.aq4_p3_profile_target_command.v1", "fresh_per_execution": True, "generated_by": "launcher_after_live_preflight", "maximum_invocations": 1, "static_manifest_present": False}, "pre_execution_audit": {"quiet_window": "passed", "fresh_outputs": "9/9 absent", "historical_operator_v7": "immutable_readback", "actual_executed": False}, "actual_executed": False, "gpu_command_executed": False, "service_touched": False, "secret_material_embedded": False, "manifest_sha256": None}
     manifest["manifest_sha256"] = sha_bytes(canonical(manifest))
     write_sealed(output, "command-manifest.json", manifest); validate_operator(output)
     return manifest
@@ -395,34 +421,67 @@ def stream_record(path: Path) -> dict[str, Any]:
     return {"path": str(path), "bytes": path.stat().st_size, "sha256": sha_file(path)}
 
 
+def optional_stream(root: Path, value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not isinstance(value.get("file"), str):
+        return None
+    relative = Path(value["file"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise OperatorError("subprocess stream binding differs")
+    path = root / relative
+    if not path.is_file() or path.is_symlink():
+        raise OperatorError("subprocess stream evidence differs")
+    return stream_record(path)
+
+
+def seal_optional(root: Path, *, required: bool) -> dict[str, Any] | None:
+    if not root.exists() and not root.is_symlink():
+        if required:
+            raise OperatorError(f"required evidence root is missing: {root}")
+        return None
+    return seal_existing(root)
+
+
+def validate_actual_documents(result: dict[str, Any], audit: dict[str, Any]) -> None:
+    clone = json.loads(json.dumps(audit)); declared = clone.get("audit_sha256"); clone["audit_sha256"] = None
+    returncode = result.get("returncode")
+    succeeded = type(returncode) is int and returncode == 0
+    expected_result = "passed" if succeeded else "failed"
+    expected_audit = "passed_immutable_evidence_preserved_restore_passed" if succeeded else "failed_immutable_evidence_preserved_restore_passed"
+    if result.get("schema_version") != OPERATOR_RESULT_SCHEMA or result.get("status") != expected_result or type(returncode) is not int or result.get("invocation_count") != 1 or result.get("maximum_invocations") != 1 or result.get("shell") is not False or result.get("retry_performed") is not False or result.get("actual_executed") is not True or result.get("secret_material_recorded") is not False:
+        raise OperatorError("operator result semantic boundary differs")
+    execution = audit.get("execution", {})
+    profile = audit.get("profile_artifacts", {})
+    if audit.get("schema_version") != ACTUAL_AUDIT_SCHEMA or declared != sha_bytes(canonical(clone)) or audit.get("status") != expected_audit or execution.get("returncode") != returncode or execution.get("invocation_count") != 1 or execution.get("maximum_invocations") != 1 or execution.get("shell") is not False or execution.get("retry_performed") is not False or audit.get("restore", {}).get("passed") is not True or audit.get("package_integrity", {}).get("full_hash_count") != 1 or audit.get("cleanup", {}).get("residual_targeted_processes") != [] or audit.get("actual_executed") is not True or audit.get("retry_performed") is not False or audit.get("secret_material_recorded") is not False:
+        raise OperatorError("actual audit semantic boundary differs")
+    if succeeded and (audit.get("failure") is not None or profile.get("status") != "complete_diagnostic" or profile.get("measurement_eligible") is not False or profile.get("promotion_eligible") is not False):
+        raise OperatorError("successful actual audit outcome differs")
+    if not succeeded and (not isinstance(audit.get("failure"), dict) or profile.get("status") != "failure_evidence_only"):
+        raise OperatorError("failed actual audit outcome differs")
+
+
 def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) -> dict[str, Any]:
-    if returncode != 1 or start_unix_ns <= 0 or end_unix_ns <= start_unix_ns:
+    if type(returncode) is not int or start_unix_ns <= 0 or end_unix_ns <= start_unix_ns:
         raise OperatorError("actual execution boundary differs")
     manifest = validate_operator()["value"]
     quiet = validate_quiet()["value"]
     stdout_path = OPERATOR_RESULT / "operator.stdout.bin"
     stderr_path = OPERATOR_RESULT / "operator.stderr.bin"
-    if not stdout_path.is_file() or not stderr_path.is_file() or (OPERATOR_RESULT / "operator-result.json").exists():
+    if ACTUAL_AUDIT.exists() or ACTUAL_AUDIT.is_symlink() or OPERATOR_RESULT.is_symlink() or not OPERATOR_RESULT.is_dir() or not stdout_path.is_file() or stdout_path.is_symlink() or not stderr_path.is_file() or stderr_path.is_symlink() or (OPERATOR_RESULT / "operator-result.json").exists() or (OPERATOR_RESULT / "SHA256SUMS").exists():
         raise OperatorError("operator raw stream state differs")
     stdout_value = load(stdout_path, "operator stdout")
-    if stdout_value.get("status") != "failed" or stdout_value.get("mode") != "execute" or stdout_value.get("evidence") != str(MAINTENANCE_EVIDENCE / "launcher-evidence.json") or stderr_path.stat().st_size != 0:
+    succeeded = returncode == 0
+    outcome_status = "passed" if succeeded else "failed"
+    if stdout_value.get("status") != outcome_status or stdout_value.get("mode") != "execute" or stdout_value.get("evidence") != str(MAINTENANCE_EVIDENCE / "launcher-evidence.json"):
         raise OperatorError("operator raw outcome differs")
 
     maintenance_inventory = verify_sums(MAINTENANCE_EVIDENCE)
-    execute_inventory = verify_sums(PROFILE_EXECUTE_EVIDENCE)
     maintenance = load(MAINTENANCE_EVIDENCE / "launcher-evidence.json", "maintenance evidence")
-    launcher = load(PROFILE_EXECUTE_EVIDENCE / "launcher-evidence.json", "launcher evidence")
-    capture_failure = load(PROFILE_CAPTURE / "capture-failure.json", "capture failure")
-    runtime_summary = load(PROFILE_RUNTIME / "resident-batch.summary.json", "runtime summary")
-    driver_process = load(PROFILE_RUNTIME / "resident-batch.driver-process.json", "driver process")
-    if maintenance.get("status") != "failed" or maintenance.get("failure") != {"stage": "profile-capture", "reason": "immutable launcher failed", "launcher_started": True}:
-        raise OperatorError("maintenance failure boundary differs")
-    if launcher.get("status") != "failed" or launcher.get("runner", {}).get("exit_code") != 1 or launcher.get("failure", {}).get("children_remaining") != []:
-        raise OperatorError("launcher failure boundary differs")
-    if capture_failure.get("status") != "failed" or capture_failure.get("reason") != "expected exactly one marker trace, got 0" or capture_failure.get("children_remaining") != [] or capture_failure.get("process_group_cleanup_complete") is not True:
-        raise OperatorError("capture failure boundary differs")
-    if runtime_summary.get("status") != "complete" or runtime_summary.get("resident_model_loads") != 1 or driver_process.get("cleanup", {}).get("passed") is not True:
-        raise OperatorError("runtime completion boundary differs")
+    if maintenance.get("status") != outcome_status or maintenance.get("mode") != "execute":
+        raise OperatorError("maintenance outcome boundary differs")
+    if succeeded and maintenance.get("failure") is not None:
+        raise OperatorError("successful maintenance recorded a failure")
+    if not succeeded and not isinstance(maintenance.get("failure"), dict):
+        raise OperatorError("failed maintenance omitted its failure")
     package = maintenance.get("package_integrity", {})
     restore = maintenance.get("restore", {})
     cleanup = maintenance.get("lock_substrate_cleanup", {})
@@ -432,6 +491,34 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
         raise OperatorError("outer-finally restore differs")
     if cleanup.get("passed") is not True or cleanup.get("runner_children") != [] or cleanup.get("holder_pids") != []:
         raise OperatorError("lock/residual cleanup differs")
+
+    execute_inventory = seal_optional(PROFILE_EXECUTE_EVIDENCE, required=succeeded)
+    runtime_inventory = seal_optional(PROFILE_RUNTIME, required=succeeded)
+    capture_inventory = seal_optional(PROFILE_CAPTURE, required=succeeded)
+    launcher_path = PROFILE_EXECUTE_EVIDENCE / "launcher-evidence.json"
+    runtime_summary_path = PROFILE_RUNTIME / "resident-batch.summary.json"
+    driver_process_path = PROFILE_RUNTIME / "resident-batch.driver-process.json"
+    capture_artifact_path = PROFILE_CAPTURE / "capture-artifact.json"
+    capture_failure_path = PROFILE_CAPTURE / "capture-failure.json"
+    launcher = load(launcher_path, "launcher evidence") if launcher_path.is_file() else None
+    runtime_summary = load(runtime_summary_path, "runtime summary") if runtime_summary_path.is_file() else None
+    driver_process = load(driver_process_path, "driver process") if driver_process_path.is_file() else None
+    capture_artifact = load(capture_artifact_path, "capture artifact") if capture_artifact_path.is_file() else None
+    capture_failure = load(capture_failure_path, "capture failure") if capture_failure_path.is_file() else None
+    if succeeded:
+        if not isinstance(launcher, dict) or launcher.get("status") != "passed" or launcher.get("runner", {}).get("exit_code") != 0:
+            raise OperatorError("successful launcher boundary differs")
+        if not isinstance(runtime_summary, dict) or runtime_summary.get("status") != "complete" or runtime_summary.get("resident_model_loads") != 1 or not isinstance(driver_process, dict) or driver_process.get("cleanup", {}).get("passed") is not True:
+            raise OperatorError("successful runtime boundary differs")
+        if not isinstance(capture_artifact, dict) or capture_artifact.get("status") != "complete_diagnostic" or capture_artifact.get("measurement_eligible") is not False or capture_artifact.get("promotion_eligible") is not False or capture_failure is not None:
+            raise OperatorError("successful capture boundary differs")
+    else:
+        if isinstance(launcher, dict) and (launcher.get("status") != "failed" or launcher.get("failure", {}).get("children_remaining") != []):
+            raise OperatorError("failed launcher boundary differs")
+        if isinstance(driver_process, dict) and driver_process.get("cleanup", {}).get("passed") is not True:
+            raise OperatorError("failed runtime cleanup differs")
+        if isinstance(capture_failure, dict) and (capture_failure.get("status") != "failed" or capture_failure.get("children_remaining") != [] or capture_failure.get("process_group_cleanup_complete") is not True):
+            raise OperatorError("capture failure boundary differs")
 
     post = capture_snapshot(load(PROFILE_READY, "profile ready binding"))
     running = {"service": post["service"], "worker": post["worker"], "gpu": post["gpu"], "owners": post["owners"], "lock": post["lock"], "hashes": post["hashes"], "formal_health_sha256": post["formal_health_sha256"], "targeted_processes": post["targeted_processes"]}
@@ -443,11 +530,9 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
     if post["hashes"] != pre["hashes"] or post["formal_health_sha256"] != pre["formal_health_sha256"]:
         raise OperatorError("post-restore health/hash state differs")
 
-    runtime_inventory = seal_existing(PROFILE_RUNTIME)
-    capture_inventory = seal_existing(PROFILE_CAPTURE)
     operator_result = {
         "schema_version": OPERATOR_RESULT_SCHEMA,
-        "status": "failed",
+        "status": outcome_status,
         "authority_commit": manifest["inputs"]["profile_ready"]["artifact_commit"],
         "operator_manifest_commit": git("log", "-1", "--format=%H", "--", str((OPERATOR_ROOT / "command-manifest.json").relative_to(ROOT))),
         "manifest_file_sha256": sha_file(OPERATOR_ROOT / "command-manifest.json"),
@@ -474,20 +559,36 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
     (OPERATOR_RESULT / "operator-result.json").write_bytes(raw)
     operator_inventory = seal_existing(OPERATOR_RESULT)
 
-    trace_files = [item for item in capture_inventory["members"].values() if item["path"].endswith(".csv")]
+    trace_files = [] if capture_inventory is None else [item for item in capture_inventory["members"].values() if item["path"].endswith(".csv")]
+    maintenance_failure = maintenance.get("failure") if isinstance(maintenance.get("failure"), dict) else {}
+    launcher_failure = launcher.get("failure") if isinstance(launcher, dict) and isinstance(launcher.get("failure"), dict) else {}
+    failure = None if succeeded else {
+        "returncode": returncode,
+        "maintenance_stage": maintenance_failure.get("stage"),
+        "maintenance_reason": maintenance_failure.get("reason"),
+        "launcher_stage": launcher_failure.get("stage"),
+        "launcher_reason": launcher_failure.get("reason"),
+        "capture_failure_schema": capture_failure.get("schema_version") if isinstance(capture_failure, dict) else None,
+        "capture_failure_reason": capture_failure.get("reason") if isinstance(capture_failure, dict) else None,
+        "capture_failure_sha256": sha_file(capture_failure_path) if capture_failure_path.is_file() else None,
+        "ready_candidate_reason_code": capture_failure.get("ready_candidate_audit", {}).get("reason_code") if isinstance(capture_failure, dict) else None,
+    }
+    runner = launcher.get("runner", {}) if isinstance(launcher, dict) else {}
+    validator = launcher.get("validator", {}) if isinstance(launcher, dict) else {}
+    capture_process = maintenance.get("capture", {}) if isinstance(maintenance.get("capture"), dict) else {}
     audit = {
         "schema_version": ACTUAL_AUDIT_SCHEMA,
-        "status": "failed_immutable_evidence_preserved_restore_passed",
+        "status": "passed_immutable_evidence_preserved_restore_passed" if succeeded else "failed_immutable_evidence_preserved_restore_passed",
         "authority_commit": operator_result["operator_manifest_commit"],
         "manifest_file_sha256": operator_result["manifest_file_sha256"],
         "execution": {key: operator_result[key] for key in ("argument_count", "working_directory", "shell", "same_pty_sudo_cache", "maximum_invocations", "invocation_count", "retry_performed", "returncode", "canonical_start_unix_ns", "canonical_end_unix_ns", "elapsed_ns")},
-        "failure": {"maintenance_stage": maintenance["failure"]["stage"], "maintenance_reason": maintenance["failure"]["reason"], "launcher_stage": launcher["failure"]["stage"], "launcher_reason": launcher["failure"]["reason"], "capture_failure_schema": capture_failure["schema_version"], "capture_failure_reason": capture_failure["reason"], "capture_failure_sha256": sha_file(PROFILE_CAPTURE / "capture-failure.json"), "ready_candidate_reason_code": capture_failure["ready_candidate_audit"]["reason_code"]},
-        "all_returncodes_and_streams": {"operator": {"returncode": returncode, "stdout": operator_result["stdout"], "stderr": operator_result["stderr"]}, "runner": {"returncode": launcher["runner"]["exit_code"], "stdout": stream_record(PROFILE_EXECUTE_EVIDENCE / launcher["runner"]["stdout"]["file"]), "stderr": stream_record(PROFILE_EXECUTE_EVIDENCE / launcher["runner"]["stderr"]["file"])}, "validator": {"returncode": launcher["validator"]["exit_code"], "stdout": stream_record(PROFILE_EXECUTE_EVIDENCE / launcher["validator"]["stdout"]["file"]), "stderr": stream_record(PROFILE_EXECUTE_EVIDENCE / launcher["validator"]["stderr"]["file"])}, "rocprof": {"returncode": 1, "stdout": stream_record(PROFILE_CAPTURE / "rocprof.stdout"), "stderr": stream_record(PROFILE_CAPTURE / "rocprof.stderr")}},
+        "failure": failure,
+        "all_returncodes_and_streams": {"operator": {"returncode": returncode, "stdout": operator_result["stdout"], "stderr": operator_result["stderr"]}, "runner": {"returncode": runner.get("exit_code"), "stdout": optional_stream(PROFILE_EXECUTE_EVIDENCE, runner.get("stdout")), "stderr": optional_stream(PROFILE_EXECUTE_EVIDENCE, runner.get("stderr"))}, "validator": {"returncode": validator.get("exit_code"), "stdout": optional_stream(PROFILE_EXECUTE_EVIDENCE, validator.get("stdout")), "stderr": optional_stream(PROFILE_EXECUTE_EVIDENCE, validator.get("stderr"))}, "rocprof": {"returncode": capture_process.get("exit_code"), "stdout": stream_record(PROFILE_CAPTURE / "rocprof.stdout") if (PROFILE_CAPTURE / "rocprof.stdout").is_file() else None, "stderr": stream_record(PROFILE_CAPTURE / "rocprof.stderr") if (PROFILE_CAPTURE / "rocprof.stderr").is_file() else None}},
         "package_integrity": package,
         "restore": restore,
         "post_health": running,
-        "cleanup": {"capture_children_remaining": capture_failure["children_remaining"], "capture_process_group_cleanup_complete": capture_failure["process_group_cleanup_complete"], "launcher_children_remaining": launcher["failure"]["children_remaining"], "launcher_cleanup_passed": launcher["failure"]["cleanup_passed"], "driver_cleanup_passed": driver_process["cleanup"]["passed"], "residual_targeted_processes": post["targeted_processes"], "trusted_lock_substrate_cleanup_passed": cleanup["passed"], "trusted_lock_substrate_holder_pids": cleanup["holder_pids"], "retry_forbidden_and_not_performed": True},
-        "profile_artifacts": {"status": "failure_evidence_only", "measurement_eligible": False, "promotion_eligible": False, "trace_csv_count": len(trace_files), "trace_csv_bytes": sum(item["size"] for item in trace_files), "capture_failure": capture_inventory["members"]["capture-failure.json"], "runtime_summary": runtime_inventory["members"]["resident-batch.summary.json"]},
+        "cleanup": {"capture_children_remaining": capture_failure.get("children_remaining") if isinstance(capture_failure, dict) else [], "capture_process_group_cleanup_complete": capture_failure.get("process_group_cleanup_complete") if isinstance(capture_failure, dict) else True, "launcher_children_remaining": launcher_failure.get("children_remaining", []), "launcher_cleanup_passed": launcher_failure.get("cleanup_passed", True), "driver_cleanup_passed": driver_process.get("cleanup", {}).get("passed") if isinstance(driver_process, dict) else None, "residual_targeted_processes": post["targeted_processes"], "trusted_lock_substrate_cleanup_passed": cleanup["passed"], "trusted_lock_substrate_holder_pids": cleanup["holder_pids"], "retry_forbidden_and_not_performed": True},
+        "profile_artifacts": {"status": "complete_diagnostic" if succeeded else "failure_evidence_only", "measurement_eligible": False, "promotion_eligible": False, "trace_csv_count": len(trace_files), "trace_csv_bytes": sum(item["size"] for item in trace_files), "capture_artifact": capture_inventory["members"].get("capture-artifact.json") if capture_inventory is not None else None, "capture_failure": capture_inventory["members"].get("capture-failure.json") if capture_inventory is not None else None, "runtime_summary": runtime_inventory["members"].get("resident-batch.summary.json") if runtime_inventory is not None else None},
         "evidence": {"maintenance": maintenance_inventory, "execute": execute_inventory, "runtime": runtime_inventory, "capture": capture_inventory, "operator_result": operator_inventory},
         "actual_executed": True,
         "retry_performed": False,
@@ -495,6 +596,7 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
         "audit_sha256": None,
     }
     audit["audit_sha256"] = sha_bytes(canonical(audit))
+    validate_actual_documents(operator_result, audit)
     write_sealed(ACTUAL_AUDIT, "actual-audit.json", audit)
     validate_actual()
     return audit
@@ -505,13 +607,11 @@ def validate_actual() -> dict[str, Any]:
     audit_inventory = verify_sums(ACTUAL_AUDIT)
     result = load(OPERATOR_RESULT / "operator-result.json", "operator result")
     audit = load(ACTUAL_AUDIT / "actual-audit.json", "actual audit")
-    clone = json.loads(json.dumps(audit)); declared = clone.get("audit_sha256"); clone["audit_sha256"] = None
-    if result.get("schema_version") != OPERATOR_RESULT_SCHEMA or result.get("status") != "failed" or result.get("returncode") != 1 or result.get("invocation_count") != 1 or result.get("retry_performed") is not False or result.get("actual_executed") is not True or result.get("secret_material_recorded") is not False:
-        raise OperatorError("operator result semantic boundary differs")
-    if audit.get("schema_version") != ACTUAL_AUDIT_SCHEMA or declared != sha_bytes(canonical(clone)) or audit.get("status") != "failed_immutable_evidence_preserved_restore_passed" or audit.get("execution", {}).get("invocation_count") != 1 or audit.get("execution", {}).get("retry_performed") is not False or audit.get("restore", {}).get("passed") is not True or audit.get("package_integrity", {}).get("full_hash_count") != 1 or audit.get("cleanup", {}).get("residual_targeted_processes") != [] or audit.get("secret_material_recorded") is not False:
-        raise OperatorError("actual audit semantic boundary differs")
-    for root in (MAINTENANCE_EVIDENCE, PROFILE_EXECUTE_EVIDENCE, PROFILE_RUNTIME, PROFILE_CAPTURE):
-        verify_sums(root)
+    validate_actual_documents(result, audit)
+    verify_sums(MAINTENANCE_EVIDENCE)
+    for root in (PROFILE_EXECUTE_EVIDENCE, PROFILE_RUNTIME, PROFILE_CAPTURE):
+        if root.exists() or root.is_symlink():
+            verify_sums(root)
     return {"result": result, "audit": audit, "result_inventory": result_inventory, "audit_inventory": audit_inventory}
 
 
