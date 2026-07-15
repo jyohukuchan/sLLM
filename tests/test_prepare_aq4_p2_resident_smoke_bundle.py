@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -729,6 +730,7 @@ def test_binding_actual_runner_authority_matches_076c_source() -> None:
 
 def test_checked_in_v5_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
     value = BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, BINDING)
+    assert stat.S_IMODE(BINDING.lstat().st_mode) == BUNDLE.BINDING_ROOT_MODE == 0o555
     assert value["status"] == "prepared_not_executed"
     assert value["promotion"] is False
     assert value["launch_eligible"] is False
@@ -823,6 +825,12 @@ def test_v5_binding_records_actual_runner_and_mandatory_validator_subprocesses()
 
 def test_v5_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
+    assert manifest["binding_root_contract"] == {
+        "type": "directory",
+        "mode": "0555",
+        "members_single_link": True,
+        "members_read_only": True,
+    }
     assert manifest["runner_roles"] == {
         "prepared_bootstrap": {
             "commit": BUNDLE.RUNNER_COMMIT,
@@ -862,6 +870,14 @@ def test_v5_binding_rejects_report_replacement(tmp_path: Path) -> None:
         BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
 
 
+def test_v5_binding_rejects_writable_root(tmp_path: Path) -> None:
+    root = tmp_path / "binding"
+    shutil.copytree(BINDING, root)
+    root.chmod(0o775)
+    with pytest.raises(BUNDLE.BundleError, match="binding root mode differs"):
+        BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
+
+
 @pytest.mark.parametrize("variant", ("late_unknown", "late_missing", "late_replace"))
 def test_v5_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
     root = tmp_path / "binding"
@@ -871,6 +887,7 @@ def test_v5_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, va
     replacement.chmod(0o444)
 
     def mutate(binding_root: Path) -> None:
+        binding_root.chmod(0o755)
         if variant == "late_unknown":
             (binding_root / "late-unknown.json").write_text("{}\n", encoding="utf-8")
         elif variant == "late_missing":
