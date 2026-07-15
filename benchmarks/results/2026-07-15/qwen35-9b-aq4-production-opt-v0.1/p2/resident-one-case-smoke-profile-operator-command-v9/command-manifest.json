@@ -1,0 +1,167 @@
+{
+  "actual_executed": false,
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+    "--mode",
+    "execute",
+    "--profile-diagnostic",
+    "--ready-artifact",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v11/ready-binding.json",
+    "--evidence-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v8",
+    "--confirm-one-case"
+  ],
+  "authorization": {
+    "evidence_output_flag_count": 1,
+    "explicit_confirmation_flag_count": 1,
+    "maximum_invocations": 1,
+    "profile_diagnostic_flag_count": 1,
+    "quiet_window_decision_required": "GO",
+    "quiet_window_status_required": "go",
+    "ready_artifact_flag_count": 1
+  },
+  "command_sha256": "127bc83be11deaed96b0fa2ee30144ff9ad620b820258afff309391607e8c4a5",
+  "execution": {
+    "argument_count": 10,
+    "external_service_stop_required": true,
+    "maximum_invocations": 1,
+    "measurement_eligible": false,
+    "operator_must_use_manifest_argv_exactly": true,
+    "output_no_reuse": true,
+    "promotion_eligible": false,
+    "requires_fresh_output_recheck_immediately_before_execution": true,
+    "same_pty_sudo_cache_required": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "failure_contract": {
+    "children_remaining_must_be_empty": true,
+    "immutable_failure_capture_before_reporting": true,
+    "outer_restore_in_finally": true,
+    "preserve_maintenance_launcher_capture_and_ready_audits": true,
+    "preserve_operator_stdout_stderr": true,
+    "restore_requires_active_running_new_epoch_nrestarts_zero_worker_lock_gpu_kfd_formal_health_and_hashes": true,
+    "restore_timeout_seconds": 120.0,
+    "retry_forbidden": true
+  },
+  "fresh_outputs": [
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v8"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v8"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v8"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v8"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v8/capture-artifact.json"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v8/rocprof.stdout"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v8/rocprof.stderr"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v9"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v9"
+    }
+  ],
+  "gpu_command_executed": false,
+  "inputs": {
+    "historical_operator_v8": {
+      "members": {
+        "command-manifest.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v8/command-manifest.json",
+          "sha256": "8eb7a31142a74efffe1a06bfd65e1d86f0d4343e196f0af8849a3d0421c947d1",
+          "size": 7987
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v8",
+      "sha256sums_sha256": "5e5e03f653a5e1a9c6a1a5db40538485635bc60c32b5952cd81e9f424a943bbb"
+    },
+    "profile_ready": {
+      "artifact_commit": "abcf95ad3e56010b3e5f8b38c883c25bf5e2c780",
+      "inventory": {
+        "members": {
+          "harness-trust.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v11/harness-trust.json",
+            "sha256": "c3923509edb18daa039198fea0746c576825452ab642cd2b55ab47552a4c78e5",
+            "size": 634
+          },
+          "qa-attestation.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v11/qa-attestation.json",
+            "sha256": "63879dbde60a8572e5e709a03ef597b6d15c18e77178908a80bd46d30ef718f7",
+            "size": 8590
+          },
+          "ready-binding.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v11/ready-binding.json",
+            "sha256": "ef23daf6b8166abc98fa0a72a0eeeae86ab24b5b1747ff0018c4240398ba0c18",
+            "size": 23629
+          }
+        },
+        "mode": "0555",
+        "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v11",
+        "sha256sums_sha256": "7bb6a891969ef73a3024aec370c8e38a245bb95e21711e0f1b6068cdfabf9217"
+      },
+      "ready_binding_sha256": "ef23daf6b8166abc98fa0a72a0eeeae86ab24b5b1747ff0018c4240398ba0c18"
+    },
+    "quiet_window": {
+      "decision": "GO",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-quiet-window-v14/quiet-window.json",
+      "sha256": "87799427cde1c74a05a434d41f1b135686b9f23b4ea78a6e9d2c7906326ac366",
+      "status": "go"
+    }
+  },
+  "manifest_sha256": "51e91b6495ad3da319a7e3f6d244efebc00a27eb0277d0f93b44748050fb7d19",
+  "pre_execution_audit": {
+    "actual_executed": false,
+    "fresh_outputs": "9/9 absent",
+    "historical_operator_v8": "immutable_readback",
+    "quiet_window": "passed"
+  },
+  "quiet_final_streak": {
+    "confirmation_passed": true,
+    "final_streak_samples": 27,
+    "final_streak_span_seconds": 312.301672447,
+    "fresh_outputs_absent": true,
+    "reset_count": 0,
+    "sample_count": 27
+  },
+  "schema_version": "ullm.aq4_p3_profile_operator_command.v9",
+  "secret_material_embedded": false,
+  "service_touched": false,
+  "status": "audited_ready_for_single_explicit_profile_diagnostic",
+  "target_runner_manifest": {
+    "fresh_per_execution": true,
+    "generated_by": "launcher_after_live_preflight",
+    "maximum_invocations": 1,
+    "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+    "static_manifest_present": false
+  }
+}
