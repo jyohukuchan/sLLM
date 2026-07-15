@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import importlib.util
+import hashlib
 import json
 import stat
-import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
-SPEC = importlib.util.spec_from_file_location("aq4_profile_ready_v7_artifacts", SCRIPT)
-assert SPEC and SPEC.loader
-HARNESS = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = HARNESS
-SPEC.loader.exec_module(HARNESS)
+BASE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+READY_ROOT = BASE / "resident-one-case-smoke-profile-ready-v7"
+DRY_ROOT = BASE / "resident-one-case-smoke-profile-ready-dry-run-v7"
 
 
 def verify_sealed(root: Path) -> dict[str, str]:
@@ -30,14 +26,14 @@ def verify_sealed(root: Path) -> dict[str, str]:
         assert stat.S_ISREG(child.st_mode) and child.st_nlink == 1
         assert stat.S_IMODE(child.st_mode) == 0o444
         if path.name != "SHA256SUMS":
-            assert HARNESS.LAUNCHER.sha_file(path, path.name)[0] == declared[path.name]
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == declared[path.name]
     return declared
 
 
 def test_profile_ready_v7_is_sealed_and_pins_final_authorities() -> None:
-    verify_sealed(HARNESS.PROFILE_READY_ROOT)
-    ready = HARNESS.load_ready_artifact(HARNESS.PROFILE_READY_PATH)
-    trust = json.loads(HARNESS.PROFILE_HARNESS_TRUST_PATH.read_text())
+    verify_sealed(READY_ROOT)
+    ready = json.loads((READY_ROOT / "ready-binding.json").read_text())
+    trust = json.loads((READY_ROOT / "harness-trust.json").read_text())
     assert trust["commit"] == "3fc2b8cd6f6910fbebd3ff4728855d55bf2cbbd2"
     assert trust["git_blob"] == "9b5566a0f6d1381732342c0ee26f9778c54f852b"
     assert trust["sha256"] == "6a964e0dc93c889a31e28e89ccbc25ba5e0db095aad3d7c2ca427230c36428b0"
@@ -57,10 +53,10 @@ def test_profile_ready_v7_is_sealed_and_pins_final_authorities() -> None:
 
 
 def test_profile_ready_v7_dry_run_is_process_zero_and_sealed() -> None:
-    verify_sealed(HARNESS.PROFILE_DRY_RUN_EVIDENCE)
-    evidence = json.loads((HARNESS.PROFILE_DRY_RUN_EVIDENCE / "launcher-evidence.json").read_text())
+    verify_sealed(DRY_ROOT)
+    evidence = json.loads((DRY_ROOT / "launcher-evidence.json").read_text())
     assert evidence["status"] == "passed" and evidence["mode"] == "dry-run"
     assert evidence["execution_mode"] == "profile_diagnostic" and evidence["actual_eligible"] is True
     assert evidence["process_counts"] and set(evidence["process_counts"].values()) == {0}
     assert evidence["service_touched"] is evidence["gpu_command_executed"] is evidence["model_load_executed"] is False
-    assert evidence["ready_binding_sha256"] == HARNESS.LAUNCHER.sha_file(HARNESS.PROFILE_READY_PATH, "profile ready")[0]
+    assert evidence["ready_binding_sha256"] == hashlib.sha256((READY_ROOT / "ready-binding.json").read_bytes()).hexdigest()
