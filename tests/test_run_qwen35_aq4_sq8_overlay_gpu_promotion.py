@@ -30,6 +30,20 @@ class Lease:
         self.released = True
 
 
+class ReceiptWriter:
+    @staticmethod
+    def write_actual_receipt(**kwargs: Any) -> None:
+        Path(kwargs["output_path"]).write_text(
+            '{"status":"actual_verified"}\n', encoding="ascii"
+        )
+
+    @staticmethod
+    def write_failure_receipt(**kwargs: Any) -> None:
+        Path(kwargs["output_path"]).write_text(
+            '{"status":"failed"}\n', encoding="ascii"
+        )
+
+
 def snapshot(tag: str = "same") -> dict[str, Any]:
     return {
         "source": {"commit": "a" * 40, "tree": "b" * 40, "archive_sha256": "c" * 64},
@@ -62,10 +76,23 @@ def owners(worker: int | None = None) -> dict[str, Any]:
 def candidate(tmp_path: Path) -> Path:
     root = tmp_path / "candidate"
     root.mkdir()
+    receipt = root / "promotion-receipt.json"
+    receipt.write_text("{}\n", encoding="ascii")
     profile = {
         "worker": {"required_environment": list(MODULE.REQUIRED_OVERLAY_ENV)},
+        "promotion": {"receipt": str(receipt)},
     }
     (root / "profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    (root / "gate.json").write_text(
+        json.dumps(
+            {
+                "request": {
+                    "actual": {"request_id": "sq8-promotion-" + "a" * 64}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     return root
 
 
@@ -121,7 +148,12 @@ def dependencies(
 def prepare(monkeypatch: pytest.MonkeyPatch, values: list[dict[str, Any]] | None = None) -> None:
     snapshots = iter(values or [snapshot(), snapshot()])
     monkeypatch.setattr(MODULE, "candidate_snapshot", lambda _: next(snapshots))
-    monkeypatch.setattr(MODULE, "validate_executor_record", lambda path, identity: {"status": "ok"})
+    monkeypatch.setattr(
+        MODULE,
+        "validate_executor_record",
+        lambda path, identity, request_id: {"status": "ok"},
+    )
+    monkeypatch.setattr(MODULE, "load_receipt_writer", lambda: ReceiptWriter)
 
 
 def test_success_runs_candidate_once_and_restores_new_epoch(
@@ -142,17 +174,22 @@ def test_success_runs_candidate_once_and_restores_new_epoch(
     assert calls["lease"].released is True
     assert len(calls["capture"]) == 1
     invocation = calls["capture"][0]
-    assert invocation["argv"][-1] == "--sq8-promotion-evidence"
+    assert invocation["argv"][-2:] == [
+        "--sq8-promotion-request-id",
+        "sq8-promotion-" + "a" * 64,
+    ]
     assert invocation["environment"]["HIP_VISIBLE_DEVICES"] == "1"
     assert invocation["environment"]["ULLM_HIP_VISIBLE_DEVICES"] == "1"
     assert "ROCR_VISIBLE_DEVICES" not in invocation["environment"]
     assert {path.name for path in output.iterdir()} == {
         "maintenance-evidence.json",
         "executor-record.json",
+        "promotion-actual-receipt.json",
         "SHA256SUMS",
     }
     sums = (output / "SHA256SUMS").read_text(encoding="ascii")
     assert "maintenance-evidence.json" in sums and "executor-record.json" in sums
+    assert not (output / "promotion-failure-receipt.json").exists()
 
 
 def test_capture_failure_still_releases_and_restores(
@@ -169,6 +206,8 @@ def test_capture_failure_still_releases_and_restores(
     assert evidence["restore"]["passed"] is True
     assert calls["lease"].released is True
     assert calls["start"] == 1
+    assert (tmp_path / "failure" / "promotion-failure-receipt.json").is_file()
+    assert not (tmp_path / "failure" / "promotion-actual-receipt.json").exists()
 
 
 def test_stop_failure_attempts_restore(

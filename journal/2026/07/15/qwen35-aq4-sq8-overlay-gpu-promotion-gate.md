@@ -18,6 +18,9 @@
 - 独立監査で見つかったlifecycle不足を解消するため、候補専用maintenance wrapperを追加した。default service prestate、停止後のsystemd/worker/AMD/KFD owner-free stable 2回、`/run/ullm/device-1.lock`の同一inode flock、候補capture 1回、source/artifact/package/releaseのpre/post同一性、失敗を含む全経路でのlock解放とdefault service新epoch/health/production lock owner復旧を必須化した。既存P2 production launcherは候補実行に使用しない。
 - overlay promotion receiptを2 phase化した。pre-GPU候補は`prepared_not_executed`かつ`actual: pending`で、source commit/tree/archive、worker/profile/served semantic identity、binding/content/tensor-set、完全artifact inventory、packageを束縛する。actual後だけmaintenance stable2とexecutor telemetryを再検証したcreate-new `actual_verified` receiptを生成できる。
 - served-model generatorはSQ8 overlayのpromotion profile/receiptをexact schemaで検証し、旧evidence keyの追加、field削除、stale source、worker/profile/manifest、inventory/mode/uid/gid/nlink/bytes、package、actual evidenceの不一致をfail closedにした。
+- 最終監査でrequest identityの生成元がcapture側の乱数だった問題を修正した。builderがsource commit/tree/archive、worker、binding/content/tensor-set、packageのcanonical identityをSHA-256へ束縛し、`sq8-promotion-<64 hex>`を1件だけ生成する。Gate、build receipt、prepared receipt、profile、capture argv、worker telemetry環境、executor record、maintenance evidence、actual/failure receiptが同じrequest IDをexact照合する。promotion captureではexplicit `--sq8-promotion-request-id`が必須で、`capture-*`乱数request IDを生成しない。
+- prepared receiptは上書きせず、actual成功後だけ別のcreate-new `promotion-actual-receipt.json`を生成する。actual receiptはprepared receiptの絶対path/SHA、maintenance/executorの相対path/SHA、request ID、live worker/profile/overlay inventory/package、stable2 exclusivity、telemetry、manifest/output identityを束縛する。失敗時は別の`promotion-failure-receipt.json`だけを生成する。
+- production `generate`/`materialize`は`actual_verified` receiptだけを受理し、GPU前候補は明示的な`generate_prepared_candidate`経路に限定した。wrong request、replay/overwrite、prepared receipt置換、pending receiptのproduction利用を拒否する。
 
 ## 検証
 
@@ -29,6 +32,7 @@
 - dedicated wrapper lifecycle tests: 6 passed
 - strict receipt/generator/builder tests: 6 passed
 - combined related Python tests: 44 passed（worktree絶対pathに依存する既存1件は対象外）
+- final request/receipt auditを含むcombined related Python tests: 46 passed（同じ既存1件は対象外）
 - GPU command・service状態変更: 0。wrapper実装確認中にread-onlyの`systemctl cat`を1回実行したが、start/stop/restart/showやGPU commandは実行していない。
 
 ## 次の行動

@@ -11,11 +11,14 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -26,6 +29,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = ROOT / "tools/capture-aq4-resident-executor-record.py"
+RECEIPT_WRITER = ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py"
 SCHEMA = "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1"
 GATE_SCHEMA = "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_gate.v1"
 TELEMETRY_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry.v1"
@@ -37,6 +41,8 @@ STOP_TIMEOUT_SECONDS = 30.0
 RESTORE_TIMEOUT_SECONDS = 120.0
 POLL_SECONDS = 0.25
 MAX_JSON_BYTES = 16 * 1024 * 1024
+PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 READY_URL = "http://172.20.0.1:8000/readyz"
 READY_BODY = b'{"status":"ready"}'
 PRODUCTION_LOCK_PATH = Path("/run/ullm/r9700.lock")
@@ -212,6 +218,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "release_from_receipt",
         "package_from_receipt",
         "actual_evidence_from_receipt",
+        "request_id_from_receipt",
         "release_source_commit",
     }:
         raise PromotionError("candidate strict promotion profile differs")
@@ -246,13 +253,18 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     }
     if any(identity.get(key) != value for key, value in expected.items()):
         raise PromotionError("candidate Gate live identity differs")
-    if set(receipt) != {"schema_version", "status", "source_commit", "source_provenance", "release", "overlay", "package", "actual"}:
+    request_id = gate.get("request", {}).get("actual", {}).get("request_id")
+    if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise PromotionError("candidate Gate promotion request ID differs")
+    if set(receipt) != {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "actual"}:
         raise PromotionError("candidate promotion receipt shape differs")
     source = receipt.get("source_provenance")
     if (
         receipt.get("schema_version") != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
         or receipt.get("status") != "prepared_not_executed"
         or receipt.get("actual") != {"status": "pending", "required": True}
+        or receipt.get("request_id") != request_id
+        or build.get("promotion_request_id") != request_id
         or receipt.get("source_commit") != build.get("release_source_commit")
         or source != {
             "tree_sha256": build.get("release_source_tree"),
@@ -340,13 +352,15 @@ def stable_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def validate_executor_record(path: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+def validate_executor_record(path: Path, snapshot: dict[str, Any], expected_request_id: str) -> dict[str, Any]:
     value = read_object(path, "SQ8 executor record")
     evidence = value.get("sq8_promotion_evidence")
     if value.get("status") != "ok" or not isinstance(evidence, dict):
         raise PromotionError("SQ8 executor evidence is incomplete")
     if evidence.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_executor.v1":
         raise PromotionError("SQ8 executor evidence schema differs")
+    if evidence.get("request_id") != expected_request_id:
+        raise PromotionError("SQ8 executor promotion request ID differs")
     manifest = evidence.get("manifest_identity")
     files = snapshot["files"]
     if manifest != {
@@ -369,7 +383,12 @@ def validate_executor_record(path: Path, snapshot: dict[str, Any]) -> dict[str, 
     if not isinstance(staging, dict) or any(staging.get(key) != 0 for key in ("read_count", "write_count", "read_bytes", "write_bytes")):
         raise PromotionError("SQ8 executor used diagnostic host staging")
     output = evidence.get("output_identity")
-    if not isinstance(output, dict) or output.get("token_ids_recorded") is not False or not isinstance(output.get("token_ids_sha256"), str) or len(output["token_ids_sha256"]) != 64:
+    if (
+        not isinstance(output, dict)
+        or output.get("token_ids_recorded") is not False
+        or not isinstance(output.get("token_ids_sha256"), str)
+        or SHA256_RE.fullmatch(output["token_ids_sha256"]) is None
+    ):
         raise PromotionError("SQ8 executor output identity is incomplete")
     return value
 
@@ -766,7 +785,9 @@ def capture_environment(profile: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def capture_command(candidate: Path, output: Path) -> list[str]:
+def capture_command(candidate: Path, output: Path, request_id: str) -> list[str]:
+    if PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise PromotionError("candidate promotion request ID differs")
     return [
         "python3",
         str(CAPTURE),
@@ -781,10 +802,16 @@ def capture_command(candidate: Path, output: Path) -> list[str]:
         "--timeout",
         "240",
         "--sq8-promotion-evidence",
+        "--sq8-promotion-request-id",
+        request_id,
     ]
 
 
-def finalize_directory(output: Path, documents: dict[str, dict[str, Any]]) -> None:
+def finalize_directory(
+    output: Path,
+    documents: dict[str, dict[str, Any]],
+    receipt_factory: Callable[[Path], str] | None = None,
+) -> None:
     if output.exists() or output.is_symlink():
         raise PromotionError("promotion evidence output must be create-new")
     staging = output.with_name(f".{output.name}.incomplete")
@@ -792,7 +819,6 @@ def finalize_directory(output: Path, documents: dict[str, dict[str, Any]]) -> No
         raise PromotionError("promotion evidence staging path already exists")
     staging.mkdir(mode=0o700)
     try:
-        sums = []
         for name, value in documents.items():
             path = staging / name
             raw = (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("ascii")
@@ -801,7 +827,18 @@ def finalize_directory(output: Path, documents: dict[str, dict[str, Any]]) -> No
                 destination.flush()
                 os.fsync(destination.fileno())
             path.chmod(0o444)
-            sums.append(f"{sha_file(path)}  {name}\n")
+        receipt_name = receipt_factory(staging) if receipt_factory is not None else None
+        names = sorted(
+            path.name
+            for path in staging.iterdir()
+            if path.is_file() and not path.is_symlink()
+        )
+        expected_names = set(documents)
+        if receipt_name is not None:
+            expected_names.add(receipt_name)
+        if set(names) != expected_names:
+            raise PromotionError("promotion evidence receipt output set differs")
+        sums = [f"{sha_file(staging / name)}  {name}\n" for name in names]
         sums_path = staging / "SHA256SUMS"
         with sums_path.open("xb") as destination:
             destination.write("".join(sums).encode("ascii"))
@@ -820,13 +857,32 @@ def finalize_directory(output: Path, documents: dict[str, dict[str, Any]]) -> No
         raise
 
 
+def load_receipt_writer() -> Any:
+    spec = importlib.util.spec_from_file_location("_ullm_sq8_actual_receipt_writer", RECEIPT_WRITER)
+    if spec is None or spec.loader is None:
+        raise PromotionError("promotion receipt writer import failed")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    return module
+
+
 def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dict[str, Any]]:
     before_candidate = candidate_snapshot(candidate)
     profile = read_object(candidate / "profile.json", "candidate profile")
+    gate = read_object(candidate / "gate.json", "candidate Gate")
+    request_id = gate.get("request", {}).get("actual", {}).get("request_id")
+    if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise PromotionError("candidate Gate promotion request ID differs")
     evidence: dict[str, Any] = {
         "schema_version": SCHEMA,
         "status": "running",
         "candidate": str(candidate),
+        "promotion_request_id": request_id,
         "candidate_pre": before_candidate,
         "service_prestate": None,
         "stopped_observations": [],
@@ -840,7 +896,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
     service_touched = False
     lease = None
     capture_record: dict[str, Any] | None = None
-    capture_temp = Path(tempfile.mkdtemp(prefix="ullm-sq8-overlay-capture-")) / "executor-record.json"
+    capture_temp = Path(tempfile.mkdtemp(prefix="ullm-sq8-overlay-evidence-run-")) / "executor-record.json"
     code = 1
     try:
         prestate = deps.service_snapshot()
@@ -860,7 +916,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
         evidence["stopped_observations"] = poll_stopped(deps, old_worker_pid)
         lease = deps.acquire_lock()
         evidence["lock"] = lease.evidence()
-        command = capture_command(candidate, capture_temp)
+        command = capture_command(candidate, capture_temp, request_id)
         environment = capture_environment(profile)
         evidence["capture"] = {
             "argv": command,
@@ -874,7 +930,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             raise PromotionError("candidate SQ8 capture status JSON differs") from error
         if completed.returncode != 0 or capture_status != {"status": "ok", "output": str(capture_temp)}:
             raise PromotionError("candidate SQ8 capture failed")
-        capture_record = validate_executor_record(capture_temp, before_candidate)
+        capture_record = validate_executor_record(capture_temp, before_candidate, request_id)
         after_candidate = candidate_snapshot(candidate)
         evidence["candidate_post"] = after_candidate
         if stable_identity(after_candidate) != stable_identity(before_candidate):
@@ -905,7 +961,29 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
     documents = {"maintenance-evidence.json": evidence}
     if capture_record is not None:
         documents["executor-record.json"] = capture_record
-    finalize_directory(output, documents)
+    prepared_receipt = Path(str(profile["promotion"]["receipt"])).resolve()
+
+    def receipt_factory(staging: Path) -> str:
+        writer = load_receipt_writer()
+        maintenance_path = staging / "maintenance-evidence.json"
+        if evidence["status"] == "passed" and capture_record is not None:
+            name = "promotion-actual-receipt.json"
+            writer.write_actual_receipt(
+                prepared_receipt_path=prepared_receipt,
+                maintenance_evidence_path=maintenance_path,
+                executor_record_path=staging / "executor-record.json",
+                output_path=staging / name,
+            )
+            return name
+        name = "promotion-failure-receipt.json"
+        writer.write_failure_receipt(
+            prepared_receipt_path=prepared_receipt,
+            maintenance_evidence_path=maintenance_path,
+            output_path=staging / name,
+        )
+        return name
+
+    finalize_directory(output, documents, receipt_factory)
     return code, evidence
 
 

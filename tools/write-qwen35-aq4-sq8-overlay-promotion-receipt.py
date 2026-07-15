@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 RECEIPT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
 IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
+REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 HEX40 = set("0123456789abcdef")
 HEX64 = set("0123456789abcdef")
 MAX_JSON_BYTES = 32 * 1024 * 1024
@@ -32,6 +34,12 @@ MAX_JSON_BYTES = 32 * 1024 * 1024
 
 class ReceiptError(RuntimeError):
     """Raised when an overlay receipt cannot be safely published."""
+
+
+def _request_id(value: Any) -> str:
+    if not isinstance(value, str) or REQUEST_ID_RE.fullmatch(value) is None:
+        raise ReceiptError("SQ8 promotion request_id must be sq8-promotion-<64 lowercase hex>")
+    return value
 
 
 def _canonical(value: Any) -> bytes:
@@ -206,6 +214,7 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         "release_from_receipt",
         "package_from_receipt",
         "actual_evidence_from_receipt",
+        "request_id_from_receipt",
         "release_source_commit",
     }
     if set(promotion) != expected_keys:
@@ -224,6 +233,8 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         raise ReceiptError("overlay profile package binding differs")
     if promotion["actual_evidence_from_receipt"] != ["actual"]:
         raise ReceiptError("overlay profile actual evidence binding differs")
+    if promotion["request_id_from_receipt"] != ["request_id"]:
+        raise ReceiptError("overlay profile request ID binding differs")
     _hex(promotion["release_source_commit"], 40, "overlay profile release source commit")
     worker = profile.get("worker")
     product = profile.get("product")
@@ -299,6 +310,12 @@ def _relative_evidence_ref(path: Path, output_path: Path, label: str) -> dict[st
     return {"path": os.fspath(relative), "sha256": sha256_file(path)}
 
 
+def _absolute_evidence_ref(path: Path, label: str) -> dict[str, str]:
+    if path.is_symlink() or not path.is_file():
+        raise ReceiptError(f"{label} must be a regular non-symlink file")
+    return {"path": os.fspath(path.resolve()), "sha256": sha256_file(path)}
+
+
 def _validate_sq8_telemetry(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version", "projection", "diagnostic_host_staging"
@@ -334,7 +351,10 @@ def _actual_evidence(
     profile: dict[str, Any],
     overlay: dict[str, Any],
     package_sha256: str,
+    request_id: str,
+    prepared_receipt_path: Path | None = None,
 ) -> dict[str, Any]:
+    request_id = _request_id(request_id)
     paths = (maintenance_path, executor_path)
     if all(path is None for path in paths):
         return {"status": "pending", "required": True}
@@ -342,6 +362,8 @@ def _actual_evidence(
         raise ReceiptError("actual maintenance and executor evidence must be supplied together")
     assert maintenance_path is not None and executor_path is not None
     maintenance = _read_object(maintenance_path, "maintenance evidence")
+    if maintenance.get("promotion_request_id") != request_id:
+        raise ReceiptError("maintenance promotion request ID differs")
     gpu = _gpu_evidence_from_maintenance(maintenance)
     executor = _read_object(executor_path, "executor record")
     if executor.get("schema_version") != "ullm.production_executor_record.v1" or executor.get("status") != "ok":
@@ -353,6 +375,8 @@ def _actual_evidence(
         raise ReceiptError("executor SQ8 promotion evidence is missing")
     if promotion["schema_version"] != "ullm.qwen35_aq4.sq8_promotion_executor.v1":
         raise ReceiptError("executor SQ8 promotion evidence schema differs")
+    if promotion.get("request_id") != request_id:
+        raise ReceiptError("executor SQ8 promotion request ID differs")
     manifest_identity = promotion["manifest_identity"]
     expected_identity = {
         "implementation_id": IMPLEMENTATION_ID,
@@ -370,12 +394,12 @@ def _actual_evidence(
         or set(output_identity) != {"token_count", "token_ids_sha256", "token_ids_recorded"}
         or type(output_identity["token_count"]) is not int
         or output_identity["token_count"] < 1
-        or not isinstance(output_identity["token_ids_sha256"], str)
-        or len(output_identity["token_ids_sha256"]) != 64
+        or _hex(output_identity.get("token_ids_sha256"), 64, "executor token IDs SHA-256")
+        != output_identity.get("token_ids_sha256")
         or output_identity["token_ids_recorded"] is not False
     ):
         raise ReceiptError("executor output identity differs")
-    return {
+    actual = {
         "status": "actual_verified",
         "required": True,
         "maintenance_evidence": _relative_evidence_ref(maintenance_path, output_path, "maintenance evidence"),
@@ -385,6 +409,22 @@ def _actual_evidence(
         "manifest_identity": manifest_identity,
         "output_identity": output_identity,
     }
+    if prepared_receipt_path is not None:
+        actual["prepared_receipt"] = _absolute_evidence_ref(
+            prepared_receipt_path, "prepared receipt"
+        )
+        # Keep the receipt reference first in the serialized object order only
+        # for readability; canonical validation is key-set based.
+        actual = {
+            "status": actual["status"],
+            "required": actual["required"],
+            "prepared_receipt": actual["prepared_receipt"],
+            **{key: actual[key] for key in (
+                "maintenance_evidence", "executor_record", "gpu_exclusive_preflight",
+                "telemetry", "manifest_identity", "output_identity",
+            )},
+        }
+    return actual
 
 
 def validate_actual_evidence(
@@ -395,6 +435,8 @@ def validate_actual_evidence(
     profile: dict[str, Any],
     overlay: dict[str, Any],
     package_sha256: str,
+    request_id: str,
+    prepared_receipt_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate post-run evidence and return its canonical receipt projection."""
 
@@ -405,6 +447,8 @@ def validate_actual_evidence(
         profile=profile,
         overlay=overlay,
         package_sha256=package_sha256,
+        request_id=request_id,
+        prepared_receipt_path=prepared_receipt_path,
     )
 
 
@@ -446,8 +490,7 @@ def write_receipt(
     source_tree_sha256: str,
     source_archive_sha256: str,
     served_model_path: Path,
-    maintenance_evidence_path: Path | None = None,
-    executor_record_path: Path | None = None,
+    request_id: str,
 ) -> dict[str, Any]:
     """Create a strict receipt and publish it once, with no overwrite."""
 
@@ -458,6 +501,7 @@ def write_receipt(
     profile = _read_object(profile_path, "SQ8 overlay profile")
     worker_profile, product = _profile_contract(profile, output_path)
     source_commit = _hex(profile["promotion"]["release_source_commit"], 40, "source commit")
+    request_id = _request_id(request_id)
     source_tree_sha256 = _hex(source_tree_sha256, 40, "source tree SHA-256")
     source_archive_sha256 = _hex(source_archive_sha256, 64, "source archive SHA-256")
 
@@ -490,26 +534,13 @@ def write_receipt(
     if not isinstance(package_ref, dict) or package_ref.get("manifest_sha256") != package_manifest_sha256:
         raise ReceiptError("overlay binding package SHA-256 differs")
     inventory = artifact_inventory(artifact_manifest_path.parent)
-    actual = _actual_evidence(
-        maintenance_path=maintenance_evidence_path,
-        executor_path=executor_record_path,
-        output_path=output_path,
-        profile=profile,
-        overlay={
-            "binding_manifest_sha256": sha256_file(artifact_manifest_path),
-            "content_sha256": content_sha256,
-        },
-        package_sha256=package_manifest_sha256,
-    )
+    actual = {"status": "pending", "required": True}
 
     generator = _load_generator()
     synthetic_receipt = {
         "schema_version": RECEIPT_SCHEMA,
-        "status": (
-            "prepared_not_executed"
-            if actual["status"] == "pending"
-            else "actual_verified"
-        ),
+        "status": "prepared_not_executed",
+        "request_id": request_id,
         "source_commit": source_commit,
         "source_provenance": {
             "tree_sha256": source_tree_sha256,
@@ -564,6 +595,229 @@ def write_receipt(
     return synthetic_receipt
 
 
+def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
+    path = path.resolve()
+    if path.is_symlink() or not path.is_file():
+        raise ReceiptError("prepared receipt must be a regular non-symlink file")
+    prepared = _read_object(path, "prepared promotion receipt")
+    if set(prepared) != {
+        "schema_version", "status", "request_id", "source_commit", "source_provenance",
+        "release", "overlay", "package", "actual",
+    }:
+        raise ReceiptError("prepared receipt shape differs")
+    if (
+        prepared.get("schema_version") != RECEIPT_SCHEMA
+        or prepared.get("status") != "prepared_not_executed"
+        or prepared.get("actual") != {"status": "pending", "required": True}
+    ):
+        raise ReceiptError("prepared receipt is not pending")
+    request_id = _request_id(prepared.get("request_id"))
+    _hex(prepared.get("source_commit"), 40, "prepared source commit")
+    source = prepared.get("source_provenance")
+    if not isinstance(source, dict):
+        raise ReceiptError("prepared source provenance is missing")
+    _hex(source.get("tree_sha256"), 40, "prepared source tree")
+    _hex(source.get("archive_sha256"), 64, "prepared source archive SHA-256")
+    release = prepared.get("release")
+    profile = release.get("profile") if isinstance(release, dict) else None
+    if not isinstance(profile, dict) or not isinstance(profile.get("path"), str):
+        raise ReceiptError("prepared receipt profile binding is missing")
+    worker = release.get("worker") if isinstance(release, dict) else None
+    served = release.get("served_model") if isinstance(release, dict) else None
+    overlay = prepared.get("overlay")
+    package = prepared.get("package")
+    for value, label in (
+        (worker.get("sha256") if isinstance(worker, dict) else None, "prepared worker SHA-256"),
+        (profile.get("sha256"), "prepared profile SHA-256"),
+        (served.get("semantic_sha256") if isinstance(served, dict) else None, "prepared served-model semantic SHA-256"),
+        (overlay.get("binding_manifest_sha256") if isinstance(overlay, dict) else None, "prepared binding SHA-256"),
+        (overlay.get("content_sha256") if isinstance(overlay, dict) else None, "prepared content SHA-256"),
+        (overlay.get("tensor_set_sha256") if isinstance(overlay, dict) else None, "prepared tensor-set SHA-256"),
+        (package.get("manifest_sha256") if isinstance(package, dict) else None, "prepared package SHA-256"),
+    ):
+        _hex(value, 64, label)
+    profile_path = Path(profile["path"]).resolve()
+    if profile.get("sha256") != sha256_file(profile_path):
+        raise ReceiptError("prepared receipt profile SHA-256 differs")
+    profile_value = _read_object(profile_path, "overlay profile")
+    return prepared, profile_value, request_id
+
+
+def _actual_output_path(path: Path, basename: str) -> Path:
+    # Check the caller path before resolving so dangling symlinks cannot be
+    # followed into a new publication target.
+    if path.is_symlink() or path.name != basename:
+        raise ReceiptError(f"actual receipt output must be the create-new {basename} file")
+    resolved = path.resolve()
+    if resolved.exists() or resolved.is_symlink():
+        raise ReceiptError("actual receipt output already exists or is a symlink")
+    return resolved
+
+
+def _final_publication_path(path: Path) -> Path:
+    """Resolve the final path when called by the wrapper's hidden staging dir."""
+
+    parent = path.parent
+    marker = parent.name
+    if marker.startswith(".") and marker.endswith(".incomplete"):
+        final_name = marker[1 : -len(".incomplete")]
+        if final_name:
+            return parent.parent / final_name / path.name
+    return path
+
+
+def write_actual_receipt(
+    prepared_receipt_path: Path,
+    maintenance_evidence_path: Path,
+    executor_record_path: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Publish a separate actual-verified receipt after one successful run."""
+
+    if prepared_receipt_path.is_symlink():
+        raise ReceiptError("prepared receipt must not be a symlink")
+    prepared_path = prepared_receipt_path.resolve()
+    output_path = _actual_output_path(output_path, "promotion-actual-receipt.json")
+    if output_path == prepared_path:
+        raise ReceiptError("actual receipt cannot replace the prepared receipt")
+    prepared, profile, request_id = _load_prepared_receipt(prepared_path)
+    worker_profile, product = _profile_contract(profile, prepared_path)
+    generator = _load_generator()
+    try:
+        generator._materialize_profile_document(
+            Path(str(prepared["release"]["profile"]["path"])),
+            expected_manifest_path=Path(str(prepared["release"]["served_model"]["path"])),
+            receipt_override=prepared,
+            validate_receipt=True,
+            allow_prepared=True,
+        )
+    except Exception as error:
+        raise ReceiptError(f"prepared receipt binding could not be revalidated: {error}") from error
+    product_root = Path(str(product["product"].get("root", ""))).resolve()
+    artifact_manifest_path = (product_root / str(product["artifact"].get("manifest_path", ""))).resolve()
+    package_manifest_path = (product_root / str(product["package"].get("manifest_path", ""))).resolve()
+    binding = _read_object(artifact_manifest_path, "SQ8 overlay binding manifest")
+    if binding.get("implementation_id") != IMPLEMENTATION_ID:
+        raise ReceiptError("SQ8 overlay binding identity differs")
+    content_sha256 = _hex(binding.get("content_sha256"), 64, "overlay content SHA-256")
+    package_manifest_sha256 = sha256_file(package_manifest_path)
+    if not isinstance(binding.get("package"), dict) or binding["package"].get("manifest_sha256") != package_manifest_sha256:
+        raise ReceiptError("overlay binding package SHA-256 differs")
+    prepared_overlay = prepared.get("overlay")
+    prepared_package = prepared.get("package")
+    expected_overlay = {
+        "binding_manifest_path": os.fspath(artifact_manifest_path),
+        "binding_manifest_sha256": sha256_file(artifact_manifest_path),
+        "content_sha256": content_sha256,
+        "tensor_set_sha256": _hex(binding.get("tensor_set_sha256"), 64, "overlay tensor-set SHA-256"),
+        "tensor_count": 48,
+        "artifact_inventory": artifact_inventory(artifact_manifest_path.parent),
+    }
+    if prepared_overlay != expected_overlay:
+        raise ReceiptError("prepared receipt overlay identity differs from live artifact")
+    if prepared_package != {
+        "manifest_path": os.fspath(package_manifest_path),
+        "manifest_sha256": package_manifest_sha256,
+    }:
+        raise ReceiptError("prepared receipt package identity differs from live package")
+    release = prepared.get("release")
+    worker = release.get("worker") if isinstance(release, dict) else None
+    profile_release = release.get("profile") if isinstance(release, dict) else None
+    worker_path = Path(str(worker.get("path", ""))).resolve() if isinstance(worker, dict) else Path("/")
+    if (
+        not isinstance(worker, dict)
+        or worker_path.is_symlink()
+        or not worker_path.is_file()
+        or worker.get("sha256") != sha256_file(worker_path)
+        or worker.get("bytes") != worker_path.stat().st_size
+        or worker.get("mode") != "0555"
+        or worker.get("nlink") != 1
+    ):
+        raise ReceiptError("prepared receipt worker identity differs from live worker")
+    profile_path = Path(str(profile_release.get("path", ""))).resolve() if isinstance(profile_release, dict) else Path("/")
+    if (
+        not isinstance(profile_release, dict)
+        or profile_path.is_symlink()
+        or not profile_path.is_file()
+        or profile_release.get("sha256") != sha256_file(profile_path)
+    ):
+        raise ReceiptError("prepared receipt profile identity differs from live profile")
+    actual = _actual_evidence(
+        maintenance_path=maintenance_evidence_path,
+        executor_path=executor_record_path,
+        output_path=output_path,
+        profile=profile,
+        overlay={
+            "binding_manifest_sha256": sha256_file(artifact_manifest_path),
+            "content_sha256": content_sha256,
+        },
+        package_sha256=package_manifest_sha256,
+        request_id=request_id,
+        prepared_receipt_path=prepared_path,
+    )
+    if actual.get("status") != "actual_verified":
+        raise ReceiptError("actual receipt evidence is not verified")
+    receipt = json.loads(json.dumps(prepared, ensure_ascii=True, allow_nan=False))
+    receipt["status"] = "actual_verified"
+    receipt["actual"] = actual
+    served_path = Path(str(receipt["release"]["served_model"]["path"])).resolve()
+    final_output_path = _final_publication_path(output_path)
+    try:
+        document = generator._materialize_profile_document(
+            Path(str(receipt["release"]["profile"]["path"])),
+            expected_manifest_path=served_path,
+            receipt_override=receipt,
+            receipt_path_override=final_output_path,
+            receipt_sha256_override=hashlib.sha256(
+                (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")
+            ).hexdigest(),
+            validate_receipt=False,
+        )
+        receipt["release"]["served_model"]["semantic_sha256"] = generator._served_model_semantic_sha256(document)
+    except Exception as error:
+        raise ReceiptError(f"actual served-model binding could not be reconstructed: {error}") from error
+    raw = (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")
+    _exclusive_write(output_path, raw)
+    return receipt
+
+
+def write_failure_receipt(
+    prepared_receipt_path: Path,
+    maintenance_evidence_path: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Publish a separate immutable failure receipt without promoting the candidate."""
+
+    if prepared_receipt_path.is_symlink():
+        raise ReceiptError("prepared receipt must not be a symlink")
+    prepared_path = prepared_receipt_path.resolve()
+    output_path = _actual_output_path(output_path, "promotion-failure-receipt.json")
+    if output_path == prepared_path:
+        raise ReceiptError("failure receipt cannot replace the prepared receipt")
+    prepared, _profile, request_id = _load_prepared_receipt(prepared_path)
+    maintenance = _read_object(maintenance_evidence_path, "maintenance evidence")
+    if maintenance.get("schema_version") != "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1":
+        raise ReceiptError("maintenance evidence schema differs")
+    if maintenance.get("promotion_request_id") != request_id:
+        raise ReceiptError("maintenance promotion request ID differs")
+    if maintenance.get("status") != "failed":
+        raise ReceiptError("maintenance evidence is not a failed run")
+    receipt = json.loads(json.dumps(prepared, ensure_ascii=True, allow_nan=False))
+    receipt["status"] = "actual_failed"
+    receipt["actual"] = {
+        "status": "failed",
+        "required": True,
+        "prepared_receipt": _absolute_evidence_ref(prepared_path, "prepared receipt"),
+        "maintenance_evidence": _relative_evidence_ref(
+            maintenance_evidence_path, output_path, "maintenance evidence"
+        ),
+        "request_id": request_id,
+    }
+    raw = (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")
+    _exclusive_write(output_path, raw)
+    return receipt
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True, type=Path)
@@ -571,8 +825,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-tree-sha256", required=True)
     parser.add_argument("--source-archive-sha256", required=True)
     parser.add_argument("--served-model", required=True, type=Path)
-    parser.add_argument("--maintenance-evidence", type=Path)
-    parser.add_argument("--executor-record", type=Path)
+    parser.add_argument("--request-id", required=True)
     return parser.parse_args(argv)
 
 
@@ -585,8 +838,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_tree_sha256=args.source_tree_sha256,
             source_archive_sha256=args.source_archive_sha256,
             served_model_path=args.served_model,
-            maintenance_evidence_path=args.maintenance_evidence,
-            executor_record_path=args.executor_record,
+            request_id=args.request_id,
         )
     except Exception as error:
         print(f"SQ8 overlay promotion receipt publication failed: {error}", file=sys.stderr)

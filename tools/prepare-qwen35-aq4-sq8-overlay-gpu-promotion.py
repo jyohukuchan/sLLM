@@ -40,7 +40,6 @@ REQUIRED_OVERLAY_ENV = (
     "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL",
     "ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA",
 )
-ACTUAL_REQUEST_ID = "sq8-overlay-promotion-actual-v1"
 MAX_JSON_BYTES = 16 * 1024 * 1024
 
 
@@ -115,6 +114,34 @@ def source_archive_sha256(commit: str) -> str:
     if archive.returncode != 0:
         raise GateError(f"git archive failed: {stderr.decode(errors='replace')}")
     return digest.hexdigest()
+
+
+def fixed_promotion_request_id(
+    *,
+    commit: str,
+    tree: str,
+    archive_sha256: str,
+    worker_sha256: str,
+    binding_sha256: str,
+    content_sha256: str,
+    tensor_set_sha256: str,
+    package_sha256: str,
+) -> str:
+    identity = {
+        "schema_version": "ullm.qwen35_aq4.sq8_overlay_promotion_request.v1",
+        "source": {"commit": commit, "tree": tree, "archive_sha256": archive_sha256},
+        "worker_sha256": worker_sha256,
+        "overlay": {
+            "binding_sha256": binding_sha256,
+            "content_sha256": content_sha256,
+            "tensor_set_sha256": tensor_set_sha256,
+        },
+        "package_sha256": package_sha256,
+    }
+    encoded = json.dumps(
+        identity, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
+    ).encode("ascii")
+    return "sq8-promotion-" + hashlib.sha256(encoded).hexdigest()
 
 
 def write_exclusive(path: Path, payload: bytes, mode: int = 0o444) -> None:
@@ -224,6 +251,16 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     try:
         immutable_worker = output / "ullm-aq4-worker"
         worker_identity = copy_binary_exclusive(worker_source, immutable_worker)
+        request_id = fixed_promotion_request_id(
+            commit=commit,
+            tree=source_tree,
+            archive_sha256=source_archive,
+            worker_sha256=worker_identity["immutable_sha256"],
+            binding_sha256=sha_file(binding_path),
+            content_sha256=binding["content_sha256"],
+            tensor_set_sha256=binding["tensor_set_sha256"],
+            package_sha256=sha_file(package_manifest),
+        )
         receipt_path = output / "promotion-receipt.json"
         candidate_profile = json.loads(json.dumps(profile))
         candidate_profile["worker"]["binary"] = str(immutable_worker)
@@ -235,6 +272,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "release_from_receipt": ["release"],
             "package_from_receipt": ["package"],
             "actual_evidence_from_receipt": ["actual"],
+            "request_id_from_receipt": ["request_id"],
             "release_source_commit": commit,
         }
         profile_path = output / "profile.json"
@@ -248,14 +286,16 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             source_tree_sha256=source_tree,
             source_archive_sha256=source_archive,
             served_model_path=manifest_path,
+            request_id=request_id,
         )
         generator = load_module("_ullm_sq8_gate_generator", GENERATOR)
-        generator.generate(profile_path, manifest_path)
+        generator.generate_prepared_candidate(profile_path, manifest_path)
         manifest_path.chmod(0o444)
         manifest = read_object(manifest_path, "candidate served-model manifest")
 
         build_receipt = {
             "schema_version": BUILD_SCHEMA,
+            "promotion_request_id": request_id,
             "release_source_commit": commit,
             "release_source_tree": source_tree,
             "release_source_archive_sha256": source_archive,
@@ -321,11 +361,11 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "request": {
                 "smoke": {"prompt_token_ids": [1], "max_new_tokens": 1, "telemetry_eligible": False},
                 "actual": {
-                    "request_id": ACTUAL_REQUEST_ID,
+                    "request_id": request_id,
                     "prompt_token_ids": list(range(1, 129)),
                     "max_new_tokens": 1,
                     "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
-                    "telemetry_environment": {"ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": ACTUAL_REQUEST_ID},
+                    "telemetry_environment": {"ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id},
                 },
             },
             "sequence": [

@@ -94,3 +94,22 @@ def test_sq8_promotion_marker_is_not_a_caller_control_surface() -> None:
     assert promotion["HIP_VISIBLE_DEVICES"] == "1"
     assert promotion["ULLM_HIP_VISIBLE_DEVICES"] == "1"
     assert "ROCR_VISIBLE_DEVICES" not in promotion
+
+
+def test_sq8_promotion_request_id_is_explicit_fixed_and_not_capture_random() -> None:
+    request_id = "sq8-promotion-" + "a" * 64
+    assert TOOL.resolve_capture_request_id(
+        sq8_promotion=True, promotion_request_id=request_id
+    ) == request_id
+    for invalid in (None, "capture-deadbeef", "sq8-promotion-" + "g" * 64):
+        with pytest.raises(TOOL.CaptureError, match="fixed cryptographic"):
+            TOOL.resolve_capture_request_id(
+                sq8_promotion=True, promotion_request_id=invalid
+            )
+    with pytest.raises(TOOL.CaptureError, match="forbidden"):
+        TOOL.resolve_capture_request_id(
+            sq8_promotion=False, promotion_request_id=request_id
+        )
+    assert TOOL.resolve_capture_request_id(
+        sq8_promotion=False, promotion_request_id=None
+    ).startswith("executor-")

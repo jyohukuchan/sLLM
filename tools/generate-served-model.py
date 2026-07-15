@@ -25,6 +25,7 @@ SQ8_OVERLAY_IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 SQ8_OVERLAY_RECEIPT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+SQ8_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 
 
 class GenerationError(RuntimeError):
@@ -122,6 +123,8 @@ def _validate_sq8_overlay_receipt(
     package_manifest_path: str,
     package_manifest_sha256: str,
     expected_manifest_path: Path | None = None,
+    allow_prepared: bool = False,
+    prepared_only: bool = False,
 ) -> dict[str, Any]:
     """Validate the immutable SQ8 overlay publication contract.
 
@@ -138,6 +141,7 @@ def _validate_sq8_overlay_receipt(
         "release_from_receipt",
         "package_from_receipt",
         "actual_evidence_from_receipt",
+        "request_id_from_receipt",
         "release_source_commit",
     }
     if set(promotion_profile) != expected_promotion:
@@ -154,6 +158,8 @@ def _validate_sq8_overlay_receipt(
         raise GenerationError("SQ8 overlay receipt package binding differs")
     if promotion_profile.get("actual_evidence_from_receipt") != ["actual"]:
         raise GenerationError("SQ8 overlay actual evidence receipt binding differs")
+    if promotion_profile.get("request_id_from_receipt") != ["request_id"]:
+        raise GenerationError("SQ8 overlay request ID receipt binding differs")
     release_commit = _require_hex(
         promotion_profile.get("release_source_commit"), HEX40_RE,
         "SQ8 overlay profile release source commit",
@@ -164,6 +170,7 @@ def _validate_sq8_overlay_receipt(
     expected_receipt_keys = {
         "schema_version",
         "status",
+        "request_id",
         "source_commit",
         "source_provenance",
         "release",
@@ -178,9 +185,16 @@ def _validate_sq8_overlay_receipt(
     )
     if source_commit != release_commit:
         raise GenerationError("SQ8 overlay receipt source commit is stale or mismatched")
+    request_id = receipt.get("request_id")
+    if not isinstance(request_id, str) or SQ8_REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise GenerationError("SQ8 overlay receipt request ID differs")
     status = receipt.get("status")
     if status not in {"prepared_not_executed", "actual_verified"}:
         raise GenerationError("SQ8 overlay promotion receipt status differs")
+    if status == "prepared_not_executed" and not allow_prepared:
+        raise GenerationError("SQ8 overlay prepared receipt is not executable")
+    if status == "actual_verified" and prepared_only:
+        raise GenerationError("SQ8 overlay prepared candidate requires a pending receipt")
     source = receipt.get("source_provenance")
     if not isinstance(source, dict) or set(source) != {"tree_sha256", "archive_sha256"}:
         raise GenerationError("SQ8 overlay source provenance is incomplete")
@@ -295,12 +309,51 @@ def _validate_sq8_overlay_receipt(
     else:
         if not isinstance(actual, dict) or actual.get("status") != "actual_verified":
             raise GenerationError("SQ8 overlay actual evidence is incomplete")
+        prepared_ref = actual.get("prepared_receipt")
+        if not isinstance(prepared_ref, dict) or set(prepared_ref) != {"path", "sha256"}:
+            raise GenerationError("SQ8 overlay prepared receipt reference is incomplete")
+        _require_hex(prepared_ref.get("sha256"), HEX64_RE, "SQ8 overlay prepared receipt SHA-256")
+        prepared_raw_path = prepared_ref.get("path")
+        if not isinstance(prepared_raw_path, str) or not Path(prepared_raw_path).is_absolute():
+            raise GenerationError("SQ8 overlay prepared receipt path must be absolute")
+        prepared_path = Path(prepared_raw_path)
+        if prepared_path.is_symlink() or not prepared_path.is_file():
+            raise GenerationError("SQ8 overlay prepared receipt path must be a regular non-symlink file")
+        configured_prepared_path = Path(str(promotion_profile.get("receipt", ""))).resolve()
+        if prepared_path != configured_prepared_path:
+            raise GenerationError("SQ8 overlay prepared receipt path differs from profile")
+        if _sha256_file(prepared_path) != prepared_ref["sha256"]:
+            raise GenerationError("SQ8 overlay prepared receipt SHA-256 differs")
+        try:
+            prepared_value = _load_json(prepared_path, "SQ8 overlay prepared receipt")
+        except Exception as error:
+            raise GenerationError(f"SQ8 overlay prepared receipt is unreadable: {error}") from error
+        if (
+            prepared_value.get("schema_version") != SQ8_OVERLAY_RECEIPT_SCHEMA
+            or prepared_value.get("status") != "prepared_not_executed"
+            or prepared_value.get("request_id") != request_id
+            or prepared_value.get("actual") != {"status": "pending", "required": True}
+        ):
+            raise GenerationError("SQ8 overlay prepared receipt state differs")
+        for section in ("source_commit", "source_provenance", "overlay", "package"):
+            if prepared_value.get(section) != receipt.get(section):
+                raise GenerationError(f"SQ8 overlay prepared receipt {section} differs")
+        prepared_release = prepared_value.get("release")
+        if (
+            not isinstance(prepared_release, dict)
+            or not isinstance(release, dict)
+            or prepared_release.get("worker") != release.get("worker")
+            or prepared_release.get("profile") != release.get("profile")
+        ):
+            raise GenerationError("SQ8 overlay prepared receipt release identity differs")
         maintenance_ref = actual.get("maintenance_evidence")
         executor_ref = actual.get("executor_record")
         if not isinstance(maintenance_ref, dict) or set(maintenance_ref) != {"path", "sha256"}:
             raise GenerationError("SQ8 overlay maintenance evidence reference is incomplete")
         if not isinstance(executor_ref, dict) or set(executor_ref) != {"path", "sha256"}:
             raise GenerationError("SQ8 overlay executor evidence reference is incomplete")
+        _require_hex(maintenance_ref.get("sha256"), HEX64_RE, "SQ8 overlay maintenance evidence SHA-256")
+        _require_hex(executor_ref.get("sha256"), HEX64_RE, "SQ8 overlay executor record SHA-256")
         maintenance_path = _resolve_receipt_file(
             receipt_path, maintenance_ref["path"], "SQ8 overlay maintenance evidence path"
         )
@@ -319,6 +372,8 @@ def _validate_sq8_overlay_receipt(
                 profile=profile,
                 overlay=overlay,
                 package_sha256=package_manifest_sha256,
+                request_id=request_id,
+                prepared_receipt_path=prepared_path,
             )
         except Exception as error:
             raise GenerationError(f"SQ8 overlay actual evidence validation failed: {error}") from error
@@ -628,6 +683,9 @@ def _materialize_profile_document(
     receipt_override: dict[str, Any] | None = None,
     receipt_sha256_override: str | None = None,
     validate_receipt: bool = True,
+    receipt_path_override: Path | None = None,
+    allow_prepared: bool = False,
+    prepared_only: bool = False,
 ) -> dict[str, Any]:
     profile = _load_json(profile_path, "served-model profile")
     if profile.get("schema_version") != PROFILE_SCHEMA:
@@ -678,7 +736,15 @@ def _materialize_profile_document(
         else None
     )
 
-    receipt_path = Path(str(promotion_profile.get("receipt", ""))).resolve()
+    configured_receipt_path = Path(str(promotion_profile.get("receipt", ""))).resolve()
+    receipt_path = (
+        receipt_path_override.resolve()
+        if receipt_path_override is not None
+        else configured_receipt_path
+    )
+    if receipt_path_override is not None:
+        if receipt_path == configured_receipt_path:
+            raise GenerationError("receipt path override must identify a separate actual receipt")
     receipt = (
         _load_json(receipt_path, "promotion receipt")
         if receipt_override is None
@@ -707,6 +773,8 @@ def _materialize_profile_document(
                 package_manifest_path=package_manifest_path,
                 package_manifest_sha256=package_manifest_sha256,
                 expected_manifest_path=expected_manifest_path,
+                allow_prepared=allow_prepared,
+                prepared_only=prepared_only,
             )
         else:
             _validate_aq4_evidence(
@@ -794,20 +862,34 @@ def _materialize_profile_document(
 
 
 def materialize(
-    profile_path: Path, *, expected_manifest_path: Path | None = None
+    profile_path: Path,
+    *,
+    expected_manifest_path: Path | None = None,
+    receipt_path_override: Path | None = None,
 ) -> dict[str, Any]:
     return _materialize_profile_document(
-        profile_path, expected_manifest_path=expected_manifest_path
+        profile_path,
+        expected_manifest_path=expected_manifest_path,
+        receipt_path_override=receipt_path_override,
     )
 
 
-def generate(profile_path: Path, output_path: Path) -> str:
+def generate(
+    profile_path: Path,
+    output_path: Path,
+    *,
+    receipt_path_override: Path | None = None,
+) -> str:
     # Check the caller-supplied path before normalization; resolving first would
     # turn a symlink into its target and silently allow replacement through it.
     if output_path.is_symlink():
         raise GenerationError("output path must not be a symlink")
     output_path = output_path.resolve()
-    document = materialize(profile_path, expected_manifest_path=output_path)
+    document = materialize(
+        profile_path,
+        expected_manifest_path=output_path,
+        receipt_path_override=receipt_path_override,
+    )
     if output_path.is_symlink():
         raise GenerationError("output path must not be a symlink")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -819,6 +901,43 @@ def generate(profile_path: Path, output_path: Path) -> str:
         descriptor, raw_path = tempfile.mkstemp(
             prefix=f".{output_path.name}.", dir=output_path.parent
         )
+        temporary = Path(raw_path)
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(encoded)
+            destination.flush()
+            os.fsync(destination.fileno())
+        temporary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        model = _load_validator().load_served_model(temporary)
+        os.replace(temporary, output_path)
+        temporary = None
+        directory = os.open(output_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return model.manifest_sha256
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def generate_prepared_candidate(profile_path: Path, output_path: Path) -> str:
+    """Materialize the immutable pre-GPU candidate manifest only."""
+
+    if output_path.is_symlink():
+        raise GenerationError("output path must not be a symlink")
+    output_path = output_path.resolve()
+    document = _materialize_profile_document(
+        profile_path,
+        expected_manifest_path=output_path,
+        allow_prepared=True,
+        prepared_only=True,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("utf-8")
+    temporary: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
         temporary = Path(raw_path)
         with os.fdopen(descriptor, "wb") as destination:
             destination.write(encoded)

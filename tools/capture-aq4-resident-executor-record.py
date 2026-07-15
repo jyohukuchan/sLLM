@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import re
 import secrets
 import select
 import subprocess
@@ -30,6 +31,7 @@ MAX_BYTES = 4 * 1024 * 1024
 SAFE_INT = 9_007_199_254_740_991
 LAYER_RE = re.compile(r"\.layers\.(\d+)(?:\.|$)")
 SQ8_PROMOTION_REQUEST_ENV = "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID"
+SQ8_PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 SQ8_OVERLAY_IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 SQ8_OVERLAY_EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
 
@@ -98,6 +100,16 @@ def configure_sq8_promotion_environment(
         result.pop("ROCR_VISIBLE_DEVICES", None)
         result[SQ8_PROMOTION_REQUEST_ENV] = request_id
     return result
+
+
+def resolve_capture_request_id(*, sq8_promotion: bool, promotion_request_id: str | None) -> str:
+    if sq8_promotion:
+        if promotion_request_id is None or SQ8_PROMOTION_REQUEST_ID_RE.fullmatch(promotion_request_id) is None:
+            raise CaptureError("SQ8 promotion requires a fixed cryptographic request ID")
+        return promotion_request_id
+    if promotion_request_id is not None:
+        raise CaptureError("SQ8 promotion request ID is forbidden outside promotion capture")
+    return "executor-" + secrets.token_hex(16)
 
 
 def load_json(path: Path, label: str) -> Any:
@@ -432,8 +444,11 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     prompt_tokens = args.prompt_tokens
     if not 1 <= prompt_tokens <= int(manifest.get("public", {}).get("context_length", 4096)):
         raise CaptureError("prompt token count is outside the served context")
-    internal_request_id = "capture-" + secrets.token_hex(8)
     sq8_promotion = bool(getattr(args, "sq8_promotion_evidence", False))
+    internal_request_id = resolve_capture_request_id(
+        sq8_promotion=sq8_promotion,
+        promotion_request_id=getattr(args, "sq8_promotion_request_id", None),
+    )
     if sq8_promotion:
         if manifest.get("format", {}).get("implementation_id") != SQ8_OVERLAY_IMPLEMENTATION_ID:
             raise CaptureError("SQ8 promotion manifest implementation identity differs")
@@ -689,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-new-tokens", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=240.0)
     parser.add_argument("--sq8-promotion-evidence", action="store_true")
+    parser.add_argument("--sq8-promotion-request-id")
     args = parser.parse_args(argv)
     try:
         atomic_write(args.output, run_capture(args))

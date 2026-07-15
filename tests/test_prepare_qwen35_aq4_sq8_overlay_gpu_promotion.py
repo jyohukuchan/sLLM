@@ -102,6 +102,8 @@ class FakeGenerator:
         }
         TOOL.write_json_exclusive(output_path, value)
 
+    generate_prepared_candidate = generate
+
 
 class FakeReceiptWriter:
     @staticmethod
@@ -158,7 +160,13 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
         "release_from_receipt": ["release"],
         "package_from_receipt": ["package"],
         "actual_evidence_from_receipt": ["actual"],
+        "request_id_from_receipt": ["request_id"],
         "release_source_commit": commit,
+    }
+    request_id = gate["request"]["actual"]["request_id"]
+    assert request_id.startswith("sq8-promotion-") and len(request_id) == 78
+    assert gate["request"]["actual"]["telemetry_environment"] == {
+        "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id
     }
     assert gate["release_source_commit"] == commit
     assert gate["profile_identity"]["artifact_binding_sha256"] == binding_sha

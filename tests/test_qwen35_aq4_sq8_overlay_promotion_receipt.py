@@ -38,6 +38,9 @@ def _immutable_tree(root: Path) -> None:
     root.chmod(0o555)
 
 
+REQUEST_ID = "sq8-promotion-" + "a" * 64
+
+
 @pytest.fixture
 def fixture(tmp_path: Path) -> dict[str, Path | dict]:
     tokenizer = tmp_path / "tokenizer"
@@ -109,6 +112,7 @@ def fixture(tmp_path: Path) -> dict[str, Path | dict]:
             "release_from_receipt": ["release"],
             "package_from_receipt": ["package"],
             "actual_evidence_from_receipt": ["actual"],
+            "request_id_from_receipt": ["request_id"],
             "release_source_commit": "1" * 40,
         },
     }
@@ -125,6 +129,7 @@ def test_pre_gpu_receipt_is_pending_and_create_new(fixture: dict[str, Path | dic
         source_tree_sha256="2" * 40,
         source_archive_sha256="3" * 64,
         served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
     )
     assert value["status"] == "prepared_not_executed"
     assert value["actual"] == {"status": "pending", "required": True}
@@ -137,8 +142,10 @@ def test_pre_gpu_receipt_is_pending_and_create_new(fixture: dict[str, Path | dic
             source_tree_sha256="2" * 40,
             source_archive_sha256="3" * 64,
             served_model_path=Path(fixture["served"]),
+            request_id=REQUEST_ID,
         )
-    assert GENERATOR.materialize(Path(fixture["profile"]))["promotion"]["source_commit"] == "1" * 40
+    with pytest.raises(GENERATOR.GenerationError, match="not executable"):
+        GENERATOR.materialize(Path(fixture["profile"]))
 
 
 def test_profile_weakening_and_live_inventory_change_are_rejected(
@@ -155,6 +162,7 @@ def test_profile_weakening_and_live_inventory_change_are_rejected(
             source_tree_sha256="2" * 40,
             source_archive_sha256="3" * 64,
             served_model_path=Path(fixture["served"]),
+            request_id=REQUEST_ID,
         )
 
     profile["promotion"].pop("evidence_from_receipt")
@@ -165,9 +173,10 @@ def test_profile_weakening_and_live_inventory_change_are_rejected(
         source_tree_sha256="2" * 40,
         source_archive_sha256="3" * 64,
         served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
     )
     Path(fixture["binding"]).chmod(0o644)
-    with pytest.raises(GENERATOR.GenerationError, match="inventory"):
+    with pytest.raises(GENERATOR.GenerationError, match="not executable"):
         GENERATOR.materialize(profile_path)
 
 
@@ -178,6 +187,7 @@ def test_generate_rejects_symlink_output(tmp_path: Path, fixture: dict[str, Path
         source_tree_sha256="2" * 40,
         source_archive_sha256="3" * 64,
         served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
     )
     target = tmp_path / "target.json"
     target.write_text("keep\n", encoding="utf-8")
@@ -196,6 +206,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
     snapshot = {"identity": "unchanged"}
     maintenance = {
         "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
+        "promotion_request_id": REQUEST_ID,
         "status": "passed",
         "actual_run_count": 1,
         "failure": None,
@@ -218,7 +229,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
             "status": "ok",
             "sq8_promotion_evidence": {
                 "schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1",
-                "request_id": "request-1",
+                "request_id": REQUEST_ID,
                 "manifest_identity": {
                     "implementation_id": WRITER.IMPLEMENTATION_ID,
                     "execution_profile": "sq8-test",
@@ -235,21 +246,73 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
             },
         },
     )
-    output = Path(fixture["profile"]).with_name("promotion.json")
-    value = WRITER.write_receipt(
+    output = Path(fixture["profile"]).with_name("promotion-actual-receipt.json")
+    WRITER.write_receipt(
         profile_path=Path(fixture["profile"]),
-        output_path=output,
+        output_path=Path(fixture["profile"]).with_name("promotion.json"),
         source_tree_sha256="2" * 40,
         source_archive_sha256="3" * 64,
         served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+    )
+    wrong_executor = json.loads(executor_path.read_text(encoding="utf-8"))
+    wrong_executor["sq8_promotion_evidence"]["request_id"] = "sq8-promotion-" + "f" * 64
+    _write_json(executor_path, wrong_executor)
+    with pytest.raises(WRITER.ReceiptError, match="request ID differs"):
+        WRITER.write_actual_receipt(
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+            maintenance_evidence_path=maintenance_path,
+            executor_record_path=executor_path,
+            output_path=output,
+        )
+    wrong_executor["sq8_promotion_evidence"]["request_id"] = REQUEST_ID
+    _write_json(executor_path, wrong_executor)
+    value = WRITER.write_actual_receipt(
+        prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
         maintenance_evidence_path=maintenance_path,
         executor_record_path=executor_path,
+        output_path=output,
     )
     assert value["status"] == "actual_verified"
     assert value["actual"]["gpu_exclusive_preflight"]["mode"] == "maintenance_stable2"
-    assert GENERATOR.materialize(Path(fixture["profile"]))["promotion"]["source_commit"] == "1" * 40
+    assert GENERATOR.materialize(
+        Path(fixture["profile"]), receipt_path_override=output
+    )["promotion"]["source_commit"] == "1" * 40
+    for index, invalid_digest in enumerate(("A" * 64, "z" * 64)):
+        tampered = json.loads(output.read_text(encoding="utf-8"))
+        tampered["actual"]["prepared_receipt"]["sha256"] = invalid_digest
+        tampered_path = tmp_path / f"tampered-actual-{index}.json"
+        _write_json(tampered_path, tampered)
+        with pytest.raises(GENERATOR.GenerationError, match="lowercase hexadecimal"):
+            GENERATOR.materialize(
+                Path(fixture["profile"]), receipt_path_override=tampered_path
+            )
+    with pytest.raises(WRITER.ReceiptError, match="already exists"):
+        WRITER.write_actual_receipt(
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+            maintenance_evidence_path=maintenance_path,
+            executor_record_path=executor_path,
+            output_path=output,
+        )
 
     executor = json.loads(executor_path.read_text(encoding="utf-8"))
+    executor["sq8_promotion_evidence"]["request_id"] = "sq8-promotion-" + "b" * 64
+    _write_json(executor_path, executor)
+    with pytest.raises(WRITER.ReceiptError, match="request ID"):
+        WRITER.validate_actual_evidence(
+            maintenance_path=maintenance_path,
+            executor_path=executor_path,
+            output_path=output,
+            profile=profile,
+            overlay={
+                "binding_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
+                "content_sha256": binding["content_sha256"],
+            },
+            package_sha256=package_sha,
+            request_id=REQUEST_ID,
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+        )
+    executor["sq8_promotion_evidence"]["request_id"] = REQUEST_ID
     executor["sq8_promotion_evidence"]["telemetry"]["projection"]["pair_matvec_count"] = 0
     _write_json(executor_path, executor)
     with pytest.raises(WRITER.ReceiptError, match="batch and pair"):
@@ -263,4 +326,51 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
                 "content_sha256": binding["content_sha256"],
             },
             package_sha256=package_sha,
+            request_id=REQUEST_ID,
+            prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
         )
+    executor["sq8_promotion_evidence"]["telemetry"]["projection"]["pair_matvec_count"] = 1
+    for invalid_digest in ("A" * 64, "z" * 64):
+        executor["sq8_promotion_evidence"]["output_identity"]["token_ids_sha256"] = invalid_digest
+        _write_json(executor_path, executor)
+        with pytest.raises(WRITER.ReceiptError, match="lowercase hexadecimal"):
+            WRITER.validate_actual_evidence(
+                maintenance_path=maintenance_path,
+                executor_path=executor_path,
+                output_path=output,
+                profile=profile,
+                overlay={
+                    "binding_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
+                    "content_sha256": binding["content_sha256"],
+                },
+                package_sha256=package_sha,
+                request_id=REQUEST_ID,
+                prepared_receipt_path=Path(fixture["profile"]).with_name("promotion.json"),
+            )
+
+
+def test_failure_receipt_is_separate_and_request_bound(fixture: dict[str, Path | dict]) -> None:
+    prepared = Path(fixture["profile"]).with_name("promotion.json")
+    WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=prepared,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+    )
+    maintenance = Path(fixture["profile"]).with_name("failed-maintenance.json")
+    _write_json(
+        maintenance,
+        {
+            "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
+            "promotion_request_id": REQUEST_ID,
+            "status": "failed",
+            "failure": {"reason": "capture failed"},
+        },
+    )
+    output = Path(fixture["profile"]).with_name("promotion-failure-receipt.json")
+    value = WRITER.write_failure_receipt(prepared, maintenance, output)
+    assert value["status"] == "actual_failed"
+    with pytest.raises(WRITER.ReceiptError, match="already exists"):
+        WRITER.write_failure_receipt(prepared, maintenance, output)
