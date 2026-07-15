@@ -32,6 +32,8 @@
 - root専用の固定path lock helperを追加した。service stopped/owner-free後だけ、`sudo -n`のexact argvで`/run/ullm`を0750 uid/gid 1000、`device-1.lock`をcreate-new 0600 uid/gid 1000 single-linkとして作る。wrapperは同userでopen/flockし、helperが返したdevice/inodeとの一致をcapture終了まで検証する。cleanupはservice stopped中に同inode lockだけを削除し、wrapper-created directoryがemptyの場合だけrmdirしてからserviceをstartする。
 - restoreは最大120秒のmonotonic deadlineで、一時的なsystemd/cgroup topology例外を含めてretryする。active/running、新main PID、`NRestarts=0`、新cgroup worker、production lock owner、AMD/KFD owner、Gate-bound bridge healthを順に要求し、attempt count、elapsed、last failure、全observationをmaintenance evidenceへ残す。
 - 新request/Gate/build receiptは、消費済みfailure receiptのimmutable path/SHA、prior request ID、`consumed_failed_not_reusable` dispositionをauthorization lineageとして束縛する。
+- lock/restore修正版`56450b3a`の独立監査は、restoreがterminal identity mismatchまでdeadline retryする点をblockingとして`implementation_no_go`にした。formal No-Go audit receipt SHA-256 `c44f681b4372f074973e1b31404c750a1329f155a29afdc78926bb70526356e1`を新authorization lineageへexact bindし、旧runtimeを認可しない。
+- restore errorを`TransientRestoreError`と`TerminalRestoreError`へ分離した。retry allowlistはinactive/activating、active topology/cgroup worker未準備、production lock未取得、foreignなしのAMD/KFD owner未準備、identity検証後のbridge health未達だけである。Gate readiness/Docker inspect identity、owner source/schema、foreign PID、epoch regression、`NRestarts`、lock topology、unexpected exceptionはattempt 1でterminalにし、sleepしない。
 
 ## 検証
 

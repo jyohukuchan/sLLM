@@ -588,7 +588,7 @@ def test_lock_cleanup_failure_is_terminal(
 def test_restore_retries_transient_topology_and_reports_attempts() -> None:
     clock = [0.0]
     services: list[Any] = [
-        MODULE.PromotionError("active service process topology differs"),
+        MODULE.TransientRestoreError("active service process topology differs"),
         service(True, epoch=101, worker=201),
     ]
 
@@ -613,7 +613,9 @@ def test_restore_retries_transient_topology_and_reports_attempts() -> None:
     assert result["attempts"] == 2
     assert result["elapsed_seconds"] == MODULE.POLL_SECONDS
     assert result["last_failure"] is None
-    assert result["observations"][0] == {"failure": "active service process topology differs"}
+    assert result["observations"][0] == {
+        "transient_failure": "active service process topology differs"
+    }
 
 
 def test_restore_timeout_preserves_last_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -633,4 +635,58 @@ def test_restore_timeout_preserves_last_failure(monkeypatch: pytest.MonkeyPatch)
     assert result["passed"] is False
     assert result["attempts"] == 2
     assert result["elapsed_seconds"] == 0.5
-    assert result["last_failure"] == "service not active/running"
+    assert result["last_failure"] == "service is not active/running yet"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MODULE.PromotionError("readiness container identity differs from Gate"),
+        OSError("owner source unavailable"),
+    ],
+)
+def test_restore_terminal_identity_or_unexpected_error_is_not_retried(
+    error: BaseException,
+) -> None:
+    sleeps: list[float] = []
+
+    def service_snapshot(_: dict[str, Any]) -> dict[str, Any]:
+        raise error
+
+    deps = MODULE.Dependencies(
+        service_snapshot=service_snapshot,
+        owner_snapshot=lambda: owners(),
+        stop_service=lambda: None,
+        start_service=lambda: None,
+        acquire_lock=lambda: Lease(),
+        capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+        monotonic=lambda: 0.0,
+        sleep=sleeps.append,
+    )
+
+    with pytest.raises(MODULE.TerminalRestoreError) as captured:
+        MODULE.poll_restored(deps, service(True), readiness())
+
+    assert captured.value.details is not None
+    assert captured.value.details["attempts"] == 1
+    assert captured.value.details["elapsed_seconds"] == 0.0
+    assert sleeps == []
+
+
+def test_restore_epoch_regression_and_foreign_owner_are_terminal() -> None:
+    for current, observed, reason in (
+        (service(True), owners(200), "main PID epoch regressed"),
+        (service(True, epoch=101, worker=201), owners(999), "foreign"),
+    ):
+        deps = MODULE.Dependencies(
+            service_snapshot=lambda _, value=current: value,
+            owner_snapshot=lambda value=observed: value,
+            stop_service=lambda: None,
+            start_service=lambda: None,
+            acquire_lock=lambda: Lease(),
+            capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+            monotonic=lambda: 0.0,
+            sleep=lambda _: (_ for _ in ()).throw(AssertionError("terminal restore slept")),
+        )
+        with pytest.raises(MODULE.TerminalRestoreError, match=reason):
+            MODULE.poll_restored(deps, service(True), readiness())

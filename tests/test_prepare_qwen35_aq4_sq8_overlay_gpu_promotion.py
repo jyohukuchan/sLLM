@@ -363,14 +363,37 @@ def test_prior_failure_lineage_binds_consumed_receipt_and_rejects_weak_files(
         encoding="ascii",
     )
     path.chmod(0o444)
+    no_go_path = tmp_path / "no-go-audit.json"
+    no_go_path.write_text(
+        json.dumps(
+            {
+                "schema_version": TOOL.AUDIT_SCHEMA,
+                "verdict": "implementation_no_go",
+                "actual": "not_executed",
+                "reason_code": "restore_retry_terminal_identity_not_fail_closed",
+                "audited_source": {"commit": "8" * 40},
+                "runtime": {"gate": {"sha256": "9" * 64}},
+            }
+        ) + "\n",
+        encoding="ascii",
+    )
+    no_go_path.chmod(0o444)
 
-    lineage = TOOL.prior_failure_lineage(path)
+    lineage = TOOL.prior_failure_lineage(path, no_go_path)
 
     assert lineage == {
         "schema": TOOL.AUTHORIZATION_LINEAGE_SCHEMA,
         "disposition": "consumed_failed_not_reusable",
         "prior_request_id": request_id,
         "prior_failure_receipt": {"path": str(path.resolve()), "sha256": sha(path)},
+        "prior_no_go_audit": {
+            "path": str(no_go_path.resolve()),
+            "sha256": sha(no_go_path),
+            "verdict": "implementation_no_go",
+            "reason_code": "restore_retry_terminal_identity_not_fail_closed",
+            "audited_source_commit": "8" * 40,
+            "audited_gate_sha256": "9" * 64,
+        },
     }
     path.chmod(0o644)
     with pytest.raises(TOOL.GateError, match="immutable"):

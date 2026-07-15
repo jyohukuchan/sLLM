@@ -72,6 +72,18 @@ class PromotionError(RuntimeError):
     pass
 
 
+class TransientRestoreError(PromotionError):
+    """A narrowly allowlisted startup state that may become ready."""
+
+
+class TerminalRestoreError(PromotionError):
+    """A restore invariant violation that must never be retried."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details
+
+
 def sha_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -174,7 +186,8 @@ def validate_authorization_lineage(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) != {
-        "schema", "disposition", "prior_request_id", "prior_failure_receipt"
+        "schema", "disposition", "prior_request_id", "prior_failure_receipt",
+        "prior_no_go_audit",
     }:
         raise PromotionError("candidate authorization lineage shape differs")
     request_id = value.get("prior_request_id")
@@ -219,6 +232,53 @@ def validate_authorization_lineage(value: Any) -> dict[str, Any] | None:
         or actual.get("request_id") != request_id
     ):
         raise PromotionError("candidate prior failure receipt state differs")
+    no_go = value.get("prior_no_go_audit")
+    if no_go is not None:
+        if not isinstance(no_go, dict) or set(no_go) != {
+            "path", "sha256", "verdict", "reason_code", "audited_source_commit",
+            "audited_gate_sha256",
+        }:
+            raise PromotionError("candidate prior No-Go audit identity differs")
+        raw_audit_path = no_go.get("path")
+        if (
+            no_go.get("verdict") != "implementation_no_go"
+            or no_go.get("reason_code") != "restore_retry_terminal_identity_not_fail_closed"
+            or not isinstance(raw_audit_path, str)
+            or not Path(raw_audit_path).is_absolute()
+            or not isinstance(no_go.get("sha256"), str)
+            or SHA256_RE.fullmatch(no_go["sha256"]) is None
+            or not isinstance(no_go.get("audited_source_commit"), str)
+            or len(no_go["audited_source_commit"]) != 40
+            or not isinstance(no_go.get("audited_gate_sha256"), str)
+            or SHA256_RE.fullmatch(no_go["audited_gate_sha256"]) is None
+        ):
+            raise PromotionError("candidate prior No-Go audit identity differs")
+        audit_path = Path(raw_audit_path)
+        audit_metadata = audit_path.stat(follow_symlinks=False)
+        if (
+            audit_path.is_symlink()
+            or not stat.S_ISREG(audit_metadata.st_mode)
+            or stat.S_IMODE(audit_metadata.st_mode) != 0o444
+            or audit_metadata.st_nlink != 1
+            or audit_path.resolve() != audit_path
+            or sha_file(audit_path) != no_go["sha256"]
+        ):
+            raise PromotionError("candidate prior No-Go audit file differs")
+        audit = read_object(audit_path, "prior No-Go audit")
+        audit_source = audit.get("audited_source")
+        audit_runtime = audit.get("runtime")
+        audit_gate = audit_runtime.get("gate") if isinstance(audit_runtime, dict) else None
+        if (
+            audit.get("schema_version") != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+            or audit.get("verdict") != no_go["verdict"]
+            or audit.get("actual") != "not_executed"
+            or audit.get("reason_code") != no_go["reason_code"]
+            or not isinstance(audit_source, dict)
+            or audit_source.get("commit") != no_go["audited_source_commit"]
+            or not isinstance(audit_gate, dict)
+            or audit_gate.get("sha256") != no_go["audited_gate_sha256"]
+        ):
+            raise PromotionError("candidate prior No-Go audit state differs")
     return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
 
 
@@ -776,6 +836,8 @@ def _cgroup_pids(control_group: str) -> list[int]:
     path = Path("/sys/fs/cgroup") / control_group.lstrip("/") / "cgroup.procs"
     try:
         values = _bounded_bytes(path, 64 * 1024, "service cgroup process list").decode("ascii").splitlines()
+    except FileNotFoundError as error:
+        raise TransientRestoreError("service cgroup process list is not ready") from error
     except (OSError, UnicodeError) as error:
         raise PromotionError("service cgroup process list is unavailable") from error
     try:
@@ -1080,7 +1142,7 @@ def default_service_snapshot(
     cgroup_pids = _cgroup_pids(control_group) if active else []
     workers = _worker_pids(cgroup_pids) if active else []
     if active and (main_pid <= 0 or len(workers) != 1 or main_pid not in cgroup_pids):
-        raise PromotionError("active service process topology differs")
+        raise TransientRestoreError("active service process topology is not ready")
     lock_holders = _lock_holder_pids(PRODUCTION_LOCK_PATH)
     lock_owned = bool(lock_holders) and set(lock_holders).issubset(cgroup_pids)
     return {
@@ -1210,6 +1272,25 @@ def poll_restored(
     observations: list[dict[str, Any]] = []
     attempts = 0
     last_failure: str | None = None
+
+    def details() -> dict[str, Any]:
+        return {
+            "passed": False,
+            "attempts": attempts,
+            "elapsed_seconds": max(0.0, deps.monotonic() - started),
+            "last_failure": last_failure,
+            "observations": observations,
+        }
+
+    def terminal(reason: str, cause: BaseException | None = None) -> None:
+        nonlocal last_failure
+        last_failure = reason
+        observations.append({"terminal_failure": reason})
+        error = TerminalRestoreError(reason, details())
+        if cause is None:
+            raise error
+        raise error from cause
+
     while deps.monotonic() < deadline:
         attempts += 1
         try:
@@ -1217,52 +1298,61 @@ def poll_restored(
             owners = deps.owner_snapshot()
             observation = {"service": current, "owners": owners}
             observations.append(observation)
+            if current.get("active") is not True or current.get("running") is not True:
+                raise TransientRestoreError("service is not active/running yet")
+            main_pid = current.get("main_pid")
+            if not isinstance(main_pid, int) or main_pid <= 0:
+                terminal("service main PID schema differs")
+            if main_pid == before.get("main_pid"):
+                terminal("service main PID epoch regressed")
+            if current.get("nrestarts") != 0:
+                terminal("service NRestarts differs")
+            if current.get("control_group") != before.get("control_group"):
+                terminal("service control group identity differs")
             worker_pid = current.get("worker_pid")
-            predicates = (
-                (current.get("active") is True and current.get("running") is True, "service not active/running"),
-                (
-                    isinstance(current.get("main_pid"), int)
-                    and current["main_pid"] > 0
-                    and current["main_pid"] != before.get("main_pid"),
-                    "service main PID is not a new epoch",
-                ),
-                (current.get("nrestarts") == 0, "service NRestarts differs"),
-                (
-                    current.get("control_group") == before.get("control_group")
-                    and isinstance(worker_pid, int)
-                    and worker_pid > 0
-                    and worker_pid != before.get("worker_pid"),
-                    "service cgroup worker is not a new epoch",
-                ),
-                (current.get("lock_owned") is True, "production lock owner differs"),
-                (
-                    owners.get("worker_pids") == [worker_pid]
-                    and owners.get("amd_pids") == [worker_pid]
-                    and owners.get("kfd_pids") == [worker_pid],
-                    "AMD/KFD worker owner differs",
-                ),
-                (current.get("healthy") is True, "bridge readiness is not healthy"),
-            )
-            last_failure = next((reason for passed, reason in predicates if not passed), None)
-            if last_failure is None:
-                return {
-                    "passed": True,
-                    "attempts": attempts,
-                    "elapsed_seconds": max(0.0, deps.monotonic() - started),
-                    "last_failure": None,
-                    "observations": observations,
-                }
-        except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
+            if worker_pid in (None, 0):
+                raise TransientRestoreError("service cgroup worker is not ready")
+            if not isinstance(worker_pid, int) or worker_pid < 0:
+                terminal("service worker PID schema differs")
+            if worker_pid == before.get("worker_pid"):
+                terminal("service worker PID epoch regressed")
+            if current.get("lock_owned") is not True:
+                raise TransientRestoreError("production lock is not owned yet")
+            owner_lists = []
+            for key in ("worker_pids", "amd_pids", "kfd_pids"):
+                value = owners.get(key)
+                if not isinstance(value, list) or any(
+                    not isinstance(pid, int) or pid <= 0 for pid in value
+                ):
+                    terminal(f"{key} owner schema differs")
+                owner_lists.append(value)
+            foreign = (set().union(*map(set, owner_lists))) - {worker_pid}
+            if foreign:
+                terminal("foreign AMD/KFD/worker owner observed")
+            if any(value != [worker_pid] for value in owner_lists):
+                raise TransientRestoreError("AMD/KFD worker owner is not ready")
+            if current.get("healthy") is not True:
+                raise TransientRestoreError("bridge readiness is not healthy yet")
+            return {
+                "passed": True,
+                "attempts": attempts,
+                "elapsed_seconds": max(0.0, deps.monotonic() - started),
+                "last_failure": None,
+                "observations": observations,
+            }
+        except TransientRestoreError as error:
             last_failure = str(error)
-            observations.append({"failure": last_failure})
+            observations.append({"transient_failure": last_failure})
+        except TerminalRestoreError:
+            raise
+        except PromotionError as error:
+            terminal(str(error), error)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            terminal(f"unexpected restore exception: {type(error).__name__}: {error}", error)
+        except Exception as error:
+            terminal(f"unexpected restore exception: {type(error).__name__}: {error}", error)
         deps.sleep(POLL_SECONDS)
-    return {
-        "passed": False,
-        "attempts": attempts,
-        "elapsed_seconds": max(0.0, deps.monotonic() - started),
-        "last_failure": last_failure,
-        "observations": observations,
-    }
+    return details()
 
 
 def capture_environment(profile: dict[str, Any]) -> dict[str, str]:
@@ -1461,6 +1551,8 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
                 if not restored["passed"]:
                     raise PromotionError("default service restore/new epoch/health timed out")
             except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
+                if isinstance(error, TerminalRestoreError) and error.details is not None:
+                    evidence["restore"].update(error.details)
                 evidence["restore"]["error"] = str(error)
                 code = 1
     evidence["status"] = "passed" if code == 0 and evidence["restore"]["passed"] else "failed"

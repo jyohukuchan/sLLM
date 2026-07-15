@@ -167,7 +167,49 @@ def fixed_promotion_request_id(
     return "sq8-promotion-" + hashlib.sha256(encoded).hexdigest()
 
 
-def prior_failure_lineage(path: Path | None) -> dict[str, Any] | None:
+def _prior_no_go_audit(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    if path.is_symlink():
+        raise GateError("prior No-Go audit must be immutable 0444 single-link non-symlink")
+    path = path.resolve()
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+        or metadata.st_nlink != 1
+    ):
+        raise GateError("prior No-Go audit must be immutable 0444 single-link non-symlink")
+    receipt = read_object(path, "prior No-Go audit")
+    source = receipt.get("audited_source")
+    runtime = receipt.get("runtime")
+    gate = runtime.get("gate") if isinstance(runtime, dict) else None
+    if (
+        receipt.get("schema_version") != AUDIT_SCHEMA
+        or receipt.get("verdict") != "implementation_no_go"
+        or receipt.get("actual") != "not_executed"
+        or receipt.get("reason_code") != "restore_retry_terminal_identity_not_fail_closed"
+        or not isinstance(source, dict)
+        or not isinstance(source.get("commit"), str)
+        or len(source["commit"]) != 40
+        or not isinstance(gate, dict)
+        or not isinstance(gate.get("sha256"), str)
+        or SHA256_RE.fullmatch(gate["sha256"]) is None
+    ):
+        raise GateError("prior No-Go audit state differs")
+    return {
+        "path": str(path),
+        "sha256": sha_file(path),
+        "verdict": "implementation_no_go",
+        "reason_code": receipt["reason_code"],
+        "audited_source_commit": source["commit"],
+        "audited_gate_sha256": gate["sha256"],
+    }
+
+
+def prior_failure_lineage(
+    path: Path | None, prior_no_go_audit_path: Path | None = None
+) -> dict[str, Any] | None:
     if path is None:
         return None
     if path.is_symlink():
@@ -198,6 +240,7 @@ def prior_failure_lineage(path: Path | None) -> dict[str, Any] | None:
         "disposition": "consumed_failed_not_reusable",
         "prior_request_id": request_id,
         "prior_failure_receipt": {"path": str(path), "sha256": sha_file(path)},
+        "prior_no_go_audit": _prior_no_go_audit(prior_no_go_audit_path),
     }
 
 
@@ -529,7 +572,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     validate_binding(binding, package_manifest)
     readiness = readiness_identity()
     authorization_lineage = prior_failure_lineage(
-        getattr(args, "prior_failure_receipt", None)
+        getattr(args, "prior_failure_receipt", None),
+        getattr(args, "prior_no_go_audit_receipt", None),
     )
     source_tree = git_value("rev-parse", f"{commit}^{{tree}}")
     source_archive = source_archive_sha256(commit)
@@ -784,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--authorize-actual-run", action="store_true")
     parser.add_argument("--independent-audit-receipt", type=Path)
     parser.add_argument("--prior-failure-receipt", type=Path)
+    parser.add_argument("--prior-no-go-audit-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
         print(json.dumps(materialize(args), sort_keys=True))
