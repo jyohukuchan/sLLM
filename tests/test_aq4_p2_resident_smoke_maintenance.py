@@ -541,6 +541,32 @@ def test_profile_v3_outputs_are_fresh_from_failed_v2_attempt() -> None:
     assert value["trust"]["production"]["expected_package_integrity_identity_sha256"] == HARNESS.PACKAGE_INTEGRITY_IDENTITY_SHA
 
 
+def test_qa_manifest_strictly_resolves_all_source_commit_path_blobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    HARNESS.validate_qa_test_manifest()
+    original = HARNESS.QA_ATTESTATION
+    missing = json.loads(json.dumps(original))
+    selection = next(
+        suite for suite in missing["automated_tests"]["suites"]
+        if suite["name"] == "selection_raw_producer"
+    )["files"][0]
+    selection["source_commit"] = "0" * 40
+    monkeypatch.setattr(HARNESS, "QA_ATTESTATION", missing)
+    with pytest.raises(HARNESS.HarnessError, match="source commit/path is unavailable"):
+        HARNESS.validate_qa_test_manifest()
+
+    mismatched = json.loads(json.dumps(original))
+    selection = next(
+        suite for suite in mismatched["automated_tests"]["suites"]
+        if suite["name"] == "selection_raw_producer"
+    )["files"][0]
+    selection["git_blob"] = "0" * 40
+    monkeypatch.setattr(HARNESS, "QA_ATTESTATION", mismatched)
+    with pytest.raises(HARNESS.HarnessError, match="source Git blob differs"):
+        HARNESS.validate_qa_test_manifest()
+
+
 def test_explicit_restore_resets_nonzero_nrestarts_to_zero(tmp_path: Path) -> None:
     runtime = FakeRuntime(pre_nrestarts=1, post_nrestarts=0)
     code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "nrestarts-reset", runtime.dependencies())
