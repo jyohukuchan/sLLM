@@ -1,0 +1,59 @@
+{
+  "children_remaining": [],
+  "children_state_known": true,
+  "command_sha256": "ddaecf24df8e4ed5456024b37e56daa0dab59f602a23dfeffb0740def083e835",
+  "context": {
+    "profiler": {
+      "executable_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "invocation_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "resolved_identity": [
+        66306,
+        41551451,
+        33261,
+        1,
+        62506,
+        1773373040000000000,
+        1783630549665735286
+      ],
+      "resolved_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "symlink_chain": [],
+      "tool": "rocprofv3"
+    },
+    "target_command_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner-target-command-manifest.json",
+      "sha256": "ada12e2b7f3e8ed4332563309cc39ec475ce33a24b435f015b4ef0e7464329a6"
+    }
+  },
+  "effective_command_sha256": "e042107e6c9b30fa09948a98a97c4795e35a09a4a0d5eda9a57f8e447bf95bd5",
+  "failure_sha256": "d7363d8bdeeeb85c6dabbe9edbdedc1e71781b040472b987084e650d4f898786",
+  "measurement_eligible": false,
+  "outer_harness_signalled": false,
+  "process_group_cleanup_complete": true,
+  "promotion_eligible": false,
+  "ready_candidate_audit": {
+    "audit": null,
+    "audit_sha256": null,
+    "marker_count": 0,
+    "marker_sha256": null,
+    "reason_code": "ready_candidate_marker_absent",
+    "schema_version": "ullm.aq4_p3_ready_candidate_capture.v1",
+    "self_sha256": "d362271a037df5683f8acc1957d0228849ca25a7dc9a94f09838f7f52030b59a",
+    "source_stream": "rocprof.stderr",
+    "source_stream_sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c",
+    "status": "absent"
+  },
+  "reason": "kernel trace row 83 interval/order is invalid",
+  "rocprof_child_new_session": true,
+  "schema_version": "ullm.aq4_p3_diagnostic_rocprof_failure.v2",
+  "status": "failed",
+  "streams": {
+    "rocprof.stderr": {
+      "bytes": 558,
+      "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c"
+    },
+    "rocprof.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}
