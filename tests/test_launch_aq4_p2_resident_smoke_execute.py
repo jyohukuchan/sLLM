@@ -704,7 +704,13 @@ def test_canonical_execute_binding_pins_launcher_self_and_remains_blocked() -> N
     assert binding["actual_eligible"] is False
     assert trust["actual_eligible"] is False and trust["status"] == "qa_pending"
     assert trust["sha256"] == LAUNCHER.sha_bytes(SCRIPT.read_bytes())
-    assert trust["commit"] == "bc382fc04293b8a6a3751ca2ab09b366a5179876"
+    committed = subprocess.run(
+        ["git", "show", f'{trust["commit"]}:tools/launch-aq4-p2-resident-smoke.py'],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    assert committed.stdout == SCRIPT.read_bytes()
 
 
 def test_execute_rejects_untrusted_launcher_self_before_output_creation(tmp_path: Path) -> None:
