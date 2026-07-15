@@ -31,8 +31,10 @@ EXPECTED_PACKAGE_SHA256="a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d6
 EXPECTED_ACTIVE_SHA256="feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 EXPECTED_PROFILE_SHA256="1013cc803adce27a178856e9fe300fc5a26cc998b5381812b0c3bd17ebbb5937"
 EXPECTED_WORKER_SHA256="177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
-EXPECTED_BUILD_COMMIT="2bcef0d897d43ea1ff397dc558f7e0e179d8a904"
+EXPECTED_BUILD_COMMIT="4a4b0e28eb27fa6710a339e470ee80d21d602680"
 EXPECTED_BUILD_COMMAND="CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-layer0-qkv-runtime-probe"
+EXPECTED_PROBE_BINARY_SHA256="f58f0734ec595d9a9cd76161d28d096b2b18fc6e437cf3ad9d526eb710c7cf69"
+EXPECTED_BUILD_RECEIPT_SHA256="34a39bd6f0d20dd8a98991f3c66b6a538697bf0689894150139a929e3c3c32c4"
 EXPECTED_DEVICE_ARCHITECTURE="gfx1201"
 EXPECTED_PHYSICAL_CARD="2"
 EXPECTED_HIP_VISIBLE_TOKEN="1"
@@ -93,6 +95,8 @@ validate_identity() {
   require_digest EXPECTED_ACTIVE_SHA256 "$EXPECTED_ACTIVE_SHA256"
   require_digest EXPECTED_PROFILE_SHA256 "$EXPECTED_PROFILE_SHA256"
   require_digest EXPECTED_WORKER_SHA256 "$EXPECTED_WORKER_SHA256"
+  require_digest EXPECTED_PROBE_BINARY_SHA256 "$EXPECTED_PROBE_BINARY_SHA256"
+  require_digest EXPECTED_BUILD_RECEIPT_SHA256 "$EXPECTED_BUILD_RECEIPT_SHA256"
   require_regular "$INPUT" input_sidecar
   require_regular "$PACKAGE_MANIFEST" package_manifest
   require_regular "$ACTIVE" active_manifest
@@ -106,6 +110,8 @@ validate_identity() {
   require_regular "$PROBE" probe_binary
   require_regular "$RECEIPT" build_receipt
   require_regular "$SUMS" build_sums
+  [[ "$(sha256_file "$PROBE")" = "$EXPECTED_PROBE_BINARY_SHA256" ]] || fail "probe binary SHA differs"
+  [[ "$(sha256_file "$RECEIPT")" = "$EXPECTED_BUILD_RECEIPT_SHA256" ]] || fail "probe build receipt SHA differs"
   (cd "$PROBE_ROOT" && sha256sum -c SHA256SUMS >/dev/null) || fail "probe SHA256SUMS verification failed"
   "$PYTHON" - "$RECEIPT" "$PROBE" "$EXPECTED_BUILD_COMMIT" "$EXPECTED_BUILD_COMMAND" <<'PY'
 import hashlib, json, pathlib, sys

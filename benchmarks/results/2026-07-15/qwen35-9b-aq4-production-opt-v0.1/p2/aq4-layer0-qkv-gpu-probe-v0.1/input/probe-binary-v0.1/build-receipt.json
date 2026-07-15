@@ -1,24 +1,24 @@
 {
   "binary": {
-    "bytes": 1275464,
+    "bytes": 1277136,
     "mode": 365,
     "nlink": 1,
     "path": "ullm-aq4-layer0-qkv-runtime-probe",
-    "sha256": "b889dbd08d467395c339e5e9524b4d0b94353ca6e3aec29d354aae5070e357f0",
-    "source_bytes": 1275464
+    "sha256": "f58f0734ec595d9a9cd76161d28d096b2b18fc6e437cf3ad9d526eb710c7cf69",
+    "source_bytes": 1277136
   },
   "build": {
     "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-layer0-qkv-runtime-probe",
     "exit_status": 0,
     "jobs": 1,
-    "stderr_sha256": "011585bee966139eac95a89f8f2945b8b38848ad8ff84062246287b5a03f5565",
+    "stderr_sha256": "6c8b56ebbdcdacdb2584d488b3e23ca17250d5b31744926e24604ef44f5edd2b",
     "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "schema_version": "ullm.aq4_layer0_qkv_runtime_probe_build_receipt.v1",
   "source": {
-    "commit": "2bcef0d897d43ea1ff397dc558f7e0e179d8a904",
+    "commit": "4a4b0e28eb27fa6710a339e470ee80d21d602680",
     "tree_clean": true,
-    "worktree": "/tmp/ullm-aq4-gpu-probe-gate-source"
+    "worktree": "/tmp/ullm-aq4-probe-source-4a4"
   },
   "status": "ready"
 }

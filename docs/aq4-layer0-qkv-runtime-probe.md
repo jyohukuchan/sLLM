@@ -63,3 +63,10 @@ never allowed. This threshold-free path is not a numeric Go/No-Go, does not
 observe holdout data, and always remains `unclassified` with
 `promotion_eligible: false`. It must not be treated as fused-wrapper or serving
 evidence.
+
+The current immutable gate artifact is built from commit
+`4a4b0e28eb27fa6710a339e470ee80d21d602680` with
+`CARGO_BUILD_JOBS=1`; its binary SHA-256 is
+`f58f0734ec595d9a9cd76161d28d096b2b18fc6e437cf3ad9d526eb710c7cf69` and its
+build-receipt SHA-256 is
+`34a39bd6f0d20dd8a98991f3c66b6a538697bf0689894150139a929e3c3c32c4`.
