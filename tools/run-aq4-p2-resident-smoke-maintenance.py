@@ -92,6 +92,24 @@ PROFILE_CAPTURE_RAW_NAMES = (
     "rocprof.stderr",
     "rocprof.stdout",
 )
+GENERIC_MEMCPY_RAW_SHA256 = {
+    "hip_api_trace": "1b782186326bba54e369dc422ce750c7916db3a52226063dc637d583f165b531",
+    "memory_copy_trace": "2b3faa5a208e97eb983e698d503c1a99368fd12cf0630d2da363834d0aa2b07b",
+    "kernel_trace": "936617bf9e855c388baeff379c01f3f6fe58195e1afc339eb822ff62f1d6964f",
+}
+GENERIC_MEMCPY_EXPECTED_COVERAGE = {
+    "total_rows": 14084,
+    "unique_correlations": 14084,
+    "memory_exact_one": 10845,
+    "kernel_copy_buffer_exact_one": 3239,
+    "direction_counts": {"H2D": 6438, "D2H": 4407, "D2D": 3239},
+    "missing": 0,
+    "duplicate": 0,
+    "ambiguous": 0,
+    "overlap": 0,
+    "unknown_direction": 0,
+    "other_kernel": 0,
+}
 PROFILE_REASSEMBLY_TARGET_MANIFEST = ACTUAL_V12_ROOTS[1] / "runner-target-command-manifest.json"
 PROFILE_REASSEMBLY_IDENTITY = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/identity.json"
 PROFILE_REASSEMBLY_SUMMARY = ACTUAL_V12_ROOTS[2] / "resident-batch.summary.json"
@@ -3150,26 +3168,27 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 639, "passed": 639, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 13, "collected": 678, "passed": 678, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
-                "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 382, "passed": 382, "failed": 0, "deselected": 0,
+                "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_prepared_bootstrap.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
+                "collected": 401, "passed": 401, "failed": 0, "deselected": 0,
                 "files": [
-                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "fb0a5afe86763c95c7bef99ae19ac864c2f56bd5", "git_blob": "d5f7da9c9b32ce6d6391dd3edc23bd8ed4420a48", "collected": 66, "passed": 66},
-                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "76c48aa27c08f8cd5115a15e6be25b83d679d8fa", "git_blob": "ebc41e27f6a7c734329298bc0f73c3f803241ebc", "collected": 54, "passed": 54},
+                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "a016564b4cc1dd913227df915a4929bac984f392", "git_blob": "577ccca504997aaca3dc7d24f9626a4a6e90c901", "collected": 67, "passed": 67},
+                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "d367b6da07393f55c720ded7250bda8cdc402a79", "git_blob": "b62503b59973828cc87836299fa07ff355c28d85", "collected": 59, "passed": 59},
+                    {"path": "tests/test_run_aq4_p2_resident_prepared_bootstrap.py", "source_commit": "410d6fa1876a6772215604ba765ae1d6a91d67b9", "git_blob": "9c42926eaec7086345b8580022f353de502c2011", "collected": 10, "passed": 10},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "60461d796ba64a7f0ba28353cb4f263d08d18dab", "git_blob": "f1305f145f2c635754b6061fc4c5d1606345cefa", "collected": 8, "passed": 8},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "7f961f8de75ccbb1080fcd35a5b274584d4e00f3", "git_blob": "d361a25db676b6afa232354816cf345a8f2fe423", "collected": 71, "passed": 71},
-                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "59b78b4af7bb574a456c238f5f8ecf790df9ea0c", "git_blob": "00c1dfe57c869d516e932e6c6b3ac243ce3fbaec", "collected": 156, "passed": 156},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "fc4559ee4fb8c7c1e62353fb3978a1a1e0a7d86d", "git_blob": "7104e3181ee3584829d673909cd09238119dd0ce", "collected": 8, "passed": 8},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "2b477ed0dd1344d368e684e413cb756706af22f3", "git_blob": "f6df5f9b1f2a5396ce73db2ba88a031dc653c846", "collected": 72, "passed": 72},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "1572ac12e47655f25be01d1c2405ea54884a823e", "git_blob": "3ac75cb0a6886818bf59bc25bdbc2480cbb97784", "collected": 158, "passed": 158},
                 ],
             },
             {
                 "name": "resident_driver_unit",
                 "command": ["cargo", "test", "-p", "ullm-engine", "--bin", "ullm-aq4-p2-resident-driver", "--no-default-features"],
                 "collected": 22, "passed": 22, "failed": 0, "deselected": 0,
-                "files": [{"path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f", "git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f", "collected": 22, "passed": 22}],
+                "files": [{"path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", "source_commit": "43ba16f2347a45caba8a60cac2189714118db280", "git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f", "collected": 22, "passed": 22}],
             },
             {
                 "name": "resident_roctx_ranges",
@@ -3179,9 +3198,9 @@ QA_ATTESTATION = {
             },
             {
                 "name": "diagnostic_capture",
-                "command": ["env", "ULLM_TEST_AQ4_P2_RESIDENT_DRIVER=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver", "python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
-                "collected": 60, "passed": 60, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "1aed601a7e4102c99550b09384ef45fe57d43287", "git_blob": "5f69f9b0c59f8463bf21bb2eff83209e7f1638b4", "collected": 60, "passed": 60}],
+                "command": ["env", "ULLM_TEST_AQ4_P2_RESIDENT_DRIVER=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver", "python3", "-m", "pytest", "-q", "tests/test_capture_aq4_p3_diagnostic_profile.py"],
+                "collected": 80, "passed": 80, "failed": 0, "deselected": 0,
+                "files": [{"path": "tests/test_capture_aq4_p3_diagnostic_profile.py", "source_commit": "1572ac12e47655f25be01d1c2405ea54884a823e", "git_blob": "557901ae08c2c0005bc442857030d467bf04b9db", "collected": 80, "passed": 80}],
             },
             {
                 "name": "selection_raw_producer",
@@ -3490,6 +3509,141 @@ def actual_v12_seal() -> dict[str, Any]:
     }
 
 
+def derive_generic_memcpy_rows(
+    hip_rows: list[dict[str, str]],
+    memory_rows: list[dict[str, str]],
+    kernel_rows: list[dict[str, str]],
+    *,
+    expected_coverage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    generic: dict[str, dict[str, str]] = {}
+    duplicate_hip = 0
+    for row in hip_rows:
+        normalized = re.sub(r"[^a-z0-9]", "", row.get("Function", "").lower())
+        if normalized != "hipmemcpyasync":
+            continue
+        correlation = row.get("Correlation_Id", "").strip()
+        if not correlation.isdigit():
+            raise HarnessError("generic memcpy correlation is invalid")
+        if correlation in generic:
+            duplicate_hip += 1
+        else:
+            generic[correlation] = row
+    memory: dict[str, list[dict[str, str]]] = {}
+    for row in memory_rows:
+        memory.setdefault(row.get("Correlation_Id", "").strip(), []).append(row)
+    kernels: dict[str, list[dict[str, str]]] = {}
+    for row in kernel_rows:
+        kernels.setdefault(row.get("Correlation_Id", "").strip(), []).append(row)
+    counters = {
+        "missing": 0,
+        "duplicate": duplicate_hip,
+        "ambiguous": 0,
+        "overlap": 0,
+        "unknown_direction": 0,
+        "other_kernel": 0,
+    }
+    directions = {
+        "MEMORY_COPY_HOST_TO_DEVICE": "H2D",
+        "MEMORY_COPY_DEVICE_TO_HOST": "D2H",
+    }
+    derived: list[dict[str, str]] = []
+    for correlation in sorted(generic, key=int):
+        memory_matches = memory.get(correlation, [])
+        kernel_matches = kernels.get(correlation, [])
+        if memory_matches and kernel_matches:
+            counters["overlap"] += 1
+            continue
+        if len(memory_matches) > 1 or len(kernel_matches) > 1:
+            counters["duplicate"] += 1
+            continue
+        if len(memory_matches) == 1:
+            direction = directions.get(memory_matches[0].get("Direction", ""))
+            if direction is None:
+                counters["unknown_direction"] += 1
+                continue
+            derived.append({"correlation_id": correlation, "direction": direction, "evidence": "memory_copy_trace_exact_one"})
+            continue
+        if len(kernel_matches) == 1:
+            if kernel_matches[0].get("Kernel_Name") != "__amd_rocclr_copyBuffer":
+                counters["other_kernel"] += 1
+                continue
+            derived.append({"correlation_id": correlation, "direction": "D2D", "evidence": "kernel_copy_buffer_exact_one"})
+            continue
+        counters["missing"] += 1
+    direction_counts = {
+        direction: sum(record["direction"] == direction for record in derived)
+        for direction in ("H2D", "D2H", "D2D")
+    }
+    coverage = {
+        "total_rows": sum(1 for row in hip_rows if re.sub(r"[^a-z0-9]", "", row.get("Function", "").lower()) == "hipmemcpyasync"),
+        "unique_correlations": len(generic),
+        "memory_exact_one": direction_counts["H2D"] + direction_counts["D2H"],
+        "kernel_copy_buffer_exact_one": direction_counts["D2D"],
+        "direction_counts": direction_counts,
+        **counters,
+    }
+    if any(counters.values()) or len(derived) != len(generic):
+        raise HarnessError(f"generic memcpy exact-one direction coverage differs: {coverage}")
+    if expected_coverage is not None and coverage != expected_coverage:
+        raise HarnessError("sealed actual-v12 generic memcpy counts differ")
+    return {
+        **coverage,
+        "derived_records_sha256": sha_bytes(canonical(derived)),
+        "d2d_inference": {
+            "scope": "sealed_actual_v12_only",
+            "kernel_name": "__amd_rocclr_copyBuffer",
+            "contract": "generic hipMemcpyAsync correlation has no memory-copy row and exact-one copyBuffer kernel row",
+        },
+    }
+
+
+def derive_actual_v12_generic_memcpy(capture_module: types.ModuleType) -> dict[str, Any]:
+    snapshots = {
+        "hip": capture_module.PRODUCER.capture(PROFILE_CAPTURE_SOURCE / "aq4-p3-diagnostic_hip_api_trace.csv", "offline HIP API trace"),
+        "memory": capture_module.PRODUCER.capture(PROFILE_CAPTURE_SOURCE / "aq4-p3-diagnostic_memory_copy_trace.csv", "offline memory copy trace"),
+        "kernel": capture_module.PRODUCER.capture(PROFILE_CAPTURE_SOURCE / "aq4-p3-diagnostic_kernel_trace.csv", "offline kernel trace"),
+    }
+    hip_fields, hip_rows = capture_module.csv_rows(snapshots["hip"], "offline HIP API trace")
+    memory_fields, memory_rows = capture_module.csv_rows(snapshots["memory"], "offline memory copy trace")
+    kernel_fields, kernel_rows = capture_module.csv_rows(snapshots["kernel"], "offline kernel trace")
+    if (
+        "Function" not in hip_fields
+        or "Correlation_Id" not in hip_fields
+        or "Direction" not in memory_fields
+        or "Correlation_Id" not in memory_fields
+        or "Kernel_Name" not in kernel_fields
+        or "Correlation_Id" not in kernel_fields
+    ):
+        raise HarnessError("sealed actual-v12 direction join schema differs")
+    observed_hashes = {
+        "hip_api_trace": snapshots["hip"].sha256,
+        "memory_copy_trace": snapshots["memory"].sha256,
+        "kernel_trace": snapshots["kernel"].sha256,
+    }
+    if observed_hashes != GENERIC_MEMCPY_RAW_SHA256:
+        raise HarnessError("sealed actual-v12 generic memcpy raw trace hashes differ")
+    return {
+        **derive_generic_memcpy_rows(
+            hip_rows,
+            memory_rows,
+            kernel_rows,
+            expected_coverage=GENERIC_MEMCPY_EXPECTED_COVERAGE,
+        ),
+        "raw_trace_sha256": observed_hashes,
+    }
+
+
+def _generic_memcpy_adapter(derivation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "normalized_hip_api": "hipmemcpyasync",
+        "classification": "known_other_memcpy_after_exact_direction_join",
+        "grouped_child_rows": "stable_start_end_timestamp_order",
+        "scope": "sealed_actual_v12_offline_reassembly_only",
+        "direction_derivation": derivation,
+    }
+
+
 def _copy_regular_single_link(source: Path, destination: Path) -> None:
     metadata = source.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or destination.exists() or destination.is_symlink():
@@ -3562,8 +3716,68 @@ def validate_profile_offline_reassembly(
     evidence = LAUNCHER.parse_json(evidence_raw, "offline reassembly evidence")
     if evidence.get("evidence_sha256") != _semantic_self_hash(evidence, "evidence_sha256"):
         raise HarnessError("offline reassembly evidence self-hash differs")
-    if evidence.get("source_actual_seal") != seal or evidence.get("output") != output:
+    capture_raw, _ = LAUNCHER.read_regular(PROFILE_CAPTURE_TOOL, "offline capture parser")
+    if sha_bytes(capture_raw) != PROFILE_CAPTURE_SHA:
+        raise HarnessError("offline capture parser SHA differs")
+    capture_module = _load_profile_capture_module(capture_raw)
+    derivation = derive_actual_v12_generic_memcpy(capture_module)
+    raw_inputs = []
+    for name in PROFILE_CAPTURE_RAW_NAMES:
+        record = _sealed_file_record(PROFILE_CAPTURE_SOURCE / name, ACTUAL_V12_COMMIT)
+        raw_inputs.append({key: record[key] for key in ("path", "relative_path", "sha256", "git_blob", "bytes")})
+    expected_parser = {
+        "path": str(PROFILE_CAPTURE_TOOL),
+        "commit": PROFILE_CAPTURE_COMMIT,
+        "tree": PROFILE_CAPTURE_TREE,
+        "git_blob": PROFILE_CAPTURE_GIT_BLOB,
+        "sha256": PROFILE_CAPTURE_SHA,
+        "mode": "offline_assemble",
+    }
+    expected_execution = {
+        "offline_assemble_calls": 1,
+        "workload_processes": 0,
+        "rocprof_processes": 0,
+        "gpu_commands": 0,
+        "service_operations": 0,
+        "operator_invocations": 0,
+        "actual_invocations": 0,
+        "model_loads": 0,
+    }
+    expected_safety = {
+        "source_actual_immutable": True,
+        "source_capture_v9_immutable": True,
+        "service_state_unchanged_by_generator": True,
+        "gpu_state_unchanged_by_generator": True,
+        "secret_material_recorded": False,
+    }
+    if (
+        set(evidence) != {
+            "schema_version", "status", "measurement_eligible", "promotion_eligible",
+            "evidence_sha256", "source_actual_seal", "raw_inputs", "capture_parser",
+            "generic_memcpy_derivation", "generator", "output", "execution", "safety",
+        }
+        or evidence.get("schema_version") != PROFILE_REASSEMBLY_SCHEMA
+        or evidence.get("status") != "offline_reassembled_sealed"
+        or evidence.get("measurement_eligible") is not False
+        or evidence.get("promotion_eligible") is not False
+        or evidence.get("source_actual_seal") != seal
+        or evidence.get("raw_inputs") != {
+            "source_root": str(PROFILE_CAPTURE_SOURCE),
+            "count": len(raw_inputs),
+            "members": raw_inputs,
+        }
+        or evidence.get("capture_parser") != expected_parser
+        or evidence.get("generic_memcpy_derivation") != derivation
+        or evidence.get("generator") != _git_identity()
+        or evidence.get("output") != output
+        or evidence.get("execution") != expected_execution
+        or evidence.get("safety") != expected_safety
+    ):
         raise HarnessError("offline reassembly source/output seal differs")
+    artifact_raw, _ = LAUNCHER.read_regular(capture_root / "capture-artifact.json", "offline capture artifact")
+    artifact = LAUNCHER.parse_json(artifact_raw, "offline capture artifact")
+    if artifact.get("profiler", {}).get("offline_compatibility_adapter") != _generic_memcpy_adapter(derivation):
+        raise HarnessError("offline capture direction adapter differs")
     expected_sums = f"{sha_bytes(evidence_raw)}  offline-reassembly.json\n".encode("ascii")
     sums_raw, _ = LAUNCHER.read_regular(evidence_root / "SHA256SUMS", "offline reassembly evidence sums")
     if sums_raw != expected_sums or stat.S_IMODE(evidence_root.lstat().st_mode) != 0o555:
@@ -3632,6 +3846,7 @@ def prepare_profile_offline_reassembly(
         if sha_bytes(capture_raw) != PROFILE_CAPTURE_SHA:
             raise HarnessError("offline capture parser SHA differs")
         capture_module = _load_profile_capture_module(capture_raw)
+        generic_memcpy_derivation = derive_actual_v12_generic_memcpy(capture_module)
         generic_memcpy_api = "hipmemcpyasync"
         if generic_memcpy_api in capture_module.PRODUCER.KNOWN_OTHER_MEMCPY_APIS:
             raise HarnessError("offline generic memcpy compatibility adapter is no longer required")
@@ -3665,10 +3880,7 @@ def prepare_profile_offline_reassembly(
             "offline_reassembly": True,
             "source_actual_commit": ACTUAL_V12_COMMIT,
             "offline_compatibility_adapter": {
-                "normalized_hip_api": generic_memcpy_api,
-                "classification": "known_other_memcpy_direction_resolved_by_memory_copy_trace",
-                "marker_rows": "stable_start_end_timestamp_order",
-                "scope": "sealed_actual_v12_offline_reassembly_only",
+                **_generic_memcpy_adapter(generic_memcpy_derivation),
             },
             "target_command_manifest": {"path": str(PROFILE_REASSEMBLY_TARGET_MANIFEST), "sha256": sha_bytes(target_raw)},
             "target_environment": {
@@ -3717,6 +3929,7 @@ def prepare_profile_offline_reassembly(
                 "sha256": PROFILE_CAPTURE_SHA,
                 "mode": "offline_assemble",
             },
+            "generic_memcpy_derivation": generic_memcpy_derivation,
             "generator": generator,
             "output": output,
             "execution": {

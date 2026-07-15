@@ -585,6 +585,47 @@ def test_actual_v12_exact_35_file_seal_and_capture_parser_authority() -> None:
     assert HARNESS.PROFILE_CAPTURE_TREE == "545511060d95a02d69f4164d35bb56d89c22ea59"
     assert HARNESS.PROFILE_CAPTURE_GIT_BLOB == "91f243ff5dcc0c36c63e471ac7c4581c74535a2f"
     assert HARNESS.PROFILE_CAPTURE_SHA == "e326fb5c9f5ff04290fe0c37cfd25ad7e1e37bd7f76b5d7a62002465b9965df4"
+    capture_raw = HARNESS.PROFILE_CAPTURE_TOOL.read_bytes()
+    capture_module = HARNESS._load_profile_capture_module(capture_raw)
+    derivation = HARNESS.derive_actual_v12_generic_memcpy(capture_module)
+    assert {key: derivation[key] for key in HARNESS.GENERIC_MEMCPY_EXPECTED_COVERAGE} == HARNESS.GENERIC_MEMCPY_EXPECTED_COVERAGE
+    assert derivation["raw_trace_sha256"] == HARNESS.GENERIC_MEMCPY_RAW_SHA256
+
+
+def test_generic_memcpy_exact_one_direction_join() -> None:
+    value = HARNESS.derive_generic_memcpy_rows(
+        [
+            {"Function": "hipMemcpyAsync", "Correlation_Id": "1"},
+            {"Function": "hipMemcpyAsync", "Correlation_Id": "2"},
+        ],
+        [{"Correlation_Id": "1", "Direction": "MEMORY_COPY_HOST_TO_DEVICE"}],
+        [{"Correlation_Id": "2", "Kernel_Name": "__amd_rocclr_copyBuffer"}],
+    )
+    assert value["direction_counts"] == {"H2D": 1, "D2H": 0, "D2D": 1}
+    assert value["memory_exact_one"] == value["kernel_copy_buffer_exact_one"] == 1
+    assert value["missing"] == value["duplicate"] == value["overlap"] == 0
+
+
+@pytest.mark.parametrize("failure", ("missing", "duplicate", "other_kernel", "overlap", "duplicate_hip"))
+def test_generic_memcpy_direction_join_rejects_non_exact_coverage(failure: str) -> None:
+    hip = [{"Function": "hipMemcpyAsync", "Correlation_Id": "1"}]
+    memory: list[dict[str, str]] = []
+    kernel: list[dict[str, str]] = []
+    if failure == "duplicate":
+        memory = [
+            {"Correlation_Id": "1", "Direction": "MEMORY_COPY_HOST_TO_DEVICE"},
+            {"Correlation_Id": "1", "Direction": "MEMORY_COPY_HOST_TO_DEVICE"},
+        ]
+    elif failure == "other_kernel":
+        kernel = [{"Correlation_Id": "1", "Kernel_Name": "some_other_kernel"}]
+    elif failure == "overlap":
+        memory = [{"Correlation_Id": "1", "Direction": "MEMORY_COPY_DEVICE_TO_HOST"}]
+        kernel = [{"Correlation_Id": "1", "Kernel_Name": "__amd_rocclr_copyBuffer"}]
+    elif failure == "duplicate_hip":
+        hip.append(dict(hip[0]))
+        memory = [{"Correlation_Id": "1", "Direction": "MEMORY_COPY_HOST_TO_DEVICE"}]
+    with pytest.raises(HARNESS.HarnessError, match="exact-one direction coverage differs"):
+        HARNESS.derive_generic_memcpy_rows(hip, memory, kernel)
 
 
 def test_offline_reassembly_generator_is_process_zero_and_self_validating(
@@ -621,6 +662,25 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
         "model_loads": 0,
     }
     assert capture.lstat().st_mode & 0o777 == evidence.lstat().st_mode & 0o777 == 0o555
+
+    evidence_path = evidence / "offline-reassembly.json"
+    sums_path = evidence / "SHA256SUMS"
+    os.chmod(evidence, 0o700)
+    os.chmod(evidence_path, 0o600)
+    os.chmod(sums_path, 0o600)
+    tampered = json.loads(evidence_path.read_text())
+    tampered["generic_memcpy_derivation"]["direction_counts"]["D2D"] += 1
+    tampered["evidence_sha256"] = HARNESS._semantic_self_hash(tampered, "evidence_sha256")
+    tampered_raw = HARNESS.pretty(tampered)
+    evidence_path.write_bytes(tampered_raw)
+    sums_path.write_bytes(
+        f"{HARNESS.sha_bytes(tampered_raw)}  offline-reassembly.json\n".encode("ascii")
+    )
+    os.chmod(evidence_path, 0o444)
+    os.chmod(sums_path, 0o444)
+    os.chmod(evidence, 0o555)
+    with pytest.raises(HARNESS.HarnessError, match="source/output seal differs"):
+        HARNESS.validate_profile_offline_reassembly(capture, evidence)
 
 
 def test_profile_v13_is_invalid_preoperator_and_future_outputs_are_poststate_independent() -> None:
