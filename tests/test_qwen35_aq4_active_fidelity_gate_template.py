@@ -24,6 +24,8 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             if worker.stat().st_nlink == 1:
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertIn("mock_preflight=1 service_stop=0 gpu_run=0", completed.stdout)
+                self.assertIn("device_mapping=rocm_smi_card2->hip_visible_token1->filtered_hip_ordinal0->global_logical_device1 expected_architecture=gfx1201", completed.stdout)
+                self.assertIn("device_index_boundary=global0_cpu global1_filtered_hip_ordinal0", completed.stdout)
             else:
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn("worker identity differs", completed.stderr)
@@ -56,9 +58,12 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             'EXPECTED_BUILD_COMMIT="05a8ab661b8e56559353f5a530ec8abac08b9a68"',
             'EXPECTED_BUILD_TREE_SHA256="12e6d777f37d648ede369263296cd5606676a441"',
             'EXPECTED_CARGO_LOCK_SHA256="10df8371ae3a33ed792dc4e8c15dd6196a8a7e176e377ef275e75b3219aa157b"',
-            'EXPECTED_VISIBLE_PHYSICAL_DEVICE="2"',
-            'EXPECTED_LOGICAL_DEVICE_INDEX=0',
-            '[[ "$EXPECTED_VISIBLE_PHYSICAL_DEVICE" = "2" && "$EXPECTED_LOGICAL_DEVICE_INDEX" = 0 && "$DEVICE_ARCHITECTURE" = "gfx1201" ]] || fail "device mapping differs"',
+            'EXPECTED_ROCM_SMI_PHYSICAL_CARD="2"',
+            'EXPECTED_HIP_VISIBLE_TOKEN="1"',
+            'EXPECTED_FILTERED_HIP_ORDINAL=0',
+            'EXPECTED_CPU_GLOBAL_DEVICE_INDEX=0',
+            'EXPECTED_LOGICAL_DEVICE_INDEX=1',
+            '[[ "$EXPECTED_ROCM_SMI_PHYSICAL_CARD" = "2" && "$EXPECTED_HIP_VISIBLE_TOKEN" = "1" && "$EXPECTED_FILTERED_HIP_ORDINAL" = 0 && "$EXPECTED_CPU_GLOBAL_DEVICE_INDEX" = 0 && "$EXPECTED_LOGICAL_DEVICE_INDEX" = 1 && "$DEVICE_ARCHITECTURE" = "gfx1201" ]] || fail "device mapping differs"',
             'PACKAGE_MANIFEST="$PACKAGE_ROOT/package/manifest.json"',
             'SYSTEMCTL=(sudo -n -- systemctl)',
             'RUNTIME_DIR_INSTALL=(sudo -n -- install -d -o homelab1 -g homelab1 -m 0750)',
@@ -80,8 +85,8 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
             '--cases "$CASES"',
             '--output "$OUTPUT"',
             '--expected-guard-sha256 "$GUARD_SHA256"',
-            '"ULLM_HIP_VISIBLE_DEVICES=$EXPECTED_VISIBLE_PHYSICAL_DEVICE"',
-            '"HIP_VISIBLE_DEVICES=$EXPECTED_VISIBLE_PHYSICAL_DEVICE"',
+            '"ULLM_HIP_VISIBLE_DEVICES=$EXPECTED_HIP_VISIBLE_TOKEN"',
+            '"HIP_VISIBLE_DEVICES=$EXPECTED_HIP_VISIBLE_TOKEN"',
             '--device-index "$EXPECTED_LOGICAL_DEVICE_INDEX"',
         ):
             self.assertIn(needle, text, needle)
@@ -92,7 +97,8 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
         self.assertNotIn('chmod 600 "$LOCK"', text)
         self.assertNotIn("runuser -u homelab1", text)
         self.assertIn('env "${guard_env[@]}" \\\n  timeout --signal=TERM --kill-after=30s 1200s "$FIDELITY_BIN"', text)
-        self.assertIn('device_mapping=physical_card${EXPECTED_VISIBLE_PHYSICAL_DEVICE}->logical_device${EXPECTED_LOGICAL_DEVICE_INDEX}', text)
+        self.assertIn('device_mapping=rocm_smi_card${EXPECTED_ROCM_SMI_PHYSICAL_CARD}->hip_visible_token${EXPECTED_HIP_VISIBLE_TOKEN}->filtered_hip_ordinal${EXPECTED_FILTERED_HIP_ORDINAL}->global_logical_device${EXPECTED_LOGICAL_DEVICE_INDEX}', text)
+        self.assertIn('device_index_boundary=global${EXPECTED_CPU_GLOBAL_DEVICE_INDEX}_cpu global${EXPECTED_LOGICAL_DEVICE_INDEX}_filtered_hip_ordinal${EXPECTED_FILTERED_HIP_ORDINAL}', text)
         self.assertIn("one_model_load=1 nonfinite_rows=0", text)
         self.assertIn("for guard_name in \"${REQUIRED_GUARDS[@]}\"; do guard_env+=(\"$guard_name=1\"); done", text)
         self.assertIn("tools/capture-qwen35-aq4-fidelity.py", text)
