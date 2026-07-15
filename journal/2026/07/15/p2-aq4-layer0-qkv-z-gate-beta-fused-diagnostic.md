@@ -32,4 +32,6 @@
 
 ## 次の行動
 
+follow-upではdevice 0 CPUとdevice 1 HIP/gfx1201の境界、HIP visibility/guard、fused RPB=4、manifestの6 exact name count、Q/K/V row segment、4 output layout、output directory symlink拒否、publish rollbackを追加した。GPU/service/holdout実行は行っていない。
+
 このbranchの限定commitを親branchへcherry-pickし、oracle仕様確定後にgate/beta/zの解釈や追加referenceを必要に応じて更新する。
