@@ -190,6 +190,13 @@ def test_builder_materializes_create_new_immutable_gate(
     assert copied.stat().st_nlink == 1
     assert (copied.stat().st_mode & 0o777) == 0o555
     gate = json.loads((output / "gate.json").read_text())
+    build = json.loads((output / "build-receipt.json").read_text())
+    expected_worker = str(copied.resolve())
+    assert build["worker"]["source_path"] == expected_worker
+    assert build["worker"]["immutable_path"] == expected_worker
+    assert build["worker"]["source_sha256"] == build["worker"]["immutable_sha256"]
+    assert build["worker"]["source_mode"] == build["worker"]["immutable_mode"] == "0555"
+    assert build["worker"]["source_nlink"] == build["worker"]["immutable_nlink"] == 1
     profile_value = json.loads((output / "profile.json").read_text())
     assert profile_value["promotion"] == {
         "receipt": str(output / "promotion-receipt.json"),

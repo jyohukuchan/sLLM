@@ -481,7 +481,7 @@ def copy_binary_exclusive(source: Path, destination: Path) -> dict[str, Any]:
     }
 
 
-def normalize_authorized_worker_identity(
+def normalize_runtime_worker_identity(
     identity: dict[str, Any], worker_path: Path
 ) -> dict[str, Any]:
     metadata = worker_path.stat(follow_symlinks=False)
@@ -494,7 +494,7 @@ def normalize_authorized_worker_identity(
         or digest != identity.get("immutable_sha256")
         or metadata.st_size != identity.get("immutable_bytes")
     ):
-        raise GateError("authorized worker self identity differs")
+        raise GateError("runtime worker self identity differs")
     path = str(worker_path.resolve())
     return {
         "source_path": path,
@@ -970,10 +970,9 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             raise GateError(
                 "authorized candidate differs from independently audited identity"
             )
-        if audit is not None:
-            worker_identity = normalize_authorized_worker_identity(
-                worker_identity, immutable_worker
-            )
+        worker_identity = normalize_runtime_worker_identity(
+            worker_identity, immutable_worker
+        )
         receipt_path = output / "promotion-receipt.json"
         candidate_profile = json.loads(json.dumps(profile))
         candidate_profile["worker"]["binary"] = str(immutable_worker)
@@ -1249,11 +1248,10 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             ):
                 raise GateError("authorization lineage changed during materialization")
         if (
-            audit is not None
-            and normalize_authorized_worker_identity(worker_identity, immutable_worker)
+            normalize_runtime_worker_identity(worker_identity, immutable_worker)
             != worker_identity
         ):
-            raise GateError("authorized worker changed during materialization")
+            raise GateError("runtime worker changed during materialization")
         write_exclusive(output / "SHA256SUMS", "".join(hashes).encode("ascii"))
         if audit is not None:
             reject_runtime_references(output, Path(audit["runtime"]))
