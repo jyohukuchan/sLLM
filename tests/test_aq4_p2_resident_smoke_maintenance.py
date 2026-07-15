@@ -29,6 +29,8 @@ class FakeRuntime:
         restore_health_failures: int = 0,
         hash_seconds: float = 0.0,
         metadata_mutation: str | None = None,
+        pre_nrestarts: int = 0,
+        post_nrestarts: int = 0,
     ) -> None:
         self.active = True
         self.epoch = 0
@@ -45,6 +47,8 @@ class FakeRuntime:
         self.full_hash_count = 0
         self.metadata_scan_count = 0
         self.metadata_mutation = metadata_mutation
+        self.pre_nrestarts = pre_nrestarts
+        self.post_nrestarts = post_nrestarts
         self.events: list[str] = []
         self.runner_started_count = 0
 
@@ -64,7 +68,7 @@ class FakeRuntime:
         if argv[:2] == [str(HARNESS.LAUNCHER.SYSTEMCTL), "show"]:
             if not self.active:
                 return subprocess.CompletedProcess(argv, 0, b"ActiveState=inactive\nSubState=dead\nMainPID=0\nNRestarts=0\nControlGroup=/system.slice/ullm-openai.service\n", b"")
-            nrestarts = 1 if self.fail == "nrestarts-increment" and self.epoch > 0 else 0
+            nrestarts = self.pre_nrestarts if self.epoch == 0 else self.post_nrestarts
             raw = f"ActiveState=active\nSubState=running\nMainPID={self.gateway_pid}\nNRestarts={nrestarts}\nControlGroup=/system.slice/ullm-openai.service\n".encode()
             return subprocess.CompletedProcess(argv, 0, raw, b"")
         if argv[0] == str(HARNESS.LAUNCHER.PGREP):
@@ -483,12 +487,41 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
         "worker_pid_changed": True,
         "nrestarts_before": 0,
         "nrestarts_after": 0,
-        "nrestarts_semantics": "explicit_start_does_not_increment_automatic_restart_counter",
-        "nrestarts_unchanged": True,
+        "nrestarts_semantics": "explicit_stop_start_resets_automatic_restart_counter_to_zero",
+        "nrestarts_reset_to_zero": True,
         "control_group_unchanged": True,
     }
     assert (tmp_path / "maintenance/maintenance-marker.json").stat().st_mode & 0o777 == 0o444
     assert evidence["secret_material_recorded"] is False
+
+
+def test_profile_v3_outputs_are_fresh_from_failed_v2_attempt() -> None:
+    base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v3"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v3"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v3"
+    assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+
+
+def test_explicit_restore_resets_nonzero_nrestarts_to_zero(tmp_path: Path) -> None:
+    runtime = FakeRuntime(pre_nrestarts=1, post_nrestarts=0)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "nrestarts-reset", runtime.dependencies())
+    assert code == 0 and evidence["restore"]["passed"] is True
+    epoch = evidence["restore"]["post_start"]["service_epoch"]
+    assert epoch["nrestarts_before"] == 1
+    assert epoch["nrestarts_after"] == 0
+    assert epoch["nrestarts_reset_to_zero"] is True
+    assert runtime.full_hash_count == 1
+
+
+def test_explicit_restore_rejects_nonzero_post_start_nrestarts(tmp_path: Path) -> None:
+    runtime = FakeRuntime(pre_nrestarts=1, post_nrestarts=1)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "nrestarts-not-reset", runtime.dependencies())
+    assert code == 1 and evidence["restore"]["passed"] is False
+    assert evidence["restore"]["poll_count"] == 120
+    assert "NRestarts semantics differ" in evidence["restore"]["last_failure"]["reason"]
+    assert evidence["restore"]["duration_ns"] == 120_000_000_000
+    assert runtime.full_hash_count == 1
 
 
 def test_package_tree_snapshot_includes_root_directories_files_and_symlinks(tmp_path: Path) -> None:

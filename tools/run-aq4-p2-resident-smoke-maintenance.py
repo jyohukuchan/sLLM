@@ -32,10 +32,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553"
-LAUNCHER_TREE = "7992fa953638d5c6fadb6106813f560d3fce1cbd"
-LAUNCHER_GIT_BLOB = "90347ec49b00c0bd89ea9aab08fd68f44850e343"
-LAUNCHER_SHA = "b6ee5e255f768df58e421ed704b59ea4f9fba9d6ade4c821479f7c48102cd528"
+LAUNCHER_COMMIT = "dfabd466d90c05d7fc6d1fb588f4cb3116d2229d"
+LAUNCHER_TREE = "d31e09f1e72caee51a171e9753fcc44b72a32e8d"
+LAUNCHER_GIT_BLOB = "856a8352c4a87b92759372ea454db9ff2452105a"
+LAUNCHER_SHA = "4ec1df2880f759095e118e2046bbdf24cc329fe7d10b01adb5ae8eeb53685f97"
 RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -52,8 +52,8 @@ PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-product
 PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
 PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
 PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
-PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1"
-PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v1"
+PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v3"
+PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v3"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
 PROFILE_CAPTURE_COMMIT = "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553"
 PROFILE_CAPTURE_TREE = "7992fa953638d5c6fadb6106813f560d3fce1cbd"
@@ -61,7 +61,7 @@ PROFILE_CAPTURE_GIT_BLOB = "671ec370eea971d1e4131b7fb1acef0a5e5697c5"
 PROFILE_CAPTURE_SHA = "9445ab1f1ba4a8d3d2c7b9961ddfc27f65b7b4eeaa4792c5cd7fc3e487c02b7d"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
-PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1"
+PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v3"
 PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
 PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_TIMEOUT_SECONDS = 1800
@@ -1827,13 +1827,13 @@ def capture_running(
             "worker_pid_changed": worker_pid != previous["worker"]["pid"],
             "nrestarts_before": previous["service"]["nrestarts"],
             "nrestarts_after": service["nrestarts"],
-            "nrestarts_semantics": "explicit_start_does_not_increment_automatic_restart_counter",
-            "nrestarts_unchanged": service["nrestarts"] == previous["service"]["nrestarts"],
+            "nrestarts_semantics": "explicit_stop_start_resets_automatic_restart_counter_to_zero",
+            "nrestarts_reset_to_zero": service["nrestarts"] == 0,
             "control_group_unchanged": service["control_group"] == previous["service"]["control_group"],
         }
         if not all(
             service_epoch[key]
-            for key in ("main_pid_changed", "worker_pid_changed", "nrestarts_unchanged", "control_group_unchanged")
+            for key in ("main_pid_changed", "worker_pid_changed", "nrestarts_reset_to_zero", "control_group_unchanged")
         ):
             raise HarnessError("restored explicit service epoch/NRestarts semantics differ")
     return {
