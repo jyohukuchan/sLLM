@@ -1,0 +1,119 @@
+{
+  "schema_version": "ullm.aq4_active_fidelity_gate_attempt_result.v1",
+  "attempt": "active-attempt7-20260715T091108Z",
+  "commit": "1c010e77ab3efc7aaa3d8032c2320a7d2b540fd8",
+  "gate_script_sha256": "776bdc8de72fe7394dfafa03d3ccbca5d7ad16e6461dcc8502eddb31574b8e1b",
+  "gate_exit_code": 90,
+  "preflight": {
+    "passed": true,
+    "plan_sha256": "1b4f8c244e922ab73c0bb026216d8333a9cfe57c23e6695c4141554d117693c0",
+    "cases_sha256": "53f256bc8f5ed4036cfb1a9a98c0c9d9197bb980e1ef91d7ff01cf73001369a8",
+    "split_sha256": "966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887",
+    "policy_sha256": "302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03",
+    "calibration_sha256": "20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f",
+    "source_sums_verified": true,
+    "capture_binary_sums_verified": true,
+    "worker_nlink": 1,
+    "output_require_absent": true,
+    "device_mapping": "rocm_smi_card2_to_hip_visible_token1_to_filtered_hip_ordinal0_to_global_device1",
+    "device_architecture": "gfx1201"
+  },
+  "capture": {
+    "run_started": true,
+    "gpu_compute_executed": true,
+    "capture_process_completed": true,
+    "capture_output_sha256sums_verified": true,
+    "gate_post_capture_failure": "KeyError: 'row_count'",
+    "gate_post_capture_failure_scope": "fixed inline verifier looked for manifest.row_count; artifact stores row_count under manifest.cases and manifest.runtime.run",
+    "output_schema": "ullm.qwen35_aq4_target_calibration.v1",
+    "output_status": "available",
+    "output_evidence_class": "production",
+    "output_promotion_eligible": false,
+    "row_count": 24,
+    "unique_case_ids": 24,
+    "unique_case_step_keys": 24,
+    "nonfinite_rows": 0,
+    "model_loads": 1,
+    "one_model_load": true,
+    "runtime_device": {
+      "architecture": "gfx1201",
+      "backend": "hip",
+      "device_id": 0,
+      "name": "AMD Radeon Graphics",
+      "requested_index": 1
+    },
+    "hidden_sidecar_bytes": 393216,
+    "logits_sidecar_bytes": 23838720,
+    "rows_jsonl_min_bytes": 1157,
+    "rows_jsonl_max_bytes": 1194
+  },
+  "metrics_postprocess": {
+    "attempted_after_capture": true,
+    "metrics_json_present": false,
+    "validator_executed": false,
+    "failure": "aq4_target calibration artifact failed validation: parent sampled oracle binding differs",
+    "stderr_sha256": "71f19ae05647249cc13b79d3119b943ca6047e5d5ecdb76066d9a8e4dac38a91",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "service": {
+    "pre_stop_main_pid": 877038,
+    "pre_stop_n_restarts": 0,
+    "stop_started_at": "2026-07-15T09:11:07+09:00",
+    "stop_returned_at": "2026-07-15T09:11:08+09:00",
+    "restore_started_at": "2026-07-15T09:17:46+09:00",
+    "restore_startup_complete_at": "2026-07-15T09:17:49+09:00",
+    "stop_return_to_restore_seconds": 398,
+    "attempt_to_restore_seconds": 399,
+    "post_active_state": "active",
+    "post_sub_state": "running",
+    "post_main_pid": 930324,
+    "post_n_restarts": 0,
+    "runtime_dir": {
+      "path": "/run/ullm",
+      "mode": "0750",
+      "uid": 1000,
+      "gid": 1000,
+      "nlink": 2,
+      "type": "directory"
+    },
+    "runtime_lock": {
+      "path": "/run/ullm/r9700.lock",
+      "inode": 754242,
+      "nlink": 1,
+      "mode": "0600",
+      "uid": 1000,
+      "gid": 1000,
+      "size": 0,
+      "owner_pid": 930324
+    }
+  },
+  "identity": {
+    "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d",
+    "worker_nlink": 1
+  },
+  "observer": {
+    "observer_failed_marker": false,
+    "sample_count": 1,
+    "gpu_use_percent": {"card0": 0, "card1": 0, "card2": 100},
+    "vram_used_bytes": {"card0": 21471232, "card1": 21471232, "card2": 7439605760},
+    "monitor_log_sha256": "86cb7e9120cb529e342e19d29233df6b21a73b8f9eaa3f636d7fff6c4633e4ff"
+  },
+  "artifact_sha256": {
+    "output/SHA256SUMS": "a224fa3ecdef0c2bdae4378c27a343cd73c05a6705d13f9f7144e3eb245b94aa",
+    "output/manifest.json": "5093ad9e495d6232c65035cec26ba0db02ebdf5aed75bde118074688db5df305",
+    "output/rows.jsonl": "b45015560645e84b53bb12be87e77b6a33b2c2c0f22182e19bc087645708b02d",
+    "output/vectors/hidden.f32le": "d740249d9d3da1c54487e73be935d5634e718d958105d9f1aebf5957db349330",
+    "output/vectors/logits.f32le": "668751728a19f476592470b4a154c4a3e5f96a9817c64a42b073c509400da83e"
+  },
+  "raw_artifacts": {
+    "monitor.log": "86cb7e9120cb529e342e19d29233df6b21a73b8f9eaa3f636d7fff6c4633e4ff",
+    "observer-sample.marker": "c629ee388546bb107fe366dacb61e76e7c6eee89c136770b58b2dd43de72ae8c",
+    "run-started.marker": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "run.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "service-stopped.marker": "c5695dd4e84a0166d1ba59023019bd28cb2592356dd2ee25427d9180cda6a3dc",
+    "metrics.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "metrics.stderr": "71f19ae05647249cc13b79d3119b943ca6047e5d5ecdb76066d9a8e4dac38a91"
+  }
+}

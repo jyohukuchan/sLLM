@@ -1,0 +1,4 @@
+armed_at=2026-07-15T09:11:07+09:00
+service_stop_attempt_at=2026-07-15T09:11:07+09:00
+service_stop_returned_at=2026-07-15T09:11:08+09:00
+runtime_lock_acquired_at=2026-07-15T09:11:08+09:00
