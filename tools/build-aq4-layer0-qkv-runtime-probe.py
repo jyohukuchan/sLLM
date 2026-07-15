@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 
-EXPECTED_COMMIT = "2bcef0d897d43ea1ff397dc558f7e0e179d8a904"
+EXPECTED_COMMIT = "4a4b0e28eb27fa6710a339e470ee80d21d602680"
 COMMAND_TEXT = "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-layer0-qkv-runtime-probe"
 BINARY_NAME = "ullm-aq4-layer0-qkv-runtime-probe"
 SCHEMA = "ullm.aq4_layer0_qkv_runtime_probe_build_receipt.v1"
@@ -26,6 +26,24 @@ def sha256(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def stable_build_output_sha256(payload: bytes) -> str:
+    """Hash diagnostics without Cargo's nondeterministic progress/timing lines."""
+    text = payload.decode(errors="replace")
+    volatile_prefixes = (
+        "   Compiling ",
+        "    Finished ",
+        "   Checking ",
+        " Downloading ",
+        " Downloaded ",
+    )
+    stable_lines = [
+        line for line in text.splitlines() if not line.startswith(volatile_prefixes)
+    ]
+    if not stable_lines:
+        return hashlib.sha256(b"").hexdigest()
+    return hashlib.sha256(("\n".join(stable_lines) + "\n").encode()).hexdigest()
 
 
 def regular_nlink_one(path: Path, label: str) -> os.stat_result:
@@ -139,8 +157,8 @@ def build(source_root: Path, artifact_root: Path) -> dict[str, object]:
             "command": COMMAND_TEXT,
             "jobs": 1,
             "exit_status": completed.returncode,
-            "stdout_sha256": hashlib.sha256(completed.stdout).hexdigest(),
-            "stderr_sha256": hashlib.sha256(completed.stderr).hexdigest(),
+            "stdout_sha256": stable_build_output_sha256(completed.stdout),
+            "stderr_sha256": stable_build_output_sha256(completed.stderr),
         },
         "binary": {
             "path": BINARY_NAME,

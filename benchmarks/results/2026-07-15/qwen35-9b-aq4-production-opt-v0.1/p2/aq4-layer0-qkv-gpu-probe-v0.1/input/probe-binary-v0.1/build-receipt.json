@@ -11,7 +11,7 @@
     "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-layer0-qkv-runtime-probe",
     "exit_status": 0,
     "jobs": 1,
-    "stderr_sha256": "6c8b56ebbdcdacdb2584d488b3e23ca17250d5b31744926e24604ef44f5edd2b",
+    "stderr_sha256": "882c61bc042a017a693a43f45adc950a4e147300266bcc4f5251fdd7a27ca826",
     "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "schema_version": "ullm.aq4_layer0_qkv_runtime_probe_build_receipt.v1",

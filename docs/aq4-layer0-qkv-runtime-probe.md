@@ -69,4 +69,4 @@ The current immutable gate artifact is built from commit
 `CARGO_BUILD_JOBS=1`; its binary SHA-256 is
 `f58f0734ec595d9a9cd76161d28d096b2b18fc6e437cf3ad9d526eb710c7cf69` and its
 build-receipt SHA-256 is
-`34a39bd6f0d20dd8a98991f3c66b6a538697bf0689894150139a929e3c3c32c4`.
+`0c94ef027982ff82094053e1fc150294044e25b5c365c6e55009c5cff2cf1637`.
