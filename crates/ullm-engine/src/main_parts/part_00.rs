@@ -8950,6 +8950,7 @@ mod tests {
             batch_matvec_count: 2,
             pair_matvec_count: 0,
             triple_matvec_count: 3,
+            fallback_count: 0,
         };
         assert_eq!(
             sq_fp8_projection_kernel_families(telemetry, dispatches),

@@ -7,6 +7,10 @@
 //! Preparing a token is deliberately separate from publishing and committing it, so cancellation
 //! and publisher failures cannot make an unobserved token part of the decode history.
 
+use crate::aq4_package_runtime::{
+    SqFp8ProjectionTelemetry, reset_sq_fp8_projection_telemetry,
+    snapshot_sq_fp8_projection_telemetry,
+};
 use crate::backend_operation_registry::{
     OperationExecutionAudit, OperationExecutionCount, OperationExecutionRecord,
     OperationExecutionStatus, OperationResolutionTrace,
@@ -15,6 +19,10 @@ use crate::execution_batch::ExecutionPhase;
 use crate::inference_api::{
     CancellationToken, FinishReason, InferenceRequest, ReasoningUsage, ReleaseOutcome,
     ReleaseSummary,
+};
+use crate::qwen35_aq4_layer_runtime::{
+    SqDiagnosticHostStagingTelemetry, reset_sq_diagnostic_host_staging_telemetry,
+    snapshot_sq_diagnostic_host_staging_telemetry,
 };
 use crate::qwen35_aq4_model_runtime::{
     Qwen35Aq4CalibrationObserver, Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime,
@@ -32,6 +40,17 @@ pub const QWEN35_AQ4_MAX_PREFILL_CHUNK: usize = 128;
 /// production implementation or rejected before a request can execute.
 pub const QWEN35_AQ4_PREFILL_CHUNK_GRID: &[usize] = &[1, 8, 16, 32, 64, 128];
 pub const QWEN35_AQ4_SUPPORTED_PREFILL_CHUNK_TOKENS: &[usize] = QWEN35_AQ4_PREFILL_CHUNK_GRID;
+pub const QWEN35_AQ4_SQ8_PROMOTION_EVIDENCE_REQUEST_ID_ENV: &str =
+    "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID";
+
+fn sq8_promotion_telemetry_enabled_for_request(
+    expected_request_id: Option<std::ffi::OsString>,
+    request_id: &str,
+) -> bool {
+    expected_request_id
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|expected| !expected.is_empty() && expected == request_id)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Qwen35Aq4TransactionCounts {
@@ -85,6 +104,15 @@ pub struct Qwen35Aq4RequestExecutionAudit {
     pub lifecycle: Qwen35Aq4LifecycleCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_audit: Option<OperationExecutionAudit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sq8_promotion_telemetry: Option<Qwen35Aq4Sq8PromotionTelemetry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Qwen35Aq4Sq8PromotionTelemetry {
+    pub schema_version: &'static str,
+    pub projection: SqFp8ProjectionTelemetry,
+    pub diagnostic_host_staging: SqDiagnosticHostStagingTelemetry,
 }
 
 impl Qwen35Aq4RequestExecutionAudit {
@@ -338,6 +366,7 @@ impl Qwen35Aq4LifecycleObserver {
             internal_batch_count: self.internal_batch_count,
             lifecycle: self.lifecycle,
             operation_audit,
+            sq8_promotion_telemetry: None,
         })
     }
 }
@@ -1596,6 +1625,7 @@ pub struct Qwen35Aq4InferenceSession<M = Qwen35Aq4ModelRuntime> {
     active_lifecycle_observer: Option<Qwen35Aq4LifecycleObserver>,
     last_terminal_request_audit: Option<Qwen35Aq4RequestExecutionAudit>,
     active_calibration_replay: Option<ActiveCalibrationReplay>,
+    active_sq8_promotion_telemetry: bool,
 }
 
 impl Qwen35Aq4InferenceSession<Qwen35Aq4ModelRuntime> {
@@ -1632,6 +1662,7 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             active_lifecycle_observer: None,
             last_terminal_request_audit: None,
             active_calibration_replay: None,
+            active_sq8_promotion_telemetry: false,
         })
     }
 
@@ -1982,7 +2013,17 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
     fn snapshot_terminal_request_audit(&mut self) -> Result<(), String> {
         let operation_audit = self.last_terminal_operation_audit.clone();
         self.last_terminal_request_audit = match self.active_lifecycle_observer.as_ref() {
-            Some(observer) => Some(observer.snapshot(operation_audit)?),
+            Some(observer) => {
+                let mut audit = observer.snapshot(operation_audit)?;
+                if self.active_sq8_promotion_telemetry {
+                    audit.sq8_promotion_telemetry = Some(Qwen35Aq4Sq8PromotionTelemetry {
+                        schema_version: "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
+                        projection: snapshot_sq_fp8_projection_telemetry(),
+                        diagnostic_host_staging: snapshot_sq_diagnostic_host_staging_telemetry(),
+                    });
+                }
+                Some(audit)
+            }
             None => None,
         };
         Ok(())
@@ -2442,6 +2483,7 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         if let Err(error) = self.snapshot_terminal_request_audit() {
             return self.fail(error);
         }
+        self.active_sq8_promotion_telemetry = false;
         self.pending = None;
         self.active_lifecycle_observer = None;
         self.active_calibration_replay = None;
@@ -2505,6 +2547,14 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             }
             (None, _) => None,
         };
+        self.active_sq8_promotion_telemetry = sq8_promotion_telemetry_enabled_for_request(
+            std::env::var_os(QWEN35_AQ4_SQ8_PROMOTION_EVIDENCE_REQUEST_ID_ENV),
+            &request.request_id,
+        );
+        if self.active_sq8_promotion_telemetry {
+            reset_sq_fp8_projection_telemetry();
+            reset_sq_diagnostic_host_staging_telemetry();
+        }
         self.active = Some(ActiveRequest {
             request_id: request.request_id,
             prompt_token_ids: request.prompt_token_ids,
@@ -2883,6 +2933,23 @@ mod tests {
     use super::*;
     use crate::inference_api::SamplingParams;
     use std::collections::VecDeque;
+
+    #[test]
+    fn sq8_promotion_telemetry_is_default_off_and_exact_request_scoped() {
+        assert!(!sq8_promotion_telemetry_enabled_for_request(None, "actual"));
+        assert!(!sq8_promotion_telemetry_enabled_for_request(
+            Some(std::ffi::OsString::from("")),
+            "actual",
+        ));
+        assert!(!sq8_promotion_telemetry_enabled_for_request(
+            Some(std::ffi::OsString::from("smoke")),
+            "actual",
+        ));
+        assert!(sq8_promotion_telemetry_enabled_for_request(
+            Some(std::ffi::OsString::from("actual")),
+            "actual",
+        ));
+    }
 
     fn audited_contract() -> Vec<LayerExecutionContract> {
         (0..32)

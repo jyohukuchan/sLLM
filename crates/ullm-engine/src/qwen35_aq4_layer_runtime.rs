@@ -220,7 +220,7 @@ pub struct MixedRequestStateBatchStepItem {
     pub cache_position: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SqDiagnosticHostStagingTelemetry {
     pub read_count: u64,
     pub write_count: u64,

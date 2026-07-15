@@ -29,10 +29,75 @@ from typing import Any
 MAX_BYTES = 4 * 1024 * 1024
 SAFE_INT = 9_007_199_254_740_991
 LAYER_RE = re.compile(r"\.layers\.(\d+)(?:\.|$)")
+SQ8_PROMOTION_REQUEST_ENV = "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID"
+SQ8_OVERLAY_IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
+SQ8_OVERLAY_EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
 
 
 class CaptureError(ValueError):
     pass
+
+
+def token_identity_digest(token_ids: list[int]) -> str:
+    digest = hashlib.sha256(b"ullm.sq8-promotion-output-token-ids.v1\0")
+    for token_id in token_ids:
+        if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
+            raise CaptureError("output token identity contains an invalid token id")
+        digest.update(token_id.to_bytes(8, "little"))
+    return digest.hexdigest()
+
+
+def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "projection",
+        "diagnostic_host_staging",
+    }:
+        raise CaptureError("SQ8 promotion telemetry shape differs")
+    if value.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_telemetry.v1":
+        raise CaptureError("SQ8 promotion telemetry schema differs")
+    projection = value.get("projection")
+    expected_projection_keys = {
+        "single_matvec_count",
+        "batch_matvec_count",
+        "pair_matvec_count",
+        "triple_matvec_count",
+        "fallback_count",
+    }
+    if not isinstance(projection, dict) or set(projection) != expected_projection_keys:
+        raise CaptureError("SQ8 projection telemetry shape differs")
+    if any(
+        not isinstance(projection[key], int)
+        or isinstance(projection[key], bool)
+        or projection[key] < 0
+        for key in expected_projection_keys
+    ):
+        raise CaptureError("SQ8 projection telemetry counts are invalid")
+    if projection["batch_matvec_count"] <= 0 or projection["pair_matvec_count"] <= 0:
+        raise CaptureError("SQ8 batch and pair projection evidence is required")
+    for key in ("single_matvec_count", "triple_matvec_count", "fallback_count"):
+        if projection[key] != 0:
+            raise CaptureError(f"SQ8 promotion requires zero {key}")
+    staging = value.get("diagnostic_host_staging")
+    staging_keys = {"read_count", "write_count", "read_bytes", "write_bytes"}
+    if not isinstance(staging, dict) or set(staging) != staging_keys:
+        raise CaptureError("SQ8 host-staging telemetry shape differs")
+    if any(staging[key] != 0 for key in staging_keys):
+        raise CaptureError("SQ8 promotion requires zero diagnostic host staging")
+    return value
+
+
+def configure_sq8_promotion_environment(
+    environment: dict[str, str], *, enabled: bool, request_id: str
+) -> dict[str, str]:
+    result = dict(environment)
+    result.pop(SQ8_PROMOTION_REQUEST_ENV, None)
+    if enabled:
+        result["HIP_VISIBLE_DEVICES"] = "1"
+        result["ULLM_HIP_VISIBLE_DEVICES"] = "1"
+        result.pop("ROCR_VISIBLE_DEVICES", None)
+        result[SQ8_PROMOTION_REQUEST_ENV] = request_id
+    return result
 
 
 def load_json(path: Path, label: str) -> Any:
@@ -368,6 +433,15 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     if not 1 <= prompt_tokens <= int(manifest.get("public", {}).get("context_length", 4096)):
         raise CaptureError("prompt token count is outside the served context")
     internal_request_id = "capture-" + secrets.token_hex(8)
+    sq8_promotion = bool(getattr(args, "sq8_promotion_evidence", False))
+    if sq8_promotion:
+        if manifest.get("format", {}).get("implementation_id") != SQ8_OVERLAY_IMPLEMENTATION_ID:
+            raise CaptureError("SQ8 promotion manifest implementation identity differs")
+        if worker.get("identity", {}).get("execution_profile") != SQ8_OVERLAY_EXECUTION_PROFILE:
+            raise CaptureError("SQ8 promotion manifest execution profile differs")
+    environment = configure_sq8_promotion_environment(
+        environment, enabled=sq8_promotion, request_id=internal_request_id
+    )
     request = {
         "schema_version": protocol,
         "type": "generate",
@@ -398,6 +472,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     proc.stdin.write((json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"))
     proc.stdin.flush()
     events: list[dict[str, Any]] = []
+    output_token_ids: list[int] = []
     released: dict[str, Any] | None = None
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
@@ -416,6 +491,13 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         if not isinstance(event, dict):
             continue
         event_type = event.get("type")
+        if event_type == "token":
+            if event.get("request_id") != internal_request_id or event.get("index") != len(output_token_ids):
+                raise CaptureError("resident worker token event identity is discontinuous")
+            token_id = event.get("token_id")
+            if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
+                raise CaptureError("resident worker emitted an invalid token id")
+            output_token_ids.append(token_id)
         events.append({"type": event_type, "processed_prompt_tokens": event.get("processed_prompt_tokens"), "completion_tokens": event.get("completion_tokens")})
         if event_type == "released":
             released = event
@@ -442,6 +524,16 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     if backend is None:
         raise CaptureError("resident worker request audit was not observed")
     audit = backend["operation_execution_audit"]
+    if backend.get("request_id") != internal_request_id:
+        raise CaptureError("resident worker request audit identity differs")
+    request_audit = backend.get("request_execution_audit")
+    if not isinstance(request_audit, dict):
+        raise CaptureError("resident worker request execution audit was not observed")
+    sq8_telemetry = None
+    if sq8_promotion:
+        sq8_telemetry = validate_sq8_promotion_telemetry(
+            request_audit.get("sq8_promotion_telemetry")
+        )
     load_records = [x for x in stderr_records if x.get("schema_version") == "ullm.backend_operation.load.v1"]
     operators, fallback_events = operator_records(load_records, audit)
     if len(operators) == 0 or audit.get("coverage_complete") is not True:
@@ -479,6 +571,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     if not observer_data["complete"] or observer_data["peak_bytes"] is None or observer_data["capacity_bytes"] is None:
         raise CaptureError("complete R9700 VRAM observation was not available")
     completion_tokens = int(released.get("completion_tokens", 0))
+    if completion_tokens != len(output_token_ids):
+        raise CaptureError("resident worker output token identity count differs")
     phases = [
         {"phase_id": "cold-prefill-0", "kind": "cold_prefill", "executor_id": "generic_model_executor", "executor_version": "0.2.0", "prefill_mode": "cold", "chunk_width_tokens": prompt_tokens, "actual_token_batch_width": width, "actual_request_batch_width": 1, "request_count": 1, "input_token_count": prompt_tokens, "output_token_count": 0, "cached_prefix_token_count": 0, "context_tokens_before": 0, "context_tokens_after": prompt_tokens, "wall_time_ms": float(timings.get("prompt_ms", 0.0))},
         {"phase_id": "decode-0", "kind": "decode", "executor_id": "generic_model_executor", "executor_version": "0.2.0", "prefill_mode": None, "chunk_width_tokens": 1, "actual_token_batch_width": 1, "actual_request_batch_width": 1, "request_count": 1, "input_token_count": completion_tokens, "output_token_count": completion_tokens, "cached_prefix_token_count": 0, "context_tokens_before": prompt_tokens, "context_tokens_after": prompt_tokens + completion_tokens, "wall_time_ms": float(timings.get("predicted_ms", 0.001))},
@@ -531,7 +625,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "planned_headroom_bytes": observer_data["capacity_bytes"] - planned_total,
         "observed_headroom_bytes": observer_data["capacity_bytes"] - observer_data["peak_bytes"],
     })
-    return {
+    result = {
         "schema_version": "ullm.production_executor_record.v1",
         "trace_id": trace_id,
         "status": "ok",
@@ -566,6 +660,25 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "status": "ok",
         "failure": None,
     }
+    if sq8_promotion:
+        result["sq8_promotion_evidence"] = {
+            "schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1",
+            "request_id": internal_request_id,
+            "manifest_identity": {
+                "implementation_id": manifest["format"]["implementation_id"],
+                "execution_profile": worker["identity"]["execution_profile"],
+                "artifact_content_sha256": manifest["product"]["artifact"]["content_sha256"],
+                "artifact_manifest_sha256": manifest["product"]["artifact"]["manifest_sha256"],
+                "package_manifest_sha256": manifest["product"]["package"]["manifest_sha256"],
+            },
+            "telemetry": sq8_telemetry,
+            "output_identity": {
+                "token_count": len(output_token_ids),
+                "token_ids_sha256": token_identity_digest(output_token_ids),
+                "token_ids_recorded": False,
+            },
+        }
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -575,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt-tokens", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--sq8-promotion-evidence", action="store_true")
     args = parser.parse_args(argv)
     try:
         atomic_write(args.output, run_capture(args))

@@ -29,18 +29,20 @@ use crate::sq::fp8_e4m3fn_to_f32;
 use crate::sq_runtime::{Sq8ResidentRuntimeTensorRef, load_sq8_resident_tensor};
 use crate::sq8_model_head_runtime::validate_qwen3_14b_sq8_r9700_device_info;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SqFp8ProjectionTelemetry {
     pub single_matvec_count: u64,
     pub batch_matvec_count: u64,
     pub pair_matvec_count: u64,
     pub triple_matvec_count: u64,
+    pub fallback_count: u64,
 }
 
 static SQ_FP8_SINGLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_BATCH_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_PAIR_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_FP8_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 pub struct SqFp8ProjectionDispatch {
@@ -57,11 +59,14 @@ impl SqFp8ProjectionDispatch {
     pub fn require_direct_family(&self, label: &str) -> Result<(), String> {
         match self.family {
             Some(Sq8ProjectionFamily::Direct) => Ok(()),
-            None => Err(format!(
-                "{label} SQ8_0 projection dispatch has no direct kernel family: operation={} implementation_id={}",
-                self.operation.label(),
-                self.implementation_id
-            )),
+            None => {
+                SQ_FP8_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                Err(format!(
+                    "{label} SQ8_0 projection dispatch has no direct kernel family: operation={} implementation_id={}",
+                    self.operation.label(),
+                    self.implementation_id
+                ))
+            }
         }
     }
 }
@@ -117,6 +122,7 @@ pub fn reset_sq_fp8_projection_telemetry() {
     SQ_FP8_BATCH_MATVEC_COUNT.store(0, Ordering::Relaxed);
     SQ_FP8_PAIR_MATVEC_COUNT.store(0, Ordering::Relaxed);
     SQ_FP8_TRIPLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
+    SQ_FP8_FALLBACK_COUNT.store(0, Ordering::Relaxed);
 }
 
 pub fn snapshot_sq_fp8_projection_telemetry() -> SqFp8ProjectionTelemetry {
@@ -125,6 +131,7 @@ pub fn snapshot_sq_fp8_projection_telemetry() -> SqFp8ProjectionTelemetry {
         batch_matvec_count: SQ_FP8_BATCH_MATVEC_COUNT.load(Ordering::Relaxed),
         pair_matvec_count: SQ_FP8_PAIR_MATVEC_COUNT.load(Ordering::Relaxed),
         triple_matvec_count: SQ_FP8_TRIPLE_MATVEC_COUNT.load(Ordering::Relaxed),
+        fallback_count: SQ_FP8_FALLBACK_COUNT.load(Ordering::Relaxed),
     }
 }
 
@@ -1585,6 +1592,40 @@ mod tests {
             row_scale_count: 0,
             tensor_scale_bits: 1.0_f32.to_bits(),
         }
+    }
+
+    #[test]
+    fn sq_fp8_projection_telemetry_counts_dispatch_kinds_and_fallback_rejections() {
+        reset_sq_fp8_projection_telemetry();
+        for operation in [
+            SqFp8ProjectionMatvecOperation::Single,
+            SqFp8ProjectionMatvecOperation::Batch,
+            SqFp8ProjectionMatvecOperation::Pair,
+            SqFp8ProjectionMatvecOperation::Triple,
+        ] {
+            record_sq_fp8_projection_dispatch(SqFp8ProjectionDispatch {
+                operation,
+                implementation_id: "fixture.direct",
+                family: Some(Sq8ProjectionFamily::Direct),
+            });
+        }
+        let rejected = SqFp8ProjectionDispatch {
+            operation: SqFp8ProjectionMatvecOperation::Single,
+            implementation_id: "fixture.unavailable",
+            family: None,
+        };
+        assert!(rejected.require_direct_family("fixture").is_err());
+        assert_eq!(
+            snapshot_sq_fp8_projection_telemetry(),
+            SqFp8ProjectionTelemetry {
+                single_matvec_count: 1,
+                batch_matvec_count: 1,
+                pair_matvec_count: 1,
+                triple_matvec_count: 1,
+                fallback_count: 1,
+            }
+        );
+        reset_sq_fp8_projection_telemetry();
     }
 
     #[test]
