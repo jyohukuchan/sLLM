@@ -1,0 +1,30 @@
+{
+  "schema_version": "ullm.qwen35_aq4_sq8_overlay_artifact_receipt.v1",
+  "artifact": {
+    "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/artifacts/sq8-linear-qkv-z-rowblock256-v0.1",
+    "regular_file_count": 99,
+    "regular_file_bytes": 1227133633,
+    "payload_in_git": false
+  },
+  "binding": {
+    "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/artifacts/sq8-linear-qkv-z-rowblock256-v0.1/binding.json",
+    "sha256": "6b360a059e7eef0c3f4962919c149702e103de308b1dae43dba27c51f31b646b"
+  },
+  "content_sha256": "b7d5ef6c3e4ebceae9c9dee8e3094c5a29a8d444bdb2ca1170a559c9539a13fc",
+  "tensor_set_sha256": "6fbf047fe19b27a6c9075f06a76fa4bf376ba08ff9d39c84da43461fdf606846",
+  "tensor_count": 48,
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 256,
+    "dtype": "f32"
+  },
+  "promotion_receipt": {
+    "path": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/promotion-sq8-linear-qkv-z-overlay-v0.1.json",
+    "sha256": "982624558dbe98fd92af627f22290ffded2c74eb34bb926f66942f814c54b3e9"
+  },
+  "cpu_oracle": {
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/sq8-linear-qkv-z-overlay-v0.1/cpu-oracle.json",
+    "sha256": "b5c8a1d62a9adef5809327cba8babf27cb014c6265a34f1e076da779037dc8c4",
+    "status": "valid"
+  }
+}
