@@ -5,6 +5,8 @@
 //! requested prefill width.  Final hidden and full-logit rows are streamed directly to F32LE
 //! sidecars, so no sequence-by-vocabulary matrix is retained in host memory.
 
+#![recursion_limit = "256"]
+
 use serde::de::{self, Deserialize as DeDeserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,12 +61,14 @@ struct Args {
     split_root: PathBuf,
     source_root: PathBuf,
     cases: PathBuf,
+    subset: String,
     output: PathBuf,
     device_index: u32,
     chunk_elements: usize,
     expected_split_manifest_sha256: String,
     expected_policy_sha256: String,
     expected_calibration_cases_sha256: String,
+    expected_holdout_cases_sha256: Option<String>,
     expected_served_model_manifest_sha256: String,
     expected_package_manifest_sha256: String,
     expected_worker_binary_sha256: String,
@@ -378,17 +382,35 @@ fn load_args() -> Result<Args, String> {
         if map.insert(name.clone(), value).is_some() { return Err(format!("duplicate argument {name}")); }
     }
     let take = |name: &str, map: &mut BTreeMap<String, String>| map.remove(name).ok_or_else(|| format!("{name} is required"));
+    let cases = match (map.remove("--cases"), map.remove("--cases-file")) {
+        (Some(path), None) | (None, Some(path)) => PathBuf::from(path),
+        (Some(_), Some(_)) => return Err("--cases and --cases-file are mutually exclusive".into()),
+        (None, None) => return Err("--cases (or --cases-file) is required".into()),
+    };
+    let subset = map.remove("--subset").unwrap_or_else(|| "calibration".into());
+    if subset != "calibration" && subset != "holdout" {
+        return Err("subset must be calibration or holdout".into());
+    }
+    let expected_holdout_cases_sha256 = map.remove("--expected-holdout-cases-sha256");
+    if subset == "holdout" {
+        let value = expected_holdout_cases_sha256.as_deref().ok_or("--expected-holdout-cases-sha256 is required for --subset holdout")?;
+        if !valid_sha(value) { return Err("expected holdout cases SHA is invalid".into()); }
+    } else if expected_holdout_cases_sha256.is_some() {
+        return Err("--expected-holdout-cases-sha256 is only valid for --subset holdout".into());
+    }
     let args = Args {
         served_model_manifest: PathBuf::from(take("--served-model-manifest", &mut map)?),
         split_root: PathBuf::from(take("--split-root", &mut map)?),
         source_root: PathBuf::from(take("--source", &mut map)?),
-        cases: PathBuf::from(take("--cases", &mut map)?),
+        cases,
+        subset,
         output: PathBuf::from(take("--output", &mut map)?),
         device_index: map.remove("--device-index").unwrap_or_else(|| "0".into()).parse().map_err(|_| "device-index is invalid")?,
         chunk_elements: map.remove("--chunk-elements").unwrap_or_else(|| "65536".into()).parse().map_err(|_| "chunk-elements is invalid")?,
         expected_split_manifest_sha256: take("--expected-split-manifest-sha256", &mut map)?,
         expected_policy_sha256: take("--expected-policy-sha256", &mut map)?,
         expected_calibration_cases_sha256: take("--expected-calibration-cases-sha256", &mut map)?,
+        expected_holdout_cases_sha256,
         expected_served_model_manifest_sha256: take("--expected-served-model-manifest-sha256", &mut map)?,
         expected_package_manifest_sha256: take("--expected-package-manifest-sha256", &mut map)?,
         expected_worker_binary_sha256: take("--expected-worker-binary-sha256", &mut map)?,
@@ -404,19 +426,23 @@ fn load_args() -> Result<Args, String> {
     Ok(args)
 }
 
-fn load_split(root: &Path, expected_split_sha: &str, expected_policy_sha: &str, expected_cases_sha: &str) -> Result<(Value, Vec<SplitRow>, String, String, String), String> {
+fn load_split(root: &Path, subset: &str, expected_split_sha: &str, expected_policy_sha: &str, expected_cases_sha: &str) -> Result<(Value, Vec<SplitRow>, String, String, String, String, String), String> {
     let manifest_path = root.join("split-manifest.json");
     let policy_path = root.join("policy.json");
-    let cases_path = root.join("calibration-cases.jsonl");
+    let calibration_path = root.join("calibration-cases.jsonl");
+    let holdout_path = root.join("holdout-cases.jsonl");
+    let cases_path = root.join(if subset == "holdout" { "holdout-cases.jsonl" } else { "calibration-cases.jsonl" });
     let manifest = read_json(&manifest_path, "split manifest")?;
     let policy = read_json(&policy_path, "fidelity policy")?;
     if manifest.get("schema_version").and_then(Value::as_str) != Some(SPLIT_SCHEMA) || manifest.get("status").and_then(Value::as_str) != Some("ready_for_calibration") { return Err("split manifest schema/status differs".into()); }
     validate_policy(&policy)?;
     let split_sha = sha_file(&manifest_path, "split manifest")?;
     let policy_sha = sha_file(&policy_path, "policy")?;
-    let cases_sha = sha_file(&cases_path, "calibration cases")?;
+    let calibration_sha = sha_file(&calibration_path, "calibration cases")?;
+    let holdout_sha = sha_file(&holdout_path, "holdout cases")?;
+    let cases_sha = if subset == "holdout" { holdout_sha.clone() } else { calibration_sha.clone() };
     if split_sha != expected_split_sha || policy_sha != expected_policy_sha || cases_sha != expected_cases_sha {
-        return Err("split/policy/calibration SHA does not match the pinned execution contract".into());
+        return Err(format!("split/policy/{subset} SHA does not match the pinned execution contract"));
     }
     let sums = fs::read_to_string(root.join("SHA256SUMS")).map_err(|e| format!("split SHA256SUMS: {e}"))?;
     let mut declared = BTreeMap::new();
@@ -427,20 +453,20 @@ fn load_split(root: &Path, expected_split_sha: &str, expected_policy_sha: &str, 
     let expected_names = ["calibration-cases.jsonl", "holdout-cases.jsonl", "policy.json", "split-manifest.json"];
     if declared.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected_names.into_iter().collect::<BTreeSet<_>>() { return Err("split SHA256SUMS file set differs".into()); }
     for name in expected_names { let expected = declared.get(name).ok_or("split SHA256SUMS entry is missing")?; if sha_file(&root.join(name), name)? != *expected { return Err(format!("split SHA256SUMS digest differs for {name}")); } }
-    if manifest.get("calibration_sha256").and_then(Value::as_str) != Some(cases_sha.as_str()) || manifest.get("policy_sha256").and_then(Value::as_str) != Some(policy_sha.as_str()) { return Err("split manifest file binding differs".into()); }
+    if manifest.get("calibration_sha256").and_then(Value::as_str) != Some(calibration_sha.as_str()) || manifest.get("holdout_sha256").and_then(Value::as_str) != Some(holdout_sha.as_str()) || manifest.get("policy_sha256").and_then(Value::as_str) != Some(policy_sha.as_str()) { return Err("split manifest file binding differs".into()); }
     let file = File::open(&cases_path).map_err(|e| format!("calibration cases open: {e}"))?;
     let mut rows = Vec::new();
     let mut seen = BTreeSet::new();
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| format!("calibration row {line_no}: {e}"))?;
-        if line.is_empty() || line.len() > MAX_ROW_BYTES { return Err("calibration row exceeds bounded size".into()); }
-        let row: SplitRow = serde_json::from_value(parse_strict_json(line.as_bytes(), &format!("calibration row {line_no}"))?).map_err(|e| format!("calibration row {line_no}: {e}"))?;
-        if !seen.insert(row.case_id.clone()) { return Err("calibration rows contain duplicate case_id".into()); }
-        if row.subset != "calibration" || row.step != 0 || row.row_count != 1 || row.cached_prefix_tokens != 0 || row.generated_tokens != 0 || row.prompt_tokens != row.context_tokens || !valid_sha(&row.case_sha256) || !valid_sha(&row.fixture_sha256) || !valid_sha(&row.prompt_token_ids_sha256) || !valid_sha(&row.context_token_ids_sha256) { return Err(format!("calibration row {} violates identity/step contract", row.case_id)); }
+        let line = line.map_err(|e| format!("{subset} row {line_no}: {e}"))?;
+        if line.is_empty() || line.len() > MAX_ROW_BYTES { return Err(format!("{subset} row exceeds bounded size")); }
+        let row: SplitRow = serde_json::from_value(parse_strict_json(line.as_bytes(), &format!("{subset} row {line_no}"))?).map_err(|e| format!("{subset} row {line_no}: {e}"))?;
+        if !seen.insert(row.case_id.clone()) { return Err(format!("{subset} rows contain duplicate case_id")); }
+        if row.subset != subset || row.step != 0 || row.row_count != 1 || row.cached_prefix_tokens != 0 || row.generated_tokens != 0 || row.prompt_tokens != row.context_tokens || !valid_sha(&row.case_sha256) || !valid_sha(&row.fixture_sha256) || !valid_sha(&row.prompt_token_ids_sha256) || !valid_sha(&row.context_token_ids_sha256) { return Err(format!("{subset} row {} violates identity/step contract", row.case_id)); }
         rows.push(row);
     }
-    if rows.len() != MAX_ROWS { return Err(format!("calibration cases must contain exactly {MAX_ROWS} rows")); }
-    Ok((manifest, rows, split_sha, policy_sha, cases_sha))
+    if rows.len() != MAX_ROWS { return Err(format!("{subset} cases must contain exactly {MAX_ROWS} rows")); }
+    Ok((manifest, rows, split_sha, policy_sha, cases_sha, calibration_sha, holdout_sha))
 }
 
 fn fixture_tokens(split_root: &Path, row: &SplitRow) -> Result<Vec<usize>, String> {
@@ -503,7 +529,12 @@ fn rename_noreplace(_source: &Path, _destination: &Path) -> Result<(), String> {
 
 fn run(args: Args) -> Result<(), String> {
     if fs::symlink_metadata(&args.output).is_ok() { return Err("output root already exists; overwrite is forbidden".into()); }
-    let (split_manifest, split_rows, split_sha, policy_sha, cases_sha) = load_split(&args.split_root, &args.expected_split_manifest_sha256, &args.expected_policy_sha256, &args.expected_calibration_cases_sha256)?;
+    let expected_cases_sha = if args.subset == "holdout" {
+        args.expected_holdout_cases_sha256.as_deref().ok_or("holdout cases SHA is missing")?
+    } else {
+        args.expected_calibration_cases_sha256.as_str()
+    };
+    let (split_manifest, split_rows, split_sha, policy_sha, cases_sha, calibration_sha, holdout_sha) = load_split(&args.split_root, &args.subset, &args.expected_split_manifest_sha256, &args.expected_policy_sha256, expected_cases_sha)?;
     let source_manifest_path = args.source_root.join("manifest.json");
     let source_manifest = read_json(&source_manifest_path, "source manifest")?;
     if source_manifest.get("schema_version").and_then(Value::as_str) != Some(SOURCE_SCHEMA) { return Err("source manifest schema differs".into()); }
@@ -598,7 +629,7 @@ fn run(args: Args) -> Result<(), String> {
     let identity = json!({"artifact": {"package_manifest_sha256": Value::Null, "artifact_manifest_sha256": Value::Null}, "model_id": model.public.upstream_id, "model_revision": provenance.model_revision, "source_checkpoint": provenance.source_checkpoint, "tokenizer": provenance.tokenizer, "hidden_size": HIDDEN_SIZE, "vocab_size": VOCAB_SIZE, "package_content_sha256": package_content_sha, "package_manifest_sha256": package_manifest_sha, "worker_binary_sha256": worker_sha});
     let nonfinite_rows = output_rows.checked_sub(finite_rows).ok_or("finite row count exceeds output rows")?;
     let run = json!({"row_count": output_rows, "nonfinite_rows": nonfinite_rows, "elapsed_seconds": 0.0});
-    let manifest = json!({"schema_version": SCHEMA, "oracle_kind": "aq4_target", "status": "available", "evidence_class": "production", "usable_as_source_evidence": false, "promotion_eligible": false, "created_utc": source_manifest.get("created_utc").cloned().unwrap_or_else(|| Value::String("2026-01-01T00:00:00Z".into())), "identity": identity, "parent_sampled_oracle": parent, "vector_contract": {"hidden_shape": [HIDDEN_SIZE], "logits_shape": [VOCAB_SIZE], "dtype": "f32", "endianness": "little", "layout": "flat", "chunk_elements": args.chunk_elements, "row_bytes": (HIDDEN_SIZE + VOCAB_SIZE) * F32_BYTES, "semantic_hidden": "post_final_rmsnorm_hidden_used_by_lm_head", "semantic_logits": "raw_pre_softmax_lm_head_logits"}, "limits": {"max_case_file_bytes": MAX_JSON_BYTES, "max_cases": MAX_ROWS, "max_rows": MAX_ROWS, "max_steps": 1}, "cases": {"path": args.cases.canonicalize().map_err(|e| format!("cases path: {e}"))?.to_string_lossy(), "sha256": sha_file(&args.cases, "source cases")?, "case_count": MAX_ROWS, "row_count": MAX_ROWS}, "files": {"rows": "rows.jsonl", "hidden": "vectors/hidden.f32le", "logits": "vectors/logits.f32le"}, "runtime": {"runtime": {"name": "ullm-aq4-fidelity-capture", "build_sha256": capture_sha, "one_model_load": true, "split_manifest_sha256": split_sha, "policy_sha256": policy_sha, "calibration_cases_sha256": cases_sha, "served_model_manifest_sha256": manifest_sha, "package_manifest_sha256": package_manifest_sha, "worker_binary_sha256": worker_sha, "guard_sha256": guard_sha, "upstream_model_revision": provenance.model_revision, "quantized_artifact_revision": model.public.revision, "source_checkpoint_aggregate_sha256": provenance.source_checkpoint.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "tokenizer_aggregate_sha256": provenance.tokenizer.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "device": {"requested_index": args.device_index, "device_id": device.device_id, "backend": device.backend, "name": device.name, "architecture": device.gcn_arch_name}}, "transformers": Value::Null, "torch": Value::Null, "safetensors": Value::Null, "python": Value::Null, "device": "gpu", "dtype": "f32", "low_cpu_mem_usage": false, "torch_num_threads": 1, "torch_num_interop_threads": 1, "model_loads": 1, "inference_mode": true, "full_vocab_ranking": true, "max_resident_logit_rows": 1, "memory_preflight": {"checkpoint_bytes": 0, "mem_total_bytes": Value::Null, "mem_available_bytes": Value::Null, "required_headroom_bytes": 0, "headroom_factor": 1.0, "status": "streaming"}, "disk_preflight": {"expected_vector_bytes": MAX_VECTOR_BYTES, "required_free_bytes": MAX_VECTOR_BYTES, "free_bytes": Value::Null, "status": "bounded_streaming_unchecked"}, "run": run}, "legacy_cross_check": {"status": "not_applicable", "legacy_manifest_sha256": source_manifest_sha, "legacy_payload_sha256": source_manifest.get("payload").and_then(|v| v.get("sha256")).and_then(Value::as_str).unwrap_or(""), "row_count": MAX_ROWS, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}});
+    let manifest = json!({"schema_version": SCHEMA, "oracle_kind": "aq4_target", "status": "available", "evidence_class": "production", "usable_as_source_evidence": false, "promotion_eligible": false, "created_utc": source_manifest.get("created_utc").cloned().unwrap_or_else(|| Value::String("2026-01-01T00:00:00Z".into())), "identity": identity, "parent_sampled_oracle": parent, "vector_contract": {"hidden_shape": [HIDDEN_SIZE], "logits_shape": [VOCAB_SIZE], "dtype": "f32", "endianness": "little", "layout": "flat", "chunk_elements": args.chunk_elements, "row_bytes": (HIDDEN_SIZE + VOCAB_SIZE) * F32_BYTES, "semantic_hidden": "post_final_rmsnorm_hidden_used_by_lm_head", "semantic_logits": "raw_pre_softmax_lm_head_logits"}, "limits": {"max_case_file_bytes": MAX_JSON_BYTES, "max_cases": MAX_ROWS, "max_rows": MAX_ROWS, "max_steps": 1}, "cases": {"path": args.cases.canonicalize().map_err(|e| format!("cases path: {e}"))?.to_string_lossy(), "sha256": sha_file(&args.cases, "source cases")?, "case_count": MAX_ROWS, "row_count": MAX_ROWS}, "files": {"rows": "rows.jsonl", "hidden": "vectors/hidden.f32le", "logits": "vectors/logits.f32le"}, "runtime": {"runtime": {"name": "ullm-aq4-fidelity-capture", "build_sha256": capture_sha, "one_process": true, "one_model_load": true, "gpu_parallelism": 1, "split_manifest_sha256": split_sha, "policy_sha256": policy_sha, "calibration_cases_sha256": calibration_sha, "holdout_cases_sha256": holdout_sha, "selected_cases_sha256": cases_sha, "selected_subset": args.subset, "served_model_manifest_sha256": manifest_sha, "package_manifest_sha256": package_manifest_sha, "worker_binary_sha256": worker_sha, "guard_sha256": guard_sha, "upstream_model_revision": provenance.model_revision, "quantized_artifact_revision": model.public.revision, "source_checkpoint_aggregate_sha256": provenance.source_checkpoint.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "tokenizer_aggregate_sha256": provenance.tokenizer.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "device": {"requested_index": args.device_index, "device_id": device.device_id, "backend": device.backend, "name": device.name, "architecture": device.gcn_arch_name}}, "transformers": Value::Null, "torch": Value::Null, "safetensors": Value::Null, "python": Value::Null, "device": "gpu", "dtype": "f32", "low_cpu_mem_usage": false, "torch_num_threads": 1, "torch_num_interop_threads": 1, "model_loads": 1, "inference_mode": true, "full_vocab_ranking": true, "max_resident_logit_rows": 1, "memory_preflight": {"checkpoint_bytes": 0, "mem_total_bytes": Value::Null, "mem_available_bytes": Value::Null, "required_headroom_bytes": 0, "headroom_factor": 1.0, "status": "streaming"}, "disk_preflight": {"expected_vector_bytes": MAX_VECTOR_BYTES, "required_free_bytes": MAX_VECTOR_BYTES, "free_bytes": Value::Null, "status": "bounded_streaming_unchecked"}, "run": run}, "legacy_cross_check": {"status": "not_applicable", "legacy_manifest_sha256": source_manifest_sha, "legacy_payload_sha256": source_manifest.get("payload").and_then(|v| v.get("sha256")).and_then(Value::as_str).unwrap_or(""), "row_count": MAX_ROWS, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}});
     fs::write(temporary.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| format!("manifest JSON: {e}"))?).map_err(|e| format!("manifest write: {e}"))?;
     let files = ["manifest.json", "rows.jsonl", "vectors/hidden.f32le", "vectors/logits.f32le"];
     let mut sums = String::new(); for file in files { sums.push_str(&format!("{}  {file}\n", sha_file(&temporary.join(file), file)?)); }
@@ -609,7 +640,7 @@ fn run(args: Args) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    let args = match load_args() { Ok(args) => args, Err(error) if error == "help" => { eprintln!("usage: ullm-aq4-fidelity-capture --served-model-manifest PATH --split-root DIR --source DIR --cases FILE --output DIR [--device-index N] [--chunk-elements N]"); return ExitCode::SUCCESS; }, Err(error) => { eprintln!("AQ4 fidelity capture arguments rejected: {error}"); return ExitCode::from(2); } };
+    let args = match load_args() { Ok(args) => args, Err(error) if error == "help" => { eprintln!("usage: ullm-aq4-fidelity-capture --served-model-manifest PATH --split-root DIR --source DIR (--cases FILE|--cases-file FILE) --output DIR [--subset calibration|holdout] [--expected-holdout-cases-sha256 SHA] [--device-index N] [--chunk-elements N]"); return ExitCode::SUCCESS; }, Err(error) => { eprintln!("AQ4 fidelity capture arguments rejected: {error}"); return ExitCode::from(2); } };
     match run(args) { Ok(()) => ExitCode::SUCCESS, Err(error) => { eprintln!("AQ4 fidelity capture failed: {error}"); ExitCode::from(1) } }
 }
 
