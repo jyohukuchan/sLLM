@@ -103,6 +103,19 @@ class FakeGenerator:
         TOOL.write_json_exclusive(output_path, value)
 
 
+class FakeReceiptWriter:
+    @staticmethod
+    def write_receipt(**kwargs: object) -> dict[str, object]:
+        output = Path(str(kwargs["output_path"]))
+        value: dict[str, object] = {
+            "schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "status": "prepared_not_executed",
+            "actual": {"status": "pending", "required": True},
+        }
+        TOOL.write_json_exclusive(output, value)
+        return value
+
+
 def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     profile, worker, binding_sha = fixture(tmp_path)
     commit = "a" * 40
@@ -113,7 +126,11 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
     )
     monkeypatch.setattr(TOOL, "source_archive_sha256", lambda _: "e" * 64)
     monkeypatch.setattr(TOOL, "command_text", lambda argv, **_: "fixture-version")
-    monkeypatch.setattr(TOOL, "load_module", lambda *_: FakeGenerator)
+    monkeypatch.setattr(
+        TOOL,
+        "load_module",
+        lambda _name, path: FakeReceiptWriter if path == TOOL.RECEIPT_WRITER else FakeGenerator,
+    )
     output = tmp_path / "gate-output"
     args = argparse.Namespace(
         release_source_commit=commit,
@@ -132,6 +149,17 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
     assert copied.stat().st_nlink == 1
     assert (copied.stat().st_mode & 0o777) == 0o555
     gate = json.loads((output / "gate.json").read_text())
+    profile_value = json.loads((output / "profile.json").read_text())
+    assert profile_value["promotion"] == {
+        "receipt": str(output / "promotion-receipt.json"),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+        "overlay_from_receipt": ["overlay"],
+        "release_from_receipt": ["release"],
+        "package_from_receipt": ["package"],
+        "actual_evidence_from_receipt": ["actual"],
+        "release_source_commit": commit,
+    }
     assert gate["release_source_commit"] == commit
     assert gate["profile_identity"]["artifact_binding_sha256"] == binding_sha
     assert gate["actual_evidence_requirements"]["projection_counts"] == {

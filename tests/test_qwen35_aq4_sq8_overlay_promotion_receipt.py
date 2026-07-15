@@ -1,0 +1,266 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_tool(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+WRITER = load_tool(
+    "sq8_overlay_receipt_writer",
+    ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py",
+)
+GENERATOR = load_tool("served_model_generator", ROOT / "tools/generate-served-model.py")
+
+
+def _write_json(path: Path, value: dict, mode: int = 0o644) -> None:
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    path.chmod(mode)
+
+
+def _immutable_tree(root: Path) -> None:
+    for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    root.chmod(0o555)
+
+
+@pytest.fixture
+def fixture(tmp_path: Path) -> dict[str, Path | dict]:
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    _write_json(tokenizer / "tokenizer_config.json", {"chat_template": "{{ messages }}"})
+
+    worker = tmp_path / "ullm-aq4-worker"
+    worker.write_bytes(b"worker\n")
+    worker.chmod(0o555)
+
+    product = tmp_path / "product"
+    artifact_root = product / "artifacts" / "overlay"
+    package_root = product / "package"
+    artifact_root.mkdir(parents=True)
+    package_root.mkdir(parents=True)
+    package = package_root / "manifest.json"
+    _write_json(package, {"schema_version": "package.v1", "files": []})
+    content = "a" * 64
+    tensor_set = "b" * 64
+    binding = artifact_root / "binding.json"
+    _write_json(
+        binding,
+        {
+            "schema_version": "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2",
+            "format_id": "AQ4_0",
+            "overlay_format_id": "SQ8_0",
+            "implementation_id": WRITER.IMPLEMENTATION_ID,
+            "tensor_names": [f"tensor_{i:02d}" for i in range(48)],
+            "content_sha256": content,
+            "tensor_set_sha256": tensor_set,
+            "package": {"manifest_sha256": WRITER.sha256_file(package)},
+        },
+    )
+    _immutable_tree(product)
+
+    profile_path = tmp_path / "profile.json"
+    profile = {
+        "schema_version": "ullm.served_model.profile.v1",
+        "tokenizer": {
+            "root": str(tokenizer),
+            "files": ["tokenizer_config.json"],
+            "transformers_version": "4.0",
+            "class": "Qwen2Tokenizer",
+            "template_options": {},
+        },
+        "worker": {
+            "protocol": "ullm.worker.v1",
+            "binary": str(worker),
+            "arguments": [],
+            "required_environment": [],
+            "identity": {"device": "gfx1201", "execution_profile": "sq8-test"},
+        },
+        "product": {
+            "root": str(product),
+            "artifact": {
+                "manifest_path": "artifacts/overlay/binding.json",
+                "content_sha256_from_receipt": ["overlay", "content_sha256"],
+            },
+            "package": {"manifest_path": "package/manifest.json"},
+        },
+        "public": {"id": "qwen-test", "revision": "r1"},
+        "generation": {"max_new_tokens": 1},
+        "format": {"implementation_id": WRITER.IMPLEMENTATION_ID, "id": "AQ4_0"},
+        "promotion": {
+            "receipt": str(tmp_path / "promotion.json"),
+            "source_commit_from_receipt": ["source_commit"],
+            "required_schema_version": WRITER.RECEIPT_SCHEMA,
+            "overlay_from_receipt": ["overlay"],
+            "release_from_receipt": ["release"],
+            "package_from_receipt": ["package"],
+            "actual_evidence_from_receipt": ["actual"],
+            "release_source_commit": "1" * 40,
+        },
+    }
+    _write_json(profile_path, profile)
+    served = tmp_path / "served-model.json"
+    return {"profile": profile_path, "profile_value": profile, "product": product, "package": package, "binding": binding, "worker": worker, "served": served}
+
+
+def test_pre_gpu_receipt_is_pending_and_create_new(fixture: dict[str, Path | dict]) -> None:
+    receipt_path = Path(fixture["profile"]).with_name("promotion.json")
+    value = WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=receipt_path,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+    )
+    assert value["status"] == "prepared_not_executed"
+    assert value["actual"] == {"status": "pending", "required": True}
+    metadata = receipt_path.lstat()
+    assert stat.S_IMODE(metadata.st_mode) == 0o444 and metadata.st_nlink == 1
+    with pytest.raises(WRITER.ReceiptError, match="already exists"):
+        WRITER.write_receipt(
+            profile_path=Path(fixture["profile"]),
+            output_path=receipt_path,
+            source_tree_sha256="2" * 40,
+            source_archive_sha256="3" * 64,
+            served_model_path=Path(fixture["served"]),
+        )
+    assert GENERATOR.materialize(Path(fixture["profile"]))["promotion"]["source_commit"] == "1" * 40
+
+
+def test_profile_weakening_and_live_inventory_change_are_rejected(
+    fixture: dict[str, Path | dict]
+) -> None:
+    profile_path = Path(fixture["profile"])
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["promotion"]["evidence_from_receipt"] = ["evidence"]
+    _write_json(profile_path, profile)
+    with pytest.raises(WRITER.ReceiptError, match="contract is incomplete"):
+        WRITER.write_receipt(
+            profile_path=profile_path,
+            output_path=profile_path.with_name("promotion.json"),
+            source_tree_sha256="2" * 40,
+            source_archive_sha256="3" * 64,
+            served_model_path=Path(fixture["served"]),
+        )
+
+    profile["promotion"].pop("evidence_from_receipt")
+    _write_json(profile_path, profile)
+    WRITER.write_receipt(
+        profile_path=profile_path,
+        output_path=profile_path.with_name("promotion.json"),
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+    )
+    Path(fixture["binding"]).chmod(0o644)
+    with pytest.raises(GENERATOR.GenerationError, match="inventory"):
+        GENERATOR.materialize(profile_path)
+
+
+def test_generate_rejects_symlink_output(tmp_path: Path, fixture: dict[str, Path | dict]) -> None:
+    WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=Path(fixture["profile"]).with_name("promotion.json"),
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+    )
+    target = tmp_path / "target.json"
+    target.write_text("keep\n", encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    with pytest.raises(GENERATOR.GenerationError, match="symlink"):
+        GENERATOR.generate(Path(fixture["profile"]), link)
+    assert target.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[str, Path | dict]) -> None:
+    profile = fixture["profile_value"]
+    assert isinstance(profile, dict)
+    binding = json.loads(Path(fixture["binding"]).read_text(encoding="utf-8"))
+    package_sha = WRITER.sha256_file(Path(fixture["package"]))
+    snapshot = {"identity": "unchanged"}
+    maintenance = {
+        "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
+        "status": "passed",
+        "actual_run_count": 1,
+        "failure": None,
+        "candidate_pre": snapshot,
+        "candidate_post": snapshot,
+        "stopped_observations": [
+            {"service": {"active": False, "running": False, "main_pid": 0, "worker_pid": 0, "lock_owned": False}, "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []}},
+            {"service": {"active": False, "running": False, "main_pid": 0, "worker_pid": 0, "lock_owned": False}, "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []}},
+        ],
+        "lock": {"path": "/run/ullm/device-1.lock", "held": True, "released": True},
+        "restore": {"attempted": True, "passed": True},
+    }
+    maintenance_path = tmp_path / "maintenance-evidence.json"
+    _write_json(maintenance_path, maintenance)
+    executor_path = tmp_path / "executor-record.json"
+    _write_json(
+        executor_path,
+        {
+            "schema_version": "ullm.production_executor_record.v1",
+            "status": "ok",
+            "sq8_promotion_evidence": {
+                "schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1",
+                "request_id": "request-1",
+                "manifest_identity": {
+                    "implementation_id": WRITER.IMPLEMENTATION_ID,
+                    "execution_profile": "sq8-test",
+                    "artifact_content_sha256": binding["content_sha256"],
+                    "artifact_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
+                    "package_manifest_sha256": package_sha,
+                },
+                "telemetry": {
+                    "schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
+                    "projection": {"single_matvec_count": 0, "batch_matvec_count": 1, "pair_matvec_count": 1, "triple_matvec_count": 0, "fallback_count": 0},
+                    "diagnostic_host_staging": {"read_count": 0, "write_count": 0, "read_bytes": 0, "write_bytes": 0},
+                },
+                "output_identity": {"token_count": 1, "token_ids_sha256": "4" * 64, "token_ids_recorded": False},
+            },
+        },
+    )
+    output = Path(fixture["profile"]).with_name("promotion.json")
+    value = WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=output,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        maintenance_evidence_path=maintenance_path,
+        executor_record_path=executor_path,
+    )
+    assert value["status"] == "actual_verified"
+    assert value["actual"]["gpu_exclusive_preflight"]["mode"] == "maintenance_stable2"
+    assert GENERATOR.materialize(Path(fixture["profile"]))["promotion"]["source_commit"] == "1" * 40
+
+    executor = json.loads(executor_path.read_text(encoding="utf-8"))
+    executor["sq8_promotion_evidence"]["telemetry"]["projection"]["pair_matvec_count"] = 0
+    _write_json(executor_path, executor)
+    with pytest.raises(WRITER.ReceiptError, match="batch and pair"):
+        WRITER.validate_actual_evidence(
+            maintenance_path=maintenance_path,
+            executor_path=executor_path,
+            output_path=output,
+            profile=profile,
+            overlay={
+                "binding_manifest_sha256": WRITER.sha256_file(Path(fixture["binding"])),
+                "content_sha256": binding["content_sha256"],
+            },
+            package_sha256=package_sha,
+        )

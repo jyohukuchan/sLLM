@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4-sq8-linear-qkv-z-overlay.profile.json"
 WORKER = ROOT / "target/release/ullm-aq4-worker"
 GENERATOR = ROOT / "tools/generate-served-model.py"
-MAINTENANCE = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
+RECEIPT_WRITER = ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py"
+MAINTENANCE = ROOT / "tools/run-qwen35-aq4-sq8-overlay-gpu-promotion.py"
 CAPTURE = ROOT / "tools/capture-aq4-resident-executor-record.py"
 SCHEMA = "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_gate.v1"
 BUILD_SCHEMA = "ullm.qwen35_aq4.sq8_overlay_release_build.v1"
@@ -216,34 +217,39 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     package_manifest = product_root / str(profile["product"]["package"]["manifest_path"])
     binding = read_object(binding_path, "overlay binding")
     validate_binding(binding, package_manifest)
+    source_tree = git_value("rev-parse", f"{commit}^{{tree}}")
+    source_archive = source_archive_sha256(commit)
 
     output.mkdir(mode=0o700, parents=False)
     try:
         immutable_worker = output / "ullm-aq4-worker"
         worker_identity = copy_binary_exclusive(worker_source, immutable_worker)
-        preflight_receipt = {
-            "source_commit": commit,
-            "overlay": {
-                "content_sha256": binding["content_sha256"],
-                "binding_manifest_sha256": sha_file(binding_path),
-                "tensor_set_sha256": binding["tensor_set_sha256"],
-            },
-        }
-        receipt_path = output / "preflight-receipt.json"
-        write_json_exclusive(receipt_path, preflight_receipt)
-
+        receipt_path = output / "promotion-receipt.json"
         candidate_profile = json.loads(json.dumps(profile))
         candidate_profile["worker"]["binary"] = str(immutable_worker)
-        promotion = candidate_profile["promotion"]
-        promotion["receipt"] = str(receipt_path)
-        promotion.pop("required_schema_version", None)
-        promotion.pop("evidence_from_receipt", None)
-        promotion.pop("evidence_sha256_from_receipt", None)
+        candidate_profile["promotion"] = {
+            "receipt": str(receipt_path),
+            "source_commit_from_receipt": ["source_commit"],
+            "required_schema_version": "ullm.qwen35_aq4_sq8_overlay_promotion.v1",
+            "overlay_from_receipt": ["overlay"],
+            "release_from_receipt": ["release"],
+            "package_from_receipt": ["package"],
+            "actual_evidence_from_receipt": ["actual"],
+            "release_source_commit": commit,
+        }
         profile_path = output / "profile.json"
         write_json_exclusive(profile_path, candidate_profile)
 
-        generator = load_module("_ullm_sq8_gate_generator", GENERATOR)
+        receipt_writer = load_module("_ullm_sq8_gate_receipt_writer", RECEIPT_WRITER)
         manifest_path = output / "served-model.json"
+        receipt_writer.write_receipt(
+            profile_path=profile_path,
+            output_path=receipt_path,
+            source_tree_sha256=source_tree,
+            source_archive_sha256=source_archive,
+            served_model_path=manifest_path,
+        )
+        generator = load_module("_ullm_sq8_gate_generator", GENERATOR)
         generator.generate(profile_path, manifest_path)
         manifest_path.chmod(0o444)
         manifest = read_object(manifest_path, "candidate served-model manifest")
@@ -251,8 +257,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
         build_receipt = {
             "schema_version": BUILD_SCHEMA,
             "release_source_commit": commit,
-            "release_source_tree": git_value("rev-parse", f"{commit}^{{tree}}"),
-            "release_source_archive_sha256": source_archive_sha256(commit),
+            "release_source_tree": source_tree,
+            "release_source_archive_sha256": source_archive,
             "build": {
                 "command": ["cargo", "build", "--release", "-p", "ullm-engine", "--bin", "ullm-aq4-worker"],
                 "jobs": 1,
@@ -351,9 +357,10 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "failure_cleanup_and_restore_required": True,
             },
             "trusted_components": {
-                "maintenance_harness": {"path": str(MAINTENANCE), "sha256": sha_file(MAINTENANCE)},
+                "maintenance_wrapper": {"path": str(MAINTENANCE), "sha256": sha_file(MAINTENANCE)},
                 "executor_capture": {"path": str(CAPTURE), "sha256": sha_file(CAPTURE)},
                 "served_model_generator": {"path": str(GENERATOR), "sha256": sha_file(GENERATOR)},
+                "promotion_receipt_writer": {"path": str(RECEIPT_WRITER), "sha256": sha_file(RECEIPT_WRITER)},
             },
             "candidate": {
                 "worker": str(immutable_worker),
@@ -376,7 +383,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
         hashes = []
         for name in (
             "ullm-aq4-worker",
-            "preflight-receipt.json",
+            "promotion-receipt.json",
             "profile.json",
             "served-model.json",
             "build-receipt.json",
