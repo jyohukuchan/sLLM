@@ -477,15 +477,18 @@ fn package_linear_attn_mlp_block_sequence_run(
         cell_delta_overrides,
         None,
         None,
+        None,
     )
 }
 
 /// Diagnostic-only extension of the production sequence path.
 ///
 /// The normal worker never calls this function.  `input_normed_override` is
-/// an explicit fixed-input probe hook and `z_projection_override` is applied
+/// an explicit fixed-input probe hook. `qkv_projection_override` is applied
+/// only after the production QKV matvec has completed and immediately before
+/// the production depthwise convolution. `z_projection_override` is applied
 /// only after the production Z matvec has completed and immediately before
-/// the production SiLU-mul.  Both options are `None` for every normal path.
+/// the production SiLU-mul. All options are `None` for every normal path.
 fn package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
     path: &str,
     device_index: u32,
@@ -496,6 +499,7 @@ fn package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
     cell_delta_overrides: Option<&PackageCellDeltaOverrides>,
     input_normed_override: Option<&[f32]>,
+    qkv_projection_override: Option<&[f32]>,
     z_projection_override: Option<&[f32]>,
 ) -> Result<PackageLinearAttnMlpBlockSequenceRun, String> {
     let key_heads = 16_usize;
@@ -952,7 +956,20 @@ fn package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
             })?;
         }
 
-        let qkv_output = decode_f32_le_values(&qkv_sequence_bytes_host);
+        let mut qkv_output = decode_f32_le_values(&qkv_sequence_bytes_host);
+        if let Some(override_values) = qkv_projection_override {
+            if override_values.len() != sequence_len * qkv_rows_expected
+                || override_values.iter().any(|value| !value.is_finite())
+            {
+                return Err(format!(
+                    "diagnostic QKV projection override length/finite mismatch: got {} expected {}",
+                    override_values.len(),
+                    sequence_len * qkv_rows_expected
+                ));
+            }
+            qkv_output.copy_from_slice(override_values);
+            qkv_sequence_bytes_host = encode_f32_to_bytes(&qkv_output);
+        }
         let a_output = decode_f32_le_values(&a_sequence_bytes);
         let b_output = decode_f32_le_values(&b_sequence_bytes);
         let mut z_output = decode_f32_le_values(&z_sequence_bytes);
@@ -2013,6 +2030,67 @@ fn z_hybrid_per_step_metrics(
         .collect()
 }
 
+fn qkv_hybrid_recurrent_state_digests(
+    run: &PackageLinearAttnMlpBlockSequenceRun,
+    sequence_len: usize,
+) -> Result<Vec<String>, String> {
+    let key_heads = 16_usize;
+    let value_heads = run.attention_gate_dim;
+    let key_dim = run
+        .attention_recurrent_qk_dim
+        .checked_div(key_heads)
+        .ok_or_else(|| "QKV hybrid recurrent key dimension is invalid".to_string())?;
+    let value_dim = run
+        .attention_recurrent_v
+        .len()
+        .checked_div(sequence_len.checked_mul(value_heads).ok_or_else(|| {
+            "QKV hybrid recurrent value geometry overflows".to_string()
+        })?)
+        .ok_or_else(|| "QKV hybrid recurrent value dimension is invalid".to_string())?;
+    if sequence_len == 0
+        || value_heads == 0
+        || key_dim == 0
+        || value_dim == 0
+        || run.attention_recurrent_q.len() != sequence_len * run.attention_recurrent_qk_dim
+        || run.attention_recurrent_k.len() != sequence_len * run.attention_recurrent_qk_dim
+        || run.attention_recurrent_v.len() != sequence_len * value_heads * value_dim
+        || run.attention_gate.len() != sequence_len * value_heads
+        || run.attention_beta.len() != sequence_len * value_heads
+    {
+        return Err("QKV hybrid recurrent state geometry differs".to_string());
+    }
+    let mut state = vec![0.0_f32; value_heads * key_dim * value_dim];
+    let mut digests = Vec::with_capacity(sequence_len);
+    for timestep in 0..sequence_len {
+        let qk_start = timestep * run.attention_recurrent_qk_dim;
+        let qk_end = qk_start + run.attention_recurrent_qk_dim;
+        let v_start = timestep * value_heads * value_dim;
+        let v_end = v_start + value_heads * value_dim;
+        let gate_start = timestep * value_heads;
+        let gate_end = gate_start + value_heads;
+        let output = runtime_host_linear_attn_recurrent_f32(
+            &run.attention_recurrent_q[qk_start..qk_end],
+            &run.attention_recurrent_k[qk_start..qk_end],
+            &run.attention_recurrent_v[v_start..v_end],
+            &run.attention_gate[gate_start..gate_end],
+            &run.attention_beta[gate_start..gate_end],
+            key_heads,
+            value_heads,
+            1,
+            key_dim,
+            value_dim,
+            &mut state,
+        );
+        if output.len() != value_heads * value_dim || state.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "QKV hybrid recurrent state is invalid after timestep {timestep}"
+            ));
+        }
+        digests.push(z_hybrid_sha256(&encode_f32_to_bytes(&state)));
+    }
+    Ok(digests)
+}
+
 fn z_hybrid_write_f32(path: &std::path::Path, values: &[f32]) -> Result<String, String> {
     if path.exists() {
         return Err(format!("refusing to overwrite Z hybrid sidecar: {}", path.display()));
@@ -2159,6 +2237,7 @@ fn package_linear_attn_z_hybrid_diagnostic(
             None,
             Some(&input_values),
             None,
+            None,
         )?;
         let hybrid = package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
             &path,
@@ -2170,6 +2249,7 @@ fn package_linear_attn_z_hybrid_diagnostic(
             None,
             None,
             Some(&input_values),
+            None,
             Some(&source_z_values),
         )?;
         let output_dir = std::path::Path::new(&output);
@@ -2238,6 +2318,151 @@ fn package_linear_attn_z_hybrid_diagnostic(
         }
         Err(err) => {
             eprintln!("package-linear-attn-z-hybrid-diagnostic: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_qkv_hybrid_diagnostic(
+    path: Option<String>, input: Option<String>, source_qkv: Option<String>, output: Option<String>,
+    device_index: Option<String>, chunk_bytes: Option<String>, sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-qkv-hybrid-diagnostic requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(input) = input else {
+        eprintln!("package-linear-attn-qkv-hybrid-diagnostic requires a fixed input JSONL");
+        return ExitCode::from(2);
+    };
+    let Some(source_qkv) = source_qkv else {
+        eprintln!("package-linear-attn-qkv-hybrid-diagnostic requires a source QKV f32le sidecar");
+        return ExitCode::from(2);
+    };
+    let Some(output) = output else {
+        eprintln!("package-linear-attn-qkv-hybrid-diagnostic requires a new output directory");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if device_index != 0 {
+        eprintln!("package-linear-attn-qkv-hybrid-diagnostic is CPU-only and requires device index 0");
+        return ExitCode::from(2);
+    }
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => { eprintln!("chunk bytes must be greater than zero"); return ExitCode::from(2); }
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => { eprintln!("sequence length must be greater than zero"); return ExitCode::from(2); }
+        Err(code) => return code,
+    };
+    if std::path::Path::new(&output).exists() {
+        eprintln!("refusing to overwrite diagnostic output directory: {output}");
+        return ExitCode::from(2);
+    }
+    let result = (|| -> Result<serde_json::Value, String> {
+        let (cases, input_values, input_sha256) = z_hybrid_read_input(&input, sequence_len)?;
+        let source_qkv_bytes = fs::read(&source_qkv)
+            .map_err(|err| format!("failed to read source QKV sidecar {source_qkv}: {err}"))?;
+        let hidden = 32_usize * 128;
+        let qkv_rows = 2_usize * 16 * 128 + hidden;
+        let expected_source_bytes = sequence_len.checked_mul(qkv_rows)
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "source QKV sidecar size overflows".to_string())?;
+        if source_qkv_bytes.len() != expected_source_bytes {
+            return Err(format!("source QKV sidecar size differs: got {} expected {}", source_qkv_bytes.len(), expected_source_bytes));
+        }
+        let source_qkv_values = decode_f32_le_values(&source_qkv_bytes);
+        if source_qkv_values.iter().any(|value| !value.is_finite()) {
+            return Err("source QKV sidecar contains non-finite values".to_string());
+        }
+        fs::create_dir_all(&output).map_err(|err| format!("failed to create diagnostic output: {err}"))?;
+        let residual_base = deterministic_f32_vector(hidden);
+        let mut residual_sequence = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len {
+            residual_sequence.extend(linear_attn_step_input(&residual_base, timestep));
+        }
+        let baseline = package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+            &path, device_index, chunk_bytes, 0, sequence_len, residual_sequence.clone(),
+            None, None, Some(&input_values), None, None,
+        )?;
+        let hybrid = package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+            &path, device_index, chunk_bytes, 0, sequence_len, residual_sequence,
+            None, None, Some(&input_values), Some(&source_qkv_values), None,
+        )?;
+        if baseline.attention_qkv_projection_dim != qkv_rows || hybrid.attention_qkv_projection_dim != qkv_rows {
+            return Err("QKV hybrid production projection geometry differs".to_string());
+        }
+        let output_dir = std::path::Path::new(&output);
+        let baseline_qkv_sha = z_hybrid_write_f32(&output_dir.join("baseline-qkv.f32le"), &baseline.attention_qkv_projection)?;
+        let hybrid_qkv_sha = z_hybrid_write_f32(&output_dir.join("hybrid-qkv.f32le"), &hybrid.attention_qkv_projection)?;
+        let baseline_recurrent_sha = z_hybrid_write_f32(&output_dir.join("baseline-recurrent.f32le"), &baseline.attention_recurrent)?;
+        let hybrid_recurrent_sha = z_hybrid_write_f32(&output_dir.join("hybrid-recurrent.f32le"), &hybrid.attention_recurrent)?;
+        let baseline_block_sha = z_hybrid_write_f32(&output_dir.join("baseline-attention-block.f32le"), &baseline.attention_block_output)?;
+        let hybrid_block_sha = z_hybrid_write_f32(&output_dir.join("hybrid-attention-block.f32le"), &hybrid.attention_block_output)?;
+        let baseline_layer_sha = z_hybrid_write_f32(&output_dir.join("baseline-layer-output.f32le"), &baseline.layer_output)?;
+        let hybrid_layer_sha = z_hybrid_write_f32(&output_dir.join("hybrid-layer-output.f32le"), &hybrid.layer_output)?;
+        let baseline_state_digests = qkv_hybrid_recurrent_state_digests(&baseline, sequence_len)?;
+        let hybrid_state_digests = qkv_hybrid_recurrent_state_digests(&hybrid, sequence_len)?;
+        let state_digest_document = serde_json::json!({
+            "schema_version": "ullm.aq4_layer0_qkv_hybrid_recurrent_state_digests.cpu.v1",
+            "status": "valid", "calculation": "host_reference_f32_replay_of_production_q_k_v_gate_beta",
+            "state_shape": [32, 128, 128], "reset": "zero_before_each_baseline_or_hybrid_sequence",
+            "baseline": baseline_state_digests.iter().enumerate().map(|(step, sha256)| serde_json::json!({"step": step, "sha256": sha256})).collect::<Vec<_>>(),
+            "hybrid": hybrid_state_digests.iter().enumerate().map(|(step, sha256)| serde_json::json!({"step": step, "sha256": sha256})).collect::<Vec<_>>(),
+            "changed_by_step": baseline_state_digests.iter().zip(&hybrid_state_digests).map(|(lhs, rhs)| lhs != rhs).collect::<Vec<_>>(),
+            "promotion": false, "holdout": "not_run"
+        });
+        let state_digest_bytes = serde_json::to_vec_pretty(&state_digest_document)
+            .map_err(|err| format!("failed to encode recurrent state digests: {err}"))?;
+        let state_digest_path = output_dir.join("recurrent-state-digests.json");
+        fs::write(&state_digest_path, &state_digest_bytes)
+            .map_err(|err| format!("failed to write recurrent state digests: {err}"))?;
+        let manifest_bytes = fs::read(std::path::Path::new(&path).join("manifest.json"))
+            .map_err(|err| format!("failed to read package manifest: {err}"))?;
+        let report = serde_json::json!({
+            "schema_version": "ullm.aq4_layer0_qkv_hybrid_fidelity.cpu.v1", "status": "valid",
+            "classification": "unclassified", "promotion": false, "holdout": "not_run",
+            "policy_evaluation": "policy_not_evaluated", "thresholds": serde_json::Value::Null,
+            "device": {"backend": "cpu", "requested_index": device_index},
+            "package": {"root": path, "manifest_sha256": z_hybrid_sha256(&manifest_bytes), "layer_index": 0},
+            "input": {"path": input, "sha256": input_sha256, "schema": "ullm.aq4_layer0_input_normed_jsonl.v1", "rows": sequence_len, "shape": [hidden], "cases": cases.iter().map(|case| serde_json::json!({"case_id": case.case_id, "step": case.step, "context_length": case.context_length, "context_token_ids_sha256": case.context_token_ids_sha256, "input_sha256": case.input_sha256})).collect::<Vec<_>>()},
+            "source_qkv": {"path": source_qkv, "sha256": z_hybrid_sha256(&source_qkv_bytes), "shape": [sequence_len, qkv_rows], "dtype": "f32", "operation": "input_f32_matmul_source_bf16_weight_cast_f32_accumulate_f32"},
+            "state_reset": {"boundary": "before_each_run", "recurrent_state": "zero_initialized_once_for_sequence", "same_between_baseline_and_hybrid": true},
+            "override": {"family": "qkv", "boundary": "after_production_qkv_matvec_before_production_depthwise_conv_split_norm_recurrent", "default_off": true, "worker_reachable": false, "promotion": false},
+            "baseline": {"mode": "all_aq4", "qkv_sha256": baseline_qkv_sha, "recurrent_sha256": baseline_recurrent_sha, "attention_block_sha256": baseline_block_sha, "layer_output_sha256": baseline_layer_sha},
+            "hybrid": {"mode": "aq4_except_qkv_source_bf16", "qkv_sha256": hybrid_qkv_sha, "recurrent_sha256": hybrid_recurrent_sha, "attention_block_sha256": hybrid_block_sha, "layer_output_sha256": hybrid_layer_sha},
+            "recurrent_state_digests": {"path": state_digest_path, "sha256": z_hybrid_sha256(&state_digest_bytes), "calculation": "host_reference_f32_replay", "shape": [sequence_len, 32, 128, 128]},
+            "metrics": {
+                "baseline_vs_source_qkv": {"aggregate": z_hybrid_metric(&baseline.attention_qkv_projection, &source_qkv_values, sequence_len)?, "per_step": z_hybrid_per_step_metrics(&baseline.attention_qkv_projection, &source_qkv_values, sequence_len)?},
+                "hybrid_vs_source_qkv": {"aggregate": z_hybrid_metric(&hybrid.attention_qkv_projection, &source_qkv_values, sequence_len)?, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_qkv_projection, &source_qkv_values, sequence_len)?},
+                "hybrid_vs_baseline_qkv": {"aggregate": z_hybrid_metric(&hybrid.attention_qkv_projection, &baseline.attention_qkv_projection, sequence_len)?, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_qkv_projection, &baseline.attention_qkv_projection, sequence_len)?},
+                "hybrid_vs_baseline_recurrent": {"aggregate": z_hybrid_metric(&hybrid.attention_recurrent, &baseline.attention_recurrent, sequence_len)?, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_recurrent, &baseline.attention_recurrent, sequence_len)?},
+                "hybrid_vs_baseline_attention_block": {"aggregate": z_hybrid_metric(&hybrid.attention_block_output, &baseline.attention_block_output, sequence_len)?, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_block_output, &baseline.attention_block_output, sequence_len)?},
+                "hybrid_vs_baseline_layer_output": {"aggregate": z_hybrid_metric(&hybrid.layer_output, &baseline.layer_output, sequence_len)?, "per_step": z_hybrid_per_step_metrics(&hybrid.layer_output, &baseline.layer_output, sequence_len)?}
+            },
+            "production_path": {"input_norm": "same_fixed_input_sidecar", "z_a_b": "same_production_aq4_matvec", "qkv_after_override": "same_production_depthwise_conv_split_qk_norm_recurrent", "post_norm_mlp_residual": "same_production_runtime"}
+        });
+        fs::write(output_dir.join("report.json"), serde_json::to_vec_pretty(&report)
+            .map_err(|err| format!("failed to encode report: {err}"))?)
+            .map_err(|err| format!("failed to write report: {err}"))?;
+        Ok(report)
+    })();
+    match result {
+        Ok(report) => {
+            let metric = |name: &str| report.get("metrics").and_then(|value| value.get(name))
+                .and_then(|value| value.get("aggregate")).and_then(|value| value.get("relative_l2"))
+                .and_then(serde_json::Value::as_f64).unwrap_or(f64::NAN);
+            println!("package-linear-attn-qkv-hybrid-diagnostic report={output}/report.json rows={sequence_len} attention_block_relative_l2={:.9} layer_output_relative_l2={:.9} promotion=false holdout=not_run", metric("hybrid_vs_baseline_attention_block"), metric("hybrid_vs_baseline_layer_output"));
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("package-linear-attn-qkv-hybrid-diagnostic: {err}");
             ExitCode::from(1)
         }
     }
