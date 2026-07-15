@@ -128,6 +128,19 @@ def test_gpu_output_identity_mismatch_is_rejected(tmp_path: Path) -> None:
         ORACLE._load_tensor_outputs(path, {"name": ORACLE.DEFAULT_TENSOR}, expected)
 
 
+@pytest.mark.parametrize(
+    ("abs_tol", "relative_tol"),
+    [(0.0, ORACLE.DEFAULT_GPU_RELATIVE_TOL), (ORACLE.DEFAULT_GPU_ABS_TOL, 0.0), (1.0e-3 + 1.0e-12, ORACLE.DEFAULT_GPU_RELATIVE_TOL), (float("nan"), ORACLE.DEFAULT_GPU_RELATIVE_TOL)],
+)
+def test_gpu_comparison_tolerance_override_is_rejected(abs_tol: float, relative_tol: float) -> None:
+    with pytest.raises(ORACLE.OracleError, match="tolerances"):
+        ORACLE._validate_gpu_tolerances(abs_tol, relative_tol)
+
+
+def test_gpu_comparison_tolerance_pin_is_exact() -> None:
+    ORACLE._validate_gpu_tolerances(ORACLE.DEFAULT_GPU_ABS_TOL, ORACLE.DEFAULT_GPU_RELATIVE_TOL)
+
+
 def test_runtime_input_sidecar_is_atomic_and_probe_compatible(tmp_path: Path) -> None:
     vectors = {key: [float(index) for index in range(4096)] for key in ORACLE.EXPECTED_ROWS}
     bindings = {key: {"context_token_ids_sha256": "a" * 64, "context_length": 2, "input_sha256": ORACLE.vector_sha(vectors[key])} for key in ORACLE.EXPECTED_ROWS}
@@ -138,6 +151,18 @@ def test_runtime_input_sidecar_is_atomic_and_probe_compatible(tmp_path: Path) ->
     assert header == {"dtype": "f32", "kind": "header", "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1", "shape": [4096], "tensor_name": ORACLE.DEFAULT_TENSOR}
     with pytest.raises(ORACLE.OracleError, match="refusing to overwrite"):
         ORACLE.emit_runtime_input_jsonl(path, vectors, bindings)
+    report_identity = ORACLE._runtime_input_report_identity(path, identity, tmp_path)
+    assert report_identity == {
+        "artifact_relative_path": "input.jsonl",
+        "sha256": identity["sha256"],
+        "size_bytes": identity["post_stat"]["size_bytes"],
+        "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
+        "rows": len(ORACLE.EXPECTED_ROWS),
+    }
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(ORACLE.OracleError, match="contained"):
+        ORACLE._runtime_input_report_identity(path, identity, other)
 
 
 def test_candidate1_evidence_is_fail_closed_and_identity_bound() -> None:
@@ -154,7 +179,18 @@ def test_candidate1_evidence_is_fail_closed_and_identity_bound() -> None:
     assert report["file_identities"]["package manifest"]["sha256"] == report["package_manifest_sha256"]
     assert report["gpu_tensor_output_identity_contract"]["effective_rpb"] == {"rows_per_block": 4, "threads_per_row": 64}
     assert report["runtime_input_sidecar"]["sha256"] == "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
-    assert report["gpu_comparison_tolerance"]["abs_tol"] == 1.0e-3
+    assert report["runtime_input_sidecar"]["artifact_relative_path"] == "runtime-input.jsonl"
+    assert report["runtime_input_sidecar"]["size_bytes"] == 250573
+    assert report["runtime_input_sidecar"]["schema_version"] == "ullm.aq4_layer0_input_normed_jsonl.v1"
+    assert "canonical_path" not in report["runtime_input_sidecar"]
+    assert report["gpu_comparison_tolerance"] == {
+        "abs_tol": ORACLE.DEFAULT_GPU_ABS_TOL,
+        "relative_tol": ORACLE.DEFAULT_GPU_RELATIVE_TOL,
+        "basis": "predeclared AQ4-vs-GPU probe bound; not a promotion threshold; any finite mismatch is no-go",
+    }
+    assert "canonical_path" not in report["file_identities"]["runtime input sidecar"]
+    assert report["file_identities"]["runtime input sidecar"]["artifact_relative_path"] == "runtime-input.jsonl"
+    assert report["file_identities"]["runtime input sidecar"]["size_bytes"] == 250573
     assert report["promotion_eligible"] is False
     for row in report["rows"]:
         assert "cosine" in row["cpu_vs_source"]
