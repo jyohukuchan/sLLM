@@ -12,16 +12,17 @@
   - tree: `8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca`
   - Git blob: `c6f5f30a0a3bc64dca01787648f19bb74edc95f5`
   - raw SHA-256: `bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb`
-- validator authorityはsource/tests commit `dd17e7326fbff50afb87dd2de8bb991f6b1bdb17`へ更新し、tree `6fa00dc36105ef2d7a68e48a2ea1237f391f9088`、Git blob `5ed525fb12c3aa8f9289195981a21c8a10c294bb`、raw SHA-256 `c22e05869146b8937384a72d410abbba7a8bf2368d79486048042a058c0d8f02`をarchiveと照合した。
+- validator authorityはroot sealing追補source/tests commit `a3f0527a200bfe14f81301789089c61b59047116`へ更新し、tree `becc037dbb3a4e91c10499ea3bc2cf9b7c011748`、Git blob `bec05f97ad9156ae49aab27ccda5c73fab346d8e`、raw SHA-256 `8a151a4d3b44c266a667c1e902d284b019ed282639fa5f0f6e5339de0488e5bc`をarchiveと照合した。
 - resident driverはbinary SHA-256 `458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34`、source/provenance/build pinsを変更していない。
-- v5生成時のsubprocess countはrunner 1、trusted validator 1、fake driver 1であり、model load、GPU command、service操作はすべてfalseである。生成後のinventory SHA-256は`1e93f1dd82f053f81a830eaa02e941c674f68365d97b5d7b719d4e29db5c666e`である。
+- v5生成時のsubprocess countはrunner 1、trusted validator 1、fake driver 1であり、model load、GPU command、service操作はすべてfalseである。root modeを含む生成後inventory SHA-256は`3cf2fc65e8a67c1135983f67671a5fea6be28c74481d375363a16cabba650aac`である。
+- 初回v5生成ではroot modeがumask依存の`0775`になり、validatorもroot modeを固定していない契約漏れをread-only follow-upで検出した。generator、validator、manifestへexact `0555`契約を追加し、writable-root負例を追加したうえでofficial fresh再生成した。最終v5はroot `0555`、全7 files `0444` / `nlink=1`である。既存binding-v4の歴史成果物は変更していない。
 - prepared-v1は再生成せず、`SHA256SUMS`と正式validatorをreadbackした。modeを含むinventory SHA-256は生成前後とも`ba399b9e19e355cde0f16b1b37211515f83c5bb8e94c2a90b4221eb8828c7155`である。
 - 既存binding-v4も変更せず、modeを含むinventory SHA-256は生成前後とも`ac7a5dc03486f7dafb010cd277e58fedc6cfd1b779176a21dcba24d41a7f02c4`である。
 - v5の`SHA256SUMS`、formal `validate-binding`、runner/validator archive対Git object/raw照合はすべてPASSした。
-- scoped testはgenerator `65 passed`、runner `53 passed`、READY candidate/capture `19 passed, 30 deselected`である。
+- scoped testはgenerator `66 passed`、runner `53 passed`、READY candidate/capture `19 passed, 30 deselected`である。
 - generator、runner、captureの統合pytestは`163 passed, 1 skipped, 3 failed`だった。三件は所有外launcherが旧validator SHA-256 `f11394f8...`を固定しているため、更新後source `c22e0586...`を意図どおりfail-closedで拒否したdownstream pin差分である。profile、ready、launcher、maintenanceは変更していない。
 
 ## 次の行動
 
-- launcher/downstream laneはbinding-v5 manifestとvalidator authority `dd17e732...` / `c22e0586...`を明示的にpinし、該当するlauncher capture testsを再生成後に再実行する。
+- launcher/downstream laneはbinding-v5 manifestとvalidator authority `a3f0527a...` / `8a151a4d...`を明示的にpinし、該当するlauncher capture testsを再生成後に再実行する。
 - actual、GPU、service実行は新しいsingle-use authorizationと全downstream pin更新が完了するまで行わない。

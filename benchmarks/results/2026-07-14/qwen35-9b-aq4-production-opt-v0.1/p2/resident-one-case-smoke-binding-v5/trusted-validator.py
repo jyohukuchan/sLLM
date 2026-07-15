@@ -111,6 +111,7 @@ BINDING_SOURCE_TREE = "8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca"
 BINDING_RUNNER_GIT_BLOB = "c6f5f30a0a3bc64dca01787648f19bb74edc95f5"
 BINDING_RUNNER_SHA = "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
 BINDING_DRIVER_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
+BINDING_ROOT_MODE = 0o555
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "actual_generic_runner_source"),
     "trusted-validator.py": (0o444, "trusted_bundle_validator_source"),
@@ -1385,6 +1386,12 @@ def binding_manifest(plan_raw: bytes, evidence_raw: bytes, report_raw: bytes, di
     return {
         "schema_version": "ullm.aq4_p2_resident_smoke_binding.v5", "status": "prepared_not_executed", "promotion": False,
         "launch_eligible": False, "requires_immutable_launcher": True,
+        "binding_root_contract": {
+            "type": "directory",
+            "mode": f"{BINDING_ROOT_MODE:04o}",
+            "members_single_link": True,
+            "members_read_only": True,
+        },
         "predecessor": {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False},
         "trust_roots": {
             "source_commit": BINDING_SOURCE_COMMIT, "source_tree": BINDING_SOURCE_TREE,
@@ -1426,7 +1433,10 @@ def validate_binding(validator_commit: str, validator_sha: str, root: Path = BIN
     reject_symlink_components(root, "binding root")
     if root.is_symlink() or not root.is_dir():
         raise BundleError("binding root must be a non-symlink directory")
-    root_before = fingerprint(root.lstat())
+    root_metadata = root.lstat()
+    if stat.S_IMODE(root_metadata.st_mode) != BINDING_ROOT_MODE:
+        raise BundleError("binding root mode differs")
+    root_before = fingerprint(root_metadata)
     allowed = set(BINDING_FILES) | {"SHA256SUMS"}
     if {entry.name for entry in root.iterdir()} != allowed:
         raise BundleError("binding sidecar exact member coverage differs")
@@ -1520,6 +1530,7 @@ def prepare_binding(validator_commit: str, validator_sha: str, output: Path = BI
     for name, (mode, _) in BINDING_FILES.items():
         os.chmod(output / name, mode)
     os.chmod(output / "SHA256SUMS", 0o444)
+    os.chmod(output, BINDING_ROOT_MODE)
     directory_after, members_after = input_root_inventory()
     if directory_after != directory_before or members_after != members_before:
         raise BundleError("binding input root changed during actual runner validation")

@@ -1,4 +1,10 @@
 {
+  "binding_root_contract": {
+    "members_read_only": true,
+    "members_single_link": true,
+    "mode": "0555",
+    "type": "directory"
+  },
   "cycle_control": {
     "generated_outputs_outside_input_root": true,
     "generic_runner_schema_not_embedded_back_into_input_root": true,
@@ -187,8 +193,8 @@
     "required": true
   },
   "outputs": {
-    "runner_evidence_sha256": "d9369a06ceb544ef6ff004a1c862aa692e548eda0b94c27167b5e79358773865",
-    "runner_plan_sha256": "ae566f975684ee2dacc99049bc1e23ac5c2a3b027d339003a9ed82c714e1b7ce",
+    "runner_evidence_sha256": "a3646ec43d6c74e087fc16155c7e5ef0434331e4f2e3c903d0ed4f5f76ac19ba",
+    "runner_plan_sha256": "8063dcc804cf48b2ceb890cc444c3f80279756c740968b9cab044ec5992e5009",
     "validator_report_canonical_sha256": "e4173764a06cd90a0d5d6faefaabd83a874595c94702549dda19004598a4684a",
     "validator_report_file_sha256": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2"
   },
@@ -258,10 +264,10 @@
     "validator": {
       "archive_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5/trusted-validator.py",
       "execution_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
-      "git_blob": "5ed525fb12c3aa8f9289195981a21c8a10c294bb",
-      "sha256": "c22e05869146b8937384a72d410abbba7a8bf2368d79486048042a058c0d8f02",
-      "source_commit": "dd17e7326fbff50afb87dd2de8bb991f6b1bdb17",
-      "source_tree": "6fa00dc36105ef2d7a68e48a2ea1237f391f9088"
+      "git_blob": "bec05f97ad9156ae49aab27ccda5c73fab346d8e",
+      "sha256": "8a151a4d3b44c266a667c1e902d284b019ed282639fa5f0f6e5339de0488e5bc",
+      "source_commit": "a3f0527a200bfe14f81301789089c61b59047116",
+      "source_tree": "becc037dbb3a4e91c10499ea3bc2cf9b7c011748"
     }
   }
 }
