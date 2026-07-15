@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import signal
 
 import pytest
 
@@ -32,6 +34,8 @@ def test_stderr_json_dict_compatibility_and_raw_digest() -> None:
     assert summary["sha256"] == hashlib.sha256(raw).hexdigest()
     assert summary["captured_bytes"] == len(summary["preview_text"].encode("utf-8"))
     assert summary["utf8_replacement"] is False
+    assert summary["complete"] is True
+    assert summary["stream_error"] is None
 
 
 def test_stderr_invalid_utf8_is_drained_and_preview_is_valid_utf8() -> None:
@@ -79,20 +83,41 @@ def test_giant_non_json_line_is_bounded_without_retaining_the_line() -> None:
     assert summary["truncated"] is True
 
 
+def test_stderr_drain_failure_is_incomplete_and_structurally_bounded() -> None:
+    class BrokenStream:
+        def read(self, _: int) -> bytes:
+            raise OSError("simulated drain failure")
+
+    collector = TOOL.WorkerStderrCollector(BrokenStream())
+    collector.drain()
+    summary = collector.summary()
+    assert summary["complete"] is False
+    assert summary["stream_error"] == "OSError"
+
+
 def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    raw = b"bad\n"
     summary = {
         "schema_version": TOOL.WORKER_STDERR_SCHEMA_VERSION,
-        "byte_count": 3,
-        "sha256": hashlib.sha256(b"bad").hexdigest(),
-        "preview_text": "bad\n",
-        "captured_bytes": 4,
+        "byte_count": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "preview_text": raw.decode(),
+        "captured_bytes": len(raw),
         "truncated": False,
         "utf8_replacement": False,
         "redacted_lines": 0,
+        "complete": True,
+        "stream_error": None,
     }
 
     def fail(_: object) -> dict:
-        raise TOOL.CaptureError("resident worker did not release", worker_stderr=summary, stage="request")
+        raise TOOL.CaptureError(
+            "resident worker did not release",
+            worker_stderr=summary,
+            stage="request",
+            worker_returncode=-signal.SIGKILL,
+            worker_signal=signal.SIGKILL,
+        )
 
     monkeypatch.setattr(TOOL, "run_capture", fail)
     assert TOOL.main(["--manifest", "manifest.json", "--output", "record.json"]) == 1
@@ -100,10 +125,166 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
     envelope = json.loads(captured.out)
     assert envelope == {
         "schema_version": "ullm.aq4_resident_capture_error.v1",
-        "status": "error",
+        "status": "failed",
         "stage": "request",
         "reason": "resident worker did not release",
+        "timed_out": False,
+        "worker_returncode": -signal.SIGKILL,
+        "worker_signal": signal.SIGKILL,
         "worker_stderr": summary,
     }
     assert "resident worker did not release" in captured.err
 
+
+def _fake_manifest(tmp_path: Path, worker_source: str) -> Path:
+    worker = tmp_path / "fake-worker.py"
+    worker.write_text("#!/usr/bin/env python3\n" + worker_source, encoding="utf-8")
+    worker.chmod(0o755)
+    (tmp_path / "package.json").write_text(
+        json.dumps({"passthrough_tensors": [], "tensors": []}), encoding="utf-8"
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "product": {"root": ".", "package": {"manifest_path": "package.json"}},
+                "worker": {
+                    "binary": worker.name,
+                    "protocol": "ullm.worker.v1",
+                    "identity": {"device": "gfx1201", "device_index": 0},
+                    "arguments": [],
+                },
+                "public": {"context_length": 4096},
+                "generation": {"eos_token_ids": []},
+                "format": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+@pytest.mark.parametrize(
+    ("worker_source", "expected_signal", "expected_timeout"),
+    [
+        (
+            "import os, signal, sys\nsys.stdin.buffer.readline()\nsys.stderr.buffer.write(b'not-json\\xff\\npassword=secret\\n'+b'x'*40000)\nsys.stderr.flush()\nos.kill(os.getpid(), signal.SIGTERM)\n",
+            signal.SIGTERM,
+            False,
+        ),
+        (
+            "import sys, time\nsys.stdin.buffer.readline()\nsys.stderr.buffer.write(b'not-json\\xff\\npassword=secret\\n'+b'x'*40000)\nsys.stderr.flush()\ntime.sleep(10)\n",
+            None,
+            True,
+        ),
+    ],
+)
+def test_real_fake_worker_failure_envelope_preserves_terminal_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    worker_source: str,
+    expected_signal: int | None,
+    expected_timeout: bool,
+) -> None:
+    manifest = _fake_manifest(tmp_path, worker_source)
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--timeout",
+            "0.1",
+        ]
+    ) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert set(envelope) == {
+        "schema_version",
+        "status",
+        "stage",
+        "reason",
+        "timed_out",
+        "worker_returncode",
+        "worker_signal",
+        "worker_stderr",
+    }
+    assert envelope["status"] == "failed"
+    assert envelope["timed_out"] is expected_timeout
+    if expected_signal is not None:
+        assert envelope["worker_returncode"] == -expected_signal
+        assert envelope["worker_signal"] == expected_signal
+    else:
+        assert envelope["worker_returncode"] is not None
+    assert envelope["worker_stderr"]["complete"] is True
+    assert envelope["worker_stderr"]["stream_error"] is None
+    stderr = envelope["worker_stderr"]
+    assert stderr["byte_count"] > 32 * 1024
+    assert stderr["utf8_replacement"] is True
+    assert stderr["redacted_lines"] == 1
+    assert stderr["truncated"] is True
+    assert "password=secret" not in stderr["preview_text"]
+
+
+def test_real_fake_worker_json_success_path_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker_source = r'''
+import json, sys
+request = json.loads(sys.stdin.buffer.readline())
+request_id = request["request_id"]
+print(json.dumps({"type": "token", "request_id": request_id, "index": 0, "token_id": 42}, separators=(",", ":")), flush=True)
+print(json.dumps({"type": "released", "request_id": request_id, "completion_tokens": 1, "timings": {"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}, "reset_complete": True}, separators=(",", ":")), flush=True)
+json.dump({"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 1, "chunk_width": 1}}, sys.stderr); sys.stderr.write("\n")
+json.dump({"event": "request_released", "request_id": request_id, "operation_execution_audit": {"coverage_complete": True, "implementation_counts": [{"implementation_id": "impl", "count": 1}], "prefill_width_histogram": [0, 1], "total_steps": 1}, "request_execution_audit": {}}, sys.stderr); sys.stderr.write("\n"); sys.stderr.flush()
+json.loads(sys.stdin.buffer.readline())
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    package = tmp_path / "package.json"
+    package.write_text(
+        json.dumps(
+            {
+                "passthrough_tensors": [],
+                "tensors": [
+                    {
+                        "name": "model.layers.0.self_attn.q_proj.weight",
+                        "index_file": "weights.idx",
+                        "scale_file": "weights.scale",
+                        "codebook_file": "codebook.bin",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ("weights.idx", "weights.scale", "codebook.bin"):
+        (tmp_path / name).write_bytes(b"x")
+
+    class CompleteObserver:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def finish(self) -> dict[str, object]:
+            return {
+                "kind": "rocm_smi_vram_target_card",
+                "sample_count": 2,
+                "complete": True,
+                "capacity_bytes": 1_000_000,
+                "peak_bytes": 100,
+                "target_card": "card0",
+            }
+
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "VramObserver", CompleteObserver)
+    output = tmp_path / "record.json"
+    assert TOOL.main(["--manifest", str(manifest), "--output", str(output)]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["status"] == "ok"
+    record = json.loads(output.read_text(encoding="utf-8"))
+    assert record["status"] == "ok"
+    assert record["request_summary"]["generated_token_count"] == 1

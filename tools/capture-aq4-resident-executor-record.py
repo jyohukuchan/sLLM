@@ -57,10 +57,16 @@ class CaptureError(ValueError):
         *,
         worker_stderr: dict[str, Any] | None = None,
         stage: str | None = None,
+        timed_out: bool = False,
+        worker_returncode: int | None = None,
+        worker_signal: int | None = None,
     ) -> None:
         super().__init__(message)
         self.worker_stderr = worker_stderr
         self.stage = stage
+        self.timed_out = timed_out
+        self.worker_returncode = worker_returncode
+        self.worker_signal = worker_signal
 
 
 class WorkerStderrCollector:
@@ -90,7 +96,7 @@ class WorkerStderrCollector:
         self._line_sensitive = False
         self._marker_tail = b""
         self._finished = False
-        self.stream_error: BaseException | None = None
+        self.stream_error: str | None = None
 
     @property
     def byte_count(self) -> int:
@@ -199,9 +205,19 @@ class WorkerStderrCollector:
             except UnicodeDecodeError:
                 self._utf8_replacement = True
         except BaseException as error:
-            self.stream_error = error
+            # Keep the failure marker bounded and free of arbitrary worker
+            # diagnostics.  The exact raw stream digest remains available, but
+            # it is never claimed complete after a drain failure.
+            self.stream_error = type(error).__name__
         finally:
             self._finished = True
+
+    def mark_incomplete(self, reason: str = "drain_thread_timeout") -> None:
+        """Mark a drain that did not finish before the cleanup deadline."""
+
+        if self.stream_error is None:
+            self.stream_error = reason[:1024]
+        self._finished = False
 
     def summary(self) -> dict[str, Any]:
         if not self._finished:
@@ -217,6 +233,8 @@ class WorkerStderrCollector:
             "truncated": self._preview_truncated,
             "utf8_replacement": self._utf8_replacement,
             "redacted_lines": self._redacted_lines,
+            "complete": self._finished and self.stream_error is None,
+            "stream_error": self.stream_error,
         }
 
 
@@ -554,6 +572,7 @@ def operator_records(load_records: list[dict[str, Any]], audit: dict[str, Any]) 
             },
             "workspace": {
                 "planned_bytes": int(trace.get("persistent_bytes", 0)) + int(trace.get("temporary_bytes", 0)),
+                "temporary_bytes": int(trace.get("temporary_bytes", 0)),
                 "observed_peak_bytes": None,
             },
             "invocation_count": invocation_count or 1,
@@ -602,13 +621,20 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
 
 
 def _terminate_worker(proc: subprocess.Popen[bytes]) -> None:
-    """Terminate a worker and reap it, tolerating an already-exited process."""
+    """Terminate a worker, escalate to kill, and reap it."""
 
     if proc.poll() is None:
         try:
-            proc.kill()
+            proc.terminate()
         except (OSError, ProcessLookupError):
             pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except (OSError, ProcessLookupError):
+                pass
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
@@ -626,7 +652,7 @@ def _finish_worker_stderr(
     stderr_thread: threading.Thread,
     collector: WorkerStderrCollector,
 ) -> dict[str, Any]:
-    """Join the drain thread after EOF, closing the pipe as a bounded fallback."""
+    """Join the drain thread, failing closed if EOF cannot be collected."""
 
     stderr_thread.join(timeout=3)
     if stderr_thread.is_alive():
@@ -637,8 +663,123 @@ def _finish_worker_stderr(
                 proc.stderr.close()
         except (OSError, ValueError):
             pass
-        stderr_thread.join(timeout=3)
+        stderr_thread.join(timeout=1)
+    if stderr_thread.is_alive():
+        collector.mark_incomplete()
     return collector.summary()
+
+
+def _finish_worker_stdout(proc: subprocess.Popen[bytes]) -> bool:
+    """Drain protocol bytes left after the terminal event without retaining them."""
+
+    stream = proc.stdout
+    if stream is None:
+        return True
+    finished = threading.Event()
+    stream_error: list[str] = []
+
+    def drain() -> None:
+        try:
+            fd = stream.fileno()
+            deadline = time.monotonic() + 3
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stream_error.append("drain_thread_timeout")
+                    return
+                ready, _, _ = select.select([stream], [], [], remaining)
+                if not ready:
+                    stream_error.append("drain_thread_timeout")
+                    return
+                try:
+                    chunk = os.read(fd, 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    return
+        except BaseException as error:
+            stream_error.append(type(error).__name__)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=drain, name="aq4-stdout-drain", daemon=True)
+    thread.start()
+    thread.join(timeout=3)
+    if thread.is_alive():
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+        thread.join(timeout=1)
+    return finished.is_set() and not thread.is_alive() and not stream_error
+
+
+def _empty_worker_stderr() -> dict[str, Any]:
+    """Return the structurally valid evidence for a worker never started."""
+
+    return {
+        "schema_version": WORKER_STDERR_SCHEMA_VERSION,
+        "byte_count": 0,
+        "sha256": hashlib.sha256(b"").hexdigest(),
+        "preview_text": "",
+        "captured_bytes": 0,
+        "truncated": False,
+        "utf8_replacement": False,
+        "redacted_lines": 0,
+        "complete": False,
+        "stream_error": "worker_not_started",
+    }
+
+
+def _normalize_worker_stderr(value: Any) -> dict[str, Any]:
+    """Keep the public failure envelope exact even for injected failures."""
+
+    if not isinstance(value, dict):
+        return _empty_worker_stderr()
+    preview = value.get("preview_text")
+    if not isinstance(preview, str):
+        preview = ""
+    original_preview_bytes = preview.encode("utf-8", errors="replace")
+    preview_bytes = original_preview_bytes[:WORKER_STDERR_PREVIEW_MAX_BYTES]
+    preview = preview_bytes.decode("utf-8", errors="replace")
+    byte_count = value.get("byte_count")
+    if type(byte_count) is not int or byte_count < 0:
+        byte_count = 0
+    digest = value.get("sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        digest = hashlib.sha256(b"").hexdigest()
+    stream_error = value.get("stream_error")
+    if stream_error is not None:
+        stream_error = str(stream_error).encode("utf-8", errors="replace")[:1024].decode(
+            "utf-8", errors="replace"
+        ) or "worker_stderr_incomplete"
+    complete = value.get("complete") is True and stream_error is None
+    if not complete and stream_error is None:
+        stream_error = "worker_stderr_incomplete"
+    return {
+        "schema_version": WORKER_STDERR_SCHEMA_VERSION,
+        "byte_count": byte_count,
+        "sha256": digest,
+        "preview_text": preview,
+        "captured_bytes": len(preview_bytes),
+        "truncated": value.get("truncated") is True or len(preview_bytes) < len(original_preview_bytes),
+        "utf8_replacement": value.get("utf8_replacement") is True,
+        "redacted_lines": value.get("redacted_lines") if type(value.get("redacted_lines")) is int and value.get("redacted_lines") >= 0 else 0,
+        "complete": complete,
+        "stream_error": stream_error,
+    }
+
+
+def _bind_worker_terminal(error: CaptureError, proc: subprocess.Popen[bytes]) -> None:
+    """Bind the reap result to a failure without losing signal identity."""
+
+    returncode = proc.returncode
+    error.worker_returncode = int(returncode) if isinstance(returncode, int) else None
+    error.worker_signal = (
+        -error.worker_returncode
+        if isinstance(error.worker_returncode, int) and error.worker_returncode < 0
+        else None
+    )
 
 
 def run_capture(args: argparse.Namespace) -> dict[str, Any]:
@@ -696,6 +837,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     observer_data: dict[str, Any] | None = None
     stderr_summary: dict[str, Any] | None = None
     process_error: BaseException | None = None
+    timed_out = False
     try:
         observer.start()
         assert proc.stdin is not None and proc.stdout is not None
@@ -705,32 +847,53 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         output_token_ids: list[int] = []
         released: dict[str, Any] | None = None
         deadline = time.monotonic() + args.timeout
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+        stdout_fd = proc.stdout.fileno()
+        os.set_blocking(stdout_fd, False)
+        stdout_buffer = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                raise CaptureError(
+                    "resident worker request timed out",
+                    stage="request",
+                    timed_out=True,
+                )
+            ready, _, _ = select.select([proc.stdout], [], [], min(1.0, remaining))
             if not ready:
                 if proc.poll() is not None:
                     break
                 continue
-            line = proc.stdout.readline()
-            if not line:
-                break
             try:
-                event = json.loads(line)
-            except (UnicodeError, json.JSONDecodeError):
+                chunk = os.read(stdout_fd, 64 * 1024)
+            except BlockingIOError:
                 continue
-            if not isinstance(event, dict):
-                continue
-            event_type = event.get("type")
-            if event_type == "token":
-                if event.get("request_id") != internal_request_id or event.get("index") != len(output_token_ids):
-                    raise CaptureError("resident worker token event identity is discontinuous")
-                token_id = event.get("token_id")
-                if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
-                    raise CaptureError("resident worker emitted an invalid token id")
-                output_token_ids.append(token_id)
-            events.append({"type": event_type, "processed_prompt_tokens": event.get("processed_prompt_tokens"), "completion_tokens": event.get("completion_tokens")})
-            if event_type == "released":
-                released = event
+            if not chunk:
+                break
+            stdout_buffer.extend(chunk)
+            while b"\n" in stdout_buffer:
+                newline_index = stdout_buffer.index(b"\n")
+                line = bytes(stdout_buffer[:newline_index])
+                del stdout_buffer[: newline_index + 1]
+                try:
+                    event = json.loads(line)
+                except (UnicodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_type = event.get("type")
+                if event_type == "token":
+                    if event.get("request_id") != internal_request_id or event.get("index") != len(output_token_ids):
+                        raise CaptureError("resident worker token event identity is discontinuous")
+                    token_id = event.get("token_id")
+                    if not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0:
+                        raise CaptureError("resident worker emitted an invalid token id")
+                    output_token_ids.append(token_id)
+                events.append({"type": event_type, "processed_prompt_tokens": event.get("processed_prompt_tokens"), "completion_tokens": event.get("completion_tokens")})
+                if event_type == "released":
+                    released = event
+                    break
+            if released is not None:
                 break
         if released is None:
             raise CaptureError("resident worker did not release the capture request", stage="request")
@@ -740,31 +903,77 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            raise CaptureError("resident worker did not shut down after capture", stage="shutdown")
+            timed_out = True
+            raise CaptureError(
+                "resident worker did not shut down after capture",
+                stage="shutdown",
+                timed_out=True,
+            )
     except BaseException as error:
         process_error = error
     finally:
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except (OSError, ValueError):
+            pass
         if process_error is not None or proc.poll() is None:
             try:
                 _terminate_worker(proc)
-            except BaseException as error:
+            except BaseException:
                 if process_error is None:
                     process_error = CaptureError("resident worker could not be reaped", stage="cleanup")
         try:
             observer_data = observer.finish()
-        except BaseException as error:
+        except BaseException:
             if process_error is None:
                 process_error = CaptureError("resident worker resource observation failed", stage="cleanup")
         stderr_summary = _finish_worker_stderr(proc, stderr_thread, stderr_collector)
+        stdout_complete = _finish_worker_stdout(proc)
+        if (
+            not isinstance(stderr_summary, dict)
+            or stderr_summary.get("complete") is not True
+            or stderr_summary.get("stream_error") is not None
+            or not stdout_complete
+        ) and process_error is None:
+            process_error = CaptureError(
+                "worker pipe drain did not complete",
+                stage="cleanup",
+            )
+        if isinstance(process_error, CaptureError):
+            process_error.timed_out = process_error.timed_out or timed_out
+            _bind_worker_terminal(process_error, proc)
     if process_error is not None:
         if isinstance(process_error, CaptureError):
             process_error.worker_stderr = stderr_summary
             raise process_error
-        raise CaptureError(str(process_error), worker_stderr=stderr_summary, stage="worker") from process_error
+        failure = CaptureError(
+            str(process_error),
+            worker_stderr=stderr_summary,
+            stage="worker",
+            timed_out=timed_out,
+            worker_returncode=int(proc.returncode)
+            if isinstance(proc.returncode, int)
+            else None,
+        )
+        if failure.worker_returncode is not None and failure.worker_returncode < 0:
+            failure.worker_signal = -failure.worker_returncode
+        raise failure from process_error
     assert observer_data is not None and stderr_summary is not None
 
     def worker_failure(message: str, stage: str = "validation") -> CaptureError:
-        return CaptureError(message, worker_stderr=stderr_summary, stage=stage)
+        failure = CaptureError(
+            message,
+            worker_stderr=stderr_summary,
+            stage=stage,
+            timed_out=timed_out,
+            worker_returncode=int(proc.returncode)
+            if isinstance(proc.returncode, int)
+            else None,
+        )
+        if failure.worker_returncode is not None and failure.worker_returncode < 0:
+            failure.worker_signal = -failure.worker_returncode
+        return failure
 
     if proc.returncode != 0:
         raise worker_failure(f"resident worker exited with status {proc.returncode}", "worker_exit")
@@ -876,7 +1085,6 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     result = {
         "schema_version": "ullm.production_executor_record.v1",
         "trace_id": trace_id,
-        "status": "ok",
         "scope": "full_model",
         "graph": graph,
         "executor": {
@@ -944,18 +1152,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "ok", "output": str(args.output)}))
         return 0
     except (CaptureError, OSError, ValueError) as error:
-        worker_stderr = getattr(error, "worker_stderr", None)
+        worker_stderr = _normalize_worker_stderr(getattr(error, "worker_stderr", None))
+        reason = str(error)
+        # Keep the status line bounded even when an exception originates in a
+        # dependency.  The worker stderr preview has its own independent cap.
+        reason = reason.encode("utf-8", errors="replace")[:4096].decode(
+            "utf-8", errors="replace"
+        )
         envelope = {
             "schema_version": "ullm.aq4_resident_capture_error.v1",
-            "status": "error",
+            "status": "failed",
             "stage": getattr(error, "stage", None) or "capture",
-            "reason": str(error),
-            "worker_stderr": worker_stderr if isinstance(worker_stderr, dict) else None,
+            "reason": reason,
+            "timed_out": bool(getattr(error, "timed_out", False)),
+            "worker_returncode": getattr(error, "worker_returncode", None),
+            "worker_signal": getattr(error, "worker_signal", None),
+            "worker_stderr": worker_stderr,
         }
         # The outer runner treats this as an opaque, single-line status record
         # on failure.  The diagnostic text remains on stderr for operators.
         print(json.dumps(envelope, ensure_ascii=True, separators=(",", ":")))
-        print(f"resident executor capture failed: {error}", file=sys.stderr)
+        print(f"resident executor capture failed: {reason}", file=sys.stderr)
         return 1
 
 
