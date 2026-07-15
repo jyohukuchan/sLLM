@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -170,6 +171,28 @@ def test_profile_diagnostic_runner_argv_is_exact_and_normal_argv_is_unchanged(tm
     expected[expected.index(normal["run_id"])] = profile["run_id"]
     expected[expected.index(str(Path(normal["evidence_output"]) / "live-preflight.json"))] = str(Path(profile["evidence_output"]) / "live-preflight.json")
     assert stripped == expected
+
+
+def test_profile_roctx_sdk_authority_and_generic_runner_cli_are_exact() -> None:
+    library = LAUNCHER.ROCTX_LIBRARY
+    metadata = library.lstat()
+    assert library == Path("/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0")
+    assert library.resolve(strict=True) == LAUNCHER.ROCTX_LIBRARY_RESOLVED == library
+    assert stat.S_ISREG(metadata.st_mode) and not library.is_symlink()
+    assert stat.S_IMODE(metadata.st_mode) == LAUNCHER.ROCTX_LIBRARY_MODE == 0o644
+    assert metadata.st_nlink == 1
+    assert metadata.st_size == LAUNCHER.ROCTX_LIBRARY_BYTES == 456232
+    assert LAUNCHER.sha_bytes(library.read_bytes()) == LAUNCHER.ROCTX_LIBRARY_SHA == "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9"
+    dynamic = subprocess.run(["/usr/bin/readelf", "-d", str(library)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    assert dynamic.returncode == 0 and dynamic.stderr == b""
+    assert f"Library soname: [{LAUNCHER.ROCTX_LIBRARY_SONAME}]".encode() in dynamic.stdout
+
+    normal = LAUNCHER.execute_runner_argv(LAUNCHER.execute_binding_document())
+    profile = LAUNCHER.execute_runner_argv(LAUNCHER.profile_execute_binding_document())
+    assert "--profile-roctx-ranges" not in normal and "--roctx-library" not in normal
+    assert profile.count("--profile-roctx-ranges") == profile.count("--roctx-library") == profile.count("--roctx-library-sha256") == 1
+    index = profile.index("--profile-roctx-ranges")
+    assert profile[index:index + 5] == ["--profile-roctx-ranges", "--roctx-library", str(library), "--roctx-library-sha256", LAUNCHER.ROCTX_LIBRARY_SHA]
 
 
 def test_profile_execute_cli_builds_only_the_exact_ready_profile_binding(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -699,18 +722,21 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
-def test_canonical_execute_binding_pins_launcher_self_and_remains_blocked() -> None:
-    binding, trust = LAUNCHER.load_execute_binding(LAUNCHER.EXECUTE_BINDING_PATH)
+def test_canonical_execute_binding_fails_closed_until_sdk_launcher_is_recascaded() -> None:
+    with pytest.raises(LAUNCHER.LauncherError, match="launcher self differs"):
+        LAUNCHER.load_execute_binding(LAUNCHER.EXECUTE_BINDING_PATH)
+    binding = json.loads(LAUNCHER.EXECUTE_BINDING_PATH.read_text())
+    trust = json.loads(LAUNCHER.EXECUTE_LAUNCHER_TRUST_PATH.read_text())
     assert binding["actual_eligible"] is False
     assert trust["actual_eligible"] is False and trust["status"] == "qa_pending"
-    assert trust["sha256"] == LAUNCHER.sha_bytes(SCRIPT.read_bytes())
     committed = subprocess.run(
         ["git", "show", f'{trust["commit"]}:tools/launch-aq4-p2-resident-smoke.py'],
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
     )
-    assert committed.stdout == SCRIPT.read_bytes()
+    assert LAUNCHER.sha_bytes(committed.stdout) == trust["sha256"]
+    assert committed.stdout != SCRIPT.read_bytes()
 
 
 def test_execute_rejects_untrusted_launcher_self_before_output_creation(tmp_path: Path) -> None:
