@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
 BINDING_VALIDATOR_EXEC = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
 SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
@@ -105,15 +105,15 @@ REQUIRED_FILES = {
 }
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
-BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
-BINDING_SOURCE_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
-BINDING_RUNNER_GIT_BLOB = "b7a3af27b17bd9dfae926c320eda04f7c3afae4e"
-BINDING_RUNNER_SHA = "5d4cf385a83961f8aedc37d36c3e4625d783ec7ddd6b17de4f93648516d42354"
+BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v5-runner")
+BINDING_SOURCE_COMMIT = "076c3662aad6a3c8c74b3875882df4b41c026de7"
+BINDING_SOURCE_TREE = "8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca"
+BINDING_RUNNER_GIT_BLOB = "c6f5f30a0a3bc64dca01787648f19bb74edc95f5"
+BINDING_RUNNER_SHA = "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
 BINDING_DRIVER_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
 BINDING_FILES = {
-    "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
-    "trusted-validator.py": (0o444, "ed67910_bundle_validator_source"),
+    "trusted-runner.py": (0o444, "actual_generic_runner_source"),
+    "trusted-validator.py": (0o444, "trusted_bundle_validator_source"),
     "runner-plan.json": (0o444, "actual_generic_runner_dry_run_plan"),
     "runner-subprocess-evidence.json": (0o444, "actual_runner_subprocess_evidence"),
     "validator-report.json": (0o444, "trusted_validator_report"),
@@ -1285,7 +1285,7 @@ def binding_runner_argv(validator_sha: str, root: Path = BINDING_ROOT) -> list[s
         "--trusted-validator", str(BINDING_VALIDATOR_EXEC),
         "--trusted-validator-sha256", validator_sha,
         "--output-dir", str(BINDING_RUNNER_OUTPUT),
-        "--run-id", "p2-r9700-resident-one-case-smoke-binding-v4-validate",
+        "--run-id", "p2-r9700-resident-one-case-smoke-binding-v5-validate",
         "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run",
     ]
 
@@ -1328,7 +1328,7 @@ def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[st
         raise BundleError("binding runner plan one-case facts differ")
     identity = parse_json(read_stable(CANONICAL_ROOT / "identity.json", "binding identity"), "binding identity")
     baseline = {
-        "run_id": "p2-r9700-resident-one-case-smoke-binding-v4-validate", "kind": "active-production",
+        "run_id": "p2-r9700-resident-one-case-smoke-binding-v5-validate", "kind": "active-production",
         "identity_file": {"path": str(CANONICAL_ROOT / "identity.json"), "sha256": members["identity.json"]["sha256"]},
         "served_model_manifest_sha256": EXPECTED_SERVED_SHA, "worker_binary_sha256": EXPECTED_WORKER_SHA, "build_git_commit": DRIVER_COMMIT,
     }
@@ -1364,8 +1364,15 @@ def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[st
 
 def binding_evidence(plan_raw: bytes, report: dict[str, Any], stdout: bytes, stderr: bytes, exit_code: int, validator_sha: str) -> bytes:
     return pretty({
-        "schema_version": "ullm.aq4_p2_resident_binding_runner_evidence.v1", "runner_subprocess_count": 1,
+        "schema_version": "ullm.aq4_p2_resident_binding_runner_evidence.v2", "runner_subprocess_count": 1,
         "command": binding_runner_argv(validator_sha), "exit_code": exit_code,
+        "runner_source": {
+            "source_commit": BINDING_SOURCE_COMMIT,
+            "source_tree": BINDING_SOURCE_TREE,
+            "git_blob": BINDING_RUNNER_GIT_BLOB,
+            "source_sha256": BINDING_RUNNER_SHA,
+            "archive_path": str(BINDING_ROOT / "trusted-runner.py"),
+        },
         "stdout": {"sha256": sha_bytes(stdout), "utf8": stdout.decode("utf-8")},
         "stderr": {"sha256": sha_bytes(stderr), "utf8": stderr.decode("utf-8")},
         "plan": {"path": str(BINDING_ROOT / "runner-plan.json"), "sha256": sha_bytes(plan_raw)},
@@ -1376,12 +1383,18 @@ def binding_evidence(plan_raw: bytes, report: dict[str, Any], stdout: bytes, std
 def binding_manifest(plan_raw: bytes, evidence_raw: bytes, report_raw: bytes, directory: dict[str, Any], members: dict[str, dict[str, Any]], runner_raw: bytes, validator_raw: bytes, validator_commit: str, validator_tree: str, validator_object: str) -> dict[str, Any]:
     root_fingerprint = {"directory": directory, "members": members, "sha256": sha_bytes(canonical({"directory": directory, "members": members}))}
     return {
-        "schema_version": "ullm.aq4_p2_resident_smoke_binding.v4", "status": "prepared_not_executed", "promotion": False,
+        "schema_version": "ullm.aq4_p2_resident_smoke_binding.v5", "status": "prepared_not_executed", "promotion": False,
         "launch_eligible": False, "requires_immutable_launcher": True,
         "predecessor": {"commit": "791a20c", "status": "SUPERSEDED", "execution_eligible": False},
         "trust_roots": {
             "source_commit": BINDING_SOURCE_COMMIT, "source_tree": BINDING_SOURCE_TREE,
-            "runner": {"git_blob": BINDING_RUNNER_GIT_BLOB, "sha256": sha_bytes(runner_raw)},
+            "runner": {
+                "source_commit": BINDING_SOURCE_COMMIT,
+                "source_tree": BINDING_SOURCE_TREE,
+                "git_blob": BINDING_RUNNER_GIT_BLOB,
+                "source_sha256": sha_bytes(runner_raw),
+                "archive_path": str(BINDING_ROOT / "trusted-runner.py"),
+            },
             "validator": {"source_commit": validator_commit, "source_tree": validator_tree, "git_blob": validator_object, "sha256": sha_bytes(validator_raw), "archive_path": str(BINDING_ROOT / "trusted-validator.py"), "execution_path": str(BINDING_VALIDATOR_EXEC)},
             "resident_driver": {"normative_commit": DRIVER_COMMIT, "source_tree": DRIVER_TREE, "git_blob_at_binding_commit": BINDING_DRIVER_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged": True, "binary_sha256": EXPECTED_DRIVER_SHA, "binary_bytes": EXPECTED_DRIVER_BYTES, "binary_build_id_sha1": EXPECTED_DRIVER_BUILD_ID, "build": DRIVER_BUILD_METADATA},
         },
@@ -1540,7 +1553,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = validate_binding(args.validator_source_commit, args.validator_sha256, args.binding)
         summary = {"status": result["status"], "promotion": result["promotion"]}
-        summary["run_id"] = result.get("run_id", "p2-r9700-resident-one-case-smoke-binding-v4")
+        summary["run_id"] = result.get("run_id", "p2-r9700-resident-one-case-smoke-binding-v5")
         print(json.dumps(summary, sort_keys=True))
         return 0
     except (BundleError, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:

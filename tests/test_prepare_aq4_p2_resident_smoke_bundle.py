@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
@@ -16,9 +17,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "a44074278d4bbd5e243153ab8c5be272489e23a2"
-VALIDATOR_SHA = "f11394f84cdf8b858634bab20a48ba24d19cd51a0f0c95783dfe329f33e1e976"
+BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
+if (BINDING / "binding-manifest.json").is_file():
+    _CHECKED_IN_BINDING_MANIFEST = json.loads(
+        (BINDING / "binding-manifest.json").read_text()
+    )
+    VALIDATOR_COMMIT = _CHECKED_IN_BINDING_MANIFEST["trust_roots"]["validator"]["source_commit"]
+    VALIDATOR_SHA = _CHECKED_IN_BINDING_MANIFEST["trust_roots"]["validator"]["sha256"]
+else:
+    VALIDATOR_COMMIT = ""
+    VALIDATOR_SHA = ""
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",
@@ -689,7 +697,37 @@ def test_rejects_rebound_runner_plan_or_normal_profile(tmp_path: Path, trusted_r
         BUNDLE.validate(root, trusted_reconstruction)
 
 
-def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
+def test_binding_actual_runner_authority_matches_076c_source() -> None:
+    commit = BUNDLE.BINDING_SOURCE_COMMIT
+    source_path = "tools/run-aq4-p2-resident-batch.py"
+    assert commit == "076c3662aad6a3c8c74b3875882df4b41c026de7"
+    assert subprocess.run(
+        ["git", "rev-parse", f"{commit}^{{tree}}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip() == BUNDLE.BINDING_SOURCE_TREE
+    assert subprocess.run(
+        ["git", "rev-parse", f"{commit}:{source_path}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip() == BUNDLE.BINDING_RUNNER_GIT_BLOB
+    source = subprocess.run(
+        ["git", "show", f"{commit}:{source_path}"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    assert hashlib.sha256(source).hexdigest() == BUNDLE.BINDING_RUNNER_SHA
+    assert BUNDLE.BINDING_RUNNER_SHA == (
+        "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
+    )
+
+
+def test_checked_in_v5_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
     value = BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, BINDING)
     assert value["status"] == "prepared_not_executed"
     assert value["promotion"] is False
@@ -699,7 +737,13 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     roots = value["trust_roots"]
     assert roots["source_commit"] == BUNDLE.BINDING_SOURCE_COMMIT
     assert roots["source_tree"] == BUNDLE.BINDING_SOURCE_TREE
-    assert roots["runner"] == {"git_blob": BUNDLE.BINDING_RUNNER_GIT_BLOB, "sha256": BUNDLE.BINDING_RUNNER_SHA}
+    assert roots["runner"] == {
+        "source_commit": BUNDLE.BINDING_SOURCE_COMMIT,
+        "source_tree": BUNDLE.BINDING_SOURCE_TREE,
+        "git_blob": BUNDLE.BINDING_RUNNER_GIT_BLOB,
+        "source_sha256": BUNDLE.BINDING_RUNNER_SHA,
+        "archive_path": str(BINDING / "trusted-runner.py"),
+    }
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
     assert roots["resident_driver"]["blob_unchanged"] is True
@@ -712,7 +756,42 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert roots["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
 
 
-def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
+def test_v5_binding_runner_and_validator_archives_match_pinned_git_objects() -> None:
+    manifest = json.loads((BINDING / "binding-manifest.json").read_text())
+    for role, source_path, archive_name in (
+        ("runner", "tools/run-aq4-p2-resident-batch.py", "trusted-runner.py"),
+        ("validator", "tools/prepare-aq4-p2-resident-smoke-bundle.py", "trusted-validator.py"),
+    ):
+        authority = manifest["trust_roots"][role]
+        commit = authority["source_commit"]
+        observed_tree = subprocess.run(
+            ["git", "rev-parse", f"{commit}^{{tree}}"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        observed_blob = subprocess.run(
+            ["git", "rev-parse", f"{commit}:{source_path}"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        archived = (BINDING / archive_name).read_bytes()
+        committed = subprocess.run(
+            ["git", "show", f"{commit}:{source_path}"],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout
+        assert observed_tree == authority["source_tree"]
+        assert observed_blob == authority["git_blob"]
+        assert archived == committed
+        assert hashlib.sha256(archived).hexdigest() == authority["source_sha256" if role == "runner" else "sha256"]
+
+
+def test_v5_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
     plan_raw = (BINDING / "runner-plan.json").read_bytes()
     plan = json.loads(plan_raw)
     evidence = json.loads((BINDING / "runner-subprocess-evidence.json").read_text())
@@ -728,6 +807,13 @@ def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses()
     assert validator["source"] == {"path": str(BUNDLE.BINDING_VALIDATOR_EXEC), "sha256": VALIDATOR_SHA}
     assert validator["report_sha256"] == hashlib.sha256(BUNDLE.canonical(validator["report"])).hexdigest()
     assert evidence["runner_subprocess_count"] == 1
+    assert evidence["runner_source"] == {
+        "source_commit": BUNDLE.BINDING_SOURCE_COMMIT,
+        "source_tree": BUNDLE.BINDING_SOURCE_TREE,
+        "git_blob": BUNDLE.BINDING_RUNNER_GIT_BLOB,
+        "source_sha256": BUNDLE.BINDING_RUNNER_SHA,
+        "archive_path": str(BINDING / "trusted-runner.py"),
+    }
     assert evidence["exit_code"] == 0
     assert evidence["stdout"] == {"sha256": hashlib.sha256(b"").hexdigest(), "utf8": ""}
     assert evidence["stderr"] == {"sha256": hashlib.sha256(b"").hexdigest(), "utf8": ""}
@@ -735,7 +821,7 @@ def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses()
     assert evidence["trusted_validator"]["report_file_sha256"] == hashlib.sha256(report_raw).hexdigest()
 
 
-def test_v4_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
+def test_v5_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
     assert manifest["runner_roles"] == {
         "prepared_bootstrap": {
@@ -764,7 +850,7 @@ def test_v4_binding_keeps_generic_runner_outputs_outside_immutable_input_root() 
     assert manifest["next_stage"]["required"] is True
 
 
-def test_v4_binding_rejects_report_replacement(tmp_path: Path) -> None:
+def test_v5_binding_rejects_report_replacement(tmp_path: Path) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     report = root / "validator-report.json"
@@ -777,7 +863,7 @@ def test_v4_binding_rejects_report_replacement(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("variant", ("late_unknown", "late_missing", "late_replace"))
-def test_v4_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
+def test_v5_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     replacement = tmp_path / "replacement-report.json"
