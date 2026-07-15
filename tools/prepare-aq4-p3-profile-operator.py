@@ -59,6 +59,7 @@ HISTORICAL_PROFILE_CAPTURE_V8 = P3 / "aq4-p3-diagnostic-rocprof-capture-v8"
 HISTORICAL_OPERATOR_RESULT_V9 = P2 / "resident-one-case-smoke-profile-operator-result-v9"
 HISTORICAL_ACTUAL_AUDIT_V9 = P2 / "resident-one-case-smoke-profile-actual-audit-v9"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_OID_RE = re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_INTERVAL = 5.0
 DEFAULT_MAXIMUM = 900.0
 DEFAULT_MINIMUM_SPAN = 130.0
@@ -621,6 +622,176 @@ def seal_optional(root: Path, *, required: bool) -> dict[str, Any] | None:
     return seal_existing(root)
 
 
+def finalizer_source_authority() -> dict[str, Any]:
+    relative = str(SOURCE.relative_to(ROOT))
+    commit = git("log", "-1", "--format=%H", "--", relative)
+    blob = git("rev-parse", f"{commit}:{relative}")
+    if git("hash-object", str(SOURCE)) != blob:
+        raise OperatorError("finalizer source is not committed authority")
+    return {
+        "role": "existing_evidence_recovery_only_not_execution_authority",
+        "path": str(SOURCE),
+        "commit": commit,
+        "git_blob": blob,
+        "sha256": sha_file(SOURCE),
+    }
+
+
+def validate_finalizer_source_authority(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "role",
+        "path",
+        "commit",
+        "git_blob",
+        "sha256",
+    }:
+        raise OperatorError("finalizer source authority shape differs")
+    path = Path(str(value["path"]))
+    try:
+        relative = str(path.relative_to(ROOT))
+    except ValueError as error:
+        raise OperatorError("finalizer source authority path differs") from error
+    if (
+        value["role"] != "existing_evidence_recovery_only_not_execution_authority"
+        or path != SOURCE
+        or GIT_OID_RE.fullmatch(str(value["commit"])) is None
+        or GIT_OID_RE.fullmatch(str(value["git_blob"])) is None
+        or SHA_RE.fullmatch(str(value["sha256"])) is None
+        or git("rev-parse", f"{value['commit']}:{relative}") != value["git_blob"]
+    ):
+        raise OperatorError("finalizer source Git authority differs")
+    completed = subprocess.run(
+        ["git", "cat-file", "blob", value["git_blob"]],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr or sha_bytes(completed.stdout) != value["sha256"]:
+        raise OperatorError("finalizer source blob authority differs")
+
+
+def pre_stop_noop_failure_record(
+    maintenance: dict[str, Any],
+    inventory: dict[str, Any],
+) -> dict[str, Any]:
+    failure = maintenance.get("failure")
+    restore = maintenance.get("restore")
+    counts = maintenance.get("process_counts")
+    safety = maintenance.get("safety")
+    expected_counts = {
+        "sudo": 1,
+        "sudo_keepalive": 0,
+        "systemctl_stop": 0,
+        "launcher": 0,
+        "systemctl_start": 0,
+        "capture_tool": 0,
+        "rocprof": 0,
+        "docker": 0,
+        "docker_exec": 0,
+        "container_curl": 0,
+        "container_curl_total": 0,
+        "container_curl_version": 0,
+        "container_curl_endpoint": 0,
+        "stopped_gate_polls": 0,
+        "stopped_gate_probe_commands": 0,
+    }
+    if (
+        failure
+        != {
+            "stage": "pre-stop-snapshot",
+            "reason": "restored worker does not uniquely own target GPU",
+            "launcher_started": False,
+        }
+        or restore
+        != {"attempted": False, "error": None, "passed": True, "post_start": None}
+        or counts != expected_counts
+        or safety
+        != {
+            "service_touched": False,
+            "service_stopped": False,
+            "gpu_command_executed": False,
+            "model_load_executed": False,
+        }
+        or maintenance.get("pre_stop") is not None
+        or maintenance.get("stopped_gates") is not None
+        or maintenance.get("stopped_gate_poll") is not None
+        or maintenance.get("lock_substrate") is not None
+        or maintenance.get("lock_substrate_cleanup") is not None
+        or maintenance.get("launcher") is not None
+        or maintenance.get("capture") is not None
+        or maintenance.get("sequence") != ["sudo-prevalidate"]
+        or maintenance.get("secret_material_recorded") is not False
+    ):
+        raise OperatorError("pre-stop no-op restore evidence differs")
+    member = inventory.get("members", {}).get("launcher-evidence.json", {})
+    if member.get("sha256") != sha_file(MAINTENANCE_EVIDENCE / "launcher-evidence.json"):
+        raise OperatorError("pre-stop failure evidence hash differs")
+    return {
+        "source": "sealed_maintenance_failure",
+        "maintenance_evidence_path": member["path"],
+        "maintenance_evidence_sha256": member["sha256"],
+        "stage": failure["stage"],
+        "reason": failure["reason"],
+        "launcher_started": False,
+        "owner_identity_evidence": "unavailable_not_recorded_by_pre_stop_probe",
+        "normative_external_owner_pids": None,
+        "post_hoc_owner_diagnostics_normative": False,
+    }
+
+
+def capture_recovery_snapshot(ready: dict[str, Any]) -> dict[str, Any]:
+    maintenance = load_maintenance()
+    running = maintenance.capture_running(maintenance.default_dependencies())
+    formal = running["health"]["formal"]
+    lock_metadata = Path(running["lock"]["path"]).lstat()
+    return {
+        "phase": "post_actual_evidence_recovery",
+        "source": "fresh_read_only_phase_aware_probe",
+        "previous_authorization_source": "sealed_operator_manifest_no_live_absence_recheck",
+        "actual_outputs_permitted": True,
+        "service": running["service"],
+        "worker": running["worker"],
+        "gpu": running["gpu"],
+        "owners": {
+            "amd_smi": running["owners"]["amd_smi"],
+            "kfd": running["owners"]["kfd"],
+        },
+        "lock": {
+            "path": running["lock"]["path"],
+            "busy": running["lock"]["busy"],
+            "identity": [
+                lock_metadata.st_dev,
+                lock_metadata.st_ino,
+                lock_metadata.st_mode,
+                lock_metadata.st_nlink,
+                lock_metadata.st_size,
+            ],
+        },
+        "hashes": running["hashes"],
+        "formal_health_sha256": sha_bytes(
+            canonical(
+                {
+                    key: formal[key]
+                    for key in (
+                        "container",
+                        "curl",
+                        "docker",
+                        "endpoints",
+                        "process_counts",
+                        "secret_material_recorded",
+                    )
+                }
+            )
+        ),
+        "targeted_processes": targeted_processes(),
+        "read_only": True,
+        "service_touched": False,
+        "gpu_workload_executed": False,
+    }
+
+
 def validate_actual_documents(
     result: dict[str, Any],
     audit: dict[str, Any],
@@ -643,6 +814,54 @@ def validate_actual_documents(
         raise OperatorError("successful actual audit outcome differs")
     if not succeeded and (not isinstance(audit.get("failure"), dict) or profile.get("status") != "failure_evidence_only"):
         raise OperatorError("failed actual audit outcome differs")
+    if result_schema == OPERATOR_RESULT_SCHEMA and audit_schema == ACTUAL_AUDIT_SCHEMA:
+        authority = result.get("finalizer_authority")
+        restore = audit.get("restore", {})
+        classification = audit.get("restore_classification")
+        recovery = audit.get("recovery_snapshot", {})
+        cleanup = audit.get("cleanup", {})
+        if (
+            not isinstance(authority, dict)
+            or authority != audit.get("finalizer_authority")
+            or authority.get("role")
+            != "existing_evidence_recovery_only_not_execution_authority"
+            or authority.get("path") != str(SOURCE)
+            or GIT_OID_RE.fullmatch(str(authority.get("commit", ""))) is None
+            or GIT_OID_RE.fullmatch(str(authority.get("git_blob", ""))) is None
+            or SHA_RE.fullmatch(str(authority.get("sha256", ""))) is None
+            or recovery.get("source") != "fresh_read_only_phase_aware_probe"
+            or recovery.get("previous_authorization_source")
+            != "sealed_operator_manifest_no_live_absence_recheck"
+            or recovery.get("actual_outputs_permitted") is not True
+            or recovery.get("targeted_processes") != []
+            or recovery.get("read_only") is not True
+            or recovery.get("service_touched") is not False
+            or recovery.get("gpu_workload_executed") is not False
+        ):
+            raise OperatorError("actual finalizer/recovery authority differs")
+        if restore.get("attempted") is False:
+            failure_snapshot = audit.get("pre_stop_failure_snapshot", {})
+            if (
+                classification != "pre_stop_untouched_same_epoch"
+                or restore
+                != {"attempted": False, "error": None, "passed": True, "post_start": None}
+                or cleanup.get("trusted_lock_substrate_cleanup_required") is not False
+                or failure_snapshot.get("stage") != "pre-stop-snapshot"
+                or failure_snapshot.get("reason")
+                != "restored worker does not uniquely own target GPU"
+                or failure_snapshot.get("owner_identity_evidence")
+                != "unavailable_not_recorded_by_pre_stop_probe"
+                or failure_snapshot.get("normative_external_owner_pids") is not None
+                or failure_snapshot.get("post_hoc_owner_diagnostics_normative") is not False
+            ):
+                raise OperatorError("actual pre-stop no-op restore binding differs")
+        elif (
+            restore.get("attempted") is not True
+            or classification != "outer_finally_restored_new_epoch"
+            or audit.get("pre_stop_failure_snapshot") is not None
+            or cleanup.get("trusted_lock_substrate_cleanup_required") is not True
+        ):
+            raise OperatorError("actual touched restore binding differs")
 
 
 def historical_actual_v9_fresh_paths() -> list[Path]:
@@ -892,13 +1111,35 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
         raise OperatorError("failed maintenance omitted its failure")
     package = maintenance.get("package_integrity", {})
     restore = maintenance.get("restore", {})
-    cleanup = maintenance.get("lock_substrate_cleanup", {})
+    cleanup_value = maintenance.get("lock_substrate_cleanup")
+    cleanup = cleanup_value if isinstance(cleanup_value, dict) else {}
     if package.get("full_hash_count") != 1 or package.get("full_content", {}).get("passed") is not True or package.get("integrity_identity", {}).get("passed") is not True:
         raise OperatorError("package exact-one integrity differs")
-    if restore.get("passed") is not True or restore.get("duration_ns", 120_000_000_001) > 120_000_000_000 or restore.get("final_metadata_recheck", {}).get("within_absolute_deadline") is not True:
-        raise OperatorError("outer-finally restore differs")
-    if cleanup.get("passed") is not True or cleanup.get("runner_children") != [] or cleanup.get("holder_pids") != []:
-        raise OperatorError("lock/residual cleanup differs")
+    no_op_restore = restore.get("attempted") is False
+    pre_stop_failure_snapshot = None
+    if no_op_restore:
+        if succeeded:
+            raise OperatorError("successful execution cannot use pre-stop no-op restore")
+        pre_stop_failure_snapshot = pre_stop_noop_failure_record(
+            maintenance,
+            maintenance_inventory,
+        )
+        if any(
+            root.exists() or root.is_symlink()
+            for root in (PROFILE_EXECUTE_EVIDENCE, PROFILE_RUNTIME, PROFILE_CAPTURE)
+        ):
+            raise OperatorError("pre-stop failure produced downstream artifacts")
+    else:
+        if (
+            restore.get("attempted") is not True
+            or restore.get("passed") is not True
+            or restore.get("duration_ns", 120_000_000_001) > 120_000_000_000
+            or restore.get("final_metadata_recheck", {}).get("within_absolute_deadline")
+            is not True
+        ):
+            raise OperatorError("outer-finally restore differs")
+        if cleanup.get("passed") is not True or cleanup.get("runner_children") != [] or cleanup.get("holder_pids") != []:
+            raise OperatorError("lock/residual cleanup differs")
 
     execute_inventory = seal_optional(PROFILE_EXECUTE_EVIDENCE, required=succeeded)
     runtime_inventory = seal_optional(PROFILE_RUNTIME, required=succeeded)
@@ -928,15 +1169,32 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
         if isinstance(capture_failure, dict) and (capture_failure.get("status") != "failed" or capture_failure.get("children_remaining") != [] or capture_failure.get("process_group_cleanup_complete") is not True):
             raise OperatorError("capture failure boundary differs")
 
-    post = capture_snapshot(load(PROFILE_READY, "profile ready binding"))
+    post = capture_recovery_snapshot(load(PROFILE_READY, "profile ready binding"))
     running = {"service": post["service"], "worker": post["worker"], "gpu": post["gpu"], "owners": post["owners"], "lock": post["lock"], "hashes": post["hashes"], "formal_health_sha256": post["formal_health_sha256"], "targeted_processes": post["targeted_processes"]}
     pre = quiet["confirmation"]
-    if post["service"].get("active_state") != "active" or post["service"].get("sub_state") != "running" or post["service"].get("nrestarts") != 0 or post["service"].get("main_pid") == pre["service"]["main_pid"] or post["worker"]["pid"] == pre["worker"]["pid"]:
-        raise OperatorError("post-restore service epoch differs")
     if post["owners"] != {"amd_smi": [post["worker"]["pid"]], "kfd": [post["worker"]["pid"]]} or post["lock"].get("busy") is not True or post["targeted_processes"]:
         raise OperatorError("post-restore owner/residual state differs")
-    if post["hashes"] != pre["hashes"] or post["formal_health_sha256"] != pre["formal_health_sha256"]:
-        raise OperatorError("post-restore health/hash state differs")
+    if no_op_restore:
+        if (
+            post["service"] != pre["service"]
+            or post["worker"] != pre["worker"]
+            or post["gpu"] != pre["gpu"]
+            or post["owners"] != pre["owners"]
+            or post["lock"] != pre["lock"]
+            or post["hashes"] != pre["hashes"]
+            or post["formal_health_sha256"] != pre["formal_health_sha256"]
+            or post["service"].get("active_state") != "active"
+            or post["service"].get("sub_state") != "running"
+            or post["service"].get("nrestarts") != 0
+        ):
+            raise OperatorError("pre-stop no-op recovery epoch differs")
+    else:
+        if post["service"].get("active_state") != "active" or post["service"].get("sub_state") != "running" or post["service"].get("nrestarts") != 0 or post["service"].get("main_pid") == pre["service"]["main_pid"] or post["worker"]["pid"] == pre["worker"]["pid"]:
+            raise OperatorError("post-restore service epoch differs")
+        if post["hashes"] != pre["hashes"] or post["formal_health_sha256"] != pre["formal_health_sha256"]:
+            raise OperatorError("post-restore health/hash state differs")
+
+    finalizer_authority = finalizer_source_authority()
 
     operator_result = {
         "schema_version": OPERATOR_RESULT_SCHEMA,
@@ -946,6 +1204,7 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
         "manifest_file_sha256": sha_file(OPERATOR_ROOT / "command-manifest.json"),
         "manifest_semantic_sha256": manifest["manifest_sha256"],
         "command_sha256": manifest["command_sha256"],
+        "finalizer_authority": finalizer_authority,
         "argument_count": len(manifest["argv"]),
         "working_directory": str(ROOT),
         "shell": False,
@@ -989,13 +1248,17 @@ def finalize_actual(*, returncode: int, start_unix_ns: int, end_unix_ns: int) ->
         "status": "passed_immutable_evidence_preserved_restore_passed" if succeeded else "failed_immutable_evidence_preserved_restore_passed",
         "authority_commit": operator_result["operator_manifest_commit"],
         "manifest_file_sha256": operator_result["manifest_file_sha256"],
+        "finalizer_authority": finalizer_authority,
         "execution": {key: operator_result[key] for key in ("argument_count", "working_directory", "shell", "same_pty_sudo_cache", "maximum_invocations", "invocation_count", "retry_performed", "returncode", "canonical_start_unix_ns", "canonical_end_unix_ns", "elapsed_ns")},
         "failure": failure,
         "all_returncodes_and_streams": {"operator": {"returncode": returncode, "stdout": operator_result["stdout"], "stderr": operator_result["stderr"]}, "runner": {"returncode": runner.get("exit_code"), "stdout": optional_stream(PROFILE_EXECUTE_EVIDENCE, runner.get("stdout")), "stderr": optional_stream(PROFILE_EXECUTE_EVIDENCE, runner.get("stderr"))}, "validator": {"returncode": validator.get("exit_code"), "stdout": optional_stream(PROFILE_EXECUTE_EVIDENCE, validator.get("stdout")), "stderr": optional_stream(PROFILE_EXECUTE_EVIDENCE, validator.get("stderr"))}, "rocprof": {"returncode": capture_process.get("exit_code"), "stdout": stream_record(PROFILE_CAPTURE / "rocprof.stdout") if (PROFILE_CAPTURE / "rocprof.stdout").is_file() else None, "stderr": stream_record(PROFILE_CAPTURE / "rocprof.stderr") if (PROFILE_CAPTURE / "rocprof.stderr").is_file() else None}},
         "package_integrity": package,
         "restore": restore,
+        "restore_classification": "pre_stop_untouched_same_epoch" if no_op_restore else "outer_finally_restored_new_epoch",
+        "pre_stop_failure_snapshot": pre_stop_failure_snapshot,
+        "recovery_snapshot": post,
         "post_health": running,
-        "cleanup": {"capture_children_remaining": capture_failure.get("children_remaining") if isinstance(capture_failure, dict) else [], "capture_process_group_cleanup_complete": capture_failure.get("process_group_cleanup_complete") if isinstance(capture_failure, dict) else True, "launcher_children_remaining": launcher_failure.get("children_remaining", []), "launcher_cleanup_passed": launcher_failure.get("cleanup_passed", True), "driver_cleanup_passed": driver_process.get("cleanup", {}).get("passed") if isinstance(driver_process, dict) else None, "residual_targeted_processes": post["targeted_processes"], "trusted_lock_substrate_cleanup_passed": cleanup["passed"], "trusted_lock_substrate_holder_pids": cleanup["holder_pids"], "retry_forbidden_and_not_performed": True},
+        "cleanup": {"capture_children_remaining": capture_failure.get("children_remaining") if isinstance(capture_failure, dict) else [], "capture_process_group_cleanup_complete": capture_failure.get("process_group_cleanup_complete") if isinstance(capture_failure, dict) else True, "launcher_children_remaining": launcher_failure.get("children_remaining", []), "launcher_cleanup_passed": launcher_failure.get("cleanup_passed", True), "driver_cleanup_passed": driver_process.get("cleanup", {}).get("passed") if isinstance(driver_process, dict) else None, "residual_targeted_processes": post["targeted_processes"], "trusted_lock_substrate_cleanup_required": not no_op_restore, "trusted_lock_substrate_cleanup_passed": True if no_op_restore else cleanup["passed"], "trusted_lock_substrate_holder_pids": [] if no_op_restore else cleanup["holder_pids"], "retry_forbidden_and_not_performed": True},
         "profile_artifacts": {"status": "complete_diagnostic" if succeeded else "failure_evidence_only", "measurement_eligible": False, "promotion_eligible": False, "trace_csv_count": len(trace_files), "trace_csv_bytes": sum(item["size"] for item in trace_files), "capture_artifact": capture_inventory["members"].get("capture-artifact.json") if capture_inventory is not None else None, "capture_failure": capture_inventory["members"].get("capture-failure.json") if capture_inventory is not None else None, "runtime_summary": runtime_inventory["members"].get("resident-batch.summary.json") if runtime_inventory is not None else None},
         "evidence": {"maintenance": maintenance_inventory, "execute": execute_inventory, "runtime": runtime_inventory, "capture": capture_inventory, "operator_result": operator_inventory},
         "actual_executed": True,
@@ -1016,6 +1279,7 @@ def validate_actual() -> dict[str, Any]:
     result = load(OPERATOR_RESULT / "operator-result.json", "operator result")
     audit = load(ACTUAL_AUDIT / "actual-audit.json", "actual audit")
     validate_actual_documents(result, audit)
+    validate_finalizer_source_authority(result.get("finalizer_authority"))
     verify_sums(MAINTENANCE_EVIDENCE)
     for root in (PROFILE_EXECUTE_EVIDENCE, PROFILE_RUNTIME, PROFILE_CAPTURE):
         if root.exists() or root.is_symlink():

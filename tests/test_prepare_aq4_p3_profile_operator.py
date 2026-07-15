@@ -41,6 +41,8 @@ def finalizer_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     returncode: int,
+    pre_stop_noop: bool = False,
+    pre_stop_case: str | None = None,
 ) -> dict:
     paths = {
         "ROOT": tmp_path,
@@ -68,17 +70,81 @@ def finalizer_fixture(
     }
     unsealed_json(paths["OPERATOR_ROOT"], "command-manifest.json", manifest)
     unsealed_json(paths["PROFILE_READY_ROOT"], "ready-binding.json", {})
-    maintenance = {
-        "status": status,
-        "mode": "execute",
-        "failure": None if succeeded else {"stage": "profile-capture", "reason": "capture failed", "launcher_started": True},
-        "package_integrity": {"full_hash_count": 1, "full_content": {"passed": True}, "integrity_identity": {"passed": True}},
-        "restore": {"passed": True, "duration_ns": 1, "final_metadata_recheck": {"within_absolute_deadline": True}},
-        "lock_substrate_cleanup": {"passed": True, "runner_children": [], "holder_pids": []},
-        "capture": {"exit_code": returncode, "capture_tool_invocations": 1, "rocprof_invocations": 1},
-        "process_counts": {"capture_tool": 1, "launcher": 1, "rocprof": 1},
-        "secret_material_recorded": False,
-    }
+    if pre_stop_noop:
+        assert not succeeded
+        maintenance = {
+            "status": "failed",
+            "mode": "execute",
+            "failure": {
+                "stage": "pre-stop-snapshot",
+                "reason": "restored worker does not uniquely own target GPU",
+                "launcher_started": False,
+            },
+            "package_integrity": {"full_hash_count": 1, "full_content": {"passed": True}, "integrity_identity": {"passed": True}},
+            "restore": {"attempted": False, "error": None, "passed": True, "post_start": None},
+            "lock_substrate_cleanup": None,
+            "capture": None,
+            "launcher": None,
+            "pre_stop": None,
+            "stopped_gates": None,
+            "stopped_gate_poll": None,
+            "lock_substrate": None,
+            "sequence": ["sudo-prevalidate"],
+            "process_counts": {
+                "sudo": 1,
+                "sudo_keepalive": 0,
+                "systemctl_stop": 0,
+                "launcher": 0,
+                "systemctl_start": 0,
+                "capture_tool": 0,
+                "rocprof": 0,
+                "docker": 0,
+                "docker_exec": 0,
+                "container_curl": 0,
+                "container_curl_total": 0,
+                "container_curl_version": 0,
+                "container_curl_endpoint": 0,
+                "stopped_gate_polls": 0,
+                "stopped_gate_probe_commands": 0,
+            },
+            "safety": {
+                "service_touched": False,
+                "service_stopped": False,
+                "gpu_command_executed": False,
+                "model_load_executed": False,
+            },
+            "secret_material_recorded": False,
+        }
+        if pre_stop_case == "restore_false":
+            maintenance["restore"]["passed"] = False
+        elif pre_stop_case == "restore_unknown":
+            del maintenance["restore"]["passed"]
+        elif pre_stop_case == "later_stage":
+            maintenance["failure"]["stage"] = "service-stop"
+        elif pre_stop_case == "process_started":
+            maintenance["process_counts"]["launcher"] = 1
+        elif pre_stop_case == "service_stop_started":
+            maintenance["process_counts"]["systemctl_stop"] = 1
+        elif pre_stop_case == "capture_started":
+            maintenance["process_counts"]["capture_tool"] = 1
+        elif pre_stop_case == "rocprof_started":
+            maintenance["process_counts"]["rocprof"] = 1
+        elif pre_stop_case == "service_touched":
+            maintenance["safety"]["service_touched"] = True
+        elif pre_stop_case == "cleanup_present":
+            maintenance["lock_substrate_cleanup"] = {"passed": True, "runner_children": [], "holder_pids": []}
+    else:
+        maintenance = {
+            "status": status,
+            "mode": "execute",
+            "failure": None if succeeded else {"stage": "profile-capture", "reason": "capture failed", "launcher_started": True},
+            "package_integrity": {"full_hash_count": 1, "full_content": {"passed": True}, "integrity_identity": {"passed": True}},
+            "restore": {"attempted": True, "passed": True, "duration_ns": 1, "final_metadata_recheck": {"within_absolute_deadline": True}},
+            "lock_substrate_cleanup": {"passed": True, "runner_children": [], "holder_pids": []},
+            "capture": {"exit_code": returncode, "capture_tool_invocations": 1, "rocprof_invocations": 1},
+            "process_counts": {"capture_tool": 1, "launcher": 1, "rocprof": 1},
+            "secret_material_recorded": False,
+        }
     sealed(paths["MAINTENANCE_EVIDENCE"], "launcher-evidence.json", maintenance)
     launcher = {
         "status": status,
@@ -86,29 +152,62 @@ def finalizer_fixture(
         "validator": {"exit_code": 0, "stdout": {"file": "validator.stdout.bin"}, "stderr": {"file": "validator.stderr.bin"}},
         "failure": None if succeeded else {"stage": "runner", "reason": "capture failed", "children_remaining": [], "cleanup_passed": True},
     }
-    unsealed_json(paths["PROFILE_EXECUTE_EVIDENCE"], "launcher-evidence.json", launcher)
-    for name in ("runner.stdout.bin", "runner.stderr.bin", "validator.stdout.bin", "validator.stderr.bin"):
-        (paths["PROFILE_EXECUTE_EVIDENCE"] / name).write_bytes(b"")
-    OPERATOR.seal_existing(paths["PROFILE_EXECUTE_EVIDENCE"])
-    unsealed_json(paths["PROFILE_RUNTIME"], "resident-batch.summary.json", {"status": "complete", "resident_model_loads": 1})
-    unsealed_json(paths["PROFILE_RUNTIME"], "resident-batch.driver-process.json", {"cleanup": {"passed": True}})
-    if succeeded:
-        unsealed_json(paths["PROFILE_CAPTURE"], "capture-artifact.json", {"status": "complete_diagnostic", "measurement_eligible": False, "promotion_eligible": False})
-        nested = paths["PROFILE_CAPTURE"] / "measured-runs"
-        nested.mkdir()
-        (nested / "run-00_kernel_trace.csv").write_bytes(b"Kind,Name\nKERNEL,fixture\n")
-    else:
-        unsealed_json(paths["PROFILE_CAPTURE"], "capture-failure.json", {"schema_version": "ullm.aq4_p3_diagnostic_rocprof_failure.v2", "status": "failed", "reason": "capture failed", "children_remaining": [], "process_group_cleanup_complete": True, "ready_candidate_audit": {"reason_code": "marker_missing"}, "streams": {"rocprof.stdout": {"bytes": 0, "sha256": OPERATOR.sha_bytes(b"")}, "rocprof.stderr": {"bytes": len(b"capture failed\n"), "sha256": OPERATOR.sha_bytes(b"capture failed\n")}}})
-    (paths["PROFILE_CAPTURE"] / "rocprof.stdout").write_bytes(b"")
-    (paths["PROFILE_CAPTURE"] / "rocprof.stderr").write_bytes(b"" if succeeded else b"capture failed\n")
+    if not pre_stop_noop:
+        unsealed_json(paths["PROFILE_EXECUTE_EVIDENCE"], "launcher-evidence.json", launcher)
+        for name in ("runner.stdout.bin", "runner.stderr.bin", "validator.stdout.bin", "validator.stderr.bin"):
+            (paths["PROFILE_EXECUTE_EVIDENCE"] / name).write_bytes(b"")
+        OPERATOR.seal_existing(paths["PROFILE_EXECUTE_EVIDENCE"])
+        unsealed_json(paths["PROFILE_RUNTIME"], "resident-batch.summary.json", {"status": "complete", "resident_model_loads": 1})
+        unsealed_json(paths["PROFILE_RUNTIME"], "resident-batch.driver-process.json", {"cleanup": {"passed": True}})
+        if succeeded:
+            unsealed_json(paths["PROFILE_CAPTURE"], "capture-artifact.json", {"status": "complete_diagnostic", "measurement_eligible": False, "promotion_eligible": False})
+            nested = paths["PROFILE_CAPTURE"] / "measured-runs"
+            nested.mkdir()
+            (nested / "run-00_kernel_trace.csv").write_bytes(b"Kind,Name\nKERNEL,fixture\n")
+        else:
+            unsealed_json(paths["PROFILE_CAPTURE"], "capture-failure.json", {"schema_version": "ullm.aq4_p3_diagnostic_rocprof_failure.v2", "status": "failed", "reason": "capture failed", "children_remaining": [], "process_group_cleanup_complete": True, "ready_candidate_audit": {"reason_code": "marker_missing"}, "streams": {"rocprof.stdout": {"bytes": 0, "sha256": OPERATOR.sha_bytes(b"")}, "rocprof.stderr": {"bytes": len(b"capture failed\n"), "sha256": OPERATOR.sha_bytes(b"capture failed\n")}}})
+        (paths["PROFILE_CAPTURE"] / "rocprof.stdout").write_bytes(b"")
+        (paths["PROFILE_CAPTURE"] / "rocprof.stderr").write_bytes(b"" if succeeded else b"capture failed\n")
+    elif pre_stop_case == "partial_runtime":
+        paths["PROFILE_RUNTIME"].mkdir()
     paths["OPERATOR_RESULT"].mkdir()
     (paths["OPERATOR_RESULT"] / "operator.stdout.bin").write_bytes(OPERATOR.pretty({"status": status, "mode": "execute", "evidence": str(paths["MAINTENANCE_EVIDENCE"] / "launcher-evidence.json")}))
     (paths["OPERATOR_RESULT"] / "operator.stderr.bin").write_bytes(b"" if succeeded else b"maintenance failed\n")
-    pre = {"service": {"main_pid": 10}, "worker": {"pid": 20}, "owners": {"amd_smi": [20], "kfd": [20]}, "hashes": {"fixture": "same"}, "formal_health_sha256": "d" * 64}
-    post = {"service": {"active_state": "active", "sub_state": "running", "nrestarts": 0, "main_pid": 11}, "worker": {"pid": 21}, "gpu": {"device": "fixture"}, "owners": {"amd_smi": [21], "kfd": [21]}, "lock": {"busy": True}, "hashes": pre["hashes"], "formal_health_sha256": pre["formal_health_sha256"], "targeted_processes": []}
+    pre = {"service": {"active_state": "active", "sub_state": "running", "nrestarts": 0, "main_pid": 10}, "worker": {"path": "/worker", "pid": 20, "sha256": "f" * 64}, "gpu": {"device": "fixture"}, "owners": {"amd_smi": [20], "kfd": [20]}, "lock": {"path": "/run/lock", "busy": True, "identity": [1, 2, 3, 1, 0]}, "hashes": {"fixture": "same"}, "formal_health_sha256": "d" * 64}
+    if pre_stop_noop:
+        post = {**pre, "phase": "post_actual_evidence_recovery", "source": "fresh_read_only_phase_aware_probe", "previous_authorization_source": "sealed_operator_manifest_no_live_absence_recheck", "actual_outputs_permitted": True, "targeted_processes": [], "read_only": True, "service_touched": False, "gpu_workload_executed": False}
+        if pre_stop_case == "epoch_changed":
+            post = json.loads(json.dumps(post))
+            post["service"]["main_pid"] = 11
+        elif pre_stop_case == "owner_changed":
+            post = json.loads(json.dumps(post))
+            post["owners"]["amd_smi"] = [20, 30]
+        elif pre_stop_case == "lock_changed":
+            post = json.loads(json.dumps(post))
+            post["lock"]["identity"][1] = 3
+        elif pre_stop_case == "hash_changed":
+            post = json.loads(json.dumps(post))
+            post["hashes"]["fixture"] = "changed"
+        elif pre_stop_case == "health_changed":
+            post = json.loads(json.dumps(post))
+            post["formal_health_sha256"] = "c" * 64
+    else:
+        post = {"phase": "post_actual_evidence_recovery", "source": "fresh_read_only_phase_aware_probe", "previous_authorization_source": "sealed_operator_manifest_no_live_absence_recheck", "actual_outputs_permitted": True, "service": {"active_state": "active", "sub_state": "running", "nrestarts": 0, "main_pid": 11}, "worker": {"path": "/worker", "pid": 21, "sha256": "f" * 64}, "gpu": {"device": "fixture"}, "owners": {"amd_smi": [21], "kfd": [21]}, "lock": {"path": "/run/lock", "busy": True, "identity": [1, 2, 3, 1, 0]}, "hashes": pre["hashes"], "formal_health_sha256": pre["formal_health_sha256"], "targeted_processes": [], "read_only": True, "service_touched": False, "gpu_workload_executed": False}
     monkeypatch.setattr(OPERATOR, "validate_operator", lambda _root=paths["OPERATOR_ROOT"]: {"value": manifest})
     monkeypatch.setattr(OPERATOR, "validate_quiet", lambda _root=paths["QUIET_ROOT"]: {"value": {"confirmation": pre}})
-    monkeypatch.setattr(OPERATOR, "capture_snapshot", lambda _ready: post)
+    monkeypatch.setattr(OPERATOR, "capture_recovery_snapshot", lambda _ready: post)
+    monkeypatch.setattr(
+        OPERATOR,
+        "finalizer_source_authority",
+        lambda: {
+            "role": "existing_evidence_recovery_only_not_execution_authority",
+            "path": str(SCRIPT),
+            "commit": "e" * 40,
+            "git_blob": "f" * 40,
+            "sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(OPERATOR, "validate_finalizer_source_authority", lambda _value: None)
     monkeypatch.setattr(OPERATOR, "git", lambda *_args: "e" * 40)
     return paths
 
@@ -148,7 +247,7 @@ def test_v12_ready_execute_binding_and_fresh_output_authorities_are_exact() -> N
     )
     fresh = OPERATOR.fresh_paths(ready)
     assert len(fresh) == len({str(path) for path in fresh}) == 9
-    previous = OPERATOR.previous_authorization_v10_state()
+    previous = OPERATOR.validate_operator()["value"]["inputs"]["previous_operator_v10"]
     assert previous["state"] == "authorized_not_invoked_preflight_blocked"
     assert previous["authorization_commit"] == OPERATOR.PREVIOUS_OPERATOR_V10_COMMIT
     assert previous["authorization_tree"] == OPERATOR.PREVIOUS_OPERATOR_V10_TREE
@@ -395,6 +494,9 @@ def test_finalizer_immutably_seals_success_and_nonzero_failure(
     assert audit["execution"]["shell"] is False
     assert audit["execution"]["retry_performed"] is False
     assert audit["restore"]["passed"] is True
+    assert audit["restore_classification"] == "outer_finally_restored_new_epoch"
+    assert audit["pre_stop_failure_snapshot"] is None
+    assert audit["cleanup"]["trusted_lock_substrate_cleanup_required"] is True
     assert audit["cleanup"]["retry_forbidden_and_not_performed"] is True
     assert audit["profile_artifacts"]["status"] == ("complete_diagnostic" if succeeded else "failure_evidence_only")
     validated = OPERATOR.validate_actual()
@@ -407,6 +509,86 @@ def test_finalizer_immutably_seals_success_and_nonzero_failure(
         assert OPERATOR.verify_sums(root)["mode"] == "0555"
     if succeeded:
         assert (paths["PROFILE_CAPTURE"] / "measured-runs").stat().st_mode & 0o777 == 0o555
+
+
+def test_finalizer_seals_strict_pre_stop_noop_failure_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = finalizer_fixture(
+        tmp_path,
+        monkeypatch,
+        returncode=1,
+        pre_stop_noop=True,
+    )
+    audit = OPERATOR.finalize_actual(
+        returncode=1,
+        start_unix_ns=100,
+        end_unix_ns=18_000_000_100,
+    )
+    assert audit["status"] == "failed_immutable_evidence_preserved_restore_passed"
+    assert audit["execution"]["invocation_count"] == 1
+    assert audit["execution"]["maximum_invocations"] == 1
+    assert audit["execution"]["retry_performed"] is False
+    assert audit["execution"]["elapsed_ns"] == 18_000_000_000
+    assert audit["restore"] == {
+        "attempted": False,
+        "error": None,
+        "passed": True,
+        "post_start": None,
+    }
+    assert audit["restore_classification"] == "pre_stop_untouched_same_epoch"
+    assert audit["pre_stop_failure_snapshot"]["owner_identity_evidence"] == "unavailable_not_recorded_by_pre_stop_probe"
+    assert audit["pre_stop_failure_snapshot"]["normative_external_owner_pids"] is None
+    assert audit["recovery_snapshot"]["previous_authorization_source"] == "sealed_operator_manifest_no_live_absence_recheck"
+    assert audit["cleanup"]["trusted_lock_substrate_cleanup_required"] is False
+    assert audit["evidence"]["execute"] is None
+    assert audit["evidence"]["runtime"] is None
+    assert audit["evidence"]["capture"] is None
+    assert OPERATOR.validate_actual()["audit"] == audit
+    for root in (paths["PROFILE_EXECUTE_EVIDENCE"], paths["PROFILE_RUNTIME"], paths["PROFILE_CAPTURE"]):
+        assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("restore_false", "pre-stop no-op restore evidence"),
+        ("restore_unknown", "pre-stop no-op restore evidence"),
+        ("later_stage", "pre-stop no-op restore evidence"),
+        ("process_started", "pre-stop no-op restore evidence"),
+        ("service_stop_started", "pre-stop no-op restore evidence"),
+        ("capture_started", "pre-stop no-op restore evidence"),
+        ("rocprof_started", "pre-stop no-op restore evidence"),
+        ("service_touched", "pre-stop no-op restore evidence"),
+        ("cleanup_present", "pre-stop no-op restore evidence"),
+        ("partial_runtime", "downstream artifacts"),
+        ("epoch_changed", "recovery epoch"),
+        ("owner_changed", "owner/residual state"),
+        ("lock_changed", "recovery epoch"),
+        ("hash_changed", "recovery epoch"),
+        ("health_changed", "recovery epoch"),
+    ),
+)
+def test_finalizer_rejects_unsafe_pre_stop_noop_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    message: str,
+) -> None:
+    finalizer_fixture(
+        tmp_path,
+        monkeypatch,
+        returncode=1,
+        pre_stop_noop=True,
+        pre_stop_case=case,
+    )
+    with pytest.raises(OPERATOR.OperatorError, match=message):
+        OPERATOR.finalize_actual(
+            returncode=1,
+            start_unix_ns=100,
+            end_unix_ns=18_000_000_100,
+        )
 
 
 def test_monitor_requires_one_unchanged_clean_streak_and_confirmation() -> None:
