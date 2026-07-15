@@ -51,12 +51,17 @@ HARNESS_TRUST_PATH = READY_ROOT / "harness-trust.json"
 ATTESTATION_PATH = READY_ROOT / "qa-attestation.json"
 MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-maintenance-evidence-v10"
 DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-dry-run-v6"
-PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v15"
+PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v16"
 PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
 PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
 PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
+HISTORICAL_PROFILE_READY_V15_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v15"
+HISTORICAL_PROFILE_READY_V15_PATH = HISTORICAL_PROFILE_READY_V15_ROOT / "ready-binding.json"
+HISTORICAL_PROFILE_HARNESS_TRUST_V15_PATH = HISTORICAL_PROFILE_READY_V15_ROOT / "harness-trust.json"
+HISTORICAL_PROFILE_ATTESTATION_V15_PATH = HISTORICAL_PROFILE_READY_V15_ROOT / "qa-attestation.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11"
-PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v15"
+PROFILE_OFFLINE_REASSEMBLY_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v11"
+PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v16"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
 PROFILE_CAPTURE_COMMIT = "eb00cbd83b90d6fd8d519f6662ddea16d5f4438c"
 PROFILE_CAPTURE_TREE = "545511060d95a02d69f4164d35bb56d89c22ea59"
@@ -67,7 +72,7 @@ PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10"
 PROFILE_OUTPUT_NAME = "aq4-p3-diagnostic"
 PROFILE_ARTIFACT = PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
-PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v10"
+PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v11"
 PROFILE_TIMEOUT_SECONDS = 1800
 PROFILE_CAPTURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_capture.v1"
 PROFILE_CAPTURE_FAILURE_SCHEMA = "ullm.aq4_p3_diagnostic_rocprof_failure.v2"
@@ -3710,7 +3715,7 @@ def _seal_capture_output(root: Path) -> dict[str, Any]:
 
 def validate_profile_offline_reassembly(
     capture_root: Path = PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY,
-    evidence_root: Path = PROFILE_MAINTENANCE_EVIDENCE,
+    evidence_root: Path = PROFILE_OFFLINE_REASSEMBLY_EVIDENCE,
 ) -> dict[str, Any]:
     seal = actual_v12_seal()
     output = _capture_output_readback(capture_root)
@@ -3830,7 +3835,7 @@ def _capture_output_readback(root: Path) -> dict[str, Any]:
 
 def prepare_profile_offline_reassembly(
     capture_root: Path = PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY,
-    evidence_root: Path = PROFILE_MAINTENANCE_EVIDENCE,
+    evidence_root: Path = PROFILE_OFFLINE_REASSEMBLY_EVIDENCE,
 ) -> dict[str, Any]:
     if capture_root.exists() or capture_root.is_symlink() or evidence_root.exists() or evidence_root.is_symlink():
         raise HarnessError("offline reassembly fresh output already exists")
@@ -4060,6 +4065,11 @@ def load_ready_artifact(path: Path = READY_PATH) -> dict[str, Any]:
         root, trust_path, attestation_path, profile_diagnostic = READY_ROOT, HARNESS_TRUST_PATH, ATTESTATION_PATH, False
     elif path == PROFILE_READY_PATH:
         root, trust_path, attestation_path, profile_diagnostic = PROFILE_READY_ROOT, PROFILE_HARNESS_TRUST_PATH, PROFILE_ATTESTATION_PATH, True
+    elif path == HISTORICAL_PROFILE_READY_V15_PATH:
+        root = HISTORICAL_PROFILE_READY_V15_ROOT
+        trust_path = HISTORICAL_PROFILE_HARNESS_TRUST_V15_PATH
+        attestation_path = HISTORICAL_PROFILE_ATTESTATION_V15_PATH
+        profile_diagnostic = True
     else:
         raise HarnessError("ready artifact path differs")
     expected_names = {"ready-binding.json", "qa-attestation.json", "harness-trust.json", "SHA256SUMS"}
@@ -4068,12 +4078,68 @@ def load_ready_artifact(path: Path = READY_PATH) -> dict[str, Any]:
     ready_raw, _ = LAUNCHER.read_regular(path, "ready binding"); value = LAUNCHER.parse_json(ready_raw, "ready binding")
     trust_raw, _ = LAUNCHER.read_regular(trust_path, "harness trust"); trust = LAUNCHER.parse_json(trust_raw, "harness trust")
     attestation_raw, _ = LAUNCHER.read_regular(attestation_path, "QA attestation"); attestation = LAUNCHER.parse_json(attestation_raw, "QA attestation")
-    expected = ready_document({key: trust[key] for key in ("path", "commit", "tree", "git_blob", "sha256")}, profile_diagnostic=profile_diagnostic)
-    if value != expected or attestation != QA_ATTESTATION or trust.get("schema_version") != "ullm.aq4_p2_resident_maintenance_harness_trust.v1" or trust.get("status") != "ready_for_one_case" or trust.get("execution_mode") != value["execution_mode"] or trust.get("actual_eligible") is not True or trust.get("ready_binding_sha256") != sha_bytes(ready_raw):
+    expected_trust_fields = {
+        "schema_version", "status", "execution_mode", "actual_eligible", "path",
+        "commit", "tree", "git_blob", "sha256", "ready_binding_sha256",
+    }
+    source_path = Path(trust.get("path", ""))
+    source_commit = trust.get("commit")
+    source_tree = trust.get("tree")
+    source_blob = trust.get("git_blob")
+    source_sha = trust.get("sha256")
+    if (
+        set(trust) != expected_trust_fields
+        or trust.get("schema_version") != "ullm.aq4_p2_resident_maintenance_harness_trust.v1"
+        or trust.get("status") != "ready_for_one_case"
+        or trust.get("execution_mode") != value.get("execution_mode")
+        or trust.get("actual_eligible") is not True
+        or trust.get("ready_binding_sha256") != sha_bytes(ready_raw)
+        or source_path != Path(__file__).resolve()
+        or not isinstance(source_commit, str)
+        or GIT_OID_RE.fullmatch(source_commit) is None
+        or not isinstance(source_tree, str)
+        or GIT_OID_RE.fullmatch(source_tree) is None
+        or not isinstance(source_blob, str)
+        or GIT_OID_RE.fullmatch(source_blob) is None
+        or not isinstance(source_sha, str)
+        or SHA_RE.fullmatch(source_sha) is None
+    ):
         raise HarnessError("ready artifact semantic binding differs")
-    self_sha = LAUNCHER.sha_file(Path(__file__).resolve(), "maintenance harness self")[0]
-    if trust.get("path") != str(Path(__file__).resolve()) or trust.get("sha256") != self_sha:
-        raise HarnessError("maintenance harness self differs")
+    relative = source_path.relative_to(ROOT)
+    historical_raw = _git_bytes(
+        ["show", f"{source_commit}:{relative}"],
+        "ready historical maintenance source",
+    )
+    if (
+        _git_stdout(["rev-parse", f"{source_commit}^{{tree}}"], "ready historical source tree") != source_tree
+        or _git_stdout(["rev-parse", f"{source_commit}:{relative}"], "ready historical source blob") != source_blob
+        or sha_bytes(historical_raw) != source_sha
+        or hashlib.sha1(f"blob {len(historical_raw)}\0".encode("ascii") + historical_raw).hexdigest() != source_blob
+    ):
+        raise HarnessError("ready historical maintenance source authority differs")
+    historical_name = f"_aq4_p2_ready_historical_{source_commit}"
+    historical = types.ModuleType(historical_name)
+    historical.__file__ = str(source_path)
+    historical.__package__ = ""
+    sys.modules[historical_name] = historical
+    try:
+        exec(compile(historical_raw, f"{source_commit}:{relative}", "exec"), historical.__dict__)
+        historical_attestation = historical.QA_ATTESTATION
+        expected = historical.ready_document(
+            {key: trust[key] for key in ("path", "commit", "tree", "git_blob", "sha256")},
+            profile_diagnostic=profile_diagnostic,
+        )
+    except Exception as error:
+        raise HarnessError("ready historical generator source evaluation failed") from error
+    finally:
+        sys.modules.pop(historical_name, None)
+    if (
+        attestation != historical_attestation
+        or attestation_raw != historical.pretty(historical_attestation)
+        or value != expected
+        or value.get("qa_attestation_sha256") != sha_bytes(attestation_raw)
+    ):
+        raise HarnessError("ready historical generator/QA semantic binding differs")
     sum_inputs = [("harness-trust.json", trust_raw), ("qa-attestation.json", attestation_raw), ("ready-binding.json", ready_raw)]
     expected_sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in sorted(sum_inputs)).encode("ascii")
     sums_raw, _ = LAUNCHER.read_regular(root / "SHA256SUMS", "ready sums")
@@ -4531,10 +4597,10 @@ def main(argv: list[str] | None = None, *, dependencies: Dependencies | None = N
             raise HarnessError("artifact preparation/validation modes are mutually exclusive")
         if args.prepare_profile_offline_reassembly:
             value = prepare_profile_offline_reassembly()
-            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
+            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY), "evidence": str(PROFILE_OFFLINE_REASSEMBLY_EVIDENCE)}, sort_keys=True)); return 0
         if args.validate_profile_offline_reassembly:
             value = validate_profile_offline_reassembly()
-            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY), "evidence": str(PROFILE_MAINTENANCE_EVIDENCE)}, sort_keys=True)); return 0
+            print(json.dumps({"status": value["status"], "capture": str(PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY), "evidence": str(PROFILE_OFFLINE_REASSEMBLY_EVIDENCE)}, sort_keys=True)); return 0
         if args.prepare_ready_artifact or args.prepare_profile_ready_artifact:
             profile = args.prepare_profile_ready_artifact
             value = prepare_ready_artifact(profile_diagnostic=profile)

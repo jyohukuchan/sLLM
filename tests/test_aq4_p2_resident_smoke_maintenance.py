@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -662,7 +663,7 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
         "model_loads": 0,
     }
     assert capture.lstat().st_mode & 0o777 == evidence.lstat().st_mode & 0o777 == 0o555
-    assert HARNESS.PROFILE_READY_ROOT.is_dir()
+    assert HARNESS.HISTORICAL_PROFILE_READY_V15_ROOT.is_dir()
     assert HARNESS.ACTUAL_V12_ROOTS[4].is_dir()
     assert value == HARNESS.validate_profile_offline_reassembly(capture, evidence)
 
@@ -708,14 +709,18 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
 
 def test_profile_v13_is_invalid_preoperator_and_future_outputs_are_poststate_independent() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v15"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v16"
+    assert HARNESS.HISTORICAL_PROFILE_READY_V15_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v15"
     assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v11"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v15"
+    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v11"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v16"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v10"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
-    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v10"
+    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v11"
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.is_symlink()
+    assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
+    assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.is_symlink()
     invalid_preoperator_v13_roots = (
         base / "p2/resident-one-case-smoke-profile-ready-v13",
         base / "p2/resident-one-case-smoke-profile-ready-dry-run-v13",
@@ -975,7 +980,7 @@ def test_offline_reassembly_poststate_does_not_change_canonical_ready(
         "sha256": "4" * 64,
     }
     before = HARNESS.ready_document(identity, profile_diagnostic=True)
-    offline = tmp_path / "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v10"
+    offline = tmp_path / "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v11"
     monkeypatch.setattr(HARNESS, "PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY", offline)
     offline.mkdir()
     (offline / "capture-artifact.json").write_text("{}\n", encoding="ascii")
@@ -989,6 +994,73 @@ def test_offline_reassembly_poststate_does_not_change_canonical_ready(
         "must_not_exist_before_capture": True,
     }
     assert str(offline) not in json.dumps(after, sort_keys=True)
+
+
+def test_historical_ready_v15_loader_is_final_state_independent() -> None:
+    trust = json.loads(HARNESS.HISTORICAL_PROFILE_HARNESS_TRUST_V15_PATH.read_text())
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout.strip() != trust["commit"]
+    assert HARNESS.ACTUAL_V12_ROOTS[4].is_dir()
+    value = HARNESS.load_ready_artifact(HARNESS.HISTORICAL_PROFILE_READY_V15_PATH)
+    assert value == json.loads(HARNESS.HISTORICAL_PROFILE_READY_V15_PATH.read_text())
+    assert value["actual_eligible"] is True
+
+
+@pytest.mark.parametrize("tamper", ("trust", "qa", "source"))
+def test_historical_ready_v15_rejects_resealed_authority_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    root = tmp_path / "profile-ready-v15"
+    shutil.copytree(HARNESS.HISTORICAL_PROFILE_READY_V15_ROOT, root)
+    os.chmod(root, 0o700)
+    for path in root.iterdir():
+        os.chmod(path, 0o600)
+    ready_path = root / "ready-binding.json"
+    trust_path = root / "harness-trust.json"
+    attestation_path = root / "qa-attestation.json"
+    ready = json.loads(ready_path.read_text())
+    trust = json.loads(trust_path.read_text())
+    attestation = json.loads(attestation_path.read_text())
+    if tamper == "trust":
+        trust["tree"] = "0" * 40
+    elif tamper == "source":
+        trust["sha256"] = "0" * 64
+    else:
+        attestation["manual_checks"]["boundary_count"] += 1
+        attestation_raw = HARNESS.pretty(attestation)
+        ready["qa_attestation_sha256"] = HARNESS.sha_bytes(attestation_raw)
+        ready_raw = HARNESS.pretty(ready)
+        trust["ready_binding_sha256"] = HARNESS.sha_bytes(ready_raw)
+        ready_path.write_bytes(ready_raw)
+        attestation_path.write_bytes(attestation_raw)
+    trust_path.write_bytes(HARNESS.pretty(trust))
+    members = [
+        ("harness-trust.json", trust_path.read_bytes()),
+        ("qa-attestation.json", attestation_path.read_bytes()),
+        ("ready-binding.json", ready_path.read_bytes()),
+    ]
+    (root / "SHA256SUMS").write_bytes(
+        "".join(
+            f"{HARNESS.sha_bytes(raw)}  {name}\n"
+            for name, raw in members
+        ).encode("ascii")
+    )
+    for path in root.iterdir():
+        os.chmod(path, 0o444)
+    os.chmod(root, 0o555)
+    monkeypatch.setattr(HARNESS, "HISTORICAL_PROFILE_READY_V15_ROOT", root)
+    monkeypatch.setattr(HARNESS, "HISTORICAL_PROFILE_READY_V15_PATH", ready_path)
+    monkeypatch.setattr(HARNESS, "HISTORICAL_PROFILE_HARNESS_TRUST_V15_PATH", trust_path)
+    monkeypatch.setattr(HARNESS, "HISTORICAL_PROFILE_ATTESTATION_V15_PATH", attestation_path)
+    with pytest.raises(HARNESS.HarnessError, match="ready (historical|artifact)"):
+        HARNESS.load_ready_artifact(ready_path)
 
 
 def test_offline_source_authority_uses_path_last_change_not_current_head(
