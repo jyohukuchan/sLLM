@@ -32,16 +32,16 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "b89acf82e78fc7e236c649ac7bcbd3bbac91e865"
-LAUNCHER_TREE = "adb9dff37a34d2cadedf8bfd2f64ddded2745997"
-LAUNCHER_GIT_BLOB = "bfc2ab94e08f0836ff0ccf06336962fcd300eeea"
-LAUNCHER_SHA = "35195d815fca42b4705ff0e9001674507a37149b1d70c0bdd183378417e8279c"
-RUNNER_COMMIT = "e993016f4a62b9970423223db8702f77ee834b12"
+LAUNCHER_COMMIT = "bc382fc04293b8a6a3751ca2ab09b366a5179876"
+LAUNCHER_TREE = "1b85029e15e68568fd0baec28bce98bc2dc9438f"
+LAUNCHER_GIT_BLOB = "7623e6fc31f38596cc897e2cfb6826ce5e32b828"
+LAUNCHER_SHA = "382dca37f2fb5fb398a0c71128a96d58ad7f0d56543c0c418ae09532092ba3b4"
+RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
-VALIDATOR_COMMIT = "efc18d0262e4ff18421c57a77b27f67bf56362cc"
-B_COMMIT = "cd764a3ba3ca00d141c2e3aadde162d099a5ce87"
-RESIDENT_COMMIT = "084d2e71114857da77e4196061d18a1dfefd53e8"
+VALIDATOR_COMMIT = "614fea0808a4bbe044df734fbf530b2bd9a6e6ec"
+B_COMMIT = "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407"
+RESIDENT_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-ready-v1"
 READY_PATH = READY_ROOT / "ready-binding.json"
 HARNESS_TRUST_PATH = READY_ROOT / "harness-trust.json"
@@ -1584,7 +1584,7 @@ def capture_running(dependencies: Dependencies, previous: dict[str, Any] | None 
     worker_pid, worker_record = _worker_pid(dependencies.run)
     gpu, gpu_record = _gpu_identity(dependencies.run)
     manifest_sha = LAUNCHER.sha_file(LAUNCHER.SERVED_MANIFEST, "active manifest")[0]
-    worker_sha = hash_regular_with_nlink(WORKER, "active worker", 2)
+    worker_sha = hash_regular_with_nlink(WORKER, "active worker", 1)
     package_manifest_sha = LAUNCHER.sha_file(PACKAGE_MANIFEST, "package manifest")[0]
     package_content_sha = dependencies.package_hash(PACKAGE_ROOT)
     if manifest_sha != LAUNCHER.SERVED_SHA or worker_sha != WORKER_SHA or package_manifest_sha != PACKAGE_MANIFEST_SHA or package_content_sha != PACKAGE_CONTENT_SHA:
@@ -1864,20 +1864,26 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 11, "collected": 345, "passed": 345, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 362, "passed": 362, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 255, "passed": 255, "failed": 0, "deselected": 0,
+                "collected": 256, "passed": 256, "failed": 0, "deselected": 0,
                 "files": [
-                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "cd764a3ba3ca00d141c2e3aadde162d099a5ce87", "git_blob": "faed4cbd7edd36ae89e543d80144290db994c0f2", "collected": 50, "passed": 50},
+                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "1478ce8bf681ab7f1e3a8ed8aa1f5e319e80d407", "git_blob": "301b0df899590b28f9b9564866fbda80016580e2", "collected": 51, "passed": 51},
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "e57f7df362ced2fc6753519772b2e656b530ad7f", "collected": 37, "passed": 37},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "438e8637c4bb0333ed321e7c6da63681d05a3a5f", "git_blob": "ea5c71899b096843902da3b237952fef35592dc6", "collected": 58, "passed": 58},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "564d3b51d080328415b2e62511b87562469b7734", "git_blob": "f41c5ed91689ab19a99e9fd4b98142505c5f986c", "collected": 58, "passed": 58},
                     {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "9a3de26914fee595466644bc9f47f276ae7337c0", "git_blob": "c6f55e522435c037ee607d3bc661a2954371bd61", "collected": 76, "passed": 76},
                 ],
+            },
+            {
+                "name": "resident_driver_unit",
+                "command": ["cargo", "test", "-p", "ullm-engine", "--bin", "ullm-aq4-p2-resident-driver", "--no-default-features"],
+                "collected": 16, "passed": 16, "failed": 0, "deselected": 0,
+                "files": [{"path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", "source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf", "git_blob": "ea26726e95aeb73b4285fd36ea3f8b0be74578f4", "collected": 16, "passed": 16}],
             },
             {
                 "name": "resident_roctx_ranges",
@@ -1912,8 +1918,8 @@ QA_ATTESTATION = {
         ],
     },
     "manual_checks": {"boundary_count": 15, "status": "passed"},
-    "strict_negative_contract_count": 40,
-    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "worker-exact-two-hardlink-set-pre-open-post-and-rehash", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
+    "strict_negative_contract_count": 43,
+    "coverage": ["safety-success-start-failure-partial", "validator-runner-finalize-toctou", "identity-and-hash-bindings", "source-family-and-runtime-gfx-vocabulary-separation", "runtime-device-five-field-exact-binding", "worker-fixture-driven-single-or-two-link-exact-topology-pre-open-post-and-rehash", "bounded-driver-stdout-and-streamed-stderr-failure-evidence", "driver-process-group-descendant-cleanup-and-secret-redaction", "strict-amd-process-active-owner-and-zero-sentinel-schema", "secret-free-amd-process-rejection-shape-and-raw-sha", "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics", "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding", "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection", "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive", "immutable-streamed-stop-poll-evidence", "container-namespace-health-and-authenticated-model-binding", "secret-free-stdin-header-transport", "base-and-profile-dry-run-process-count-zero", "rocprof-pinned-fd-and-target-manifest", "roctx-run-session-case-and-library-binding"],
     "launcher": {"commit": LAUNCHER_COMMIT, "sha256": LAUNCHER_SHA},
     "runner": {"commit": RUNNER_COMMIT, "sha256": RUNNER_SHA},
     "capture_tool": {"commit": PROFILE_CAPTURE_COMMIT, "sha256": PROFILE_CAPTURE_SHA},
@@ -1940,7 +1946,13 @@ def validate_qa_test_manifest() -> None:
             if not isinstance(item, dict) or set(item) != {"path", "source_commit", "git_blob", "collected", "passed"}:
                 raise HarnessError("QA exact test file schema differs")
             path = item.get("path")
-            if not isinstance(path, str) or not path.startswith("tests/test_") or Path(path).is_absolute() or ".." in Path(path).parts or path in observed_paths:
+            if (
+                not isinstance(path, str)
+                or (not path.startswith("tests/test_") and path != "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs")
+                or Path(path).is_absolute()
+                or ".." in Path(path).parts
+                or path in observed_paths
+            ):
                 raise HarnessError("QA exact test file coverage differs")
             if not isinstance(item.get("source_commit"), str) or re.fullmatch(r"[0-9a-f]{40}", item["source_commit"]) is None or not isinstance(item.get("git_blob"), str) or re.fullmatch(r"[0-9a-f]{40}", item["git_blob"]) is None:
                 raise HarnessError("QA exact test file Git identity differs")
@@ -1950,7 +1962,13 @@ def validate_qa_test_manifest() -> None:
             suite_paths.append(path)
             suite_collected += item["collected"]
             suite_passed += item["passed"]
-        if suite.get("command") != ["python3", "-m", "pytest", "-q", *suite_paths] or suite.get("collected") != suite_collected or suite.get("passed") != suite_passed or suite.get("failed") != 0 or suite.get("deselected") != 0:
+        expected_command = (
+            ["cargo", "test", "-p", "ullm-engine", "--bin", "ullm-aq4-p2-resident-driver", "--no-default-features"]
+            if suite.get("name") == "resident_driver_unit"
+            and suite_paths == ["crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs"]
+            else ["python3", "-m", "pytest", "-q", *suite_paths]
+        )
+        if suite.get("command") != expected_command or suite.get("collected") != suite_collected or suite.get("passed") != suite_passed or suite.get("failed") != 0 or suite.get("deselected") != 0:
             raise HarnessError("QA exact test suite command/counts differ")
         collected += suite_collected
         passed += suite_passed
