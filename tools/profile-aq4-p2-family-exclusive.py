@@ -42,6 +42,12 @@ GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # Patterns are deliberately conservative.  An unknown production kernel is
 # unclassified and fails the default zero threshold instead of being guessed.
 FAMILY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "runtime_support": (
+        r"^__amd_rocclr_(?:fillBufferAligned|copyBuffer)$",
+    ),
+    "embedding": (
+        r"(?:^|[_:])bf16[_:]?row[_:]?f32[_:]?kernel(?:$|[_:])",
+    ),
     "paged_validation": (
         r"paged[_:]?kv[_:]?write",
         r"qwen35[_:]?qk[_:]?norm[_:]?rope",
@@ -66,10 +72,11 @@ FAMILY_PATTERNS: dict[str, tuple[str, ...]] = {
     "normalization": (
         r"rmsnorm",
         r"rms[_:]?norm",
-        r"silu[_:]?mul",
+        r"^(?!.*aq4.*(?:matvec|gemm|projection|register[_:]?bm8)).*silu[_:]?mul",
         r"sigmoid[_:]?mul",
         r"(?:^|[_:])rope(?:[_:](?:f32|bf16))?[_:]kernel(?:$|[_:])",
-        r"(?:^|[_:])add[_:]?kernel",
+        r"^(?!.*aq4.*(?:matvec|gemm|projection|register[_:]?bm8))"
+        r".*(?:^|[_:])add(?:[_:]?f32)?[_:]?kernel(?:$|[_:])",
     ),
     "head": (
         r"(?:^|[_:])top1(?:[_:]|$)",

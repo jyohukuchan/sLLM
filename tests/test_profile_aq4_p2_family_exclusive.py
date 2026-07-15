@@ -271,6 +271,34 @@ def test_parser_accepts_v3_and_legacy_timestamp_schemas(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("name", "family"),
+    [
+        ("__amd_rocclr_fillBufferAligned", "runtime_support"),
+        ("__amd_rocclr_copyBuffer", "runtime_support"),
+        ("ullm_bf16_row_f32_kernel", "embedding"),
+        ("ullm_add_f32_kernel", "normalization"),
+        ("ullm_aq4_matvec_silu_mul_f32_kernel", "aq4_projection"),
+        ("ullm_aq4_matvec_add_f32_kernel", "aq4_projection"),
+        ("hip_paged_kv_write_kernel", "paged_validation"),
+        ("hip_paged_decode_attention", "attention"),
+        ("hip_linear_attn_recurrent", "recurrent"),
+        ("hip_rmsnorm_kernel", "normalization"),
+        ("hip_top1_kernel", "head"),
+    ],
+)
+def test_actual_runtime_names_and_existing_families_are_exclusive(
+    name: str, family: str
+) -> None:
+    assert PROFILE.classify_kernel(name) == family
+
+
+def test_unknown_and_multiple_family_names_remain_fail_closed() -> None:
+    assert PROFILE.classify_kernel("vendor_new_unreviewed_kernel") is None
+    with pytest.raises(PROFILE.ProfileError, match="matches multiple families"):
+        PROFILE.classify_kernel("hip_aq4_matvec_rmsnorm_kernel")
+
+
+@pytest.mark.parametrize(
     ("rows", "message"),
     [
         (
