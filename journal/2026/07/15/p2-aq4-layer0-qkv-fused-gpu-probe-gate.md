@@ -52,4 +52,16 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 
 ## 次の行動
 
-attempt3のGPU/output/observer/復旧証跡、閾値なし比較成果物、監査修正済みの期限付きpost-start readiness診断を限定commitとして保存する。GPU/serviceの再実行・promotionは行わない。
+## attempt4 closeout（2026-07-15）
+
+- 実行時HEADは`c53d8f619b7c45d9e2f57aeaf80d5e22a759655a`である。指定されていた`04fc7753855de6fd78c5e286aa4a55bef34d01b7`の直系子で、追加差分はbundle preparation tool 1ファイルだけだった。Gate commit `f89361d55dd548bde7d27a95c9e95c540250c965`はancestorで、Gate blobは`a623a6f3534b1a90ba1c28619e7cd9543189a171`、Gate file SHA-256は`cec5522cafc2f1f9d7570b5b2f82676d9c75aa6fdca5c87d082ef042740ee5cb`のまま不変だった。
+- fixed probe SHA-256 `42752e7a29614f59f72f90bed6797c3e925b032bffb1a4196c462c8476386840`、receipt SHA-256 `90e9ef6d383f7ef25e9526659f035e40291ba1a5efa7f8ba36340c8b245d9504`、input SHA-256 `c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17`、package manifest SHA-256 `a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad`を再確認した。既存attempt1〜3へ触れず、fresh `attempts/attempt4/`を使用した。既定post-start bounds `120秒/1秒/512回`はoverrideしていない。
+- 同一PTYで`sudo -v`後、attempt4 pathへ束縛した`PREFLIGHT_ONLY=1`を1回実行してrc0を確認し、通常`EXECUTE_GPU_PROBE=1`を1回だけ実行してrc0で完了した。実行前はservice workerだけがR9700/KFDを所有し、cargo、rustc、rocprof、別Gate、fidelity capture、resident batchは存在しなかった。
+- modern AMD-SMI observerはcard 2/gfx1201のusage、power、mem_usage、ASIC identityを取得した。monitor SHA-256は`b082fedb1757bc0ac24d0b18102ad8bb58f4dceab593ecabd8d491578009ed68`である。probe validatorはschema v2、HIP logical device 1、gfx1201、両kernel guard、fused RPB4、standalone effective RPB32/default、Q/K/V segments、5 sidecarのlayout/rows/SHA/finiteを受理した。report SHA-256は`399388961f0b1892a7256d443dad63880200e81d297e0519210ba9357d7c1bb1`で、classificationは`unclassified`、promotionはfalseである。holdout、数値threshold、policy decisionは実行していない。
+- post-start readinessは4 attempts、elapsed `4,068,542,916 ns`でpassedした。最初の3 attemptsはserviceのlock再生成・owner待ちで、最終attemptはservice active/running、新MainPID、NRestarts、active/package/worker SHA、lock identity、flock保持、owner、health exact HTTP 200の9条件がすべてtrueだった。JSONL SHA-256は`817df166b9aaecc62ad2298950d7831a3002283f57e0db1a707fd3590015db89`、final artifact SHA-256は`1767bdc380250f24e9151a6228e463efd24a8105295fc03ba44108a4ebc2d344`である。
+- serviceは旧MainPID `2442053`から新MainPID `2634680`、workerは`2442481`から`2635236`へ切り替わり、`NRestarts=0`を維持した。healthはHTTP 200、`/run/ullm/r9700.lock`はdevice/inode `26:772895`、regular、nlink 1、mode `0600`、uid/gid `1000:1000`で、新MainPIDのfd ownerを確認した。
+- attempt4全ファイルは`attempts/attempt4/SHA256SUMS`へ束縛した。既存dirty/untrackedは保全し、Gate、production、P3コードは変更していない。
+
+## 次の行動
+
+fused Gate closeoutは完了した。attempt4を再実行せず、holdout・数値threshold・promotionへ流用しない。P2 fidelityのNo-Goを維持したまま、次は別レーンでfidelity修正と凍結済みcalibration再測定を行う。

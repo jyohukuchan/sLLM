@@ -350,7 +350,7 @@ class PinnedFdMap:
             offset += len(chunk)
         after = self.verify_binding(item)
         observed_sha = digest.hexdigest()
-        if fingerprint(after) != fingerprint(before) or observed_sha != item["sha256"]:
+        if not self._identity_matches(item, after) or observed_sha != item["sha256"]:
             raise BundleError(f"pinned FD binding bytes changed: {item['role']}")
         return b"".join(chunks), observed_sha, before
 

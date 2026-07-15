@@ -1,0 +1,114 @@
+{
+  "attempt_count": 4,
+  "attempts": [
+    {
+      "attempt": 1,
+      "conditions": {
+        "active_hashes": "true",
+        "flock_held": "false",
+        "health_200": "true",
+        "lock_identity": "false",
+        "new_main_pid": "true",
+        "nrestarts": "true",
+        "owner": "false",
+        "service_active": "true",
+        "service_running": "true"
+      },
+      "elapsed_ns": 167731080,
+      "failure_reasons": {
+        "flock_held": "lock identity unavailable",
+        "lock_identity": "expected regular nlink1 mode0600 uid1000 gid1000",
+        "owner": "expected new MainPID to hold lock fd"
+      },
+      "status": "retry"
+    },
+    {
+      "attempt": 2,
+      "conditions": {
+        "active_hashes": "true",
+        "flock_held": "false",
+        "health_200": "true",
+        "lock_identity": "false",
+        "new_main_pid": "true",
+        "nrestarts": "true",
+        "owner": "false",
+        "service_active": "true",
+        "service_running": "true"
+      },
+      "elapsed_ns": 1440376167,
+      "failure_reasons": {
+        "flock_held": "lock identity unavailable",
+        "lock_identity": "expected regular nlink1 mode0600 uid1000 gid1000",
+        "owner": "expected new MainPID to hold lock fd"
+      },
+      "status": "retry"
+    },
+    {
+      "attempt": 3,
+      "conditions": {
+        "active_hashes": "true",
+        "flock_held": "false",
+        "health_200": "true",
+        "lock_identity": "false",
+        "new_main_pid": "true",
+        "nrestarts": "true",
+        "owner": "false",
+        "service_active": "true",
+        "service_running": "true"
+      },
+      "elapsed_ns": 2715734169,
+      "failure_reasons": {
+        "flock_held": "lock identity unavailable",
+        "lock_identity": "expected regular nlink1 mode0600 uid1000 gid1000",
+        "owner": "expected new MainPID to hold lock fd"
+      },
+      "status": "retry"
+    },
+    {
+      "attempt": 4,
+      "conditions": {
+        "active_hashes": "true",
+        "flock_held": "true",
+        "health_200": "true",
+        "lock_identity": "true",
+        "new_main_pid": "true",
+        "nrestarts": "true",
+        "owner": "true",
+        "service_active": "true",
+        "service_running": "true"
+      },
+      "elapsed_ns": 3992735855,
+      "failure_reasons": {},
+      "status": "passed"
+    }
+  ],
+  "deadline_ns": 1346054312378283,
+  "elapsed_ns": 4068542916,
+  "last_failure": {
+    "flock_held": "lock identity unavailable",
+    "lock_identity": "expected regular nlink1 mode0600 uid1000 gid1000",
+    "owner": "expected new MainPID to hold lock fd"
+  },
+  "limits": {
+    "max_attempts": 512,
+    "poll_seconds": 1.0,
+    "timeout_seconds": 120
+  },
+  "predicate_order": [
+    "service_active",
+    "service_running",
+    "new_main_pid",
+    "nrestarts",
+    "active_hashes",
+    "lock_identity",
+    "flock_held",
+    "owner",
+    "health_200"
+  ],
+  "safety": {
+    "additional_gpu_probe_executed": false,
+    "additional_probe_executed": false
+  },
+  "schema_version": "ullm.aq4_layer0_qkv_fused_gpu_post_start_readiness.v1",
+  "status": "passed"
+}
