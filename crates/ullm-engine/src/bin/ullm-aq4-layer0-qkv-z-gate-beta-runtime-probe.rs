@@ -6,10 +6,12 @@
 //! The probe deliberately takes input_normed vectors from an external JSONL
 //! sidecar. It performs one fused
 //! `PackageAq4ResidentMatvec::matvec_qkv_z_gate_beta_with` call per row on
-//! CPU device zero, compares the fused QKV output with the existing standalone
-//! `matvec` path bit-for-bit, writes four independent little-endian f32
-//! sidecars, and emits an identity-bound report. This binary is diagnostic
-//! only; it does not alter the production layer or its defaults.
+//! CPU device zero or the guarded HIP device one, compares the fused QKV
+//! output with the existing standalone `matvec` path, writes independent
+//! little-endian f32 sidecars, and emits an identity-bound report. CPU uses
+//! the standalone path as a formal bit-exact reference; HIP records finite,
+//! shape-compatible comparison metrics as a diagnostic. This binary is
+//! diagnostic only; it does not alter the production layer or its defaults.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,7 +30,7 @@ use ullm_engine::package::{
     TensorPayloadBundle, TensorSelector,
 };
 
-const SCHEMA: &str = "ullm.aq4_layer0_qkv_z_gate_beta_runtime_probe.v1";
+const SCHEMA: &str = "ullm.aq4_layer0_qkv_z_gate_beta_runtime_probe.v2";
 const INPUT_SCHEMA: &str = "ullm.aq4_layer0_input_normed_jsonl.v1";
 const QKV_TENSOR: &str = "model.language_model.layers.0.linear_attn.in_proj_qkv.weight";
 const Z_TENSOR: &str = "model.language_model.layers.0.linear_attn.in_proj_z.weight";
@@ -227,6 +229,7 @@ struct OutputLayoutReport {
     dtype: String,
     row_order: String,
     qkv_shape: Vec<usize>,
+    qkv_standalone_shape: Vec<usize>,
     z_shape: Vec<usize>,
     gate_shape: Vec<usize>,
     beta_shape: Vec<usize>,
@@ -234,8 +237,14 @@ struct OutputLayoutReport {
 
 #[derive(Debug, Serialize)]
 struct QkvReferenceReport {
+    reference_backend: String,
+    reference_kind: String,
     operation: String,
+    standalone_rpb_raw: Option<String>,
+    standalone_rpb_effective: Option<u32>,
+    standalone_rpb_source: String,
     bit_exact: bool,
+    standalone_output_key: String,
     bit_mismatch_count: usize,
     byte_mismatch_count: usize,
     max_abs: f32,
@@ -313,15 +322,31 @@ impl RollbackGuard {
         }
     }
 
-    fn register_published(&mut self, path: PathBuf) -> ProbeResult<()> {
-        let identity = file_stat(&path, "published output")?;
-        if identity.nlink != 1 {
+    fn register_published(&mut self, path: PathBuf, identity: FileStat) -> ProbeResult<()> {
+        self.published.push(PublishedPath {
+            path: path.clone(),
+            identity: identity.clone(),
+        });
+        let current = file_stat(&path, "published output")?;
+        if current.nlink != 1 || !same_file_identity(&current, &identity) {
             return Err(format!(
-                "published output must have nlink=1: {}",
+                "published output identity differs during registration: {}",
                 path.display()
             ));
         }
-        self.published.push(PublishedPath { path, identity });
+        Ok(())
+    }
+
+    fn verify_current(&self) -> ProbeResult<()> {
+        for published in &self.published {
+            let current = file_stat(&published.path, "published output")?;
+            if current.nlink != 1 || !same_file_identity(&current, &published.identity) {
+                return Err(format!(
+                    "published output changed before report commit: {}",
+                    published.path.display()
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -339,7 +364,7 @@ impl Drop for RollbackGuard {
             let Ok(current) = file_stat(&published.path, "rollback output") else {
                 continue;
             };
-            if current != published.identity {
+            if current.nlink != 1 || !same_file_identity(&current, &published.identity) {
                 continue;
             }
             let _ = fs::remove_file(&published.path);
@@ -387,13 +412,14 @@ impl AtomicFile {
         })
     }
 
-    fn publish(mut self) -> ProbeResult<()> {
+    fn publish(mut self) -> ProbeResult<FileStat> {
         self.file
             .flush()
             .map_err(|err| format!("failed to flush {}: {err}", self.temp.display()))?;
         self.file
             .sync_all()
             .map_err(|err| format!("failed to sync {}: {err}", self.temp.display()))?;
+        let own = file_stat(&self.temp, "atomic temporary output")?;
         fs::hard_link(&self.temp, &self.final_path).map_err(|err| {
             let _ = fs::remove_file(&self.temp);
             format!(
@@ -401,13 +427,45 @@ impl AtomicFile {
                 self.final_path.display()
             )
         })?;
+        let linked = match file_stat(&self.final_path, "atomic published output") {
+            Ok(stat) => stat,
+            Err(err) => {
+                remove_file_if_identity(&self.final_path, &own);
+                return Err(err);
+            }
+        };
+        if !same_file_identity(&own, &linked) {
+            remove_file_if_identity(&self.final_path, &own);
+            return Err(format!(
+                "atomic published output identity differs: {}",
+                self.final_path.display()
+            ));
+        }
         fs::remove_file(&self.temp).map_err(|err| {
             format!(
                 "published {} but could not remove temporary {}: {err}",
                 self.final_path.display(),
                 self.temp.display()
             )
-        })
+        })?;
+        let final_stat = file_stat(&self.final_path, "atomic published output")?;
+        if final_stat.nlink != 1 || !same_file_identity(&own, &final_stat) {
+            remove_file_if_identity(&self.final_path, &own);
+            return Err(format!(
+                "atomic published output identity changed: {}",
+                self.final_path.display()
+            ));
+        }
+        Ok(final_stat)
+    }
+}
+
+fn remove_file_if_identity(path: &Path, identity: &FileStat) {
+    let Ok(current) = file_stat(path, "owned output cleanup") else {
+        return;
+    };
+    if same_file_identity(&current, identity) {
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -496,9 +554,8 @@ impl OutputSink {
         }
     }
 
-    fn publish(self) -> ProbeResult<()> {
-        self.file.publish()?;
-        Ok(())
+    fn publish(self) -> ProbeResult<FileStat> {
+        self.file.publish()
     }
 }
 
@@ -549,7 +606,14 @@ impl QkvCompare {
         Ok(())
     }
 
-    fn finish(self) -> QkvReferenceReport {
+    fn finish(
+        self,
+        reference_backend: &str,
+        reference_kind: &str,
+        standalone_rpb_raw: Option<String>,
+        standalone_rpb_effective: Option<u32>,
+        standalone_rpb_source: &str,
+    ) -> QkvReferenceReport {
         let relative_l2 = if self.sum_reference_sq == 0.0 {
             if self.sum_diff_sq == 0.0 {
                 0.0
@@ -560,8 +624,14 @@ impl QkvCompare {
             self.sum_diff_sq.sqrt() / self.sum_reference_sq.sqrt()
         };
         QkvReferenceReport {
+            reference_backend: reference_backend.to_string(),
+            reference_kind: reference_kind.to_string(),
             operation: "standalone_aq4_matvec_f32".to_string(),
+            standalone_rpb_raw,
+            standalone_rpb_effective,
+            standalone_rpb_source: standalone_rpb_source.to_string(),
             bit_exact: self.bit_mismatch_count == 0 && self.byte_mismatch_count == 0,
+            standalone_output_key: "qkv_standalone".to_string(),
             bit_mismatch_count: self.bit_mismatch_count,
             byte_mismatch_count: self.byte_mismatch_count,
             max_abs: self.max_abs,
@@ -570,6 +640,37 @@ impl QkvCompare {
             standalone_rows_sha256: self.standalone_rows_sha256,
         }
     }
+}
+
+fn resolve_standalone_reference_config(
+    is_cpu: bool,
+) -> (String, String, Option<String>, Option<u32>, String) {
+    let raw = env::var("ULLM_AQ4_MATVEC_RPB").ok();
+    if is_cpu {
+        return (
+            "cpu".to_string(),
+            "formal_standalone_reference".to_string(),
+            raw,
+            None,
+            "not_applicable_cpu".to_string(),
+        );
+    }
+    if let Some(effective) = raw.as_deref().and_then(parse_rpb_value) {
+        return (
+            "hip".to_string(),
+            "diagnostic_standalone_reference".to_string(),
+            raw,
+            Some(effective),
+            "environment:ULLM_AQ4_MATVEC_RPB".to_string(),
+        );
+    }
+    (
+        "hip".to_string(),
+        "diagnostic_standalone_reference".to_string(),
+        raw,
+        Some(32),
+        "architecture_default:gfx1201".to_string(),
+    )
 }
 
 fn main() {
@@ -627,6 +728,13 @@ fn run() -> ProbeResult<()> {
             args.device_index, device_info.backend
         ));
     }
+    let (
+        reference_backend,
+        reference_kind,
+        standalone_rpb_raw,
+        standalone_rpb_effective,
+        standalone_rpb_source,
+    ) = resolve_standalone_reference_config(is_cpu);
     let hip_guard_required = is_hip;
     let (fused_rpb_raw, fused_rpb_effective, fused_rpb_source) = if is_hip {
         resolve_fused_rpb_environment()?
@@ -754,7 +862,7 @@ fn run() -> ProbeResult<()> {
     let output_dir = prepare_output_directory(&args.output_dir)?;
     let report_path = output_dir.join("report.json");
     if fs::symlink_metadata(&report_path).is_ok()
-        || ["qkv", "z", "gate", "beta"]
+        || ["qkv", "qkv-standalone", "z", "gate", "beta"]
             .iter()
             .any(|name| fs::symlink_metadata(output_dir.join(format!("{name}.f32le"))).is_ok())
     {
@@ -763,6 +871,8 @@ fn run() -> ProbeResult<()> {
     let report_file = AtomicFile::create(report_path)?;
     let mut rollback = RollbackGuard::new();
     let mut qkv_sink = OutputSink::create(&output_dir, "qkv", EXPECTED_QKV_ROWS)?;
+    let mut standalone_qkv_sink =
+        OutputSink::create(&output_dir, "qkv-standalone", EXPECTED_QKV_ROWS)?;
     let mut z_sink = OutputSink::create(&output_dir, "z", EXPECTED_Z_ROWS)?;
     let mut gate_sink = OutputSink::create(&output_dir, "gate", EXPECTED_HEADS)?;
     let mut beta_sink = OutputSink::create(&output_dir, "beta", EXPECTED_HEADS)?;
@@ -858,6 +968,7 @@ fn run() -> ProbeResult<()> {
         ensure_finite_row(&beta_row, "beta", &case.case_id)?;
         qkv_compare.row(&qkv_row, &standalone_qkv_row)?;
         qkv_sink.write_row(&case, &qkv_row)?;
+        standalone_qkv_sink.write_row(&case, &standalone_qkv_row)?;
         z_sink.write_row(&case, &z_row)?;
         gate_sink.write_row(&case, &gate_row)?;
         beta_sink.write_row(&case, &beta_row)?;
@@ -882,12 +993,21 @@ fn run() -> ProbeResult<()> {
             .map(passthrough_report)
             .collect(),
     };
-    let qkv_component_reference = qkv_compare.finish();
-    if !qkv_component_reference.bit_exact {
-        return Err("fused QKV component differs from standalone CPU output".to_string());
+    let qkv_component_reference = qkv_compare.finish(
+        &reference_backend,
+        &reference_kind,
+        standalone_rpb_raw,
+        standalone_rpb_effective,
+        &standalone_rpb_source,
+    );
+    if !qkv_comparison_passes(is_cpu, qkv_component_reference.bit_exact) {
+        return Err(
+            "CPU formal standalone QKV reference differs from fused QKV output".to_string(),
+        );
     }
     let mut outputs = std::collections::BTreeMap::new();
     outputs.insert("qkv".to_string(), qkv_sink.report());
+    outputs.insert("qkv_standalone".to_string(), standalone_qkv_sink.report());
     outputs.insert("z".to_string(), z_sink.report());
     outputs.insert("gate".to_string(), gate_sink.report());
     outputs.insert("beta".to_string(), beta_sink.report());
@@ -934,6 +1054,7 @@ fn run() -> ProbeResult<()> {
             dtype: "f32".to_string(),
             row_order: "input_jsonl_order".to_string(),
             qkv_shape: vec![EXPECTED_QKV_ROWS],
+            qkv_standalone_shape: vec![EXPECTED_QKV_ROWS],
             z_shape: vec![EXPECTED_Z_ROWS],
             gate_shape: vec![EXPECTED_HEADS],
             beta_shape: vec![EXPECTED_HEADS],
@@ -950,20 +1071,24 @@ fn run() -> ProbeResult<()> {
     // Sidecars publish before the report commit marker. RollbackGuard removes
     // every already-published sidecar if any later publication fails.
     let qkv_path = qkv_sink.path.clone();
-    qkv_sink.publish()?;
-    rollback.register_published(qkv_path)?;
+    let qkv_identity = qkv_sink.publish()?;
+    rollback.register_published(qkv_path, qkv_identity)?;
+    let standalone_qkv_path = standalone_qkv_sink.path.clone();
+    let standalone_qkv_identity = standalone_qkv_sink.publish()?;
+    rollback.register_published(standalone_qkv_path, standalone_qkv_identity)?;
     let z_path = z_sink.path.clone();
-    z_sink.publish()?;
-    rollback.register_published(z_path)?;
+    let z_identity = z_sink.publish()?;
+    rollback.register_published(z_path, z_identity)?;
     let gate_path = gate_sink.path.clone();
-    gate_sink.publish()?;
-    rollback.register_published(gate_path)?;
+    let gate_identity = gate_sink.publish()?;
+    rollback.register_published(gate_path, gate_identity)?;
     let beta_path = beta_sink.path.clone();
-    beta_sink.publish()?;
-    rollback.register_published(beta_path)?;
+    let beta_identity = beta_sink.publish()?;
+    rollback.register_published(beta_path, beta_identity)?;
+    rollback.verify_current()?;
     let report_path = report_file.final_path.clone();
-    report_file.publish()?;
-    rollback.register_published(report_path)?;
+    let report_identity = report_file.publish()?;
+    rollback.register_published(report_path, report_identity)?;
     rollback.commit();
     Ok(())
 }
@@ -1679,6 +1804,13 @@ fn file_stat(path: &Path, label: &str) -> ProbeResult<FileStat> {
     }
 }
 
+fn same_file_identity(left: &FileStat, right: &FileStat) -> bool {
+    left.device == right.device
+        && left.inode == right.inode
+        && left.size_bytes == right.size_bytes
+        && left.mtime_ns == right.mtime_ns
+}
+
 fn ensure_regular_nlink_one(path: &Path, label: &str) -> ProbeResult<()> {
     let stat = file_stat(path, label)?;
     if stat.nlink != 1 {
@@ -1736,6 +1868,10 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
     hex_digest(digest.finalize())
+}
+
+fn qkv_comparison_passes(is_cpu: bool, bit_exact: bool) -> bool {
+    !is_cpu || bit_exact
 }
 
 fn hex_digest(digest: impl AsRef<[u8]>) -> String {
@@ -1985,6 +2121,34 @@ mod tests {
     }
 
     #[test]
+    fn qkv_exactness_is_required_on_cpu_but_diagnostic_on_hip() {
+        assert!(qkv_comparison_passes(true, true));
+        assert!(!qkv_comparison_passes(true, false));
+        assert!(qkv_comparison_passes(false, true));
+        assert!(qkv_comparison_passes(false, false));
+    }
+
+    #[test]
+    fn standalone_reference_contract_names_backend_and_effective_rpb() {
+        let (backend, kind, _raw, effective, source) = resolve_standalone_reference_config(true);
+        assert_eq!(backend, "cpu");
+        assert_eq!(kind, "formal_standalone_reference");
+        assert_eq!(effective, None);
+        assert_eq!(source, "not_applicable_cpu");
+
+        let (backend, kind, raw, effective, source) = resolve_standalone_reference_config(false);
+        assert_eq!(backend, "hip");
+        assert_eq!(kind, "diagnostic_standalone_reference");
+        assert_eq!(
+            effective,
+            Some(raw.as_deref().and_then(parse_rpb_value).unwrap_or(32))
+        );
+        assert!(
+            source == "architecture_default:gfx1201" || source == "environment:ULLM_AQ4_MATVEC_RPB"
+        );
+    }
+
+    #[test]
     fn manifest_exact_name_count_rejects_duplicates() {
         let mut tensors = vec![QKV_TENSOR, Z_TENSOR, A_TENSOR, B_TENSOR]
             .into_iter()
@@ -2021,8 +2185,12 @@ mod tests {
         fs::write(&report, b"report").unwrap();
         {
             let mut guard = RollbackGuard::new();
-            guard.register_published(qkv.clone()).unwrap();
-            guard.register_published(report.clone()).unwrap();
+            guard
+                .register_published(qkv.clone(), file_stat(&qkv, "test qkv").unwrap())
+                .unwrap();
+            guard
+                .register_published(report.clone(), file_stat(&report, "test report").unwrap())
+                .unwrap();
         }
         assert!(!qkv.exists());
         assert!(!report.exists());
@@ -2038,11 +2206,45 @@ mod tests {
         fs::write(&path, b"probe").unwrap();
         {
             let mut guard = RollbackGuard::new();
-            guard.register_published(path.clone()).unwrap();
+            guard
+                .register_published(path.clone(), file_stat(&path, "test race").unwrap())
+                .unwrap();
             fs::remove_file(&path).unwrap();
             fs::write(&path, b"foreign").unwrap();
         }
         assert_eq!(fs::read(&path).unwrap(), b"foreign");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_registration_failure_preserves_foreign_replacement() {
+        let root = temp_path("rollback-registration-race");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("qkv.f32le");
+        fs::write(&path, b"probe").unwrap();
+        let own = file_stat(&path, "test registration race").unwrap();
+        let mut guard = RollbackGuard::new();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"foreign").unwrap();
+        assert!(guard.register_published(path.clone(), own).is_err());
+        drop(guard);
+        assert_eq!(fs::read(&path).unwrap(), b"foreign");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_publish_returns_owned_identity() {
+        let root = temp_path("atomic-identity");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let final_path = root.join("output.f32le");
+        let mut atomic = AtomicFile::create(final_path.clone()).unwrap();
+        atomic.file.write_all(b"output").unwrap();
+        let identity = atomic.publish().unwrap();
+        let current = file_stat(&final_path, "atomic test output").unwrap();
+        assert_eq!(identity, current);
+        assert_eq!(identity.nlink, 1);
         fs::remove_dir_all(root).unwrap();
     }
 
