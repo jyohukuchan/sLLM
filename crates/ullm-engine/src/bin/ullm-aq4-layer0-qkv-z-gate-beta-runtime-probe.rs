@@ -441,13 +441,14 @@ impl AtomicFile {
                 self.final_path.display()
             ));
         }
-        fs::remove_file(&self.temp).map_err(|err| {
-            format!(
+        if let Err(err) = fs::remove_file(&self.temp) {
+            remove_file_if_identity(&self.final_path, &own);
+            return Err(format!(
                 "published {} but could not remove temporary {}: {err}",
                 self.final_path.display(),
                 self.temp.display()
-            )
-        })?;
+            ));
+        }
         let final_stat = file_stat(&self.final_path, "atomic published output")?;
         if final_stat.nlink != 1 || !same_file_identity(&own, &final_stat) {
             remove_file_if_identity(&self.final_path, &own);
