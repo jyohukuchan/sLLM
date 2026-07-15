@@ -19,6 +19,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "ullm.qwen35_aq4_source_calibration_cases.v1"
+RECEIPT_SCHEMA = "ullm.aq4_p2_fidelity_holdout_source_cases.v1"
 MAX_ROWS = 24
 
 
@@ -74,7 +75,12 @@ def _atomic(path: Path, value: Any) -> str:
         current /= component
         if stat.S_ISLNK(os.lstat(current).st_mode):
             raise CasesError(f"output parent has symlink component: {current}")
-    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False).encode() + b"\n"
+    encoded = (
+        json.dumps(
+            value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False
+        ).encode()
+        + b"\n"
+    )
     temporary = path.with_name(f".{path.name}.{os.getpid()}.incomplete")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444)
     try:
@@ -84,7 +90,10 @@ def _atomic(path: Path, value: Any) -> str:
             os.fsync(stream.fileno())
         os.link(temporary, path, follow_symlinks=False)
         os.unlink(temporary)
-        parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
         try:
             os.fsync(parent_fd)
         finally:
@@ -105,13 +114,27 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise CasesError(f"split validation failed: {error}") from error
     manifest_raw = (args.split_root / "split-manifest.json").read_bytes()
     policy_raw = (args.split_root / "policy.json").read_bytes()
-    calibration_sha = _sha(args.split_root / "calibration-cases.jsonl", "calibration cases")
+    calibration_sha = _sha(
+        args.split_root / "calibration-cases.jsonl", "calibration cases"
+    )
     holdout_path = args.split_root / "holdout-cases.jsonl"
     holdout_sha = _sha(holdout_path, "holdout cases")
-    expected = {"split_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(), "policy_sha256": hashlib.sha256(policy_raw).hexdigest(), "calibration_cases_sha256": calibration_sha, "holdout_cases_sha256": holdout_sha}
-    supplied = {"split_manifest_sha256": args.expected_split_manifest_sha256, "policy_sha256": args.expected_policy_sha256, "calibration_cases_sha256": args.expected_calibration_cases_sha256, "holdout_cases_sha256": args.expected_holdout_cases_sha256}
+    expected = {
+        "split_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "policy_sha256": hashlib.sha256(policy_raw).hexdigest(),
+        "calibration_cases_sha256": calibration_sha,
+        "holdout_cases_sha256": holdout_sha,
+    }
+    supplied = {
+        "split_manifest_sha256": args.expected_split_manifest_sha256,
+        "policy_sha256": args.expected_policy_sha256,
+        "calibration_cases_sha256": args.expected_calibration_cases_sha256,
+        "holdout_cases_sha256": args.expected_holdout_cases_sha256,
+    }
     if supplied != expected:
-        raise CasesError("split/policy/calibration/holdout SHA does not match the pinned contract")
+        raise CasesError(
+            "split/policy/calibration/holdout SHA does not match the pinned contract"
+        )
     rows = PROTOCOL.read_jsonl(holdout_path, "holdout cases")
     if len(rows) != MAX_ROWS or any(row.get("subset") != "holdout" for row in rows):
         raise CasesError("holdout cases must contain exactly 24 holdout rows")
@@ -130,18 +153,60 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         value, _ = PROTOCOL.load(fixture, f"fixture {case_id}")
         item = value.get("cases", [{}])[0]
         tokens = item.get("prompt_token_ids")
-        if item.get("case_id") != case_id or not isinstance(tokens, list) or len(tokens) != row.get("prompt_tokens") or PROTOCOL.sha_bytes(PROTOCOL.canonical(tokens)) != row.get("prompt_token_ids_sha256") or PROTOCOL.context_hash(tokens) != row.get("context_token_ids_sha256"):
+        if (
+            item.get("case_id") != case_id
+            or not isinstance(tokens, list)
+            or len(tokens) != row.get("prompt_tokens")
+            or PROTOCOL.sha_bytes(PROTOCOL.canonical(tokens))
+            != row.get("prompt_token_ids_sha256")
+            or PROTOCOL.context_hash(tokens) != row.get("context_token_ids_sha256")
+        ):
             raise CasesError(f"fixture/token identity differs: {case_id}")
-        cases.append({"case_id": case_id, "prompt_token_ids": tokens, "step_count": 1, "semantic_input_id": case_id, "observation": "fidelity_full_context_step0"})
+        cases.append(
+            {
+                "case_id": case_id,
+                "prompt_token_ids": tokens,
+                "step_count": 1,
+                "semantic_input_id": case_id,
+                "observation": "fidelity_holdout_full_context_step0",
+            }
+        )
     payload = {"schema_version": SCHEMA, "cases": cases}
     output_sha = _atomic(args.output, payload)
-    return {"status": "ok", "row_count": MAX_ROWS, "subset": "holdout", "output": str(args.output), "output_sha256": output_sha, **expected}
+    info = os.lstat(args.output)
+    receipt = {
+        "schema_version": RECEIPT_SCHEMA,
+        "status": "ready",
+        "subset": "holdout",
+        "observation": "fidelity_holdout_full_context_step0",
+        "row_count": MAX_ROWS,
+        "cases": {
+            "path": str(args.output.resolve()),
+            "sha256": output_sha,
+            "bytes": info.st_size,
+            "mode": f"{stat.S_IMODE(info.st_mode):04o}",
+            "nlink": info.st_nlink,
+        },
+        "split": expected,
+    }
+    receipt_sha = _atomic(args.receipt_output, receipt)
+    return {
+        "status": "ok",
+        "row_count": MAX_ROWS,
+        "subset": "holdout",
+        "output": str(args.output),
+        "output_sha256": output_sha,
+        "receipt": str(args.receipt_output),
+        "receipt_sha256": receipt_sha,
+        **expected,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--receipt-output", type=Path, required=True)
     parser.add_argument("--expected-split-manifest-sha256", required=True)
     parser.add_argument("--expected-policy-sha256", required=True)
     parser.add_argument("--expected-calibration-cases-sha256", required=True)

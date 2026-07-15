@@ -17,7 +17,7 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -266,6 +266,27 @@ fn sha_file(path: &Path, label: &str) -> Result<String, String> {
     let mut buf = [0_u8; 1024 * 1024];
     loop { let read = file.read(&mut buf).map_err(|e| format!("{label} read: {e}"))?; if read == 0 { break; } digest.update(&buf[..read]); }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sync_dir(path: &Path, label: &str) -> Result<(), String> {
+    File::open(path).and_then(|file| file.sync_all()).map_err(|error| format!("{label} sync: {error}"))
+}
+
+fn seal_file(path: &Path, label: &str) -> Result<(), String> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o444)).map_err(|error| format!("{label} chmod: {error}"))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{label} seal metadata: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1 || metadata.mode() & 0o777 != 0o444 {
+        return Err(format!("{label} immutable topology differs"));
+    }
+    Ok(())
+}
+
+fn write_sealed(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
+    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o444).open(path).map_err(|error| format!("{label} create: {error}"))?;
+    file.write_all(bytes).map_err(|error| format!("{label} write: {error}"))?;
+    file.sync_all().map_err(|error| format!("{label} sync: {error}"))?;
+    drop(file);
+    seal_file(path, label)
 }
 
 fn read_json(path: &Path, label: &str) -> Result<Value, String> {
@@ -529,6 +550,14 @@ fn rename_noreplace(_source: &Path, _destination: &Path) -> Result<(), String> {
 
 fn run(args: Args) -> Result<(), String> {
     if fs::symlink_metadata(&args.output).is_ok() { return Err("output root already exists; overwrite is forbidden".into()); }
+    if args.subset == "holdout" {
+        let visible_device = args.device_index.to_string();
+        for name in ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"] {
+            if env::var(name).ok().as_deref() != Some(visible_device.as_str()) {
+                return Err(format!("{name} does not match the requested device index"));
+            }
+        }
+    }
     let expected_cases_sha = if args.subset == "holdout" {
         args.expected_holdout_cases_sha256.as_deref().ok_or("holdout cases SHA is missing")?
     } else {
@@ -589,9 +618,15 @@ fn run(args: Args) -> Result<(), String> {
     if !runtime.calibration_full_logits_top1_available() { return Err("active LM head has no full-logit calibration path".into()); }
     let mut output_rows = 0usize;
     let mut finite_rows = 0usize;
+    let mut rows_started = 0usize;
+    let mut generation_states_observed = 0usize;
+    let mut reset_calls = 0usize;
     for row in &split_rows {
+        if runtime.last_generation_state_epoch().is_some() { return Err(format!("retained request state exists before {}", row.case_id)); }
+        rows_started += 1;
         let source_case = source_by_id.get(row.case_id.as_str()).ok_or_else(|| format!("source case missing: {}", row.case_id))?;
         if source_case.step_count != 1 { return Err("fidelity source cases must be one step".into()); }
+        if args.subset == "holdout" && source_case.observation.as_deref() != Some("fidelity_holdout_full_context_step0") { return Err(format!("source case subset observation differs: {}", row.case_id)); }
         let prompt = fixture_tokens(&args.split_root, row)?;
         if prompt.len() != row.prompt_tokens || canonical_token_hash(&prompt, false)? != row.prompt_token_ids_sha256 || canonical_token_hash(&prompt, true)? != row.context_token_ids_sha256 || source_case.prompt_token_ids != prompt { return Err(format!("fixture/case token identity differs: {}", row.case_id)); }
         let requested = row.prefill_requested_m;
@@ -613,6 +648,7 @@ fn run(args: Args) -> Result<(), String> {
         runtime.synchronize()?;
         let top = runtime.top_logits_from_last_layer(TOP_K, &format!("aq4-fidelity-top-{}", row.case_id))?;
         let epoch = runtime.last_generation_state_epoch().ok_or("active generation epoch is missing")?;
+        generation_states_observed += 1;
         let mut observer = CaptureObserver::new(&mut hidden, &mut logits, args.chunk_elements)?;
         runtime.visit_last_generation_state(epoch, &mut observer)?;
         let vector_row = observer.finish_row(row, source_case.semantic_input_id.clone().unwrap_or_else(|| row.case_id.clone()), source_case.observation.clone().unwrap_or_else(|| "fidelity_full_context_step0".into()))?;
@@ -621,6 +657,8 @@ fn run(args: Args) -> Result<(), String> {
         if top.first().map(|item| item.token_id) != Some(vector_row.greedy_token_id) { return Err(format!("active top-1 differs from full-logit row: {}", row.case_id)); }
         serde_json::to_writer(&mut rows_file, &vector_row).map_err(|e| format!("row JSON: {e}"))?; rows_file.write_all(b"\n").map_err(|e| format!("row newline: {e}"))?; output_rows += 1;
         runtime.reset_all_request_state_synchronized()?;
+        reset_calls += 1;
+        if runtime.last_generation_state_epoch().is_some() { return Err(format!("request state remains after reset: {}", row.case_id)); }
     }
     if output_rows != MAX_ROWS { return Err("active fidelity output row count differs".into()); }
     hidden.sync_all().map_err(|e| format!("hidden sync: {e}"))?; logits.sync_all().map_err(|e| format!("logits sync: {e}"))?; rows_file.sync_all().map_err(|e| format!("rows sync: {e}"))?;
@@ -629,12 +667,19 @@ fn run(args: Args) -> Result<(), String> {
     let identity = json!({"artifact": {"package_manifest_sha256": Value::Null, "artifact_manifest_sha256": Value::Null}, "model_id": model.public.upstream_id, "model_revision": provenance.model_revision, "source_checkpoint": provenance.source_checkpoint, "tokenizer": provenance.tokenizer, "hidden_size": HIDDEN_SIZE, "vocab_size": VOCAB_SIZE, "package_content_sha256": package_content_sha, "package_manifest_sha256": package_manifest_sha, "worker_binary_sha256": worker_sha});
     let nonfinite_rows = output_rows.checked_sub(finite_rows).ok_or("finite row count exceeds output rows")?;
     let run = json!({"row_count": output_rows, "nonfinite_rows": nonfinite_rows, "elapsed_seconds": 0.0});
-    let manifest = json!({"schema_version": SCHEMA, "oracle_kind": "aq4_target", "status": "available", "evidence_class": "production", "usable_as_source_evidence": false, "promotion_eligible": false, "created_utc": source_manifest.get("created_utc").cloned().unwrap_or_else(|| Value::String("2026-01-01T00:00:00Z".into())), "identity": identity, "parent_sampled_oracle": parent, "vector_contract": {"hidden_shape": [HIDDEN_SIZE], "logits_shape": [VOCAB_SIZE], "dtype": "f32", "endianness": "little", "layout": "flat", "chunk_elements": args.chunk_elements, "row_bytes": (HIDDEN_SIZE + VOCAB_SIZE) * F32_BYTES, "semantic_hidden": "post_final_rmsnorm_hidden_used_by_lm_head", "semantic_logits": "raw_pre_softmax_lm_head_logits"}, "limits": {"max_case_file_bytes": MAX_JSON_BYTES, "max_cases": MAX_ROWS, "max_rows": MAX_ROWS, "max_steps": 1}, "cases": {"path": args.cases.canonicalize().map_err(|e| format!("cases path: {e}"))?.to_string_lossy(), "sha256": sha_file(&args.cases, "source cases")?, "case_count": MAX_ROWS, "row_count": MAX_ROWS}, "files": {"rows": "rows.jsonl", "hidden": "vectors/hidden.f32le", "logits": "vectors/logits.f32le"}, "runtime": {"runtime": {"name": "ullm-aq4-fidelity-capture", "build_sha256": capture_sha, "one_process": true, "one_model_load": true, "gpu_parallelism": 1, "split_manifest_sha256": split_sha, "policy_sha256": policy_sha, "calibration_cases_sha256": calibration_sha, "holdout_cases_sha256": holdout_sha, "selected_cases_sha256": cases_sha, "selected_subset": args.subset, "served_model_manifest_sha256": manifest_sha, "package_manifest_sha256": package_manifest_sha, "worker_binary_sha256": worker_sha, "guard_sha256": guard_sha, "upstream_model_revision": provenance.model_revision, "quantized_artifact_revision": model.public.revision, "source_checkpoint_aggregate_sha256": provenance.source_checkpoint.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "tokenizer_aggregate_sha256": provenance.tokenizer.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "device": {"requested_index": args.device_index, "device_id": device.device_id, "backend": device.backend, "name": device.name, "architecture": device.gcn_arch_name}}, "transformers": Value::Null, "torch": Value::Null, "safetensors": Value::Null, "python": Value::Null, "device": "gpu", "dtype": "f32", "low_cpu_mem_usage": false, "torch_num_threads": 1, "torch_num_interop_threads": 1, "model_loads": 1, "inference_mode": true, "full_vocab_ranking": true, "max_resident_logit_rows": 1, "memory_preflight": {"checkpoint_bytes": 0, "mem_total_bytes": Value::Null, "mem_available_bytes": Value::Null, "required_headroom_bytes": 0, "headroom_factor": 1.0, "status": "streaming"}, "disk_preflight": {"expected_vector_bytes": MAX_VECTOR_BYTES, "required_free_bytes": MAX_VECTOR_BYTES, "free_bytes": Value::Null, "status": "bounded_streaming_unchecked"}, "run": run}, "legacy_cross_check": {"status": "not_applicable", "legacy_manifest_sha256": source_manifest_sha, "legacy_payload_sha256": source_manifest.get("payload").and_then(|v| v.get("sha256")).and_then(Value::as_str).unwrap_or(""), "row_count": MAX_ROWS, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}});
-    fs::write(temporary.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|e| format!("manifest JSON: {e}"))?).map_err(|e| format!("manifest write: {e}"))?;
+    let state_evidence = json!({"contract": "full_context_step_zero_reset_v1", "rows_started": rows_started, "rows_completed": output_rows, "clean_before_each_row": rows_started == MAX_ROWS, "generation_states_observed": generation_states_observed, "reset_calls": reset_calls, "clean_after_each_reset": reset_calls == MAX_ROWS, "scheduler_mode": "not_used_direct_capture", "scheduler_pending_before_each_row": 0, "scheduler_pending_after_each_row": 0});
+    let manifest = json!({"schema_version": SCHEMA, "oracle_kind": "aq4_target", "status": "available", "evidence_class": "production", "usable_as_source_evidence": false, "promotion_eligible": false, "created_utc": source_manifest.get("created_utc").cloned().unwrap_or_else(|| Value::String("2026-01-01T00:00:00Z".into())), "identity": identity, "parent_sampled_oracle": parent, "vector_contract": {"hidden_shape": [HIDDEN_SIZE], "logits_shape": [VOCAB_SIZE], "dtype": "f32", "endianness": "little", "layout": "flat", "chunk_elements": args.chunk_elements, "row_bytes": (HIDDEN_SIZE + VOCAB_SIZE) * F32_BYTES, "semantic_hidden": "post_final_rmsnorm_hidden_used_by_lm_head", "semantic_logits": "raw_pre_softmax_lm_head_logits"}, "limits": {"max_case_file_bytes": MAX_JSON_BYTES, "max_cases": MAX_ROWS, "max_rows": MAX_ROWS, "max_steps": 1}, "cases": {"path": args.cases.canonicalize().map_err(|e| format!("cases path: {e}"))?.to_string_lossy(), "sha256": sha_file(&args.cases, "source cases")?, "case_count": MAX_ROWS, "row_count": MAX_ROWS}, "files": {"rows": "rows.jsonl", "hidden": "vectors/hidden.f32le", "logits": "vectors/logits.f32le"}, "runtime": {"runtime": {"name": "ullm-aq4-fidelity-capture", "build_sha256": capture_sha, "capture_binary_sha256": capture_sha, "one_process": true, "one_model_load": true, "gpu_parallelism": 1, "split_manifest_sha256": split_sha, "policy_sha256": policy_sha, "calibration_cases_sha256": calibration_sha, "holdout_cases_sha256": holdout_sha, "selected_cases_sha256": cases_sha, "selected_subset": args.subset, "served_model_manifest_sha256": manifest_sha, "package_manifest_sha256": package_manifest_sha, "package_content_sha256": package_content_sha, "worker_binary_sha256": worker_sha, "guard_sha256": guard_sha, "upstream_model_revision": provenance.model_revision, "quantized_artifact_revision": model.public.revision, "source_checkpoint_aggregate_sha256": provenance.source_checkpoint.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "tokenizer_aggregate_sha256": provenance.tokenizer.get("aggregate_sha256").and_then(Value::as_str).unwrap_or(""), "device": {"requested_index": args.device_index, "device_id": device.device_id, "backend": device.backend, "name": device.name, "architecture": device.gcn_arch_name}, "state_evidence": state_evidence}, "transformers": Value::Null, "torch": Value::Null, "safetensors": Value::Null, "python": Value::Null, "device": "gpu", "dtype": "f32", "low_cpu_mem_usage": false, "torch_num_threads": 1, "torch_num_interop_threads": 1, "model_loads": 1, "inference_mode": true, "full_vocab_ranking": true, "max_resident_logit_rows": 1, "memory_preflight": {"checkpoint_bytes": 0, "mem_total_bytes": Value::Null, "mem_available_bytes": Value::Null, "required_headroom_bytes": 0, "headroom_factor": 1.0, "status": "streaming"}, "disk_preflight": {"expected_vector_bytes": MAX_VECTOR_BYTES, "required_free_bytes": MAX_VECTOR_BYTES, "free_bytes": Value::Null, "status": "bounded_streaming_unchecked"}, "run": run}, "legacy_cross_check": {"status": "not_applicable", "legacy_manifest_sha256": source_manifest_sha, "legacy_payload_sha256": source_manifest.get("payload").and_then(|v| v.get("sha256")).and_then(Value::as_str).unwrap_or(""), "row_count": MAX_ROWS, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}});
+    write_sealed(&temporary.join("manifest.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| format!("manifest JSON: {e}"))?, "manifest")?;
     let files = ["manifest.json", "rows.jsonl", "vectors/hidden.f32le", "vectors/logits.f32le"];
     let mut sums = String::new(); for file in files { sums.push_str(&format!("{}  {file}\n", sha_file(&temporary.join(file), file)?)); }
-    fs::write(temporary.join("SHA256SUMS"), sums).map_err(|e| format!("SHA256SUMS: {e}"))?;
+    write_sealed(&temporary.join("SHA256SUMS"), sums.as_bytes(), "SHA256SUMS")?;
+    for (relative, label) in [("rows.jsonl", "rows"), ("vectors/hidden.f32le", "hidden"), ("vectors/logits.f32le", "logits")] { seal_file(&temporary.join(relative), label)?; }
+    fs::set_permissions(temporary.join("vectors"), fs::Permissions::from_mode(0o555)).map_err(|e| format!("vectors chmod: {e}"))?;
+    sync_dir(&temporary.join("vectors"), "vectors")?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o555)).map_err(|e| format!("temporary root chmod: {e}"))?;
+    sync_dir(&temporary, "temporary root")?;
     rename_noreplace(&temporary, &args.output)?;
+    sync_dir(args.output.parent().ok_or("output parent missing")?, "output parent")?;
     let _ = split_manifest;
     Ok(())
 }
@@ -715,6 +760,21 @@ mod tests {
         fs::write(root.join("a.txt"), b"alpha").unwrap();
         fs::write(root.join("dir/b.bin"), [0_u8, 1]).unwrap();
         assert_eq!(package_tree_hash(&root).unwrap(), "0440739e282bc7be23704973be9428815c4e05924b3e66dfd5216e6c3e46913f");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sealed_output_file_is_read_only_single_link_and_create_new() {
+        let root = temp("sealed-output");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("receipt");
+        write_sealed(&path, b"sealed\n", "test receipt").unwrap();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o444);
+        assert_eq!(metadata.nlink(), 1);
+        assert!(write_sealed(&path, b"replace\n", "test receipt").is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
