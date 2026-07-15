@@ -121,6 +121,24 @@ class AuthorizationAuditIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class ReadinessIdentity:
+    container_name: str
+    container_id: str
+    image_id: str
+    config_image: str
+    network_name: str
+    network_id: str
+    network_driver: str
+    bridge_interface: str
+    url: str
+    path: str
+    expected_status: int
+    expected_body: str
+    expected_body_sha256: str
+    timeout_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProductContract:
     root: Path
     artifact: ArtifactIdentity | None
@@ -133,6 +151,7 @@ class PromotionContract:
     receipt: Path
     receipt_sha256: str
     authorization_audit: AuthorizationAuditIdentity | None = None
+    readiness: ReadinessIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,7 +581,8 @@ def _parse_product(value: Any, base: Path) -> ProductContract:
 def _parse_promotion(value: Any, base: Path) -> PromotionContract:
     item = _mapping(value, "promotion")
     expected = {"source_commit", "receipt", "receipt_sha256"}
-    if set(item) not in (expected, expected | {"authorization_audit"}):
+    optional = {"authorization_audit", "readiness"}
+    if not expected.issubset(item) or not set(item).issubset(expected | optional):
         raise ServedModelError("promotion field set differs")
     receipt = _safe_regular_file(
         _resolve_root(base, _text(item["receipt"], "promotion.receipt", maximum=4096)),
@@ -592,6 +612,9 @@ def _parse_promotion(value: Any, base: Path) -> PromotionContract:
             audit_path, audit_digest, "promotion.authorization_audit"
         )
         authorization_audit = AuthorizationAuditIdentity(audit_path, audit_digest)
+    readiness: ReadinessIdentity | None = None
+    if "readiness" in item and item["readiness"] is not None:
+        readiness = _parse_readiness(item["readiness"])
     return PromotionContract(
         source_commit=_text(
             item["source_commit"], "promotion.source_commit", maximum=256
@@ -599,6 +622,81 @@ def _parse_promotion(value: Any, base: Path) -> PromotionContract:
         receipt=receipt,
         receipt_sha256=digest,
         authorization_audit=authorization_audit,
+        readiness=readiness,
+    )
+
+
+def _parse_readiness(value: Any) -> ReadinessIdentity:
+    item = _mapping(value, "promotion.readiness")
+    _exact_keys(
+        item, {"schema", "container", "network", "endpoint"},
+        "promotion.readiness",
+    )
+    if item["schema"] != "ullm.bridge_container_readiness.v1":
+        raise ServedModelError("promotion.readiness schema differs")
+    container = _mapping(item["container"], "promotion.readiness.container")
+    _exact_keys(
+        container, {"name", "id", "image_id", "config_image"},
+        "promotion.readiness.container",
+    )
+    network = _mapping(item["network"], "promotion.readiness.network")
+    _exact_keys(
+        network, {"name", "id", "driver", "bridge_interface"},
+        "promotion.readiness.network",
+    )
+    endpoint = _mapping(item["endpoint"], "promotion.readiness.endpoint")
+    _exact_keys(
+        endpoint,
+        {"url", "path", "expected_status", "expected_body", "expected_body_sha256", "timeout_seconds"},
+        "promotion.readiness.endpoint",
+    )
+    container_id = _text(container["id"], "promotion.readiness.container.id", maximum=64)
+    image_id = _text(container["image_id"], "promotion.readiness.container.image_id", maximum=71)
+    network_id = _text(network["id"], "promotion.readiness.network.id", maximum=64)
+    body = _text(endpoint["expected_body"], "promotion.readiness.endpoint.expected_body", maximum=256)
+    body_sha256 = _sha256(
+        endpoint["expected_body_sha256"], "promotion.readiness.endpoint.expected_body_sha256"
+    )
+    expected = {
+        "container_name": "open-webui",
+        "network_driver": "bridge",
+        "url": "http://172.20.0.1:8000/readyz",
+        "path": "/readyz",
+        "expected_status": 200,
+        "expected_body": '{"status":"ready"}',
+        "timeout_seconds": 5,
+    }
+    if (
+        _text(container["name"], "promotion.readiness.container.name", maximum=256) != expected["container_name"]
+        or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+        or not _text(container["config_image"], "promotion.readiness.container.config_image", maximum=512)
+        or re.fullmatch(r"[0-9a-f]{64}", network_id) is None
+        or _text(network["driver"], "promotion.readiness.network.driver", maximum=64) != expected["network_driver"]
+        or _text(network["bridge_interface"], "promotion.readiness.network.bridge_interface", maximum=64) != f"br-{network_id[:12]}"
+        or _text(endpoint["url"], "promotion.readiness.endpoint.url", maximum=512) != expected["url"]
+        or _text(endpoint["path"], "promotion.readiness.endpoint.path", maximum=256) != expected["path"]
+        or endpoint["expected_status"] != expected["expected_status"]
+        or body != expected["expected_body"]
+        or hashlib.sha256(body.encode("ascii")).hexdigest() != body_sha256
+        or endpoint["timeout_seconds"] != expected["timeout_seconds"]
+    ):
+        raise ServedModelError("promotion.readiness identity differs")
+    return ReadinessIdentity(
+        container_name=expected["container_name"],
+        container_id=container_id,
+        image_id=image_id,
+        config_image=container["config_image"],
+        network_name=_text(network["name"], "promotion.readiness.network.name", maximum=256),
+        network_id=network_id,
+        network_driver=expected["network_driver"],
+        bridge_interface=network["bridge_interface"],
+        url=expected["url"],
+        path=expected["path"],
+        expected_status=expected["expected_status"],
+        expected_body=body,
+        expected_body_sha256=body_sha256,
+        timeout_seconds=expected["timeout_seconds"],
     )
 
 

@@ -45,6 +45,14 @@ MAX_JSON_BYTES = 16 * 1024 * 1024
 AUDIT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+READY_CONTAINER = "open-webui"
+READY_PATH = "/readyz"
+READY_URL = "http://172.20.0.1:8000/readyz"
+READY_BODY = '{"status":"ready"}'
+READY_TIMEOUT_SECONDS = 5
+READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
 
 
 class GateError(RuntimeError):
@@ -136,6 +144,7 @@ def fixed_promotion_request_id(
     content_sha256: str,
     tensor_set_sha256: str,
     package_sha256: str,
+    readiness: dict[str, Any],
 ) -> str:
     identity = {
         "schema_version": "ullm.qwen35_aq4.sq8_overlay_promotion_request.v1",
@@ -147,11 +156,94 @@ def fixed_promotion_request_id(
             "tensor_set_sha256": tensor_set_sha256,
         },
         "package_sha256": package_sha256,
+        "readiness": readiness,
     }
     encoded = json.dumps(
         identity, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
     ).encode("ascii")
     return "sq8-promotion-" + hashlib.sha256(encoded).hexdigest()
+
+
+def _docker_inspect(kind: str, identity: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        ["docker", "inspect", "--type", kind, identity],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=5,
+    )
+    if completed.returncode != 0 or completed.stderr or len(completed.stdout) > MAX_JSON_BYTES:
+        raise GateError(f"readiness {kind} inspect failed")
+    try:
+        values = json.loads(completed.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise GateError(f"readiness {kind} inspect JSON differs") from error
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+        raise GateError(f"readiness {kind} inspect shape differs")
+    return values[0]
+
+
+def readiness_identity() -> dict[str, Any]:
+    """Bind the one audited bridge-side readiness observation path."""
+
+    container = _docker_inspect("container", READY_CONTAINER)
+    container_id = container.get("Id")
+    raw_name = container.get("Name")
+    image_id = container.get("Image")
+    config = container.get("Config")
+    networks = container.get("NetworkSettings", {}).get("Networks")
+    if (
+        not isinstance(container_id, str)
+        or HEX64_RE.fullmatch(container_id) is None
+        or raw_name != f"/{READY_CONTAINER}"
+        or not isinstance(image_id, str)
+        or IMAGE_ID_RE.fullmatch(image_id) is None
+        or not isinstance(config, dict)
+        or not isinstance(config.get("Image"), str)
+        or not config["Image"]
+        or not isinstance(networks, dict)
+        or len(networks) != 1
+    ):
+        raise GateError("readiness container identity differs")
+    network_name, attachment = next(iter(networks.items()))
+    if not isinstance(network_name, str) or not network_name or not isinstance(attachment, dict):
+        raise GateError("readiness container network attachment differs")
+    network_id = attachment.get("NetworkID")
+    if not isinstance(network_id, str) or HEX64_RE.fullmatch(network_id) is None:
+        raise GateError("readiness container network ID differs")
+    network = _docker_inspect("network", network_id)
+    bridge_interface = f"br-{network_id[:12]}"
+    if (
+        network.get("Id") != network_id
+        or network.get("Name") != network_name
+        or network.get("Driver") != "bridge"
+        or not (Path("/sys/class/net") / bridge_interface).is_dir()
+    ):
+        raise GateError("readiness bridge network identity differs")
+    expected_body_sha256 = hashlib.sha256(READY_BODY.encode("ascii")).hexdigest()
+    return {
+        "schema": READINESS_SCHEMA,
+        "container": {
+            "name": READY_CONTAINER,
+            "id": container_id,
+            "image_id": image_id,
+            "config_image": config["Image"],
+        },
+        "network": {
+            "name": network_name,
+            "id": network_id,
+            "driver": "bridge",
+            "bridge_interface": bridge_interface,
+        },
+        "endpoint": {
+            "url": READY_URL,
+            "path": READY_PATH,
+            "expected_status": 200,
+            "expected_body": READY_BODY,
+            "expected_body_sha256": expected_body_sha256,
+            "timeout_seconds": READY_TIMEOUT_SECONDS,
+        },
+    }
 
 
 def write_exclusive(path: Path, payload: bytes, mode: int = 0o444) -> None:
@@ -398,6 +490,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     package_manifest = product_root / str(profile["product"]["package"]["manifest_path"])
     binding = read_object(binding_path, "overlay binding")
     validate_binding(binding, package_manifest)
+    readiness = readiness_identity()
     source_tree = git_value("rev-parse", f"{commit}^{{tree}}")
     source_archive = source_archive_sha256(commit)
     authorize = bool(getattr(args, "authorize_actual_run", False))
@@ -428,6 +521,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             content_sha256=binding["content_sha256"],
             tensor_set_sha256=binding["tensor_set_sha256"],
             package_sha256=sha_file(package_manifest),
+            readiness=readiness,
         )
         if audit is not None and (
             request_id != audit["request_id"]
@@ -449,6 +543,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "actual_evidence_from_receipt": ["actual"],
             "request_id_from_receipt": ["request_id"],
             "authorization_audit_from_receipt": ["authorization_audit"],
+            "readiness_from_receipt": ["readiness"],
+            "readiness": readiness,
             "release_source_commit": commit,
         }
         profile_path = output / "profile.json"
@@ -521,6 +617,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     if audit is not None else None
                 ),
             },
+            "readiness": readiness,
             "device": {
                 "HIP_VISIBLE_DEVICES": "1",
                 "ULLM_HIP_VISIBLE_DEVICES": "1",

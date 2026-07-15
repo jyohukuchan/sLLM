@@ -25,6 +25,9 @@
 - 認可候補は監査SHA由来のcreate-new固定pathだけへ生成し、Gateを`authorized_pending_execution`、`actual_run_allowed=true`、`max_attempts=1`にする。Gate、prepared receipt、profile、served manifestへ同一の監査絶対path/lowercase SHA-256を伝播し、片側flag、identity mismatch、writable/symlink audit、出力replayを拒否する。
 - gatewayは`promotion.authorization_audit`をtyped optional identityとして読み、旧manifestのabsent/null互換を維持しながら、object時はexact path/SHA、canonical absolute regular non-symlink file、lowercase SHA-256、live hashを検証する。SQ8 profileはauthorization auditのreceipt mappingを必須にし、認可候補ではnullを許さない実体bindingを生成する。
 - maintenance wrapperは未認可候補のactual executeをservice参照前に拒否する。認可候補ではGate/receipt/manifestの監査identity一致、監査ファイルの0444/single-link/non-symlink/live SHA、`max_attempts=1`を再検査する。
+- 最初のauthorized preflightで、host namespaceから`172.20.0.1:8000/readyz`へ到達できず`healthy=false`になった。service、worker、production lock、AMD/KFD ownerは正常で、actual commandは発行していない。
+- host `urllib` readinessを廃止し、既存の`open-webui` bridge namespaceだけからreadyを観測するfail-closed経路へ置き換えた。builderがcontainer name/full ID/image ID/config image、network name/full ID/driver/bridge interface、固定endpoint/status/body/body SHA/timeoutをread-onlyで取得し、request ID、Gate、profile、prepared receipt、served manifestへ同一objectを束縛する。
+- wrapperはGate/receipt/manifestのreadiness exact一致後、Docker container/network inspectとlive bridge interfaceを照合し、full container IDを指定したbounded `docker exec curl`だけで`/readyz`を検査する。HTTP 200と本文`{"status":"ready"}`のbyte完全一致を要求し、host fallback、iptables/nftables変更、container名だけの実行を許可しない。prestateとpost-restoreは同じpredicateを使う。
 
 ## 検証
 
@@ -42,9 +45,11 @@
 - openai-gateway full tests: 237 passed
 - 独立監査receipt実物照合: passed（SHA-256 `db71e280e6605118883f2de80ed308df85dc03a1b9b8b79f947dbc106cfa5146`）
 - 統合Python tests: 57 passed。既存deployment profileが元worktreeの絶対pathを持つため、別worktreeでは既存1件だけ失敗する。
+- bridge readiness builder/receipt/wrapper関連: 40 passed
+- gateway full regression: 247 passed
 
 ## 次の行動
 
-1. authorization/gateway統合を通常commitとして固定し、`CARGO_BUILD_JOBS=1`でworkerをrelease rebuildする。
-2. 監査SHA由来のcreate-new authorized runtimeを正式materializeし、Gate/worker/manifest/receipt/SHA256SUMSとmodeを固定する。
-3. GPU/serviceは起動せず、認可候補を`authorized_pending_execution`のまま引き渡す。
+1. bridge readiness identity統合を通常commitとして固定し、`CARGO_BUILD_JOBS=1`でworkerをrelease rebuildする。
+2. fresh unauthorized runtimeをcreate-new materializeし、Gate/worker/manifest/receipt/SHA256SUMSとmodeを固定する。旧authorized runtimeはstaleとして使用しない。
+3. 新runtimeを独立監査し、新audit receiptから新しいauthorized runtimeを生成するまでGPU/service実行を禁止する。

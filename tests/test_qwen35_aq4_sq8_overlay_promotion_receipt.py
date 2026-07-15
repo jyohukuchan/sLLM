@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
-import os
 import stat
 from pathlib import Path
 
@@ -39,6 +39,30 @@ def _immutable_tree(root: Path) -> None:
 
 
 REQUEST_ID = "sq8-promotion-" + "a" * 64
+READY_BODY = '{"status":"ready"}'
+READINESS = {
+    "schema": "ullm.bridge_container_readiness.v1",
+    "container": {
+        "name": "open-webui",
+        "id": "4" * 64,
+        "image_id": "sha256:" + "5" * 64,
+        "config_image": "ullm/open-webui:test",
+    },
+    "network": {
+        "name": "open-webui-network",
+        "id": "6" * 64,
+        "driver": "bridge",
+        "bridge_interface": "br-" + "6" * 12,
+    },
+    "endpoint": {
+        "url": "http://172.20.0.1:8000/readyz",
+        "path": "/readyz",
+        "expected_status": 200,
+        "expected_body": READY_BODY,
+        "expected_body_sha256": hashlib.sha256(READY_BODY.encode("ascii")).hexdigest(),
+        "timeout_seconds": 5,
+    },
+}
 
 
 @pytest.fixture
@@ -114,6 +138,8 @@ def fixture(tmp_path: Path) -> dict[str, Path | dict]:
             "actual_evidence_from_receipt": ["actual"],
             "request_id_from_receipt": ["request_id"],
             "authorization_audit_from_receipt": ["authorization_audit"],
+            "readiness_from_receipt": ["readiness"],
+            "readiness": READINESS,
             "release_source_commit": "1" * 40,
         },
     }

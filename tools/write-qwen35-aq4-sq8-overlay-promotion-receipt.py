@@ -216,6 +216,8 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         "actual_evidence_from_receipt",
         "request_id_from_receipt",
         "authorization_audit_from_receipt",
+        "readiness_from_receipt",
+        "readiness",
         "release_source_commit",
     }
     if set(promotion) != expected_keys:
@@ -238,6 +240,9 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         raise ReceiptError("overlay profile request ID binding differs")
     if promotion["authorization_audit_from_receipt"] != ["authorization_audit"]:
         raise ReceiptError("overlay profile authorization audit binding differs")
+    if promotion["readiness_from_receipt"] != ["readiness"]:
+        raise ReceiptError("overlay profile readiness binding differs")
+    _readiness_identity(promotion["readiness"])
     _hex(promotion["release_source_commit"], 40, "overlay profile release source commit")
     worker = profile.get("worker")
     product = profile.get("product")
@@ -330,6 +335,56 @@ def _authorization_audit_ref(path: Path | None) -> dict[str, str] | None:
     if not resolved.is_absolute() or resolved == Path("/"):
         raise ReceiptError("authorization audit receipt path is invalid")
     return {"path": os.fspath(resolved), "sha256": sha256_file(resolved)}
+
+
+def _readiness_identity(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "container", "network", "endpoint"}:
+        raise ReceiptError("readiness identity shape differs")
+    if value.get("schema") != "ullm.bridge_container_readiness.v1":
+        raise ReceiptError("readiness identity schema differs")
+    container = value.get("container")
+    network = value.get("network")
+    endpoint = value.get("endpoint")
+    if not isinstance(container, dict) or set(container) != {"name", "id", "image_id", "config_image"}:
+        raise ReceiptError("readiness container identity differs")
+    if (
+        container.get("name") != "open-webui"
+        or not isinstance(container.get("id"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", container["id"]) is None
+        or not isinstance(container.get("image_id"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", container["image_id"]) is None
+        or not isinstance(container.get("config_image"), str)
+        or not container["config_image"]
+    ):
+        raise ReceiptError("readiness container identity differs")
+    if not isinstance(network, dict) or set(network) != {"name", "id", "driver", "bridge_interface"}:
+        raise ReceiptError("readiness network identity differs")
+    network_id = network.get("id")
+    if (
+        not isinstance(network.get("name"), str)
+        or not network["name"]
+        or not isinstance(network_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", network_id) is None
+        or network.get("driver") != "bridge"
+        or network.get("bridge_interface") != f"br-{network_id[:12]}"
+    ):
+        raise ReceiptError("readiness network identity differs")
+    expected_body = '{"status":"ready"}'
+    if not isinstance(endpoint, dict) or set(endpoint) != {
+        "url", "path", "expected_status", "expected_body",
+        "expected_body_sha256", "timeout_seconds",
+    }:
+        raise ReceiptError("readiness endpoint identity differs")
+    if endpoint != {
+        "url": "http://172.20.0.1:8000/readyz",
+        "path": "/readyz",
+        "expected_status": 200,
+        "expected_body": expected_body,
+        "expected_body_sha256": hashlib.sha256(expected_body.encode("ascii")).hexdigest(),
+        "timeout_seconds": 5,
+    }:
+        raise ReceiptError("readiness endpoint identity differs")
+    return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
 
 
 def _validate_sq8_telemetry(value: Any) -> dict[str, Any]:
@@ -522,6 +577,7 @@ def write_receipt(
     source_tree_sha256 = _hex(source_tree_sha256, 40, "source tree SHA-256")
     source_archive_sha256 = _hex(source_archive_sha256, 64, "source archive SHA-256")
     authorization_audit = _authorization_audit_ref(authorization_audit_path)
+    readiness = _readiness_identity(profile["promotion"]["readiness"])
 
     worker_path = Path(str(worker_profile.get("binary", ""))).resolve()
     if worker_path.is_symlink() or not worker_path.is_file():
@@ -594,6 +650,7 @@ def write_receipt(
             "manifest_sha256": package_manifest_sha256,
         },
         "authorization_audit": authorization_audit,
+        "readiness": readiness,
         "actual": actual,
     }
     try:
@@ -621,7 +678,7 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
     prepared = _read_object(path, "prepared promotion receipt")
     if set(prepared) != {
         "schema_version", "status", "request_id", "source_commit", "source_provenance",
-        "release", "overlay", "package", "authorization_audit", "actual",
+        "release", "overlay", "package", "authorization_audit", "readiness", "actual",
     }:
         raise ReceiptError("prepared receipt shape differs")
     if (
@@ -660,6 +717,7 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
             raise ReceiptError("prepared authorization audit path must be canonical")
         if sha256_file(audit_path) != authorization_audit["sha256"]:
             raise ReceiptError("prepared authorization audit SHA-256 differs")
+    _readiness_identity(prepared.get("readiness"))
     for value, label in (
         (worker.get("sha256") if isinstance(worker, dict) else None, "prepared worker SHA-256"),
         (profile.get("sha256"), "prepared profile SHA-256"),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -44,6 +45,33 @@ class ReceiptWriter:
         )
 
 
+def readiness() -> dict[str, Any]:
+    network_id = "3" * 64
+    return {
+        "schema": MODULE.READINESS_SCHEMA,
+        "container": {
+            "name": "open-webui",
+            "id": "1" * 64,
+            "image_id": "sha256:" + "2" * 64,
+            "config_image": "ghcr.io/open-webui/open-webui:v0.6.18",
+        },
+        "network": {
+            "name": "open-webui-network",
+            "id": network_id,
+            "driver": "bridge",
+            "bridge_interface": f"br-{network_id[:12]}",
+        },
+        "endpoint": {
+            "url": MODULE.READY_URL,
+            "path": MODULE.READY_PATH,
+            "expected_status": 200,
+            "expected_body": MODULE.READY_BODY.decode("ascii"),
+            "expected_body_sha256": hashlib.sha256(MODULE.READY_BODY).hexdigest(),
+            "timeout_seconds": MODULE.READY_TIMEOUT_SECONDS,
+        },
+    }
+
+
 def snapshot(tag: str = "same", *, authorized: bool = True) -> dict[str, Any]:
     return {
         "source": {"commit": "a" * 40, "tree": "b" * 40, "archive_sha256": "c" * 64},
@@ -53,6 +81,7 @@ def snapshot(tag: str = "same", *, authorized: bool = True) -> dict[str, Any]:
         },
         "overlay": {"content_sha256": "f" * 64},
         "authorization": {"actual_run_allowed": authorized},
+        "readiness": readiness(),
         "tag": tag,
     }
 
@@ -113,7 +142,17 @@ def dependencies(
         ]
     )
     owner_values = iter([owners(), owners(), owners(201)])
-    calls: dict[str, Any] = {"stop": 0, "start": 0, "capture": [], "lease": Lease()}
+    calls: dict[str, Any] = {
+        "stop": 0,
+        "start": 0,
+        "capture": [],
+        "lease": Lease(),
+        "readiness": [],
+    }
+
+    def service_probe(bound_readiness: dict[str, Any]) -> dict[str, Any]:
+        calls["readiness"].append(bound_readiness)
+        return next(service_values)
 
     def stop() -> None:
         calls["stop"] += 1
@@ -134,7 +173,7 @@ def dependencies(
         return subprocess.CompletedProcess(argv, capture_code, stdout=stdout, stderr="")
 
     deps = MODULE.Dependencies(
-        service_snapshot=lambda: next(service_values),
+        service_snapshot=service_probe,
         owner_snapshot=lambda: next(owner_values),
         stop_service=stop,
         start_service=start,
@@ -157,6 +196,131 @@ def prepare(monkeypatch: pytest.MonkeyPatch, values: list[dict[str, Any]] | None
     monkeypatch.setattr(MODULE, "load_receipt_writer", lambda: ReceiptWriter)
 
 
+def docker_runner(
+    contract: dict[str, Any],
+    *,
+    curl_status: int = 200,
+    curl_body: str | None = None,
+    curl_returncode: int = 0,
+    curl_timeout: bool = False,
+    container_overrides: dict[str, Any] | None = None,
+    network_overrides: dict[str, Any] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    container = contract["container"]
+    network = contract["network"]
+    observed_container = {
+        "id": container["id"],
+        "name": "/" + container["name"],
+        "image_id": container["image_id"],
+        "config_image": container["config_image"],
+        "networks": {
+            network["name"]: {"NetworkID": network["id"]},
+        },
+    }
+    observed_network = {
+        "id": network["id"],
+        "name": network["name"],
+        "driver": network["driver"],
+        "options": {
+            "com.docker.network.bridge.name": network["bridge_interface"],
+        },
+        "containers": {
+            container["id"]: {"Name": container["name"]},
+        },
+    }
+    if container_overrides:
+        observed_container.update(container_overrides)
+    if network_overrides:
+        observed_network.update(network_overrides)
+    calls: list[dict[str, Any]] = []
+
+    def run(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": argv, "timeout": timeout})
+        if argv[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(observed_container), stderr=""
+            )
+        if argv[:3] == ["docker", "network", "inspect"]:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(observed_network), stderr=""
+            )
+        assert argv[:2] == ["docker", "exec"]
+        if curl_timeout:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        body = contract["endpoint"]["expected_body"] if curl_body is None else curl_body
+        return subprocess.CompletedProcess(
+            argv,
+            curl_returncode,
+            stdout=f"{body}\n{curl_status}",
+            stderr="" if curl_returncode == 0 else "curl failed",
+        )
+
+    return run, calls
+
+
+def test_docker_readiness_is_exact_and_uses_full_gate_bound_identity() -> None:
+    contract = readiness()
+    runner, calls = docker_runner(contract)
+
+    assert MODULE._ready(contract, runner, lambda _: True) is True
+    assert len(calls) == 3
+    assert calls[0]["argv"][-1] == contract["container"]["id"]
+    assert calls[1]["argv"][-1] == contract["network"]["id"]
+    assert calls[2]["argv"][:3] == [
+        "docker", "exec", contract["container"]["id"]
+    ]
+    assert calls[2]["argv"][-1] == contract["endpoint"]["url"]
+    assert all(call["timeout"] == MODULE.READY_TIMEOUT_SECONDS for call in calls)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"curl_status": 503},
+        {"curl_body": '{"status":"starting"}'},
+        {"curl_returncode": 7},
+        {"curl_timeout": True},
+    ],
+)
+def test_docker_readiness_rejects_status_body_nonzero_and_timeout(
+    kwargs: dict[str, Any]
+) -> None:
+    contract = readiness()
+    runner, _calls = docker_runner(contract, **kwargs)
+
+    assert MODULE._ready(contract, runner, lambda _: True) is False
+
+
+def test_docker_readiness_rejects_container_identity_mismatch() -> None:
+    contract = readiness()
+    runner, calls = docker_runner(contract, container_overrides={"id": "9" * 64})
+
+    with pytest.raises(MODULE.PromotionError, match="container identity differs"):
+        MODULE._ready(contract, runner, lambda _: True)
+    assert len(calls) == 2
+
+
+def test_docker_readiness_rejects_network_identity_mismatch() -> None:
+    contract = readiness()
+    runner, calls = docker_runner(contract, network_overrides={"driver": "overlay"})
+
+    with pytest.raises(MODULE.PromotionError, match="network identity differs"):
+        MODULE._ready(contract, runner, lambda _: True)
+    assert len(calls) == 2
+
+
+def test_readiness_contract_rejects_aliases_and_weak_endpoint() -> None:
+    contract = readiness()
+    contract["container"]["image_digest"] = contract["container"].pop("image_id")
+    with pytest.raises(MODULE.PromotionError, match="container identity"):
+        MODULE.validate_readiness_contract(contract)
+
+    contract = readiness()
+    contract["endpoint"]["expected_body"] = {"status": "ready"}
+    with pytest.raises(MODULE.PromotionError, match="endpoint contract"):
+        MODULE.validate_readiness_contract(contract)
+
+
 def test_success_runs_candidate_once_and_restores_new_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,6 +337,8 @@ def test_success_runs_candidate_once_and_restores_new_epoch(
     assert evidence["restore"]["passed"] is True
     assert calls["stop"] == calls["start"] == 1
     assert calls["lease"].released is True
+    assert len(calls["readiness"]) == 4
+    assert all(value == readiness() for value in calls["readiness"])
     assert len(calls["capture"]) == 1
     invocation = calls["capture"][0]
     assert invocation["argv"][-2:] == [

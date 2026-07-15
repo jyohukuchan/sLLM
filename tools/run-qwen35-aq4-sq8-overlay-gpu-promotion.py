@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -43,8 +42,14 @@ POLL_SECONDS = 0.25
 MAX_JSON_BYTES = 16 * 1024 * 1024
 PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+DOCKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 READY_URL = "http://172.20.0.1:8000/readyz"
 READY_BODY = b'{"status":"ready"}'
+READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
+READY_CONTAINER_NAME = "open-webui"
+READY_PATH = "/readyz"
+READY_TIMEOUT_SECONDS = 5
+DOCKER_INSPECT_MAX_BYTES = 256 * 1024
 PRODUCTION_LOCK_PATH = Path("/run/ullm/r9700.lock")
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_INDEX = 2
@@ -87,6 +92,78 @@ def canonical_sha(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("ascii")
     ).hexdigest()
+
+
+def validate_readiness_contract(value: Any) -> dict[str, Any]:
+    """Validate the exact Gate-bound Open WebUI readiness identity."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "container", "network", "endpoint"
+    }:
+        raise PromotionError("candidate readiness contract shape differs")
+    if value.get("schema") != READINESS_SCHEMA:
+        raise PromotionError("candidate readiness contract schema differs")
+    container = value.get("container")
+    network = value.get("network")
+    endpoint = value.get("endpoint")
+    if not isinstance(container, dict) or set(container) != {
+        "name", "id", "image_id", "config_image"
+    }:
+        raise PromotionError("candidate readiness container identity differs")
+    if not isinstance(network, dict) or set(network) != {
+        "name", "id", "driver", "bridge_interface"
+    }:
+        raise PromotionError("candidate readiness network identity differs")
+    if not isinstance(endpoint, dict) or set(endpoint) != {
+        "url", "path", "expected_status", "expected_body",
+        "expected_body_sha256", "timeout_seconds",
+    }:
+        raise PromotionError("candidate readiness endpoint contract differs")
+
+    container_id = container.get("id")
+    image_id = container.get("image_id")
+    config_image = container.get("config_image")
+    if (
+        container.get("name") != READY_CONTAINER_NAME
+        or not isinstance(container_id, str)
+        or SHA256_RE.fullmatch(container_id) is None
+        or not isinstance(image_id, str)
+        or not image_id.startswith("sha256:")
+        or SHA256_RE.fullmatch(image_id.removeprefix("sha256:")) is None
+        or not isinstance(config_image, str)
+        or not config_image
+        or len(config_image.encode("utf-8")) > 4096
+        or any(ord(character) < 0x20 for character in config_image)
+    ):
+        raise PromotionError("candidate readiness container identity differs")
+
+    network_id = network.get("id")
+    network_name = network.get("name")
+    bridge_interface = network.get("bridge_interface")
+    if (
+        not isinstance(network_name, str)
+        or DOCKER_NAME_RE.fullmatch(network_name) is None
+        or not isinstance(network_id, str)
+        or SHA256_RE.fullmatch(network_id) is None
+        or network.get("driver") != "bridge"
+        or bridge_interface != f"br-{network_id[:12]}"
+    ):
+        raise PromotionError("candidate readiness network identity differs")
+
+    expected_body = endpoint.get("expected_body")
+    if (
+        endpoint.get("url") != READY_URL
+        or endpoint.get("path") != READY_PATH
+        or endpoint.get("expected_status") != 200
+        or type(endpoint.get("expected_status")) is not int
+        or expected_body != READY_BODY.decode("ascii")
+        or endpoint.get("expected_body_sha256")
+        != hashlib.sha256(READY_BODY).hexdigest()
+        or endpoint.get("timeout_seconds") != READY_TIMEOUT_SECONDS
+        or type(endpoint.get("timeout_seconds")) is not int
+    ):
+        raise PromotionError("candidate readiness endpoint contract differs")
+    return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
 
 
 def metadata(path: Path, label: str, *, executable: bool = False) -> dict[str, Any]:
@@ -220,15 +297,19 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "actual_evidence_from_receipt",
         "request_id_from_receipt",
         "authorization_audit_from_receipt",
+        "readiness_from_receipt",
         "release_source_commit",
     }:
         raise PromotionError("candidate strict promotion profile differs")
     if promotion.get("authorization_audit_from_receipt") != ["authorization_audit"]:
         raise PromotionError("candidate authorization audit profile binding differs")
+    if promotion.get("readiness_from_receipt") != ["readiness"]:
+        raise PromotionError("candidate readiness profile binding differs")
     receipt_path = Path(str(promotion["receipt"])).resolve()
     receipt = read_object(receipt_path, "candidate promotion receipt")
     if gate.get("schema_version") != GATE_SCHEMA:
         raise PromotionError("candidate Gate schema differs")
+    readiness = validate_readiness_contract(gate.get("readiness"))
     if gate.get("release_source_commit") != build.get("release_source_commit"):
         raise PromotionError("candidate Gate and build source commits differ")
     identity = gate.get("profile_identity")
@@ -262,6 +343,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     if set(receipt) != {
         "schema_version", "status", "request_id", "source_commit", "source_provenance",
         "release", "overlay", "package", "authorization_audit", "actual",
+        "readiness",
     }:
         raise PromotionError("candidate promotion receipt shape differs")
     source = receipt.get("source_provenance")
@@ -344,6 +426,9 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     ):
         raise PromotionError("candidate Gate authorization policy differs")
     manifest_audit = manifest.get("promotion", {}).get("authorization_audit")
+    manifest_readiness = manifest.get("promotion", {}).get("readiness")
+    if receipt.get("readiness") != readiness or manifest_readiness != readiness:
+        raise PromotionError("candidate readiness propagation differs")
     if actual_run_allowed:
         if not isinstance(authorization_audit, dict) or set(authorization_audit) != {"path", "sha256"}:
             raise PromotionError("authorized candidate audit binding is incomplete")
@@ -408,6 +493,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             "max_attempts": expected_attempts,
             "independent_audit_receipt": authorization_audit,
         },
+        "readiness": readiness,
     }
 
 
@@ -563,14 +649,138 @@ def _lock_holder_pids(path: Path) -> list[int]:
     return sorted(holders)
 
 
-def _ready() -> bool:
-    request = urllib.request.Request(READY_URL, method="GET", headers={"Accept": "application/json"})
+def _inspect_object(
+    completed: subprocess.CompletedProcess[str], label: str
+) -> dict[str, Any]:
+    if completed.returncode != 0 or completed.stderr:
+        raise PromotionError(f"{label} failed")
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            body = response.read(len(READY_BODY) + 1)
-            return response.status == 200 and body == READY_BODY
-    except OSError:
+        raw = completed.stdout.encode("utf-8")
+    except UnicodeError as error:
+        raise PromotionError(f"{label} output encoding differs") from error
+    if len(raw) > DOCKER_INSPECT_MAX_BYTES:
+        raise PromotionError(f"{label} output exceeds its bound")
+    try:
+        value = json.loads(completed.stdout)
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise PromotionError(f"{label} output differs") from error
+    if not isinstance(value, dict):
+        raise PromotionError(f"{label} output differs")
+    return value
+
+
+def _ready(
+    readiness: dict[str, Any],
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] = _run,
+    bridge_exists: Callable[[str], bool] = lambda name: (Path("/sys/class/net") / name).is_dir(),
+) -> bool:
+    """Probe readiness only through the exact Gate-bound Docker identity."""
+
+    contract = validate_readiness_contract(readiness)
+    container = contract["container"]
+    network = contract["network"]
+    endpoint = contract["endpoint"]
+    container_format = (
+        '{"id":{{json .Id}},"name":{{json .Name}},'
+        '"image_id":{{json .Image}},"config_image":{{json .Config.Image}},'
+        '"networks":{{json .NetworkSettings.Networks}}}'
+    )
+    network_format = (
+        '{"id":{{json .Id}},"name":{{json .Name}},'
+        '"driver":{{json .Driver}},"options":{{json .Options}},'
+        '"containers":{{json .Containers}}}'
+    )
+    try:
+        container_result = command_runner(
+            [
+                "docker", "inspect", "--type", "container", "--format",
+                container_format, container["id"],
+            ],
+            timeout=endpoint["timeout_seconds"],
+        )
+        network_result = command_runner(
+            [
+                "docker", "network", "inspect", "--format", network_format,
+                network["id"],
+            ],
+            timeout=endpoint["timeout_seconds"],
+        )
+    except subprocess.TimeoutExpired as error:
+        raise PromotionError("Docker readiness identity inspection timed out") from error
+    except OSError as error:
+        raise PromotionError("Docker readiness identity inspection failed") from error
+
+    observed_container = _inspect_object(container_result, "container inspect")
+    if set(observed_container) != {
+        "id", "name", "image_id", "config_image", "networks"
+    }:
+        raise PromotionError("readiness container inspect shape differs")
+    observed_name = observed_container.get("name")
+    if isinstance(observed_name, str):
+        observed_name = observed_name.removeprefix("/")
+    networks = observed_container.get("networks")
+    if (
+        observed_container.get("id") != container["id"]
+        or observed_name != container["name"]
+        or observed_container.get("image_id") != container["image_id"]
+        or observed_container.get("config_image") != container["config_image"]
+        or not isinstance(networks, dict)
+        or set(networks) != {network["name"]}
+    ):
+        raise PromotionError("readiness container identity differs from Gate")
+    attachment = networks[network["name"]]
+    if (
+        not isinstance(attachment, dict)
+        or attachment.get("NetworkID") != network["id"]
+    ):
+        raise PromotionError("readiness container network attachment differs from Gate")
+
+    observed_network = _inspect_object(network_result, "network inspect")
+    if set(observed_network) != {"id", "name", "driver", "options", "containers"}:
+        raise PromotionError("readiness network inspect shape differs")
+    options = observed_network.get("options")
+    containers = observed_network.get("containers")
+    configured_bridge = (
+        options.get("com.docker.network.bridge.name")
+        if isinstance(options, dict)
+        else None
+    )
+    network_member = containers.get(container["id"]) if isinstance(containers, dict) else None
+    if (
+        observed_network.get("id") != network["id"]
+        or observed_network.get("name") != network["name"]
+        or observed_network.get("driver") != network["driver"]
+        or not isinstance(options, dict)
+        or configured_bridge not in {None, network["bridge_interface"]}
+        or not bridge_exists(network["bridge_interface"])
+        or not isinstance(network_member, dict)
+        or network_member.get("Name") not in {None, container["name"]}
+    ):
+        raise PromotionError("readiness network identity differs from Gate")
+
+    expected_body = endpoint["expected_body"]
+    curl_command = [
+        "docker", "exec", container["id"], "curl",
+        "--silent", "--show-error", "--request", "GET",
+        "--header", "Accept: application/json",
+        "--connect-timeout", str(endpoint["timeout_seconds"]),
+        "--max-time", str(endpoint["timeout_seconds"]),
+        "--max-filesize", str(len(expected_body.encode("ascii"))),
+        "--output", "-", "--write-out", "\n%{http_code}", endpoint["url"],
+    ]
+    try:
+        completed = command_runner(
+            curl_command, timeout=endpoint["timeout_seconds"]
+        )
+    except (subprocess.TimeoutExpired, OSError):
         return False
+    expected = f"{expected_body}\n{endpoint['expected_status']}"
+    return (
+        completed.returncode == 0
+        and completed.stderr == ""
+        and len(completed.stdout.encode("utf-8")) <= len(expected.encode("utf-8"))
+        and completed.stdout == expected
+    )
 
 
 def _amd_owner_snapshot(raw: bytes) -> dict[str, Any]:
@@ -667,7 +877,10 @@ def _kfd_owner_snapshot() -> dict[str, Any]:
     }
 
 
-def default_service_snapshot() -> dict[str, Any]:
+def default_service_snapshot(
+    readiness: dict[str, Any],
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] = _run,
+) -> dict[str, Any]:
     fields = "ActiveState,SubState,MainPID,NRestarts,ControlGroup"
     result = _run(["systemctl", "show", SERVICE, f"--property={fields}"], timeout=5)
     if result.returncode != 0:
@@ -699,7 +912,7 @@ def default_service_snapshot() -> dict[str, Any]:
         "control_group": control_group,
         "worker_pid": workers[0] if len(workers) == 1 else 0,
         "cgroup_pids": cgroup_pids,
-        "healthy": active and running and _ready(),
+        "healthy": active and running and _ready(readiness, command_runner),
         "lock_owned": lock_owned,
         "lock_holders": lock_holders,
     }
@@ -736,7 +949,7 @@ def default_capture(argv: list[str], environment: dict[str, str]) -> subprocess.
 
 @dataclass
 class Dependencies:
-    service_snapshot: Callable[[], dict[str, Any]]
+    service_snapshot: Callable[[dict[str, Any]], dict[str, Any]]
     owner_snapshot: Callable[[], dict[str, Any]]
     stop_service: Callable[[], None]
     start_service: Callable[[], None]
@@ -789,13 +1002,18 @@ def stopped_decision(observation: dict[str, Any], old_worker_pid: int, seen_zero
     return stable, seen_zero or zero
 
 
-def poll_stopped(deps: Dependencies, old_worker_pid: int) -> list[dict[str, Any]]:
+def poll_stopped(
+    deps: Dependencies, old_worker_pid: int, readiness: dict[str, Any]
+) -> list[dict[str, Any]]:
     deadline = deps.monotonic() + STOP_TIMEOUT_SECONDS
     stable_count = 0
     seen_zero = False
     observations = []
     while deps.monotonic() < deadline:
-        observation = {"service": deps.service_snapshot(), "owners": deps.owner_snapshot()}
+        observation = {
+            "service": deps.service_snapshot(readiness),
+            "owners": deps.owner_snapshot(),
+        }
         stable, seen_zero = stopped_decision(observation, old_worker_pid, seen_zero)
         observations.append(observation)
         stable_count = stable_count + 1 if stable else 0
@@ -805,11 +1023,13 @@ def poll_stopped(deps: Dependencies, old_worker_pid: int) -> list[dict[str, Any]
     raise PromotionError("stable stopped owner-free state timed out")
 
 
-def poll_restored(deps: Dependencies, before: dict[str, Any]) -> list[dict[str, Any]]:
+def poll_restored(
+    deps: Dependencies, before: dict[str, Any], readiness: dict[str, Any]
+) -> list[dict[str, Any]]:
     deadline = deps.monotonic() + RESTORE_TIMEOUT_SECONDS
     observations = []
     while deps.monotonic() < deadline:
-        current = deps.service_snapshot()
+        current = deps.service_snapshot(readiness)
         owners = deps.owner_snapshot()
         observation = {"service": current, "owners": owners}
         observations.append(observation)
@@ -940,6 +1160,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
     if before_candidate.get("authorization", {}).get("actual_run_allowed") is not True:
         raise PromotionError("candidate is not authorized for actual execution")
     profile = read_object(candidate / "profile.json", "candidate profile")
+    readiness = validate_readiness_contract(before_candidate.get("readiness"))
     gate = read_object(candidate / "gate.json", "candidate Gate")
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
     if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
@@ -965,7 +1186,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
     capture_temp = Path(tempfile.mkdtemp(prefix="ullm-sq8-overlay-evidence-run-")) / "executor-record.json"
     code = 1
     try:
-        prestate = deps.service_snapshot()
+        prestate = deps.service_snapshot(readiness)
         evidence["service_prestate"] = prestate
         if not (
             prestate.get("active") is True
@@ -979,7 +1200,9 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             raise PromotionError("default service prestate worker PID is invalid")
         service_touched = True
         deps.stop_service()
-        evidence["stopped_observations"] = poll_stopped(deps, old_worker_pid)
+        evidence["stopped_observations"] = poll_stopped(
+            deps, old_worker_pid, readiness
+        )
         lease = deps.acquire_lock()
         evidence["lock"] = lease.evidence()
         command = capture_command(candidate, capture_temp, request_id)
@@ -1018,7 +1241,9 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             evidence["restore"]["attempted"] = True
             try:
                 deps.start_service()
-                evidence["restore"]["observations"] = poll_restored(deps, evidence["service_prestate"])
+                evidence["restore"]["observations"] = poll_restored(
+                    deps, evidence["service_prestate"], readiness
+                )
                 evidence["restore"]["passed"] = True
             except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
                 evidence["restore"]["error"] = str(error)

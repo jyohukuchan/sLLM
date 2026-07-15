@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,27 @@ SPEC.loader.exec_module(TOOL)
 
 def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def readiness() -> dict[str, object]:
+    body = '{"status":"ready"}'
+    return {
+        "schema": "ullm.bridge_container_readiness.v1",
+        "container": {
+            "name": "open-webui", "id": "4" * 64,
+            "image_id": "sha256:" + "5" * 64, "config_image": "ullm/open-webui:test",
+        },
+        "network": {
+            "name": "open-webui-network", "id": "6" * 64, "driver": "bridge",
+            "bridge_interface": "br-" + "6" * 12,
+        },
+        "endpoint": {
+            "url": "http://172.20.0.1:8000/readyz", "path": "/readyz",
+            "expected_status": 200, "expected_body": body,
+            "expected_body_sha256": hashlib.sha256(body.encode("ascii")).hexdigest(),
+            "timeout_seconds": 5,
+        },
+    }
 
 
 def fixture(tmp_path: Path) -> tuple[Path, Path, str]:
@@ -127,6 +147,7 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
         lambda *args: commit if args[0] == "rev-parse" and args[1].endswith("^{commit}") else "d" * 40,
     )
     monkeypatch.setattr(TOOL, "source_archive_sha256", lambda _: "e" * 64)
+    monkeypatch.setattr(TOOL, "readiness_identity", readiness)
     monkeypatch.setattr(TOOL, "command_text", lambda argv, **_: "fixture-version")
     monkeypatch.setattr(
         TOOL,
@@ -162,6 +183,8 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
         "actual_evidence_from_receipt": ["actual"],
         "request_id_from_receipt": ["request_id"],
         "authorization_audit_from_receipt": ["authorization_audit"],
+        "readiness_from_receipt": ["readiness"],
+        "readiness": readiness(),
         "release_source_commit": commit,
     }
     request_id = gate["request"]["actual"]["request_id"]
@@ -222,6 +245,7 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         lambda *args: commit if args[0] == "rev-parse" and args[1].endswith("^{commit}") else tree,
     )
     monkeypatch.setattr(TOOL, "source_archive_sha256", lambda _: archive)
+    monkeypatch.setattr(TOOL, "readiness_identity", readiness)
     monkeypatch.setattr(TOOL, "command_text", lambda argv, **_: "fixture-version")
     monkeypatch.setattr(
         TOOL,
@@ -249,6 +273,7 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         content_sha256="b" * 64,
         tensor_set_sha256="c" * 64,
         package_sha256=package_sha,
+        readiness=readiness(),
     )
     audit = {
         "path": str(audit_path.resolve()),

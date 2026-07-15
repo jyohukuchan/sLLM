@@ -147,6 +147,52 @@ def _resolve_authorization_audit(value: Any, label: str) -> dict[str, str] | Non
     return {"path": os.fspath(audit_path), "sha256": digest}
 
 
+def _resolve_readiness(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "container", "network", "endpoint"}:
+        raise GenerationError(f"{label} shape differs")
+    if value.get("schema") != "ullm.bridge_container_readiness.v1":
+        raise GenerationError(f"{label} schema differs")
+    container = value.get("container")
+    network = value.get("network")
+    endpoint = value.get("endpoint")
+    if not isinstance(container, dict) or set(container) != {"name", "id", "image_id", "config_image"}:
+        raise GenerationError(f"{label} container identity differs")
+    if (
+        container.get("name") != "open-webui"
+        or not isinstance(container.get("id"), str)
+        or HEX64_RE.fullmatch(container["id"]) is None
+        or not isinstance(container.get("image_id"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", container["image_id"]) is None
+        or not isinstance(container.get("config_image"), str)
+        or not container["config_image"]
+    ):
+        raise GenerationError(f"{label} container identity differs")
+    if not isinstance(network, dict) or set(network) != {"name", "id", "driver", "bridge_interface"}:
+        raise GenerationError(f"{label} network identity differs")
+    network_id = network.get("id")
+    if (
+        not isinstance(network.get("name"), str)
+        or not network["name"]
+        or not isinstance(network_id, str)
+        or HEX64_RE.fullmatch(network_id) is None
+        or network.get("driver") != "bridge"
+        or network.get("bridge_interface") != f"br-{network_id[:12]}"
+    ):
+        raise GenerationError(f"{label} network identity differs")
+    expected_body = '{"status":"ready"}'
+    expected_endpoint = {
+        "url": "http://172.20.0.1:8000/readyz",
+        "path": "/readyz",
+        "expected_status": 200,
+        "expected_body": expected_body,
+        "expected_body_sha256": hashlib.sha256(expected_body.encode("ascii")).hexdigest(),
+        "timeout_seconds": 5,
+    }
+    if not isinstance(endpoint, dict) or endpoint != expected_endpoint:
+        raise GenerationError(f"{label} endpoint identity differs")
+    return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
+
+
 def _validate_sq8_overlay_receipt(
     *,
     profile: dict[str, Any],
@@ -182,6 +228,8 @@ def _validate_sq8_overlay_receipt(
         "actual_evidence_from_receipt",
         "request_id_from_receipt",
         "authorization_audit_from_receipt",
+        "readiness_from_receipt",
+        "readiness",
         "release_source_commit",
     }
     if set(promotion_profile) != expected_promotion:
@@ -202,6 +250,11 @@ def _validate_sq8_overlay_receipt(
         raise GenerationError("SQ8 overlay request ID receipt binding differs")
     if promotion_profile.get("authorization_audit_from_receipt") != ["authorization_audit"]:
         raise GenerationError("SQ8 overlay authorization audit receipt binding differs")
+    if promotion_profile.get("readiness_from_receipt") != ["readiness"]:
+        raise GenerationError("SQ8 overlay readiness receipt binding differs")
+    profile_readiness = _resolve_readiness(
+        promotion_profile.get("readiness"), "SQ8 overlay profile readiness"
+    )
     release_commit = _require_hex(
         promotion_profile.get("release_source_commit"), HEX40_RE,
         "SQ8 overlay profile release source commit",
@@ -219,6 +272,7 @@ def _validate_sq8_overlay_receipt(
         "overlay",
         "package",
         "authorization_audit",
+        "readiness",
         "actual",
     }
     if set(receipt) != expected_receipt_keys:
@@ -252,6 +306,16 @@ def _validate_sq8_overlay_receipt(
         ),
         "SQ8 overlay authorization audit",
     )
+    readiness = _resolve_readiness(
+        _receipt_object(
+            receipt,
+            promotion_profile.get("readiness_from_receipt"),
+            "SQ8 overlay readiness",
+        ),
+        "SQ8 overlay readiness",
+    )
+    if readiness != profile_readiness:
+        raise GenerationError("SQ8 overlay profile/receipt readiness differs")
 
     release = receipt.get("release")
     if not isinstance(release, dict) or set(release) != {"worker", "profile", "served_model"}:
@@ -388,7 +452,8 @@ def _validate_sq8_overlay_receipt(
         ):
             raise GenerationError("SQ8 overlay prepared receipt state differs")
         for section in (
-            "source_commit", "source_provenance", "overlay", "package", "authorization_audit"
+            "source_commit", "source_provenance", "overlay", "package",
+            "authorization_audit", "readiness",
         ):
             if prepared_value.get(section) != receipt.get(section):
                 raise GenerationError(f"SQ8 overlay prepared receipt {section} differs")
@@ -437,6 +502,7 @@ def _validate_sq8_overlay_receipt(
         "source_commit": source_commit,
         "served_model_semantic_sha256": release_manifest["semantic_sha256"],
         "authorization_audit": authorization_audit,
+        "readiness": readiness,
     }
 
 
@@ -812,6 +878,7 @@ def _materialize_profile_document(
     )
     overlay_receipt = None
     authorization_audit: dict[str, str] | None = None
+    readiness: dict[str, Any] | None = None
     if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
         authorization_audit = _resolve_authorization_audit(
             _receipt_object(
@@ -821,6 +888,18 @@ def _materialize_profile_document(
             ),
             "SQ8 overlay authorization audit",
         )
+        readiness = _resolve_readiness(
+            _receipt_object(
+                receipt,
+                promotion_profile.get("readiness_from_receipt"),
+                "SQ8 overlay readiness",
+            ),
+            "SQ8 overlay readiness",
+        )
+        if readiness != _resolve_readiness(
+            promotion_profile.get("readiness"), "SQ8 overlay profile readiness"
+        ):
+            raise GenerationError("SQ8 overlay profile/receipt readiness differs")
     if validate_receipt:
         if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
             if artifact_manifest_path is None:
@@ -919,6 +998,7 @@ def _materialize_profile_document(
     }
     if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
         document["promotion"]["authorization_audit"] = authorization_audit
+        document["promotion"]["readiness"] = readiness
     if reasoning_profile is not None:
         document["reasoning"] = reasoning_profile
     if overlay_receipt is not None:

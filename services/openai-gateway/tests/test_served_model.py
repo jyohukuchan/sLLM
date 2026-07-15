@@ -112,6 +112,72 @@ def test_promotion_authorization_audit_rejects_weak_or_mismatched_refs(
         load_served_model(path)
 
 
+def _readiness() -> dict[str, Any]:
+    body = '{"status":"ready"}'
+    return {
+        "schema": "ullm.bridge_container_readiness.v1",
+        "container": {
+            "name": "open-webui", "id": "4" * 64,
+            "image_id": "sha256:" + "5" * 64,
+            "config_image": "ullm/open-webui:test",
+        },
+        "network": {
+            "name": "open-webui-network", "id": "6" * 64,
+            "driver": "bridge", "bridge_interface": "br-" + "6" * 12,
+        },
+        "endpoint": {
+            "url": "http://172.20.0.1:8000/readyz", "path": "/readyz",
+            "expected_status": 200, "expected_body": body,
+            "expected_body_sha256": hashlib.sha256(body.encode("ascii")).hexdigest(),
+            "timeout_seconds": 5,
+        },
+    }
+
+
+def test_promotion_readiness_is_optional_and_typed(tmp_path: Path) -> None:
+    path = _copy_fixture(tmp_path)
+    assert load_served_model(path).promotion.readiness is None
+    value = _document(path)
+    value["promotion"]["readiness"] = _readiness()
+    _write(path, value)
+
+    readiness = load_served_model(path).promotion.readiness
+
+    assert readiness is not None
+    assert readiness.container_id == "4" * 64
+    assert readiness.network_id == "6" * 64
+    assert readiness.bridge_interface == "br-" + "6" * 12
+    assert readiness.expected_status == 200
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["container"].__setitem__("id", "A" * 64),
+        lambda value: value["container"].__setitem__("image_id", "5" * 64),
+        lambda value: value["network"].__setitem__("driver", "host"),
+        lambda value: value["network"].__setitem__("bridge_interface", "docker0"),
+        lambda value: value["endpoint"].__setitem__("url", "http://127.0.0.1:8000/readyz"),
+        lambda value: value["endpoint"].__setitem__("expected_status", 204),
+        lambda value: value["endpoint"].__setitem__("expected_body", '{"status":"ready"}\n'),
+        lambda value: value["endpoint"].__setitem__("timeout_seconds", 6),
+        lambda value: value["endpoint"].__setitem__("extra", True),
+    ],
+)
+def test_promotion_readiness_rejects_identity_weakening(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], Any]
+) -> None:
+    path = _copy_fixture(tmp_path)
+    value = _document(path)
+    readiness = _readiness()
+    mutate(readiness)
+    value["promotion"]["readiness"] = readiness
+    _write(path, value)
+
+    with pytest.raises(ServedModelError):
+        load_served_model(path)
+
+
 def _copy_fixture(tmp_path: Path, name: str = "sq8") -> Path:
     target = tmp_path / name
     shutil.copytree(FIXTURES / name, target)
