@@ -45,5 +45,25 @@ python3 tools/prepare-aq4-p3-profile-operator.py validate-operator
 
 ## 次の行動
 
-- 親エージェントから明示的GOが来るまではactualを実行しない。
-- GO直前に`audit-current`と9/9 fresh absenceを再確認する。quietまたはservice epochが変化していればactualを止め、fresh quietを再採取する。
+- 独立GOを受領し、GO直前の`audit-current`と9/9 fresh absenceがcleanであることを確認した。
+- sealed manifestのargvを`os.execv`でshellを介さず、同一PTYのsudo cacheを使って1回だけ実行した。returncodeは`1`で、retryは`0`。
+- 最上位reason codeは`ready_candidate_marker_absent`。capture failureは`expected exactly one marker trace, got 0`で、runnerは完了しtrace CSVを4件生成したが、capture contractがfail-closedした。
+- 今回のprofile evidenceはfailure evidenceであり、measurementおよびpromotionには使用しない。
+
+## actual failureの保存とrestore結果
+
+- operator result status: `failed`
+- actual audit status: `failed_immutable_evidence_preserved_restore_passed`
+- operator result JSON SHA-256: `15a0f971350b403106c4d7f37c5148d88b4d590b396fe9b1d8dcf056a0fcbb55`
+- actual audit JSON SHA-256: `fb72e65c2219aae049ac6133cddbe35c84329ef320cf0f4b8eb499e931a0e8be`
+- capture failure JSON SHA-256: `de9518084982fe49e39e9a3939eed4cecade57f91bd8289af6e3c6d94be0061e`
+- outer-finally restoreは`15.094784399`秒で成功し、120秒のabsolute deadline内だった。
+- serviceはmain PID `193179`から`466848`、workerは`193294`から`467004`の新epochへ移行した。`active/running`、`NRestarts=0`、lock busy、AMD/KFD owners `[467004]`を確認した。
+- worker/package-manifest/served-manifest/formal-health hashはpreflightと一致した。package full content hashはexactly 1回でpassedし、最終metadata identityも一致した。
+- capture children、launcher children、lock holders、targeted residual processはいずれも0。secret pattern hitも0だった。
+- maintenance-v6、execute-evidence-v6、runtime-v6、capture-v6、operator-result-v7、actual-audit-v7はすべて`SHA256SUMS`付きでroot `0555`、member `0444`へ封印した。
+
+## 次の行動（actual後）
+
+- retryは禁止されたままであり、同じprofile-v6 outputを再利用しない。
+- marker trace欠落の原因調査は、今回のimmutable evidenceを入力にした別作業として行う。
