@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -143,6 +144,44 @@ def candidate(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+def worker_stderr_envelope(preview: str = "worker failed\n") -> dict[str, Any]:
+    raw = preview.encode("utf-8")
+    return {
+        "schema_version": MODULE.WORKER_STDERR_SCHEMA,
+        "byte_count": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "preview_text": preview,
+        "captured_bytes": len(raw),
+        "truncated": False,
+        "utf8_replacement": "\ufffd" in preview,
+        "redacted_lines": preview.count("<redacted sensitive diagnostic line>"),
+        "complete": True,
+        "stream_error": None,
+    }
+
+
+def capture_error_envelope(
+    *, preview: str = "worker failed\n", stage: str = "worker_exit"
+) -> dict[str, Any]:
+    return {
+        "schema_version": MODULE.CAPTURE_ERROR_SCHEMA,
+        "status": "failed",
+        "stage": stage,
+        "reason": "resident worker exited with status 7",
+        "timed_out": False,
+        "worker_returncode": 7,
+        "worker_signal": None,
+        "worker_stderr": worker_stderr_envelope(preview),
+    }
+
+
+def capture_stream(raw: bytes, *, parse: bool = True) -> Any:
+    collector = MODULE._CaptureStreamCollector(retain_parse_buffer=parse)
+    collector.feed(raw)
+    collector.finish()
+    return collector.result(False)
 
 
 def dependencies(
@@ -547,6 +586,238 @@ def test_bounded_diagnostic_recaps_redacted_and_invalid_display(
     assert value["display"]["truncated_after_redaction"] is True
     assert "token=x" not in value["display"]["text"]
     assert "password=x" not in value["display"]["text"]
+
+
+def test_exact_capture_error_envelope_preserves_large_worker_structure() -> None:
+    preview = "\ufffd" * 10000
+    value = capture_error_envelope(preview=preview)
+    raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    assert len(raw) > MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+
+    parsed = MODULE._capture_error_envelope(capture_stream(raw))
+
+    assert parsed["validation"] == "valid"
+    worker = parsed["worker_stderr"]
+    assert worker["byte_count"] == len(preview.encode("utf-8"))
+    assert worker["sha256"] == hashlib.sha256(preview.encode("utf-8")).hexdigest()
+    display = worker["preview"]
+    serialized = json.dumps(
+        display,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    assert len(serialized) <= MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    assert display["display"]["serialized_byte_count"] == len(serialized)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("unknown", "capture_error_envelope_keys_differ"),
+        ("unknown-stage", "capture_error_envelope_type_or_value_differs"),
+        ("stage", "capture_error_envelope_stage_terminal_mismatch"),
+        ("worker-key", "worker_stderr_keys_differ"),
+        ("worker-type", "worker_stderr_type_or_value_differs"),
+        ("incomplete", "worker_stderr_incomplete"),
+    ],
+)
+def test_capture_error_envelope_fails_closed_on_shape_and_stage(
+    mutation: str, reason: str
+) -> None:
+    value = capture_error_envelope()
+    if mutation == "unknown":
+        value["unknown"] = True
+    elif mutation == "unknown-stage":
+        value["stage"] = "invented_stage"
+    elif mutation == "stage":
+        value["worker_returncode"] = 0
+    elif mutation == "worker-key":
+        value["worker_stderr"]["unknown"] = True
+    elif mutation == "worker-type":
+        value["worker_stderr"]["byte_count"] = True
+    else:
+        value["worker_stderr"]["complete"] = False
+        value["worker_stderr"]["stream_error"] = "drain incomplete"
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+    parsed = MODULE._capture_error_envelope(capture_stream(raw))
+
+    assert parsed["validation"] == "invalid"
+    assert parsed.get("validation_reason", parsed.get("reason")) == reason
+    if mutation == "incomplete":
+        assert parsed["worker_stderr"]["complete"] is False
+        assert parsed["worker_stderr"]["stream_error"] == "drain incomplete"
+
+
+def test_capture_error_envelope_rejects_duplicate_invalid_and_truncated() -> None:
+    value = capture_error_envelope()
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    duplicate = raw.replace(b'{"schema_version":', b'{"status":"failed","schema_version":', 1)
+    assert MODULE._capture_error_envelope(capture_stream(duplicate))["reason"] == (
+        "capture_error_envelope_duplicate_key"
+    )
+    assert MODULE._capture_error_envelope(capture_stream(b"{\xff"))["reason"] == (
+        "capture_error_envelope_invalid_json"
+    )
+    stream = capture_stream(raw)
+    stream.parse_buffer_truncated = True
+    assert MODULE._capture_error_envelope(stream)["reason"] == (
+        "capture_error_envelope_truncated"
+    )
+
+
+def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
+    signaled = capture_error_envelope()
+    signaled["worker_returncode"] = -signal.SIGKILL
+    signaled["worker_signal"] = signal.SIGKILL
+    parsed = MODULE._capture_error_envelope(
+        capture_stream(json.dumps(signaled).encode("utf-8"))
+    )
+    assert parsed["validation"] == "valid"
+    assert parsed["worker_returncode"] == -signal.SIGKILL
+    assert parsed["worker_signal"] == signal.SIGKILL
+
+    timed_out = capture_error_envelope(stage="request")
+    timed_out["timed_out"] = True
+    timed_out["worker_returncode"] = -signal.SIGKILL
+    timed_out["worker_signal"] = signal.SIGKILL
+    parsed = MODULE._capture_error_envelope(
+        capture_stream(json.dumps(timed_out).encode("utf-8"))
+    )
+    assert parsed["validation"] == "valid"
+    assert parsed["timed_out"] is True
+
+
+def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() -> None:
+    preview = (
+        "non-JSON worker cause \ufffd\n"
+        "<redacted sensitive diagnostic line>\n"
+        + "ordinary worker detail\n" * 1400
+    )
+    preview = preview.encode("utf-8")[: MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+    envelope = capture_error_envelope(preview=preview)
+    payload = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
+    script = (
+        "import os,sys;"
+        "sys.stdout.write(sys.argv[1]+'\\n');sys.stdout.flush();"
+        "raw=b'non-json\\xff\\nAPI_KEY=do-not-persist\\n'+b'x'*100000;"
+        "sys.stderr.buffer.write(raw);sys.stderr.flush();sys.exit(7)"
+    )
+
+    result = MODULE.default_capture([sys.executable, "-c", script, payload], dict(os.environ))
+
+    assert result.returncode == 7 and result.timed_out is False
+    assert result.stdout.byte_count == len((payload + "\n").encode("utf-8"))
+    assert result.stdout.byte_count > MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    expected_stderr = b"non-json\xff\nAPI_KEY=do-not-persist\n" + b"x" * 100000
+    assert result.stderr.byte_count == len(expected_stderr)
+    assert result.stderr.sha256 == hashlib.sha256(expected_stderr).hexdigest()
+    stderr_evidence = MODULE._stream_diagnostic(result.stderr)
+    assert "do-not-persist" not in stderr_evidence["display"]["text"]
+    parsed = MODULE._capture_error_envelope(result.stdout)
+    assert parsed["validation"] == "valid"
+    assert parsed["worker_stderr"]["sha256"] == envelope["worker_stderr"]["sha256"]
+
+
+def test_default_capture_success_status_is_unchanged() -> None:
+    status = {"status": "ok", "output": "/tmp/executor-record.json"}
+    result = MODULE.default_capture(
+        [
+            sys.executable,
+            "-c",
+            "import json,sys; print(json.dumps(json.loads(sys.argv[1])))",
+            json.dumps(status),
+        ],
+        dict(os.environ),
+    )
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert result.stderr.byte_count == 0
+    assert result.stdout.complete is True
+    assert MODULE._unique_json_object(result.stdout.parse_buffer) == status
+
+
+def test_default_capture_preserves_timeout_signal_and_bounded_malformed_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MODULE, "CAPTURE_SUBPROCESS_TIMEOUT_SECONDS", 0.05)
+    timeout = MODULE.default_capture(
+        [sys.executable, "-c", "import time; print('partial', flush=True); time.sleep(10)"],
+        dict(os.environ),
+    )
+    assert timeout.timed_out is True
+    assert timeout.timeout_seconds == 0.05
+    assert timeout.returncode == -signal.SIGKILL
+    assert timeout.stdout.sha256 == hashlib.sha256(b"partial\n").hexdigest()
+
+    killed = MODULE.default_capture(
+        [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"],
+        dict(os.environ),
+    )
+    assert killed.timed_out is False
+    assert killed.returncode == -signal.SIGTERM
+
+    malformed_raw = b"not-json\xff\n" + b"z" * 600000
+    malformed = MODULE.default_capture(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'not-json\\xff\\n'+b'z'*600000); sys.exit(3)",
+        ],
+        dict(os.environ),
+    )
+    assert malformed.stdout.byte_count == len(malformed_raw)
+    assert malformed.stdout.sha256 == hashlib.sha256(malformed_raw).hexdigest()
+    assert malformed.stdout.parse_buffer_truncated is True
+    assert MODULE._capture_error_envelope(malformed.stdout)["reason"] == (
+        "capture_error_envelope_truncated"
+    )
+
+
+def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(monkeypatch, [snapshot()])
+    deps, _calls = dependencies(tmp_path)
+    preview = "non-JSON worker cause \ufffd\n<redacted sensitive diagnostic line>\n"
+    envelope = capture_error_envelope(preview=preview)
+    payload = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
+    script = (
+        "import sys;sys.stdout.write(sys.argv[1]+'\\n');sys.stdout.flush();"
+        "sys.stderr.buffer.write(b'API_KEY=do-not-persist\\n'+b'q'*100000);"
+        "sys.stderr.flush();sys.exit(7)"
+    )
+
+    def real_capture(_argv: list[str], _environment: dict[str, str]) -> Any:
+        return MODULE.default_capture(
+            [sys.executable, "-c", script, payload], dict(os.environ)
+        )
+
+    deps.capture = real_capture
+    output = tmp_path / "real-fake-failure"
+    code, evidence = MODULE.execute(candidate(tmp_path), output, deps)
+
+    assert code == 1
+    tool_error = evidence["capture_failure"]["capture_tool_error"]
+    assert tool_error["validation"] == "valid"
+    assert tool_error["worker_stderr"]["sha256"] == envelope["worker_stderr"]["sha256"]
+    assert "do-not-persist" not in evidence["capture_failure"]["stderr"]["display"]["text"]
+    persisted = json.loads((output / "maintenance-evidence.json").read_text())
+    assert persisted["capture_failure"]["capture_tool_error"] == tool_error
+    receipt = json.loads((output / "promotion-failure-receipt.json").read_text())
+    maintenance_sha = MODULE.sha_file(output / "maintenance-evidence.json")
+    assert receipt["actual"]["maintenance_evidence"]["sha256"] == maintenance_sha
+    assert f"{maintenance_sha}  maintenance-evidence.json\n" in (
+        output / "SHA256SUMS"
+    ).read_text(encoding="ascii")
+    for path in output.iterdir():
+        metadata = path.stat(follow_symlinks=False)
+        assert metadata.st_nlink == 1
+        assert stat.S_IMODE(metadata.st_mode) == 0o444
 
 
 def test_stop_failure_attempts_restore(

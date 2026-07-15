@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,24 @@ RESTORE_TIMEOUT_SECONDS = 120.0
 POLL_SECONDS = 0.25
 MAX_JSON_BYTES = 16 * 1024 * 1024
 CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
+CAPTURE_ENVELOPE_MAX_BYTES = 512 * 1024
+CAPTURE_READ_CHUNK_BYTES = 64 * 1024
+CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 300.0
+CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v1"
+WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v1"
+CAPTURE_ERROR_STAGES = frozenset(
+    {
+        "capture",
+        "request",
+        "shutdown",
+        "cleanup",
+        "worker",
+        "worker_exit",
+        "audit_missing",
+        "resource_observation",
+        "package_validation",
+    }
+)
 PROMOTION_REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DOCKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -1186,14 +1205,134 @@ def default_owner_snapshot() -> dict[str, Any]:
     }
 
 
-def default_capture(argv: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
+@dataclass
+class CaptureStream:
+    byte_count: int
+    sha256: str
+    prefix: bytes
+    prefix_truncated: bool
+    parse_buffer: bytes | None
+    parse_buffer_truncated: bool
+    complete: bool
+    stream_error: str | None
+
+
+@dataclass
+class CaptureProcessResult:
+    argv: list[str]
+    returncode: int
+    stdout: CaptureStream
+    stderr: CaptureStream
+    timed_out: bool
+    timeout_seconds: float | None
+
+
+class _CaptureStreamCollector:
+    def __init__(self, *, retain_parse_buffer: bool) -> None:
+        self._digest = hashlib.sha256()
+        self._byte_count = 0
+        self._prefix = bytearray()
+        self._parse = bytearray() if retain_parse_buffer else None
+        self._parse_truncated = False
+        self._complete = False
+        self._stream_error: str | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        self._digest.update(chunk)
+        self._byte_count += len(chunk)
+        remaining = CAPTURE_DIAGNOSTIC_MAX_BYTES - len(self._prefix)
+        if remaining > 0:
+            self._prefix.extend(chunk[:remaining])
+        if self._parse is not None:
+            parse_remaining = CAPTURE_ENVELOPE_MAX_BYTES - len(self._parse)
+            if parse_remaining > 0:
+                self._parse.extend(chunk[:parse_remaining])
+            if len(chunk) > parse_remaining:
+                self._parse_truncated = True
+
+    def drain(self, stream: Any) -> None:
+        try:
+            while True:
+                chunk = stream.read(CAPTURE_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    chunk = bytes(chunk)
+                self.feed(chunk)
+        except BaseException as error:
+            self._stream_error = type(error).__name__
+        finally:
+            self._complete = True
+
+    def finish(self) -> None:
+        self._complete = True
+
+    def result(self, thread_alive: bool) -> CaptureStream:
+        complete = self._complete and not thread_alive and self._stream_error is None
+        return CaptureStream(
+            byte_count=self._byte_count,
+            sha256=self._digest.hexdigest(),
+            prefix=bytes(self._prefix),
+            prefix_truncated=self._byte_count > len(self._prefix),
+            parse_buffer=bytes(self._parse) if self._parse is not None else None,
+            parse_buffer_truncated=self._parse_truncated,
+            complete=complete,
+            stream_error=self._stream_error,
+        )
+
+
+def default_capture(argv: list[str], environment: dict[str, str]) -> CaptureProcessResult:
+    proc = subprocess.Popen(
         argv,
-        check=False,
-        capture_output=True,
-        text=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=environment,
-        timeout=300,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_collector = _CaptureStreamCollector(retain_parse_buffer=True)
+    stderr_collector = _CaptureStreamCollector(retain_parse_buffer=False)
+    stdout_thread = threading.Thread(
+        target=stdout_collector.drain,
+        args=(proc.stdout,),
+        name="sq8-capture-stdout",
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=stderr_collector.drain,
+        args=(proc.stderr,),
+        name="sq8-capture-stderr",
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=CAPTURE_SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+    finally:
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        for stream, thread in (
+            (proc.stdout, stdout_thread),
+            (proc.stderr, stderr_thread),
+        ):
+            if thread.is_alive():
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+                thread.join(timeout=1)
+    return CaptureProcessResult(
+        argv=list(argv),
+        returncode=int(proc.returncode),
+        stdout=stdout_collector.result(stdout_thread.is_alive()),
+        stderr=stderr_collector.result(stderr_thread.is_alive()),
+        timed_out=timed_out,
+        timeout_seconds=CAPTURE_SUBPROCESS_TIMEOUT_SECONDS if timed_out else None,
     )
 
 
@@ -1229,12 +1368,23 @@ def _redact_diagnostic(raw: bytes) -> str:
 def _bounded_diagnostic(value: Any) -> dict[str, Any]:
     raw = _diagnostic_bytes(value)
     captured = raw[:CAPTURE_DIAGNOSTIC_MAX_BYTES]
+    return _bounded_diagnostic_parts(
+        byte_count=len(raw),
+        sha256=hashlib.sha256(raw).hexdigest(),
+        captured=captured,
+        prefix_truncated=len(raw) > len(captured),
+    )
+
+
+def _bounded_diagnostic_parts(
+    *, byte_count: int, sha256: str, captured: bytes, prefix_truncated: bool
+) -> dict[str, Any]:
     redacted = _redact_diagnostic(captured)
     source = {
-        "byte_count": len(raw),
-        "sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_count": byte_count,
+        "sha256": sha256,
         "captured_prefix_bytes": len(captured),
-        "prefix_truncated": len(raw) > len(captured),
+        "prefix_truncated": prefix_truncated,
     }
 
     def document(text: str, truncated: bool, serialized_bytes: int) -> dict[str, Any]:
@@ -1287,6 +1437,15 @@ def _bounded_diagnostic(value: Any) -> dict[str, Any]:
     return result
 
 
+def _stream_diagnostic(stream: CaptureStream) -> dict[str, Any]:
+    return _bounded_diagnostic_parts(
+        byte_count=stream.byte_count,
+        sha256=stream.sha256,
+        captured=stream.prefix,
+        prefix_truncated=stream.prefix_truncated,
+    )
+
+
 def capture_failure_diagnostic(
     *,
     stage: str,
@@ -1303,15 +1462,237 @@ def capture_failure_diagnostic(
         except ValueError:
             name = None
         signal_value = {"number": number, "name": name}
-    return {
+    stdout_diagnostic = (
+        _stream_diagnostic(stdout)
+        if isinstance(stdout, CaptureStream)
+        else _bounded_diagnostic(stdout)
+    )
+    stderr_diagnostic = (
+        _stream_diagnostic(stderr)
+        if isinstance(stderr, CaptureStream)
+        else _bounded_diagnostic(stderr)
+    )
+    result = {
         "schema_version": "ullm.qwen35_aq4.sq8_overlay_capture_failure.v1",
         "stage": stage,
         "returncode": returncode,
         "signal": signal_value,
         "timeout_seconds": timeout_seconds,
-        "stdout": _bounded_diagnostic(stdout),
-        "stderr": _bounded_diagnostic(stderr),
+        "stdout": stdout_diagnostic,
+        "stderr": stderr_diagnostic,
     }
+    if isinstance(stdout, CaptureStream) and isinstance(stderr, CaptureStream):
+        result["outer_collection"] = {
+            "stdout": {
+                "complete": stdout.complete,
+                "stream_error": stdout.stream_error,
+                "parse_buffer_truncated": stdout.parse_buffer_truncated,
+            },
+            "stderr": {
+                "complete": stderr.complete,
+                "stream_error": stderr.stream_error,
+            },
+        }
+    return result
+
+
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+def _unique_json_object(raw: bytes) -> dict[str, Any]:
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise _DuplicateJsonKey(key)
+            result[key] = value
+        return result
+
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise ValueError("capture error envelope is not an object")
+    return value
+
+
+def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
+    invalid: dict[str, Any] = {"validation": "invalid", "reason": None}
+    if not stream.complete or stream.stream_error is not None:
+        invalid["reason"] = "outer_stdout_collection_incomplete"
+        return invalid
+    if stream.parse_buffer_truncated or stream.parse_buffer is None:
+        invalid["reason"] = "capture_error_envelope_truncated"
+        return invalid
+    try:
+        value = _unique_json_object(stream.parse_buffer)
+    except _DuplicateJsonKey:
+        invalid["reason"] = "capture_error_envelope_duplicate_key"
+        return invalid
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        invalid["reason"] = "capture_error_envelope_invalid_json"
+        return invalid
+    expected = {
+        "schema_version",
+        "status",
+        "stage",
+        "reason",
+        "timed_out",
+        "worker_returncode",
+        "worker_signal",
+        "worker_stderr",
+    }
+    if set(value) != expected:
+        invalid["reason"] = "capture_error_envelope_keys_differ"
+        return invalid
+    stage = value.get("stage")
+    reason = value.get("reason")
+    timed_out = value.get("timed_out")
+    returncode = value.get("worker_returncode")
+    worker_signal = value.get("worker_signal")
+    if (
+        value.get("schema_version") != CAPTURE_ERROR_SCHEMA
+        or value.get("status") != "failed"
+        or not isinstance(stage, str)
+        or stage not in CAPTURE_ERROR_STAGES
+        or not isinstance(reason, str)
+        or not reason
+        or len(reason.encode("utf-8")) > 4096
+        or type(timed_out) is not bool
+        or not (
+            returncode is None
+            or (type(returncode) is int and -(2**31) <= returncode < 2**31)
+        )
+        or not (
+            worker_signal is None
+            or (type(worker_signal) is int and 0 < worker_signal < 128)
+        )
+    ):
+        invalid["reason"] = "capture_error_envelope_type_or_value_differs"
+        return invalid
+    if (
+        (returncode is None and worker_signal is not None)
+        or (
+            isinstance(returncode, int)
+            and returncode < 0
+            and worker_signal != -returncode
+        )
+        or (
+            isinstance(returncode, int)
+            and returncode >= 0
+            and worker_signal is not None
+        )
+        or (
+            stage == "worker_exit"
+            and (returncode in {None, 0} or timed_out is True)
+        )
+        or (timed_out is True and stage not in {"request", "shutdown", "cleanup"})
+    ):
+        invalid["reason"] = "capture_error_envelope_stage_terminal_mismatch"
+        return invalid
+    worker = value.get("worker_stderr")
+    worker_expected = {
+        "schema_version",
+        "byte_count",
+        "sha256",
+        "preview_text",
+        "captured_bytes",
+        "truncated",
+        "utf8_replacement",
+        "redacted_lines",
+        "complete",
+        "stream_error",
+    }
+    if not isinstance(worker, dict) or set(worker) != worker_expected:
+        invalid["reason"] = "worker_stderr_keys_differ"
+        return invalid
+    byte_count = worker.get("byte_count")
+    captured_bytes = worker.get("captured_bytes")
+    redacted_lines = worker.get("redacted_lines")
+    preview_text = worker.get("preview_text")
+    complete = worker.get("complete")
+    stream_error = worker.get("stream_error")
+    if (
+        worker.get("schema_version") != WORKER_STDERR_SCHEMA
+        or type(byte_count) is not int
+        or not 0 <= byte_count <= 9_007_199_254_740_991
+        or not isinstance(worker.get("sha256"), str)
+        or SHA256_RE.fullmatch(worker["sha256"]) is None
+        or not isinstance(preview_text, str)
+        or type(captured_bytes) is not int
+        or not 0 <= captured_bytes <= CAPTURE_DIAGNOSTIC_MAX_BYTES
+        or len(preview_text.encode("utf-8")) != captured_bytes
+        or type(worker.get("truncated")) is not bool
+        or type(worker.get("utf8_replacement")) is not bool
+        or type(redacted_lines) is not int
+        or redacted_lines < 0
+        or type(complete) is not bool
+        or not (
+            stream_error is None
+            or (
+                isinstance(stream_error, str)
+                and 0 < len(stream_error.encode("utf-8")) <= 1024
+            )
+        )
+    ):
+        invalid["reason"] = "worker_stderr_type_or_value_differs"
+        return invalid
+    normalized_worker = {
+        key: worker[key]
+        for key in (
+            "schema_version",
+            "byte_count",
+            "sha256",
+            "captured_bytes",
+            "truncated",
+            "utf8_replacement",
+            "redacted_lines",
+            "complete",
+            "stream_error",
+        )
+    }
+    if isinstance(stream_error, str):
+        normalized_worker["stream_error"] = _redact_diagnostic(
+            stream_error.encode("utf-8")
+        )
+    normalized_worker["preview"] = _bounded_diagnostic(preview_text)
+    result = {
+        "validation": "valid",
+        "schema_version": value["schema_version"],
+        "status": value["status"],
+        "stage": stage,
+        "reason": _redact_diagnostic(reason.encode("utf-8")),
+        "timed_out": timed_out,
+        "worker_returncode": returncode,
+        "worker_signal": worker_signal,
+        "worker_stderr": normalized_worker,
+    }
+    if complete is not True or stream_error is not None:
+        result["validation"] = "invalid"
+        result["validation_reason"] = "worker_stderr_incomplete"
+    return result
+
+
+def _coerce_capture_result(value: Any) -> CaptureProcessResult:
+    if isinstance(value, CaptureProcessResult):
+        return value
+    if not isinstance(value, subprocess.CompletedProcess):
+        raise PromotionError("capture dependency result type differs")
+    stdout_collector = _CaptureStreamCollector(retain_parse_buffer=True)
+    stderr_collector = _CaptureStreamCollector(retain_parse_buffer=False)
+    stdout_collector.feed(_diagnostic_bytes(value.stdout))
+    stderr_collector.feed(_diagnostic_bytes(value.stderr))
+    stdout_collector.finish()
+    stderr_collector.finish()
+    raw_args = value.args
+    argv = [raw_args] if isinstance(raw_args, str) else [str(item) for item in raw_args]
+    return CaptureProcessResult(
+        argv=argv,
+        returncode=int(value.returncode),
+        stdout=stdout_collector.result(False),
+        stderr=stderr_collector.result(False),
+        timed_out=False,
+        timeout_seconds=None,
+    )
 
 
 @dataclass
@@ -1664,7 +2045,7 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
         }
         evidence["actual_run_count"] = 1
         try:
-            completed = deps.capture(command, environment)
+            completed = _coerce_capture_result(deps.capture(command, environment))
         except subprocess.TimeoutExpired as error:
             evidence["capture_failure"] = capture_failure_diagnostic(
                 stage="capture_subprocess_timeout",
@@ -1674,6 +2055,23 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
                 timeout_seconds=float(error.timeout),
             )
             raise PromotionError("candidate SQ8 capture timed out") from error
+        if completed.timed_out:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_subprocess_timeout",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                timeout_seconds=completed.timeout_seconds,
+            )
+            raise PromotionError("candidate SQ8 capture timed out")
+        if not completed.stdout.complete or not completed.stderr.complete:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_stream_collection",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+            raise PromotionError("candidate SQ8 capture stream collection failed")
         if completed.returncode != 0:
             evidence["capture_failure"] = capture_failure_diagnostic(
                 stage="capture_subprocess_completed",
@@ -1681,10 +2079,22 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
                 stdout=completed.stdout,
                 stderr=completed.stderr,
             )
+            evidence["capture_failure"]["capture_tool_error"] = (
+                _capture_error_envelope(completed.stdout)
+            )
             raise PromotionError("candidate SQ8 capture failed")
         try:
-            capture_status = json.loads(completed.stdout) if completed.stdout.strip() else None
-        except (UnicodeError, json.JSONDecodeError) as error:
+            if (
+                completed.stdout.parse_buffer is None
+                or completed.stdout.parse_buffer_truncated
+            ):
+                raise ValueError("capture status output exceeds its bound")
+            capture_status = (
+                _unique_json_object(completed.stdout.parse_buffer)
+                if completed.stdout.parse_buffer.strip()
+                else None
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError) as error:
             evidence["capture_failure"] = capture_failure_diagnostic(
                 stage="capture_status_parse",
                 returncode=completed.returncode,
