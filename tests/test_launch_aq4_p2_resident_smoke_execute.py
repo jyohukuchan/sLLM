@@ -195,16 +195,17 @@ def test_profile_roctx_sdk_authority_and_generic_runner_cli_are_exact() -> None:
     assert profile[index:index + 5] == ["--profile-roctx-ranges", "--roctx-library", str(library), "--roctx-library-sha256", LAUNCHER.ROCTX_LIBRARY_SHA]
 
 
-def test_v8_normal_and_profile_namespaces_are_fresh_and_disjoint() -> None:
-    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v8"
-    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v8"
-    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v8"
-    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v8"
-    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v8"
-    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v8"
-    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v8"
-    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v8"
-    assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_PRODUCER_HELPER.read_bytes()) == LAUNCHER.PROFILE_PRODUCER_HELPER_SHA == "d0360a494f30c2bbac7ca1d043385dd6de9384fa2d81ab99881e54afeaaed934"
+def test_v9_normal_and_profile_namespaces_are_fresh_and_disjoint() -> None:
+    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v9"
+    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v9"
+    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v9"
+    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v9"
+    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v9"
+    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v9"
+    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v9"
+    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v9"
+    assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_PRODUCER_HELPER.read_bytes()) == LAUNCHER.PROFILE_PRODUCER_HELPER_SHA == "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
+    assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_FAMILY_HELPER.read_bytes()) == LAUNCHER.PROFILE_FAMILY_HELPER_SHA == "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
     paths = {LAUNCHER.EXECUTE_RUN_OUTPUT, LAUNCHER.EXECUTE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_RUN_OUTPUT, LAUNCHER.PROFILE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY}
     assert len(paths) == 5 and all(not path.exists() and not path.is_symlink() for path in paths)
 
@@ -736,8 +737,8 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
-def test_historical_execute_binding_v7_is_sealed_and_remains_blocked() -> None:
-    root = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v7"
+def test_historical_execute_binding_v8_is_sealed_and_remains_blocked() -> None:
+    root = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v8"
     assert stat.S_IMODE(root.stat().st_mode) == 0o555
     assert {item.name for item in root.iterdir()} == {"execute-binding.json", "launcher-trust.json", "SHA256SUMS"}
     for item in root.iterdir():
