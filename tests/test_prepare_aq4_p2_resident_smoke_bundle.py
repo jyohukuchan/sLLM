@@ -310,6 +310,13 @@ def test_checked_in_bundle_passes_offline_validation(trusted_reconstruction) -> 
     assert value["actual_live_observations"]["power"] is None
     assert value["actual_live_observations"]["vram"] is None
     assert value["resident_driver"]["source_commit"] == BUNDLE.DRIVER_COMMIT
+    assert value["resident_driver"]["source_tree"] == BUNDLE.DRIVER_TREE
+    assert value["resident_driver"]["source_git_blob"] == BUNDLE.DRIVER_SOURCE_GIT_BLOB
+    assert value["resident_driver"]["source_sha256"] == BUNDLE.DRIVER_SOURCE_SHA
+    assert value["resident_driver"]["binary_sha256"] == BUNDLE.EXPECTED_DRIVER_SHA
+    assert value["resident_driver"]["binary_bytes"] == BUNDLE.EXPECTED_DRIVER_BYTES
+    assert value["resident_driver"]["binary_build_id_sha1"] == BUNDLE.EXPECTED_DRIVER_BUILD_ID
+    assert value["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
     assert value["runner"]["source_commit"] == BUNDLE.RUNNER_COMMIT
     assert value["historical_predecessor"] == {
         "source_commit": "0fd7993843d0d7f1096d89079ce06922871d9f1a",
@@ -686,7 +693,13 @@ def test_checked_in_v4_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert roots["validator"]["source_commit"] == VALIDATOR_COMMIT
     assert roots["validator"]["sha256"] == VALIDATOR_SHA
     assert roots["resident_driver"]["blob_unchanged"] is True
+    assert roots["resident_driver"]["source_tree"] == BUNDLE.DRIVER_TREE
+    assert roots["resident_driver"]["git_blob_at_binding_commit"] == BUNDLE.DRIVER_SOURCE_GIT_BLOB
+    assert roots["resident_driver"]["source_sha256"] == BUNDLE.DRIVER_SOURCE_SHA
     assert roots["resident_driver"]["binary_sha256"] == BUNDLE.EXPECTED_DRIVER_SHA
+    assert roots["resident_driver"]["binary_bytes"] == BUNDLE.EXPECTED_DRIVER_BYTES
+    assert roots["resident_driver"]["binary_build_id_sha1"] == BUNDLE.EXPECTED_DRIVER_BUILD_ID
+    assert roots["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
 
 
 def test_v4_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:

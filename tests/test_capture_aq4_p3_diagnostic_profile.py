@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -147,6 +148,104 @@ def write_target_manifest(
     value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     return value
+
+
+def write_live_runner_target(
+    path: Path,
+    command: list[str],
+    lock: Path,
+    fixture_index: Path,
+    output: Path,
+) -> dict[str, object]:
+    paths = {
+        "case_binding": Path(command[command.index("--expanded") + 1]),
+        "fixture_index": fixture_index,
+        "identity": Path(command[command.index("--identity") + 1]),
+        "prepared_preflight": Path(command[command.index("--preflight") + 1]),
+        "policy": Path(command[command.index("--policy") + 1]),
+        "resident_driver": Path(command[command.index("--driver-command") + 1]),
+        "served_manifest": Path(
+            command[command.index("--served-model-manifest") + 1]
+        ),
+    }
+    bound_indices = {
+        0: ("python_interpreter", "code_execution", "exec", True),
+        1: ("resident_runner", "code_execution", "exec", False),
+        **{
+            command.index(str(value)): (
+                role,
+                "code_execution" if role == "resident_driver" else "control_input",
+                "exec" if role == "resident_driver" else "read",
+                role == "resident_driver",
+            )
+            for role, value in paths.items()
+        },
+    }
+    target: dict[str, object] = {
+        "schema_version": CAPTURE.TARGET_SCHEMA,
+        "status": "bound",
+        "manifest_sha256": None,
+        "argv": command,
+        "environment": {"ULLM_TEST_PROFILE_TARGET": "1"},
+        "input_files": [
+            {
+                "argument_index": index,
+                "path": command[index],
+                "sha256": hashlib.sha256(Path(command[index]).read_bytes()).hexdigest(),
+                "executable": executable,
+                "role": role,
+                "closure": closure,
+                "method": method,
+            }
+            for index, (role, closure, method, executable) in sorted(
+                bound_indices.items()
+            )
+        ],
+        "runtime_paths": [
+            {
+                "argument_index": command.index(str(lock)),
+                "path": str(lock),
+                "kind": "regular_file",
+                "identity": list(CAPTURE.PROFILER._identity(lock.lstat())),
+                "role": "device_lock",
+                "closure": "device_lock",
+                "method": "flock",
+            }
+        ],
+        "control_files": [
+            {
+                "path": entry["fixture_path"],
+                "sha256": entry["fixture_sha256"],
+                "role": f"case_fixture_{number:03d}",
+                "closure": "control_input",
+                "method": "read",
+            }
+            for number, entry in enumerate(
+                json.loads(fixture_index.read_text())["cases"]
+            )
+        ],
+        "output_paths": [
+            {"argument_index": command.index(str(output)), "path": str(output)}
+        ],
+        "closure_contract": {
+            "code_execution_closure": "pinned_fd",
+            "control_input_closure": "pinned_fd",
+            "device_lock_closure": "pinned_fd",
+            "data_integrity": "trusted_pre_post_guarded",
+        },
+        "capture_helpers": CAPTURE.capture_helper_contract(),
+        "authorization": {
+            "maximum_invocations": 1,
+            "target_role": "profile_runner_only",
+            "promotion_eligible": False,
+        },
+    }
+    target["manifest_sha256"] = CAPTURE.self_hash(target, "manifest_sha256")
+    path.write_text(
+        json.dumps(target, ensure_ascii=True, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return target
 
 
 def test_profiler_command_enables_all_required_domains(tmp_path: Path) -> None:
@@ -943,6 +1042,156 @@ def test_real_runner_reaches_fake_driver_ready_through_fake_rocprof_with_pinned_
             backup.rename(manifest)
         pinned_map.close()
         CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_capture_executes_real_rust_driver_with_nonascii_pinned_manifest_before_gpu(
+    tmp_path: Path,
+) -> None:
+    configured = os.environ.get("ULLM_TEST_AQ4_P2_RESIDENT_DRIVER")
+    if configured is None:
+        pytest.skip("set ULLM_TEST_AQ4_P2_RESIDENT_DRIVER to the clean release binary")
+    source_driver = Path(configured).resolve(strict=True)
+    driver = (tmp_path / "detached-real-resident-driver").resolve()
+    shutil.copy2(source_driver, driver)
+    driver.chmod(0o555)
+    driver_sha256 = hashlib.sha256(driver.read_bytes()).hexdigest()
+    assert driver.stat().st_nlink == 1
+
+    runner = (ROOT / "tools/run-aq4-p2-resident-batch.py").resolve()
+    expanded, fixture_index, identity_path, preflight, policy = RUNNER_TESTS._bundle(
+        tmp_path / "bundle", driver_sha256
+    )
+    manifest_dir = (tmp_path / "served-モデル").resolve()
+    manifest_dir.mkdir()
+    manifest = manifest_dir / "active.json"
+    served_snapshot = (
+        ROOT
+        / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-prepared-v1/served-model.json"
+    )
+    shutil.copy2(served_snapshot, manifest)
+    manifest.chmod(0o444)
+    manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    identity = json.loads(identity_path.read_text())
+    identity["resident_driver_identity"]["served_model_manifest_sha256"] = (
+        manifest_sha256
+    )
+    identity["hash_binding"]["served_model_manifest_sha256"] = manifest_sha256
+    identity["identity_sha256"] = None
+    identity["identity_sha256"] = RUNNER_TESTS.BATCH._identity_self_sha256(identity)
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+
+    lock = (tmp_path / "real-rust-driver.lock").resolve()
+    lock.touch(mode=0o600)
+    output = (tmp_path / "real-rust-runner-output").resolve()
+    command = [
+        str(Path(sys.executable).resolve()),
+        str(runner),
+        "--expanded",
+        str(expanded),
+        "--fixture-index",
+        str(fixture_index),
+        "--identity",
+        str(identity_path),
+        "--preflight",
+        str(preflight),
+        "--policy",
+        str(policy),
+        "--output-dir",
+        str(output),
+        "--run-id",
+        "real-rust-pinned-manifest-before-gpu",
+        "--baseline-kind",
+        "p3-current-head",
+        "--lock-path",
+        str(lock),
+        "--driver-command",
+        str(driver),
+        "--served-model-manifest",
+        str(manifest),
+        "--device-index",
+        "1",
+        "--build-git-commit",
+        "e" * 40,
+    ]
+    target_path = (tmp_path / "real-rust-target.json").resolve()
+    write_live_runner_target(target_path, command, lock, fixture_index, output)
+
+    fake_rocprof = (tmp_path / "fake-real-rust-rocprof.py").resolve()
+    fake_rocprof.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,os,subprocess,sys\n"
+        "if '--version' in sys.argv:\n"
+        " print('version: 7.2.1\\nrocm_version: 7.2.1')\n"
+        " raise SystemExit(0)\n"
+        "m=int(os.environ['ULLM_AQ4_PINNED_FD_MAP'])\n"
+        "v=json.loads(os.pread(m,1048576,0))\n"
+        "fds=tuple(sorted({m,*[x['descriptor'] for x in v['bindings']]}))\n"
+        "target=sys.argv[sys.argv.index('--')+1:]\n"
+        "raise SystemExit(subprocess.run(target,pass_fds=fds,env=os.environ).returncode)\n",
+        encoding="utf-8",
+    )
+    fake_rocprof.chmod(0o555)
+    capture_output = (tmp_path / "real-rust-capture").resolve()
+    starts: list[str] = []
+    rc = CAPTURE.main(
+        [
+            "capture",
+            "--profiler-path",
+            str(fake_rocprof),
+            "--profiler-sha256",
+            hashlib.sha256(fake_rocprof.read_bytes()).hexdigest(),
+            "--target-command-manifest",
+            str(target_path),
+            "--target-command-manifest-sha256",
+            hashlib.sha256(target_path.read_bytes()).hexdigest(),
+            "--profile-output-directory",
+            str(capture_output),
+            "--profile-output-name",
+            "real-rust-before-gpu",
+            "--identity",
+            str(identity_path),
+            "--resident-summary",
+            str(tmp_path / "unused-summary.json"),
+            "--resident-raw",
+            str(tmp_path / "unused-raw.json"),
+            "--artifact",
+            str(tmp_path / "must-not-exist-artifact.json"),
+            "--timeout",
+            "30",
+        ],
+        on_rocprof_started=lambda: starts.append("rocprof"),
+    )
+    assert rc == 1
+    assert starts == ["rocprof"]
+    failure = json.loads((output / "resident-batch.failure.json").read_text())
+    driver_stderr = (output / "resident-driver.stderr.log").read_text()
+    assert failure["status"] == "failed"
+    assert failure["failure"] == {
+        "stage": "ready",
+        "kind": "eof",
+        "reason": "resident driver exited before response",
+    }
+    assert failure["exit"] == {
+        "kind": "exit",
+        "exit_code": 1,
+        "signal": None,
+        "oom_like_unconfirmed": False,
+    }
+    assert failure["cleanup"]["passed"] is True
+    assert failure["cleanup"]["process_group_alive_final"] is False
+    assert "required environment " in driver_stderr
+    assert " must equal 1" in driver_stderr
+    assert "pinned FD map self-hash differs" not in driver_stderr
+    assert "served-model manifest traverses a symlink" not in driver_stderr
+    assert "runtime device query failed" not in driver_stderr
+    capture_failure = json.loads(
+        (capture_output / "capture-failure.json").read_text()
+    )
+    assert capture_failure["status"] == "failed"
+    assert capture_failure["reason"] == "rocprof diagnostic capture failed with exit 1"
+    assert capture_failure["process_group_cleanup_complete"] is True
+    assert not (tmp_path / "must-not-exist-artifact.json").exists()
 
 
 def test_helper_swap_executes_verified_bytes_and_preserves_execution_hash(tmp_path: Path) -> None:
