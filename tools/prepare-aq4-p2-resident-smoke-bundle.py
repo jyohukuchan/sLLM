@@ -30,9 +30,9 @@ SOURCE_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
 DRIVER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 DRIVER_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
 DRIVER_SOURCE_SHA = "63821344747158f94e4934bb47da93e265a2a44fe8215979ef826fac0734bd4c"
-RUNNER_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
-RUNNER_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
-RUNNER_SOURCE_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
+RUNNER_COMMIT = "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9"
+RUNNER_TREE = "bd46e713c658878e66fcab6d49ef863e43a06bd8"
+RUNNER_SOURCE_SHA = "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
 ACTIVE_CASE_DEVICE_FIXTURE_SHA = "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73"
@@ -1340,6 +1340,21 @@ def binding_manifest(plan_raw: bytes, evidence_raw: bytes, report_raw: bytes, di
             "runner": {"git_blob": BINDING_RUNNER_GIT_BLOB, "sha256": sha_bytes(runner_raw)},
             "validator": {"source_commit": validator_commit, "source_tree": validator_tree, "git_blob": validator_object, "sha256": sha_bytes(validator_raw), "archive_path": str(BINDING_ROOT / "trusted-validator.py"), "execution_path": str(BINDING_VALIDATOR_EXEC)},
             "resident_driver": {"normative_commit": DRIVER_COMMIT, "git_blob_at_binding_commit": BINDING_DRIVER_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged": True, "binary_sha256": EXPECTED_DRIVER_SHA},
+        },
+        "runner_roles": {
+            "prepared_bootstrap": {
+                "commit": RUNNER_COMMIT,
+                "sha256": RUNNER_SOURCE_SHA,
+                "role": "historical_control_member",
+                "execution_closure": "control_input/read",
+            },
+            "binding_actual": {
+                "commit": BINDING_SOURCE_COMMIT,
+                "sha256": BINDING_RUNNER_SHA,
+                "role": "actual_generic_runner",
+                "execution_closure": "code_execution/exec",
+            },
+            "same_runner": False,
         },
         "input_root": root_fingerprint,
         "outputs": {"runner_plan_sha256": sha_bytes(plan_raw), "runner_evidence_sha256": sha_bytes(evidence_raw), "validator_report_file_sha256": sha_bytes(report_raw), "validator_report_canonical_sha256": sha_bytes(canonical(parse_json(report_raw, "binding validator report")))},
