@@ -26,6 +26,12 @@ REPRESENTATIVE_PROMPTS = 7
 MIN_ABOVE_NOISE = 4
 
 CANDIDATES: dict[str, dict[str, Any]] = {
+    "sequence-output-direct-v1": {
+        "family": "attention_recurrent",
+        "requires_d2h_count": False,
+        "requires_stream_sync_count": False,
+        "candidate_a": True,
+    },
     "paged-kv-table-validation-v1": {
         "family": "paged_validation",
         "requires_d2h_count": True,
@@ -72,6 +78,18 @@ CAPABILITY_FIELDS = {
     "d2h_count",
     "stream_sync_count",
 }
+CANDIDATE_A_CAPABILITY_FIELDS = {
+    "direct_sequence_output",
+    "d2d_bytes",
+    "d2d_copy_count",
+    "launch_count",
+    "component_latency",
+    "full_model_latency",
+    "workspace_peak_vram",
+    "fallback_reasons",
+    "alias_size_admission_safety",
+    "direct_copy_fidelity",
+}
 MEASUREMENT_FIELDS = {
     "candidate_id",
     "family",
@@ -95,6 +113,55 @@ PAIR_FIELDS = {
     "identity_sha256",
     "baseline_ms",
     "candidate_ms",
+}
+CANDIDATE_A_MEASUREMENT_FIELDS = MEASUREMENT_FIELDS | {
+    "baseline_d2d_bytes",
+    "candidate_d2d_bytes",
+    "baseline_d2d_copy_count",
+    "candidate_d2d_copy_count",
+    "baseline_launch_count",
+    "candidate_launch_count",
+    "baseline_component_p50_ms",
+    "baseline_component_p95_ms",
+    "candidate_component_p50_ms",
+    "candidate_component_p95_ms",
+    "baseline_full_model_p95_ms",
+    "candidate_full_model_p50_ms",
+    "candidate_full_model_p95_ms",
+    "baseline_workspace_bytes",
+    "candidate_workspace_bytes",
+    "baseline_peak_vram_bytes",
+    "candidate_peak_vram_bytes",
+    "baseline_fallback_count",
+    "candidate_fallback_count",
+    "baseline_fallback_reasons",
+    "candidate_fallback_reasons",
+    "direct_alias_safe",
+    "direct_size_safe",
+    "direct_admission_safe",
+    "direct_fidelity_binding_sha256",
+    "copy_fidelity_binding_sha256",
+}
+CANDIDATE_A_PAIR_FIELDS = PAIR_FIELDS | {
+    "baseline_d2d_bytes",
+    "candidate_d2d_bytes",
+    "baseline_d2d_copy_count",
+    "candidate_d2d_copy_count",
+    "baseline_launch_count",
+    "candidate_launch_count",
+    "baseline_workspace_bytes",
+    "candidate_workspace_bytes",
+    "baseline_peak_vram_bytes",
+    "candidate_peak_vram_bytes",
+    "baseline_fallback_count",
+    "candidate_fallback_count",
+    "baseline_fallback_reasons",
+    "candidate_fallback_reasons",
+    "direct_alias_safe",
+    "direct_size_safe",
+    "direct_admission_safe",
+    "direct_fidelity_binding_sha256",
+    "copy_fidelity_binding_sha256",
 }
 PROFILE_ROOT_FIELDS = {
     "schema_version",
@@ -403,6 +470,14 @@ def require_count(value: Any, label: str, *, allow_none: bool = False) -> int | 
     return value
 
 
+def require_reason_list(value: Any, label: str) -> list[str]:
+    if type(value) is not list or any(type(item) is not str or not item for item in value):
+        raise SelectionError(f"{label} must be a string array")
+    if len(value) != len(set(value)):
+        raise SelectionError(f"{label} contains duplicate reasons")
+    return sorted(value)
+
+
 def canonical_json(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -440,6 +515,91 @@ def semantic_sha256(value: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(normalized_raw(value))).hexdigest()
 
 
+def _validate_candidate_a_measurement(
+    row: dict[str, Any], label: str, parsed: dict[str, Any]
+) -> None:
+    positive_fields = {
+        "baseline_component_p50_ms",
+        "baseline_component_p95_ms",
+        "candidate_component_p50_ms",
+        "candidate_component_p95_ms",
+        "baseline_full_model_p95_ms",
+        "candidate_full_model_p50_ms",
+        "candidate_full_model_p95_ms",
+    }
+    count_fields = {
+        "baseline_d2d_copy_count",
+        "candidate_d2d_copy_count",
+        "baseline_launch_count",
+        "candidate_launch_count",
+        "baseline_fallback_count",
+        "candidate_fallback_count",
+    }
+    nonnegative_fields = {
+        "baseline_d2d_bytes",
+        "candidate_d2d_bytes",
+        "baseline_workspace_bytes",
+        "candidate_workspace_bytes",
+        "baseline_peak_vram_bytes",
+        "candidate_peak_vram_bytes",
+    }
+    for field in sorted(positive_fields):
+        parsed[field] = require_number(row[field], f"{label}.{field}", positive=True)
+    for field in sorted(count_fields):
+        parsed[field] = require_count(row[field], f"{label}.{field}")
+    for field in sorted(nonnegative_fields):
+        parsed[field] = require_count(row[field], f"{label}.{field}")
+    for field in ("baseline_fallback_reasons", "candidate_fallback_reasons"):
+        parsed[field] = require_reason_list(row[field], f"{label}.{field}")
+    for field in ("direct_alias_safe", "direct_size_safe", "direct_admission_safe"):
+        if not isinstance(row[field], bool):
+            raise SelectionError(f"{label}.{field} must be boolean")
+        parsed[field] = row[field]
+    for field in ("direct_fidelity_binding_sha256", "copy_fidelity_binding_sha256"):
+        parsed[field] = require_digest(row[field], f"{label}.{field}")
+    if parsed["baseline_full_model_p95_ms"] < parsed["baseline_p50_ms"]:
+        raise SelectionError(f"{label}.baseline_full_model_p95_ms is below baseline p50")
+    if parsed["candidate_full_model_p95_ms"] < parsed["candidate_full_model_p50_ms"]:
+        raise SelectionError(f"{label}.candidate_full_model_p95_ms is below candidate p50")
+    if parsed["baseline_component_p95_ms"] < parsed["baseline_component_p50_ms"]:
+        raise SelectionError(f"{label}.baseline_component_p95_ms is below baseline component p50")
+    if parsed["candidate_component_p95_ms"] < parsed["candidate_component_p50_ms"]:
+        raise SelectionError(f"{label}.candidate_component_p95_ms is below candidate component p50")
+
+
+def _validate_candidate_a_pair(
+    row: dict[str, Any], label: str, parsed: dict[str, Any]
+) -> None:
+    count_fields = {
+        "baseline_d2d_copy_count",
+        "candidate_d2d_copy_count",
+        "baseline_launch_count",
+        "candidate_launch_count",
+        "baseline_fallback_count",
+        "candidate_fallback_count",
+    }
+    byte_fields = {
+        "baseline_d2d_bytes",
+        "candidate_d2d_bytes",
+        "baseline_workspace_bytes",
+        "candidate_workspace_bytes",
+        "baseline_peak_vram_bytes",
+        "candidate_peak_vram_bytes",
+    }
+    for field in sorted(count_fields):
+        parsed[field] = require_count(row[field], f"{label}.{field}")
+    for field in sorted(byte_fields):
+        parsed[field] = require_count(row[field], f"{label}.{field}")
+    for field in ("baseline_fallback_reasons", "candidate_fallback_reasons"):
+        parsed[field] = require_reason_list(row[field], f"{label}.{field}")
+    for field in ("direct_alias_safe", "direct_size_safe", "direct_admission_safe"):
+        if not isinstance(row[field], bool):
+            raise SelectionError(f"{label}.{field} must be boolean")
+        parsed[field] = row[field]
+    for field in ("direct_fidelity_binding_sha256", "copy_fidelity_binding_sha256"):
+        parsed[field] = require_digest(row[field], f"{label}.{field}")
+
+
 def validate_raw(value: dict[str, Any]) -> RawSource:
     exact_fields(value, RAW_ROOT_FIELDS, "raw evidence")
     if value["schema_version"] != RAW_SCHEMA or value["status"] != "complete":
@@ -460,13 +620,32 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
     if not isinstance(identity, dict) or not isinstance(capabilities, dict):
         raise SelectionError("raw identity/capabilities must be objects")
     exact_fields(identity, IDENTITY_FIELDS, "raw identity")
-    exact_fields(capabilities, CAPABILITY_FIELDS, "raw capabilities")
+    # Fixed candidate fixtures retain the v1 capability contract.  Candidate A is
+    # deliberately conditional so old E/N evidence cannot silently claim direct
+    # sequence-output safety metrics it never captured.
+    capability_fields = set(CAPABILITY_FIELDS)
+    measurement_values = value.get("measurements", [])
+    pair_values = value.get("full_model_pairs", [])
+    if not isinstance(measurement_values, list):
+        measurement_values = []
+    if not isinstance(pair_values, list):
+        pair_values = []
+    has_candidate_a = any(
+        isinstance(row, dict) and row.get("candidate_id") == "sequence-output-direct-v1"
+        for row in measurement_values
+    ) or any(
+        isinstance(row, dict) and row.get("candidate_id") == "sequence-output-direct-v1"
+        for row in pair_values
+    )
+    if has_candidate_a:
+        capability_fields |= CANDIDATE_A_CAPABILITY_FIELDS
+    exact_fields(capabilities, capability_fields, "raw capabilities")
     identity_value = {
         field: require_digest(identity[field], f"raw identity.{field}")
         for field in sorted(IDENTITY_FIELDS)
     }
     capability_value: dict[str, bool] = {}
-    for field in sorted(CAPABILITY_FIELDS):
+    for field in sorted(capability_fields):
         if not isinstance(capabilities[field], bool):
             raise SelectionError(f"raw capabilities.{field} must be boolean")
         capability_value[field] = capabilities[field]
@@ -481,8 +660,9 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         label = f"raw measurements[{index}]"
         if not isinstance(row, dict):
             raise SelectionError(f"{label} must be an object")
-        exact_fields(row, MEASUREMENT_FIELDS, label)
-        candidate_id = row["candidate_id"]
+        candidate_id = row.get("candidate_id")
+        row_fields = CANDIDATE_A_MEASUREMENT_FIELDS if candidate_id == "sequence-output-direct-v1" else MEASUREMENT_FIELDS
+        exact_fields(row, row_fields, label)
         if candidate_id not in CANDIDATES:
             raise SelectionError(f"{label}.candidate_id is unknown: {candidate_id}")
         if row["family"] != CANDIDATES[candidate_id]["family"]:
@@ -501,8 +681,7 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         assert resolved_m is not None
         if resolved_m <= 0:
             raise SelectionError(f"{label}.resolved_m must be positive")
-        parsed_measurements.append(
-            {
+        parsed_row = {
                 "candidate_id": candidate_id,
                 "family": row["family"],
                 "prompt_id": prompt_id,
@@ -537,7 +716,9 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
                     row["stream_sync_time_ms"], f"{label}.stream_sync_time_ms"
                 ),
             }
-        )
+        if CANDIDATES[candidate_id].get("candidate_a"):
+            _validate_candidate_a_measurement(row, label, parsed_row)
+        parsed_measurements.append(parsed_row)
 
     parsed_pairs: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str, str]] = set()
@@ -545,8 +726,9 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         label = f"raw full_model_pairs[{index}]"
         if not isinstance(row, dict):
             raise SelectionError(f"{label} must be an object")
-        exact_fields(row, PAIR_FIELDS, label)
-        candidate_id = row["candidate_id"]
+        candidate_id = row.get("candidate_id")
+        row_fields = CANDIDATE_A_PAIR_FIELDS if candidate_id == "sequence-output-direct-v1" else PAIR_FIELDS
+        exact_fields(row, row_fields, label)
         if candidate_id not in CANDIDATES:
             raise SelectionError(f"{label}.candidate_id is unknown: {candidate_id}")
         pair_id = row["pair_id"]
@@ -558,8 +740,7 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         seen_pairs.add(key)
         if row["identity_sha256"] != identity_value["identity_sha256"]:
             raise SelectionError(f"{label}.identity_sha256 differs from raw identity")
-        parsed_pairs.append(
-            {
+        parsed_pair = {
                 "candidate_id": candidate_id,
                 "pair_id": pair_id,
                 "case_sha256": require_digest(row["case_sha256"], f"{label}.case_sha256"),
@@ -571,7 +752,9 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
                     row["candidate_ms"], f"{label}.candidate_ms", positive=True
                 ),
             }
-        )
+        if CANDIDATES[candidate_id].get("candidate_a"):
+            _validate_candidate_a_pair(row, label, parsed_pair)
+        parsed_pairs.append(parsed_pair)
 
     declared_sha = require_digest(value["evidence_sha256"], "raw evidence_sha256")
     calculated_sha = semantic_sha256(value)
@@ -896,6 +1079,72 @@ def paired_ci(pairs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _candidate_a_reasons(
+    rows: list[dict[str, Any]], pairs: list[dict[str, Any]], reasons: list[str]
+) -> None:
+    if not rows or not pairs:
+        return
+    if any(row["candidate_d2d_bytes"] > row["baseline_d2d_bytes"] for row in rows):
+        reasons.append("candidate_a_d2d_bytes_regressed")
+    if not any(row["candidate_d2d_bytes"] < row["baseline_d2d_bytes"] for row in rows):
+        reasons.append("candidate_a_d2d_bytes_not_reduced")
+    if any(row["candidate_d2d_copy_count"] > row["baseline_d2d_copy_count"] for row in rows):
+        reasons.append("candidate_a_d2d_copy_count_regressed")
+    if not any(row["candidate_d2d_copy_count"] < row["baseline_d2d_copy_count"] for row in rows):
+        reasons.append("candidate_a_d2d_copy_count_not_reduced")
+    if any(row["candidate_launch_count"] > row["baseline_launch_count"] for row in rows):
+        reasons.append("candidate_a_launch_count_regressed")
+    if any(
+        row["candidate_workspace_bytes"] > row["baseline_workspace_bytes"]
+        for row in rows
+    ):
+        reasons.append("candidate_a_workspace_regressed")
+    if any(
+        row["candidate_peak_vram_bytes"] > row["baseline_peak_vram_bytes"]
+        for row in rows
+    ):
+        reasons.append("candidate_a_peak_vram_regressed")
+    if any(row["candidate_fallback_count"] > row["baseline_fallback_count"] for row in rows):
+        reasons.append("candidate_a_fallback_regressed")
+    if any(
+        row["candidate_fallback_count"] == 0 and row["candidate_fallback_reasons"]
+        or not set(row["candidate_fallback_reasons"]).issubset(row["baseline_fallback_reasons"])
+        for row in rows
+    ):
+        reasons.append("candidate_a_fallback_reasons_inconsistent")
+    if any(
+        not row["direct_alias_safe"] or not row["direct_size_safe"] or not row["direct_admission_safe"]
+        for row in rows
+    ) or any(
+        not row["direct_alias_safe"] or not row["direct_size_safe"] or not row["direct_admission_safe"]
+        for row in pairs
+    ):
+        reasons.append("candidate_a_safety_regression")
+    if any(
+        row["direct_fidelity_binding_sha256"] != row["copy_fidelity_binding_sha256"]
+        for row in rows
+    ) or any(
+        row["direct_fidelity_binding_sha256"] != row["copy_fidelity_binding_sha256"]
+        for row in pairs
+    ):
+        reasons.append("candidate_a_fidelity_binding_mismatch")
+    if any(
+        row["candidate_d2d_bytes"] > row["baseline_d2d_bytes"]
+        or row["candidate_d2d_copy_count"] > row["baseline_d2d_copy_count"]
+        or row["candidate_launch_count"] > row["baseline_launch_count"]
+        or row["candidate_workspace_bytes"] > row["baseline_workspace_bytes"]
+        or row["candidate_peak_vram_bytes"] > row["baseline_peak_vram_bytes"]
+        or row["candidate_fallback_count"] > row["baseline_fallback_count"]
+        for row in pairs
+    ):
+        reasons.append("candidate_a_full_model_safety_regression")
+    if any(
+        not set(row["candidate_fallback_reasons"]).issubset(row["baseline_fallback_reasons"])
+        for row in pairs
+    ):
+        reasons.append("candidate_a_full_model_fallback_regression")
+
+
 def evaluate_candidate(
     candidate_id: str,
     measurements: list[dict[str, Any]],
@@ -932,6 +1181,13 @@ def evaluate_candidate(
                 "stream_sync_time_ms": row["stream_sync_time_ms"],
             }
         )
+        if policy.get("candidate_a"):
+            prompt_results[-1].update(
+                {
+                    field: row[field]
+                    for field in CANDIDATE_A_MEASUREMENT_FIELDS - MEASUREMENT_FIELDS
+                }
+            )
     recoverable_e = median(item["recoverable_share_e"] for item in prompt_results) if prompt_results else None
     noise_n = median(item["noise_floor_n"] for item in prompt_results) if prompt_results else None
     above = [item for item in prompt_results if item["e_above_n"]]
@@ -975,7 +1231,13 @@ def evaluate_candidate(
         if not observed:
             reasons.append("paged_kv_transfer_or_sync_not_observed")
 
-    return {
+    if policy.get("candidate_a"):
+        for field in sorted(CANDIDATE_A_CAPABILITY_FIELDS):
+            if not capabilities.get(field, False):
+                reasons.append(f"candidate_a_{field}_missing")
+        _candidate_a_reasons(prompt_results, pairs, reasons)
+
+    result = {
         "candidate_id": candidate_id,
         "family": policy["family"],
         "eligible": not reasons,
@@ -1003,6 +1265,14 @@ def evaluate_candidate(
             "stream_sync_count": capabilities.get("stream_sync_count", False),
         },
     }
+    if policy.get("candidate_a"):
+        result["required_evidence"].update(
+            {
+                field: capabilities.get(field, False)
+                for field in sorted(CANDIDATE_A_CAPABILITY_FIELDS)
+            }
+        )
+    return result
 
 
 def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
@@ -1048,7 +1318,10 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
         candidate_capabilities = {
             field: bool(measurement_sources)
             and all(source.capabilities[field] for source in measurement_sources)
-            for field in CAPABILITY_FIELDS
+            for field in (
+                CAPABILITY_FIELDS
+                | (CANDIDATE_A_CAPABILITY_FIELDS if CANDIDATES[candidate_id].get("candidate_a") else set())
+            )
         }
         candidates.append(
             evaluate_candidate(

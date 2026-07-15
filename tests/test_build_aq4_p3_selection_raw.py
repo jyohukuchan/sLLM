@@ -295,6 +295,67 @@ def capability_fixture(path: Path, *, diagnostic: bool = False) -> tuple[Path, d
     return path, value
 
 
+def direct_trace_fixture(
+    path: Path,
+    *,
+    case_id: str = "case",
+    case_sha: str = "2" * 64,
+    identity_sha: str = "3" * 64,
+    binding_kind: str = "run",
+    binding_id: str = "2",
+    duplicate: bool = False,
+    baseline_full_model_ms: float = 100.0,
+    candidate_full_model_ms: float = 90.0,
+) -> Path:
+    events = []
+    for side, d2d_bytes, copy_count in (("baseline", 1000, 10), ("candidate", 400, 4)):
+        values = {
+            "d2d_bytes": d2d_bytes,
+            "d2d_copy_count": copy_count,
+            "launch_count": copy_count,
+            "component_ms": 12.0 if side == "baseline" else 8.0,
+            "full_model_ms": baseline_full_model_ms if side == "baseline" else candidate_full_model_ms,
+            "workspace_bytes": 2000,
+            "peak_vram_bytes": 3000,
+            "fallback_count": 0,
+            "fallback_reasons": [],
+            "alias_safe": True,
+            "size_safe": True,
+            "admission_safe": True,
+            "fidelity_binding_sha256": "d" * 64,
+        }
+        allowed = PRODUCER.DIRECT_RUN_METRICS if binding_kind == "run" else PRODUCER.DIRECT_PAIR_METRICS
+        for metric, value in values.items():
+            if metric not in allowed:
+                continue
+            event = {
+                "event_id": f"{side}-{metric}",
+                "event_sha256": None,
+                "side": side,
+                "metric": metric,
+                "value": value,
+            }
+            event["event_sha256"] = PRODUCER.self_hash(event, "event_sha256")
+            events.append(event)
+    if duplicate:
+        events.append(events[-1].copy())
+    value = {
+        "schema_version": PRODUCER.DIRECT_TRACE_SCHEMA,
+        "status": "complete",
+        "trace_sha256": None,
+        "binding_kind": binding_kind,
+        "binding_id": binding_id,
+        "candidate_id": "sequence-output-direct-v1",
+        "case_id": case_id,
+        "case_sha256": case_sha,
+        "identity_sha256": identity_sha,
+        "events": events,
+    }
+    value["trace_sha256"] = PRODUCER.self_hash(value, "trace_sha256")
+    write_json(path, value)
+    return path
+
+
 def promotion_manifest(tmp_path: Path, *, all_m128: bool = False) -> tuple[Path, dict[str, object]]:
     identity_path, identity = identity_fixture(tmp_path)
     capability_path, _capability = capability_fixture(tmp_path / "capture-capabilities.json")
@@ -460,6 +521,47 @@ def test_hip_api_zero_requires_hash_bound_complete_domain_proof(tmp_path: Path) 
     }
 
 
+def test_candidate_a_direct_trace_binds_events_and_rejects_duplicate_or_tamper(
+    tmp_path: Path,
+) -> None:
+    path = direct_trace_fixture(tmp_path / "direct.json")
+    parsed = PRODUCER.parse_direct_sequence_output_trace(
+        PRODUCER.capture(path.resolve(), "direct"),
+        case_id="case",
+        case_sha256="2" * 64,
+        identity_sha256="3" * 64,
+        candidate_id="sequence-output-direct-v1",
+        binding_kind="run",
+        binding_id="2",
+    )
+    assert parsed["candidate"]["d2d_bytes"] == 400
+    duplicate_path = direct_trace_fixture(tmp_path / "duplicate.json", duplicate=True)
+    with pytest.raises(PRODUCER.ProducerError, match="event ID|metric is duplicated"):
+        PRODUCER.parse_direct_sequence_output_trace(
+            PRODUCER.capture(duplicate_path.resolve(), "duplicate"),
+            case_id="case",
+            case_sha256="2" * 64,
+            identity_sha256="3" * 64,
+            candidate_id="sequence-output-direct-v1",
+            binding_kind="run",
+            binding_id="2",
+        )
+    tampered = json.loads(path.read_text())
+    tampered["events"][0]["value"] = 999
+    tampered_path = tmp_path / "tampered.json"
+    write_json(tampered_path, tampered)
+    with pytest.raises(PRODUCER.ProducerError, match="self-hash differs"):
+        PRODUCER.parse_direct_sequence_output_trace(
+            PRODUCER.capture(tampered_path.resolve(), "tampered"),
+            case_id="case",
+            case_sha256="2" * 64,
+            identity_sha256="3" * 64,
+            candidate_id="sequence-output-direct-v1",
+            binding_kind="run",
+            binding_id="2",
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -545,6 +647,49 @@ def test_promotion_build_emits_selector_compatible_hash_bound_raw(tmp_path: Path
     assert output["measurements"][0]["stream_sync_count"] == 10
     assert output["measurements"][0]["d2h_time_ms"] == pytest.approx(0.001)
     assert output["measurements"][0]["stream_sync_time_ms"] == pytest.approx(0.001)
+    PRODUCER.SELECTOR.validate_raw(output)
+
+
+def test_candidate_a_promotion_build_emits_direct_metrics_and_contract(tmp_path: Path) -> None:
+    _path, manifest = promotion_manifest(tmp_path)
+    identity_path = Path(manifest["identity"]["path"])
+    identity = json.loads(identity_path.read_text())
+    manifest["candidate"] = {
+        "candidate_id": "sequence-output-direct-v1",
+        "family": "attention_recurrent",
+    }
+    for index, case in enumerate(manifest["representative_cases"]):
+        case_id = case["case_id"]
+        case_sha = case["case_sha256"]
+        for binding in case["profile_runs"]:
+            run_index = binding["resident_run_index"]
+            direct = direct_trace_fixture(
+                tmp_path / f"direct-{index}-{run_index}.json",
+                case_id=case_id,
+                case_sha=case_sha,
+                identity_sha=identity["identity_sha256"],
+                binding_id=str(run_index),
+                baseline_full_model_ms=100.0 + (run_index % 3) * 0.1,
+                candidate_full_model_ms=90.0 + (run_index % 3) * 0.1,
+            )
+            binding["direct_sequence_output_trace"] = ref(direct)
+    for index, pair in enumerate(manifest["full_model_pairs"]):
+        direct = direct_trace_fixture(
+            tmp_path / f"pair-direct-{index}.json",
+            case_id=pair["case_id"],
+            case_sha=pair["case_sha256"],
+            identity_sha=identity["identity_sha256"],
+            binding_kind="pair",
+            binding_id=pair["pair_id"],
+        )
+        pair["direct_sequence_output_trace"] = ref(direct)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    manifest_path = tmp_path / "candidate-a-manifest.json"
+    write_json(manifest_path, manifest)
+    output = build_manifest(manifest_path)
+    assert output["measurements"][0]["candidate_d2d_bytes"] == 400
+    assert output["measurements"][0]["candidate_component_p50_ms"] == 8.0
+    assert output["full_model_pairs"][0]["candidate_d2d_copy_count"] == 4
     PRODUCER.SELECTOR.validate_raw(output)
 
 

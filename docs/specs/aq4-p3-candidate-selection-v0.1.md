@@ -75,6 +75,23 @@ stream_sync_time_ms
 
 同じ候補を複数raw inputへ分ける場合、その候補のmeasurementを含む全inputが必要capabilityをtrueにしなければならない。別候補のcapabilityを流用しない。
 
+既存4固定候補はこの契約をそのまま使用する。候補Aの正式IDは
+`sequence-output-direct-v1`で、familyは既存trace分類と互換な`attention_recurrent`である。
+Aを含むrawだけは、次のA専用capabilityもexactに持つ。
+
+```text
+direct_sequence_output
+d2d_bytes
+d2d_copy_count
+launch_count
+component_latency
+full_model_latency
+workspace_peak_vram
+fallback_reasons
+alias_size_admission_safety
+direct_copy_fidelity
+```
+
 ### 2.2 代表prompt measurement
 
 `measurements`の各rowのexact fieldsは次の通りである。
@@ -106,8 +123,30 @@ stream_sync_count
 | `aq4-register-bm8-v1` | `aq4_projection` | family exclusive時間 |
 | `chunk-execution-v1` | `attention_recurrent` | attention/recurrentの非重複合計 |
 | `projection-norm-activation-fusion-v1` | `normalization` | family exclusive時間 |
+| `sequence-output-direct-v1` | `attention_recurrent` | D2D bytes/copy、launch、component/full-model p50/p95、workspace/peak VRAM、fallback、alias/size/admission safety、direct/copy fidelity |
 
 unknown candidate、candidateとfamilyの不一致、同じcandidate/prompt IDの重複は拒否する。
+
+Aのmeasurement rowは、既存fieldsに加えて次のexact fieldsを持つ。
+
+```text
+baseline_d2d_bytes, candidate_d2d_bytes
+baseline_d2d_copy_count, candidate_d2d_copy_count
+baseline_launch_count, candidate_launch_count
+baseline_component_p50_ms, baseline_component_p95_ms
+candidate_component_p50_ms, candidate_component_p95_ms
+baseline_full_model_p95_ms
+candidate_full_model_p50_ms, candidate_full_model_p95_ms
+baseline_workspace_bytes, candidate_workspace_bytes
+baseline_peak_vram_bytes, candidate_peak_vram_bytes
+baseline_fallback_count, candidate_fallback_count
+baseline_fallback_reasons, candidate_fallback_reasons
+direct_alias_safe, direct_size_safe, direct_admission_safe
+direct_fidelity_binding_sha256, copy_fidelity_binding_sha256
+```
+
+Aのfull-model pairは、baseline/candidateのD2D bytes/copy count、launch count、workspace/peak
+VRAM、fallback count/reasons、安全性3項目、fidelity binding 2項目を同様に必須とする。
 
 ### 2.3 full-model paired sample
 
@@ -175,6 +214,13 @@ N_i = max(
 5. その支持promptに`resolved_m!=128`がある。
 6. full-model paired sampleが2件以上あり、95%信頼区間の下限が0より大きい。
 7. 候補固有のcapabilityと追加証拠がある。
+
+候補Aのmeasurement rowは、baseline/candidateそれぞれのD2D bytes、D2D copy count、
+launch count、component/full-model p50/p95、workspace bytes、peak VRAM、fallback count/reasonsを
+必須とする。candidateがD2D bytesまたはcopy countを減らすpromptが少なくとも1件あり、
+他のpromptで増加しないこと、launch/workspace/peak VRAM/fallbackが増加しないこと、
+alias/size/admission safetyが全てtrueであること、direct/copy fidelity binding SHA-256が一致することを
+追加ゲートとする。full-model pairにも同じD2D・安全性・fidelityの証拠を要求する。
 
 eligible候補が複数ある場合は、次の順で一意に選ぶ。
 

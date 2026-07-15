@@ -97,6 +97,76 @@ def raw_fixture(candidate_id: str = "paged-kv-table-validation-v1") -> dict[str,
     )
 
 
+def candidate_a_raw_fixture() -> dict[str, object]:
+    value = raw_fixture("chunk-execution-v1")
+    value["capabilities"].update(
+        {field: True for field in SELECTOR.CANDIDATE_A_CAPABILITY_FIELDS}
+    )
+    for row in value["measurements"]:
+        row["candidate_id"] = "sequence-output-direct-v1"
+        row["family"] = "attention_recurrent"
+        row.update(
+            {
+                "baseline_d2d_bytes": 1000,
+                "candidate_d2d_bytes": 400,
+                "baseline_d2d_copy_count": 10,
+                "candidate_d2d_copy_count": 4,
+                "baseline_launch_count": 10,
+                "candidate_launch_count": 4,
+                "baseline_component_p50_ms": 12.0,
+                "baseline_component_p95_ms": 13.0,
+                "candidate_component_p50_ms": 8.0,
+                "candidate_component_p95_ms": 9.0,
+                "baseline_full_model_p95_ms": 105.0,
+                "candidate_full_model_p50_ms": 90.0,
+                "candidate_full_model_p95_ms": 95.0,
+                "baseline_workspace_bytes": 2000,
+                "candidate_workspace_bytes": 2000,
+                "baseline_peak_vram_bytes": 3000,
+                "candidate_peak_vram_bytes": 3000,
+                "baseline_fallback_count": 0,
+                "candidate_fallback_count": 0,
+                "baseline_fallback_reasons": [],
+                "candidate_fallback_reasons": [],
+                "direct_alias_safe": True,
+                "direct_size_safe": True,
+                "direct_admission_safe": True,
+                "direct_fidelity_binding_sha256": "d" * 64,
+                "copy_fidelity_binding_sha256": "d" * 64,
+            }
+        )
+        row["d2h_count"] = None
+        row["d2h_time_ms"] = None
+        row["stream_sync_count"] = None
+        row["stream_sync_time_ms"] = None
+    for pair in value["full_model_pairs"]:
+        pair["candidate_id"] = "sequence-output-direct-v1"
+        pair.update(
+            {
+                "baseline_d2d_bytes": 1000,
+                "candidate_d2d_bytes": 400,
+                "baseline_d2d_copy_count": 10,
+                "candidate_d2d_copy_count": 4,
+                "baseline_launch_count": 10,
+                "candidate_launch_count": 4,
+                "baseline_workspace_bytes": 2000,
+                "candidate_workspace_bytes": 2000,
+                "baseline_peak_vram_bytes": 3000,
+                "candidate_peak_vram_bytes": 3000,
+                "baseline_fallback_count": 0,
+                "candidate_fallback_count": 0,
+                "baseline_fallback_reasons": [],
+                "candidate_fallback_reasons": [],
+                "direct_alias_safe": True,
+                "direct_size_safe": True,
+                "direct_admission_safe": True,
+                "direct_fidelity_binding_sha256": "d" * 64,
+                "copy_fidelity_binding_sha256": "d" * 64,
+            }
+        )
+    return seal(value)
+
+
 def write_json(path: Path, value: object) -> None:
     path.write_text(
         json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False)
@@ -285,6 +355,35 @@ def test_eligible_fixture_selects_paged_kv_and_recomputes_all_gates(
     assert item["representative"]["m128_above_noise"] is True
     assert item["representative"]["non_m128_above_noise"] is True
     assert item["paired_full_model_95ci"]["ci95_lower_ms"] == 10.0
+
+
+def test_candidate_a_requires_direct_sequence_metrics_and_selects_when_safe(
+    tmp_path: Path,
+) -> None:
+    result = select_raw(tmp_path, candidate_a_raw_fixture())
+    item = candidate(result, "sequence-output-direct-v1")
+    assert item["eligible"] is True
+    assert item["reason_codes"] == []
+    assert item["required_evidence"]["direct_sequence_output"] is True
+    assert item["representative"]["prompts"][0]["candidate_d2d_bytes"] == 400
+
+
+def test_candidate_a_d2d_direction_and_fidelity_are_fail_closed(tmp_path: Path) -> None:
+    value = candidate_a_raw_fixture()
+    value["measurements"][0]["candidate_d2d_bytes"] = 1200
+    value["measurements"][1]["copy_fidelity_binding_sha256"] = "e" * 64
+    seal(value)
+    item = candidate(select_raw(tmp_path, value), "sequence-output-direct-v1")
+    assert item["eligible"] is False
+    assert "candidate_a_d2d_bytes_regressed" in item["reason_codes"]
+    assert "candidate_a_fidelity_binding_mismatch" in item["reason_codes"]
+
+
+def test_candidate_a_missing_metric_rejected_before_selection() -> None:
+    value = candidate_a_raw_fixture()
+    del value["measurements"][0]["candidate_peak_vram_bytes"]
+    with pytest.raises(SELECTOR.SelectionError, match="fields differ"):
+        SELECTOR.validate_raw(value)
 
 
 def test_noise_floor_uses_each_maximum_term(tmp_path: Path) -> None:

@@ -264,6 +264,25 @@ baseline/candidateは異なるrun ID、同じidentity file、driver identity、c
 - 統計または出力のnon-finite/overflow
 - 既存outputへの上書き
 
+### 8.1 candidate A direct sequence output trace
+
+候補A (`sequence-output-direct-v1`) のproducer manifestでは、各profile run bindingへ
+`direct_sequence_output_trace`、各full-model pairへ同名のtrace referenceを追加する。
+固定4候補のbinding/pair fieldsは変更せず、既存fixtureとの互換を維持する。trace schemaは
+`ullm.aq4_p3_candidate_a_direct_sequence_output_trace.v1`で、rootの
+`trace_sha256`と各eventの`event_sha256`をself-hashする。
+
+trace eventは`event_id`、`event_sha256`、`side` (`baseline`/`candidate`)、`metric`、`value`を
+持つ。run traceではD2D bytes/copy count、launch count、component/full-model milliseconds、
+workspace/peak VRAM、fallback count/reasons、alias/size/admission safety、fidelity bindingを
+各sideでexactly一つずつ要求する。pair traceはlatencyを除く同じmetricsを要求する。
+event ID、(side, metric)、trace binding、identity/case/run(or pair) IDは重複・欠落・unknown・
+再利用を拒否し、non-finite、self-hash/file-hash tamper、direct/copy fidelity不一致も拒否する。
+producerは10 measured runのeventからp50/p95と安全性を再計算し、入力が書いた合否や集計値を
+信頼しない。A rawのcapabilityはselectorのA専用10項目を全てtrueにし、D2D bytes/copy countを
+減らさない、safetyを満たさない、またはfidelityが一致しない証拠はselectorがfail-closedで
+候補を選ばない。
+
 これらはexit code 2で、outputを発行しない。
 
 ## 次の行動

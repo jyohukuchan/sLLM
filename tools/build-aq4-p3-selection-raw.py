@@ -38,6 +38,7 @@ SELECTOR = load_tool("aq4_p3_selector_for_producer", ROOT / "tools/select-aq4-p3
 PROFILER = load_tool("aq4_p2_profiler_for_producer", ROOT / "tools/profile-aq4-p2-family-exclusive.py")
 
 INPUT_SCHEMA = "ullm.aq4_p3_selection_raw_producer_input.v1"
+DIRECT_TRACE_SCHEMA = "ullm.aq4_p3_candidate_a_direct_sequence_output_trace.v1"
 PROFILE_BINDING_SCHEMA = "ullm.aq4_p3_rocprof_run_binding.v1"
 CAPABILITY_SCHEMA = "ullm.aq4_p3_rocprof_capture_capabilities.v1"
 RAW_SCHEMA = SELECTOR.RAW_SCHEMA
@@ -82,6 +83,7 @@ PROFILE_RUN_FIELDS = {
     "kernel_trace",
     "hip_api_trace",
 }
+PROFILE_RUN_FIELDS_CANDIDATE_A = PROFILE_RUN_FIELDS | {"direct_sequence_output_trace"}
 PAIR_FIELDS = {
     "pair_id",
     "case_id",
@@ -90,6 +92,7 @@ PAIR_FIELDS = {
     "baseline_raw",
     "candidate_raw",
 }
+PAIR_FIELDS_CANDIDATE_A = PAIR_FIELDS | {"direct_sequence_output_trace"}
 RAW_ROOT_FIELDS = {
     "schema_version",
     "case_id",
@@ -176,6 +179,36 @@ KNOWN_OTHER_MEMCPY_APIS = {
 }
 SYNC_APIS = {"hipstreamsynchronize", "hipdevicesynchronize"}
 KNOWN_OTHER_SYNC_APIS = {"hipeventsynchronize", "hipexternal_semaphoresignal", "hipexternal_semaphorewait"}
+
+DIRECT_TRACE_ROOT_FIELDS = {
+    "schema_version",
+    "status",
+    "trace_sha256",
+    "binding_kind",
+    "binding_id",
+    "candidate_id",
+    "case_id",
+    "case_sha256",
+    "identity_sha256",
+    "events",
+}
+DIRECT_EVENT_FIELDS = {"event_id", "event_sha256", "side", "metric", "value"}
+DIRECT_RUN_METRICS = {
+    "d2d_bytes",
+    "d2d_copy_count",
+    "launch_count",
+    "component_ms",
+    "full_model_ms",
+    "workspace_bytes",
+    "peak_vram_bytes",
+    "fallback_count",
+    "fallback_reasons",
+    "alias_safe",
+    "size_safe",
+    "admission_safe",
+    "fidelity_binding_sha256",
+}
+DIRECT_PAIR_METRICS = DIRECT_RUN_METRICS - {"component_ms", "full_model_ms"}
 
 
 class ProducerError(ValueError):
@@ -1004,6 +1037,96 @@ def parse_hip_api_trace(
     }
 
 
+def parse_direct_sequence_output_trace(
+    snapshot: Snapshot,
+    *,
+    case_id: str,
+    case_sha256: str,
+    identity_sha256: str,
+    candidate_id: str,
+    binding_kind: str,
+    binding_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Parse the hash-bound candidate-A route trace.
+
+    The trace is intentionally event based: each (side, metric) pair appears exactly
+    once, event IDs and event self-hashes are checked, and unknown/missing metrics are
+    rejected before any aggregate is returned to the selector.
+    """
+    value = parse_json(snapshot, "direct sequence output trace")
+    exact(value, DIRECT_TRACE_ROOT_FIELDS, "direct sequence output trace")
+    if value["schema_version"] != DIRECT_TRACE_SCHEMA or value["status"] != "complete":
+        raise ProducerError("direct sequence output trace schema/status differs")
+    if value["trace_sha256"] != self_hash(value, "trace_sha256"):
+        raise ProducerError("direct sequence output trace self-hash differs")
+    if value["binding_kind"] != binding_kind or value["binding_id"] != binding_id:
+        raise ProducerError("direct sequence output trace binding differs")
+    if value["candidate_id"] != candidate_id:
+        raise ProducerError("direct sequence output trace candidate differs")
+    if value["case_id"] != case_id or value["case_sha256"] != case_sha256:
+        raise ProducerError("direct sequence output trace case differs")
+    if value["identity_sha256"] != identity_sha256:
+        raise ProducerError("direct sequence output trace identity differs")
+    if type(value["events"]) is not list or not value["events"]:
+        raise ProducerError("direct sequence output trace events must be non-empty")
+    expected_metrics = DIRECT_RUN_METRICS if binding_kind == "run" else DIRECT_PAIR_METRICS
+    result: dict[str, dict[str, Any]] = {"baseline": {}, "candidate": {}}
+    seen_ids: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    for index, event in enumerate(value["events"]):
+        label = f"direct sequence output trace events[{index}]"
+        if not isinstance(event, dict):
+            raise ProducerError(f"{label} must be an object")
+        exact(event, DIRECT_EVENT_FIELDS, label)
+        event_id = text_value(event["event_id"], f"{label}.event_id")
+        if event_id in seen_ids:
+            raise ProducerError("direct sequence output trace event ID is duplicated")
+        seen_ids.add(event_id)
+        if event["event_sha256"] != self_hash(event, "event_sha256"):
+            raise ProducerError(f"{label} self-hash differs")
+        side = event["side"]
+        metric = event["metric"]
+        if side not in result or metric not in expected_metrics:
+            raise ProducerError(f"{label} side/metric is unknown")
+        pair = (side, metric)
+        if pair in seen_pairs:
+            raise ProducerError("direct sequence output trace metric is duplicated")
+        seen_pairs.add(pair)
+        raw = event["value"]
+        if metric in {
+            "d2d_bytes", "d2d_copy_count", "launch_count", "workspace_bytes",
+            "peak_vram_bytes", "fallback_count",
+        }:
+            parsed = count(raw, f"{label}.value")
+        elif metric in {"component_ms", "full_model_ms"}:
+            parsed = finite_float(raw, f"{label}.value", positive=True)
+        elif metric in {"alias_safe", "size_safe", "admission_safe"}:
+            parsed = boolean(raw, f"{label}.value")
+        elif metric == "fallback_reasons":
+            if type(raw) is not list or any(type(item) is not str or not item for item in raw):
+                raise ProducerError(f"{label}.value must be a string array")
+            if len(raw) != len(set(raw)):
+                raise ProducerError(f"{label}.value contains duplicate reasons")
+            parsed = sorted(raw)
+        elif metric == "fidelity_binding_sha256":
+            parsed = digest(raw, f"{label}.value")
+        else:  # pragma: no cover - guarded by expected_metrics above
+            raise ProducerError(f"{label} metric is unknown")
+        result[side][metric] = parsed
+    for side in result:
+        missing = expected_metrics - set(result[side])
+        if missing:
+            raise ProducerError(
+                f"direct sequence output trace {side} metrics are missing: {sorted(missing)}"
+            )
+    if result["candidate"]["fidelity_binding_sha256"] != result["baseline"]["fidelity_binding_sha256"]:
+        raise ProducerError("direct sequence output trace fidelity binding differs")
+    for side in result:
+        if result[side]["fallback_count"] == 0 and result[side]["fallback_reasons"]:
+            raise ProducerError("direct sequence output trace fallback reasons are inconsistent")
+    return result
+
+
 def stable_mean(values: list[float]) -> float:
     return math.fsum(sorted(values)) / len(values)
 
@@ -1042,6 +1165,7 @@ def trace_measurement(
     snapshots: list[Snapshot],
     used_kernel_traces: set[str],
     used_api_traces: set[str],
+    used_direct_traces: set[str],
 ) -> dict[str, Any]:
     profile_runs = case["profile_runs"]
     if not isinstance(profile_runs, list):
@@ -1059,13 +1183,15 @@ def trace_measurement(
     d2h_times_ms: list[float] = []
     sync_count = 0
     sync_times_ms: list[float] = []
+    direct_runs: list[dict[str, dict[str, Any]]] = []
     for index, binding in enumerate(
         sorted(profile_runs, key=lambda item: item.get("resident_run_index", -1) if isinstance(item, dict) else -1)
     ):
         label = f"profile_runs[{index}]"
         if not isinstance(binding, dict):
             raise ProducerError(f"{label} must be an object")
-        exact(binding, PROFILE_RUN_FIELDS, label)
+        binding_fields = PROFILE_RUN_FIELDS_CANDIDATE_A if candidate_id == "sequence-output-direct-v1" else PROFILE_RUN_FIELDS
+        exact(binding, binding_fields, label)
         if binding["schema_version"] != PROFILE_BINDING_SCHEMA:
             raise ProducerError(f"{label} schema differs")
         if (
@@ -1102,6 +1228,26 @@ def trace_measurement(
         used_api_traces.add(api.sha256)
         kernel_value = parse_kernel_trace(kernel, candidate_id)
         api_value = parse_hip_api_trace(api, capability)
+        if candidate_id == "sequence-output-direct-v1":
+            direct_snapshot, _ = load_ref(
+                binding["direct_sequence_output_trace"],
+                f"{label} direct sequence output trace",
+                snapshots,
+            )
+            if direct_snapshot.sha256 in used_direct_traces:
+                raise ProducerError("candidate A direct sequence trace was reused")
+            used_direct_traces.add(direct_snapshot.sha256)
+            direct_runs.append(
+                parse_direct_sequence_output_trace(
+                    direct_snapshot,
+                    case_id=case["case_id"],
+                    case_sha256=case["case_sha256"],
+                    identity_sha256=identity_sha,
+                    candidate_id=candidate_id,
+                    binding_kind="run",
+                    binding_id=str(run_index),
+                )
+            )
         exclusive_ms.append(kernel_value["candidate_exclusive_ns"] / 1_000_000.0)
         d2h_count += api_value["d2h_count"]
         d2h_times_ms.append(api_value["d2h_union_ns"] / 1_000_000.0)
@@ -1116,7 +1262,7 @@ def trace_measurement(
         for run in raw_runs[2:]
     ]
     p50, cv, ci_halfwidth = stats(baseline_values)
-    return {
+    observed = {
         "baseline_p50_ms": p50,
         "baseline_cv": cv,
         "ci95_halfwidth_ms": ci_halfwidth,
@@ -1126,6 +1272,65 @@ def trace_measurement(
         "stream_sync_count": sync_count,
         "stream_sync_time_ms": math.fsum(sorted(sync_times_ms)),
     }
+    if candidate_id == "sequence-output-direct-v1":
+        if len(direct_runs) != 10:
+            raise ProducerError("candidate A direct traces do not cover measured runs")
+        for index, direct in enumerate(direct_runs):
+            measured_run = raw_runs[index + 2]
+            if direct["baseline"]["full_model_ms"] != measured_run["timing"]["prefill_ms"]:
+                raise ProducerError("candidate A baseline full-model trace differs from resident raw")
+
+        def values(side: str, metric: str) -> list[Any]:
+            return [item[side][metric] for item in direct_runs]
+
+        def median_count(values_: list[int], label: str) -> int:
+            value = median([float(item) for item in values_])
+            if not value.is_integer():
+                raise ProducerError(f"{label} median is not an integer")
+            return int(value)
+
+        def percentile95(values_: list[float]) -> float:
+            ordered = sorted(values_)
+            index = 0.95 * (len(ordered) - 1)
+            left = int(math.floor(index))
+            right = int(math.ceil(index))
+            if left == right:
+                return ordered[left]
+            return ordered[left] + (ordered[right] - ordered[left]) * (index - left)
+
+        for field in ("d2d_bytes", "workspace_bytes", "peak_vram_bytes"):
+            observed[f"baseline_{field}"] = int(median([float(item) for item in values("baseline", field)]))
+            observed[f"candidate_{field}"] = int(median([float(item) for item in values("candidate", field)]))
+        for field in ("d2d_copy_count", "launch_count", "fallback_count"):
+            observed[f"baseline_{field}"] = median_count(values("baseline", field), f"baseline {field}")
+            observed[f"candidate_{field}"] = median_count(values("candidate", field), f"candidate {field}")
+        for side in ("baseline", "candidate"):
+            component = [float(item[side]["component_ms"]) for item in direct_runs]
+            full_model = [float(item[side]["full_model_ms"]) for item in direct_runs]
+            observed[f"{side}_component_p50_ms"] = median(component)
+            observed[f"{side}_component_p95_ms"] = percentile95(component)
+            observed[f"{side}_full_model_p50_ms"] = median(full_model)
+            observed[f"{side}_full_model_p95_ms"] = percentile95(full_model)
+        if observed["baseline_full_model_p50_ms"] != observed["baseline_p50_ms"]:
+            raise ProducerError("candidate A baseline full-model p50 differs from resident raw")
+        del observed["baseline_full_model_p50_ms"]
+        observed["baseline_fallback_reasons"] = sorted(
+            {reason for item in direct_runs for reason in item["baseline"]["fallback_reasons"]}
+        )
+        observed["candidate_fallback_reasons"] = sorted(
+            {reason for item in direct_runs for reason in item["candidate"]["fallback_reasons"]}
+        )
+        for field in ("alias_safe", "size_safe", "admission_safe"):
+            if not all(item["candidate"][field] for item in direct_runs):
+                observed[f"direct_{field}"] = False
+            else:
+                observed[f"direct_{field}"] = True
+        fidelity = {item[side]["fidelity_binding_sha256"] for item in direct_runs for side in ("baseline", "candidate")}
+        if len(fidelity) != 1:
+            raise ProducerError("candidate A fidelity binding changed across measured runs")
+        observed["direct_fidelity_binding_sha256"] = next(iter(fidelity))
+        observed["copy_fidelity_binding_sha256"] = observed["direct_fidelity_binding_sha256"]
+    return observed
 
 
 def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[str, Any], list[Snapshot]]:
@@ -1184,6 +1389,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
     raw_cache: dict[str, tuple[dict[str, Any], str, list[dict[str, Any]]]] = {}
     used_kernel_traces: set[str] = set()
     used_api_traces: set[str] = set()
+    used_direct_traces: set[str] = set()
 
     def resident_raw(ref: dict[str, Any], label: str) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
         key = json.dumps(ref, sort_keys=True)
@@ -1231,6 +1437,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
             snapshots,
             used_kernel_traces,
             used_api_traces,
+            used_direct_traces,
         )
         measurements.append(
             {
@@ -1260,7 +1467,8 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         label = f"full_model_pairs[{index}]"
         if not isinstance(pair, dict):
             raise ProducerError(f"{label} must be an object")
-        exact(pair, PAIR_FIELDS, label)
+        pair_fields = PAIR_FIELDS_CANDIDATE_A if candidate_id == "sequence-output-direct-v1" else PAIR_FIELDS
+        exact(pair, pair_fields, label)
         pair_id = pair["pair_id"]
         if not isinstance(pair_id, str) or not pair_id or pair_id in pair_ids:
             raise ProducerError("full-model pair IDs are invalid or duplicated")
@@ -1281,8 +1489,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
             or baseline_runs[run_index]["run_index"] != contender_runs[run_index]["run_index"]
         ):
             raise ProducerError(f"{label} baseline/candidate run pairing differs")
-        pairs.append(
-            {
+        pair_output = {
                 "candidate_id": candidate_id,
                 "pair_id": pair_id,
                 "case_sha256": case_sha,
@@ -1298,7 +1505,38 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
                     positive=True,
                 ),
             }
-        )
+        if candidate_id == "sequence-output-direct-v1":
+            direct_snapshot, _ = load_ref(
+                pair["direct_sequence_output_trace"],
+                f"{label} direct sequence output trace",
+                snapshots,
+            )
+            if direct_snapshot.sha256 in used_direct_traces:
+                raise ProducerError("candidate A direct sequence trace was reused")
+            used_direct_traces.add(direct_snapshot.sha256)
+            direct = parse_direct_sequence_output_trace(
+                direct_snapshot,
+                case_id=pair["case_id"],
+                case_sha256=case_sha,
+                identity_sha256=identity["identity_sha256"],
+                candidate_id=candidate_id,
+                binding_kind="pair",
+                binding_id=pair_id,
+            )
+            for field in (
+                "d2d_bytes", "d2d_copy_count", "launch_count", "workspace_bytes",
+                "peak_vram_bytes", "fallback_count",
+            ):
+                pair_output[f"baseline_{field}"] = direct["baseline"][field]
+                pair_output[f"candidate_{field}"] = direct["candidate"][field]
+            pair_output["baseline_fallback_reasons"] = direct["baseline"]["fallback_reasons"]
+            pair_output["candidate_fallback_reasons"] = direct["candidate"]["fallback_reasons"]
+            pair_output["direct_alias_safe"] = direct["candidate"]["alias_safe"]
+            pair_output["direct_size_safe"] = direct["candidate"]["size_safe"]
+            pair_output["direct_admission_safe"] = direct["candidate"]["admission_safe"]
+            pair_output["direct_fidelity_binding_sha256"] = direct["baseline"]["fidelity_binding_sha256"]
+            pair_output["copy_fidelity_binding_sha256"] = direct["candidate"]["fidelity_binding_sha256"]
+        pairs.append(pair_output)
 
     output = {
         "schema_version": RAW_SCHEMA,
@@ -1325,6 +1563,8 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         "measurements": measurements,
         "full_model_pairs": pairs,
     }
+    if candidate_id == "sequence-output-direct-v1":
+        output["capabilities"].update({field: True for field in SELECTOR.CANDIDATE_A_CAPABILITY_FIELDS})
     output["evidence_sha256"] = SELECTOR.semantic_sha256(output)
     ensure_finite_tree(output, "candidate selection raw output")
     if mode == "promotion":
