@@ -47,6 +47,71 @@ pub enum Qwen35Aq4SequenceOutputRoute {
     CopyFallback,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Qwen35Aq4SequenceOutputCommit {
+    route: Qwen35Aq4SequenceOutputRoute,
+    next_source_ping: usize,
+    copy_performed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Qwen35Aq4SequencePingRoute {
+    source_ping: usize,
+    destination_ping: usize,
+}
+
+fn sequence_ping_route(current_source_ping: usize) -> Result<Qwen35Aq4SequencePingRoute, String> {
+    match current_source_ping {
+        0 => Ok(Qwen35Aq4SequencePingRoute {
+            source_ping: 0,
+            destination_ping: 1,
+        }),
+        1 => Ok(Qwen35Aq4SequencePingRoute {
+            source_ping: 1,
+            destination_ping: 0,
+        }),
+        _ => Err(format!(
+            "sequence output source ping must be 0 or 1, got {current_source_ping}"
+        )),
+    }
+}
+
+fn resolve_direct_sequence_attempt<T>(
+    direct_result: Result<T, ResidentSequenceFailure>,
+    copy_fallback: impl FnOnce() -> Result<T, String>,
+    label: &str,
+) -> Result<(T, Qwen35Aq4SequenceOutputRoute), String> {
+    match direct_result {
+        Ok(value) => Ok((value, Qwen35Aq4SequenceOutputRoute::Direct)),
+        Err(ResidentSequenceFailure::Admission(direct_error)) => copy_fallback()
+            .map(|value| (value, Qwen35Aq4SequenceOutputRoute::CopyFallback))
+            .map_err(|fallback_error| {
+                format!(
+                    "{label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
+                )
+            }),
+        Err(error) => Err(error.message()),
+    }
+}
+
+fn apply_sequence_output_route(
+    route: Qwen35Aq4SequenceOutputRoute,
+    ping_route: Qwen35Aq4SequencePingRoute,
+    copy_workspace_to_destination: impl FnOnce() -> Result<(), String>,
+    poison: impl FnOnce(),
+) -> Result<Qwen35Aq4SequenceOutputCommit, String> {
+    let copy_performed = !matches!(route, Qwen35Aq4SequenceOutputRoute::Direct);
+    if copy_performed && let Err(error) = copy_workspace_to_destination() {
+        poison();
+        return Err(error);
+    }
+    Ok(Qwen35Aq4SequenceOutputCommit {
+        route,
+        next_source_ping: ping_route.destination_ping,
+        copy_performed,
+    })
+}
+
 fn direct_prefill_sequence_output_enabled_value(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
 }
@@ -57,71 +122,6 @@ fn direct_prefill_sequence_output_enabled() -> bool {
             .ok()
             .as_deref(),
     )
-}
-
-/// CPU-only routing seam for the opt-in direct sequence output path.
-///
-/// It models the ownership and failure decisions around the HIP operation while keeping the
-/// numerical payload as ordinary host `f32` values.  Tests using this seam prove route selection,
-/// finite/equal output, and admission-failure fallback; they are indirect evidence and do not
-/// replace a real R9700 execution/profile.
-#[cfg(test)]
-type CpuSequenceOutputPath = Qwen35Aq4SequenceOutputRoute;
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CpuDirectSequenceFailure {
-    Admission,
-    Execution,
-}
-
-#[cfg(test)]
-fn cpu_sequence_output_route(
-    sequence_len: usize,
-    workspace_output: &[f32],
-    destination: &mut [f32],
-    direct_requested: bool,
-    direct_failure: Option<CpuDirectSequenceFailure>,
-    aliases_workspace: bool,
-    label: &str,
-) -> Result<CpuSequenceOutputPath, String> {
-    if workspace_output.len() != destination.len() {
-        return Err(format!(
-            "{label} sequence output length mismatch: workspace={} destination={}",
-            workspace_output.len(),
-            destination.len()
-        ));
-    }
-    if aliases_workspace {
-        return Err(format!("{label} direct sequence output aliases workspace"));
-    }
-    // M=1 remains the indirect/row-splice contract. The production native prefill API rejects
-    // it before dispatch, so the CPU seam must not present direct M=1 as a supported route.
-    if sequence_len == 1 {
-        destination.copy_from_slice(workspace_output);
-        return Ok(Qwen35Aq4SequenceOutputRoute::Copy);
-    }
-    if direct_requested {
-        match direct_failure {
-            Some(CpuDirectSequenceFailure::Execution) => {
-                return Err(format!("{label} direct sequence execution failed"));
-            }
-            Some(CpuDirectSequenceFailure::Admission) => {
-                destination.copy_from_slice(workspace_output);
-                return Ok(Qwen35Aq4SequenceOutputRoute::CopyFallback);
-            }
-            None => {
-                for (destination_value, source_value) in
-                    destination.iter_mut().zip(workspace_output.iter().copied())
-                {
-                    *destination_value = source_value;
-                }
-                return Ok(CpuSequenceOutputPath::Direct);
-            }
-        }
-    }
-    destination.copy_from_slice(workspace_output);
-    Ok(Qwen35Aq4SequenceOutputRoute::Copy)
 }
 
 /// Borrowed, ordered view of one prepared generation step's post-final-RMSNorm hidden row and
@@ -1178,25 +1178,34 @@ impl Qwen35Aq4ModelRuntime {
         let mut invocations = Vec::with_capacity(layer_count * sequence_len);
         let mut current_ping = 0usize;
         for layer_position in 0..layer_count {
-            let next_ping = 1 - current_ping;
             let layer_label = format!(
                 "{label} layer {layer_position} positions {absolute_start}..{absolute_end}"
             );
-            let (source, destination) = if current_ping == 0 {
-                let (left, right) = self.prefill_ping_buffers.split_at_mut(1);
-                (&left[0], &mut right[0])
-            } else {
-                let (left, right) = self.prefill_ping_buffers.split_at_mut(1);
-                (&right[0], &mut left[0])
+            let ping_route = sequence_ping_route(current_ping)?;
+            let (source, destination) = match ping_route {
+                Qwen35Aq4SequencePingRoute {
+                    source_ping: 0,
+                    destination_ping: 1,
+                } => {
+                    let (left, right) = self.prefill_ping_buffers.split_at_mut(1);
+                    (&left[0], &mut right[0])
+                }
+                Qwen35Aq4SequencePingRoute {
+                    source_ping: 1,
+                    destination_ping: 0,
+                } => {
+                    let (left, right) = self.prefill_ping_buffers.split_at_mut(1);
+                    (&right[0], &mut left[0])
+                }
+                _ => unreachable!("validated sequence ping route"),
             };
-            match &mut self.layers[layer_position] {
+            let committed_next_ping = match &mut self.layers[layer_position] {
                 Qwen35Aq4ResidentLayer::LinearAttention(layer) => {
                     let workspace = self.prefill_sequence_workspace.as_mut().ok_or_else(|| {
                         format!("{layer_label} has no shared linear sequence workspace")
                     })?;
-                    let mut output_route = Qwen35Aq4SequenceOutputRoute::Copy;
-                    let records_result = if direct_sequence_output {
-                        match layer.run_device_sequence_for_phase_to_buffer_typed(
+                    let routed_records_result = if direct_sequence_output {
+                        let direct_result = layer.run_device_sequence_for_phase_to_buffer_typed(
                             &mut self.stream,
                             source,
                             sequence_len,
@@ -1204,48 +1213,35 @@ impl Qwen35Aq4ModelRuntime {
                             workspace,
                             destination,
                             &layer_label,
-                        ) {
-                            Ok(records) => {
-                                output_route = Qwen35Aq4SequenceOutputRoute::Direct;
-                                Ok(records)
-                            }
-                            Err(ResidentSequenceFailure::Admission(direct_error)) => {
-                                let records_result = layer.run_device_sequence_for_phase(
+                        );
+                        resolve_direct_sequence_attempt(
+                            direct_result,
+                            || {
+                                layer.run_device_sequence_for_phase(
                                     &mut self.stream,
                                     source,
                                     sequence_len,
                                     phase,
                                     workspace,
                                     &layer_label,
-                                );
-                                match records_result {
-                                    Ok(records) => {
-                                        output_route = Qwen35Aq4SequenceOutputRoute::CopyFallback;
-                                        Ok(records)
-                                    }
-                                    Err(fallback_error) => Err(format!(
-                                        "{layer_label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
-                                    )),
-                                }
-                            }
-                            Err(error) => Err(error.message()),
-                        }
-                    } else {
-                        let records_result = layer.run_device_sequence_for_phase(
-                            &mut self.stream,
-                            source,
-                            sequence_len,
-                            phase,
-                            workspace,
+                                )
+                            },
                             &layer_label,
-                        );
-                        if records_result.is_ok() {
-                            output_route = Qwen35Aq4SequenceOutputRoute::Copy;
-                        }
-                        records_result
+                        )
+                    } else {
+                        layer
+                            .run_device_sequence_for_phase(
+                                &mut self.stream,
+                                source,
+                                sequence_len,
+                                phase,
+                                workspace,
+                                &layer_label,
+                            )
+                            .map(|records| (records, Qwen35Aq4SequenceOutputRoute::Copy))
                     };
-                    let records = match records_result {
-                        Ok(records) => records,
+                    let (records, output_route) = match routed_records_result {
+                        Ok(result) => result,
                         Err(error) => {
                             let partial = layer.take_last_operation_executions();
                             self.last_partial_operation_executions.push(partial);
@@ -1260,45 +1256,54 @@ impl Qwen35Aq4ModelRuntime {
                             return Err(error);
                         }
                     };
-                    if !matches!(output_route, Qwen35Aq4SequenceOutputRoute::Direct) {
-                        if let Err(error) = destination.copy_from_buffer(
-                            0,
-                            workspace.output_buffer(),
-                            0,
-                            sequence_bytes,
-                            Some(&mut self.stream),
-                        ) {
-                            layer.mark_request_execution_failed();
-                            self.last_partial_prefill_invocations.push(
-                                Qwen35Aq4FailedPrefillInvocation {
-                                    layer_index: layer_position,
-                                    execution_width: sequence_len,
-                                    phase,
-                                    records: [Some(records[0]), Some(records[1])],
-                                },
-                            );
-                            return Err(format!(
-                                "failed to copy {layer_label} sequence output: {error}"
-                            ));
-                        }
-                    }
+                    let output_commit = apply_sequence_output_route(
+                        output_route,
+                        ping_route,
+                        || {
+                            destination
+                                .copy_from_buffer(
+                                    0,
+                                    workspace.output_buffer(),
+                                    0,
+                                    sequence_bytes,
+                                    Some(&mut self.stream),
+                                )
+                                .map_err(|error| {
+                                    format!("failed to copy {layer_label} sequence output: {error}")
+                                })
+                        },
+                        || layer.mark_request_execution_failed(),
+                    )
+                    .map_err(|error| {
+                        self.last_partial_prefill_invocations.push(
+                            Qwen35Aq4FailedPrefillInvocation {
+                                layer_index: layer_position,
+                                execution_width: sequence_len,
+                                phase,
+                                records: [Some(records[0]), Some(records[1])],
+                            },
+                        );
+                        error
+                    })?;
                     if layer_position + 1 == layer_count {
-                        let retain_result =
-                            if matches!(output_route, Qwen35Aq4SequenceOutputRoute::Direct) {
-                                layer.retain_last_sequence_row_from_buffer(
-                                    &mut self.stream,
-                                    destination,
-                                    sequence_len,
-                                    &layer_label,
-                                )
-                            } else {
-                                layer.retain_last_sequence_row(
-                                    &mut self.stream,
-                                    workspace,
-                                    sequence_len,
-                                    &layer_label,
-                                )
-                            };
+                        let retain_result = if matches!(
+                            output_commit.route,
+                            Qwen35Aq4SequenceOutputRoute::Direct
+                        ) {
+                            layer.retain_last_sequence_row_from_buffer(
+                                &mut self.stream,
+                                destination,
+                                sequence_len,
+                                &layer_label,
+                            )
+                        } else {
+                            layer.retain_last_sequence_row(
+                                &mut self.stream,
+                                workspace,
+                                sequence_len,
+                                &layer_label,
+                            )
+                        };
                         if let Err(error) = retain_result {
                             layer.mark_request_execution_failed();
                             self.last_partial_prefill_invocations.push(
@@ -1327,32 +1332,31 @@ impl Qwen35Aq4ModelRuntime {
                         phase,
                         records,
                         direct_sequence_output_requested: direct_sequence_output,
-                        output_route,
+                        output_route: output_commit.route,
                     });
+                    output_commit.next_source_ping
                 }
                 Qwen35Aq4ResidentLayer::SelfAttention(layer) => {
                     if let Some(workspace) = self.prefill_self_attention_sequence_workspace.as_mut()
                     {
-                        let mut output_route = Qwen35Aq4SequenceOutputRoute::Copy;
-                        let records_result = if direct_sequence_output {
-                            match layer.run_device_sequence_for_phase_to_buffer_typed(
-                                &mut self.stream,
-                                source,
-                                sequence_len,
-                                rotary_dim,
-                                rope_base,
-                                absolute_start,
-                                phase,
-                                workspace,
-                                destination,
-                                &layer_label,
-                            ) {
-                                Ok(records) => {
-                                    output_route = Qwen35Aq4SequenceOutputRoute::Direct;
-                                    Ok(records)
-                                }
-                                Err(ResidentSequenceFailure::Admission(direct_error)) => {
-                                    let records_result = layer.run_device_sequence_for_phase(
+                        let routed_records_result = if direct_sequence_output {
+                            let direct_result = layer
+                                .run_device_sequence_for_phase_to_buffer_typed(
+                                    &mut self.stream,
+                                    source,
+                                    sequence_len,
+                                    rotary_dim,
+                                    rope_base,
+                                    absolute_start,
+                                    phase,
+                                    workspace,
+                                    destination,
+                                    &layer_label,
+                                );
+                            resolve_direct_sequence_attempt(
+                                direct_result,
+                                || {
+                                    layer.run_device_sequence_for_phase(
                                         &mut self.stream,
                                         source,
                                         sequence_len,
@@ -1362,39 +1366,27 @@ impl Qwen35Aq4ModelRuntime {
                                         phase,
                                         workspace,
                                         &layer_label,
-                                    );
-                                    match records_result {
-                                        Ok(records) => {
-                                            output_route =
-                                                Qwen35Aq4SequenceOutputRoute::CopyFallback;
-                                            Ok(records)
-                                        }
-                                        Err(fallback_error) => Err(format!(
-                                            "{layer_label} direct sequence admission failed ({direct_error}); copy fallback failed: {fallback_error}"
-                                        )),
-                                    }
-                                }
-                                Err(error) => Err(error.message()),
-                            }
-                        } else {
-                            let records_result = layer.run_device_sequence_for_phase(
-                                &mut self.stream,
-                                source,
-                                sequence_len,
-                                rotary_dim,
-                                rope_base,
-                                absolute_start,
-                                phase,
-                                workspace,
+                                    )
+                                },
                                 &layer_label,
-                            );
-                            if records_result.is_ok() {
-                                output_route = Qwen35Aq4SequenceOutputRoute::Copy;
-                            }
-                            records_result
+                            )
+                        } else {
+                            layer
+                                .run_device_sequence_for_phase(
+                                    &mut self.stream,
+                                    source,
+                                    sequence_len,
+                                    rotary_dim,
+                                    rope_base,
+                                    absolute_start,
+                                    phase,
+                                    workspace,
+                                    &layer_label,
+                                )
+                                .map(|records| (records, Qwen35Aq4SequenceOutputRoute::Copy))
                         };
-                        let records = match records_result {
-                            Ok(records) => records,
+                        let (records, output_route) = match routed_records_result {
+                            Ok(result) => result,
                             Err(error) => {
                                 let partial = layer.take_last_operation_executions();
                                 self.last_partial_operation_executions.push(partial);
@@ -1409,28 +1401,37 @@ impl Qwen35Aq4ModelRuntime {
                                 return Err(error);
                             }
                         };
-                        if !matches!(output_route, Qwen35Aq4SequenceOutputRoute::Direct) {
-                            if let Err(error) = destination.copy_from_buffer(
+                        let output_commit = apply_sequence_output_route(
+                            output_route,
+                            ping_route,
+                            || {
+                                destination
+                                    .copy_from_buffer(
                                 0,
                                 workspace.output_buffer(),
                                 0,
                                 sequence_bytes,
                                 Some(&mut self.stream),
-                            ) {
-                                layer.mark_request_execution_failed();
-                                self.last_partial_prefill_invocations.push(
-                                    Qwen35Aq4FailedPrefillInvocation {
-                                        layer_index: layer_position,
-                                        execution_width: sequence_len,
-                                        phase,
-                                        records: [Some(records[0]), Some(records[1])],
-                                    },
-                                );
-                                return Err(format!(
-                                    "failed to copy {layer_label} self-attn sequence output: {error}"
-                                ));
-                            }
-                        }
+                                    )
+                                    .map_err(|error| {
+                                        format!(
+                                            "failed to copy {layer_label} self-attn sequence output: {error}"
+                                        )
+                                    })
+                            },
+                            || layer.mark_request_execution_failed(),
+                        )
+                        .map_err(|error| {
+                            self.last_partial_prefill_invocations.push(
+                                Qwen35Aq4FailedPrefillInvocation {
+                                    layer_index: layer_position,
+                                    execution_width: sequence_len,
+                                    phase,
+                                    records: [Some(records[0]), Some(records[1])],
+                                },
+                            );
+                            error
+                        })?;
                         self.last_partial_operation_executions
                             .push([Some(records[0]), Some(records[1])]);
                         self.last_partial_prefill_invocations.push(
@@ -1447,15 +1448,16 @@ impl Qwen35Aq4ModelRuntime {
                             phase,
                             records,
                             direct_sequence_output_requested: direct_sequence_output,
-                            output_route,
+                            output_route: output_commit.route,
                         });
+                        output_commit.next_source_ping
                     } else {
                         return Err(format!(
                             "{layer_label} native self-attn sequence workspace is unavailable"
                         ));
                     }
                 }
-            }
+            };
             if sync_each_layer_for_timing {
                 if let Err(error) = self.stream.synchronize() {
                     for layer in &mut self.layers[..=layer_position] {
@@ -1464,7 +1466,7 @@ impl Qwen35Aq4ModelRuntime {
                     return Err(format!("failed to synchronize {layer_label}: {error}"));
                 }
             }
-            current_ping = next_ping;
+            current_ping = committed_next_ping;
         }
         Ok(Qwen35Aq4PrefillChunkStep {
             execution_width: sequence_len,
@@ -1796,94 +1798,166 @@ mod tests {
     }
 
     #[test]
-    fn cpu_direct_sequence_output_matches_copy_for_m_grid_and_finite_values() {
+    fn production_direct_attempt_falls_back_for_admission_only() {
+        let (value, route) = resolve_direct_sequence_attempt(
+            Ok(7_u8),
+            || panic!("direct success must not run fallback"),
+            "direct-success",
+        )
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(route, Qwen35Aq4SequenceOutputRoute::Direct);
+
+        for failure in [
+            ResidentSequenceFailure::NotReusable("not reusable".to_string()),
+            ResidentSequenceFailure::Execution("execution failed".to_string()),
+        ] {
+            let mut fallback_calls = 0;
+            let error = resolve_direct_sequence_attempt(
+                Err::<u8, _>(failure),
+                || {
+                    fallback_calls += 1;
+                    Ok(9)
+                },
+                "direct-failure",
+            )
+            .unwrap_err();
+            assert_eq!(fallback_calls, 0);
+            assert!(matches!(
+                error.as_str(),
+                "not reusable" | "execution failed"
+            ));
+        }
+    }
+
+    #[test]
+    fn production_route_transition_matches_copy_for_m_grid_and_finite_values() {
         for sequence_len in [1_usize, 2, 8, 16, 32, 64, 128] {
             let hidden = 7_usize;
-            let source = (0..sequence_len * hidden)
+            let workspace_output = (0..sequence_len * hidden)
                 .map(|index| (index as f32 * 0.25) - 7.0)
                 .collect::<Vec<_>>();
-            assert!(source.iter().all(|value| value.is_finite()));
+            assert!(workspace_output.iter().all(|value| value.is_finite()));
 
-            let mut copy_output = vec![f32::NAN; source.len()];
-            assert_eq!(
-                cpu_sequence_output_route(
-                    sequence_len,
-                    &source,
-                    &mut copy_output,
-                    false,
-                    None,
-                    false,
-                    "copy",
-                )
-                .unwrap(),
-                CpuSequenceOutputPath::Copy
-            );
+            let mut copy_output = vec![f32::NAN; workspace_output.len()];
+            let mut copy_calls = 0;
+            let copy_commit = apply_sequence_output_route(
+                Qwen35Aq4SequenceOutputRoute::Copy,
+                sequence_ping_route(0).unwrap(),
+                || {
+                    copy_calls += 1;
+                    copy_output.copy_from_slice(&workspace_output);
+                    Ok(())
+                },
+                || panic!("successful copy must not poison"),
+            )
+            .unwrap();
+            assert_eq!(copy_calls, 1);
+            assert_eq!(copy_commit.next_source_ping, 1);
+            assert!(copy_commit.copy_performed);
 
-            let mut direct_output = vec![f32::NAN; source.len()];
-            let expected_direct_route = if sequence_len == 1 {
-                CpuSequenceOutputPath::Copy
+            let direct_route = if native_prefill_sequence_width_admitted(sequence_len) {
+                Qwen35Aq4SequenceOutputRoute::Direct
             } else {
-                CpuSequenceOutputPath::Direct
+                Qwen35Aq4SequenceOutputRoute::Copy
             };
+            let mut direct_output = if matches!(direct_route, Qwen35Aq4SequenceOutputRoute::Direct)
+            {
+                workspace_output.clone()
+            } else {
+                vec![f32::NAN; workspace_output.len()]
+            };
+            let mut direct_copy_calls = 0;
+            let direct_commit = apply_sequence_output_route(
+                direct_route,
+                sequence_ping_route(0).unwrap(),
+                || {
+                    direct_copy_calls += 1;
+                    direct_output.copy_from_slice(&workspace_output);
+                    Ok(())
+                },
+                || panic!("successful route must not poison"),
+            )
+            .unwrap();
             assert_eq!(
-                cpu_sequence_output_route(
-                    sequence_len,
-                    &source,
-                    &mut direct_output,
-                    true,
-                    None,
-                    false,
-                    "direct",
-                )
-                .unwrap(),
-                expected_direct_route
+                direct_copy_calls,
+                usize::from(!matches!(
+                    direct_route,
+                    Qwen35Aq4SequenceOutputRoute::Direct
+                ))
             );
+            assert_eq!(direct_commit.next_source_ping, 1);
             assert_eq!(direct_output, copy_output);
             assert!(direct_output.iter().all(|value| value.is_finite()));
         }
     }
 
     #[test]
-    fn cpu_direct_sequence_admission_failure_falls_back_to_copy() {
-        let source = [1.0_f32, -2.0, 3.5, 9.0];
-        let mut output = [f32::NAN; 4];
-        assert_eq!(
-            cpu_sequence_output_route(
-                4,
-                &source,
-                &mut output,
-                true,
-                Some(CpuDirectSequenceFailure::Admission),
-                false,
-                "direct-admission",
-            )
-            .unwrap(),
-            CpuSequenceOutputPath::CopyFallback
-        );
-        assert_eq!(output, source);
-        assert!(output.iter().all(|value| value.is_finite()));
+    fn production_copy_fallback_replaces_stale_destination_once_and_switches_source() {
+        let workspace_output = [1.0_f32, -2.0, 3.5, 9.0];
+        let stale = [42.0_f32; 4];
+        let mut destination = stale;
+        let mut fallback_executions = 0;
+        let (_, route) = resolve_direct_sequence_attempt(
+            Err::<(), _>(ResidentSequenceFailure::Admission(
+                "injected direct admission failure".to_string(),
+            )),
+            || {
+                fallback_executions += 1;
+                Ok(())
+            },
+            "test",
+        )
+        .unwrap();
+        assert_eq!(fallback_executions, 1);
+        assert_eq!(route, Qwen35Aq4SequenceOutputRoute::CopyFallback);
+        let mut copy_calls = 0;
+        let ping_route = sequence_ping_route(0).unwrap();
+        assert_eq!(ping_route.source_ping, 0);
+        assert_eq!(ping_route.destination_ping, 1);
+        let commit = apply_sequence_output_route(
+            route,
+            ping_route,
+            || {
+                copy_calls += 1;
+                destination.copy_from_slice(&workspace_output);
+                Ok(())
+            },
+            || panic!("successful fallback must not poison"),
+        )
+        .unwrap();
+
+        assert_eq!(copy_calls, 1);
+        assert_eq!(destination, workspace_output);
+        assert_ne!(destination, stale);
+        assert_eq!(commit.route, Qwen35Aq4SequenceOutputRoute::CopyFallback);
+        assert!(commit.copy_performed);
+        assert_eq!(commit.next_source_ping, 1);
     }
 
     #[test]
-    fn cpu_direct_sequence_execution_failure_is_not_reused_without_reset() {
-        let source = [1.0_f32, 2.0, 3.0, 4.0];
-        let sentinel = [42.0_f32; 4];
-        let mut output = sentinel;
-        let error = cpu_sequence_output_route(
-            4,
-            &source,
-            &mut output,
-            true,
-            Some(CpuDirectSequenceFailure::Execution),
-            false,
-            "direct-execution",
-        )
-        .unwrap_err();
-        assert!(error.contains("execution failed"));
-        assert_eq!(output, sentinel);
-
+    fn production_route_failure_keeps_source_and_poisons_request_state() {
+        let mut current_ping = 1;
+        let mut copy_calls = 0;
         let mut request_state = ResidentRequestState::Ready;
-        request_state.mark_execution_failed();
+        let ping_route = sequence_ping_route(current_ping).unwrap();
+        assert_eq!(ping_route.source_ping, current_ping);
+        let result = apply_sequence_output_route(
+            Qwen35Aq4SequenceOutputRoute::CopyFallback,
+            ping_route,
+            || {
+                copy_calls += 1;
+                Err("injected destination copy failure".to_string())
+            },
+            || request_state.mark_execution_failed(),
+        );
+        if let Ok(commit) = result.as_ref() {
+            current_ping = commit.next_source_ping;
+        }
+        let error = result.unwrap_err();
+        assert_eq!(error, "injected destination copy failure");
+        assert_eq!(copy_calls, 1);
+        assert_eq!(current_ping, 1);
         assert!(request_state.ensure_ready("retry").is_err());
         request_state.begin_reset("retry").unwrap();
         request_state.mark_ready();
@@ -1891,33 +1965,9 @@ mod tests {
     }
 
     #[test]
-    fn cpu_seam_keeps_m1_indirect_and_production_prefill_rejects_m1() {
+    fn m1_stays_indirect_and_production_prefill_rejects_m1() {
         assert!(!native_prefill_sequence_width_admitted(1));
         assert!(native_prefill_sequence_width_admitted(2));
-        let source = [1.0_f32, 2.0, 3.0, 4.0];
-        let mut output = [f32::NAN; 4];
-        assert_eq!(
-            cpu_sequence_output_route(1, &source, &mut output, true, None, false, "m1").unwrap(),
-            CpuSequenceOutputPath::Copy
-        );
-        assert_eq!(output, source);
-    }
-
-    #[test]
-    fn cpu_direct_sequence_contract_rejects_alias_and_length_mismatch() {
-        let source = [1.0_f32, 2.0];
-        let mut output = [0.0_f32; 2];
-        assert!(
-            cpu_sequence_output_route(2, &source, &mut output, true, None, true, "alias")
-                .unwrap_err()
-                .contains("aliases workspace")
-        );
-        let mut short = [0.0_f32; 1];
-        assert!(
-            cpu_sequence_output_route(2, &source, &mut short, true, None, false, "length")
-                .unwrap_err()
-                .contains("length mismatch")
-        );
     }
 
     fn self_attention_admission_fixture(

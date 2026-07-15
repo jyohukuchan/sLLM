@@ -12,10 +12,13 @@
   - CPU テストで alias と短いバッファを fail-closed に拒否することを確認した。
   - `ResidentRequestState` の crate 内可視性を広げ、モデルの CPU テストから実行失敗→同期 reset→再利用の状態機械を検証できるようにした。
 - `qwen35_aq4_model_runtime.rs`
-  - CPU 専用の routing seam を追加し、M={1,2,8,16,32,64,128} で copy/direct の出力一致と有限値を確認した。
+  - 当初の CPU 専用 routing seam は production dispatch と独立していたため削除した。
+  - production dispatch 自身が使う direct attempt resolver、ping source/destination 選択、route 適用 transition を共通関数へ抽出した。
+  - 同じ transition を CPU fault-injection tests から呼び、M={1,2,8,16,32,64,128} の copy/direct 出力一致と有限値を確認した。
   - per-layer の typed output route（direct / copy / admission copy fallback）と direct 要求フラグを記録するようにし、direct の admission 失敗時は workspace→destination コピーを明示して次層の source を更新するよう dispatch を更新した。
   - direct の admission 失敗だけを既存 copy 経路へ退避し、非再利用状態・実行開始後の失敗・record 欠落はコピー再試行せず poison するようにした。
-  - CPU テストで admission fallback、実行失敗後の再利用禁止と reset、alias/長さ不一致を確認した。
+  - callback 観測により CopyFallback の exactly-one copy と stale destination 上書き、Direct の no-copy、成功時だけの ping switch、copy failure 時の source 保持と poison/reset を確認した。
+  - operation record finalizer も production とテストで共通化し、record 欠落時の poison と同期 reset 後の復帰を確認した。
   - M=1 は CPU seam でも indirect copy に分類し、本番 native prefill/direct API の幅契約（M>=2）とは混同しないテストを追加した。
   - direct 経路は従来どおり環境変数の明示的 opt-in で、既定値は無効のままとした。
 
@@ -24,8 +27,9 @@
 - `rustfmt --edition 2024 --check`（変更2ファイル）: 成功
 - `git diff --check`: 成功
 - `CARGO_BUILD_JOBS=1 cargo check -p ullm-engine --lib`: 成功
-- `CARGO_BUILD_JOBS=1 cargo test -p ullm-engine --lib -- --test-threads=1`: 731 passed, 1 ignored
+- `CARGO_BUILD_JOBS=1 cargo test -p ullm-engine --lib -- --test-threads=1`: 733 passed, 1 ignored
 - `CARGO_BUILD_JOBS=1 cargo test -p ullm-engine qwen35_aq4_model_runtime::tests --lib -- --test-threads=1`: 17 passed
+- `CARGO_BUILD_JOBS=1 cargo test -p ullm-engine qwen35_aq4_layer_runtime::linear_attn_step_state_tests --lib -- --test-threads=1`: 19 passed
 
 ## 次の行動
 

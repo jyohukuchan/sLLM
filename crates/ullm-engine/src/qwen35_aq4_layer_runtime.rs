@@ -481,6 +481,30 @@ impl ResidentSequenceFailure {
     }
 }
 
+fn finalize_sequence_operation_records<T>(
+    records: [Option<T>; 2],
+    first_missing: impl FnOnce() -> String,
+    second_missing: impl FnOnce() -> String,
+    mut poison: impl FnMut(),
+) -> Result<[T; 2], ResidentSequenceFailure> {
+    let [first, second] = records;
+    let first = match first {
+        Some(record) => record,
+        None => {
+            poison();
+            return Err(ResidentSequenceFailure::Execution(first_missing()));
+        }
+    };
+    let second = match second {
+        Some(record) => record,
+        None => {
+            poison();
+            return Err(ResidentSequenceFailure::Execution(second_missing()));
+        }
+    };
+    Ok([first, second])
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResidentRequestState {
     Ready,
@@ -3639,25 +3663,12 @@ impl PackageSelfAttnResidentStepLayer {
         if self.weights.sync_component_timing {
             self.last_component_step_ms = Some(PackageSelfAttnComponentStepMs::default());
         }
-        let first = match self.last_operation_executions[0] {
-            Some(record) => record,
-            None => {
-                return fail(
-                    self,
-                    format!("{label} self-attn sequence writer record missing"),
-                );
-            }
-        };
-        let second = match self.last_operation_executions[1] {
-            Some(record) => record,
-            None => {
-                return fail(
-                    self,
-                    format!("{label} self-attn sequence reader record missing"),
-                );
-            }
-        };
-        Ok([first, second])
+        finalize_sequence_operation_records(
+            self.take_last_operation_executions(),
+            || format!("{label} self-attn sequence writer record missing"),
+            || format!("{label} self-attn sequence reader record missing"),
+            || self.request_state.mark_execution_failed(),
+        )
     }
 }
 
@@ -4749,22 +4760,13 @@ impl PackageLinearAttnResidentStepLayer {
             self.request_state.mark_execution_failed();
         }
         result?;
-        let [first, second] = self.take_last_operation_executions();
-        let first = match first {
-            Some(record) => record,
-            None => {
-                self.request_state.mark_execution_failed();
-                return Err(format!("{label} did not record QKV prepare"));
-            }
-        };
-        let second = match second {
-            Some(record) => record,
-            None => {
-                self.request_state.mark_execution_failed();
-                return Err(format!("{label} did not record recurrent scan"));
-            }
-        };
-        Ok([first, second])
+        finalize_sequence_operation_records(
+            self.take_last_operation_executions(),
+            || format!("{label} did not record QKV prepare"),
+            || format!("{label} did not record recurrent scan"),
+            || self.request_state.mark_execution_failed(),
+        )
+        .map_err(ResidentSequenceFailure::message)
     }
 
     /// Runs the sequence path with its final `[M, H]` output written directly to a caller-owned
@@ -4861,26 +4863,12 @@ impl PackageLinearAttnResidentStepLayer {
             self.request_state.mark_execution_failed();
         }
         result.map_err(ResidentSequenceFailure::Execution)?;
-        let [first, second] = self.take_last_operation_executions();
-        let first = match first {
-            Some(record) => record,
-            None => {
-                self.request_state.mark_execution_failed();
-                return Err(ResidentSequenceFailure::Execution(format!(
-                    "{label} did not record QKV prepare"
-                )));
-            }
-        };
-        let second = match second {
-            Some(record) => record,
-            None => {
-                self.request_state.mark_execution_failed();
-                return Err(ResidentSequenceFailure::Execution(format!(
-                    "{label} did not record recurrent scan"
-                )));
-            }
-        };
-        Ok([first, second])
+        finalize_sequence_operation_records(
+            self.take_last_operation_executions(),
+            || format!("{label} did not record QKV prepare"),
+            || format!("{label} did not record recurrent scan"),
+            || self.request_state.mark_execution_failed(),
+        )
     }
 
     fn run_device_sequence_inner(
@@ -8108,6 +8096,39 @@ mod linear_attn_step_state_tests {
                 .unwrap_err()
                 .contains("aliases the shared sequence workspace")
         );
+    }
+
+    #[test]
+    fn sequence_record_finalization_poisons_missing_record_until_reset() {
+        let mut state = ResidentRequestState::Ready;
+        let failure = finalize_sequence_operation_records(
+            [Some(7_u8), None],
+            || "test first record missing".to_string(),
+            || "test second record missing".to_string(),
+            || state.mark_execution_failed(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure,
+            ResidentSequenceFailure::Execution("test second record missing".to_string())
+        );
+        assert_eq!(state, ResidentRequestState::ExecutionFailed);
+        assert!(state.ensure_ready("retry").is_err());
+
+        state.begin_reset("retry").unwrap();
+        assert_eq!(state, ResidentRequestState::Poisoned);
+        state.mark_ready();
+        assert_eq!(
+            finalize_sequence_operation_records(
+                [Some(7_u8), Some(9_u8)],
+                || "test first record missing".to_string(),
+                || "test second record missing".to_string(),
+                || state.mark_execution_failed(),
+            )
+            .unwrap(),
+            [7, 9]
+        );
+        state.ensure_ready("next request").unwrap();
     }
 
     #[test]
