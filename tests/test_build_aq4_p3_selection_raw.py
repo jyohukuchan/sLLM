@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -558,7 +560,42 @@ def test_cli_publishes_once_and_refuses_overwrite(tmp_path: Path) -> None:
     value = json.loads(output.read_text())
     assert value["schema_version"] == PRODUCER.RAW_SCHEMA
     assert value["promotion_eligible"] is True
+    original = output.read_bytes()
     assert PRODUCER.main(["--manifest", str(path), "--output", str(output)]) == 2
+    assert output.read_bytes() == original
+
+
+def test_output_publish_is_atomic_no_replace_and_fsyncs_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, _manifest = promotion_manifest(tmp_path)
+    value = build_manifest(path)
+    output = tmp_path / "selection-raw.json"
+    observed_fsync_kinds: list[bool] = []
+    original_fsync = PRODUCER.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        observed_fsync_kinds.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(PRODUCER.os, "fsync", recording_fsync)
+    PRODUCER.write_output(output, value)
+    assert output.is_file()
+    assert observed_fsync_kinds == [False, True]
+
+    competing = tmp_path / "competing-selection-raw.json"
+    competitor_raw = b"competitor-wins\n"
+    original_link = PRODUCER.os.link
+
+    def racing_link(source, destination, **kwargs):
+        Path(destination).write_bytes(competitor_raw)
+        return original_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(PRODUCER.os, "link", racing_link)
+    with pytest.raises(PRODUCER.ProducerError, match="refusing to overwrite"):
+        PRODUCER.write_output(competing, value)
+    assert competing.read_bytes() == competitor_raw
+    assert list(tmp_path.glob(".competing-selection-raw.json.tmp-*")) == []
 
 
 def test_manifest_array_order_is_semantically_invariant(tmp_path: Path) -> None:
@@ -618,8 +655,48 @@ def test_hash_swap_missing_prompt_m_and_pairing_fail_closed(tmp_path: Path) -> N
     duplicate["manifest_sha256"] = PRODUCER.manifest_sha256(duplicate)
     duplicate_path = duplicate_root / "duplicate-pair.json"
     write_json(duplicate_path, duplicate)
-    with pytest.raises(PRODUCER.ProducerError, match="reuses a measured run sample"):
+    with pytest.raises(PRODUCER.ProducerError, match="reuses an underlying measured run sample"):
         build_manifest(duplicate_path)
+
+    distinct_root = tmp_path / "distinct-pair"
+    distinct_root.mkdir()
+    _path, distinct = promotion_manifest(distinct_root)
+    identity_path = Path(distinct["identity"]["path"])
+    identity = json.loads(identity_path.read_text())
+    pair_case = distinct["full_model_pairs"][0]["case_id"]
+    pair_sha = distinct["full_model_pairs"][0]["case_sha256"]
+    replacement_refs = []
+    for role, run_id, prefill_ms in (
+        ("baseline", "baseline-run-second-session", 101.0),
+        ("candidate", "candidate-run-second-session", 91.0),
+    ):
+        summary = summary_fixture(
+            distinct_root / f"summary-{run_id}.json", identity_path, run_id
+        )
+        distinct["resident_summaries"].append(ref(summary))
+        raw = raw_fixture(
+            distinct_root / f"pair-{role}-second-session.json",
+            identity_path,
+            identity,
+            run_id,
+            pair_case,
+            pair_sha,
+            128,
+            prefill_ms,
+        )
+        replacement_refs.append(ref(raw))
+    distinct["full_model_pairs"][1].update(
+        {
+            "run_index": distinct["full_model_pairs"][0]["run_index"],
+            "baseline_raw": replacement_refs[0],
+            "candidate_raw": replacement_refs[1],
+        }
+    )
+    distinct["manifest_sha256"] = PRODUCER.manifest_sha256(distinct)
+    distinct_path = distinct_root / "distinct-session-pair.json"
+    write_json(distinct_path, distinct)
+    output = build_manifest(distinct_path)
+    assert len(output["full_model_pairs"]) == 5
 
 
 @pytest.mark.parametrize(
@@ -818,4 +895,26 @@ def test_identity_requires_source_build_runtime_and_package_bindings(
     snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
     value = PRODUCER.parse_json(snapshot, "identity")
     with pytest.raises(PRODUCER.ProducerError, match=message):
+        PRODUCER.validate_identity(value, snapshot)
+
+
+def test_identity_runtime_device_accepts_zero_index_and_integer_id_but_rejects_bool(
+    tmp_path: Path,
+) -> None:
+    identity_path, identity = identity_fixture(tmp_path)
+    runtime = identity["resident_driver_identity"]["runtime_device"]
+    runtime["runtime_device_index"] = 0
+    runtime["device_id"] = 0
+    identity["identity_sha256"] = PRODUCER.self_hash(identity, "identity_sha256")
+    write_json(identity_path, identity)
+    snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
+    value = PRODUCER.parse_json(snapshot, "identity")
+    PRODUCER.validate_identity(value, snapshot)
+
+    value["resident_driver_identity"]["runtime_device"]["device_id"] = False
+    value["identity_sha256"] = PRODUCER.self_hash(value, "identity_sha256")
+    write_json(identity_path, value)
+    snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
+    value = PRODUCER.parse_json(snapshot, "identity")
+    with pytest.raises(PRODUCER.ProducerError, match="device_id is invalid"):
         PRODUCER.validate_identity(value, snapshot)

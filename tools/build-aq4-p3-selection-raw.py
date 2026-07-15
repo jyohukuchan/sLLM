@@ -541,8 +541,15 @@ def validate_identity(value: dict[str, Any], snapshot: Snapshot) -> dict[str, st
     ):
         text_value(resident.get(field), f"identity resident_driver_identity.{field}")
     runtime_index = resident["runtime_device"].get("runtime_device_index")
-    count(runtime_index, "identity resident_driver_identity.runtime_device.runtime_device_index", positive=True)
-    for field in ("device_id", "backend", "name", "architecture"):
+    count(runtime_index, "identity resident_driver_identity.runtime_device.runtime_device_index")
+    device_id = resident["runtime_device"].get("device_id")
+    if (
+        not isinstance(device_id, (str, int))
+        or isinstance(device_id, bool)
+        or (isinstance(device_id, str) and not device_id)
+    ):
+        raise ProducerError("identity resident_driver_identity.runtime_device.device_id is invalid")
+    for field in ("backend", "name", "architecture"):
         text_value(
             resident["runtime_device"].get(field),
             f"identity resident_driver_identity.runtime_device.{field}",
@@ -1393,7 +1400,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         raise ProducerError("full_model_pairs count differs for producer mode")
     pairs: list[dict[str, Any]] = []
     pair_ids: set[str] = set()
-    pair_samples: set[tuple[str, int]] = set()
+    pair_samples: set[tuple[str, str, int]] = set()
     for index, pair in enumerate(
         sorted(pair_inputs, key=lambda item: (item.get("pair_id", ""), item.get("case_sha256", "")) if isinstance(item, dict) else ("", ""))
     ):
@@ -1408,10 +1415,6 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         run_index = count(pair["run_index"], f"{label}.run_index")
         if run_index < 2 or run_index > 11:
             raise ProducerError(f"{label} does not bind a measured run")
-        sample_key = (pair.get("case_id"), run_index)
-        if sample_key in pair_samples:
-            raise ProducerError("full-model pair reuses a measured run sample")
-        pair_samples.add(sample_key)
         baseline, baseline_run_id, baseline_runs = resident_raw(pair["baseline_raw"], f"{label} baseline raw")
         contender, contender_run_id, contender_runs = resident_raw(pair["candidate_raw"], f"{label} candidate raw")
         case_sha = digest(pair["case_sha256"], f"{label}.case_sha256")
@@ -1425,6 +1428,13 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
             or baseline_runs[run_index]["run_index"] != contender_runs[run_index]["run_index"]
         ):
             raise ProducerError(f"{label} baseline/candidate run pairing differs")
+        sample_keys = (
+            (baseline_run_id, pair["case_id"], run_index),
+            (contender_run_id, pair["case_id"], run_index),
+        )
+        if any(key in pair_samples for key in sample_keys):
+            raise ProducerError("full-model pair reuses an underlying measured run sample")
+        pair_samples.update(sample_keys)
         pairs.append(
             {
                 "candidate_id": candidate_id,
@@ -1487,7 +1497,16 @@ def write_output(path: Path, value: dict[str, Any]) -> None:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as error:
+            raise ProducerError(f"refusing to overwrite output: {path}") from error
+        temporary.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if temporary.exists():
             temporary.unlink()
