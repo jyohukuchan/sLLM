@@ -16,6 +16,11 @@ from types import ModuleType
 from typing import Any, Sequence
 import re
 
+try:
+    import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+except ModuleNotFoundError:
+    from tools import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LOADER_PATH = ROOT / "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
@@ -218,7 +223,7 @@ def _validate_sq8_overlay_receipt(
     can be written.
     """
 
-    expected_promotion = {
+    legacy_promotion = {
         "receipt",
         "source_commit_from_receipt",
         "required_schema_version",
@@ -232,7 +237,12 @@ def _validate_sq8_overlay_receipt(
         "readiness",
         "release_source_commit",
     }
-    if set(promotion_profile) != expected_promotion:
+    lineage_promotion = legacy_promotion | {
+        "authorization_lineage_from_receipt",
+        "authorization_lineage",
+    }
+    has_lineage_contract = set(promotion_profile) == lineage_promotion
+    if set(promotion_profile) != legacy_promotion and not has_lineage_contract:
         raise GenerationError("SQ8 overlay promotion profile contract is incomplete")
     if promotion_profile.get("required_schema_version") != SQ8_OVERLAY_RECEIPT_SCHEMA:
         raise GenerationError("SQ8 overlay promotion receipt schema differs")
@@ -250,6 +260,8 @@ def _validate_sq8_overlay_receipt(
         raise GenerationError("SQ8 overlay request ID receipt binding differs")
     if promotion_profile.get("authorization_audit_from_receipt") != ["authorization_audit"]:
         raise GenerationError("SQ8 overlay authorization audit receipt binding differs")
+    if has_lineage_contract and promotion_profile.get("authorization_lineage_from_receipt") != ["authorization_lineage"]:
+        raise GenerationError("SQ8 overlay authorization lineage receipt binding differs")
     if promotion_profile.get("readiness_from_receipt") != ["readiness"]:
         raise GenerationError("SQ8 overlay readiness receipt binding differs")
     profile_readiness = _resolve_readiness(
@@ -275,6 +287,8 @@ def _validate_sq8_overlay_receipt(
         "readiness",
         "actual",
     }
+    if has_lineage_contract:
+        expected_receipt_keys.add("authorization_lineage")
     if set(receipt) != expected_receipt_keys:
         raise GenerationError("SQ8 overlay promotion receipt shape differs")
     source_commit = _require_hex(
@@ -306,6 +320,22 @@ def _validate_sq8_overlay_receipt(
         ),
         "SQ8 overlay authorization audit",
     )
+    authorization_lineage = None
+    if has_lineage_contract:
+        authorization_lineage = _receipt_object(
+            receipt,
+            promotion_profile.get("authorization_lineage_from_receipt"),
+            "SQ8 overlay authorization lineage",
+        )
+        if authorization_lineage != promotion_profile.get("authorization_lineage"):
+            raise GenerationError("SQ8 overlay profile/receipt authorization lineage differs")
+        if authorization_lineage is not None:
+            try:
+                lineage_tool.validate_reference(authorization_lineage)
+            except lineage_tool.LineageError as error:
+                raise GenerationError(
+                    f"SQ8 overlay authorization lineage differs: {error}"
+                ) from error
     readiness = _resolve_readiness(
         _receipt_object(
             receipt,
@@ -453,7 +483,7 @@ def _validate_sq8_overlay_receipt(
             raise GenerationError("SQ8 overlay prepared receipt state differs")
         for section in (
             "source_commit", "source_provenance", "overlay", "package",
-            "authorization_audit", "readiness",
+            "authorization_audit", "authorization_lineage", "readiness",
         ):
             if prepared_value.get(section) != receipt.get(section):
                 raise GenerationError(f"SQ8 overlay prepared receipt {section} differs")
@@ -502,6 +532,7 @@ def _validate_sq8_overlay_receipt(
         "source_commit": source_commit,
         "served_model_semantic_sha256": release_manifest["semantic_sha256"],
         "authorization_audit": authorization_audit,
+        "authorization_lineage": authorization_lineage,
         "readiness": readiness,
     }
 
@@ -878,6 +909,7 @@ def _materialize_profile_document(
     )
     overlay_receipt = None
     authorization_audit: dict[str, str] | None = None
+    authorization_lineage: dict[str, str] | None = None
     readiness: dict[str, Any] | None = None
     if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
         authorization_audit = _resolve_authorization_audit(
@@ -900,6 +932,12 @@ def _materialize_profile_document(
             promotion_profile.get("readiness"), "SQ8 overlay profile readiness"
         ):
             raise GenerationError("SQ8 overlay profile/receipt readiness differs")
+        if "authorization_lineage_from_receipt" in promotion_profile:
+            value = receipt.get("authorization_lineage")
+            if value is not None:
+                if not isinstance(value, dict):
+                    raise GenerationError("SQ8 overlay authorization lineage differs")
+                authorization_lineage = value
     if validate_receipt:
         if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
             if artifact_manifest_path is None:
@@ -998,6 +1036,8 @@ def _materialize_profile_document(
     }
     if profile.get("format", {}).get("implementation_id") == SQ8_OVERLAY_IMPLEMENTATION_ID:
         document["promotion"]["authorization_audit"] = authorization_audit
+        if "authorization_lineage_from_receipt" in promotion_profile:
+            document["promotion"]["authorization_lineage"] = authorization_lineage
         document["promotion"]["readiness"] = readiness
     if reasoning_profile is not None:
         document["reasoning"] = reasoning_profile

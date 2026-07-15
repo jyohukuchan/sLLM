@@ -183,7 +183,9 @@ def test_builder_materializes_create_new_immutable_gate(monkeypatch: pytest.Monk
         "actual_evidence_from_receipt": ["actual"],
         "request_id_from_receipt": ["request_id"],
         "authorization_audit_from_receipt": ["authorization_audit"],
+        "authorization_lineage_from_receipt": ["authorization_lineage"],
         "readiness_from_receipt": ["readiness"],
+        "authorization_lineage": None,
         "readiness": readiness(),
         "release_source_commit": commit,
     }
@@ -256,6 +258,18 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
     audit_path = tmp_path / "audit-receipt.json"
     audit_path.write_text("{}\n", encoding="ascii")
     audit_path.chmod(0o444)
+    lineage_path = (tmp_path / "lineage-input-manifest.json").resolve()
+    lineage_path.write_text("{}\n", encoding="ascii")
+    lineage_path.chmod(0o444)
+    lineage_raw = lineage_path.read_bytes()
+    lineage_validated = {
+        "path": str(lineage_path),
+        "sha256": hashlib.sha256(lineage_raw).hexdigest(),
+        "entries_sha256": "8" * 64,
+        "raw": lineage_raw,
+    }
+    monkeypatch.setattr(TOOL.lineage_tool, "validate_manifest", lambda *args, **kwargs: lineage_validated)
+    monkeypatch.setattr(TOOL.lineage_tool, "validate_reference", lambda *args, **kwargs: args[0])
     expected_output = Path(f"/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-{audit_sha[:16]}")
     if expected_output.exists():
         import shutil
@@ -275,6 +289,12 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         package_sha256=package_sha,
         readiness=readiness(),
         authorization_lineage=None,
+        authorization_lineage_manifest={
+            "schema_version": TOOL.lineage_tool.REFERENCE_SCHEMA,
+            "input_path": str(lineage_path),
+            "sha256": lineage_validated["sha256"],
+            "entries_sha256": lineage_validated["entries_sha256"],
+        },
     )
     audit = {
         "path": str(audit_path.resolve()),
@@ -291,11 +311,21 @@ def test_authorization_requires_paired_flags_and_exact_audited_identity(
         output=expected_output,
         profile=profile,
         worker_binary=worker,
+        authorization_lineage_manifest=lineage_path,
     )
     with pytest.raises(TOOL.GateError, match="required together"):
         TOOL.materialize(argparse.Namespace(**common, authorize_actual_run=True, independent_audit_receipt=None))
     with pytest.raises(TOOL.GateError, match="required together"):
         TOOL.materialize(argparse.Namespace(**common, authorize_actual_run=False, independent_audit_receipt=audit_path))
+    legacy = dict(common)
+    legacy.pop("authorization_lineage_manifest")
+    with pytest.raises(TOOL.GateError, match="lineage manifest"):
+        TOOL.materialize(
+            argparse.Namespace(
+                **legacy, authorize_actual_run=True,
+                independent_audit_receipt=audit_path,
+            )
+        )
 
     bad_audit = dict(audit)
     bad_audit["worker_sha256"] = "0" * 64
@@ -333,7 +363,8 @@ def test_audit_receipt_rejects_writable_and_symlink(tmp_path: Path) -> None:
     writable.chmod(0o644)
     with pytest.raises(TOOL.GateError, match="immutable 0444"):
         TOOL.validate_independent_audit(
-            writable, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64
+            writable, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64,
+            authorization_lineage_manifest={},
         )
     target = tmp_path / "target.json"
     target.write_text("{}\n", encoding="ascii")
@@ -342,7 +373,8 @@ def test_audit_receipt_rejects_writable_and_symlink(tmp_path: Path) -> None:
     link.symlink_to(target)
     with pytest.raises(TOOL.GateError, match="immutable 0444"):
         TOOL.validate_independent_audit(
-            link, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64
+            link, commit="a" * 40, tree="b" * 40, archive_sha256="c" * 64,
+            authorization_lineage_manifest={},
         )
 
 

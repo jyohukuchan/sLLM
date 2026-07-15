@@ -22,6 +22,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
 
+try:
+    import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+except ModuleNotFoundError:
+    from tools import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RECEIPT_SCHEMA = "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
@@ -220,7 +225,12 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         "readiness",
         "release_source_commit",
     }
-    if set(promotion) != expected_keys:
+    lineage_keys = {
+        "authorization_lineage_from_receipt",
+        "authorization_lineage",
+    }
+    has_lineage_contract = set(promotion) == expected_keys | lineage_keys
+    if set(promotion) != expected_keys and not has_lineage_contract:
         raise ReceiptError("overlay profile receipt contract is incomplete")
     if Path(str(promotion["receipt"])).resolve() != output_path.resolve():
         raise ReceiptError("overlay profile receipt path differs from output")
@@ -240,6 +250,18 @@ def _profile_contract(profile: dict[str, Any], output_path: Path) -> tuple[dict[
         raise ReceiptError("overlay profile request ID binding differs")
     if promotion["authorization_audit_from_receipt"] != ["authorization_audit"]:
         raise ReceiptError("overlay profile authorization audit binding differs")
+    if has_lineage_contract:
+        if promotion.get("authorization_lineage_from_receipt") != [
+            "authorization_lineage"
+        ]:
+            raise ReceiptError("overlay profile authorization lineage binding differs")
+        if promotion.get("authorization_lineage") is not None:
+            try:
+                lineage_tool.validate_reference(promotion["authorization_lineage"])
+            except lineage_tool.LineageError as error:
+                raise ReceiptError(
+                    f"overlay profile authorization lineage differs: {error}"
+                ) from error
     if promotion["readiness_from_receipt"] != ["readiness"]:
         raise ReceiptError("overlay profile readiness binding differs")
     _readiness_identity(promotion["readiness"])
@@ -563,6 +585,7 @@ def write_receipt(
     served_model_path: Path,
     request_id: str,
     authorization_audit_path: Path | None = None,
+    authorization_lineage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a strict receipt and publish it once, with no overwrite."""
 
@@ -572,6 +595,13 @@ def write_receipt(
     profile_path = profile_path.resolve()
     profile = _read_object(profile_path, "SQ8 overlay profile")
     worker_profile, product = _profile_contract(profile, output_path)
+    profile_promotion = profile["promotion"]
+    has_lineage_contract = "authorization_lineage_from_receipt" in profile_promotion
+    if has_lineage_contract:
+        if profile_promotion.get("authorization_lineage") != authorization_lineage:
+            raise ReceiptError("profile/receipt authorization lineage differs")
+    elif authorization_lineage is not None:
+        raise ReceiptError("legacy profile cannot bind authorization lineage")
     source_commit = _hex(profile["promotion"]["release_source_commit"], 40, "source commit")
     request_id = _request_id(request_id)
     source_tree_sha256 = _hex(source_tree_sha256, 40, "source tree SHA-256")
@@ -653,6 +683,8 @@ def write_receipt(
         "readiness": readiness,
         "actual": actual,
     }
+    if has_lineage_contract:
+        synthetic_receipt["authorization_lineage"] = authorization_lineage
     try:
         document = generator._materialize_profile_document(
             profile_path,
@@ -676,9 +708,13 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
     if path.is_symlink() or not path.is_file():
         raise ReceiptError("prepared receipt must be a regular non-symlink file")
     prepared = _read_object(path, "prepared promotion receipt")
-    if set(prepared) != {
+    expected_prepared = {
         "schema_version", "status", "request_id", "source_commit", "source_provenance",
         "release", "overlay", "package", "authorization_audit", "readiness", "actual",
+    }
+    prepared_keys = set(prepared)
+    if prepared_keys != expected_prepared and prepared_keys != expected_prepared | {
+        "authorization_lineage"
     }:
         raise ReceiptError("prepared receipt shape differs")
     if (
@@ -703,6 +739,13 @@ def _load_prepared_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any], 
     overlay = prepared.get("overlay")
     package = prepared.get("package")
     authorization_audit = prepared.get("authorization_audit")
+    if prepared.get("authorization_lineage") is not None:
+        try:
+            lineage_tool.validate_reference(prepared["authorization_lineage"])
+        except lineage_tool.LineageError as error:
+            raise ReceiptError(
+                f"prepared authorization lineage differs: {error}"
+            ) from error
     if authorization_audit is not None:
         if not isinstance(authorization_audit, dict) or set(authorization_audit) != {"path", "sha256"}:
             raise ReceiptError("prepared authorization audit binding is incomplete")

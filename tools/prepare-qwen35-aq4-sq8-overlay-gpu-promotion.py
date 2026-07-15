@@ -22,6 +22,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+try:
+    import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+except ModuleNotFoundError:
+    from tools import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4-sq8-linear-qkv-z-overlay.profile.json"
@@ -147,6 +152,7 @@ def fixed_promotion_request_id(
     package_sha256: str,
     readiness: dict[str, Any],
     authorization_lineage: dict[str, Any] | None,
+    authorization_lineage_manifest: dict[str, str] | None = None,
 ) -> str:
     identity = {
         "schema_version": "ullm.qwen35_aq4.sq8_overlay_promotion_request.v1",
@@ -160,6 +166,7 @@ def fixed_promotion_request_id(
         "package_sha256": package_sha256,
         "readiness": readiness,
         "authorization_lineage": authorization_lineage,
+        "authorization_lineage_manifest": authorization_lineage_manifest,
     }
     encoded = json.dumps(
         identity, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
@@ -426,6 +433,7 @@ def validate_independent_audit(
     commit: str,
     tree: str,
     archive_sha256: str,
+    authorization_lineage_manifest: dict[str, Any],
 ) -> dict[str, Any]:
     if path.is_symlink():
         raise GateError("independent audit receipt must be immutable 0444 single-link non-symlink")
@@ -457,7 +465,7 @@ def validate_independent_audit(
     runtime = audit.get("runtime")
     if not isinstance(runtime, dict) or set(runtime) != {
         "path", "gate", "worker", "profile", "served_model", "prepared_receipt",
-        "binding", "package", "sha256sums",
+        "binding", "package", "authorization_lineage_manifest", "sha256sums",
     }:
         raise GateError("independent audit runtime shape differs")
     runtime_root = Path(str(runtime["path"])).resolve()
@@ -466,6 +474,7 @@ def validate_independent_audit(
     if {entry.name for entry in runtime_root.iterdir()} != {
         "gate.json", "ullm-aq4-worker", "profile.json", "served-model.json",
         "promotion-receipt.json", "build-receipt.json", "SHA256SUMS",
+        "lineage-input-manifest.json",
     }:
         raise GateError("independent audit runtime member set differs")
     for entry in runtime_root.iterdir():
@@ -478,6 +487,7 @@ def validate_independent_audit(
     manifest_path = runtime_root / "served-model.json"
     receipt_path = runtime_root / "promotion-receipt.json"
     sums_path = runtime_root / "SHA256SUMS"
+    lineage_path = runtime_root / "lineage-input-manifest.json"
     identities = {
         "gate_sha256": _audit_reference(runtime["gate"], gate_path, "Gate"),
         "worker_sha256": _audit_reference(runtime["worker"], worker_path, "worker"),
@@ -485,7 +495,20 @@ def validate_independent_audit(
         "manifest_sha256": _audit_reference(runtime["served_model"], manifest_path, "served model"),
         "prepared_receipt_sha256": _audit_reference(runtime["prepared_receipt"], receipt_path, "prepared receipt"),
         "sha256sums_sha256": _audit_reference(runtime["sha256sums"], sums_path, "SHA256SUMS"),
+        "authorization_lineage_manifest_sha256": _audit_reference(
+            runtime["authorization_lineage_manifest"], lineage_path,
+            "authorization lineage manifest",
+        ),
     }
+    expected_lineage_ref = lineage_tool.make_reference(
+        authorization_lineage_manifest, lineage_path
+    )
+    try:
+        lineage_tool.validate_reference(
+            expected_lineage_ref, expected_runtime_path=lineage_path
+        )
+    except lineage_tool.LineageError as error:
+        raise GateError(f"independent audit authorization lineage differs: {error}") from error
     gate = read_object(gate_path, "audited Gate")
     prepared = read_object(receipt_path, "audited prepared receipt")
     build = read_object(runtime_root / "build-receipt.json", "audited build receipt")
@@ -500,6 +523,8 @@ def validate_independent_audit(
         or build.get("release_source_tree") != tree
         or build.get("release_source_archive_sha256") != archive_sha256
         or build.get("promotion_request_id") != request_id
+        or gate.get("authorization", {}).get("lineage_manifest") != expected_lineage_ref
+        or build.get("inputs", {}).get("authorization_lineage_manifest") != expected_lineage_ref
     ):
         raise GateError("independent audit Gate/build state differs")
     if (
@@ -510,6 +535,9 @@ def validate_independent_audit(
         or prepared.get("source_provenance") != {"tree_sha256": tree, "archive_sha256": archive_sha256}
         or manifest.get("promotion", {}).get("receipt_sha256") != identities["prepared_receipt_sha256"]
         or Path(str(profile.get("promotion", {}).get("receipt", ""))).resolve() != receipt_path
+        or profile.get("promotion", {}).get("authorization_lineage") != expected_lineage_ref
+        or prepared.get("authorization_lineage") != expected_lineage_ref
+        or manifest.get("promotion", {}).get("authorization_lineage") != expected_lineage_ref
     ):
         raise GateError("independent audit prepared/profile/manifest state differs")
     product_root = Path(str(profile.get("product", {}).get("root", ""))).resolve()
@@ -577,14 +605,39 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     )
     source_tree = git_value("rev-parse", f"{commit}^{{tree}}")
     source_archive = source_archive_sha256(commit)
+    lineage_path = getattr(args, "authorization_lineage_manifest", None)
+    lineage_input = None
+    lineage_request_identity = None
+    if lineage_path is not None:
+        try:
+            lineage_input = lineage_tool.validate_manifest(
+                Path(lineage_path),
+                expected_source={
+                    "commit": commit,
+                    "tree_oid": source_tree,
+                    "archive_sha256": source_archive,
+                },
+            )
+        except lineage_tool.LineageError as error:
+            raise GateError(f"authorization lineage manifest differs: {error}") from error
+        lineage_request_identity = {
+            "schema_version": lineage_tool.REFERENCE_SCHEMA,
+            "input_path": lineage_input["path"],
+            "sha256": lineage_input["sha256"],
+            "entries_sha256": lineage_input["entries_sha256"],
+        }
     authorize = bool(getattr(args, "authorize_actual_run", False))
     audit_path = getattr(args, "independent_audit_receipt", None)
     if authorize != (audit_path is not None):
         raise GateError("authorization flag and independent audit receipt are required together")
+    if authorize and lineage_input is None:
+        raise GateError("actual authorization requires an authorization lineage manifest")
     audit = None
     if authorize:
         audit = validate_independent_audit(
-            Path(audit_path), commit=commit, tree=source_tree, archive_sha256=source_archive
+            Path(audit_path), commit=commit, tree=source_tree,
+            archive_sha256=source_archive,
+            authorization_lineage_manifest=lineage_input,
         )
         expected_output = Path(
             f"/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-{audit['sha256'][:16]}"
@@ -594,6 +647,14 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
 
     output.mkdir(mode=0o700, parents=False)
     try:
+        lineage_runtime_path = output / "lineage-input-manifest.json"
+        lineage_reference = None
+        if lineage_input is not None:
+            write_exclusive(lineage_runtime_path, lineage_input["raw"])
+            lineage_runtime_path.chmod(0o444)
+            lineage_reference = lineage_tool.make_reference(
+                lineage_input, lineage_runtime_path
+            )
         immutable_worker = output / "ullm-aq4-worker"
         worker_identity = copy_binary_exclusive(worker_source, immutable_worker)
         request_id = fixed_promotion_request_id(
@@ -607,6 +668,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             package_sha256=sha_file(package_manifest),
             readiness=readiness,
             authorization_lineage=authorization_lineage,
+            authorization_lineage_manifest=lineage_request_identity,
         )
         if audit is not None and (
             request_id != audit["request_id"]
@@ -628,7 +690,9 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "actual_evidence_from_receipt": ["actual"],
             "request_id_from_receipt": ["request_id"],
             "authorization_audit_from_receipt": ["authorization_audit"],
+            "authorization_lineage_from_receipt": ["authorization_lineage"],
             "readiness_from_receipt": ["readiness"],
+            "authorization_lineage": lineage_reference,
             "readiness": readiness,
             "release_source_commit": commit,
         }
@@ -645,6 +709,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             served_model_path=manifest_path,
             request_id=request_id,
             authorization_audit_path=Path(audit["path"]) if audit is not None else None,
+            authorization_lineage=lineage_reference,
         )
         generator = load_module("_ullm_sq8_gate_generator", GENERATOR)
         generator.generate_prepared_candidate(profile_path, manifest_path)
@@ -679,6 +744,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     authorization_lineage["prior_failure_receipt"]
                     if authorization_lineage is not None else None
                 ),
+                "authorization_lineage_manifest": lineage_reference,
             },
         }
         build_receipt_path = output / "build-receipt.json"
@@ -706,6 +772,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     if audit is not None else None
                 ),
                 "lineage": authorization_lineage,
+                "lineage_manifest": lineage_reference,
             },
             "readiness": readiness,
             "device": {
@@ -799,6 +866,31 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "gate.json",
         ):
             hashes.append(f"{sha_file(output / name)}  {name}\n")
+        if lineage_reference is not None:
+            hashes.append(
+                f"{sha_file(lineage_runtime_path)}  lineage-input-manifest.json\n"
+            )
+            try:
+                refreshed = lineage_tool.validate_manifest(
+                    Path(lineage_reference["input_path"]),
+                    expected_source={
+                        "commit": commit,
+                        "tree_oid": source_tree,
+                        "archive_sha256": source_archive,
+                    },
+                )
+                lineage_tool.validate_reference(
+                    lineage_reference, expected_runtime_path=lineage_runtime_path
+                )
+            except lineage_tool.LineageError as error:
+                raise GateError(
+                    f"authorization lineage changed during materialization: {error}"
+                ) from error
+            if (
+                refreshed["sha256"] != lineage_input["sha256"]
+                or refreshed["entries_sha256"] != lineage_input["entries_sha256"]
+            ):
+                raise GateError("authorization lineage changed during materialization")
         write_exclusive(output / "SHA256SUMS", "".join(hashes).encode("ascii"))
         directory = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -829,6 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--independent-audit-receipt", type=Path)
     parser.add_argument("--prior-failure-receipt", type=Path)
     parser.add_argument("--prior-no-go-audit-receipt", type=Path)
+    parser.add_argument("--authorization-lineage-manifest", type=Path)
     args = parser.parse_args(argv)
     try:
         print(json.dumps(materialize(args), sort_keys=True))

@@ -27,6 +27,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+except ModuleNotFoundError:
+    from tools import qwen35_aq4_sq8_authorization_lineage as lineage_tool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = ROOT / "tools/capture-aq4-resident-executor-record.py"
@@ -424,7 +429,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     profile = read_object(profile_path, "candidate profile")
     manifest = read_object(manifest_path, "candidate manifest")
     promotion = profile.get("promotion")
-    if not isinstance(promotion, dict) or set(promotion) != {
+    legacy_promotion_keys = {
         "receipt",
         "source_commit_from_receipt",
         "required_schema_version",
@@ -437,10 +442,20 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "readiness_from_receipt",
         "readiness",
         "release_source_commit",
-    }:
+    }
+    lineage_promotion_keys = legacy_promotion_keys | {
+        "authorization_lineage_from_receipt", "authorization_lineage",
+    }
+    if not isinstance(promotion, dict) or (
+        set(promotion) != legacy_promotion_keys
+        and set(promotion) != lineage_promotion_keys
+    ):
         raise PromotionError("candidate strict promotion profile differs")
+    has_lineage_contract = set(promotion) == lineage_promotion_keys
     if promotion.get("authorization_audit_from_receipt") != ["authorization_audit"]:
         raise PromotionError("candidate authorization audit profile binding differs")
+    if has_lineage_contract and promotion.get("authorization_lineage_from_receipt") != ["authorization_lineage"]:
+        raise PromotionError("candidate authorization lineage profile binding differs")
     if promotion.get("readiness_from_receipt") != ["readiness"]:
         raise PromotionError("candidate readiness profile binding differs")
     receipt_path = Path(str(promotion["receipt"])).resolve()
@@ -480,11 +495,14 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
     if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
         raise PromotionError("candidate Gate promotion request ID differs")
-    if set(receipt) != {
+    receipt_keys = {
         "schema_version", "status", "request_id", "source_commit", "source_provenance",
         "release", "overlay", "package", "authorization_audit", "actual",
         "readiness",
-    }:
+    }
+    if has_lineage_contract:
+        receipt_keys.add("authorization_lineage")
+    if set(receipt) != receipt_keys:
         raise PromotionError("candidate promotion receipt shape differs")
     source = receipt.get("source_provenance")
     if (
@@ -566,6 +584,25 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     ):
         raise PromotionError("candidate Gate authorization policy differs")
     manifest_audit = manifest.get("promotion", {}).get("authorization_audit")
+    lineage_manifest = receipt.get("authorization_lineage") if has_lineage_contract else None
+    if has_lineage_contract:
+        if (
+            promotion.get("authorization_lineage") != lineage_manifest
+            or manifest.get("promotion", {}).get("authorization_lineage") != lineage_manifest
+            or authorization.get("lineage_manifest") != lineage_manifest
+            or build.get("inputs", {}).get("authorization_lineage_manifest") != lineage_manifest
+        ):
+            raise PromotionError("candidate authorization lineage manifest propagation differs")
+        if lineage_manifest is not None:
+            try:
+                lineage_tool.validate_reference(
+                    lineage_manifest,
+                    expected_runtime_path=candidate / "lineage-input-manifest.json",
+                )
+            except (lineage_tool.LineageError, OSError) as error:
+                raise PromotionError(
+                    f"candidate authorization lineage manifest differs: {error}"
+                ) from error
     lineage = validate_authorization_lineage(authorization.get("lineage"))
     build_inputs = build.get("inputs")
     if not isinstance(build_inputs, dict) or build_inputs.get("prior_failure_receipt") != (
@@ -576,6 +613,8 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     if receipt.get("readiness") != readiness or manifest_readiness != readiness:
         raise PromotionError("candidate readiness propagation differs")
     if actual_run_allowed:
+        if not has_lineage_contract or lineage_manifest is None:
+            raise PromotionError("authorized candidate lineage manifest is incomplete")
         if not isinstance(authorization_audit, dict) or set(authorization_audit) != {"path", "sha256"}:
             raise PromotionError("authorized candidate audit binding is incomplete")
         raw_audit_path = authorization_audit.get("path")
@@ -611,7 +650,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         or manifest_audit is not None
     ):
         raise PromotionError("unauthorized candidate audit state differs")
-    return {
+    result = {
         "source": source_identity(candidate, build),
         "files": {
             "gate": metadata(gate_path, "candidate Gate"),
@@ -639,9 +678,16 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             "max_attempts": expected_attempts,
             "independent_audit_receipt": authorization_audit,
             "lineage": lineage,
+            "lineage_manifest": lineage_manifest,
         },
         "readiness": readiness,
     }
+    if lineage_manifest is not None:
+        result["files"]["authorization_lineage_manifest"] = metadata(
+            candidate / "lineage-input-manifest.json",
+            "authorization lineage manifest",
+        )
+    return result
 
 
 def stable_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
