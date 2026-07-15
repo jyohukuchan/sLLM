@@ -1,0 +1,56 @@
+{
+  "actual_eligible": true,
+  "execution_mode": "profile_diagnostic",
+  "gpu_command_executed": false,
+  "mode": "dry-run",
+  "model_load_executed": false,
+  "process_counts": {
+    "capture_tool": 0,
+    "container_curl": 0,
+    "container_curl_endpoint": 0,
+    "container_curl_total": 0,
+    "container_curl_version": 0,
+    "docker": 0,
+    "docker_exec": 0,
+    "launcher": 0,
+    "rocprof": 0,
+    "stopped_gate_polls": 0,
+    "stopped_gate_probe_commands": 0,
+    "sudo": 0,
+    "sudo_keepalive": 0,
+    "systemctl_start": 0,
+    "systemctl_stop": 0
+  },
+  "profile_diagnostic": {
+    "capture_executed": false,
+    "execution_boundary": {
+      "gates_profiled": false,
+      "order": [
+        "maintenance",
+        "launcher",
+        "validator",
+        "gates",
+        "capture",
+        "rocprof",
+        "runner"
+      ],
+      "runner_profiled": true,
+      "validator_profiled": false
+    },
+    "measurement_eligible": false,
+    "promotion_eligible": false,
+    "target_runner": {
+      "environment": "exact_execute_environment",
+      "file_name": "runner-target-command-manifest.json",
+      "fresh_per_execution": true,
+      "generated_by": "launcher_after_live_preflight",
+      "maximum_invocations": 1
+    }
+  },
+  "promotion_eligible": false,
+  "ready_binding_sha256": "81b3b47926962fede87a494b21341b8e0647bfdde645aa1cca445db0650ba800",
+  "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v7",
+  "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
+  "service_touched": false,
+  "status": "passed"
+}
