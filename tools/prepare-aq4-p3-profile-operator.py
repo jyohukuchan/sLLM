@@ -161,35 +161,36 @@ def trusted_source_snapshot(ready: dict[str, Any]) -> list[dict[str, Any]]:
     trust = load(PROFILE_READY_ROOT / "harness-trust.json", "profile harness trust")
     qa = load(PROFILE_READY_ROOT / "qa-attestation.json", "profile QA attestation")
     binding = ready["launcher_binding"]
-    specifications: list[tuple[Path, str, str]] = [
-        (Path(trust["path"]), trust["sha256"], trust["commit"]),
-        (ROOT / "tools/launch-aq4-p2-resident-smoke.py", qa["launcher"]["sha256"], qa["launcher"]["commit"]),
-        (Path(ready["profile_diagnostic"]["capture_tool"]["path"]), qa["capture_tool"]["sha256"], qa["capture_tool"]["commit"]),
-        (Path(binding["R"]["path"]), binding["R"]["sha256"], binding["R"]["commit"]),
-        (Path(binding["validator"]["path"]), binding["validator"]["sha256"], binding["validator"]["commit"]),
-        (Path(binding["resident"]["path"]), binding["resident"]["sha256"], binding["resident"]["commit"]),
+    specifications: list[tuple[Path, str, str, str | None]] = [
+        (Path(trust["path"]), trust["sha256"], trust["commit"], trust["git_blob"]),
+        (ROOT / "tools/launch-aq4-p2-resident-smoke.py", qa["launcher"]["sha256"], qa["launcher"]["commit"], None),
+        (Path(ready["profile_diagnostic"]["capture_tool"]["path"]), qa["capture_tool"]["sha256"], qa["capture_tool"]["commit"], ready["profile_diagnostic"]["capture_tool"]["git_blob"]),
+        (Path(binding["R"]["path"]), binding["R"]["sha256"], binding["R"]["commit"], binding["R"]["git_blob"]),
+        (Path(binding["validator"]["path"]), binding["validator"]["sha256"], binding["validator"]["commit"], binding["validator"]["git_blob"]),
+        (Path(binding["resident"]["path"]), binding["resident"]["sha256"], binding["resident"]["commit"], None),
     ]
     for suite in qa["automated_tests"]["suites"]:
         for item in suite["files"]:
             path = ROOT / item["path"]
-            specifications.append((path, sha_file(path), item["source_commit"]))
-    specifications.append((SOURCE, sha_file(SOURCE), git("rev-parse", "HEAD")))
-    unique: dict[str, tuple[Path, str, str]] = {}
-    for path, expected_sha, commit in specifications:
+            specifications.append((path, sha_file(path), item["source_commit"], item["git_blob"]))
+    specifications.append((SOURCE, sha_file(SOURCE), git("rev-parse", "HEAD"), None))
+    unique: dict[str, tuple[Path, str, str, str | None]] = {}
+    for path, expected_sha, source_commit, expected_blob in specifications:
         key = str(path)
-        if key in unique and unique[key][1:] != (expected_sha, commit):
+        if key in unique and unique[key][1:] != (expected_sha, source_commit, expected_blob):
             raise OperatorError(f"trusted source authority conflicts: {path}")
-        unique[key] = (path, expected_sha, commit)
+        unique[key] = (path, expected_sha, source_commit, expected_blob)
     records: list[dict[str, Any]] = []
-    for path, expected_sha, commit in unique.values():
+    for path, expected_sha, source_commit, expected_blob in unique.values():
         metadata = path.lstat()
         if path.is_symlink() or not path.is_file() or metadata.st_nlink != 1 or sha_file(path) != expected_sha:
             raise OperatorError(f"trusted source differs: {path}")
         relative = str(path.relative_to(ROOT))
         current_blob = git("hash-object", str(path))
-        if git("rev-parse", f"{commit}:{relative}") != current_blob:
+        artifact_commit = git("log", "-1", "--format=%H", "--", relative)
+        if not artifact_commit or git("rev-parse", f"{artifact_commit}:{relative}") != current_blob or (expected_blob is not None and expected_blob != current_blob):
             raise OperatorError(f"trusted source Git authority differs: {path}")
-        records.append({"path": str(path), "sha256": expected_sha, "commit": commit, "git_blob": current_blob, "identity": [metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]})
+        records.append({"path": str(path), "sha256": expected_sha, "source_commit": source_commit, "artifact_commit": artifact_commit, "git_blob": current_blob, "identity": [metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]})
     return sorted(records, key=lambda item: item["path"])
 
 
