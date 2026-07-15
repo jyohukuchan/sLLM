@@ -229,7 +229,7 @@ validate_preflight() {
 
 observer_sample_once() {
   local sample normalized
-  if ! sample="$("$ROCM_SMI" --showproductname --showuniqueid --showmeminfo vram --showuse --showpower --json 2>&1)"; then
+  if ! sample="$("$ROCM_SMI" --showmeminfo vram --showuse --showpower --json 2>&1)"; then
     : > "$OBSERVER_FAIL_MARKER"
     return 1
   fi
