@@ -1,0 +1,175 @@
+{
+  "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+  "classification": "inconclusive_missing_gpu_tensor_output",
+  "cpu_f32_reference_contract": {
+    "api_target": "ullm_runtime_aq4_matvec_f32",
+    "bit_exact_required": false,
+    "execution": "offline_python_model; runtime API not invoked",
+    "implementation": "explicit_f32_scalar_accumulation",
+    "numeric_bound": {
+      "max_abs": 0.0001,
+      "relative_l2": 0.0001
+    },
+    "operation": "standalone_aq4_matvec_f32 (fused qkv/z/gate/beta wrapper intentionally not compared)",
+    "row_scale_count": 0,
+    "row_scale_override_present": false
+  },
+  "cpu_reference": "tools/audit_aq4_p2_input_controls.py::aq4_matvec_reference",
+  "fixed_case_rows": [
+    {
+      "case_id": "fixture-prompt-0",
+      "step": 0
+    },
+    {
+      "case_id": "fixture-prompt-0",
+      "step": 1
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "step": 0
+    }
+  ],
+  "group_size": 16,
+  "input_contract": "source embedding row + effective layer-0 additive RMSNorm (raw BF16 weight + 1.0_f32; epsilon=1e-6_f32)",
+  "input_norm_identity": {
+    "effective_values_f32le_sha256": "d89b480c2fdae928d834461763aec25f4b55b341171d91d0fe5bc342ea76a554",
+    "epsilon_f32": 9.999999974752427e-07,
+    "epsilon_f32_bits_hex": "0x358637bd",
+    "mean_abs_raw": 0.03626761460327543,
+    "raw_payload_sha256": "7d9dae62cc87d982dc1fa1b476eb3ee105ea096e663d4c2e749a0723f344301a",
+    "raw_payload_sha256_expected": "7d9dae62cc87d982dc1fa1b476eb3ee105ea096e663d4c2e749a0723f344301a",
+    "tensor_name": "model.language_model.layers.0.input_layernorm.weight",
+    "transform": "effective_rmsnorm_weight_values: raw_f32 + 1.0_f32"
+  },
+  "nonfinite_counts": {
+    "cpu_outputs": 0,
+    "input_vectors": 0,
+    "runtime_cpu_outputs": 0,
+    "source_outputs": 0
+  },
+  "numeric_contract": {
+    "aq4_accumulator_dtype": "f32",
+    "codebook_dtype": "f32le",
+    "index_packing": "idx4_low_nibble_first",
+    "input_dtype": "f32",
+    "scale_table_dtype": "f32le",
+    "source_reference_accumulator_dtype": "f64_python_reference",
+    "weight_source_dtype": "BF16"
+  },
+  "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+  "payload_identity": {
+    "codebook_sha256": "1e65bfe8e89b77536a6247f796b8635197c95116b88d6ed41753aefcbbdc7aa8",
+    "index_sha256": "9cb11aff24f8271bdad525574416281a5edfff54c94428392e72c2772ded3b98",
+    "row_scale_count": 0,
+    "row_scale_override_present": false,
+    "scale_sha256": "e78b3cd5696839b16c8ef3b6830f0e199a4cdf7338f349253ef537b6289bf64a",
+    "scale_table_count": 119,
+    "scale_table_f32le_sha256": "c7f73f73756de5ddff4f96dab8d6d7ac5e5f383a270c3a889f94d6aa0279216e",
+    "source_tensor_sha256": "21286bed37372105d182b20bc47c08e04e1fd3d3f0a968aa3af1f215ec7fb6a2",
+    "tensor_scale": 0.022842333,
+    "tensor_scale_f32": 0.02284233272075653,
+    "tensor_scale_f32_bits_hex": "0x3cbb1fd8"
+  },
+  "reason": "attempt-3 trace has stage samples only; qkv tensor-level GPU output is absent",
+  "required_gpu_tensor_output_schema": "ullm.aq4_layer0_matvec_tensor_output.v1",
+  "rows": [
+    {
+      "case_id": "fixture-prompt-0",
+      "classification": "inconclusive_missing_gpu_tensor_output",
+      "cpu_formula_vs_f32_reference": {
+        "bit_mismatch_count": 7922,
+        "bit_mismatch_rate": 0.967041015625,
+        "cosine": 0.9999999999996688,
+        "finite": true,
+        "max_abs": 5.4214974944954974e-05,
+        "relative_l2": 8.142278644543577e-07
+      },
+      "cpu_vs_source": {
+        "bit_mismatch_count": 8192,
+        "bit_mismatch_rate": 1.0,
+        "cosine": 0.9997431678010696,
+        "finite": true,
+        "max_abs": 0.8781859111263941,
+        "relative_l2": 0.023454230392751046
+      },
+      "input_binding": {
+        "context_length": 3,
+        "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        "input_sha256": "dae28f06eef4c371c494f7dbc4d94e0b7ad5a1e6876c6f6afd2ae300f3916501",
+        "token_id": 13
+      },
+      "runtime_cpu_f32_api_invoked": false,
+      "runtime_cpu_f32_bit_exact": false,
+      "runtime_cpu_f32_bound_pass": true,
+      "step": 0
+    },
+    {
+      "case_id": "fixture-prompt-0",
+      "classification": "inconclusive_missing_gpu_tensor_output",
+      "cpu_formula_vs_f32_reference": {
+        "bit_mismatch_count": 7919,
+        "bit_mismatch_rate": 0.9666748046875,
+        "cosine": 0.9999999999996745,
+        "finite": true,
+        "max_abs": 4.7835926899608694e-05,
+        "relative_l2": 8.069537528556248e-07
+      },
+      "cpu_vs_source": {
+        "bit_mismatch_count": 8192,
+        "bit_mismatch_rate": 1.0,
+        "cosine": 0.999640887667278,
+        "finite": true,
+        "max_abs": 0.7104451276692991,
+        "relative_l2": 0.027357355939267167
+      },
+      "input_binding": {
+        "context_length": 4,
+        "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+        "input_sha256": "0e9ba21b847b5ac206312fd17c7f95ee905569e960ca6735837f520f8b822640",
+        "token_id": 220
+      },
+      "runtime_cpu_f32_api_invoked": false,
+      "runtime_cpu_f32_bit_exact": false,
+      "runtime_cpu_f32_bound_pass": true,
+      "step": 1
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "classification": "inconclusive_missing_gpu_tensor_output",
+      "cpu_formula_vs_f32_reference": {
+        "bit_mismatch_count": 7992,
+        "bit_mismatch_rate": 0.9755859375,
+        "cosine": 0.9999999999994799,
+        "finite": true,
+        "max_abs": 5.2858319385507e-05,
+        "relative_l2": 1.0235425258715836e-06
+      },
+      "cpu_vs_source": {
+        "bit_mismatch_count": 8192,
+        "bit_mismatch_rate": 1.0,
+        "cosine": 0.9996522815583864,
+        "finite": true,
+        "max_abs": 0.8944544679724018,
+        "relative_l2": 0.02681331154739686
+      },
+      "input_binding": {
+        "context_length": 2,
+        "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        "input_sha256": "7cab1c269cb018609d1041c666b4a033c393affc6f6baf98f8cc7a0557bde79c",
+        "token_id": 22
+      },
+      "runtime_cpu_f32_api_invoked": false,
+      "runtime_cpu_f32_bit_exact": false,
+      "runtime_cpu_f32_bound_pass": true,
+      "step": 0
+    }
+  ],
+  "schema_version": "ullm.aq4_layer0_matvec_oracle.v1",
+  "source_trace_manifest_sha256": "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463baf5fe393a692",
+  "status": "blocked_missing_gpu_tensor_output",
+  "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+  "tensor_shape": [
+    8192,
+    4096
+  ]
+}
