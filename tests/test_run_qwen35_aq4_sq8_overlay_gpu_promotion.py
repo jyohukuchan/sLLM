@@ -184,6 +184,41 @@ def capture_stream(raw: bytes, *, parse: bool = True) -> Any:
     return collector.result(False)
 
 
+def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
+    root = candidate(tmp_path)
+    worker = root / "fake-worker.py"
+    worker.write_text("#!/usr/bin/env python3\n" + worker_source, encoding="utf-8")
+    worker.chmod(0o755)
+    (root / "package.json").write_text(
+        json.dumps({"passthrough_tensors": [], "tensors": []}),
+        encoding="utf-8",
+    )
+    (root / "served-model.json").write_text(
+        json.dumps(
+            {
+                "product": {
+                    "root": ".",
+                    "package": {"manifest_path": "package.json"},
+                },
+                "worker": {
+                    "binary": worker.name,
+                    "protocol": "ullm.worker.v1",
+                    "identity": {
+                        "device": "gfx1201",
+                        "execution_profile": MODULE.EXECUTION_PROFILE,
+                    },
+                    "arguments": [],
+                },
+                "public": {"context_length": 4096},
+                "generation": {"eos_token_ids": []},
+                "format": {"implementation_id": MODULE.IMPLEMENTATION_ID},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
 def dependencies(
     tmp_path: Path,
     *,
@@ -690,6 +725,69 @@ def test_capture_error_envelope_preserves_worker_signal_and_timeout() -> None:
     assert parsed["timed_out"] is True
 
 
+@pytest.mark.parametrize(
+    ("stage", "timed_out", "returncode", "worker_signal", "valid"),
+    [
+        ("capture", False, None, None, True),
+        ("capture", False, 0, None, False),
+        ("capture", True, -9, 9, False),
+        ("request", False, 0, None, True),
+        ("request", False, 0, 9, False),
+        ("request", False, 7, None, True),
+        ("request", False, 7, 7, False),
+        ("request", False, -15, 15, True),
+        ("request", False, None, None, False),
+        ("request", False, None, 9, False),
+        ("request", True, -9, 9, True),
+        ("request", True, 0, None, False),
+        ("request", True, 7, None, False),
+        ("request", True, None, None, False),
+        ("request", True, -9, None, False),
+        ("request", True, -9, 15, False),
+        ("shutdown", True, -9, 9, True),
+        ("shutdown", False, 0, None, False),
+        ("shutdown", True, 0, None, False),
+        ("cleanup", False, 0, None, True),
+        ("cleanup", False, -9, 9, True),
+        ("cleanup", True, -9, 9, False),
+        ("worker", False, 1, None, True),
+        ("worker", False, -15, 15, True),
+        ("worker", True, -9, 9, False),
+        ("worker_exit", False, 7, None, True),
+        ("worker_exit", False, -15, 15, True),
+        ("worker_exit", False, 0, None, False),
+        ("worker_exit", False, None, None, False),
+        ("worker_exit", True, -9, 9, False),
+        ("audit_missing", False, 0, None, True),
+        ("audit_missing", False, 1, None, False),
+        ("audit_missing", False, -9, 9, False),
+        ("resource_observation", False, 0, None, True),
+        ("resource_observation", True, -9, 9, False),
+        ("package_validation", False, 0, None, True),
+        ("package_validation", False, None, None, False),
+    ],
+)
+def test_capture_error_terminal_matrix_is_exact(
+    stage: str,
+    timed_out: bool,
+    returncode: int | None,
+    worker_signal: int | None,
+    valid: bool,
+) -> None:
+    value = capture_error_envelope(stage=stage)
+    value["timed_out"] = timed_out
+    value["worker_returncode"] = returncode
+    value["worker_signal"] = worker_signal
+
+    parsed = MODULE._capture_error_envelope(
+        capture_stream(json.dumps(value).encode("utf-8"))
+    )
+
+    assert (parsed["validation"] == "valid") is valid
+    if not valid:
+        assert parsed["reason"] == "capture_error_envelope_stage_terminal_mismatch"
+
+
 def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() -> None:
     preview = (
         "non-JSON worker cause \ufffd\n"
@@ -818,6 +916,88 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
         metadata = path.stat(follow_symlinks=False)
         assert metadata.st_nlink == 1
         assert stat.S_IMODE(metadata.st_mode) == 0o444
+
+
+@pytest.mark.parametrize("failure_kind", ["signal", "timeout"])
+def test_actual_capture_tool_fake_worker_chain_binds_terminal_and_raw_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    raw_stderr = b"non-json\xff\npassword=secret\n" + b"x" * 40000
+    terminal = (
+        "import os,signal;os.kill(os.getpid(),signal.SIGTERM)"
+        if failure_kind == "signal"
+        else "import time;time.sleep(10)"
+    )
+    worker_source = (
+        "import sys\n"
+        "sys.stdin.buffer.readline()\n"
+        "raw=b'non-json\\xff\\npassword=secret\\n'+b'x'*40000\n"
+        "sys.stderr.buffer.write(raw);sys.stderr.flush()\n"
+        f"{terminal}\n"
+    )
+    root = actual_capture_candidate(tmp_path, worker_source)
+    prepare(monkeypatch, [snapshot()])
+    deps, calls = dependencies(tmp_path)
+    deps.capture = MODULE.default_capture
+    original_capture_command = MODULE.capture_command
+
+    def short_capture(candidate_path: Path, output: Path, request_id: str) -> list[str]:
+        command = original_capture_command(candidate_path, output, request_id)
+        command[command.index("--timeout") + 1] = "0.1"
+        return command
+
+    monkeypatch.setattr(MODULE, "capture_command", short_capture)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_rocm_smi = fake_bin / "rocm-smi"
+    fake_rocm_smi.write_text("#!/bin/sh\nexit 1\n", encoding="ascii")
+    fake_rocm_smi.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    output = tmp_path / f"actual-capture-chain-{failure_kind}"
+
+    code, evidence = MODULE.execute(root, output, deps)
+
+    assert code == 1
+    assert evidence["restore"]["passed"] is True
+    assert calls["lease"].released is True
+    failure = evidence["capture_failure"]
+    tool_error = failure["capture_tool_error"]
+    assert tool_error["validation"] == "valid"
+    assert tool_error["stage"] == "request"
+    assert tool_error["timed_out"] is (failure_kind == "timeout")
+    assert tool_error["worker_returncode"] < 0
+    assert tool_error["worker_signal"] == -tool_error["worker_returncode"]
+    if failure_kind == "signal":
+        assert tool_error["worker_signal"] == signal.SIGTERM
+    worker = tool_error["worker_stderr"]
+    assert worker["byte_count"] == len(raw_stderr)
+    assert worker["sha256"] == hashlib.sha256(raw_stderr).hexdigest()
+    assert worker["complete"] is True
+    assert worker["stream_error"] is None
+    assert worker["utf8_replacement"] is True
+    assert worker["redacted_lines"] == 1
+    preview = worker["preview"]
+    assert preview["display"]["serialized_byte_count"] <= (
+        MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES
+    )
+    persisted_raw = (output / "maintenance-evidence.json").read_text()
+    assert "password=secret" not in persisted_raw
+    persisted = json.loads(persisted_raw)
+    assert persisted["capture_failure"]["capture_tool_error"] == tool_error
+    receipt = json.loads((output / "promotion-failure-receipt.json").read_text())
+    maintenance_sha = MODULE.sha_file(output / "maintenance-evidence.json")
+    assert receipt["actual"]["maintenance_evidence"]["sha256"] == maintenance_sha
+    sums = (output / "SHA256SUMS").read_text(encoding="ascii")
+    for line in sums.splitlines():
+        digest, name = line.split("  ", 1)
+        assert MODULE.sha_file(output / name) == digest
+    for path in output.iterdir():
+        metadata = path.stat(follow_symlinks=False)
+        assert metadata.st_nlink == 1
+        assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert stat.S_IMODE(output.stat().st_mode) == 0o555
 
 
 def test_stop_failure_attempts_restore(

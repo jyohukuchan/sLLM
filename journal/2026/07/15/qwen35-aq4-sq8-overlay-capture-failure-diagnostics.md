@@ -11,10 +11,12 @@
 - Following independent NO-GO audit receipt `/tmp/ullm-sq8-capture-failure-independent-audit-be6e7b4d/audit-receipt.json` (SHA-256 `189ada29c116515782b8f7b153302b61fc3b316e0f3cefd3595db5f81fe38722`), the outer runner now exact-validates the fixed resident capture error and worker stderr schemas.
 - The capture subprocess now uses `Popen` with independent streaming drains. Complete stdout/stderr are hashed and counted without retention; only 32 KiB diagnostic prefixes and a bounded 512 KiB stdout envelope parser buffer remain in memory.
 - Valid worker stderr identities are structurally bound into `capture_failure`. Duplicate keys, unknown keys/stages, invalid types/UTF-8/JSON, terminal-stage mismatches, truncated envelopes, and incomplete inner or outer drains fail closed while the outer raw stream SHA-256 and byte counts remain available.
+- Following the second independent NO-GO audit receipt `/tmp/ullm-sq8-capture-failure-independent-audit-ea5b5339/audit-receipt.json` (SHA-256 `c5b306763e3424a0714d1a47e1eb3a1f6beeabcc36fd439ef0609b96b84712ab`), the terminal matrix now requires a timed-out worker to be reaped with a negative return code and its exactly derived signal, only at request or shutdown stages.
+- A connected offline chain now runs the actual capture tool with signal and timeout fake workers through outer streaming capture, maintenance evidence, immutable failure receipt, and `SHA256SUMS` publication.
 
 ## Offline verification
 
-- Outer runner, resident capture, preparation, lock helper, and receipt tests: 72 passed.
+- Outer runner, resident capture, preparation, lock helper, and receipt tests: 115 passed.
 - `uvx ruff check`: passed.
 - `python3 -m py_compile`: passed.
 - Fault coverage includes a real fake capture-tool subprocess, nonzero exit, worker and outer signals, timeout, malformed and over-limit envelopes, duplicate/unknown/mismatched schemas, truncation, invalid UTF-8, huge single-line and multi-line output, many short secret lines, both output streams, secret redaction, create-new, symlink, hard-link, mode, link count, receipt/SUMS SHA binding, and success without failure evidence.

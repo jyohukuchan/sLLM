@@ -1515,6 +1515,42 @@ def _unique_json_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
+def _capture_terminal_contract_valid(
+    *,
+    stage: str,
+    timed_out: bool,
+    returncode: int | None,
+    worker_signal: int | None,
+) -> bool:
+    if returncode is None:
+        if worker_signal is not None:
+            return False
+    elif returncode < 0:
+        if worker_signal != -returncode:
+            return False
+    elif worker_signal is not None:
+        return False
+
+    if timed_out:
+        return (
+            stage in {"request", "shutdown"}
+            and isinstance(returncode, int)
+            and returncode < 0
+            and worker_signal == -returncode
+        )
+    if stage == "capture":
+        return returncode is None and worker_signal is None
+    if stage == "shutdown":
+        return False
+    if stage == "worker_exit":
+        return isinstance(returncode, int) and returncode != 0
+    if stage in {"audit_missing", "resource_observation", "package_validation"}:
+        return returncode == 0
+    if stage in {"request", "cleanup", "worker"}:
+        return isinstance(returncode, int)
+    return False
+
+
 def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
     invalid: dict[str, Any] = {"validation": "invalid", "reason": None}
     if not stream.complete or stream.stream_error is not None:
@@ -1569,23 +1605,11 @@ def _capture_error_envelope(stream: CaptureStream) -> dict[str, Any]:
     ):
         invalid["reason"] = "capture_error_envelope_type_or_value_differs"
         return invalid
-    if (
-        (returncode is None and worker_signal is not None)
-        or (
-            isinstance(returncode, int)
-            and returncode < 0
-            and worker_signal != -returncode
-        )
-        or (
-            isinstance(returncode, int)
-            and returncode >= 0
-            and worker_signal is not None
-        )
-        or (
-            stage == "worker_exit"
-            and (returncode in {None, 0} or timed_out is True)
-        )
-        or (timed_out is True and stage not in {"request", "shutdown", "cleanup"})
+    if not _capture_terminal_contract_valid(
+        stage=stage,
+        timed_out=timed_out,
+        returncode=returncode,
+        worker_signal=worker_signal,
     ):
         invalid["reason"] = "capture_error_envelope_stage_terminal_mismatch"
         return invalid
