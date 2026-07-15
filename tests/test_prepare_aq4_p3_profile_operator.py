@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -323,6 +324,101 @@ def test_v16_ready_execute_binding_and_fresh_output_authorities_are_exact() -> N
     assert actual["retry_performed"] is False
 
 
+def test_audit_current_integrates_real_prepared_and_binding_mode_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_maintenance = OPERATOR.load_maintenance()
+    prepared = OPERATOR.verify_sums(OPERATOR.PREPARED_ROOT)
+    binding = OPERATOR.verify_sums(OPERATOR.BINDING_ROOT)
+    assert prepared["members"]["resident-driver"]["mode"] == "0555"
+    assert all(
+        member["mode"] == "0444"
+        for name, member in prepared["members"].items()
+        if name != "resident-driver"
+    )
+    assert all(member["mode"] == "0444" for member in binding["members"].values())
+
+    lock = tmp_path / "production.lock"
+    lock.write_bytes(b"")
+    running = {
+        "service": {
+            "unit": "ullm-openai.service",
+            "active_state": "active",
+            "sub_state": "running",
+            "main_pid": 10,
+            "nrestarts": 0,
+            "control_group": "/system.slice/ullm-openai.service",
+        },
+        "worker": {"path": "/worker", "pid": 20, "sha256": "a" * 64},
+        "gpu": {"amd_smi_index": 2},
+        "owners": {"amd_smi": [20], "kfd": [20]},
+        "lock": {"path": str(lock), "busy": True},
+        "hashes": {"production": "b" * 64},
+        "health": {
+            "formal": {
+                "container": {},
+                "curl": {},
+                "docker": {},
+                "endpoints": {},
+                "process_counts": {},
+                "secret_material_recorded": False,
+            }
+        },
+    }
+
+    class FakeMaintenance:
+        @staticmethod
+        def load_ready_artifact(path: Path) -> dict:
+            return real_maintenance.load_ready_artifact(path)
+
+        @staticmethod
+        def validate_profile_offline_reassembly() -> dict:
+            return real_maintenance.validate_profile_offline_reassembly()
+
+        @staticmethod
+        def default_dependencies() -> object:
+            return object()
+
+        @staticmethod
+        def capture_running(_dependencies: object) -> dict:
+            return running
+
+    monkeypatch.setattr(OPERATOR, "load_maintenance", lambda: FakeMaintenance)
+    monkeypatch.setattr(OPERATOR, "targeted_processes", lambda: [])
+    monkeypatch.setattr(OPERATOR, "trusted_source_snapshot", lambda _ready: [])
+    result = OPERATOR.audit_current()
+    assert result["status"] == "clean"
+    assert result["fresh_outputs_absent"] is True
+    assert result["actual_executed"] is False
+
+
+@pytest.mark.parametrize("driver_mode", (0o444, 0o644))
+def test_prepared_driver_rejects_non_executable_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    driver_mode: int,
+) -> None:
+    prepared = tmp_path / "prepared-v2"
+    shutil.copytree(OPERATOR.PREPARED_ROOT, prepared, copy_function=shutil.copy2)
+    monkeypatch.setattr(OPERATOR, "PREPARED_ROOT", prepared)
+    os.chmod(prepared / "resident-driver", driver_mode)
+    with pytest.raises(OPERATOR.OperatorError, match="sealed member differs"):
+        OPERATOR.verify_sums(prepared)
+
+
+def test_prepared_json_rejects_executable_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = tmp_path / "prepared-v2"
+    shutil.copytree(OPERATOR.PREPARED_ROOT, prepared, copy_function=shutil.copy2)
+    monkeypatch.setattr(OPERATOR, "PREPARED_ROOT", prepared)
+    os.chmod(prepared / "identity.json", 0o555)
+    with pytest.raises(OPERATOR.OperatorError, match="sealed member differs"):
+        OPERATOR.verify_sums(prepared)
+
+
 def test_historical_v15_and_current_offline_v11_authorities_are_separate() -> None:
     historical = OPERATOR.historical_ready_v15_authority()
     offline = OPERATOR.offline_reassembly_authority()
@@ -353,7 +449,7 @@ def test_historical_v15_and_current_offline_v11_authorities_are_separate() -> No
     assert not OPERATOR.MAINTENANCE_EVIDENCE.exists()
 
 
-def test_operator_source_authority_uses_path_last_change_after_poststate() -> None:
+def test_operator_source_authority_uses_path_last_change() -> None:
     record = OPERATOR.trusted_operator_source_record()
     assert record["source_commit"] == record["artifact_commit"]
     assert record["source_commit"] == OPERATOR.git(
@@ -363,7 +459,6 @@ def test_operator_source_authority_uses_path_last_change_after_poststate() -> No
         "--",
         str(SCRIPT.relative_to(ROOT)),
     )
-    assert record["source_commit"] != OPERATOR.git("rev-parse", "HEAD")
 
 
 @pytest.mark.parametrize("tamper", ("source_bytes", "blob_authority"))

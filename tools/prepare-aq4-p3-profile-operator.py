@@ -20,6 +20,8 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 P2 = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
 P3 = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
+PREPARED_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7"
 MAINTENANCE = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
 SOURCE = Path(__file__).resolve()
 PROFILE_READY_ROOT = P2 / "resident-one-case-smoke-profile-ready-v16"
@@ -210,6 +212,15 @@ def git_bytes(*args: str) -> bytes:
     return completed.stdout
 
 
+def sealed_mode_manifest(root: Path) -> dict[str, set[str]]:
+    """Return immutable member roles for a known sealed artifact path."""
+    if root == PREPARED_ROOT:
+        return {"executable": {"resident-driver"}}
+    if root == BINDING_ROOT:
+        return {"executable": set()}
+    return {"executable": set()}
+
+
 def verify_sums(root: Path) -> dict[str, Any]:
     metadata = root.lstat()
     if root.is_symlink() or not root.is_dir() or stat.S_IMODE(metadata.st_mode) != 0o555:
@@ -240,13 +251,18 @@ def verify_sums(root: Path) -> dict[str, Any]:
             expected.add(relative)
     if set(declared) != expected:
         raise OperatorError(f"SHA256SUMS coverage differs: {root}")
+    mode_manifest = sealed_mode_manifest(root)
+    executable_members = mode_manifest["executable"]
+    if not executable_members.issubset(expected):
+        raise OperatorError(f"sealed role coverage differs: {root}")
     members: dict[str, Any] = {}
     for name in sorted(expected):
         path = root / name
         child = path.lstat()
-        if not stat.S_ISREG(child.st_mode) or child.st_nlink != 1 or stat.S_IMODE(child.st_mode) != 0o444 or sha_file(path) != declared[name]:
+        expected_mode = 0o555 if name in executable_members else 0o444
+        if not stat.S_ISREG(child.st_mode) or child.st_nlink != 1 or stat.S_IMODE(child.st_mode) != expected_mode or sha_file(path) != declared[name]:
             raise OperatorError(f"sealed member differs: {path}")
-        members[name] = {"path": str(path), "sha256": declared[name], "mode": "0444", "nlink": 1, "size": child.st_size}
+        members[name] = {"path": str(path), "sha256": declared[name], "mode": f"0{expected_mode:o}", "nlink": 1, "size": child.st_size}
     return {"root": str(root), "mode": "0555", "sha256sums_sha256": sha_file(sums), "members": members}
 
 
@@ -899,8 +915,8 @@ def fresh_paths(ready: dict[str, Any]) -> list[Path]:
 
 def root_set() -> list[Path]:
     return [
-        ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
-        ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7",
+        PREPARED_ROOT,
+        BINDING_ROOT,
         EXECUTE_BINDING_ROOT,
         P2 / "resident-one-case-smoke-ready-v6",
         P2 / "resident-one-case-smoke-ready-dry-run-v6",
