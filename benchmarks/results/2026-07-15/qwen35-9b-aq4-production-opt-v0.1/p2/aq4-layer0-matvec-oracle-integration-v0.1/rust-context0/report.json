@@ -1,0 +1,136 @@
+{
+  "schema_version": "ullm.aq4_layer0_qkv_runtime_probe.v1",
+  "status": "valid",
+  "classification": "unclassified",
+  "promotion_eligible": false,
+  "operation": "standalone_aq4_matvec_f32",
+  "fused": false,
+  "device": {
+    "device_index": 0,
+    "device_id": 0,
+    "backend": "cpu",
+    "name": "host CPU fallback",
+    "total_global_mem": 0,
+    "compute_major": 0,
+    "compute_minor": 0,
+    "gcn_arch_name": "",
+    "flags": 1
+  },
+  "guard": {
+    "hip_aq4_matvec_kernel_required": false,
+    "fallback_allowed": false,
+    "relevant_environment": {
+      "ULLM_AQ4_FUSED_RPB": null,
+      "ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB": null,
+      "ULLM_AQ4_MATVEC_RPB": null,
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL": null,
+      "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL": null
+    }
+  },
+  "package": {
+    "root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "manifest_schema_version": "ullm-prototype-manifest-v0.1",
+    "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+    "tensor_dtype": "BF16",
+    "tensor_shape": [
+      8192,
+      4096
+    ],
+    "tensor_family": "linear_attn_qkv",
+    "tensor_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+    "group_size": 16,
+    "tensor_scale_f32": 0.022842333,
+    "index_encoding": "idx4_low_nibble_first",
+    "scale_encoding": "u8_scale_table_index",
+    "scale_format": "e4m3",
+    "row_scale_count": 0,
+    "payload_sha256": "7101b1d4ecfd029829b5e1d0a96e309469da6e72ecdc4491633a229d6d76b45b",
+    "index": {
+      "relative_path": "tensors/002-model_language_model_layers_0_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216,
+      "sha256": "9cb11aff24f8271bdad525574416281a5edfff54c94428392e72c2772ded3b98"
+    },
+    "scale": {
+      "relative_path": "tensors/002-model_language_model_layers_0_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152,
+      "sha256": "e78b3cd5696839b16c8ef3b6830f0e199a4cdf7338f349253ef537b6289bf64a"
+    },
+    "codebook": {
+      "relative_path": "codebooks/linear_attn_qkv__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64,
+      "sha256": "1e65bfe8e89b77536a6247f796b8635197c95116b88d6ed41753aefcbbdc7aa8"
+    }
+  },
+  "input": {
+    "path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-integration-v0.1/runtime-input.jsonl",
+    "sidecar_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "schema": "ullm.aq4_layer0_input_normed_jsonl.v1",
+    "dtype": "f32",
+    "shape": [
+      4096
+    ],
+    "rows": 3,
+    "identity": {
+      "canonical_path": "/tmp/ullm-integration-aq4-final/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-integration-v0.1/runtime-input.jsonl",
+      "pre_stat": {
+        "device": 66306,
+        "inode": 160200043,
+        "size_bytes": 250573,
+        "mtime_ns": 1784081504527679175,
+        "nlink": 1
+      },
+      "post_stat": {
+        "device": 66306,
+        "inode": 160200043,
+        "size_bytes": 250573,
+        "mtime_ns": 1784081504527679175,
+        "nlink": 1
+      },
+      "consumed_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+    }
+  },
+  "output": {
+    "path": "/tmp/ullm-integration-aq4-final/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-integration-v0.1/rust-context0/output.f32le",
+    "format": "concatenated_little_endian_f32_rows",
+    "dtype": "f32",
+    "row_shape": [
+      8192
+    ],
+    "row_order": "input_jsonl_order",
+    "bytes": 98304,
+    "sha256": "9683b8c5decd545c35e416da0b0f9568e6f51463ae5395fcd872dc9cbd82b473",
+    "cases": [
+      {
+        "case_id": "fixture-prompt-0",
+        "step": 0,
+        "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        "context_length": 3,
+        "input_sha256": "5d753a8a2c883c0c7a49cec3f35b76bbd8eefe9bc248f9dc20534cff4186dc8b",
+        "output_offset_bytes": 0,
+        "output_elements": 8192,
+        "output_sha256": "ddf114f8bc8ebda5530ef9cfd95cd02acb3a54d978caa2e5ca9c4673da68da83"
+      },
+      {
+        "case_id": "fixture-prompt-0",
+        "step": 1,
+        "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+        "context_length": 4,
+        "input_sha256": "3f34cee148d5731b16ff9440dd73f5f0718239d36884d688d91a8add2afcbea6",
+        "output_offset_bytes": 32768,
+        "output_elements": 8192,
+        "output_sha256": "cd7ee51b360be801889f042a8c7a9d6407edda4e8db2234fbf5b83029933241c"
+      },
+      {
+        "case_id": "fixture-prompt-1",
+        "step": 0,
+        "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        "context_length": 2,
+        "input_sha256": "ca2a7c856cc5d1ce9136550d3b2ed3836bff9b86158f710ff4209c080bdbd978",
+        "output_offset_bytes": 65536,
+        "output_elements": 8192,
+        "output_sha256": "485a5ace800646ea036947e7002b74b4308c1a0fc7ca3fe699c6acd8d4e5ca67"
+      }
+    ]
+  }
+}

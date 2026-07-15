@@ -1,0 +1,65 @@
+{
+  "all_rows_bit_exact": true,
+  "device": {
+    "backend": "cpu",
+    "compute_major": 0,
+    "compute_minor": 0,
+    "device_id": 0,
+    "device_index": 0,
+    "flags": 1,
+    "gcn_arch_name": "",
+    "name": "host CPU fallback",
+    "total_global_mem": 0
+  },
+  "gpu_executed": false,
+  "input_sidecar_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+  "operation": "standalone_aq4_matvec_f32",
+  "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+  "promotion_eligible": false,
+  "python_report_sha256": "e311995fea3f7f4f89f99094f01f4278224303ad2b369daa45be032fc94fb8a1",
+  "rows": [
+    {
+      "bit_exact": true,
+      "bit_mismatch_count": 0,
+      "case_id": "fixture-prompt-0",
+      "cosine": 1.0000000000000002,
+      "elements": 8192,
+      "finite": true,
+      "max_abs": 0.0,
+      "python_explicit_f32_sha256": "ddf114f8bc8ebda5530ef9cfd95cd02acb3a54d978caa2e5ca9c4673da68da83",
+      "relative_l2": 0.0,
+      "rust_output_sha256": "ddf114f8bc8ebda5530ef9cfd95cd02acb3a54d978caa2e5ca9c4673da68da83",
+      "step": 0
+    },
+    {
+      "bit_exact": true,
+      "bit_mismatch_count": 0,
+      "case_id": "fixture-prompt-0",
+      "cosine": 1.0,
+      "elements": 8192,
+      "finite": true,
+      "max_abs": 0.0,
+      "python_explicit_f32_sha256": "cd7ee51b360be801889f042a8c7a9d6407edda4e8db2234fbf5b83029933241c",
+      "relative_l2": 0.0,
+      "rust_output_sha256": "cd7ee51b360be801889f042a8c7a9d6407edda4e8db2234fbf5b83029933241c",
+      "step": 1
+    },
+    {
+      "bit_exact": true,
+      "bit_mismatch_count": 0,
+      "case_id": "fixture-prompt-1",
+      "cosine": 1.0,
+      "elements": 8192,
+      "finite": true,
+      "max_abs": 0.0,
+      "python_explicit_f32_sha256": "485a5ace800646ea036947e7002b74b4308c1a0fc7ca3fe699c6acd8d4e5ca67",
+      "relative_l2": 0.0,
+      "rust_output_sha256": "485a5ace800646ea036947e7002b74b4308c1a0fc7ca3fe699c6acd8d4e5ca67",
+      "step": 0
+    }
+  ],
+  "runtime_probe_output_sha256": "9683b8c5decd545c35e416da0b0f9568e6f51463ae5395fcd872dc9cbd82b473",
+  "runtime_probe_report_sha256": "2e0e623d0cec8299944ee73db7586b0790e8a83eed9d037e0416fddba1e44145",
+  "schema_version": "ullm.aq4_layer0_runtime_cpu_vs_python_f32_comparison.v1",
+  "status": "valid"
+}
