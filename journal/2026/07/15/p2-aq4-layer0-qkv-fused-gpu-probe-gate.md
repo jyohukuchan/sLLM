@@ -26,6 +26,12 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 - attempt2の初回sample失敗を根拠に、実機のread-only CLI capabilityを再確認した。`amd-smi version`はAMD-SMI `26.2.2+e1a6bc5663`/ROCm `7.2.1`、metricは`amd-smi metric -g 2 -m -u -p -t --json`、gfx/ASIC identityは`amd-smi static -g 2 -a --json`で取得できる。単発metric JSONはgpu=2のusage/power/mem_usageを、static JSONはgpu=2・`target_graphics_version=gfx1201`を返した。
 - observerを現行subcommand式へ最小修正し、metric/static両JSONの単一gpu=2、usage/power/mem_usage、gfx1201をfail closedで検証してmonitorへ保存する。mockでは初回成功、初回失敗伝播、observer停止を検証した。既存attemptは保全し、GPU kernel/serviceの再実行は行っていない。既定attemptが既存のため、fresh BASEでPREFLIGHT_ONLY/MOCK_PREFLIGHTを再確認した。
 
+## attempt3 実行結果（2026-07-15）
+
+- fresh `attempt3/attempts/attempt1/`で、PTY `sudo-v`→`PREFLIGHT_ONLY`成功→通常EXECUTEを1回行った。modern observerは初回sampleを取得し、card2/gfx1201、metric usage/power/mem_usage、static ASIC identityを保存した（monitor SHA-256 `ed24965e05b6da58503fe2372eb5407e68e01725b0565ea523d0325f725ac83a`）。
+- probeはHIP device1/gfx1201、visibility `1/1`、両kernel guard、fused RPB4、standalone effective RPB32/default、Q/K/V segments、5 sidecarsのshape/rows/case/finite/SHA/input consumed SHAを満たし、`fused_report=valid ... promotion=false`を出力した。report SHA-256は`458f998116be75b1c363ec49965d55fbfbf286d7c6ecbf3e1158df3ccabe547c`、sidecar SHA-256はqkv `d6a238abc5cd8ac7dd687b7c86dba48e25327a754425bb39ec671f3d01e33a03`、qkv-standalone `24248fd1c4b4b7186f9b048a7fa4c69925904a04b265a273390089df7312545e`、z `0785b49c69c8a6ead41c7905e6ef1f07f5708cad3dbd4f82f81f2617b3ec502e`、gate `49e42d6d6ea71af7915a13cd81b462c6882064912cb048ae755338fe798863e6`、beta `47844e8b1fb2b3dfefa2df8dcf1b489ed2d2a98c86ce0b32f7ef2e27d63d2302`である。
+- probe/output validator後のlock cleanupとservice startは実行されたが、Gate全体の終了コードは`1`になった。失敗箇所は最終post-start checkである。直後のread-only確認ではservice active/running、health HTTP 200、MainPID `2442053`がlock inode `771003`を保持、worker `2442481`、`NRestarts=0`、lock mode `0600`/uid/gid `1000:1000`/nlink `1`を確認した。numeric threshold、holdout、promotionは実施していない（classification unclassified、promotion=false）。runtime stat SHA-256は`d09bcdf35a2cf8e8054ecd074f7516b598ae541e687410ae31ab7e271b6b1863`、prestate SHA-256は`135ba31a8eec0f4d34acbdb344922ac2ac54087a0b9c61cd9a79a8c912ec90e4`である。
+
 ## 次の行動
 
-このobserver修正を限定commitとして保存する。GPU kernel実行・service stop/start・閾値判定・promotionは行わず、次回の明示許可までread-only preflight/mockだけを維持する。
+attempt3のGPU/output/observer/復旧証跡を限定commitとして保存する。post-start checkのrc1原因を別途確認するまで再実行・promotionは行わない。
