@@ -232,7 +232,6 @@ impl AtomicFile {
         self.file
             .sync_all()
             .map_err(|err| format!("failed to sync {}: {err}", self.temp.display()))?;
-        drop(self.file);
         fs::hard_link(&self.temp, &self.final_path).map_err(|err| {
             let _ = fs::remove_file(&self.temp);
             format!(
@@ -247,6 +246,12 @@ impl AtomicFile {
                 self.temp.display()
             )
         })
+    }
+}
+
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.temp);
     }
 }
 
@@ -312,6 +317,7 @@ fn run() -> ProbeResult<()> {
         args.chunk_bytes,
     )
     .map_err(|err| format!("failed to load AQ4 package tensor: {err}"))?;
+    assert_package_unchanged(&args.package, &args.tensor_name, &package)?;
     validate_loaded_geometry(&matvec, &package.bundle)?;
 
     let mut input_buffer = context
@@ -438,6 +444,7 @@ fn run() -> ProbeResult<()> {
     if output_cases.is_empty() {
         return Err("input sidecar contains no cases".to_string());
     }
+    assert_package_unchanged(&args.package, &args.tensor_name, &package)?;
 
     let input_dtype = input.header.dtype.clone();
     let input_shape = input.header.shape.clone();
@@ -662,10 +669,14 @@ fn load_package_identity(package_path: &Path, tensor_name: &str) -> ProbeResult<
     if bundle.tensor_name != tensor_name
         || bundle.dtype.as_deref() != Some("BF16")
         || bundle.shape != [8192, 4096]
+        || bundle.family.as_deref() != Some("linear_attn_qkv")
+        || bundle.candidate_id.as_deref() != Some("aq4_e4m3_g16_ts_flloyd16")
         || bundle.group_size != Some(16)
         || bundle.index_encoding.as_deref() != Some("idx4_low_nibble_first")
         || bundle.scale_encoding.as_deref() != Some("u8_scale_table_index")
         || bundle.scale_format.as_deref() != Some("e4m3")
+        || bundle.elements != 33_554_432
+        || bundle.groups != 2_097_152
         || bundle.row_scale_overrides.len() != 0
         || !bundle
             .tensor_scale
@@ -697,6 +708,23 @@ fn load_package_identity(package_path: &Path, tensor_name: &str) -> ProbeResult<
         codebook,
         payload_sha256,
     })
+}
+
+fn assert_package_unchanged(
+    package_path: &Path,
+    tensor_name: &str,
+    expected: &PackageIdentity,
+) -> ProbeResult<()> {
+    let current = load_package_identity(package_path, tensor_name)?;
+    if current.manifest_sha256 != expected.manifest_sha256
+        || current.payload_sha256 != expected.payload_sha256
+        || current.index.sha256 != expected.index.sha256
+        || current.scale.sha256 != expected.scale.sha256
+        || current.codebook.sha256 != expected.codebook.sha256
+    {
+        return Err("package manifest or QKV payload changed during probe".to_string());
+    }
+    Ok(())
 }
 
 fn validate_loaded_geometry(
