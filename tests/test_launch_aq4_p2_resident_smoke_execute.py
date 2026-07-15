@@ -40,6 +40,8 @@ def _profile_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
     run_id = "profile-execute-test-run"
     value = json.loads(json.dumps(LAUNCHER.profile_execute_binding_document()))
     value.update(status="ready_for_explicit_execute", actual_eligible=True, blocked_reasons=[], evidence_output=str(evidence), runner_output=str(result), run_id=run_id)
+    capture_output = tmp_path / "profile-capture"
+    value["profile_diagnostic"]["output"] = {"directory": str(capture_output), "artifact": str(capture_output / "capture-artifact.json")}
     value["live_preflight"] = {"required": True, "path": str(evidence / "live-preflight.json"), "sha256": None, "replaces_synthetic_preflight": True}
     return value, evidence, result, run_id
 
@@ -216,6 +218,11 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
         assert target["path"].endswith(LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME)
         _write_profile_result(result_path, binding)
         on_started()
+        artifact_path = Path(binding["profile_diagnostic"]["output"]["artifact"])
+        artifact_path.parent.mkdir()
+        artifact_raw = b"{}\n"
+        artifact_path.write_bytes(artifact_raw)
+        artifact_path.chmod(0o444)
         return {
             "completed": subprocess.CompletedProcess(command, 0, b"", b""),
             "keepalives": [],
@@ -225,7 +232,7 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
                 "profile_diagnostics": {
                     "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
                     "runner_finished": True,
-                    "capture_artifact": {"path": str(tmp_path / "capture-artifact.json"), "sha256": "0" * 64, "mode": 0o444},
+                    "capture_artifact": {"path": str(artifact_path), "sha256": LAUNCHER.sha_bytes(artifact_raw), "mode": 0o444},
                     "failure_evidence": None,
                     "validation_error": None,
                     "executor_exception": None,
@@ -249,6 +256,7 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
                     "capture_stderr_sha256": "0" * 64,
                     "timed_out": False,
                     "cleanup_passed": True,
+                    "children_state_known": True,
                     "children_remaining": [],
                 },
         }
@@ -264,7 +272,10 @@ def test_execute_bound_profile_diagnostic_validates_exact_roctx_evidence(tmp_pat
 
 @pytest.mark.parametrize(
     "mutation",
-    ("unknown-field", "runner-without-known-start", "cleanup-contradiction", "complete-timeout"),
+    (
+        "unknown-field", "runner-without-known-start", "cleanup-contradiction",
+        "complete-timeout", "unknown-children-with-cleanup", "unknown-children-list",
+    ),
 )
 def test_profile_capture_summary_rejects_unknown_fields_and_lifecycle_contradictions(
     tmp_path: Path, mutation: str
@@ -294,6 +305,7 @@ def test_profile_capture_summary_rejects_unknown_fields_and_lifecycle_contradict
             "capture_stderr_sha256": "0" * 64,
             "timed_out": False,
             "cleanup_passed": True,
+            "children_state_known": True,
             "children_remaining": [],
         }
         if mutation == "unknown-field":
@@ -304,6 +316,12 @@ def test_profile_capture_summary_rejects_unknown_fields_and_lifecycle_contradict
             capture["cleanup_passed"] = False
         elif mutation == "complete-timeout":
             capture["timed_out"] = True
+        elif mutation == "unknown-children-with-cleanup":
+            capture["children_state_known"] = False
+        elif mutation == "unknown-children-list":
+            capture["children_state_known"] = False
+            capture["cleanup_passed"] = False
+            capture["children_remaining"] = [123]
         on_rocprof_started()
         return {
             "completed": subprocess.CompletedProcess(command, 1, b"", b""),
@@ -335,6 +353,149 @@ def test_profile_capture_summary_rejects_unknown_fields_and_lifecycle_contradict
     assert code == 1
     assert evidence["failure"]["reason"] == "profile capture outcome contract differs"
     assert evidence["failure"]["runner_started"] is False
+
+
+def test_profile_executor_exception_after_rocprof_start_preserves_unknown_runner_and_children(
+    tmp_path: Path,
+) -> None:
+    binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
+
+    def executor(_command, _environment, on_rocprof_started, _target):
+        on_rocprof_started()
+        raise OSError("synthetic executor failure")
+
+    code, evidence = LAUNCHER.execute_bound(
+        binding,
+        evidence_path,
+        result_path,
+        run_id,
+        trusted_launcher_sha=TRUSTED_LAUNCHER_SHA,
+        run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, _validator_success(), b""),
+        gate_provider=_gates,
+        profile_runner_executor=executor,
+    )
+    assert code == 1
+    assert evidence["profile_diagnostics"] is None
+    assert evidence["failure"] == {
+        "stage": "runner",
+        "reason": "synthetic executor failure",
+        "runner_started": False,
+        "rocprof_started": True,
+        "runner_start_known": False,
+        "runner_completed": False,
+        "cleanup_passed": False,
+        "children_state_known": False,
+        "children_remaining": [],
+    }
+
+
+def test_valid_failure_diagnostics_are_saved_and_copied_to_launcher_failure(tmp_path: Path) -> None:
+    binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
+    failure_path = Path(binding["profile_diagnostic"]["output"]["directory"]) / "capture-failure.json"
+    failure_path.parent.mkdir()
+    failure_raw = b'{"status":"failed"}\n'
+    failure_path.write_bytes(failure_raw)
+    failure_path.chmod(0o444)
+
+    def executor(command, environment, on_rocprof_started, target):
+        on_rocprof_started()
+        return {
+            "completed": subprocess.CompletedProcess(command, 1, b"", b""),
+            "keepalives": [],
+            "keepalive_failed": False,
+            "gpu_command_executed": "unknown",
+            "model_load_executed": "unknown",
+            "profile_capture": {
+                "status": "failed", "runner_profiled": True, "validator_profiled": False,
+                "gates_profiled": False, "capture_tool_invocations": 1, "rocprof_invocations": 1,
+                "rocprof_started": True, "runner_start_known": False, "runner_started": False,
+                "runner_completed": False, "target_manifest_sha256": target["sha256"],
+                "target_manifest_semantic_sha256": target["manifest_sha256"],
+                "target_argv_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(command)),
+                "environment_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(environment)),
+                "capture_stdout_sha256": "0" * 64, "capture_stderr_sha256": "0" * 64,
+                "timed_out": True, "cleanup_passed": False, "children_state_known": False,
+                "children_remaining": [],
+            },
+            "profile_diagnostics": {
+                "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+                "runner_finished": False,
+                "capture_artifact": None,
+                "failure_evidence": {"path": str(failure_path), "sha256": LAUNCHER.sha_bytes(failure_raw), "mode": 0o444, "reason": "synthetic timeout"},
+                "validation_error": "capture failed",
+                "executor_exception": None,
+            },
+        }
+
+    code, evidence = LAUNCHER.execute_bound(
+        binding,
+        evidence_path,
+        result_path,
+        run_id,
+        trusted_launcher_sha=TRUSTED_LAUNCHER_SHA,
+        run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, _validator_success(), b""),
+        gate_provider=_gates,
+        profile_runner_executor=executor,
+    )
+    assert code == 1
+    assert evidence["profile_diagnostics"]["failure_evidence"]["path"] == str(failure_path)
+    assert evidence["failure"]["rocprof_started"] is True
+    assert evidence["failure"]["runner_start_known"] is False
+    assert evidence["failure"]["children_state_known"] is False
+    assert evidence["failure"]["cleanup_passed"] is False
+
+
+@pytest.mark.parametrize("evidence_kind", ("capture_artifact", "failure_evidence"))
+def test_profile_diagnostics_reject_other_absolute_0444_evidence_paths(
+    tmp_path: Path, evidence_kind: str
+) -> None:
+    binding, evidence_path, result_path, run_id = _profile_binding(tmp_path)
+    other = tmp_path / f"other-{evidence_kind}.json"
+    other_raw = b"{}\n"
+    other.write_bytes(other_raw)
+    other.chmod(0o444)
+
+    def executor(command, environment, on_rocprof_started, target):
+        complete = evidence_kind == "capture_artifact"
+        on_rocprof_started()
+        capture = {
+            "status": "complete_diagnostic" if complete else "failed",
+            "runner_profiled": True, "validator_profiled": False, "gates_profiled": False,
+            "capture_tool_invocations": 1, "rocprof_invocations": 1, "rocprof_started": True,
+            "runner_start_known": complete, "runner_started": complete, "runner_completed": complete,
+            "target_manifest_sha256": target["sha256"], "target_manifest_semantic_sha256": target["manifest_sha256"],
+            "target_argv_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(command)),
+            "environment_sha256": LAUNCHER.sha_bytes(LAUNCHER.canonical(environment)),
+            "capture_stdout_sha256": "0" * 64, "capture_stderr_sha256": "0" * 64,
+            "timed_out": False, "cleanup_passed": True, "children_state_known": True,
+            "children_remaining": [],
+        }
+        reference = {"path": str(other), "sha256": LAUNCHER.sha_bytes(other_raw), "mode": 0o444}
+        diagnostics = {
+            "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
+            "runner_finished": complete,
+            "capture_artifact": reference if complete else None,
+            "failure_evidence": None if complete else {**reference, "reason": "synthetic"},
+            "validation_error": None if complete else "synthetic",
+            "executor_exception": None,
+        }
+        return {
+            "completed": subprocess.CompletedProcess(command, 0 if complete else 1, b"", b""),
+            "keepalives": [], "keepalive_failed": False,
+            "gpu_command_executed": True if complete else "unknown",
+            "model_load_executed": True if complete else "unknown",
+            "profile_capture": capture, "profile_diagnostics": diagnostics,
+        }
+
+    code, evidence = LAUNCHER.execute_bound(
+        binding, evidence_path, result_path, run_id,
+        trusted_launcher_sha=TRUSTED_LAUNCHER_SHA,
+        run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, _validator_success(), b""),
+        gate_provider=_gates, profile_runner_executor=executor,
+    )
+    assert code == 1
+    assert evidence["failure"]["reason"] == "profile capture diagnostics evidence differs"
+    assert evidence["profile_diagnostics"] is None
 
 
 def test_profile_execute_rejects_generic_runner_executor_before_evidence(tmp_path: Path) -> None:

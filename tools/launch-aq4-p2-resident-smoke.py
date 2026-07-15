@@ -91,6 +91,9 @@ PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-product
 PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v3"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v3"
+PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
+PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
 ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
 ROCTX_LIBRARY_RESOLVED = Path("/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201")
 ROCTX_LIBRARY_SHA = "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
@@ -650,6 +653,10 @@ def profile_execute_binding_document() -> dict[str, Any]:
         "measurement_eligible": False,
         "promotion_eligible": False,
         "rocprof_wrapper_required": True,
+        "output": {
+            "directory": str(PROFILE_CAPTURE_OUTPUT_DIRECTORY),
+            "artifact": str(PROFILE_CAPTURE_ARTIFACT),
+        },
         "roctx_library": {
             "invocation_path": str(ROCTX_LIBRARY),
             "resolved_path": str(ROCTX_LIBRARY_RESOLVED),
@@ -702,10 +709,16 @@ def validate_execute_binding(value: dict[str, Any], *, permit_test_live_prefligh
         clone["status"] = expected["status"]
         clone["actual_eligible"] = expected["actual_eligible"]
         clone["blocked_reasons"] = expected["blocked_reasons"]
+        if "profile_diagnostic" in clone:
+            clone["profile_diagnostic"]["output"] = expected["profile_diagnostic"]["output"]
         if clone != expected:
             raise LauncherError("execute binding fixed trust roots differ")
         if not isinstance(live, dict) or live.get("required") is not True or live.get("replaces_synthetic_preflight") is not True or live.get("path") != str(Path(value["evidence_output"]) / "live-preflight.json") or live.get("sha256") is not None:
             raise LauncherError("execute live preflight binding differs")
+        if "profile_diagnostic" in value:
+            output = value["profile_diagnostic"].get("output")
+            if not isinstance(output, dict) or set(output) != {"directory", "artifact"} or not isinstance(output.get("directory"), str) or not Path(output["directory"]).is_absolute() or output.get("artifact") != str(Path(output["directory"]) / "capture-artifact.json"):
+                raise LauncherError("test profile capture output binding differs")
         return value
     if value != expected:
         raise LauncherError("execute binding exact document differs")
@@ -1231,7 +1244,10 @@ def _result_inventory(root: Path) -> dict[str, Any]:
 
 def validate_profile_constants(snapshot: Snapshot, binding: dict[str, Any]) -> None:
     expected = profile_execute_binding_document()["profile_diagnostic"]
-    if binding.get("profile_diagnostic") != expected:
+    observed = json.loads(json.dumps(binding.get("profile_diagnostic")))
+    if binding.get("run_id") != PROFILE_RUN_ID and isinstance(observed, dict):
+        observed["output"] = expected["output"]
+    if observed != expected:
         raise LauncherError("profile diagnostic binding differs")
     try:
         resolved = ROCTX_LIBRARY.resolve(strict=True)
@@ -1405,7 +1421,7 @@ def execute_bound(
     evidence_output.mkdir(mode=0o700)
     self_sha = observed_self_sha
     evidence = make_evidence("execute", self_sha)
-    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "profile_runner_target": None, "profile_capture": None, "gates": None, "gate_failure_diagnostic": None, "restore": None, "trust_verifications": []})
+    evidence.update({"execute_binding": binding, "profile_diagnostic": None, "profile_runner_target": None, "profile_capture": None, "profile_diagnostics": None, "gates": None, "gate_failure_diagnostic": None, "restore": None, "trust_verifications": []})
     evidence["safety"]["execution_state_source"] = "runner_not_started"
     snapshot = Snapshot()
     snapshot_ready = False
@@ -1435,6 +1451,33 @@ def execute_bound(
         if profile_rocprof_started:
             raise LauncherError("profile rocprof start was reported more than once")
         profile_rocprof_started = True
+
+    def profile_lifecycle() -> dict[str, Any]:
+        capture = evidence.get("profile_capture")
+        if isinstance(capture, dict):
+            return {
+                key: capture[key]
+                for key in (
+                    "rocprof_started", "runner_start_known", "runner_started",
+                    "runner_completed", "cleanup_passed", "children_state_known",
+                    "children_remaining",
+                )
+            }
+        return {
+            "rocprof_started": profile_rocprof_started,
+            "runner_start_known": not profile_rocprof_started,
+            "runner_started": False,
+            "runner_completed": False,
+            "cleanup_passed": not profile_rocprof_started,
+            "children_state_known": not profile_rocprof_started,
+            "children_remaining": [],
+        }
+
+    def failure_record(failure_stage: str, reason: str, runner_started: bool) -> dict[str, Any]:
+        value: dict[str, Any] = {"stage": failure_stage, "reason": reason, "runner_started": runner_started}
+        if profile_enabled:
+            value.update(profile_lifecycle())
+        return value
 
     try:
         validate_execute_constants(snapshot, self_sha)
@@ -1513,7 +1556,7 @@ def execute_bound(
                 "runner_started", "target_manifest_sha256", "target_manifest_semantic_sha256",
                 "target_argv_sha256", "environment_sha256", "capture_stdout_sha256",
                 "capture_stderr_sha256", "timed_out", "cleanup_passed", "children_remaining",
-                "runner_start_known", "runner_completed",
+                "children_state_known", "runner_start_known", "runner_completed",
             }
             if (
                 not isinstance(capture, dict)
@@ -1522,7 +1565,7 @@ def execute_bound(
                 or type(capture.get("runner_started")) is not bool
                 or type(capture.get("runner_start_known")) is not bool
                 or type(capture.get("runner_completed")) is not bool
-                or capture.get("runner_profiled") is not capture.get("runner_completed")
+                or capture.get("runner_profiled") is not True
                 or capture.get("validator_profiled") is not False
                 or capture.get("gates_profiled") is not False
                 or capture.get("capture_tool_invocations") != 1
@@ -1535,9 +1578,13 @@ def execute_bound(
                 or any(not isinstance(capture.get(key), str) or SHA_RE.fullmatch(capture[key]) is None for key in ("capture_stdout_sha256", "capture_stderr_sha256"))
                 or type(capture.get("timed_out")) is not bool
                 or type(capture.get("cleanup_passed")) is not bool
+                or type(capture.get("children_state_known")) is not bool
                 or not isinstance(capture.get("children_remaining"), list)
                 or any(type(pid) is not int or pid <= 0 for pid in capture["children_remaining"])
-                or capture["cleanup_passed"] is not (capture["children_remaining"] == [])
+                or len(capture["children_remaining"]) != len(set(capture["children_remaining"]))
+                or capture["children_remaining"] != sorted(capture["children_remaining"])
+                or capture["cleanup_passed"] is not (capture["children_state_known"] and capture["children_remaining"] == [])
+                or (not capture["children_state_known"] and capture["children_remaining"] != [])
                 or (capture["runner_started"] and (not capture["runner_start_known"] or not capture["rocprof_started"]))
                 or (capture["runner_completed"] and (not capture["runner_start_known"] or not capture["runner_started"]))
                 or (not capture["runner_start_known"] and (
@@ -1563,6 +1610,7 @@ def execute_bound(
                 ))
             ):
                 raise LauncherError("profile capture outcome contract differs")
+            evidence["profile_capture"] = capture
             diagnostics = outcome.get("profile_diagnostics")
             diagnostic_fields = {
                 "schema_version", "runner_finished", "capture_artifact", "failure_evidence",
@@ -1578,23 +1626,34 @@ def execute_bound(
                 ("failure_evidence", {"path", "sha256", "mode", "reason"}),
             ):
                 item = diagnostics[key]
+                expected_path = (
+                    binding["profile_diagnostic"]["output"]["artifact"]
+                    if key == "capture_artifact"
+                    else str(Path(binding["profile_diagnostic"]["output"]["directory"]) / "capture-failure.json")
+                )
                 if item is not None and (
                     not isinstance(item, dict)
                     or set(item) != fields
                     or not isinstance(item.get("path"), str)
-                    or not Path(item["path"]).is_absolute()
+                    or item["path"] != expected_path
                     or not isinstance(item.get("sha256"), str)
                     or SHA_RE.fullmatch(item["sha256"]) is None
                     or item.get("mode") != 0o444
                     or (key == "failure_evidence" and (not isinstance(item.get("reason"), str) or not item["reason"]))
                 ):
                     raise LauncherError("profile capture diagnostics evidence differs")
+                if item is not None:
+                    diagnostic_raw, _ = read_regular(Path(item["path"]), f"profile diagnostics {key}")
+                    if sha_bytes(diagnostic_raw) != item["sha256"] or stat.S_IMODE(Path(item["path"]).lstat().st_mode) != 0o444:
+                        raise LauncherError("profile capture diagnostics file binding differs")
             if diagnostics["runner_finished"] is not capture["runner_completed"] or (capture["status"] == "complete_diagnostic") is not (diagnostics["capture_artifact"] is not None) or (capture["status"] == "complete_diagnostic" and (diagnostics["failure_evidence"] is not None or diagnostics["validation_error"] is not None or diagnostics["executor_exception"] is not None)):
                 raise LauncherError("profile capture diagnostics state differs")
-            if capture["runner_completed"]:
+            if capture["status"] == "failed" and diagnostics["failure_evidence"] is None and diagnostics["validation_error"] is None and diagnostics["executor_exception"] is None:
+                raise LauncherError("profile capture diagnostics failure cause differs")
+            evidence["profile_diagnostics"] = diagnostics
+            if capture["runner_started"]:
                 mark_runner_started()
-            evidence["profile_capture"] = capture
-        if profile_enabled and evidence["process_counts"]["runner"] != int(evidence["profile_capture"]["runner_completed"]):
+        if profile_enabled and evidence["process_counts"]["runner"] != int(evidence["profile_capture"]["runner_started"]):
             raise LauncherError("profile runner lifecycle accounting differs")
         completed = outcome["completed"]
         keepalives = outcome["keepalives"]
@@ -1627,7 +1686,7 @@ def execute_bound(
     except (LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
         if isinstance(error, (AmdProcessSchemaError, KfdOwnerScanError)):
             evidence["gate_failure_diagnostic"] = error.diagnostic
-        evidence["failure"] = {"stage": stage, "reason": str(error), "runner_started": evidence["process_counts"]["runner"] == 1}
+        evidence["failure"] = failure_record(stage, str(error), evidence["process_counts"]["runner"] == 1)
         if runner_output.exists() and not runner_output.is_symlink():
             try:
                 evidence["result"] = _result_inventory(runner_output) | {"partial": True}
@@ -1640,7 +1699,7 @@ def execute_bound(
                 verify_trust("runner-after")
                 runner_after_verified = True
             except (LauncherError, OSError, ValueError) as error:
-                evidence["failure"] = {"stage": "runner-after-verification", "reason": str(error), "runner_started": True}
+                evidence["failure"] = failure_record("runner-after-verification", str(error), True)
                 evidence["status"] = "failed"; code = 1
         try:
             evidence["restore"] = {"required": False, "service_stop_performed": False, "state_preserved": True} if restore_provider is None else restore_provider()
@@ -1662,7 +1721,7 @@ def execute_bound(
             if snapshot_ready:
                 verify_trust("finalize-before")
         except (LauncherError, OSError, ValueError) as error:
-            evidence["failure"] = {"stage": "finalize-verification", "reason": str(error), "runner_started": evidence["process_counts"]["runner"] == 1}
+            evidence["failure"] = failure_record("finalize-verification", str(error), evidence["process_counts"]["runner"] == 1)
             evidence["status"] = "failed"; code = 1
         finalize_output(evidence_output, evidence)
     return code, evidence

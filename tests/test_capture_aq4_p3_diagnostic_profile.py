@@ -403,16 +403,114 @@ def test_target_swap_between_verify_and_spawn_executes_only_pinned_fds(
 
     monkeypatch.setattr(CAPTURE.subprocess, "Popen", swapping_popen)
     output = (tmp_path / "fd-profile-output").resolve()
+    logical = [str(fake_profiler), "--", *loaded["argv"]]
+    effective_command = [str(fake_profiler), "--", *effective]
     try:
         with pytest.raises(CAPTURE.CaptureError, match="post-spawn.*identity changed"):
             CAPTURE.run_profile(
-                [str(fake_profiler), "--", *effective],
+                effective_command,
                 output,
                 10.0,
                 pass_fds=target_fds,
                 verifier=lambda: [snapshot.verify() for snapshot in snapshots],
+                logical_command=logical,
             )
         assert observed.read_text(encoding="utf-8") == "trusted"
+        failure = json.loads((output / "capture-failure.json").read_text())
+        assert failure["command_sha256"] == hashlib.sha256(CAPTURE.canonical(logical)).hexdigest()
+        assert failure["effective_command_sha256"] == hashlib.sha256(CAPTURE.canonical(effective_command)).hexdigest()
+        assert failure["command_sha256"] != failure["effective_command_sha256"]
+    finally:
+        CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_runtime_directory_and_lock_swap_execute_through_pinned_path_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = (tmp_path / "bundle").resolve()
+    bundle.mkdir()
+    (bundle / "payload.txt").write_text("trusted-bundle", encoding="utf-8")
+    replacement_bundle = tmp_path / "replacement-bundle"
+    replacement_bundle.mkdir()
+    (replacement_bundle / "payload.txt").write_text("replacement-bundle", encoding="utf-8")
+    lock = (tmp_path / "runner.lock").resolve()
+    lock.write_text("trusted-lock", encoding="utf-8")
+    replacement_lock = tmp_path / "replacement.lock"
+    replacement_lock.write_text("replacement-lock", encoding="utf-8")
+    observed = (tmp_path / "runtime-observed.json").resolve()
+    runner = (tmp_path / "runtime-runner.py").resolve()
+    runner.write_text(
+        "import json,os,pathlib,sys\n"
+        "bundle=pathlib.Path(sys.argv[1]); lock=pathlib.Path(sys.argv[2]); observed=pathlib.Path(sys.argv[3])\n"
+        "fd=os.open(lock,os.O_RDWR); os.lseek(fd,0,os.SEEK_SET); os.write(fd,b'pinned-lock '); os.close(fd)\n"
+        "observed.write_text(json.dumps({'payload':(bundle/'payload.txt').read_text()}))\n",
+        encoding="utf-8",
+    )
+    interpreter = Path(sys.executable).resolve()
+    manifest = (tmp_path / "runtime-fd-target.json").resolve()
+    value = write_target_manifest(
+        manifest,
+        [str(interpreter), str(runner), str(bundle), str(lock), str(observed)],
+        input_indices=(0, 1),
+        output_indices=(4,),
+    )
+    value["runtime_paths"] = [
+        {"argument_index": 2, "path": str(bundle), "kind": "directory", "identity": list(CAPTURE.PROFILER._identity(bundle.lstat()))},
+        {"argument_index": 3, "path": str(lock), "kind": "regular_file", "identity": list(CAPTURE.PROFILER._identity(lock.lstat()))},
+    ]
+    value["manifest_sha256"] = CAPTURE.self_hash(value, "manifest_sha256")
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        manifest, hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
+    effective, target_fds = CAPTURE.pinned_target_argv(loaded, snapshots)
+    assert all(effective[index].startswith("/proc/self/fd/") for index in (0, 1, 2, 3))
+    fake_profiler = (tmp_path / "runtime-rocprofv3").resolve()
+    fake_profiler.write_text(
+        "#!/usr/bin/python3\n"
+        "import subprocess,sys\n"
+        "target=sys.argv[sys.argv.index('--')+1:]\n"
+        "fds=tuple(int(item.rsplit('/',1)[1]) for item in target if item.startswith('/proc/self/fd/'))\n"
+        "raise SystemExit(subprocess.run(target,pass_fds=fds).returncode)\n",
+        encoding="utf-8",
+    )
+    fake_profiler.chmod(0o555)
+    bundle_backup = tmp_path / "bundle-backup"
+    lock_backup = tmp_path / "lock-backup"
+    real_popen = CAPTURE.subprocess.Popen
+
+    def swapping_popen(*args, **kwargs):
+        bundle.rename(bundle_backup)
+        replacement_bundle.rename(bundle)
+        lock.rename(lock_backup)
+        replacement_lock.rename(lock)
+        try:
+            process = real_popen(*args, **kwargs)
+            deadline = time.monotonic() + 5.0
+            while not observed.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert json.loads(observed.read_text())["payload"] == "trusted-bundle"
+            assert lock_backup.read_text().startswith("pinned-lock")
+            assert lock.read_text() == "replacement-lock"
+            return process
+        finally:
+            bundle.rename(replacement_bundle)
+            bundle_backup.rename(bundle)
+            lock.rename(replacement_lock)
+            lock_backup.rename(lock)
+
+    monkeypatch.setattr(CAPTURE.subprocess, "Popen", swapping_popen)
+    try:
+        with pytest.raises(CAPTURE.CaptureError, match="post-spawn.*identity changed"):
+            CAPTURE.run_profile(
+                [str(fake_profiler), "--", *effective],
+                (tmp_path / "runtime-fd-output").resolve(),
+                10.0,
+                pass_fds=target_fds,
+                verifier=lambda: [snapshot.verify() for snapshot in snapshots],
+            )
+        assert json.loads(observed.read_text())["payload"] == "trusted-bundle"
+        assert lock.read_text().startswith("pinned-lock")
     finally:
         CAPTURE.close_target_snapshots(snapshots)
 
@@ -551,14 +649,48 @@ def test_profile_timeout_and_oom_exit_fail_closed(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n", encoding="utf-8"
     )
     sleeper.chmod(0o555)
+    timeout_output = (tmp_path / "timeout").resolve()
+    timeout_logical = ["/trusted/rocprofv3", "--", "/trusted/runner"]
     with pytest.raises(CAPTURE.CaptureError, match="timed out"):
-        CAPTURE.run_profile([str(sleeper)], (tmp_path / "timeout").resolve(), 0.05)
+        CAPTURE.run_profile([str(sleeper)], timeout_output, 0.05, logical_command=timeout_logical)
+    timeout_failure = json.loads((timeout_output / "capture-failure.json").read_text())
+    assert timeout_failure["command_sha256"] == hashlib.sha256(CAPTURE.canonical(timeout_logical)).hexdigest()
 
     oom = tmp_path / "oom-profiler"
     oom.write_text("#!/usr/bin/env python3\nraise SystemExit(137)\n", encoding="utf-8")
     oom.chmod(0o555)
+    oom_output = (tmp_path / "oom").resolve()
+    oom_logical = ["/trusted/rocprofv3", "--", "/trusted/runner", "--one-case"]
     with pytest.raises(CAPTURE.CaptureError, match="possible OOM"):
-        CAPTURE.run_profile([str(oom)], (tmp_path / "oom").resolve(), 10.0)
+        CAPTURE.run_profile([str(oom)], oom_output, 10.0, logical_command=oom_logical)
+    oom_failure = json.loads((oom_output / "capture-failure.json").read_text())
+    assert oom_failure["command_sha256"] == hashlib.sha256(CAPTURE.canonical(oom_logical)).hexdigest()
+
+
+def test_post_capture_assembly_failure_evidence_keeps_logical_command_binding(tmp_path: Path) -> None:
+    output = tmp_path / "post-capture-assembly-failure"
+    output.mkdir()
+    logical = ["/trusted/rocprofv3", "--", "/trusted/python", "/trusted/runner.py"]
+    effective = ["/proc/self/fd/11", "--", "/proc/self/fd/12", "/proc/self/fd/13"]
+    CAPTURE.write_failure_evidence(
+        output,
+        "synthetic assemble failure",
+        logical,
+        {"stage": "assemble"},
+        effective_command=effective,
+    )
+    failure = json.loads((output / "capture-failure.json").read_text())
+    assert failure["command_sha256"] == hashlib.sha256(CAPTURE.canonical(logical)).hexdigest()
+    assert failure["effective_command_sha256"] == hashlib.sha256(CAPTURE.canonical(effective)).hexdigest()
+    assert failure["context"] == {"stage": "assemble"}
+    assert (output / "capture-failure.json").stat().st_mode & 0o777 == 0o444
+    unknown = tmp_path / "cleanup-unknown"
+    unknown.mkdir()
+    CAPTURE.write_failure_evidence(unknown, "process group cleanup failed", logical, None)
+    unknown_failure = json.loads((unknown / "capture-failure.json").read_text())
+    assert unknown_failure["process_group_cleanup_complete"] is False
+    assert unknown_failure["children_state_known"] is False
+    assert unknown_failure["children_remaining"] == []
 
 
 def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> None:
@@ -617,6 +749,8 @@ def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> No
         assert failure["promotion_eligible"] is False
         assert failure["outer_harness_signalled"] is False
         assert failure["process_group_cleanup_complete"] is True
+        assert failure["children_state_known"] is True
+        assert failure["children_remaining"] == []
         assert failure["failure_sha256"] == CAPTURE.self_hash(failure, "failure_sha256")
         restore_request.write_text("restore", encoding="utf-8")
         assert outer.wait(timeout=5.0) == 0
@@ -625,6 +759,29 @@ def test_timeout_kills_sigint_ignoring_child_process_group(tmp_path: Path) -> No
         if outer.poll() is None:
             outer.terminate()
             outer.wait(timeout=5.0)
+
+
+def test_success_exit_with_live_descendant_is_cleaned_and_fails_closed(tmp_path: Path) -> None:
+    child_pid = tmp_path / "escaped-child.pid"
+    profiler = tmp_path / "early-exit-profiler"
+    profiler.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib,subprocess,sys\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n"
+        f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))\n",
+        encoding="utf-8",
+    )
+    profiler.chmod(0o555)
+    output = (tmp_path / "early-exit-output").resolve()
+    with pytest.raises(CAPTURE.CaptureError, match="descendants were terminated"):
+        CAPTURE.run_profile([str(profiler)], output, 10.0)
+    pid = int(child_pid.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    failure = json.loads((output / "capture-failure.json").read_text())
+    assert failure["children_state_known"] is True
+    assert failure["children_remaining"] == []
+    assert failure["process_group_cleanup_complete"] is True
 
 
 def test_marker_contract_binds_exact_12_runs_and_rejects_missing(tmp_path: Path) -> None:
@@ -765,6 +922,8 @@ def launcher_profile_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
         runner_output=str(result),
         run_id=run_id,
     )
+    capture_output = tmp_path / "profile-capture"
+    value["profile_diagnostic"]["output"] = {"directory": str(capture_output), "artifact": str(capture_output / "capture-artifact.json")}
     value["live_preflight"] = {
         "required": True,
         "path": str(evidence / "live-preflight.json"),
@@ -896,6 +1055,11 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
             CAPTURE.close_target_snapshots(snapshots)
         on_started()
         write_launcher_profile_result(result_path, binding)
+        artifact_path = Path(binding["profile_diagnostic"]["output"]["artifact"])
+        artifact_path.parent.mkdir()
+        artifact_raw = b"{}\n"
+        artifact_path.write_bytes(artifact_raw)
+        artifact_path.chmod(0o444)
         return {
             "completed": subprocess.CompletedProcess(command, 0, b"", b""),
             "keepalives": [],
@@ -905,7 +1069,7 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
             "profile_diagnostics": {
                 "schema_version": "ullm.aq4_p3_profile_executor_diagnostics.v1",
                 "runner_finished": True,
-                "capture_artifact": {"path": str(tmp_path / "capture-artifact.json"), "sha256": "0" * 64, "mode": 0o444},
+                "capture_artifact": {"path": str(artifact_path), "sha256": LAUNCHER.sha_bytes(artifact_raw), "mode": 0o444},
                 "failure_evidence": None,
                 "validation_error": None,
                 "executor_exception": None,
@@ -929,6 +1093,7 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
                 "capture_stderr_sha256": "0" * 64,
                 "timed_out": False,
                 "cleanup_passed": True,
+                "children_state_known": True,
                 "children_remaining": [],
             },
         }
@@ -949,6 +1114,7 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
     assert evidence["profile_capture"]["runner_profiled"] is True
     assert evidence["profile_capture"]["validator_profiled"] is False
     assert evidence["profile_capture"]["gates_profiled"] is False
+    assert evidence["profile_diagnostics"]["capture_artifact"]["mode"] == 0o444
     assert evidence["profile_runner_target"]["path"].endswith(
         LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME
     )
@@ -993,6 +1159,12 @@ def test_captured_validator_warning_remains_fail_closed_before_profile_runner(
         "stage": "validator",
         "reason": "trusted validator subprocess rejected root/B",
         "runner_started": False,
+        "rocprof_started": False,
+        "runner_start_known": True,
+        "runner_completed": False,
+        "cleanup_passed": True,
+        "children_state_known": True,
+        "children_remaining": [],
     }
     assert evidence["safety"]["gpu_command_executed"] is False
     assert evidence["safety"]["model_load_executed"] is False
@@ -1024,6 +1196,12 @@ def test_profile_launcher_without_capture_executor_never_starts_runner(tmp_path:
         "stage": "runner",
         "reason": "profile runner executor is required",
         "runner_started": False,
+        "rocprof_started": False,
+        "runner_start_known": True,
+        "runner_completed": False,
+        "cleanup_passed": True,
+        "children_state_known": True,
+        "children_remaining": [],
     }
     assert evidence["process_counts"]["runner"] == 0
     assert evidence["safety"]["execution_state_source"] == "runner_not_started"

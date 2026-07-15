@@ -22,3 +22,12 @@
 - launcher/capture/maintenance の確定 commit・blob・raw SHA と exact test count を QA attestation に再固定する。
 - execute-binding と base/profile ready artifact を公式 generator で再生成し、canonical readback と dry-run を通す。
 - actual、GPU、service、HTTP は実行しない。
+
+## A3 監査追補
+
+- `profile_diagnostics` は launcher が exact schema、binding 固有 path、SHA-256、mode `0444` を実読検証してから、success/failure の launcher evidence に保存する。
+- executor が rocprof 開始後に例外を返した場合は、runner と children を未開始・ゼロ件と断定しない。`runner_start_known=false`、`children_state_known=false`、`cleanup_passed=false` として failure に保存する。
+- `runner_profiled` は wrapper の対象契約を表し、`runner_started` と `runner_completed` は独立した実行状態として扱う。
+- `children_remaining=[]` は `children_state_known=true` の場合だけゼロ件を意味する。unknown 時の空配列は placeholder であり、cleanup 成功には使わない。
+- target runtime の bundle directory と lock regular file も O_PATH FD で固定し、target argv を `/proc/self/fd/N` に置換する。swap/restore 中も元 bundle の内容と元 lock inode だけを観測する回帰を追加した。
+- failure evidence の `command_sha256` は logical original argv に固定し、FD 置換後の argv は `effective_command_sha256` に分離した。timeout、nonzero、post-spawn verification、post-capture assembly failure で同じ規則を使う。

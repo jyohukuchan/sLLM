@@ -478,8 +478,16 @@ class PinnedRuntimePath:
         self.kind = value["kind"]
         self.argument_index = argument_index
         self.identity = tuple(value.get("identity", ()))
+        self.path_descriptor: int | None = None
         self.resolved_snapshot: PinnedTargetFile | None = None
-        if self.kind == "symlinked_file":
+        if self.kind in {"directory", "regular_file"}:
+            flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            self.path_descriptor = os.open(self.path, flags)
+            if PROFILER._identity(os.fstat(self.path_descriptor)) != self.identity:
+                os.close(self.path_descriptor)
+                self.path_descriptor = None
+                raise CaptureError("target runtime path changed while opening")
+        elif self.kind == "symlinked_file":
             resolved = Path(value["resolved_path"])
             self.resolved_snapshot = PinnedTargetFile.open(
                 resolved,
@@ -487,15 +495,22 @@ class PinnedRuntimePath:
                 argument_index,
                 require_executable=False,
             )
-        self.verify()
+        try:
+            self.verify()
+        except Exception:
+            self.close()
+            raise
 
     @property
     def descriptor(self) -> int | None:
+        if self.path_descriptor is not None:
+            return self.path_descriptor
         return None if self.resolved_snapshot is None else self.resolved_snapshot.descriptor
 
     @property
     def fd_path(self) -> str | None:
-        return None if self.resolved_snapshot is None else self.resolved_snapshot.fd_path
+        descriptor = self.descriptor
+        return None if descriptor is None else f"/proc/self/fd/{descriptor}"
 
     def verify(self) -> None:
         try:
@@ -504,6 +519,8 @@ class PinnedRuntimePath:
                 if (
                     not stat.S_ISDIR(metadata.st_mode)
                     or PROFILER._identity(metadata) != self.identity
+                    or self.path_descriptor is None
+                    or PROFILER._identity(os.fstat(self.path_descriptor)) != self.identity
                 ):
                     raise CaptureError("target runtime directory identity changed")
             elif self.kind == "regular_file":
@@ -511,6 +528,8 @@ class PinnedRuntimePath:
                 if (
                     not stat.S_ISREG(metadata.st_mode)
                     or PROFILER._identity(metadata) != self.identity
+                    or self.path_descriptor is None
+                    or PROFILER._identity(os.fstat(self.path_descriptor)) != self.identity
                 ):
                     raise CaptureError("target runtime file identity changed")
             elif self.kind == "symlinked_file":
@@ -524,6 +543,9 @@ class PinnedRuntimePath:
             raise CaptureError(f"target runtime path is unavailable: {error}") from error
 
     def close(self) -> None:
+        if self.path_descriptor is not None:
+            os.close(self.path_descriptor)
+            self.path_descriptor = None
         if self.resolved_snapshot is not None:
             self.resolved_snapshot.close()
 
@@ -824,10 +846,8 @@ def pinned_target_argv(value: dict[str, Any], snapshots: list[Any]) -> tuple[lis
             raise CaptureError("target FD binding coverage differs")
         replacements[index] = fd_path
         descriptors.append(descriptor)
-    expected = {
-        item["argument_index"] for item in value["input_files"]
-    } | {
-        item["argument_index"] for item in value["runtime_paths"] if item["kind"] == "symlinked_file"
+    expected = {item["argument_index"] for item in value["input_files"]} | {
+        item["argument_index"] for item in value["runtime_paths"]
     }
     if set(replacements) != expected or 0 not in replacements:
         raise CaptureError("target FD replacement coverage differs")
@@ -913,7 +933,8 @@ def _run_profile(
             try:
                 on_rocprof_started()
             except Exception:
-                terminate_process_group(process)
+                if not terminate_process_group(process):
+                    raise CaptureError("rocprof start callback failed and process group cleanup failed")
                 raise
         try:
             return_code = process.wait(timeout=timeout)
@@ -923,6 +944,10 @@ def _run_profile(
                     "rocprof diagnostic capture timed out and process group cleanup failed"
                 ) from error
             raise CaptureError("rocprof diagnostic capture timed out") from error
+    if process_group_alive(process.pid, process):
+        if not terminate_process_group(process):
+            raise CaptureError("rocprof exited with descendant processes and process group cleanup failed")
+        raise CaptureError("rocprof exited with descendant processes; descendants were terminated")
     if return_code != 0:
         suffix = " (possible OOM/SIGKILL)" if return_code in {-9, 9, 137} else ""
         raise CaptureError(f"rocprof diagnostic capture failed with exit {return_code}{suffix}")
@@ -933,6 +958,8 @@ def write_failure_evidence(
     reason: str,
     command: list[str],
     context: dict[str, Any] | None,
+    *,
+    effective_command: list[str] | None = None,
 ) -> None:
     path = output_directory / "capture-failure.json"
     if path.exists() or path.is_symlink():
@@ -946,6 +973,7 @@ def write_failure_evidence(
                 "bytes": stream.stat().st_size,
                 "sha256": snapshot.sha256,
             }
+    cleanup_complete = "cleanup failed" not in reason
     value = {
         "schema_version": FAILURE_SCHEMA,
         "status": "failed",
@@ -955,8 +983,11 @@ def write_failure_evidence(
         "reason": reason,
         "rocprof_child_new_session": True,
         "outer_harness_signalled": False,
-        "process_group_cleanup_complete": "cleanup failed" not in reason,
+        "process_group_cleanup_complete": cleanup_complete,
+        "children_state_known": cleanup_complete,
+        "children_remaining": [],
         "command_sha256": hashlib.sha256(canonical(command)).hexdigest(),
+        "effective_command_sha256": hashlib.sha256(canonical(effective_command if effective_command is not None else command)).hexdigest(),
         "context": context or {},
         "streams": streams,
     }
@@ -975,7 +1006,10 @@ def run_profile(
     failure_context: dict[str, Any] | None = None,
     environment: dict[str, str] | None = None,
     on_rocprof_started: Any = None,
+    logical_command: list[str] | None = None,
 ) -> None:
+    if logical_command is not None and (not logical_command or any(not isinstance(item, str) or not item for item in logical_command)):
+        raise CaptureError("logical profile command is invalid")
     if verifier is not None:
         verifier()
     output_preexisted = output_directory.exists() or output_directory.is_symlink()
@@ -1021,9 +1055,13 @@ def run_profile(
             and output_directory.is_dir()
             and not output_directory.is_symlink()
         ):
-            write_failure_evidence(
-                output_directory, reason, command, failure_context
-            )
+                write_failure_evidence(
+                    output_directory,
+                    reason,
+                    logical_command if logical_command is not None else command,
+                    failure_context,
+                    effective_command=command,
+                )
         if isinstance(failure, CaptureError) and reason == str(failure):
             raise failure
         raise CaptureError(reason) from failure
@@ -1545,6 +1583,7 @@ def main(
                 failure_context=failure_context,
                 environment=target_value["environment"],
                 on_rocprof_started=on_rocprof_started,
+                logical_command=logical_command,
             )
             if on_runner_completed is not None:
                 on_runner_completed()
@@ -1593,6 +1632,7 @@ def main(
                 str(error),
                 logical_command,
                 failure_context,
+                effective_command=command,
             )
         print(f"AQ4 P3 diagnostic rocprof capture failed: {error}", file=sys.stderr)
         return 1
