@@ -2198,7 +2198,7 @@ fn package_linear_attn_z_hybrid_diagnostic(
             "thresholds": serde_json::Value::Null,
             "device": {"backend": "cpu", "requested_index": device_index},
             "package": {"root": path, "manifest_sha256": package_manifest_sha256, "layer_index": 0},
-            "input": {"path": input, "sha256": input_sha256, "schema": "ullm.aq4_layer0_input_normed_jsonl.v1", "rows": sequence_len, "shape": [4096], "cases": cases},
+            "input": {"path": input, "sha256": input_sha256, "schema": "ullm.aq4_layer0_input_normed_jsonl.v1", "rows": sequence_len, "shape": [4096], "cases": cases.iter().map(|case| serde_json::json!({"case_id": case.case_id, "step": case.step, "context_length": case.context_length, "context_token_ids_sha256": case.context_token_ids_sha256, "input_sha256": case.input_sha256})).collect::<Vec<_>>()},
             "source_z": {"path": source_z, "sha256": z_hybrid_sha256(&source_z_bytes), "shape": [sequence_len, hidden], "dtype": "f32", "operation": "input_f32_matmul_source_bf16_weight_cast_f32_accumulate_f32"},
             "state_reset": {"boundary": "before_each_run", "recurrent_state": "zero_initialized_once_for_sequence", "same_between_baseline_and_hybrid": true},
             "override": {"family": "z", "boundary": "after_production_z_matvec_before_production_silu_mul", "default_off": true, "worker_reachable": false, "promotion": false},
