@@ -1,0 +1,146 @@
+{
+  "schema_version": "ullm.aq4_layer0_qkv_gpu_vs_cpu_f32_comparison.v1",
+  "status": "valid",
+  "comparison_scope": "diagnostic_only",
+  "operation": "standalone_aq4_matvec_f32",
+  "pairing": {
+    "input_sidecar_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+    "rows": 3,
+    "row_elements": 8192,
+    "row_order": "input_jsonl_order",
+    "bytes": 98304,
+    "case_steps": [
+      {"case_id": "fixture-prompt-0", "step": 0},
+      {"case_id": "fixture-prompt-0", "step": 1},
+      {"case_id": "fixture-prompt-1", "step": 0}
+    ]
+  },
+  "gpu_attempt2": {
+    "archive_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-qkv-gpu-probe-v0.1/attempts/attempt2",
+    "archive_sha256s_sha256": "b353bf460d21b91998f595e43126069663f014fb2e7737b1623e824388329a00",
+    "output_sha256": "24248fd1c4b4b7186f9b048a7fa4c69925904a04b265a273390089df7312545e",
+    "report_sha256": "4cce8b4a55c506d94801201314237cab1fc0adaaa70e27861116ad15e1f7efc1",
+    "device": {
+      "backend": "hip",
+      "device_index": 1,
+      "hip_ordinal": 0,
+      "gcn_arch_name": "gfx1201"
+    },
+    "identity": {
+      "probe_binary_sha256": "f58f0734ec595d9a9cd76161d28d096b2b18fc6e437cf3ad9d526eb710c7cf69",
+      "build_receipt_sha256": "0c94ef027982ff82094053e1fc150294044e25b5c365c6e55009c5cff2cf1637",
+      "input_sidecar_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "active_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+      "profile_sha256": "1013cc803adce27a178856e9fe300fc5a26cc998b5381812b0c3bd17ebbb5937",
+      "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    },
+    "observer": {
+      "monitor_sha256": "0ed22b60c354439ecab6340177295fec064bd9f2385b0af816652ee9b4757d35",
+      "samples": 2,
+      "observer_failed_marker": false,
+      "physical_card": 2
+    },
+    "service_restore": {
+      "service_active": "active",
+      "service_substate": "running",
+      "main_pid": 1722227,
+      "n_restarts": 1,
+      "runtime_directory": "mode750 uid1000 gid1000 nlink2",
+      "runtime_lock": "mode600 uid1000 gid1000 nlink1",
+      "lock_owner_command": "ullm-openai-gat",
+      "transient_namespace_failure_recorded": true,
+      "causal_attribution": "not_established",
+      "concurrent_profile_diagnostic_commit": "6442a68f38b4ddd2200f9a516a561e4c61f576a1"
+    }
+  },
+  "cpu_formal": {
+    "evidence_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-integration-v0.1/rust-context0/output.f32le",
+    "output_sha256": "9683b8c5decd545c35e416da0b0f9568e6f51463ae5395fcd872dc9cbd82b473",
+    "report_sha256": "2e0e623d0cec8299944ee73db7586b0790e8a83eed9d037e0416fddba1e44145",
+    "device": {
+      "backend": "cpu",
+      "device_index": 0,
+      "name": "host CPU fallback"
+    },
+    "identity": {
+      "input_sidecar_sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+    }
+  },
+  "metrics": {
+    "aggregate": {
+      "elements": 24576,
+      "max_abs": 5.91278076171875e-05,
+      "relative_l2": 8.828352279004451e-07,
+      "cosine": 0.999999999999611,
+      "bit_mismatch_count": 23847,
+      "bit_mismatch_bits": 81529,
+      "byte_mismatch_count": 25939,
+      "gpu_nonfinite_elements": 0,
+      "cpu_nonfinite_elements": 0,
+      "pair_nonfinite_elements": 0
+    },
+    "rows": [
+      {
+        "row": 0,
+        "case_id": "fixture-prompt-0",
+        "step": 0,
+        "elements": 8192,
+        "gpu_sha256": "b0cafc78430e74fbbbd9468699b1b155985bff9e7d104ac9a4690a09aeec0d3d",
+        "cpu_sha256": "ddf114f8bc8ebda5530ef9cfd95cd02acb3a54d978caa2e5ca9c4673da68da83",
+        "max_abs": 5.7220458984375e-05,
+        "relative_l2": 8.17770927683935e-07,
+        "cosine": 0.9999999999996659,
+        "bit_mismatch_count": 7953,
+        "bit_mismatch_bits": 26971,
+        "byte_mismatch_count": 8596,
+        "gpu_nonfinite_elements": 0,
+        "cpu_nonfinite_elements": 0,
+        "pair_nonfinite_elements": 0
+      },
+      {
+        "row": 1,
+        "case_id": "fixture-prompt-0",
+        "step": 1,
+        "elements": 8192,
+        "gpu_sha256": "50467ade06e6c12682084b0940d456dd7f175a5c231cfdf881bb4d0b572e2ee1",
+        "cpu_sha256": "cd7ee51b360be801889f042a8c7a9d6407edda4e8db2234fbf5b83029933241c",
+        "max_abs": 4.57763671875e-05,
+        "relative_l2": 7.925954378038514e-07,
+        "cosine": 0.999999999999686,
+        "bit_mismatch_count": 7934,
+        "bit_mismatch_bits": 27355,
+        "byte_mismatch_count": 8683,
+        "gpu_nonfinite_elements": 0,
+        "cpu_nonfinite_elements": 0,
+        "pair_nonfinite_elements": 0
+      },
+      {
+        "row": 2,
+        "case_id": "fixture-prompt-1",
+        "step": 0,
+        "elements": 8192,
+        "gpu_sha256": "8879b4ae415327226212a41cc97110b0cf836a100d9dec9233955fbeafdabc5c",
+        "cpu_sha256": "485a5ace800646ea036947e7002b74b4308c1a0fc7ca3fe699c6acd8d4e5ca67",
+        "max_abs": 5.91278076171875e-05,
+        "relative_l2": 1.0344757576312984e-06,
+        "cosine": 0.9999999999994701,
+        "bit_mismatch_count": 7960,
+        "bit_mismatch_bits": 27203,
+        "byte_mismatch_count": 8660,
+        "gpu_nonfinite_elements": 0,
+        "cpu_nonfinite_elements": 0,
+        "pair_nonfinite_elements": 0
+      }
+    ]
+  },
+  "verdict": {
+    "threshold_applied": false,
+    "numeric_go_no_go": false,
+    "promotion": false,
+    "holdout_observed": false,
+    "interpretation": "Threshold-free diagnostic comparison only; metrics are recorded without a quality verdict."
+  }
+}
