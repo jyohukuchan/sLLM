@@ -1925,9 +1925,12 @@ def rows_by_marker(
 
 
 def validate_memory_copy_rows(fields: list[str], rows: list[dict[str, str]]) -> None:
-    name_column = one_column(
-        fields, ("Name", "Kind", "Direction", "Operation", "name"), "memory copy kind"
-    )
+    operation_aliases = ("Name", "Kind", "Direction", "Operation", "name")
+    operation_columns = [field for field in operation_aliases if field in fields]
+    rocprof_v72_schema = operation_columns == ["Kind", "Direction"]
+    if not rocprof_v72_schema and len(operation_columns) != 1:
+        raise CaptureError("trace must have exactly one memory copy kind column")
+    operation_column = "Direction" if rocprof_v72_schema else operation_columns[0]
     seen: set[str] = set()
     correlation_column = one_column(
         fields, ("Correlation_Id", "Correlation_ID", "Index", "correlation_id"),
@@ -1935,12 +1938,17 @@ def validate_memory_copy_rows(fields: list[str], rows: list[dict[str, str]]) -> 
     )
     for line, row in enumerate(rows, 2):
         correlation = row[correlation_column].strip()
-        kind = re.sub(r"[^a-z0-9]", "", row[name_column].lower())
         if not correlation or correlation in seen:
             raise CaptureError(f"memory copy row {line} correlation differs")
         seen.add(correlation)
-        if kind not in MEMORY_COPY_KINDS:
-            raise CaptureError(f"unknown memory copy operation: {row[name_column]}")
+        if rocprof_v72_schema and row["Kind"] != "MEMORY_COPY":
+            raise CaptureError(f"memory copy row {line} Kind differs")
+        raw_operation = row[operation_column].strip()
+        operation = re.sub(r"[^a-z0-9]", "", raw_operation.lower())
+        if rocprof_v72_schema and operation.startswith("memorycopy"):
+            operation = operation.removeprefix("memorycopy")
+        if not raw_operation or operation not in MEMORY_COPY_KINDS:
+            raise CaptureError(f"unknown memory copy operation: {raw_operation}")
 
 
 def validate_all_kernel_names(fields: list[str], rows: list[dict[str, str]]) -> None:

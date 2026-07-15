@@ -2203,6 +2203,133 @@ def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
         )
 
 
+@pytest.mark.parametrize("column", ["Name", "Kind", "Direction", "Operation", "name"])
+def test_memory_copy_validation_preserves_legacy_single_operation_alias(
+    column: str,
+) -> None:
+    CAPTURE.validate_memory_copy_rows(
+        ["Correlation_Id", column],
+        [{"Correlation_Id": "1", column: "D2H"}],
+    )
+
+
+@pytest.mark.parametrize(
+    "direction",
+    [
+        "MEMORY_COPY_HOST_TO_DEVICE",
+        "MEMORY_COPY_DEVICE_TO_HOST",
+        "MEMORY_COPY_DEVICE_TO_DEVICE",
+        "MEMORY_COPY_HOST_TO_HOST",
+        "MEMORY_COPY_PEER_TO_PEER",
+    ],
+)
+def test_memory_copy_validation_accepts_exact_rocprof_v72_kind_direction_pair(
+    direction: str,
+) -> None:
+    CAPTURE.validate_memory_copy_rows(
+        ["Kind", "Direction", "Correlation_Id"],
+        [
+            {
+                "Kind": "MEMORY_COPY",
+                "Direction": direction,
+                "Correlation_Id": "1",
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize("kind", ["", "COPY", "memory_copy", " MEMORY_COPY "])
+def test_memory_copy_validation_rejects_nonexact_rocprof_v72_kind(kind: str) -> None:
+    with pytest.raises(CAPTURE.CaptureError, match="Kind differs"):
+        CAPTURE.validate_memory_copy_rows(
+            ["Kind", "Direction", "Correlation_Id"],
+            [
+                {
+                    "Kind": kind,
+                    "Direction": "MEMORY_COPY_DEVICE_TO_HOST",
+                    "Correlation_Id": "1",
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize("direction", ["", "MEMORY_COPY_UNKNOWN", "COPY_DEVICE_TO_HOST"])
+def test_memory_copy_validation_rejects_empty_or_unknown_rocprof_v72_direction(
+    direction: str,
+) -> None:
+    with pytest.raises(CAPTURE.CaptureError, match="unknown memory copy operation"):
+        CAPTURE.validate_memory_copy_rows(
+            ["Kind", "Direction", "Correlation_Id"],
+            [
+                {
+                    "Kind": "MEMORY_COPY",
+                    "Direction": direction,
+                    "Correlation_Id": "1",
+                }
+            ],
+        )
+
+
+def test_memory_copy_validation_rejects_duplicate_correlation_in_rocprof_v72_rows() -> None:
+    with pytest.raises(CAPTURE.CaptureError, match="correlation differs"):
+        CAPTURE.validate_memory_copy_rows(
+            ["Kind", "Direction", "Correlation_Id"],
+            [
+                {
+                    "Kind": "MEMORY_COPY",
+                    "Direction": direction,
+                    "Correlation_Id": "1",
+                }
+                for direction in (
+                    "MEMORY_COPY_HOST_TO_DEVICE",
+                    "MEMORY_COPY_DEVICE_TO_HOST",
+                )
+            ],
+        )
+
+
+def test_memory_copy_validation_rejects_three_operation_aliases() -> None:
+    with pytest.raises(
+        CAPTURE.CaptureError, match="exactly one memory copy kind column"
+    ):
+        CAPTURE.validate_memory_copy_rows(
+            ["Name", "Kind", "Direction", "Correlation_Id"],
+            [
+                {
+                    "Name": "D2H",
+                    "Kind": "MEMORY_COPY",
+                    "Direction": "MEMORY_COPY_DEVICE_TO_HOST",
+                    "Correlation_Id": "1",
+                }
+            ],
+        )
+
+
+def test_actual_v12_rocprof_v72_memory_trace_is_strictly_classified() -> None:
+    path = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
+        / "p3/aq4-p3-diagnostic-rocprof-capture-v9"
+        / "aq4-p3-diagnostic_memory_copy_trace.csv"
+    )
+    snapshot = CAPTURE.PRODUCER.capture(path.resolve(), "actual-v12 memory copy trace")
+    fields, rows = CAPTURE.csv_rows(snapshot, "actual-v12 memory copy trace")
+    assert fields == [
+        "Kind",
+        "Direction",
+        "Stream_Id",
+        "Source_Agent_Id",
+        "Destination_Agent_Id",
+        "Correlation_Id",
+        "Start_Timestamp",
+        "End_Timestamp",
+    ]
+    assert len(rows) == 10_845
+    assert sum(row["Direction"] == "MEMORY_COPY_HOST_TO_DEVICE" for row in rows) == 6_438
+    assert sum(row["Direction"] == "MEMORY_COPY_DEVICE_TO_HOST" for row in rows) == 4_407
+    CAPTURE.validate_memory_copy_rows(fields, rows)
+
+
 @pytest.mark.parametrize(
     ("trace_kind", "old", "new", "message"),
     [
