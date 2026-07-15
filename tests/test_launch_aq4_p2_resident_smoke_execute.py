@@ -735,11 +735,8 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
-def test_canonical_execute_binding_v7_is_absent_until_sdk_launcher_is_recascaded() -> None:
-    assert not LAUNCHER.EXECUTE_BINDING_ROOT.exists() and not LAUNCHER.EXECUTE_BINDING_ROOT.is_symlink()
-    previous = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v6"
-    binding = json.loads((previous / "execute-binding.json").read_text())
-    trust = json.loads((previous / "launcher-trust.json").read_text())
+def test_canonical_execute_binding_v7_pins_sdk_launcher_and_remains_blocked() -> None:
+    binding, trust = LAUNCHER.load_execute_binding(LAUNCHER.EXECUTE_BINDING_PATH)
     assert binding["actual_eligible"] is False
     assert trust["actual_eligible"] is False and trust["status"] == "qa_pending"
     committed = subprocess.run(
@@ -749,7 +746,7 @@ def test_canonical_execute_binding_v7_is_absent_until_sdk_launcher_is_recascaded
         stdout=subprocess.PIPE,
     )
     assert LAUNCHER.sha_bytes(committed.stdout) == trust["sha256"]
-    assert committed.stdout != SCRIPT.read_bytes()
+    assert committed.stdout == SCRIPT.read_bytes()
 
 
 def test_execute_rejects_untrusted_launcher_self_before_output_creation(tmp_path: Path) -> None:
